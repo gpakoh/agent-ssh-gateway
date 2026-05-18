@@ -1073,7 +1073,64 @@ git push github master
 - [ ] Готов к работе!
 
 
-## 12. 16 ПРАВИЛ (полный набор)
+## 12. БЕЗОПАСНОСТЬ
+
+### Встроенные защиты
+
+**Rate Limiting:**
+- 100 запросов/минута с одного IP
+- 10 сессий на один IP
+
+**Санитизация команд:**
+- Блокировка опасных команд: `rm -rf /`, fork bomb, reverse shell
+- Проверка паттернов: `curl | bash`, `nc -e`, `mkfifo`
+- Возврат ошибки 400 с описанием
+
+**Валидация путей:**
+- Запрет directory traversal (`../`, `~`)
+- Запрет доступа к системным файлам (`/etc/passwd`, `/root/.ssh`)
+- Ограничение base_path для контекстных операций
+
+**Security Headers:**
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- `X-XSS-Protection: 1; mode=block`
+- `Strict-Transport-Security`
+- `Content-Security-Policy`
+
+**Audit Logging:**
+- Все команды логируются в `/app/logs/audit.log`
+- Все операции с файлами логируются
+- Попытки атак фиксируются
+
+**Docker Hardening:**
+- Non-root user (appuser:1000)
+- Read-only filesystem
+- Drop all capabilities
+- No new privileges
+- Resource limits (2 CPU, 512MB RAM)
+
+**Шифрование:**
+- SSH credentials шифруются через Fernet
+- Master key через ENV `ENCRYPTION_KEY`
+
+### Примеры блокировок
+
+```bash
+# Блокируется: опасная команда
+curl -X POST /api/ssh/execute -d '{"command": "rm -rf /"}'
+# → 400: "Command contains dangerous pattern: rm -rf /"
+
+# Блокируется: path traversal
+curl -X POST /api/file/read -d '{"path": "../../../etc/passwd"}'
+# → 400: "Path contains directory traversal characters"
+
+# Работает: нормальная команда
+curl -X POST /api/ssh/execute -d '{"command": "ls -la"}'
+# → 200: {"stdout": "...", "exit_code": 0}
+```
+
+## 13. 16 ПРАВИЛ (полный набор)
 1. **Heartbeat каждые 30 сек** — иначе сессия отвалится
 2. **Background Jobs для всего > 60 сек** — exec_command таймаутит
 3. **File Edit API вместо cat/sed** — безопаснее, есть rollback
@@ -1093,7 +1150,7 @@ git push github master
 
 
 > Написано: 2026-05-18
-> Версия: 4.4 (22 фичи: +Project Introspection, +Batch Edit, +Streaming Upload, +Pre-commit Hooks)
+> Версия: 4.5 (28 фич: +Security Suite — Rate Limiting, Command Sanitization, Path Validation, Audit Logging, Docker Hardening, Encryption)
 > Домен: https://ssh.xloud.ru
 > GitHub: https://github.com/gpakoh/ssh-gateway-ai
 > Gitea: http://git.xloud.ru:3005/gpakoh/ssh-gateway-ai
@@ -1101,6 +1158,17 @@ git push github master
 ---
 
 ## 4. ИСТОРИЯ ИЗМЕНЕНИЙ
+
+### v4.5 (2026-05-19)
+- **Добавлено**: Rate limiting — 100 req/min, 10 сессий/IP
+- **Добавлено**: Санитизация команд — блокировка rm -rf, fork bomb, reverse shell
+- **Добавлено**: Валидация путей — защита от directory traversal
+- **Добавлено**: Security headers — X-Content-Type-Options, X-Frame-Options, CSP
+- **Добавлено**: Audit logging — /app/logs/audit.log
+- **Добавлено**: Docker hardening — non-root, read-only fs, cap_drop, resource limits
+- **Добавлено**: Шифрование credentials через Fernet (ENCRYPTION_KEY)
+- **Обновлено**: Dockerfile — security-first подход
+- **Обновлено**: docker-compose.yml — security_opt, read_only, resource limits
 
 ### v4.4 (2026-05-19)
 - **Добавлено**: POST /api/project/structure — интроспекция проекта (дерево файлов, метаданные, git status)
