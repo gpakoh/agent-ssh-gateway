@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web SSH Gateway</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <h1>Web SSH Gateway</h1>
+            <span class="status-indicator" id="connectionStatus">Disconnected</span>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-grid">
+            <!-- Connection Panel (Left) -->
+            <aside class="connection-panel">
+                <h2>Connection</h2>
+                <form id="connectForm">
+                    <div class="form-group">
+                        <label for="host">Host</label>
+                        <input type="text" id="host" placeholder="192.168.1.1" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="port">Port</label>
+                        <input type="number" id="port" value="22" min="1" max="65535" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="username">Username</label>
+                        <input type="text" id="username" placeholder="root" required>
+                    </div>
+
+                    <!-- Auth Method Tabs -->
+                    <div class="auth-tabs">
+                        <button type="button" class="auth-tab active" data-tab="password">Password</button>
+                        <button type="button" class="auth-tab" data-tab="key">Private Key</button>
+                    </div>
+
+                    <div class="auth-content active" id="passwordTab">
+                        <div class="form-group">
+                            <label for="password">Password</label>
+                            <input type="password" id="password" placeholder="Enter password">
+                        </div>
+                    </div>
+
+                    <div class="auth-content" id="keyTab">
+                        <div class="form-group">
+                            <label for="privateKey">Private Key</label>
+                            <textarea id="privateKey" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..."></textarea>
+                            <input type="file" id="keyFile" accept=".key,.pem,.txt">
+                        </div>
+                        <div class="form-group">
+                            <label for="keyPassphrase">Key Passphrase (optional)</label>
+                            <input type="password" id="keyPassphrase" placeholder="Enter passphrase">
+                        </div>
+                    </div>
+
+                    <div class="form-buttons">
+                        <button type="submit" class="btn btn-primary" id="connectBtn">Connect</button>
+                        <button type="button" class="btn btn-danger" id="disconnectBtn" disabled>Disconnect</button>
+                    </div>
+                </form>
+
+                <div class="error-message" id="errorMessage"></div>
+            </aside>
+
+            <!-- Terminal Area (Center) -->
+            <section class="terminal-section">
+                <div class="terminal-toolbar">
+                    <span class="toolbar-title">Terminal</span>
+                    <div class="toolbar-buttons">
+                        <button class="btn-icon" id="copyBtn" title="Copy output">Copy</button>
+                        <button class="btn-icon" id="clearBtn" title="Clear terminal">Clear</button>
+                    </div>
+                </div>
+                <div class="terminal" id="terminal">
+                    <div class="terminal-welcome">
+                        <p class="ansi-green">Web SSH Gateway v1.0</p>
+                        <p>Configure connection on the left panel and click <strong>Connect</strong>.</p>
+                        <p>Supports password and SSH key authentication.</p>
+                    </div>
+                </div>
+                <div class="command-input-bar">
+                    <span class="prompt" id="prompt">$</span>
+                    <input type="text" id="commandInput" placeholder="Enter command..." autocomplete="off" disabled>
+                    <button class="btn btn-primary" id="executeBtn" disabled>Execute</button>
+                    <button class="btn btn-warning" id="ctrlCBtn" disabled>Ctrl+C</button>
+                </div>
+            </section>
+
+            <!-- Sessions Panel (Right) -->
+            <aside class="sessions-panel">
+                <h2>Sessions</h2>
+                <div class="sessions-list" id="sessionsList">
+                    <p class="empty-text">No active sessions</p>
+                </div>
+
+                <div class="jobs-section">
+                    <h3>Background Jobs</h3>
+                    <p class="hint-text">Prefix command with <code>bg:</code> to run in background</p>
+                    <div class="jobs-list" id="jobsList">
+                        <p class="empty-text">No jobs</p>
+                    </div>
+                </div>
+
+                <div class="history-section">
+                    <h3>Command History</h3>
+                    <div class="history-list" id="historyList"></div>
+                </div>
+            </aside>
+        </main>
+
+        <!-- Toast Container -->
+        <div class="toast-container" id="toastContainer"></div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
