@@ -17,12 +17,12 @@ class Settings(BaseSettings):
     )
 
     # Session management
-    session_timeout: int = Field(default=300, alias="SESSION_TIMEOUT")  # seconds
-    cleanup_interval: int = Field(default=60, alias="CLEANUP_INTERVAL")  # seconds
+    session_timeout: int = Field(default=3600, alias="SESSION_TIMEOUT")  # 1 hour
+    cleanup_interval: int = Field(default=300, alias="CLEANUP_INTERVAL")  # 5 min
 
     # SSH defaults
     ssh_default_port: int = 22
-    ssh_default_timeout: int = 30  # seconds
+    ssh_default_timeout: int = 120  # seconds
 
     class Config:
         env_file = ".env"
