@@ -1,0 +1,42 @@
+version: "3.8"
+
+services:
+  web-ssh-gateway:
+    build: .
+    container_name: web-ssh-gateway
+    hostname: ssh-gateway
+    networks:
+      proxmox_macvlan:
+        ipv4_address: 10.0.0.145
+      internal_net: {}
+    ports:
+      - "8085:8085"
+    environment:
+      - UVICORN_HOST=0.0.0.0
+      - UVICORN_PORT=8085
+      - SESSION_TIMEOUT=300
+      - CLEANUP_INTERVAL=60
+      - CORS_ORIGINS=["https://ssh.xloud.ru"]
+    volumes:
+      - ssh_keys:/app/ssh_keys
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8085/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+networks:
+  proxmox_macvlan:
+    external: true
+  internal_net:
+    external: true
+
+volumes:
+  ssh_keys:
+    driver: local
