@@ -790,3 +790,147 @@ function escapeHtml(text) {
 
 updatePrompt();
 console.log('%cWeb SSH Gateway%c v1.0', 'color:#00ff88;font-weight:bold;', 'color:#888;');
+
+// ============================================
+// Monaco Editor Integration
+// ============================================
+
+let monacoEditor = null;
+let currentFilePath = null;
+
+// Initialize Monaco Editor
+function initMonacoEditor() {
+    require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.44.0/min/vs' }});
+    
+    require(['vs/editor/editor.main'], function() {
+        monacoEditor = monaco.editor.create(document.getElementById('editorContainer'), {
+            value: '',
+            language: 'python',
+            theme: 'vs-dark',
+            automaticLayout: true,
+            minimap: { enabled: false },
+            fontSize: 14,
+            lineNumbers: 'on',
+            roundedSelection: false,
+            scrollBeyondLastLine: false,
+            readOnly: false,
+            wordWrap: 'on',
+        });
+        
+        // Enable save button when editor has content
+        monacoEditor.onDidChangeModelContent(() => {
+            const saveBtn = document.getElementById('saveFileBtn');
+            if (saveBtn) saveBtn.disabled = false;
+        });
+    });
+}
+
+// Load file into editor
+async function loadFileIntoEditor(path, content) {
+    if (!monacoEditor) {
+        showToast('Editor not initialized', 'error');
+        return;
+    }
+    
+    currentFilePath = path;
+    
+    // Detect language from extension
+    const ext = path.split('.').pop();
+    const langMap = {
+        'py': 'python',
+        'js': 'javascript',
+        'ts': 'typescript',
+        'html': 'html',
+        'css': 'css',
+        'json': 'json',
+        'md': 'markdown',
+        'yml': 'yaml',
+        'yaml': 'yaml',
+        'sh': 'shell',
+        'dockerfile': 'dockerfile',
+    };
+    
+    const language = langMap[ext] || 'plaintext';
+    
+    monacoEditor.setValue(content);
+    monaco.editor.setModelLanguage(monacoEditor.getModel(), language);
+    
+    document.getElementById('editorFilename').textContent = path;
+    document.getElementById('editorPanel').style.display = 'block';
+    document.getElementById('saveFileBtn').disabled = true;
+}
+
+// Save file from editor
+async function saveFileFromEditor() {
+    if (!monacoEditor || !currentFilePath || !state.sessionId) {
+        showToast('No file to save', 'error');
+        return;
+    }
+    
+    const content = monacoEditor.getValue();
+    
+    try {
+        const res = await fetch('/api/file/edit', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: state.sessionId,
+                path: currentFilePath,
+                operations: [{
+                    type: 'replace',
+                    old: await getOriginalContent(currentFilePath),
+                    new: content,
+                }],
+            }),
+        });
+        
+        if (res.ok) {
+            showToast(`File saved: ${currentFilePath}`, 'success');
+            document.getElementById('saveFileBtn').disabled = true;
+        } else {
+            const err = await res.json();
+            showToast(`Save failed: ${err.detail}`, 'error');
+        }
+    } catch (e) {
+        showToast('Save failed', 'error');
+    }
+}
+
+// Get original file content
+async function getOriginalContent(path) {
+    try {
+        const res = await fetch('/api/file/read', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: state.sessionId,
+                path: path,
+            }),
+        });
+        
+        if (res.ok) {
+            const data = await res.json();
+            return data.content;
+        }
+    } catch (e) {
+        console.error('Failed to get original content:', e);
+    }
+    return '';
+}
+
+// Editor event listeners
+document.addEventListener('DOMContentLoaded', () => {
+    initMonacoEditor();
+    
+    const saveBtn = document.getElementById('saveFileBtn');
+    const closeBtn = document.getElementById('closeEditorBtn');
+    
+    if (saveBtn) saveBtn.addEventListener('click', saveFileFromEditor);
+    if (closeBtn) closeBtn.addEventListener('click', () => {
+        document.getElementById('editorPanel').style.display = 'none';
+        currentFilePath = null;
+    });
+});
+
+// Expose editor functions globally
+window.loadFileIntoEditor = loadFileIntoEditor;

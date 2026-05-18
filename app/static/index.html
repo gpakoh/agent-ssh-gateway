@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Web SSH Gateway</title>
     <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.44.0/min/vs/loader.min.js"></script>
 </head>
 <body>
     <div class="app-container">
@@ -14,9 +15,25 @@
             <span class="status-indicator" id="connectionStatus">Disconnected</span>
         </header>
 
-        <!-- Main Content -->
-        <main class="main-grid">
-            <!-- Connection Panel (Left) -->
+    <!-- Main Content -->
+    <main class="main-grid">
+        <!-- File Editor Panel (Left - New) -->
+        <aside class="editor-panel" id="editorPanel" style="display: none;">
+            <div class="editor-toolbar">
+                <span class="toolbar-title" id="editorFilename">No file</span>
+                <div class="toolbar-buttons">
+                    <button class="btn-icon" id="saveFileBtn" title="Save file" disabled>Save</button>
+                    <button class="btn-icon" id="closeEditorBtn" title="Close editor">Close</button>
+                </div>
+            </div>
+            <div class="editor-container" id="editorContainer">
+                <div class="editor-placeholder">
+                    <p>Select a file from the file tree or use the File API to open files</p>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Connection Panel (Left) -->
             <aside class="connection-panel">
                 <h2>Connection</h2>
                 <form id="connectForm">
