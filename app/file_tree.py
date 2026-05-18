@@ -35,6 +35,7 @@ class FileTreeExplorer:
         depth: int = 2,
         show_hidden: bool = False,
         show_git_ignored: bool = False,
+        max_files: int = 100,
     ) -> FileNode:
         """Get directory tree."""
         # Get directory info
@@ -54,6 +55,8 @@ class FileTreeExplorer:
         
         # Parse ls output
         lines = result["stdout"].strip().split("\n")
+        file_count = 0
+        
         for line in lines[1:]:  # Skip total line
             if not line.strip():
                 continue
@@ -73,6 +76,12 @@ class FileTreeExplorer:
             if not show_hidden and name.startswith("."):
                 continue
             
+            # Check max files limit
+            file_count += 1
+            if file_count > max_files:
+                logger.warning("Max files limit reached: %s", path)
+                break
+            
             full_path = f"{path}/{name}"
             
             if permissions.startswith("d"):
@@ -88,7 +97,7 @@ class FileTreeExplorer:
                 if depth > 0:
                     try:
                         children = await self._get_directory_children(
-                            session_id, full_path, depth - 1, show_hidden
+                            session_id, full_path, depth - 1, show_hidden, max_files
                         )
                         dir_node.children = children
                     except Exception as exc:
@@ -118,9 +127,11 @@ class FileTreeExplorer:
         path: str,
         depth: int,
         show_hidden: bool,
+        max_files: int = 100,
     ) -> list[FileNode]:
         """Get children of a directory."""
         children = []
+        file_count = 0
         
         ls_cmd = f"ls -la '{path}'"
         result = await self._ssh.execute(session_id, ls_cmd, timeout=10)
@@ -146,6 +157,10 @@ class FileTreeExplorer:
             if not show_hidden and name.startswith("."):
                 continue
             
+            file_count += 1
+            if file_count > max_files:
+                break
+            
             full_path = f"{path}/{name}"
             
             if permissions.startswith("d"):
@@ -159,7 +174,7 @@ class FileTreeExplorer:
                 if depth > 0:
                     try:
                         sub_children = await self._get_directory_children(
-                            session_id, full_path, depth - 1, show_hidden
+                            session_id, full_path, depth - 1, show_hidden, max_files
                         )
                         dir_node.children = sub_children
                     except Exception:
