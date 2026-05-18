@@ -155,11 +155,13 @@ s.post(f"https://ssh.xloud.ru/api/jobs/{job_id}/cancel")
 
 ### 2.3 File Edit API
 | Method | Path | Описание |
-| POST | /api/file/read | Чтение файла |
+| POST | /api/file/read | Чтение файла (JSON) |
+| GET | /api/file/raw | Чтение файла (text/plain, Range support) |
+| POST | /api/batch/read | Массовое чтение файлов |
 | PATCH | /api/file/edit | Операции: replace/insert_after/insert_before/delete/append |
 | POST | /api/file/patch | Unified diff patch |
 
-**Чтение:**
+**Чтение (JSON):**
 r = s.post("https://ssh.xloud.ru/api/file/read", json={
     "session_id": session_id,
     "path": "/media/1TB/Python/NOD_gateway/gateway_client/app/main.py",
@@ -167,6 +169,33 @@ r = s.post("https://ssh.xloud.ru/api/file/read", json={
     "limit": 30
 })
 # → {"path": "...", "total_lines": 150, "content": "строка целиком\nвторая строка\n..."}
+
+**Чтение RAW (text/plain):**
+r = s.get("https://ssh.xloud.ru/api/file/raw", params={
+    "session_id": session_id,
+    "path": "/media/1TB/Python/NOD_gateway/gateway_client/app/main.py"
+})
+# → text/plain, без JSON-обёртки
+
+**Чтение с Range (часть файла):**
+r = s.get("https://ssh.xloud.ru/api/file/raw", params={
+    "session_id": session_id,
+    "path": "/media/1TB/Python/NOD_gateway/gateway_client/app/main.py",
+    "offset": 100,
+    "limit": 50
+})
+# → строки 100-150
+
+**Массовое чтение (до 20 файлов):**
+r = s.post("https://ssh.xloud.ru/api/batch/read", json={
+    "session_id": session_id,
+    "paths": [
+        "app/main.py",
+        "app/config.py",
+        "app/models.py"
+    ]
+})
+# → {"files": {"app/main.py": "...", ...}, "errors": {}}
 
 **Редактирование:**
 r = s.patch("https://ssh.xloud.ru/api/file/edit", json={
@@ -940,7 +969,7 @@ Docker: 66 контейнеров
 
 
 > Написано: 2026-05-18
-> Версия: 4.1 (16 фич: Context API, Validation, Batch, Templates, Analytics, Search, Tree, Servers, Snapshots, Webhooks, Monaco)
+> Версия: 4.2 (16 фич: Context API, Validation, Batch, Templates, Analytics, Search, Tree, Servers, Snapshots, Webhooks, Monaco)
 > Домен: https://ssh.xloud.ru
 > GitHub: https://github.com/gpakoh/ssh-gateway-ai
 > Gitea: http://git.example.com:3005/gpakoh/ssh-gateway-ai
@@ -948,6 +977,14 @@ Docker: 66 контейнеров
 ---
 
 ## 4. ИСТОРИЯ ИЗМЕНЕНИЙ
+
+### v4.2 (2026-05-18)
+- **Добавлено**: GET /api/file/raw — чтение файлов как text/plain (без JSON-обёртки)
+- **Добавлено**: POST /api/batch/read — массовое чтение до 20 файлов за 1 запрос
+- **Добавлено**: Поддержка Range: bytes= для частичного чтения файлов (206 Partial Content)
+- **Добавлено**: offset/limit query params для raw endpoint
+- **Увеличено**: SSH window size до 2^32 для поддержки файлов 50KB+
+- **Исправлено**: Документация приведена в соответствие с реальным API
 
 ### v4.1 (2026-05-18)
 - **Исправлено**: Все 69 endpoint'ов работают корректно
