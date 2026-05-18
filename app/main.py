@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Header, Response
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Header, Response, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -120,6 +120,12 @@ from app.models import (
     DeployRequest,
     DeployResponse,
     DeploymentInfo,
+    ProjectStructureRequest,
+    ProjectStructureResponse,
+    FileMetadata,
+    BatchEditRequest,
+    BatchEditResponse,
+    BatchEditResult,
 )
 from app.ssh_manager import (
     SSHSessionManager,
@@ -717,6 +723,173 @@ async def file_download(session_id: str = Query(...), path: str = Query(...)):
     """Download file from remote server."""
     content = await file_editor.read_file(session_id, path)
     return Response(content=content, media_type="application/octet-stream")
+
+
+# ---------------------------------------------------------------------------
+# Project Introspection API
+# ---------------------------------------------------------------------------
+
+@app.post("/api/project/structure", response_model=ProjectStructureResponse)
+async def project_structure(req: ProjectStructureRequest):
+    """Get project structure with metadata and git status."""
+    import json
+    
+    # Get file list with metadata using find
+    cmd = f"cd '{req.path}' && find . -maxdepth {req.max_depth} -printf '%y|%p|%s|%m|%TY-%Tm-%Td %TH:%TM:%TS\\n' 2>/dev/null || echo 'ERROR'"
+    result = await manager.execute(req.session_id, cmd, timeout=30)
+    
+    if result["exit_code"] != 0 or "ERROR" in result["stdout"]:
+        raise HTTPException(status_code=500, detail=f"Cannot read directory: {result['stderr']}")
+    
+    files = []
+    total_files = 0
+    total_directories = 0
+    
+    for line in result["stdout"].strip().split("\n"):
+        if not line or line == "ERROR":
+            continue
+        
+        parts = line.split("|", 4)
+        if len(parts) < 5:
+            continue
+        
+        file_type, path, size, permissions, mtime = parts
+        path = path.lstrip("./")
+        
+        if not path:
+            continue
+        
+        type_map = {"f": "file", "d": "directory", "l": "symlink"}
+        file_type = type_map.get(file_type, "file")
+        
+        if file_type == "file":
+            total_files += 1
+        elif file_type == "directory":
+            total_directories += 1
+        
+        extension = None
+        if "." in path and file_type == "file":
+            extension = path.split(".")[-1]
+        
+        files.append(FileMetadata(
+            name=path.split("/")[-1] if "/" in path else path,
+            path=path,
+            type=file_type,
+            size=int(size) if size else 0,
+            permissions=permissions,
+            modified_at=mtime if mtime else None,
+            extension=extension,
+        ))
+    
+    # Get git status if requested
+    if req.include_git_status:
+        git_cmd = f"cd '{req.path}' && git status --short 2>/dev/null || echo ''"
+        git_result = await manager.execute(req.session_id, git_cmd, timeout=10)
+        
+        git_status_map = {}
+        for line in git_result["stdout"].strip().split("\n"):
+            if line and len(line) > 3:
+                status = line[:2].strip()
+                file_path = line[3:].strip()
+                git_status_map[file_path] = status
+        
+        for file_meta in files:
+            if file_meta.path in git_status_map:
+                file_meta.git_status = git_status_map[file_meta.path]
+    
+    # Build tree structure
+    tree = {"name": ".", "type": "directory", "children": {}}
+    
+    for file_meta in files:
+        parts = file_meta.path.split("/")
+        current = tree
+        
+        for i, part in enumerate(parts):
+            if not part:
+                continue
+            
+            if current.get("children") is None:
+                current["children"] = {}
+            
+            if part not in current["children"]:
+                current["children"][part] = {
+                    "name": part,
+                    "type": file_meta.type if i == len(parts) - 1 else "directory",
+                    "children": {} if i < len(parts) - 1 else None,
+                }
+            
+            current = current["children"][part]
+    
+    return ProjectStructureResponse(
+        path=req.path,
+        total_files=total_files,
+        total_directories=total_directories,
+        files=files,
+        tree=tree,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Batch Edit API
+# ---------------------------------------------------------------------------
+
+@app.patch("/api/batch/edit", response_model=BatchEditResponse)
+async def batch_edit(req: BatchEditRequest):
+    """Edit multiple files in a single request."""
+    results = []
+    files_changed = 0
+    total_operations = 0
+    
+    for file_op in req.files:
+        try:
+            result = await file_editor.edit_file(
+                req.session_id,
+                file_op.path,
+                [op.model_dump() for op in file_op.operations],
+            )
+            
+            results.append(BatchEditResult(
+                path=file_op.path,
+                success=True,
+                operations_applied=result.get("operations_applied", 0),
+                changed=result.get("changed", False),
+            ))
+            
+            total_operations += result.get("operations_applied", 0)
+            if result.get("changed", False):
+                files_changed += 1
+                
+        except Exception as exc:
+            results.append(BatchEditResult(
+                path=file_op.path,
+                success=False,
+                operations_applied=0,
+                changed=False,
+                error=str(exc),
+            ))
+    
+    return BatchEditResponse(
+        results=results,
+        total_files=len(req.files),
+        files_changed=files_changed,
+        total_operations=total_operations,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Streaming Upload API (multipart/form-data)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/file/upload/stream")
+async def file_upload_stream(
+    session_id: str = Query(...),
+    path: str = Query(...),
+    file: UploadFile = File(...),
+):
+    """Upload file using multipart/form-data for large files (1MB+)."""
+    content = await file.read()
+    await file_editor.write_file(session_id, path, content.decode("utf-8", errors="replace"))
+    return {"success": True, "path": path, "size": len(content), "method": "multipart"}
 
 
 # ---------------------------------------------------------------------------
