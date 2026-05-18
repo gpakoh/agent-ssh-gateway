@@ -789,6 +789,16 @@ async def context_get(context_id: str):
     return resp
 
 
+
+@app.delete("/api/context/bookmark")
+async def context_remove_bookmark(
+    context_id: str = Query(...),
+    path: str = Query(...),
+    line: int = Query(...),
+):
+    """Remove bookmark."""
+    success = await context_manager.remove_bookmark(context_id, path, line)
+    return {"status": "removed" if success else "not_found", "path": path, "line": line}
 @app.delete("/api/context/{context_id}")
 async def context_delete(context_id: str):
     """Delete a context."""
@@ -1588,16 +1598,6 @@ async def context_add_bookmark(req: AddBookmarkRequest):
     result = await context_manager.add_bookmark(req.context_id, req.path, req.line, req.note)
     return {"status": "added", "bookmark": result}
 
-
-@app.delete("/api/context/bookmark")
-async def context_remove_bookmark(
-    context_id: str = Query(...),
-    path: str = Query(...),
-    line: int = Query(...),
-):
-    """Remove bookmark."""
-    success = await context_manager.remove_bookmark(context_id, path, line)
-    return {"status": "removed" if success else "not_found", "path": path, "line": line}
 
 
 @app.get("/api/context/{context_id}/state")
