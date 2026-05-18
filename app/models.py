@@ -208,10 +208,10 @@ class FileEditRequest(BaseModel):
 class FileEditResponse(BaseModel):
     """Response after editing a file."""
 
-    success: bool = True
     path: str
     operations_applied: int
     changed: bool
+    success: bool = True
 
 
 class FileReadRequest(BaseModel):
@@ -819,10 +819,10 @@ class DiffResponse(BaseModel):
 class FileEditWithContextResponse(BaseModel):
     """Response after editing a file with context."""
 
-    success: bool = True
     path: str
     operations_applied: int
     changed: bool
+    success: bool = True
     git_commit: Optional[str] = None
     validation_result: Optional[ValidationReportResponse] = None
     warning: Optional[str] = None
