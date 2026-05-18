@@ -507,6 +507,20 @@ class BatchExecuteResponse(BaseModel):
     validation_result: Optional[dict] = None
 
 
+class BatchReadRequest(BaseModel):
+    """Request to read multiple files."""
+
+    session_id: str = Field(..., min_length=1)
+    paths: list[str] = Field(..., min_length=1, max_length=20)
+
+
+class BatchReadResponse(BaseModel):
+    """Response with multiple file contents."""
+
+    files: dict[str, str] = Field(default_factory=dict)
+    errors: dict[str, str] = Field(default_factory=dict)
+
+
 # ---------------------------------------------------------------------------
 # Code Intelligence
 # ---------------------------------------------------------------------------
