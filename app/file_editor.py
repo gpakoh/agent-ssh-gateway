@@ -45,11 +45,12 @@ class FileEditor:
         return result["stdout"]
 
     async def write_file(self, session_id: str, path: str, content: str) -> None:
-        """Write content to a remote file using base64 encoding."""
+        """Write content to a remote file using base64 encoding via heredoc."""
         import base64
 
         encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-        cmd = f"echo '{encoded}' | base64 -d > '{self._escape(path)}'"
+        # Use heredoc to avoid command line length limits with echo
+        cmd = f"base64 -d << 'EOF_BASE64' > '{self._escape(path)}'\n{encoded}\nEOF_BASE64"
         result = await self._ssh.execute(session_id, cmd, timeout=30)
         if result["exit_code"] != 0:
             raise ExecutionError(f"Cannot write {path}: {result['stderr']}")
