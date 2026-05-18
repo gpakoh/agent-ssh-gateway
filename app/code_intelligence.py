@@ -296,44 +296,66 @@ Code:"""
 
         adapter_url = os.environ.get("OPENCODE_ADAPTER_URL", "http://10.10.10.137:8007")
         
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{adapter_url}/api/generate",
-                    json={
-                        "model": "opencode/big-pickle",
-                        "prompt": prompt,
-                        "stream": False
-                    },
-                    timeout=aiohttp.ClientTimeout(total=120)
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        generated = data.get("response", "").strip()
-                        
-                        # Clean up the response
-                        if generated.startswith("```"):
-                            lines = generated.split("\n")
-                            if lines[0].startswith("```"):
-                                lines = lines[1:]
-                            if lines and lines[-1].startswith("```"):
-                                lines = lines[:-1]
-                            generated = "\n".join(lines).strip()
-                        
-                        if generated and len(generated) > 50:
-                            logger.info("Code generated via Big Pickle adapter")
-                            return generated
+        # Делаем до 3 попыток с задержкой
+        for attempt in range(3):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"{adapter_url}/api/generate",
+                        json={
+                            "model": "opencode/big-pickle",
+                            "prompt": prompt,
+                            "stream": False
+                        },
+                        timeout=aiohttp.ClientTimeout(total=180)
+                    ) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            generated = data.get("response", "").strip()
+                            
+                            # Проверяем на ошибку лимита от адаптера
+                            if "All proxies exhausted" in generated or "Rate limit" in generated:
+                                logger.warning(f"⚠️ Attempt {attempt + 1}: Adapter hit rate limit, waiting...")
+                                await asyncio.sleep(5 * (attempt + 1))
+                                continue
+                            
+                            # Clean up the response
+                            if generated.startswith("```"):
+                                lines = generated.split("\n")
+                                if lines[0].startswith("```"):
+                                    lines = lines[1:]
+                                if lines and lines[-1].startswith("```"):
+                                    lines = lines[:-1]
+                                generated = "\n".join(lines).strip()
+                            
+                            if generated and len(generated) > 50:
+                                logger.info("✅ Code generated via Big Pickle adapter (attempt %s)", attempt + 1)
+                                return generated
+                            else:
+                                logger.warning("⚠️ Attempt %s: Empty or short response from adapter", attempt + 1)
+                                if attempt < 2:
+                                    await asyncio.sleep(3)
+                                    continue
                         else:
-                            logger.warning("Empty or short response from adapter")
-                    else:
-                        text = await response.text()
-                        logger.warning("Adapter returned %s: %s", response.status, text)
-                        
-        except Exception as exc:
-            logger.warning("Adapter request failed: %s", exc)
+                            text = await response.text()
+                            logger.warning("⚠️ Attempt %s: Adapter returned %s: %s", attempt + 1, response.status, text)
+                            if attempt < 2:
+                                await asyncio.sleep(3)
+                                continue
+                            
+            except asyncio.TimeoutError:
+                logger.warning("⏱️ Attempt %s: Timeout waiting for adapter", attempt + 1)
+                if attempt < 2:
+                    await asyncio.sleep(5)
+                    continue
+            except Exception as exc:
+                logger.warning("❌ Attempt %s: Adapter request failed: %s", attempt + 1, exc)
+                if attempt < 2:
+                    await asyncio.sleep(3)
+                    continue
         
         # Fallback to template generation
-        logger.info("Using fallback code generation")
+        logger.info("🔄 Using fallback code generation after all attempts failed")
         return self._generate_fallback(instruction, language)
 
     def _generate_fallback(self, instruction: str, language: str) -> str:
