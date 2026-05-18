@@ -59,6 +59,8 @@ from app.models import (
     RemoveBookmarkRequest,
     BatchExecuteRequest,
     BatchExecuteResponse,
+    BatchReadRequest,
+    BatchReadResponse,
     BatchOperationResultResponse,
     CodeSearchRequest,
     CodeSearchResponse,
@@ -644,18 +646,6 @@ async def file_raw(
 # ---------------------------------------------------------------------------
 # Batch File Read API
 # ---------------------------------------------------------------------------
-
-class BatchReadRequest(BaseModel):
-    """Request to read multiple files."""
-    session_id: str = Field(..., min_length=1)
-    paths: list[str] = Field(..., min_length=1, max_length=20)
-
-
-class BatchReadResponse(BaseModel):
-    """Response with multiple file contents."""
-    files: dict[str, str]
-    errors: dict[str, str]
-
 
 @app.post("/api/batch/read", response_model=BatchReadResponse)
 async def batch_read(req: BatchReadRequest):
