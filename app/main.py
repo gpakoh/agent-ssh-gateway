@@ -1093,6 +1093,8 @@ async def context_file_edit(req: FileEditWithContextRequest):
     if not ctx:
         raise HTTPException(status_code=404, detail="Context not found")
 
+    logger.info(f"Context edit: ctx={req.context_id}, path={req.path}, ops={len(req.operations)}")
+
     # Create automatic backup before editing (if git is initialized)
     if ctx.git_info and ctx.git_info.status.value != "not_initialized":
         try:
@@ -1103,12 +1105,20 @@ async def context_file_edit(req: FileEditWithContextRequest):
         except Exception as exc:
             logger.warning("Auto-backup failed: %s", exc)
 
-    # Perform edit
-    result = await file_editor.edit_file(
-        ctx.session_id,
-        req.path,
-        [op.model_dump() for op in req.operations],
-    )
+    # Perform edit (resolve relative path against context path)
+    import os
+    file_path = req.path if req.path.startswith('/') else os.path.join(ctx.path, req.path)
+    
+    try:
+        result = await file_editor.edit_file(
+            ctx.session_id,
+            file_path,
+            [op.model_dump() for op in req.operations],
+        )
+        logger.info(f"Edit result: {result}")
+    except Exception as exc:
+        logger.error(f"Edit failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Edit failed: {exc}")
 
     await context_manager.record_edit(req.context_id, req.path, "edit")
     await context_manager.add_file_to_context(req.context_id, req.path)
@@ -1119,6 +1129,7 @@ async def context_file_edit(req: FileEditWithContextRequest):
         operations_applied=result.get("operations_applied", 0),
         changed=result.get("changed", False),
     )
+    logger.info(f"Response object: success={response.success}, changed={response.changed}")
 
     # Generate diff if file was changed
     if result.get("changed", False):
