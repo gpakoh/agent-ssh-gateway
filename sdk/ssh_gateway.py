@@ -240,7 +240,7 @@ class SSHGatewayClient:
         return r.json()
     
     def upload_file(self, local_path: str, remote_path: str) -> dict:
-        """Upload file to remote server."""
+        """Upload file to remote server (base64)."""
         if not self._ssh_session:
             raise RuntimeError("Not connected. Call ssh_connect() first.")
         
@@ -261,6 +261,24 @@ class SSHGatewayClient:
         r.raise_for_status()
         return r.json()
     
+    def upload_file_stream(self, local_path: str, remote_path: str) -> dict:
+        """Upload file using multipart/form-data for large files."""
+        if not self._ssh_session:
+            raise RuntimeError("Not connected. Call ssh_connect() first.")
+        
+        with open(local_path, 'rb') as f:
+            files = {'file': (local_path.split('/')[-1], f, 'application/octet-stream')}
+            r = self.session.post(
+                f"{self.base_url}/api/file/upload/stream",
+                params={
+                    "session_id": self._ssh_session.session_id,
+                    "path": remote_path
+                },
+                files=files
+            )
+        r.raise_for_status()
+        return r.json()
+    
     def download_file(self, remote_path: str, local_path: str):
         """Download file from remote server."""
         if not self._ssh_session:
@@ -277,6 +295,42 @@ class SSHGatewayClient:
         
         with open(local_path, 'wb') as f:
             f.write(r.content)
+    
+    def project_structure(self, path: str, include_git_status: bool = True, max_depth: int = 3) -> dict:
+        """Get project structure with metadata."""
+        if not self._ssh_session:
+            raise RuntimeError("Not connected. Call ssh_connect() first.")
+        
+        r = self.session.post(
+            f"{self.base_url}/api/project/structure",
+            json={
+                "session_id": self._ssh_session.session_id,
+                "path": path,
+                "include_git_status": include_git_status,
+                "max_depth": max_depth
+            }
+        )
+        r.raise_for_status()
+        return r.json()
+    
+    def batch_edit(self, files: list[dict], commit_message: str = None) -> dict:
+        """Edit multiple files in a single request.
+        
+        files: [{"path": "...", "operations": [{"type": "...", ...}]}]
+        """
+        if not self._ssh_session:
+            raise RuntimeError("Not connected. Call ssh_connect() first.")
+        
+        r = self.session.patch(
+            f"{self.base_url}/api/batch/edit",
+            json={
+                "session_id": self._ssh_session.session_id,
+                "files": files,
+                "commit_message": commit_message
+            }
+        )
+        r.raise_for_status()
+        return r.json()
     
     def disconnect(self):
         """Close SSH session."""

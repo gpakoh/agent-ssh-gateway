@@ -211,6 +211,25 @@ class ContextManager:
                 "error": "Git not initialized. Use /api/git/init first."
             }
 
+        # Pre-commit hooks: run validation if auto_validate is enabled
+        if ctx.auto_validate:
+            logger.info("Running pre-commit validation for context %s", context_id)
+            validation_report = await self._validation.run_validation(ctx.session_id, ctx.path)
+            
+            if not validation_report.can_commit:
+                logger.warning("Pre-commit validation failed for context %s", context_id)
+                return {
+                    "success": False,
+                    "error": f"Pre-commit validation failed: {validation_report.summary}",
+                    "validation_report": {
+                        "overall_status": validation_report.overall_status.value,
+                        "summary": validation_report.summary,
+                        "can_commit": validation_report.can_commit,
+                    }
+                }
+            
+            logger.info("Pre-commit validation passed for context %s", context_id)
+
         # Prepend context name to commit message
         full_message = f"[{ctx.name}] {message}"
         result = await self._git.commit(ctx.session_id, ctx.path, full_message, files)
