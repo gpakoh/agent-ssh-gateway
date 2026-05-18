@@ -231,6 +231,53 @@ r = s.get("https://ssh.xloud.ru/api/file/download", params={
 with open("downloaded_file.txt", "wb") as f:
     f.write(r.content)
 
+**Потоковая загрузка (для файлов 1MB+):**
+r = s.post("https://ssh.xloud.ru/api/file/upload/stream", 
+    params={"session_id": session_id, "path": "/remote/big_file.zip"},
+    files={"file": open("local_big_file.zip", "rb")}
+)
+# → {"success": true, "path": "...", "size": 1048576, "method": "multipart"}
+
+**Массовое редактирование файлов:**
+r = s.patch("https://ssh.xloud.ru/api/batch/edit", json={
+    "session_id": session_id,
+    "files": [
+        {
+            "path": "app/main.py",
+            "operations": [
+                {"type": "replace", "old": "def old():", "new": "def new():"}
+            ]
+        },
+        {
+            "path": "app/config.py",
+            "operations": [
+                {"type": "replace", "old": "DEBUG = True", "new": "DEBUG = False"}
+            ]
+        }
+    ]
+})
+# → {"results": [{"path": "...", "success": true, "changed": true}], "total_files": 2, "files_changed": 2}
+
+**Интроспекция проекта (структура + метаданные):**
+r = s.post("https://ssh.xloud.ru/api/project/structure", json={
+    "session_id": session_id,
+    "path": "/media/1TB/Python/NOD_gateway/gateway_client",
+    "include_git_status": true,
+    "max_depth": 3
+})
+# → {"path": "...", "total_files": 42, "total_directories": 15, "files": [...], "tree": {...}}
+
+**Pre-commit hooks (автоматическая валидация):**
+# При создании контекста включить auto_validate
+r = s.post("https://ssh.xloud.ru/api/context/create", json={
+    "session_id": session_id,
+    "name": "my_project",
+    "path": "/project/path",
+    "auto_commit": true,
+    "auto_validate": true  # ← mypy + pytest перед каждым коммитом
+})
+# Если валидация не пройдёт — коммит будет отменён с ошибкой
+
 
 ### 2.4 PTY (интерактивный терминал)
 | Method | Path | Описание |
@@ -1046,7 +1093,7 @@ git push github master
 
 
 > Написано: 2026-05-18
-> Версия: 4.3 (18 фич: +Upload/Download, +Auto-reconnect, +Python SDK)
+> Версия: 4.4 (22 фичи: +Project Introspection, +Batch Edit, +Streaming Upload, +Pre-commit Hooks)
 > Домен: https://ssh.xloud.ru
 > GitHub: https://github.com/gpakoh/ssh-gateway-ai
 > Gitea: http://git.xloud.ru:3005/gpakoh/ssh-gateway-ai
@@ -1054,6 +1101,13 @@ git push github master
 ---
 
 ## 4. ИСТОРИЯ ИЗМЕНЕНИЙ
+
+### v4.4 (2026-05-19)
+- **Добавлено**: POST /api/project/structure — интроспекция проекта (дерево файлов, метаданные, git status)
+- **Добавлено**: PATCH /api/batch/edit — массовое редактирование файлов (1 запрос = N файлов)
+- **Добавлено**: POST /api/file/upload/stream — потоковая загрузка файлов (multipart/form-data)
+- **Добавлено**: Pre-commit hooks — автоматический mypy/pytest перед коммитом (auto_validate)
+- **Обновлено**: Python SDK — новые методы project_structure(), batch_edit(), upload_file_stream()
 
 ### v4.3.1 (2026-05-18)
 - **Исправлено**: PATCH /api/context/file/edit — `success: null` → `success: true`

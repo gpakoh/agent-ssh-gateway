@@ -1087,3 +1087,78 @@ class DeploymentInfo(BaseModel):
     webhook_name: str
     status: str
     timestamp: float
+
+
+# ---------------------------------------------------------------------------
+# Project Introspection
+# ---------------------------------------------------------------------------
+
+class ProjectStructureRequest(BaseModel):
+    """Request to get project structure."""
+
+    session_id: str = Field(..., min_length=1)
+    path: str = Field(..., min_length=1)
+    include_git_status: bool = Field(default=True)
+    max_depth: int = Field(default=3, ge=1, le=10)
+
+
+class FileMetadata(BaseModel):
+    """File metadata for introspection."""
+
+    name: str
+    path: str
+    type: str = Field(..., pattern="^(file|directory|symlink)$")
+    size: int = 0
+    permissions: str = ""
+    modified_at: Optional[str] = None
+    git_status: Optional[str] = None
+    extension: Optional[str] = None
+
+
+class ProjectStructureResponse(BaseModel):
+    """Response with project structure."""
+
+    path: str
+    total_files: int
+    total_directories: int
+    files: list[FileMetadata]
+    tree: dict = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Batch Edit
+# ---------------------------------------------------------------------------
+
+class BatchEditOperation(BaseModel):
+    """Single file edit operation for batch editing."""
+
+    path: str = Field(..., min_length=1)
+    operations: list[EditOperation] = Field(..., min_length=1)
+
+
+class BatchEditRequest(BaseModel):
+    """Request for batch file editing."""
+
+    session_id: str = Field(..., min_length=1)
+    files: list[BatchEditOperation] = Field(..., min_length=1)
+    commit_message: Optional[str] = Field(default=None)
+
+
+class BatchEditResult(BaseModel):
+    """Result of editing a single file in batch."""
+
+    path: str
+    success: bool
+    operations_applied: int
+    changed: bool
+    error: Optional[str] = None
+
+
+class BatchEditResponse(BaseModel):
+    """Response after batch editing."""
+
+    results: list[BatchEditResult]
+    total_files: int
+    files_changed: int
+    total_operations: int
+    git_commit: Optional[str] = None
