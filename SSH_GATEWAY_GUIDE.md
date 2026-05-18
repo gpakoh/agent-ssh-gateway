@@ -78,12 +78,13 @@ r = s.post("https://ssh.xloud.ru/api/context/file/read", json={
 # Редактирование с автокоммитом
 r = s.patch("https://ssh.xloud.ru/api/context/file/edit", json={
     "context_id": context_id,
-    "path": "app/main.py",
+    "path": "app/main.py",  # относительный путь (относительно ctx.path) или абсолютный
     "operations": [{"type": "replace", "old": "...", "new": "..."}],
     "commit_message": "Update main.py",  # опционально
     "run_validation": True               # опционально
 })
 # → {"success": true, "git_commit": "abc123", "warning": null}
+# Примечание: path может быть относительным (относительно ctx.path) или абсолютным
 
 ### 2.1 SSH Sessions
 
@@ -939,7 +940,82 @@ client.disconnect()
 - Бинарные файлы через base64
 
 
-## 10. ЧЕКЛИСТ ПЕРЕД РАБОТОЙ
+## 10. GIT WORKFLOW (GitHub + Gitea)
+
+### Настройка remotes
+
+```bash
+# Проверить текущие remotes
+git remote -v
+
+# Добавить GitHub (если нет)
+git remote add github https://github.com/gpakoh/ssh-gateway-ai.git
+
+# Добавить Gitea (если нет)
+git remote add gitea http://git.xloud.ru:3005/gpakoh/ssh-gateway-ai.git
+```
+
+### Ежедневный workflow
+
+```bash
+# 1. Сделать изменения
+# ... редактируете код ...
+
+# 2. Проверить статус
+git status
+
+# 3. Добавить изменения
+git add -A
+# или конкретные файлы:
+git add app/main.py app/models.py
+
+# 4. Закоммитить
+git commit -m "Описание изменений"
+
+# 5. Запушить в ОБА репозитория
+git push github master
+git push gitea master
+
+# Или одной командой:
+git push github master && git push gitea master
+```
+
+### Работа с ветками
+
+```bash
+# Создать новую ветку
+git checkout -b feature/new-endpoint
+
+# Работать в ветке, коммитить, пушить
+git push github feature/new-endpoint
+
+# Смержить в master
+git checkout master
+git merge feature/new-endpoint
+git push github master && git push gitea master
+```
+
+### Клонирование репозитория
+
+```bash
+# С GitHub
+git clone https://github.com/gpakoh/ssh-gateway-ai.git
+
+# С Gitea
+git clone http://git.xloud.ru:3005/gpakoh/ssh-gateway-ai.git
+```
+
+### Решение конфликтов
+
+```bash
+# Если push отклонён (изменения на сервере)
+git pull github master --rebase
+# исправить конфликты если есть
+git push github master
+```
+
+
+## 11. ЧЕКЛИСТ ПЕРЕД РАБОТОЙ
 
 - [ ] Authelia login
 - [ ] SSH connect → получить session_id
@@ -950,7 +1026,7 @@ client.disconnect()
 - [ ] Готов к работе!
 
 
-## 10. 16 ПРАВИЛ (полный набор)
+## 12. 16 ПРАВИЛ (полный набор)
 1. **Heartbeat каждые 30 сек** — иначе сессия отвалится
 2. **Background Jobs для всего > 60 сек** — exec_command таймаутит
 3. **File Edit API вместо cat/sed** — безопаснее, есть rollback
@@ -978,6 +1054,12 @@ client.disconnect()
 ---
 
 ## 4. ИСТОРИЯ ИЗМЕНЕНИЙ
+
+### v4.3.1 (2026-05-18)
+- **Исправлено**: PATCH /api/context/file/edit — `success: null` → `success: true`
+- **Исправлено**: Порядок полей в Pydantic v2 (default после required)
+- **Исправлено**: Относительные пути в context/file/edit (объединение с ctx.path)
+- **Добавлено**: Логирование для отладки context/file/edit
 
 ### v4.3 (2026-05-18)
 - **Добавлено**: POST /api/file/upload — загрузка файлов на сервер (base64)
