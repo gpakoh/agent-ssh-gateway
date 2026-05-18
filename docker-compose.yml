@@ -14,10 +14,10 @@ services:
     environment:
       - UVICORN_HOST=0.0.0.0
       - UVICORN_PORT=8085
-      - SESSION_TIMEOUT=300
-      - CLEANUP_INTERVAL=60
+      - SESSION_TIMEOUT=3600
+      - CLEANUP_INTERVAL=300
       - CORS_ORIGINS=["https://ssh.xloud.ru"]
-      - OPENCODE_ADAPTER_URL=http://10.0.0.137:8007
+      - OPENCODE_ADAPTER_URL=http://172.17.0.1:8008
     volumes:
       - ssh_keys:/app/ssh_keys
     restart: unless-stopped

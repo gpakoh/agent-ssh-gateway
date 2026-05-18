@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import re
 from typing import Optional
 from dataclasses import dataclass
@@ -303,7 +304,7 @@ Code:"""
                     async with session.post(
                         f"{adapter_url}/api/generate",
                         json={
-                            "model": "opencode/big-pickle",
+                            "model": "openrouter/auto",
                             "prompt": prompt,
                             "stream": False
                         },
@@ -313,13 +314,13 @@ Code:"""
                             data = await response.json()
                             generated = data.get("response", "").strip()
                             
-                            # Проверяем на ошибку лимита от адаптера
-                            if "All proxies exhausted" in generated or "Rate limit" in generated:
-                                logger.warning(f"⚠️ Attempt {attempt + 1}: Adapter hit rate limit, waiting...")
+                            # Проверяем на ошибку от адаптера
+                            if generated.startswith("Error:"):
+                                logger.warning(f"⚠️ Attempt {attempt + 1}: Adapter error: {generated}, waiting...")
                                 await asyncio.sleep(5 * (attempt + 1))
                                 continue
                             
-                            # Clean up the response
+                            # Clean up markdown code blocks
                             if generated.startswith("```"):
                                 lines = generated.split("\n")
                                 if lines[0].startswith("```"):
@@ -329,7 +330,7 @@ Code:"""
                                 generated = "\n".join(lines).strip()
                             
                             if generated and len(generated) > 50:
-                                logger.info("✅ Code generated via Big Pickle adapter (attempt %s)", attempt + 1)
+                                logger.info("✅ Code generated via OpenRouter (attempt %s)", attempt + 1)
                                 return generated
                             else:
                                 logger.warning("⚠️ Attempt %s: Empty or short response from adapter", attempt + 1)
