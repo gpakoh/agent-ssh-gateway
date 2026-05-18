@@ -35,7 +35,6 @@ s.post("https://ssh.xloud.ru/api/ssh/heartbeat", json={"session_id": session_id}
 ### 2.0 Context Management (Git-aware)
 
 **Создать контекст разработки:**
-```python
 r = s.post("https://ssh.xloud.ru/api/context/create", json={
     "session_id": session_id,
     "name": "gateway_refactor",
@@ -46,7 +45,6 @@ r = s.post("https://ssh.xloud.ru/api/context/create", json={
 })
 context_id = r.json()["context_id"]
 # → {"context_id": "...", "git": {"status": "clean|not_initialized", ...}}
-```
 
 **Git-статус:**
 - `clean` — всё ок, можно коммитить
@@ -54,30 +52,23 @@ context_id = r.json()["context_id"]
 - `has_changes` — есть незакоммиченные изменения
 
 **Инициализировать Git (если не был):**
-```python
 r = s.post("https://ssh.xloud.ru/api/git/init", json={
     "context_id": context_id,
     "remote_url": "https://github.com/user/repo.git"  # опционально
 })
-```
 
 **Создать коммит:**
-```python
 r = s.post("https://ssh.xloud.ru/api/git/commit", json={
     "context_id": context_id,
     "message": "Add new feature",
     "files": ["app/main.py"]  # опционально, по умолчанию все
 })
-```
 
 **Бэкап / восстановление:**
-```python
 s.post("https://ssh.xloud.ru/api/git/backup", params={"context_id": context_id, "backup_name": "before_refactor"})
 s.post("https://ssh.xloud.ru/api/git/restore", params={"context_id": context_id})
-```
 
 **Работа с файлами через контекст:**
-```python
 # Чтение
 r = s.post("https://ssh.xloud.ru/api/context/file/read", json={
     "session_id": context_id,  # ← используем context_id как session_id
@@ -93,7 +84,6 @@ r = s.patch("https://ssh.xloud.ru/api/context/file/edit", json={
     "run_validation": True               # опционально
 })
 # → {"success": true, "git_commit": "abc123", "warning": null}
-```
 
 ### 2.1 SSH Sessions
 
@@ -102,6 +92,15 @@ r = s.patch("https://ssh.xloud.ru/api/context/file/edit", json={
 | POST | /api/ssh/disconnect | Закрыть сессию |
 | POST | /api/ssh/heartbeat | Продлить сессию (каждые 30с) |
 | GET | /api/ssh/sessions | Список активных сессий |
+| GET | /api/ssh/session/{id}/health | Проверить здоровье сессии и авто-реконнект |
+
+**Auto-reconnect:**
+Сессия автоматически восстанавливается при обрыве соединения:
+- Сохраняются все параметры подключения (host, port, username, password/key)
+- При `execute()` или `get_session()` проверяется соединение
+- Если disconnected — происходит автоматический reconnect
+- Счётчик reconnect'ов: `record.reconnect_count`
+- Ручная проверка: `GET /api/ssh/session/{id}/health`
 
 **Connect:**
 r = s.post("https://ssh.xloud.ru/api/ssh/connect", json={
@@ -160,6 +159,8 @@ s.post(f"https://ssh.xloud.ru/api/jobs/{job_id}/cancel")
 | POST | /api/batch/read | Массовое чтение файлов |
 | PATCH | /api/file/edit | Операции: replace/insert_after/insert_before/delete/append |
 | POST | /api/file/patch | Unified diff patch |
+| POST | /api/file/upload | Загрузка файла (base64) |
+| GET | /api/file/download | Скачивание файла (octet-stream) |
 
 **Чтение (JSON):**
 r = s.post("https://ssh.xloud.ru/api/file/read", json={
@@ -208,7 +209,26 @@ r = s.patch("https://ssh.xloud.ru/api/file/edit", json={
         {"type": "append", "text": "# End of file"}
     ]
 })
-# → {"status": "success", "operations_applied": 4, "lines_changed": 4}
+# → {"success": true, "path": "...", "operations_applied": 4, "changed": true}
+
+**Загрузка файла (Upload):**
+import base64
+content = base64.b64encode(open("local_file.txt", "rb").read()).decode("ascii")
+r = s.post("https://ssh.xloud.ru/api/file/upload", params={
+    "session_id": session_id,
+    "path": "/remote/path/file.txt",
+    "content": content
+})
+# → {"success": true, "path": "...", "size": 1234}
+
+**Скачивание файла (Download):**
+r = s.get("https://ssh.xloud.ru/api/file/download", params={
+    "session_id": session_id,
+    "path": "/remote/path/file.txt"
+})
+# → application/octet-stream, raw bytes
+with open("downloaded_file.txt", "wb") as f:
+    f.write(r.content)
 
 
 ### 2.4 PTY (интерактивный терминал)
@@ -246,7 +266,6 @@ print(r.json()["stdout"])
 ### 2.4 Validation API
 
 **Запустить валидацию (mypy + pytest):**
-```python
 r = s.post("https://ssh.xloud.ru/api/validate", json={
     "context_id": context_id,
     "run_mypy": True,      # типизация
@@ -263,10 +282,8 @@ for step in result["steps"]:
     print(f"  {step['name']}: {step['status']} ({step['duration']}s)")
     if step['errors'] > 0:
         print(f"    {step['output'][:500]}")
-```
 
 **Автовалидация при редактировании:**
-```python
 r = s.patch("https://ssh.xloud.ru/api/context/file/edit", json={
     "context_id": context_id,
     "path": "app/main.py",
@@ -278,10 +295,8 @@ result = r.json()
 # Если валидация не пройдена — коммит не создаётся!
 if result.get("validation_result"):
     print(result["validation_result"]["summary"])
-```
 
 **Автовалидация в контексте:**
-```python
 # При создании контекста
 r = s.post("https://ssh.xloud.ru/api/context/create", json={
     "session_id": session_id,
@@ -289,86 +304,68 @@ r = s.post("https://ssh.xloud.ru/api/context/create", json={
     "path": "/path/to/project",
     "auto_validate": True  # ← валидация после каждого edit
 })
-```
 
 ### 2.5 Smart Context (состояние работы)
 
 **Открыть файл (создать вкладку):**
-```python
 s.post("https://ssh.xloud.ru/api/context/file/open", json={
     "context_id": context_id,
     "path": "app/main.py"
 })
-```
 
 **Закрыть файл:**
-```python
 s.post("https://ssh.xloud.ru/api/context/file/close", json={
     "context_id": context_id,
     "path": "app/main.py"
 })
-```
 
 **Обновить позицию курсора:**
-```python
 s.post("https://ssh.xloud.ru/api/context/cursor", json={
     "context_id": context_id,
     "path": "app/main.py",
     "line": 42,
     "column": 5
 })
-```
 
 **Добавить команду в историю:**
-```python
 s.post("https://ssh.xloud.ru/api/context/command", json={
     "context_id": context_id,
     "command": "docker ps",
     "directory": "/media/1TB/Python/NOD_gateway"
 })
-```
 
 **Добавить поиск в историю:**
-```python
 s.post("https://ssh.xloud.ru/api/context/search", json={
     "context_id": context_id,
     "query": "class Context",
     "path": "app"
 })
-```
 
 **Добавить закладку:**
-```python
 s.post("https://ssh.xloud.ru/api/context/bookmark", json={
     "context_id": context_id,
     "path": "app/main.py",
     "line": 42,
     "note": "Важная функция"
 })
-```
 
 **Удалить закладку:**
-```python
 s.delete("https://ssh.xloud.ru/api/context/bookmark", params={
     "context_id": context_id,
     "path": "app/main.py",
     "line": 42
 })
-```
 
 **Получить состояние контекста:**
-```python
 r = s.get(f"https://ssh.xloud.ru/api/context/{context_id}/state")
 state = r.json()
 print(f"Открытые файлы: {[t['path'] for t in state['tabs']]}")
 print(f"Активный файл: {state['active_tab']}")
 print(f"Последняя команда: {state['command_history'][-1] if state['command_history'] else 'нет'}")
 print(f"Закладки: {len(state['bookmarks'])}")
-```
 
 ## 2.6 Workflow с Context API (рекомендуемый)
 
-```python
 import requests, urllib3
 urllib3.disable_warnings()
 
@@ -425,12 +422,10 @@ print(f"✅ Коммит: {result.get('git_commit', 'нет')}")
 # 6. Завершение
 s.delete(f"https://ssh.xloud.ru/api/context/{context_id}")
 s.post("https://ssh.xloud.ru/api/ssh/disconnect", json={"session_id": session_id})
-```
 
 ### 2.7 Batch Operations (множественные операции)
 
 **Выполнить несколько операций за один запрос:**
-```python
 r = s.post("https://ssh.xloud.ru/api/batch/execute", json={
     "context_id": context_id,
     "operations": [
@@ -468,7 +463,6 @@ print(f"Коммит: {result.get('git_commit', 'нет')}")
 for op in result["operations"]:
     status = "✅" if op["success"] else "❌"
     print(f"  {status} {op['operation']}: {op['path']} ({op['duration']}s)")
-```
 
 **Типы batch операций:**
 - `read` — прочитать файл
@@ -480,14 +474,12 @@ for op in result["operations"]:
 - `execute` — выполнить shell команду
 
 **Ошибки и continue_on_error:**
-```python
 {
     "type": "edit",
     "path": "app/main.py",
     "operations": [...],
     "continue_on_error": True  # ← продолжить даже если эта операция упадёт
 }
-```
 
 ## 3. КОГДА ЧТО ИСПОЛЬЗОВАТЬ
 | Задача | API |
@@ -655,7 +647,6 @@ def check_mypy(component):
 ### 2.8 Code Intelligence (умный поиск и генерация)
 
 **Поиск кода в проекте:**
-```python
 r = s.post("https://ssh.xloud.ru/api/code/search", json={
     "session_id": session_id,
     "path": "/media/1TB/Python/NOD_gateway/gateway_client",
@@ -665,20 +656,16 @@ r = s.post("https://ssh.xloud.ru/api/code/search", json={
 results = r.json()["results"]
 for res in results:
     print(f"{res['path']}:{res['line']} - {res['content']}")
-```
 
 **Генерация кода по описанию:**
-```python
 r = s.post("https://ssh.xloud.ru/api/code/generate", json={
     "instruction": "Создать FastAPI endpoint для health check",
     "language": "python"
 })
 code = r.json()["code"]
 print(code)
-```
 
 **Умная вставка кода:**
-```python
 r = s.post("https://ssh.xloud.ru/api/code/insert", json={
     "context_id": context_id,
     "path": "app/main.py",
@@ -686,19 +673,15 @@ r = s.post("https://ssh.xloud.ru/api/code/insert", json={
     "auto_commit": True
 })
 print(r.json()["suggestion"]["explanation"])
-```
 
 ### 2.9 Template Library (шаблоны кода)
 
 **Список шаблонов:**
-```python
 r = s.get("https://ssh.xloud.ru/api/templates")
 for t in r.json()["templates"]:
     print(f"{t['id']}: {t['name']} ({t['language']})")
-```
 
 **Использование шаблона:**
-```python
 r = s.post("https://ssh.xloud.ru/api/templates/render", json={
     "context_id": context_id,
     "template_id": "fastapi_endpoint",
@@ -711,36 +694,28 @@ r = s.post("https://ssh.xloud.ru/api/templates/render", json={
     "target_path": "/media/1TB/Python/NOD_gateway/gateway_client/app/endpoints/users.py",
     "auto_commit": True
 })
-```
 
 ### 2.10 Error Recovery (восстановление)
 
 **Создать бэкап перед изменениями:**
-```python
 s.post("https://ssh.xloud.ru/api/recovery/backup", json={
     "context_id": context_id,
     "name": "before_refactor"
 })
-```
 
 **Восстановить из бэкапа:**
-```python
 s.post("https://ssh.xloud.ru/api/recovery/restore", json={
     "context_id": context_id
 })
-```
 
 **Список бэкапов:**
-```python
 r = s.get("https://ssh.xloud.ru/api/recovery/backups", params={"context_id": context_id})
 for backup in r.json()["backups"]:
     print(f"{backup['id']}: {backup['name']}")
-```
 
 ### 2.11 Project Analytics (метрики проекта)
 
 **Анализ проекта:**
-```python
 r = s.post("https://ssh.xloud.ru/api/analytics", json={
     "session_id": session_id,
     "path": "/media/1TB/Python/NOD_gateway/gateway_client"
@@ -753,12 +728,10 @@ print(f"Функций: {data['code']['functions']}")
 print(f"Тестов: {data['tests']['total_tests']}")
 print(f"Коммитов: {data['git']['total_commits']}")
 print(f"Устаревших пакетов: {data['dependencies']['outdated_packages']}")
-```
 
 ### 2.12 Global Search & Replace (поиск и замена)
 
 **Поиск по всему проекту:**
-```python
 r = s.post("https://ssh.xloud.ru/api/search/global", json={
     "session_id": session_id,
     "path": "/media/1TB/Python/NOD_gateway/gateway_client",
@@ -768,10 +741,8 @@ r = s.post("https://ssh.xloud.ru/api/search/global", json={
 })
 for match in r.json()["matches"]:
     print(f"{match['path']}:{match['line']} - {match['content']}")
-```
 
 **Глобальная замена (dry_run сначала!):**
-```python
 # Сначала проверим что будет изменено
 r = s.post("https://ssh.xloud.ru/api/replace/global", json={
     "session_id": session_id,
@@ -793,12 +764,10 @@ r = s.post("https://ssh.xloud.ru/api/replace/global", json={
 })
 print(f"Изменено файлов: {r.json()['files_modified']}")
 print(f"Всего замен: {r.json()['total_replacements']}")
-```
 
 ### 2.13 File Tree Explorer (дерево файлов)
 
 **Получить структуру директории:**
-```python
 r = s.post("https://ssh.xloud.ru/api/tree", json={
     "session_id": session_id,
     "path": "/media/1TB/Python/NOD_gateway/gateway_client",
@@ -816,29 +785,23 @@ def print_tree(node, indent=0):
         print_tree(child, indent + 1)
 
 print_tree(tree['root'])
-```
 
 ### 2.14 Multi-Server Management (управление серверами)
 
 **Список серверов:**
-```python
 r = s.get("https://ssh.xloud.ru/api/servers")
 for server in r.json()["servers"]:
     print(f"{server['name']}: {server['host']} ({server['status']})")
-```
 
 **Подключиться к серверу:**
-```python
 r = s.post("https://ssh.xloud.ru/api/servers/lxc103/connect", json={
     "server_id": "lxc103",
     "password": "CHANGEME"
 })
 session_id = r.json()["session_id"]
 print(f"Подключено к {r.json()['message']}")
-```
 
 **Добавить новый сервер:**
-```python
 r = s.post("https://ssh.xloud.ru/api/servers", json={
     "id": "new_server",
     "name": "New Server",
@@ -847,40 +810,32 @@ r = s.post("https://ssh.xloud.ru/api/servers", json={
     "username": "root",
     "tags": ["web", "production"]
 })
-```
 
 ### 2.15 Snapshot System (точки восстановления)
 
 **Создать снапшот:**
-```python
 r = s.post("https://ssh.xloud.ru/api/snapshots", json={
     "context_id": context_id,
     "name": "before_major_refactor",
     "description": "Перед большим рефакторингом"
 })
 print(r.json()["message"])
-```
 
 **Восстановить из снапшота:**
-```python
 r = s.post("https://ssh.xloud.ru/api/snapshots/restore", json={
     "context_id": context_id,
     "snapshot_id": "snap_1234567890"
 })
 print(f"Восстановлено файлов: {len(r.json()['restored_files'])}")
-```
 
 **Список снапшотов:**
-```python
 r = s.get("https://ssh.xloud.ru/api/snapshots", params={"context_id": context_id})
 for snap in r.json()["snapshots"]:
     print(f"{snap['id']}: {snap['name']} ({len(snap['files'])} files)")
-```
 
 ### 2.16 CI/CD Webhooks (автодеплой)
 
 **Создать webhook:**
-```python
 r = s.post("https://ssh.xloud.ru/api/webhooks", json={
     "name": "Auto-deploy gateway",
     "webhook_type": "gitea",
@@ -891,15 +846,12 @@ r = s.post("https://ssh.xloud.ru/api/webhooks", json={
 })
 webhook_id = r.json()["id"]
 print(f"Webhook URL: https://ssh.xloud.ru/api/webhooks/{webhook_id}/deploy")
-```
 
 **Ручной деплой:**
-```python
 r = s.post(f"https://ssh.xloud.ru/api/webhooks/{webhook_id}/deploy", json={
     "session_id": session_id
 })
 print(f"Deploy job: {r.json()['job_id']}")
-```
 
 ### 2.17 Monaco Editor (встроенный редактор)
 
@@ -911,11 +863,9 @@ print(f"Deploy job: {r.json()['job_id']}")
 - Поддерживаются языки: Python, JavaScript, TypeScript, HTML, CSS, JSON, YAML, Markdown, Shell, Dockerfile
 - Нажми **Save** (Ctrl+S) чтобы сохранить файл
 
-**API для открытия файла в редакторе:**
-```javascript
+**API для открытия файла в редакторе:**javascript
 // Через JavaScript в браузере
 window.loadFileIntoEditor('/path/to/file.py', 'file content here');
-```
 
 ## 7. КЛЮЧЕВЫЕ ПУТИ
 | Что | Путь |
@@ -938,7 +888,58 @@ RAM: 192 GB (swap выключен)
 Docker: 66 контейнеров
 
 
-## 9. ЧЕКЛИСТ ПЕРЕД РАБОТОЙ
+## 9. PYTHON SDK
+
+Упрощённая работа с API через Python SDK:
+
+```python
+from sdk.ssh_gateway import SSHGatewayClient
+
+# Создать клиент
+client = SSHGatewayClient("https://ssh.xloud.ru")
+
+# Подключиться (с авто-reconnect и heartbeat)
+session = client.ssh_connect("10.0.1.103", username="root", password="CHANGEME")
+
+# Выполнить команду
+result = client.execute("docker ps")
+print(result["stdout"])
+
+# Редактировать файл
+client.edit_file("app/main.py", [
+    {"type": "replace", "old": "def old():", "new": "def new():"}
+])
+
+# Читать файлы
+content = client.read_file("app/main.py")
+files = client.batch_read(["app/main.py", "app/config.py"])
+
+# Загрузить / скачать файл
+client.upload_file("local.txt", "/remote/path/file.txt")
+client.download_file("/remote/path/file.txt", "local.txt")
+
+# Фоновые задачи
+job = client.run_background("pytest tests/", timeout=300)
+for log in job.stream_logs():
+    print(log)
+result = job.wait()
+
+# Работа с контекстом
+ctx_id = client.create_context("my_project", "/path/to/project", auto_commit=True)
+client.context_edit("app/main.py", [...], commit_message="Update")
+
+# Отключиться
+client.disconnect()
+```
+
+**Особенности SDK:**
+- Авто-reconnect при обрыве SSH-соединения
+- Heartbeat каждые 30 сек (фоновый поток)
+- Поддержка Unicode и многобайтовых символов
+- Бинарные файлы через base64
+
+
+## 10. ЧЕКЛИСТ ПЕРЕД РАБОТОЙ
 
 - [ ] Authelia login
 - [ ] SSH connect → получить session_id
@@ -969,7 +970,7 @@ Docker: 66 контейнеров
 
 
 > Написано: 2026-05-18
-> Версия: 4.2 (16 фич: Context API, Validation, Batch, Templates, Analytics, Search, Tree, Servers, Snapshots, Webhooks, Monaco)
+> Версия: 4.3 (18 фич: +Upload/Download, +Auto-reconnect, +Python SDK)
 > Домен: https://ssh.xloud.ru
 > GitHub: https://github.com/gpakoh/ssh-gateway-ai
 > Gitea: http://git.example.com:3005/gpakoh/ssh-gateway-ai
@@ -977,6 +978,16 @@ Docker: 66 контейнеров
 ---
 
 ## 4. ИСТОРИЯ ИЗМЕНЕНИЙ
+
+### v4.3 (2026-05-18)
+- **Добавлено**: POST /api/file/upload — загрузка файлов на сервер (base64)
+- **Добавлено**: GET /api/file/download — скачивание файлов (application/octet-stream)
+- **Добавлено**: Python SDK (sdk/ssh_gateway.py) — удобная работа с API
+- **Добавлено**: Auto-reconnect — автоматическое восстановление SSH-соединения
+- **Добавлено**: GET /api/ssh/session/{id}/health — проверка здоровья сессии
+- **Исправлено**: PATCH /api/file/edit — Unicode и многобайтовые символы работают корректно
+- **Исправлено**: write_file — использование heredoc вместо echo (большие файлы)
+- **Исправлено**: Удалён дублирующийся класс FileEditWithContextResponse
 
 ### v4.2 (2026-05-18)
 - **Добавлено**: GET /api/file/raw — чтение файлов как text/plain (без JSON-обёртки)
