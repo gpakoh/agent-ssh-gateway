@@ -103,6 +103,10 @@ from app.models import (
     AddServerRequest,
     ConnectServerRequest,
     ServerConnectResponse,
+    PTYCreateRequest,
+    PTYInputRequest,
+    PTYOutputResponse,
+    PTYCloseRequest,
     SnapshotInfo,
     CreateSnapshotRequest,
     RestoreSnapshotRequest,
@@ -318,6 +322,126 @@ async def ssh_sessions():
         for r in records
     ]
     return SessionsResponse(sessions=sessions, count=len(sessions))
+
+
+# ---------------------------------------------------------------------------
+# PTY (Interactive Terminal)
+# ---------------------------------------------------------------------------
+
+# Store PTY sessions
+_pty_sessions: dict[str, dict] = {}
+
+@app.post("/api/ssh/pty/{session_id}/create")
+async def pty_create(session_id: str, req: PTYCreateRequest):
+    """Create PTY session."""
+    import uuid
+    import paramiko
+    
+    record = await manager.get_session(session_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    pty_id = str(uuid.uuid4())
+    _pty_sessions[pty_id] = {
+        "session_id": session_id,
+        "client": record.client,
+        "channel": None,
+        "term": req.term,
+        "rows": req.rows,
+        "cols": req.cols,
+    }
+    
+    # Create interactive channel
+    try:
+        transport = record.client.get_transport()
+        channel = transport.open_session()
+        channel.get_pty(term=req.term, width=req.cols, height=req.rows)
+        channel.invoke_shell()
+        
+        _pty_sessions[pty_id]["channel"] = channel
+        
+        return {
+            "status": "created",
+            "pty_id": pty_id,
+            "message": "PTY session created",
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"PTY creation failed: {exc}")
+
+
+@app.post("/api/ssh/pty/{session_id}/input")
+async def pty_input(session_id: str, req: PTYInputRequest):
+    """Send input to PTY."""
+    # Find PTY by session_id
+    pty_info = None
+    pty_id = None
+    for pid, info in _pty_sessions.items():
+        if info["session_id"] == session_id:
+            pty_info = info
+            pty_id = pid
+            break
+    
+    if not pty_info or not pty_info.get("channel"):
+        raise HTTPException(status_code=404, detail="PTY session not found")
+    
+    try:
+        channel = pty_info["channel"]
+        channel.send(req.data)
+        
+        return {"status": "sent", "pty_id": pty_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Input failed: {exc}")
+
+
+@app.get("/api/ssh/pty/{session_id}/output")
+async def pty_output(session_id: str):
+    """Get PTY output."""
+    pty_info = None
+    for info in _pty_sessions.values():
+        if info["session_id"] == session_id:
+            pty_info = info
+            break
+    
+    if not pty_info or not pty_info.get("channel"):
+        raise HTTPException(status_code=404, detail="PTY session not found")
+    
+    try:
+        channel = pty_info["channel"]
+        output = ""
+        
+        # Read available output (non-blocking)
+        import select
+        if channel.recv_ready():
+            data = channel.recv(4096).decode("utf-8", errors="replace")
+            output += data
+        
+        return PTYOutputResponse(
+            output=output,
+            eof=channel.eof_received or channel.closed,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Output read failed: {exc}")
+
+
+@app.post("/api/ssh/pty/{session_id}/close")
+async def pty_close(session_id: str):
+    """Close PTY session."""
+    pty_id_to_remove = None
+    for pid, info in list(_pty_sessions.items()):
+        if info["session_id"] == session_id:
+            if info.get("channel"):
+                try:
+                    info["channel"].close()
+                except Exception:
+                    pass
+            pty_id_to_remove = pid
+            break
+    
+    if pty_id_to_remove:
+        del _pty_sessions[pty_id_to_remove]
+        return {"status": "closed", "session_id": session_id}
+    
+    raise HTTPException(status_code=404, detail="PTY session not found")
 
 
 # ---------------------------------------------------------------------------
@@ -1141,6 +1265,7 @@ async def get_file_tree(req: FileTreeRequest):
         path=req.path,
         depth=req.depth,
         show_hidden=req.show_hidden,
+        max_files=req.max_files,
     )
     
     def count_files(node) -> tuple[int, int]:
@@ -1182,6 +1307,11 @@ async def list_servers():
 @app.post("/api/servers")
 async def add_server(req: AddServerRequest):
     """Add a new server."""
+    # Check if server ID already exists
+    existing = server_manager.get_server(req.id)
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Server with ID '{req.id}' already exists")
+    
     server = server_manager.add_server(
         id=req.id,
         name=req.name,
@@ -1459,10 +1589,14 @@ async def context_add_bookmark(req: AddBookmarkRequest):
 
 
 @app.delete("/api/context/bookmark")
-async def context_remove_bookmark(req: RemoveBookmarkRequest):
+async def context_remove_bookmark(
+    context_id: str = Query(...),
+    path: str = Query(...),
+    line: int = Query(...),
+):
     """Remove bookmark."""
-    success = await context_manager.remove_bookmark(req.context_id, req.path, req.line)
-    return {"status": "removed" if success else "not_found", "path": req.path, "line": req.line}
+    success = await context_manager.remove_bookmark(context_id, path, line)
+    return {"status": "removed" if success else "not_found", "path": path, "line": line}
 
 
 @app.get("/api/context/{context_id}/state")

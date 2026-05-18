@@ -722,6 +722,7 @@ class FileTreeRequest(BaseModel):
     path: str = Field(..., min_length=1)
     depth: int = Field(default=2, ge=1, le=5)
     show_hidden: bool = Field(default=False)
+    max_files: int = Field(default=100, ge=10, le=1000)
 
 
 class FileTreeNode(BaseModel):
@@ -943,6 +944,39 @@ class ServerConnectResponse(BaseModel):
     session_id: str
     status: str
     message: str
+
+
+# ---------------------------------------------------------------------------
+# PTY (Interactive Terminal)
+# ---------------------------------------------------------------------------
+
+class PTYCreateRequest(BaseModel):
+    """Request to create PTY session."""
+
+    session_id: str = Field(..., min_length=1)
+    term: str = Field(default="xterm-256color")
+    rows: int = Field(default=24, ge=1)
+    cols: int = Field(default=80, ge=1)
+
+
+class PTYInputRequest(BaseModel):
+    """Request to send input to PTY."""
+
+    session_id: str = Field(..., min_length=1)
+    data: str = Field(..., min_length=1)
+
+
+class PTYOutputResponse(BaseModel):
+    """Response with PTY output."""
+
+    output: str
+    eof: bool = False
+
+
+class PTYCloseRequest(BaseModel):
+    """Request to close PTY."""
+
+    session_id: str = Field(..., min_length=1)
 
 
 # ---------------------------------------------------------------------------

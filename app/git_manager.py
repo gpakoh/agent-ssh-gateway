@@ -37,10 +37,12 @@ class GitManager:
 
     async def check_git_status(self, session_id: str, path: str) -> GitInfo:
         """Check if directory is a git repo and get status."""
+        escaped_path = path.replace("'", "'\"'\"'")
+        
         # Check if .git exists
         result = await self._ssh.execute(
             session_id,
-            f"cd {path} && test -d .git && echo 'GIT_REPO' || echo 'NOT_GIT'",
+            f"cd '{escaped_path}' && test -d .git && echo 'GIT_REPO' || echo 'NOT_GIT'",
             timeout=10
         )
         
@@ -56,7 +58,7 @@ class GitManager:
         # Get branch
         branch_result = await self._ssh.execute(
             session_id,
-            f"cd {path} && git branch --show-current 2>/dev/null || echo 'HEAD'",
+            f"cd '{escaped_path}' && git branch --show-current 2>/dev/null || echo 'HEAD'",
             timeout=10
         )
         branch = branch_result["stdout"].strip()
@@ -64,7 +66,7 @@ class GitManager:
         # Check for changes
         status_result = await self._ssh.execute(
             session_id,
-            f"cd {path} && git status --porcelain 2>/dev/null",
+            f"cd '{escaped_path}' && git status --porcelain 2>/dev/null",
             timeout=10
         )
         has_changes = bool(status_result["stdout"].strip())
@@ -72,7 +74,7 @@ class GitManager:
         # Get last commit
         last_commit_result = await self._ssh.execute(
             session_id,
-            f"cd {path} && git log -1 --format='%h %s' 2>/dev/null || echo 'No commits'",
+            f"cd '{escaped_path}' && git log -1 --format='%h %s' 2>/dev/null || echo 'No commits'",
             timeout=10
         )
         last_commit = last_commit_result["stdout"].strip()
@@ -80,7 +82,7 @@ class GitManager:
         # Get remote
         remote_result = await self._ssh.execute(
             session_id,
-            f"cd {path} && git remote get-url origin 2>/dev/null || echo ''",
+            f"cd '{escaped_path}' && git remote get-url origin 2>/dev/null || echo ''",
             timeout=10
         )
         remote_url = remote_result["stdout"].strip() or None
@@ -99,14 +101,27 @@ class GitManager:
 
     async def init_repo(self, session_id: str, path: str, remote_url: Optional[str] = None) -> dict:
         """Initialize git repository."""
+        # Check if git is installed
+        check_result = await self._ssh.execute(
+            session_id, "which git || echo 'NOT_FOUND'", timeout=5
+        )
+        if "NOT_FOUND" in check_result["stdout"]:
+            return {
+                "success": False,
+                "error": "Git not installed on remote server"
+            }
+        
+        # Escape path for shell
+        escaped_path = path.replace("'", "'\"'\"'")
+        
         commands = [
-            f"cd {path} && git init",
-            f"cd {path} && git config user.email 'ai@ssh-gateway.local'",
-            f"cd {path} && git config user.name 'AI Gateway'",
+            f"cd '{escaped_path}' && git init",
+            f"cd '{escaped_path}' && git config user.email 'ai@ssh-gateway.local'",
+            f"cd '{escaped_path}' && git config user.name 'AI Gateway'",
         ]
         
         if remote_url:
-            commands.append(f"cd {path} && git remote add origin {remote_url}")
+            commands.append(f"cd '{escaped_path}' && git remote add origin {remote_url}")
 
         for cmd in commands:
             result = await self._ssh.execute(session_id, cmd, timeout=15)
@@ -124,19 +139,22 @@ class GitManager:
 
     async def commit(self, session_id: str, path: str, message: str, files: Optional[list] = None) -> dict:
         """Create a git commit."""
+        escaped_path = path.replace("'", "'\"'\"'")
+        escaped_message = message.replace("'", "'\"'\"'")
+        
         # Add files
         if files:
-            files_str = " ".join(files)
-            add_cmd = f"cd {path} && git add {files_str}"
+            files_str = " ".join(f"'{f}'" for f in files)
+            add_cmd = f"cd '{escaped_path}' && git add {files_str}"
         else:
-            add_cmd = f"cd {path} && git add -A"
+            add_cmd = f"cd '{escaped_path}' && git add -A"
 
         result = await self._ssh.execute(session_id, add_cmd, timeout=15)
         if result["exit_code"] != 0:
             return {"success": False, "error": result["stderr"]}
 
         # Commit
-        commit_cmd = f"cd {path} && git commit -m '{message}'"
+        commit_cmd = f"cd '{escaped_path}' && git commit -m '{escaped_message}'"
         result = await self._ssh.execute(session_id, commit_cmd, timeout=15)
         
         if result["exit_code"] != 0:
@@ -153,9 +171,10 @@ class GitManager:
 
     async def create_backup(self, session_id: str, path: str, backup_name: str) -> dict:
         """Create a git stash as backup."""
+        escaped_path = path.replace("'", "'\"'\"'")
         result = await self._ssh.execute(
             session_id,
-            f"cd {path} && git stash push -m '{backup_name}'",
+            f"cd '{escaped_path}' && git stash push -m '{backup_name}'",
             timeout=15
         )
         
@@ -169,9 +188,10 @@ class GitManager:
 
     async def restore_backup(self, session_id: str, path: str) -> dict:
         """Restore from stash."""
+        escaped_path = path.replace("'", "'\"'\"'")
         result = await self._ssh.execute(
             session_id,
-            f"cd {path} && git stash pop",
+            f"cd '{escaped_path}' && git stash pop",
             timeout=15
         )
         
@@ -182,9 +202,10 @@ class GitManager:
 
     async def diff(self, session_id: str, path: str) -> str:
         """Get git diff."""
+        escaped_path = path.replace("'", "'\"'\"'")
         result = await self._ssh.execute(
             session_id,
-            f"cd {path} && git diff",
+            f"cd '{escaped_path}' && git diff",
             timeout=15
         )
         return result["stdout"]
