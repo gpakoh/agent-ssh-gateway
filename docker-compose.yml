@@ -18,13 +18,27 @@ services:
       - CLEANUP_INTERVAL=300
       - CORS_ORIGINS=["https://ssh.xloud.ru"]
       - OPENCODE_ADAPTER_URL=http://172.17.0.1:8008
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
     volumes:
-      - ssh_keys:/app/ssh_keys
+      - ssh_keys:/app/ssh_keys:ro
+      - gateway_logs:/app/logs
+      - /tmp:/tmp
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
-    tmpfs:
-      - /tmp:noexec,nosuid,size=100m
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8085/health')"]
       interval: 30s
@@ -40,4 +54,6 @@ networks:
 
 volumes:
   ssh_keys:
+    driver: local
+  gateway_logs:
     driver: local

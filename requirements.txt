@@ -6,3 +6,6 @@ pydantic-settings==2.6.0
 python-multipart==0.0.17
 websockets==13.1
 aiohttp==3.9.5
+slowapi==0.1.9
+cryptography==42.0.0
+redis==5.0.0

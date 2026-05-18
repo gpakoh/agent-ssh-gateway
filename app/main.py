@@ -8,12 +8,21 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Header, Response, UploadFile, File
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Header, Response, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.config import settings
+from app.security import (
+    limiter,
+    sanitize_command,
+    validate_path,
+    SecretManager,
+    AuditLogger,
+    SessionSecurity,
+    SECURITY_HEADERS,
+)
 from app.models import (
     ConnectRequest,
     ConnectResponse,
@@ -173,12 +182,14 @@ server_manager: ServerManager
 snapshot_manager: SnapshotManager
 webhook_manager: WebhookManager
 analytics: ProjectAnalytics
+secret_manager: SecretManager
+audit_logger: AuditLogger
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    global manager, job_manager, file_editor, context_manager, batch_manager, code_intelligence, search_replace, file_tree, server_manager, snapshot_manager, webhook_manager, analytics
+    global manager, job_manager, file_editor, context_manager, batch_manager, code_intelligence, search_replace, file_tree, server_manager, snapshot_manager, webhook_manager, analytics, secret_manager, audit_logger
     manager = SSHSessionManager(
         session_timeout=settings.session_timeout,
         cleanup_interval=settings.cleanup_interval,
@@ -224,6 +235,12 @@ async def lifespan(app: FastAPI):
     )
     
     analytics = ProjectAnalytics(ssh_manager=manager)
+    
+    # Initialize security components
+    secret_manager = SecretManager(settings.encryption_key if settings.encryption_key else None)
+    audit_logger = AuditLogger()
+    
+    logger.info("Security components initialized")
 
     logger.info("Web SSH Gateway started on %s:%d", settings.uvicorn_host, settings.uvicorn_port)
     yield
@@ -245,7 +262,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS
+# Rate limiting
+app.state.limiter = limiter
+
+# CORS (restrict in production)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -253,6 +273,15 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def security_headers_middleware(request, call_next):
+    """Add security headers to all responses."""
+    response = await call_next(request)
+    for header, value in SECURITY_HEADERS.items():
+        response.headers[header] = value
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -298,11 +327,24 @@ async def ssh_connect(req: ConnectRequest):
 
 
 @app.post("/api/ssh/execute", response_model=ExecuteResponse)
-async def ssh_execute(req: ExecuteRequest):
+@limiter.limit("100/minute")
+async def ssh_execute(req: ExecuteRequest, request: Request):
     """Execute a command on an existing SSH session."""
+    # Sanitize command
+    try:
+        sanitized = sanitize_command(req.command)
+    except ValueError as exc:
+        audit_logger.log_security_event(
+            "BLOCKED_COMMAND", str(exc), request.client.host
+        )
+        raise HTTPException(status_code=400, detail=str(exc))
+    
+    # Audit log
+    audit_logger.log_command(req.session_id, sanitized, request.client.host)
+    
     result = await manager.execute(
         session_id=req.session_id,
-        command=req.command,
+        command=sanitized,
         timeout=req.timeout,
     )
     return ExecuteResponse(**result)
@@ -599,10 +641,16 @@ async def jobs_stream(job_id: str):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/file/read", response_model=FileReadResponse)
-async def file_read(req: FileReadRequest):
+async def file_read(req: FileReadRequest, request: Request):
     """Read a file from a remote server."""
-    content = await file_editor.read_file(req.session_id, req.path)
-    return FileReadResponse(path=req.path, content=content)
+    try:
+        validated = validate_path(req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    
+    audit_logger.log_file_access(req.session_id, validated, "READ", request.client.host)
+    content = await file_editor.read_file(req.session_id, validated)
+    return FileReadResponse(path=validated, content=content)
 
 
 @app.patch("/api/file/edit", response_model=FileEditResponse)
