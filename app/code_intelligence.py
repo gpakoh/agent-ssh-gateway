@@ -277,24 +277,85 @@ async def new_endpoint():
         instruction: str,
         language: str = "python",
     ) -> str:
-        """Generate code based on instruction."""
+        """Generate code using opencode Big Pickle via adapter."""
+        import aiohttp
+        
+        prompt = f"""You are a code generator. Generate only code, no explanations.
+
+Language: {language}
+Request: {instruction}
+
+Rules:
+- Output ONLY the code block
+- No markdown formatting
+- No explanations
+- Complete, working code
+- Follow best practices
+
+Code:"""
+
+        adapter_url = os.environ.get("OPENCODE_ADAPTER_URL", "http://10.0.0.137:8007")
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{adapter_url}/api/generate",
+                    json={
+                        "model": "opencode/big-pickle",
+                        "prompt": prompt,
+                        "stream": False
+                    },
+                    timeout=aiohttp.ClientTimeout(total=120)
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        generated = data.get("response", "").strip()
+                        
+                        # Clean up the response
+                        if generated.startswith("```"):
+                            lines = generated.split("\n")
+                            if lines[0].startswith("```"):
+                                lines = lines[1:]
+                            if lines and lines[-1].startswith("```"):
+                                lines = lines[:-1]
+                            generated = "\n".join(lines).strip()
+                        
+                        if generated and len(generated) > 50:
+                            logger.info("Code generated via Big Pickle adapter")
+                            return generated
+                        else:
+                            logger.warning("Empty or short response from adapter")
+                    else:
+                        text = await response.text()
+                        logger.warning("Adapter returned %s: %s", response.status, text)
+                        
+        except Exception as exc:
+            logger.warning("Adapter request failed: %s", exc)
+        
+        # Fallback to template generation
+        logger.info("Using fallback code generation")
+        return self._generate_fallback(instruction, language)
+
+    def _generate_fallback(self, instruction: str, language: str) -> str:
+        """Fallback code generation when Ollama is unavailable."""
         instruction_lower = instruction.lower()
         
-        if "class" in instruction_lower:
-            return self._generate_class(instruction)
-        elif "function" in instruction_lower or "def " in instruction_lower:
-            return self._generate_function(instruction)
-        elif "import" in instruction_lower:
-            return self._generate_import(instruction)
-        else:
-            return self._generate_snippet(instruction)
+        if language == "python":
+            if "class" in instruction_lower:
+                return self._generate_class(instruction)
+            elif "function" in instruction_lower or "def " in instruction_lower:
+                return self._generate_function(instruction)
+            elif "endpoint" in instruction_lower or "route" in instruction_lower:
+                return self._generate_endpoint_code(instruction)
+        
+        return f"""# {instruction}
+# TODO: Implement this feature in {language}
+"""
 
     def _generate_class(self, instruction: str) -> str:
         """Generate class code."""
-        # Extract class name
         words = instruction.split()
         class_name = "NewClass"
-        
         for word in words:
             if word[0].isupper():
                 class_name = word
@@ -313,10 +374,8 @@ async def new_endpoint():
 
     def _generate_function(self, instruction: str) -> str:
         """Generate function code."""
-        # Extract function name
         words = instruction.split()
         func_name = "new_function"
-        
         for word in words:
             if word.isalpha() and word not in ('a', 'an', 'the', 'new', 'add', 'create'):
                 func_name = word.lower()
@@ -327,25 +386,6 @@ async def new_endpoint():
     # TODO: Implement
     pass
 '''
-
-    def _generate_import(self, instruction: str) -> str:
-        """Generate import statement."""
-        # Extract module name
-        words = instruction.split()
-        module = "module"
-        
-        for word in words:
-            if '.' in word:
-                module = word
-                break
-        
-        return f"import {module}\n"
-
-    def _generate_snippet(self, instruction: str) -> str:
-        """Generate generic code snippet."""
-        return f"""# {instruction}
-# TODO: Implement this feature
-"""
 
     async def suggest_completion(
         self,
