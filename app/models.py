@@ -962,7 +962,6 @@ class PTYCreateRequest(BaseModel):
 class PTYInputRequest(BaseModel):
     """Request to send input to PTY."""
 
-    session_id: str = Field(..., min_length=1)
     data: str = Field(..., min_length=1)
 
 

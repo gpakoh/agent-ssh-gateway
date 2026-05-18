@@ -189,6 +189,17 @@ class GitManager:
     async def restore_backup(self, session_id: str, path: str) -> dict:
         """Restore from stash."""
         escaped_path = path.replace("'", "'\"'\"'")
+        
+        # Check if stash exists
+        stash_check = await self._ssh.execute(
+            session_id,
+            f"cd '{escaped_path}' && git stash list",
+            timeout=10
+        )
+        
+        if not stash_check["stdout"].strip():
+            return {"success": False, "error": "No stash found. Did you create a backup?"}
+        
         result = await self._ssh.execute(
             session_id,
             f"cd '{escaped_path}' && git stash pop",
@@ -196,6 +207,13 @@ class GitManager:
         )
         
         if result["exit_code"] != 0:
+            # If conflict, try to apply with --index
+            if "conflict" in result["stderr"].lower():
+                return {
+                    "success": False, 
+                    "error": f"Merge conflict during restore: {result['stderr']}",
+                    "hint": "Resolve conflicts manually or use git checkout --ours/--theirs"
+                }
             return {"success": False, "error": result["stderr"]}
 
         return {"success": True, "message": "♻️ Бэкап восстановлен"}
