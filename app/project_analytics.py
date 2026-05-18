@@ -1,7 +1,10 @@
 """Project analytics and metrics."""
 
 import asyncio
+import logging
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class ProjectAnalytics:
