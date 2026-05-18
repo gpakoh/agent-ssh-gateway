@@ -1,0 +1,54 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Tests
+tests/
+test/
+*_test.py
+
+# Docs
+*.md
+!README.md
+docs/
+
+# SSH keys (never include in build!)
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+ssh_keys/
+
+# Environment
+.env
+.env.*
