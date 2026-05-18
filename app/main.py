@@ -1313,7 +1313,7 @@ async def add_server(req: AddServerRequest):
         raise HTTPException(status_code=409, detail=f"Server with ID '{req.id}' already exists")
     
     server = server_manager.add_server(
-        id=req.id,
+        server_id=req.id,
         name=req.name,
         host=req.host,
         port=req.port,

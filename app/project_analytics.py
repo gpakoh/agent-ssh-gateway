@@ -26,24 +26,44 @@ class ProjectAnalytics:
         }
 
         # File statistics
-        file_stats = await self._get_file_stats(session_id, path)
-        metrics["files"] = file_stats
+        try:
+            file_stats = await self._get_file_stats(session_id, path)
+            metrics["files"] = file_stats
+        except Exception as e:
+            logger.warning("File stats error: %s", e)
+            metrics["files"] = {"total_files": 0, "total_directories": 0, "extensions": {}}
 
         # Code statistics
-        code_stats = await self._get_code_stats(session_id, path)
-        metrics["code"] = code_stats
+        try:
+            code_stats = await self._get_code_stats(session_id, path)
+            metrics["code"] = code_stats
+        except Exception as e:
+            logger.warning("Code stats error: %s", e)
+            metrics["code"] = {"python_lines_of_code": 0, "classes": 0, "functions": 0}
 
         # Git statistics
-        git_stats = await self._get_git_stats(session_id, path)
-        metrics["git"] = git_stats
+        try:
+            git_stats = await self._get_git_stats(session_id, path)
+            metrics["git"] = git_stats
+        except Exception as e:
+            logger.warning("Git stats error: %s", e)
+            metrics["git"] = {"is_git_repo": False}
 
         # Test statistics
-        test_stats = await self._get_test_stats(session_id, path)
-        metrics["tests"] = test_stats
+        try:
+            test_stats = await self._get_test_stats(session_id, path)
+            metrics["tests"] = test_stats
+        except Exception as e:
+            logger.warning("Test stats error: %s", e)
+            metrics["tests"] = {"test_files": 0, "total_tests": 0, "has_tests": False}
 
         # Dependencies
-        dep_stats = await self._get_dependency_stats(session_id, path)
-        metrics["dependencies"] = dep_stats
+        try:
+            dep_stats = await self._get_dependency_stats(session_id, path)
+            metrics["dependencies"] = dep_stats
+        except Exception as e:
+            logger.warning("Dependency stats error: %s", e)
+            metrics["dependencies"] = {"requirements_count": 0, "has_pyproject": False, "outdated_packages": 0}
 
         return metrics
 
