@@ -66,8 +66,12 @@ class SessionRecord:
     host: str
     port: int
     username: str
+    password: Optional[str] = None
+    private_key: Optional[str] = None
+    key_passphrase: Optional[str] = None
     connected_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
+    reconnect_count: int = 0
 
     def touch(self) -> None:
         """Update last activity timestamp."""
@@ -77,6 +81,14 @@ class SessionRecord:
     def idle_time(self) -> float:
         """Seconds since last activity."""
         return time.time() - self.last_activity
+
+    def is_connected(self) -> bool:
+        """Check if the SSH connection is still active."""
+        try:
+            transport = self.client.get_transport()
+            return transport is not None and transport.is_active()
+        except Exception:
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +216,9 @@ class SSHSessionManager:
             host=host,
             port=port,
             username=username,
+            password=password,
+            private_key=private_key,
+            key_passphrase=key_passphrase,
         )
 
         async with self._lock:
@@ -211,6 +226,78 @@ class SSHSessionManager:
 
         logger.info("SSH session %s created for %s@%s:%d", session_id, username, host, port)
         return session_id
+
+    async def reconnect(self, session_id: str) -> bool:
+        """Reconnect a disconnected session using stored credentials.
+        
+        Returns True if reconnection was successful.
+        """
+        async with self._lock:
+            record = self._sessions.get(session_id)
+        if not record:
+            raise SessionNotFoundError(f"Session {session_id} not found")
+        
+        if record.is_connected():
+            return True
+        
+        logger.info("Attempting to reconnect session %s (%s@%s:%d)", 
+                   session_id, record.username, record.host, record.port)
+        
+        # Close old client if exists
+        try:
+            record.client.close()
+        except Exception:
+            pass
+        
+        # Create new client
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+        pkey = None
+        if record.private_key:
+            pkey = await self._load_private_key(record.private_key, record.key_passphrase)
+        
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: client.connect(
+                    hostname=record.host,
+                    port=record.port,
+                    username=record.username,
+                    password=record.password,
+                    pkey=pkey,
+                    timeout=30,
+                    banner_timeout=30,
+                    auth_timeout=30,
+                    look_for_keys=False,
+                ),
+            )
+            
+            # Configure window size for large files
+            transport = client.get_transport()
+            if transport:
+                transport.window_size = 2**32
+                transport.packetizer.REKEY_BYTES = 2**40
+                transport.packetizer.REKEY_PACKETS = 2**40
+            
+            # Update record with new client
+            record.client = client
+            record.reconnect_count += 1
+            record.touch()
+            
+            logger.info("Session %s reconnected successfully (reconnect #%d)", 
+                       session_id, record.reconnect_count)
+            return True
+            
+        except AuthenticationException as exc:
+            client.close()
+            logger.error("Reconnection failed for session %s: Authentication failed: %s", session_id, exc)
+            return False
+        except (NoValidConnectionsError, SSHException, OSError) as exc:
+            client.close()
+            logger.error("Reconnection failed for session %s: %s", session_id, exc)
+            return False
 
     async def _load_private_key(
         self, key_data: str, passphrase: Optional[str] = None
@@ -241,11 +328,21 @@ class SSHSessionManager:
     async def execute(
         self, session_id: str, command: str, timeout: int = 30
     ) -> dict[str, object]:
-        """Execute a command and return stdout, stderr, exit_code, duration."""
+        """Execute a command and return stdout, stderr, exit_code, duration.
+        
+        Auto-reconnects if the SSH connection is broken.
+        """
         async with self._lock:
             record = self._sessions.get(session_id)
         if not record:
             raise SessionNotFoundError(f"Session {session_id} not found")
+
+        # Auto-reconnect if needed
+        if not record.is_connected():
+            logger.warning("Session %s disconnected, attempting auto-reconnect", session_id)
+            reconnected = await self.reconnect(session_id)
+            if not reconnected:
+                raise ConnectionError(f"Session {session_id} is disconnected and reconnection failed")
 
         record.touch()
         client = record.client
@@ -273,6 +370,8 @@ class SSHSessionManager:
         except asyncio.TimeoutError:
             raise TimeoutError(f"Command timed out after {timeout}s: {command}")
         except SSHException as exc:
+            # Try to reconnect on SSH errors
+            logger.warning("SSH error during execution for session %s: %s", session_id, exc)
             raise ExecutionError(f"SSH error during execution: {exc}")
         except Exception as exc:
             raise ExecutionError(f"Execution error: {exc}")

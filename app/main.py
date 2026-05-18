@@ -461,6 +461,35 @@ async def ssh_heartbeat(req: DisconnectRequest):
     return {"status": "ok", "session_id": req.session_id, "idle_time": record.idle_time}
 
 
+@app.get("/api/ssh/session/{session_id}/health")
+async def session_health(session_id: str):
+    """Check session health and auto-reconnect if needed."""
+    record = await manager.get_session(session_id)
+    if not record:
+        raise SessionNotFoundError(f"Session {session_id} not found")
+    
+    is_connected = record.is_connected()
+    
+    if not is_connected:
+        logger.info("Session %s disconnected, attempting auto-reconnect", session_id)
+        reconnected = await manager.reconnect(session_id)
+        return {
+            "session_id": session_id,
+            "connected": reconnected,
+            "reconnected": True,
+            "reconnect_count": record.reconnect_count,
+            "idle_time": record.idle_time,
+        }
+    
+    return {
+        "session_id": session_id,
+        "connected": True,
+        "reconnected": False,
+        "reconnect_count": record.reconnect_count,
+        "idle_time": record.idle_time,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Background Jobs API
 # ---------------------------------------------------------------------------
@@ -573,12 +602,18 @@ async def file_read(req: FileReadRequest):
 @app.patch("/api/file/edit", response_model=FileEditResponse)
 async def file_edit(req: FileEditRequest):
     """Edit a remote file using patch operations."""
-    result = await file_editor.edit_file(
-        req.session_id,
-        req.path,
-        [op.model_dump() for op in req.operations],
-    )
-    return FileEditResponse(**result)
+    try:
+        logger.info(f"File edit request: session={req.session_id}, path={req.path}, ops={len(req.operations)}")
+        result = await file_editor.edit_file(
+            req.session_id,
+            req.path,
+            [op.model_dump() for op in req.operations],
+        )
+        logger.info(f"File edit result: {result}")
+        return FileEditResponse(**result)
+    except Exception as exc:
+        logger.error(f"File edit failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"File edit failed: {exc}")
 
 
 @app.post("/api/file/patch", response_model=PatchApplyResponse)
@@ -630,11 +665,12 @@ async def file_raw(
         except (ValueError, IndexError):
             pass
     
-    # Handle offset/limit
+    # Handle offset/limit as line numbers
     if offset > 0 or limit > 0:
+        lines = content.split("\n")
         start = offset
-        end = offset + limit if limit > 0 else len(content)
-        content = content[start:end]
+        end = offset + limit if limit > 0 else len(lines)
+        content = "\n".join(lines[start:end])
     
     return Response(
         content=content,
@@ -661,6 +697,26 @@ async def batch_read(req: BatchReadRequest):
             errors[path] = str(exc)
     
     return BatchReadResponse(files=files, errors=errors)
+
+
+# ---------------------------------------------------------------------------
+# File Upload/Download API
+# ---------------------------------------------------------------------------
+
+@app.post("/api/file/upload")
+async def file_upload(session_id: str = Query(...), path: str = Query(...), content: str = Query(...)):
+    """Upload file to remote server (base64 encoded)."""
+    import base64
+    decoded = base64.b64decode(content).decode("utf-8", errors="replace")
+    await file_editor.write_file(session_id, path, decoded)
+    return {"success": True, "path": path, "size": len(decoded)}
+
+
+@app.get("/api/file/download")
+async def file_download(session_id: str = Query(...), path: str = Query(...)):
+    """Download file from remote server."""
+    content = await file_editor.read_file(session_id, path)
+    return Response(content=content, media_type="application/octet-stream")
 
 
 # ---------------------------------------------------------------------------

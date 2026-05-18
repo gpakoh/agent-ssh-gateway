@@ -375,18 +375,6 @@ class ValidationReportResponse(BaseModel):
     steps: list[ValidationStepResult]
 
 
-class FileEditWithContextResponse(BaseModel):
-    """Response after editing a file with context."""
-
-    success: bool = True
-    path: str
-    operations_applied: int
-    changed: bool
-    git_commit: Optional[str] = None
-    validation_result: Optional[ValidationReportResponse] = None
-    warning: Optional[str] = None
-
-
 class ValidateRequest(BaseModel):
     """Request to run validation."""
 
