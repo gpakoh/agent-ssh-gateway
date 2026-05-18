@@ -212,6 +212,26 @@ r = s.patch("https://ssh.xloud.ru/api/file/edit", json={
 })
 # → {"success": true, "path": "...", "operations_applied": 4, "changed": true}
 
+**Важно: PATCH принимает типы операций:**
+- `replace` — заменить текст (требуется `old`, `new`)
+- `insert_after` — вставить после (требуется `after`, `text`)
+- `insert_before` — вставить перед (требуется `before`, `text`)
+- `delete` — удалить текст (требуется `old`)
+- `append` — добавить в конец файла (требуется `text`)
+- `create` — перезаписать файл полностью (требуется `text`)
+
+**PATCH с Unicode:**
+r = s.patch("https://ssh.xloud.ru/api/file/edit", json={
+    "session_id": session_id,
+    "path": "/tmp/test.txt",
+    "operations": [
+        {"type": "replace", "old": "привет", "new": "hello"},
+        {"type": "insert_after", "after": "line 1", "text": "\ninserted line"},
+        {"type": "append", "text": "# End of file"},
+        {"type": "create", "text": "полностью новый контент\n🎉 Unicode работает!"}
+    ]
+})
+
 **Загрузка файла (Upload):**
 import base64
 content = base64.b64encode(open("local_file.txt", "rb").read()).decode("ascii")
@@ -1150,7 +1170,7 @@ curl -X POST /api/ssh/execute -d '{"command": "ls -la"}'
 
 
 > Написано: 2026-05-18
-> Версия: 4.5 (28 фич: +Security Suite — Rate Limiting, Command Sanitization, Path Validation, Audit Logging, Docker Hardening, Encryption)
+> Версия: 4.5.1 (29 фич: +PATCH create operation, +reconnect_reason, docs fixes)
 > Домен: https://ssh.xloud.ru
 > GitHub: https://github.com/gpakoh/ssh-gateway-ai
 > Gitea: http://git.example.com:3005/gpakoh/ssh-gateway-ai
@@ -1158,6 +1178,12 @@ curl -X POST /api/ssh/execute -d '{"command": "ls -la"}'
 ---
 
 ## 4. ИСТОРИЯ ИЗМЕНЕНИЙ
+
+### v4.5.1 (2026-05-19)
+- **Добавлено**: PATCH операция `create` — создание/перезапись файла
+- **Добавлено**: `reconnect_reason` в health endpoint ("timeout", "connection_reset")
+- **Исправлено**: Документация PATCH — добавлены все типы операций с примерами
+- **Исправлено**: Upload/download примеры с query params
 
 ### v4.5 (2026-05-19)
 - **Добавлено**: Rate limiting — 100 req/min, 10 сессий/IP

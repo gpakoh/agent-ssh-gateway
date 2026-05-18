@@ -72,6 +72,7 @@ class SessionRecord:
     connected_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     reconnect_count: int = 0
+    last_reconnect_reason: Optional[str] = None
 
     def touch(self) -> None:
         """Update last activity timestamp."""
@@ -284,6 +285,7 @@ class SSHSessionManager:
             # Update record with new client
             record.client = client
             record.reconnect_count += 1
+            record.last_reconnect_reason = "timeout"  # или можно определить точнее
             record.touch()
             
             logger.info("Session %s reconnected successfully (reconnect #%d)", 

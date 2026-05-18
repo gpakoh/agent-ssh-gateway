@@ -108,6 +108,8 @@ class FileEditor:
             return self._op_delete(content, op)
         elif op_type == "append":
             return self._op_append(content, op)
+        elif op_type == "create":
+            return self._op_create(content, op)
         else:
             raise ValueError(f"Unknown operation type: {op_type}")
 
@@ -165,6 +167,10 @@ class FileEditor:
         if content and not content.endswith("\n"):
             content += "\n"
         return content + text + "\n"
+
+    def _op_create(self, content: str, op: dict) -> str:
+        text = op.get("text", "")
+        return text
 
     def _escape(self, path: str) -> str:
         """Escape single quotes in path."""

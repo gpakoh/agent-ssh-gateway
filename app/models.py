@@ -178,7 +178,7 @@ class JobListResponse(BaseModel):
 class EditOperation(BaseModel):
     """Single file edit operation."""
 
-    type: str = Field(..., pattern="^(replace|insert_after|insert_before|delete|append)$")
+    type: str = Field(..., pattern="^(replace|insert_after|insert_before|delete|append|create)$")
     old: Optional[str] = Field(default=None)
     new: Optional[str] = Field(default=None)
     after: Optional[str] = Field(default=None)
@@ -194,6 +194,8 @@ class EditOperation(BaseModel):
             raise ValueError("insert_after requires 'after'")
         if self.type == "insert_before" and self.before is None:
             raise ValueError("insert_before requires 'before'")
+        if self.type == "create" and self.text is None:
+            raise ValueError("create requires 'text'")
         return self
 
 
