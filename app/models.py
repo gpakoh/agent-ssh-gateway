@@ -642,6 +642,109 @@ class RecoveryActionResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Global Search & Replace
+# ---------------------------------------------------------------------------
+
+class GlobalSearchRequest(BaseModel):
+    """Request for global search."""
+
+    session_id: str = Field(..., min_length=1)
+    path: str = Field(..., min_length=1)
+    query: str = Field(..., min_length=1)
+    file_pattern: str = Field(default="*", description="File glob pattern")
+    use_regex: bool = Field(default=False)
+    case_sensitive: bool = Field(default=True)
+    context_lines: int = Field(default=2, ge=0, le=5)
+
+
+class SearchMatchItem(BaseModel):
+    """Single search match."""
+
+    path: str
+    line: int
+    column: int
+    content: str
+
+
+class GlobalSearchResponse(BaseModel):
+    """Response for global search."""
+
+    query: str
+    matches: list[SearchMatchItem]
+    total_count: int
+    files_affected: list[str]
+
+
+class GlobalReplaceRequest(BaseModel):
+    """Request for global replace."""
+
+    session_id: str = Field(..., min_length=1)
+    path: str = Field(..., min_length=1)
+    search: str = Field(..., min_length=1)
+    replace: str = Field(default="")
+    file_pattern: str = Field(default="*")
+    use_regex: bool = Field(default=False)
+    case_sensitive: bool = Field(default=True)
+    dry_run: bool = Field(default=False, description="Preview changes without applying")
+    auto_commit: bool = Field(default=False)
+    context_id: Optional[str] = Field(default=None)
+
+
+class ReplaceResultItem(BaseModel):
+    """Single replace result."""
+
+    path: str
+    replacements_count: int
+    success: bool
+    error: Optional[str] = None
+
+
+class GlobalReplaceResponse(BaseModel):
+    """Response for global replace."""
+
+    search: str
+    replace: str
+    results: list[ReplaceResultItem]
+    total_replacements: int
+    files_modified: int
+    dry_run: bool
+    git_commit: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# File Tree Explorer
+# ---------------------------------------------------------------------------
+
+class FileTreeRequest(BaseModel):
+    """Request to get file tree."""
+
+    session_id: str = Field(..., min_length=1)
+    path: str = Field(..., min_length=1)
+    depth: int = Field(default=2, ge=1, le=5)
+    show_hidden: bool = Field(default=False)
+
+
+class FileTreeNode(BaseModel):
+    """Node in file tree."""
+
+    name: str
+    path: str
+    type: str
+    size: int = 0
+    permissions: str = ""
+    modified_at: str = ""
+    children: list["FileTreeNode"] = []
+
+
+class FileTreeResponse(BaseModel):
+    """Response with file tree."""
+
+    root: FileTreeNode
+    total_files: int
+    total_directories: int
+
+
+# ---------------------------------------------------------------------------
 # Template Library
 # ---------------------------------------------------------------------------
 
@@ -785,3 +888,167 @@ class ProjectAnalyticsResponse(BaseModel):
     git: GitStats
     tests: TestStats
     dependencies: DependencyStats
+
+
+# ---------------------------------------------------------------------------
+# Server Management
+# ---------------------------------------------------------------------------
+
+class ServerInfo(BaseModel):
+    """Server information."""
+
+    id: str
+    name: str
+    host: str
+    port: int
+    username: str
+    description: str
+    tags: list[str]
+    status: str
+    last_check: Optional[float] = None
+    has_session: bool = False
+
+
+class ServerListResponse(BaseModel):
+    """Response with server list."""
+
+    servers: list[ServerInfo]
+    count: int
+
+
+class AddServerRequest(BaseModel):
+    """Request to add server."""
+
+    id: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1)
+    host: str = Field(..., min_length=1)
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str = Field(default="root")
+    description: str = Field(default="")
+    tags: list[str] = Field(default_factory=list)
+
+
+class ConnectServerRequest(BaseModel):
+    """Request to connect to server."""
+
+    server_id: str = Field(..., min_length=1)
+    password: Optional[str] = Field(default=None)
+    private_key: Optional[str] = Field(default=None)
+
+
+class ServerConnectResponse(BaseModel):
+    """Response after connecting to server."""
+
+    server_id: str
+    session_id: str
+    status: str
+    message: str
+
+
+# ---------------------------------------------------------------------------
+# Snapshot System
+# ---------------------------------------------------------------------------
+
+class SnapshotInfo(BaseModel):
+    """Snapshot information."""
+
+    id: str
+    name: str
+    context_id: str
+    created_at: float
+    files: list[str]
+    description: str
+    git_commit_before: Optional[str] = None
+    size_bytes: int = 0
+
+
+class CreateSnapshotRequest(BaseModel):
+    """Request to create snapshot."""
+
+    context_id: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1)
+    description: str = Field(default="")
+
+
+class RestoreSnapshotRequest(BaseModel):
+    """Request to restore snapshot."""
+
+    context_id: str = Field(..., min_length=1)
+    snapshot_id: str = Field(..., min_length=1)
+
+
+class SnapshotListResponse(BaseModel):
+    """Response with snapshot list."""
+
+    snapshots: list[SnapshotInfo]
+    count: int
+
+
+class SnapshotActionResponse(BaseModel):
+    """Response for snapshot actions."""
+
+    success: bool
+    message: str
+    snapshot_id: Optional[str] = None
+    restored_files: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# CI/CD Webhooks
+# ---------------------------------------------------------------------------
+
+class WebhookConfigResponse(BaseModel):
+    """Webhook configuration."""
+
+    id: str
+    name: str
+    webhook_type: str
+    target_path: str
+    deploy_command: str
+    context_id: str
+    notify_url: Optional[str] = None
+    enabled: bool
+
+
+class WebhookListResponse(BaseModel):
+    """Response with webhook list."""
+
+    webhooks: list[WebhookConfigResponse]
+    count: int
+
+
+class CreateWebhookRequest(BaseModel):
+    """Request to create webhook."""
+
+    name: str = Field(..., min_length=1)
+    webhook_type: str = Field(default="generic")
+    secret: str = Field(default="")
+    target_path: str = Field(..., min_length=1)
+    deploy_command: str = Field(..., min_length=1)
+    context_id: str = Field(..., min_length=1)
+    notify_url: Optional[str] = Field(default=None)
+
+
+class DeployRequest(BaseModel):
+    """Request to trigger deployment."""
+
+    webhook_id: str = Field(..., min_length=1)
+    session_id: str = Field(..., min_length=1)
+
+
+class DeployResponse(BaseModel):
+    """Response after deployment trigger."""
+
+    status: str
+    job_id: Optional[str] = None
+    message: str
+
+
+class DeploymentInfo(BaseModel):
+    """Deployment information."""
+
+    id: str
+    webhook_id: str
+    webhook_name: str
+    status: str
+    timestamp: float
