@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Header, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -588,6 +588,89 @@ async def file_patch(req: PatchApplyRequest):
         req.strip,
     )
     return PatchApplyResponse(**result)
+
+
+# ---------------------------------------------------------------------------
+# Raw File API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/file/raw")
+async def file_raw(
+    session_id: str = Query(...),
+    path: str = Query(...),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(0, ge=0),
+    range_header: Optional[str] = Header(None, alias="range"),
+):
+    """Read a remote file and return raw content as text/plain.
+    
+    Supports Range header (bytes=start-end) or offset/limit query params.
+    """
+    content = await file_editor.read_file(session_id, path)
+    
+    # Handle Range header
+    if range_header and range_header.startswith("bytes="):
+        try:
+            range_str = range_header[6:]  # Remove "bytes="
+            start, end = range_str.split("-")
+            start = int(start) if start else 0
+            end = int(end) if end else len(content)
+            content = content[start:end]
+            return Response(
+                content=content,
+                media_type="text/plain",
+                status_code=206,
+                headers={
+                    "Content-Range": f"bytes {start}-{end-1}/{len(content)}",
+                    "Accept-Ranges": "bytes",
+                },
+            )
+        except (ValueError, IndexError):
+            pass
+    
+    # Handle offset/limit
+    if offset > 0 or limit > 0:
+        start = offset
+        end = offset + limit if limit > 0 else len(content)
+        content = content[start:end]
+    
+    return Response(
+        content=content,
+        media_type="text/plain",
+        headers={"Accept-Ranges": "bytes"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Batch File Read API
+# ---------------------------------------------------------------------------
+
+class BatchReadRequest(BaseModel):
+    """Request to read multiple files."""
+    session_id: str = Field(..., min_length=1)
+    paths: list[str] = Field(..., min_length=1, max_length=20)
+
+
+class BatchReadResponse(BaseModel):
+    """Response with multiple file contents."""
+    files: dict[str, str]
+    errors: dict[str, str]
+
+
+@app.post("/api/batch/read", response_model=BatchReadResponse)
+async def batch_read(req: BatchReadRequest):
+    """Read multiple files in a single request."""
+    files = {}
+    errors = {}
+    
+    for path in req.paths:
+        try:
+            content = await file_editor.read_file(req.session_id, path)
+            files[path] = content
+        except Exception as exc:
+            errors[path] = str(exc)
+    
+    return BatchReadResponse(files=files, errors=errors)
 
 
 # ---------------------------------------------------------------------------

@@ -190,6 +190,13 @@ class SSHSessionManager:
             client.close()
             raise ConnectionError(f"Could not connect to {host}:{port}: {exc}")
 
+        # Увеличить размер окна SSH для больших файлов (50KB+)
+        transport = client.get_transport()
+        if transport:
+            transport.window_size = 2**32
+            transport.packetizer.REKEY_BYTES = 2**40
+            transport.packetizer.REKEY_PACKETS = 2**40
+
         session_id = str(uuid.uuid4())
         record = SessionRecord(
             session_id=session_id,
