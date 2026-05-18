@@ -648,3 +648,53 @@ html, body {
 ::-webkit-scrollbar-track { background: var(--bg-primary); }
 ::-webkit-scrollbar-thumb { background: #333355; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #444466; }
+
+/* ============================================
+   Monaco Editor Panel
+   ============================================ */
+
+.editor-panel {
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border-color);
+    min-width: 400px;
+    max-width: 800px;
+    height: 100%;
+    overflow: hidden;
+}
+
+.editor-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.editor-toolbar .toolbar-title {
+    font-size: 12px;
+    color: var(--accent-green);
+    font-weight: bold;
+}
+
+.editor-toolbar .toolbar-buttons {
+    display: flex;
+    gap: 8px;
+}
+
+.editor-container {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+}
+
+.editor-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+    font-size: 14px;
+}

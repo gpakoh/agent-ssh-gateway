@@ -89,6 +89,31 @@ from app.models import (
     GitStats,
     TestStats,
     DependencyStats,
+    GlobalSearchRequest,
+    GlobalSearchResponse,
+    SearchMatchItem,
+    GlobalReplaceRequest,
+    GlobalReplaceResponse,
+    ReplaceResultItem,
+    FileTreeRequest,
+    FileTreeResponse,
+    FileTreeNode,
+    ServerInfo,
+    ServerListResponse,
+    AddServerRequest,
+    ConnectServerRequest,
+    ServerConnectResponse,
+    SnapshotInfo,
+    CreateSnapshotRequest,
+    RestoreSnapshotRequest,
+    SnapshotListResponse,
+    SnapshotActionResponse,
+    WebhookConfigResponse,
+    WebhookListResponse,
+    CreateWebhookRequest,
+    DeployRequest,
+    DeployResponse,
+    DeploymentInfo,
 )
 from app.ssh_manager import (
     SSHSessionManager,
@@ -108,6 +133,11 @@ from app.code_intelligence import CodeIntelligence
 from app.template_library import TemplateLibrary
 from app.diff_generator import DiffGenerator
 from app.project_analytics import ProjectAnalytics
+from app.search_replace import GlobalSearchReplace
+from app.file_tree import FileTreeExplorer
+from app.server_manager import ServerManager, ServerStatus
+from app.snapshot_manager import SnapshotManager
+from app.webhook_manager import WebhookManager, WebhookType
 
 logging.basicConfig(
     level=logging.INFO,
@@ -125,12 +155,17 @@ file_editor: FileEditor
 context_manager: ContextManager
 batch_manager: BatchOperationsManager
 code_intelligence: CodeIntelligence
+search_replace: GlobalSearchReplace
+file_tree: FileTreeExplorer
+server_manager: ServerManager
+snapshot_manager: SnapshotManager
+webhook_manager: WebhookManager
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    global manager, job_manager, file_editor, context_manager, batch_manager, code_intelligence
+    global manager, job_manager, file_editor, context_manager, batch_manager, code_intelligence, search_replace, file_tree, server_manager, snapshot_manager, webhook_manager
     manager = SSHSessionManager(
         session_timeout=settings.session_timeout,
         cleanup_interval=settings.cleanup_interval,
@@ -154,6 +189,25 @@ async def lifespan(app: FastAPI):
     code_intelligence = CodeIntelligence(
         ssh_manager=manager,
         file_editor=file_editor,
+    )
+    
+    search_replace = GlobalSearchReplace(
+        ssh_manager=manager,
+        file_editor=file_editor,
+    )
+    
+    file_tree = FileTreeExplorer(ssh_manager=manager)
+    
+    server_manager = ServerManager()
+    
+    snapshot_manager = SnapshotManager(
+        ssh_manager=manager,
+        context_manager=context_manager,
+    )
+    
+    webhook_manager = WebhookManager(
+        ssh_manager=manager,
+        job_manager=job_manager,
     )
     
     analytics = ProjectAnalytics(ssh_manager=manager)
@@ -992,6 +1046,370 @@ async def render_template(req: TemplateRenderRequest):
         code=code,
         git_commit=git_commit,
     )
+
+
+# ---------------------------------------------------------------------------
+# Global Search & Replace API
+# ---------------------------------------------------------------------------
+
+@app.post("/api/search/global", response_model=GlobalSearchResponse)
+async def global_search(req: GlobalSearchRequest):
+    """Search across all project files."""
+    matches = await search_replace.search(
+        session_id=req.session_id,
+        path=req.path,
+        query=req.query,
+        file_pattern=req.file_pattern,
+        use_regex=req.use_regex,
+        case_sensitive=req.case_sensitive,
+        context_lines=req.context_lines,
+    )
+    
+    files_affected = list(set(m.path for m in matches))
+    
+    return GlobalSearchResponse(
+        query=req.query,
+        matches=[
+            SearchMatchItem(
+                path=m.path,
+                line=m.line,
+                column=m.column,
+                content=m.content,
+            )
+            for m in matches
+        ],
+        total_count=len(matches),
+        files_affected=files_affected,
+    )
+
+
+@app.post("/api/replace/global", response_model=GlobalReplaceResponse)
+async def global_replace(req: GlobalReplaceRequest):
+    """Replace across all project files."""
+    results = await search_replace.replace(
+        session_id=req.session_id,
+        path=req.path,
+        search_query=req.search,
+        replace_with=req.replace,
+        file_pattern=req.file_pattern,
+        use_regex=req.use_regex,
+        case_sensitive=req.case_sensitive,
+        dry_run=req.dry_run,
+    )
+    
+    total_replacements = sum(r.replacements_count for r in results)
+    files_modified = sum(1 for r in results if r.replacements_count > 0)
+    
+    git_commit = None
+    if not req.dry_run and req.auto_commit and req.context_id and files_modified > 0:
+        commit_result = await context_manager.commit_changes(
+            req.context_id,
+            f"Global replace: '{req.search}' -> '{req.replace}'",
+            [r.path for r in results if r.replacements_count > 0]
+        )
+        if commit_result.get("success"):
+            git_commit = commit_result.get("hash")
+    
+    return GlobalReplaceResponse(
+        search=req.search,
+        replace=req.replace,
+        results=[
+            ReplaceResultItem(
+                path=r.path,
+                replacements_count=r.replacements_count,
+                success=r.success,
+                error=r.error,
+            )
+            for r in results
+        ],
+        total_replacements=total_replacements,
+        files_modified=files_modified,
+        dry_run=req.dry_run,
+        git_commit=git_commit,
+    )
+
+
+# ---------------------------------------------------------------------------
+# File Tree Explorer API
+# ---------------------------------------------------------------------------
+
+@app.post("/api/tree", response_model=FileTreeResponse)
+async def get_file_tree(req: FileTreeRequest):
+    """Get directory tree structure."""
+    tree = await file_tree.get_tree(
+        session_id=req.session_id,
+        path=req.path,
+        depth=req.depth,
+        show_hidden=req.show_hidden,
+    )
+    
+    def count_files(node) -> tuple[int, int]:
+        files = 0
+        dirs = 0
+        if node.type == "file":
+            files = 1
+        elif node.type == "directory":
+            dirs = 1
+            for child in node.children:
+                f, d = count_files(child)
+                files += f
+                dirs += d
+        return files, dirs
+    
+    total_files, total_dirs = count_files(tree)
+    
+    return FileTreeResponse(
+        root=file_tree.node_to_dict(tree),
+        total_files=total_files,
+        total_directories=total_dirs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Server Management API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/servers", response_model=ServerListResponse)
+async def list_servers():
+    """List all configured servers."""
+    servers = server_manager.list_servers()
+    return ServerListResponse(
+        servers=[ServerInfo(**server_manager.to_dict(s)) for s in servers],
+        count=len(servers),
+    )
+
+
+@app.post("/api/servers")
+async def add_server(req: AddServerRequest):
+    """Add a new server."""
+    server = server_manager.add_server(
+        id=req.id,
+        name=req.name,
+        host=req.host,
+        port=req.port,
+        username=req.username,
+        description=req.description,
+        tags=req.tags,
+    )
+    return server_manager.to_dict(server)
+
+
+@app.delete("/api/servers/{server_id}")
+async def remove_server(server_id: str):
+    """Remove a server."""
+    success = server_manager.remove_server(server_id)
+    return {"status": "removed" if success else "not_found", "server_id": server_id}
+
+
+@app.post("/api/servers/{server_id}/connect", response_model=ServerConnectResponse)
+async def connect_server(server_id: str, req: ConnectServerRequest):
+    """Connect to a server and return session."""
+    server = server_manager.get_server(server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail=f"Server {server_id} not found")
+    
+    try:
+        session_id = await manager.create_session(
+            host=server.host,
+            port=server.port,
+            username=server.username,
+            password=req.password,
+            private_key=req.private_key,
+        )
+        
+        server_manager.update_server_status(
+            server_id,
+            ServerStatus.ONLINE,
+            session_id=session_id,
+        )
+        
+        return ServerConnectResponse(
+            server_id=server_id,
+            session_id=session_id,
+            status="connected",
+            message=f"Connected to {server.name}",
+        )
+    except Exception as exc:
+        server_manager.update_server_status(server_id, ServerStatus.ERROR)
+        raise HTTPException(status_code=502, detail=f"Connection failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Snapshot System API
+# ---------------------------------------------------------------------------
+
+@app.post("/api/snapshots", response_model=SnapshotActionResponse)
+async def create_snapshot(req: CreateSnapshotRequest):
+    """Create a snapshot of current project state."""
+    ctx = await context_manager.get_context(req.context_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail="Context not found")
+    
+    try:
+        snapshot = await snapshot_manager.create_snapshot(
+            session_id=ctx.session_id,
+            context_id=req.context_id,
+            name=req.name,
+            description=req.description,
+        )
+        
+        return SnapshotActionResponse(
+            success=True,
+            message=f"Snapshot '{snapshot.name}' created with {len(snapshot.files)} files",
+            snapshot_id=snapshot.id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Snapshot creation failed: {exc}")
+
+
+@app.get("/api/snapshots")
+async def list_snapshots(context_id: str):
+    """List all snapshots for context."""
+    ctx = await context_manager.get_context(context_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail="Context not found")
+    
+    snapshots = await snapshot_manager.list_snapshots(ctx.session_id, context_id)
+    
+    return SnapshotListResponse(
+        snapshots=[
+            SnapshotInfo(
+                id=s.id,
+                name=s.name,
+                context_id=s.context_id,
+                created_at=s.created_at,
+                files=s.files,
+                description=s.description,
+                git_commit_before=s.git_commit_before,
+                size_bytes=s.size_bytes,
+            )
+            for s in snapshots
+        ],
+        count=len(snapshots),
+    )
+
+
+@app.post("/api/snapshots/restore", response_model=SnapshotActionResponse)
+async def restore_snapshot(req: RestoreSnapshotRequest):
+    """Restore project from snapshot."""
+    ctx = await context_manager.get_context(req.context_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail="Context not found")
+    
+    try:
+        result = await snapshot_manager.restore_snapshot(
+            session_id=ctx.session_id,
+            context_id=req.context_id,
+            snapshot_id=req.snapshot_id,
+        )
+        
+        return SnapshotActionResponse(
+            success=result["success"],
+            message=f"Restored {result['restored_files']} of {result['total_files']} files",
+            snapshot_id=req.snapshot_id,
+            restored_files=result["restored_files"],
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Restore failed: {exc}")
+
+
+@app.delete("/api/snapshots/{snapshot_id}")
+async def delete_snapshot(snapshot_id: str, context_id: str):
+    """Delete a snapshot."""
+    ctx = await context_manager.get_context(context_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail="Context not found")
+    
+    success = await snapshot_manager.delete_snapshot(
+        session_id=ctx.session_id,
+        context_id=context_id,
+        snapshot_id=snapshot_id,
+    )
+    
+    return {"status": "deleted" if success else "not_found", "snapshot_id": snapshot_id}
+
+
+# ---------------------------------------------------------------------------
+# CI/CD Webhook API
+# ---------------------------------------------------------------------------
+
+@app.post("/api/webhooks")
+async def create_webhook(req: CreateWebhookRequest):
+    """Create a new webhook for auto-deployment."""
+    config = webhook_manager.add_webhook(
+        name=req.name,
+        webhook_type=req.webhook_type,
+        secret=req.secret,
+        target_path=req.target_path,
+        deploy_command=req.deploy_command,
+        context_id=req.context_id,
+        notify_url=req.notify_url,
+    )
+    
+    return WebhookConfigResponse(
+        id=config.id,
+        name=config.name,
+        webhook_type=config.webhook_type.value,
+        target_path=config.target_path,
+        deploy_command=config.deploy_command,
+        context_id=config.context_id,
+        notify_url=config.notify_url,
+        enabled=config.enabled,
+    )
+
+
+@app.get("/api/webhooks", response_model=WebhookListResponse)
+async def list_webhooks():
+    """List all webhooks."""
+    configs = webhook_manager.list_webhooks()
+    return WebhookListResponse(
+        webhooks=[
+            WebhookConfigResponse(
+                id=c.id,
+                name=c.name,
+                webhook_type=c.webhook_type.value,
+                target_path=c.target_path,
+                deploy_command=c.deploy_command,
+                context_id=c.context_id,
+                notify_url=c.notify_url,
+                enabled=c.enabled,
+            )
+            for c in configs
+        ],
+        count=len(configs),
+    )
+
+
+@app.delete("/api/webhooks/{webhook_id}")
+async def delete_webhook(webhook_id: str):
+    """Delete a webhook."""
+    success = webhook_manager.remove_webhook(webhook_id)
+    return {"status": "deleted" if success else "not_found", "webhook_id": webhook_id}
+
+
+@app.post("/api/webhooks/{webhook_id}/deploy", response_model=DeployResponse)
+async def trigger_deploy(webhook_id: str, req: DeployRequest):
+    """Manually trigger deployment."""
+    result = await webhook_manager.execute_deploy(
+        session_id=req.session_id,
+        webhook_id=webhook_id,
+    )
+    
+    return DeployResponse(
+        status=result["status"],
+        job_id=result.get("job_id"),
+        message=result.get("message", ""),
+    )
+
+
+@app.get("/api/webhooks/{webhook_id}/deployments")
+async def list_deployments(webhook_id: str):
+    """List deployment history."""
+    deployments = webhook_manager.get_deployments(webhook_id)
+    return {
+        "deployments": deployments,
+        "count": len(deployments),
+    }
 
 
 # ---------------------------------------------------------------------------
