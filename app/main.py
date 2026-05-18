@@ -526,14 +526,16 @@ async def session_health(session_id: str):
             "connected": reconnected,
             "reconnected": True,
             "reconnect_count": record.reconnect_count,
+            "reconnect_reason": record.last_reconnect_reason or "timeout",
             "idle_time": record.idle_time,
         }
-    
+
     return {
         "session_id": session_id,
         "connected": True,
         "reconnected": False,
         "reconnect_count": record.reconnect_count,
+        "reconnect_reason": None,
         "idle_time": record.idle_time,
     }
 
