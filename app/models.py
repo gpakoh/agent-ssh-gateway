@@ -118,6 +118,33 @@ class ErrorResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Session Configuration
+# ---------------------------------------------------------------------------
+
+class SessionTimeoutRequest(BaseModel):
+    """Request to update session timeout."""
+
+    timeout: int = Field(..., ge=60, le=86400, description="Session timeout in seconds (60-86400)")
+
+
+class SessionTimeoutResponse(BaseModel):
+    """Response after updating session timeout."""
+
+    timeout: int
+    previous_timeout: int
+    message: str = "Session timeout updated successfully"
+
+
+class SessionConfigResponse(BaseModel):
+    """Current session configuration."""
+
+    session_timeout: int
+    cleanup_interval: int
+    max_sessions_per_ip: int
+    active_sessions: int
+
+
+# ---------------------------------------------------------------------------
 # Background Jobs
 # ---------------------------------------------------------------------------
 
@@ -1221,3 +1248,63 @@ class FileDownloadRequest(BaseModel):
 
     session_id: str = Field(..., min_length=1)
     path: str = Field(..., min_length=1)
+
+
+# ---------------------------------------------------------------------------
+# AST Refactor
+# ---------------------------------------------------------------------------
+
+class ASTRefactorRenameRequest(BaseModel):
+    """Request to rename a symbol using AST."""
+
+    session_id: str = Field(..., min_length=1)
+    path: str = Field(..., min_length=1)
+    old_name: str = Field(..., min_length=1)
+    new_name: str = Field(..., min_length=1)
+
+
+class ASTRefactorRenameResponse(BaseModel):
+    """Response after AST rename operation."""
+
+    success: bool = True
+    path: str
+    old_name: str
+    new_name: str
+    replacements: int
+    code: str
+
+
+class ASTRefactorExtractRequest(BaseModel):
+    """Request to extract code block into function."""
+
+    session_id: str = Field(..., min_length=1)
+    path: str = Field(..., min_length=1)
+    start_line: int = Field(..., ge=1)
+    end_line: int = Field(..., ge=1)
+    func_name: str = Field(..., min_length=1, pattern="^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+class ASTRefactorExtractResponse(BaseModel):
+    """Response after extract function operation."""
+
+    success: bool = True
+    path: str
+    func_name: str
+    code: str
+
+
+class ASTAnalyzeRequest(BaseModel):
+    """Request to analyze code structure."""
+
+    session_id: str = Field(..., min_length=1)
+    path: str = Field(..., min_length=1)
+
+
+class ASTAnalyzeResponse(BaseModel):
+    """Response with code structure analysis."""
+
+    path: str
+    functions: list[dict]
+    classes: list[dict]
+    imports: list[str]
+    variables: list[dict]
