@@ -66,9 +66,17 @@ class FileEditor:
         Returns:
             {"success": True, "path": str, "operations_applied": int}
         """
-        # Read current content
-        content = await self.read_file(session_id, path)
-        original = content
+        # Check if first operation is create (creates new file)
+        is_create = operations and operations[0].get("type") == "create"
+        
+        if is_create:
+            # Start with empty content for create operation
+            content = ""
+            original = ""
+        else:
+            # Read current content
+            content = await self.read_file(session_id, path)
+            original = content
 
         applied = 0
         errors = []
@@ -83,15 +91,15 @@ class FileEditor:
         if errors:
             raise ExecutionError("; ".join(errors))
 
-        # Write back only if changed
-        if content != original:
+        # Write back only if changed or create
+        if content != original or is_create:
             await self.write_file(session_id, path, content)
 
         return {
             "success": True,
             "path": path,
             "operations_applied": applied,
-            "changed": content != original,
+            "changed": content != original or is_create,
         }
 
     def _apply_operation(self, content: str, op: dict) -> str:

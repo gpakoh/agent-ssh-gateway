@@ -1164,3 +1164,32 @@ class BatchEditResponse(BaseModel):
     files_changed: int
     total_operations: int
     git_commit: Optional[str] = None
+
+
+class BulkExecuteRequest(BaseModel):
+    """Request for bulk command execution."""
+
+    session_id: str = Field(..., min_length=1)
+    commands: list[str] = Field(..., min_length=1, max_length=100)
+
+
+class BulkExecuteResult(BaseModel):
+    """Result of single bulk command."""
+
+    command: str
+    success: bool
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int = -1
+    duration: float = 0.0
+    error: Optional[str] = None
+
+
+class BulkExecuteResponse(BaseModel):
+    """Response after bulk command execution."""
+
+    results: list[BulkExecuteResult]
+    total_commands: int
+    successful: int
+    failed: int
+    total_duration: float

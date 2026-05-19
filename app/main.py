@@ -141,6 +141,9 @@ from app.models import (
     BatchEditRequest,
     BatchEditResponse,
     BatchEditResult,
+    BulkExecuteRequest,
+    BulkExecuteResult,
+    BulkExecuteResponse,
 )
 from app.ssh_manager import (
     SSHSessionManager,
@@ -640,16 +643,46 @@ async def jobs_dead_letter(limit: int = 100):
     return {"jobs": jobs, "count": len(jobs)}
 
 
-@app.post("/api/bulk/execute")
-async def bulk_execute(req: BatchExecuteRequest):
+@app.post("/api/bulk/execute", response_model=BulkExecuteResponse)
+async def bulk_execute(req: BulkExecuteRequest):
     """Execute multiple commands concurrently."""
+    start_time = time.time()
     results = await bulk_ops.execute_batch_commands(
         req.session_id,
         req.commands,
         manager,
         max_concurrency=10,
     )
-    return BatchExecuteResponse(results=results)
+    
+    # Convert to response format
+    response_results = []
+    successful = 0
+    failed = 0
+    
+    for result in results:
+        is_success = result.get("success", False)
+        if is_success:
+            successful += 1
+        else:
+            failed += 1
+            
+        response_results.append(BulkExecuteResult(
+            command=result.get("item", ""),
+            success=is_success,
+            stdout=result.get("result", {}).get("stdout", "") if is_success else "",
+            stderr=result.get("result", {}).get("stderr", "") if is_success else result.get("error", ""),
+            exit_code=result.get("result", {}).get("exit_code", -1) if is_success else -1,
+            duration=result.get("result", {}).get("duration", 0.0) if is_success else 0.0,
+            error=result.get("error") if not is_success else None,
+        ))
+    
+    return BulkExecuteResponse(
+        results=response_results,
+        total_commands=len(req.commands),
+        successful=successful,
+        failed=failed,
+        total_duration=time.time() - start_time,
+    )
 
 
 @app.post("/api/bulk/read")
