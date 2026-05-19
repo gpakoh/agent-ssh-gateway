@@ -223,6 +223,8 @@ class EditOperation(BaseModel):
             raise ValueError("insert_before requires 'before'")
         if self.type == "create" and self.text is None:
             raise ValueError("create requires 'text'")
+        if self.type == "append" and self.text is None:
+            raise ValueError("append requires 'text'")
         return self
 
 
@@ -371,6 +373,52 @@ class GitActionResponse(BaseModel):
     message: str
     error: Optional[str] = None
     hash: Optional[str] = None
+
+
+class GitStatusResponse(BaseModel):
+    """Git status response."""
+
+    branch: str
+    clean: bool
+    modified: list[str] = []
+    staged: list[str] = []
+    untracked: list[str] = []
+    ahead: int = 0
+    behind: int = 0
+
+
+class GitDiffRequest(BaseModel):
+    """Request to get git diff."""
+
+    session_id: str = Field(..., min_length=1)
+    path: str = Field(default=".", min_length=1)
+    cached: bool = Field(default=False, description="Show staged diff")
+
+
+class GitDiffResponse(BaseModel):
+    """Git diff response."""
+
+    path: str
+    diff: str
+    files_changed: int = 0
+
+
+class ScaffoldRequest(BaseModel):
+    """Request to scaffold a Python class with tests."""
+
+    session_id: str = Field(..., min_length=1)
+    module_path: str = Field(..., min_length=1, description="Directory path, e.g. app/services")
+    class_name: str = Field(..., min_length=1, pattern="^[A-Z][a-zA-Z0-9_]*$")
+    methods: list[str] = Field(default_factory=list, description="Method names to generate")
+    include_test: bool = Field(default=True)
+
+
+class ScaffoldResponse(BaseModel):
+    """Response after scaffolding."""
+
+    success: bool = True
+    files_created: list[str]
+    message: str
 
 
 class FileEditWithContextRequest(BaseModel):
@@ -1248,6 +1296,24 @@ class FileDownloadRequest(BaseModel):
 
     session_id: str = Field(..., min_length=1)
     path: str = Field(..., min_length=1)
+
+
+class FileWriteRequest(BaseModel):
+    """Request to write file via JSON body (atomic, no heredoc)."""
+
+    session_id: str = Field(..., min_length=1)
+    path: str = Field(..., min_length=1)
+    content: str = Field(..., description="Raw file content (not base64)")
+    mode: str = Field(default="write", pattern="^(write|append)$")
+
+
+class FileWriteResponse(BaseModel):
+    """Response after writing file."""
+
+    success: bool = True
+    path: str
+    size: int
+    mode: str
 
 
 # ---------------------------------------------------------------------------

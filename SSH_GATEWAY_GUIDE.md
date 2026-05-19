@@ -160,8 +160,10 @@ s.post(f"https://ssh.xloud.ru/api/jobs/{job_id}/cancel")
 | POST | /api/batch/read | Массовое чтение файлов |
 | PATCH | /api/file/edit | Операции: replace/insert_after/insert_before/delete/append |
 | POST | /api/file/patch | Unified diff patch |
-| POST | /api/file/upload | Загрузка файла (base64) |
+| POST | /api/file/upload | Загрузка файла (base64 query params) |
+| POST | /api/file/upload/json | Загрузка файла (JSON body, base64) |
 | GET | /api/file/download | Скачивание файла (octet-stream) |
+| POST | /api/file/write | Atomic write через JSON body (no heredoc) |
 
 **Чтение (JSON):**
 r = s.post("https://ssh.xloud.ru/api/file/read", json={
@@ -251,6 +253,25 @@ r = s.get("https://ssh.xloud.ru/api/file/download", params={
 with open("downloaded_file.txt", "wb") as f:
     f.write(r.content)
 
+**Atomic Write через JSON (без heredoc escaping):**
+r = s.post("https://ssh.xloud.ru/api/file/write", json={
+    "session_id": session_id,
+    "path": "/remote/path/file.py",
+    "content": 'def hello():\n    print("Hello, World!")\n',
+    "mode": "write"  # или "append" для добавления в конец
+})
+# → {"success": true, "path": "...", "size": 42, "mode": "write"}
+
+**JSON Upload (для файлов >2KB):**
+import base64
+content = base64.b64encode(open("local_file.txt", "rb").read()).decode("ascii")
+r = s.post("https://ssh.xloud.ru/api/file/upload/json", json={
+    "session_id": session_id,
+    "path": "/remote/path/file.txt",
+    "content": content
+})
+# → {"success": true, "path": "...", "size": 1234, "method": "json"}
+
 **Потоковая загрузка (для файлов 1MB+):**
 r = s.post("https://ssh.xloud.ru/api/file/upload/stream", 
     params={"session_id": session_id, "path": "/remote/big_file.zip"},
@@ -299,7 +320,88 @@ r = s.post("https://ssh.xloud.ru/api/context/create", json={
 # Если валидация не пройдёт — коммит будет отменён с ошибкой
 
 
-### 2.4 PTY (интерактивный терминал)
+**Простое дерево проекта:**
+r = s.get("https://ssh.xloud.ru/api/project/tree", params={
+    "session_id": session_id,
+    "path": "/project/path",
+    "max_depth": 3
+})
+# → {"items": [{"type": "file", "path": "app/main.py", "size": 1234}, ...], "count": 42}
+
+
+### 2.4 Git Integration (простые операции)
+| Method | Path | Описание |
+| GET | /api/git/simple-status | Git status (branch, modified, staged, untracked) |
+| POST | /api/git/diff | Git diff (working или staged) |
+
+**Git status:**
+r = s.get("https://ssh.xloud.ru/api/git/simple-status", params={
+    "session_id": session_id,
+    "path": "/project/path"
+})
+# → {"branch": "main", "clean": false, "modified": ["app/main.py"], "staged": [], "untracked": []}
+
+**Git diff:**
+r = s.post("https://ssh.xloud.ru/api/git/diff", json={
+    "session_id": session_id,
+    "path": "/project/path",
+    "cached": false  # true для staged изменений
+})
+# → {"path": "...", "diff": "diff --git a/app/main.py...", "files_changed": 2}
+
+
+### 2.5 AST Refactor API
+| Method | Path | Описание |
+| POST | /api/ast/rename | Переименовать символ (AST-aware) |
+| POST | /api/ast/analyze | Анализ структуры Python файла |
+
+**Rename symbol:**
+r = s.post("https://ssh.xloud.ru/api/ast/rename", json={
+    "session_id": session_id,
+    "path": "/project/app/services.py",
+    "old_name": "old_function",
+    "new_name": "new_function"
+})
+# → {"success": true, "replacements": 3, "code": "def new_function():..."}
+
+**Analyze code:**
+r = s.post("https://ssh.xloud.ru/api/ast/analyze", json={
+    "session_id": session_id,
+    "path": "/project/app/services.py"
+})
+# → {"functions": [...], "classes": [...], "imports": [...], "variables": [...]}
+
+
+### 2.6 Session Configuration
+| Method | Path | Описание |
+| GET | /api/config/session | Текущая конфигурация сессий |
+| PATCH | /api/config/session/timeout | Изменить session timeout |
+
+**Конфигурация:**
+r = s.get("https://ssh.xloud.ru/api/config/session")
+# → {"session_timeout": 3600, "cleanup_interval": 300, "max_sessions_per_ip": 10, "active_sessions": 5}
+
+**Изменить timeout:**
+r = s.patch("https://ssh.xloud.ru/api/config/session/timeout", json={"timeout": 7200})
+# → {"timeout": 7200, "previous_timeout": 3600}
+
+
+### 2.7 Scaffold API
+| Method | Path | Описание |
+| POST | /api/scaffold/python-class | Создать Python class + test |
+
+**Создать класс:**
+r = s.post("https://ssh.xloud.ru/api/scaffold/python-class", json={
+    "session_id": session_id,
+    "module_path": "app/services",
+    "class_name": "UserService",
+    "methods": ["get_user", "create_user", "delete_user"],
+    "include_test": true
+})
+# → {"files_created": ["app/services/user_service.py", "app/services/test_user_service.py"]}
+
+
+### 2.8 PTY (интерактивный терминал)
 | Method | Path | Описание |
 | POST | /api/ssh/pty/{session_id}/create | Создать PTY |
 | POST | /api/ssh/pty/{session_id}/input | Отправить ввод |
@@ -1346,6 +1448,18 @@ curl -X POST /api/ssh/execute -d '{"command": "ls -la"}'
 ---
 
 ## 4. ИСТОРИЯ ИЗМЕНЕНИЙ
+
+### v4.6.4 (2026-05-19) — DX Improvements
+- **Добавлено**: Custom validation errors — field-specific сообщения (какое поле отсутствует/невалидно)
+- **Добавлено**: `GET /api/config/session` + `PATCH /api/config/session/timeout` — настраиваемый session timeout
+- **Добавлено**: `POST /api/file/write` — atomic write через JSON body (без heredoc escaping)
+- **Добавлено**: `GET /api/project/tree` — упрощённое дерево проекта
+- **Добавлено**: `GET /api/git/simple-status` + `POST /api/git/diff` — Git integration endpoints
+- **Добавлено**: `POST /api/ast/rename` + `POST /api/ast/analyze` — AST-aware рефакторинг
+- **Добавлено**: `POST /api/scaffold/python-class` — генерация Python class + test из шаблона
+- **Добавлено**: `GET /api/sdk/download` поддерживает `?api_key=` и `X-API-Key` header
+- **Исправлено**: PATCH `append` операция — добавлена валидация `text` поля
+- **Исправлено**: Graceful shutdown — drain active jobs перед рестартом
 
 ### v4.6.2 (2026-05-19) — SDK Download
 - **Добавлено**: `GET /api/sdk/download` — скачивание Python SDK напрямую с сервера
