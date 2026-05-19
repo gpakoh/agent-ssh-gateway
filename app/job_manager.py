@@ -311,3 +311,16 @@ class JobManager:
             "type": "status",
             "status": "cancelled",
         })
+
+    async def wait_for_all_jobs(self) -> None:
+        """Wait for all active (pending/running) jobs to complete."""
+        while True:
+            async with self._lock:
+                active = [
+                    job for job in self._jobs.values()
+                    if job.status in ("pending", "running")
+                ]
+            if not active:
+                break
+            logger.info("Waiting for %d active jobs to complete...", len(active))
+            await asyncio.sleep(0.5)
