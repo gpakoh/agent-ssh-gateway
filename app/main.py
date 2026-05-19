@@ -643,6 +643,24 @@ async def jobs_dead_letter(limit: int = 100):
     return {"jobs": jobs, "count": len(jobs)}
 
 
+@app.get("/api/sdk/download")
+async def download_sdk():
+    """Download Python SDK."""
+    sdk_path = "/app/sdk/ssh_gateway.py"
+    try:
+        with open(sdk_path, "r") as f:
+            content = f.read()
+        return Response(
+            content=content,
+            media_type="text/x-python",
+            headers={
+                "Content-Disposition": "attachment; filename=ssh_gateway.py"
+            }
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="SDK not found")
+
+
 @app.post("/api/bulk/execute", response_model=BulkExecuteResponse)
 async def bulk_execute(req: BulkExecuteRequest):
     """Execute multiple commands concurrently."""
