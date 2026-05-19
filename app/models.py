@@ -1321,23 +1321,45 @@ class FileWriteResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class ASTRefactorRenameRequest(BaseModel):
-    """Request to rename a symbol using AST."""
+    """Request to rename a symbol using AST.
+
+    Either 'path' (single file) or 'files' (multiple files) must be provided.
+    """
 
     session_id: str = Field(..., min_length=1)
-    path: str = Field(..., min_length=1)
+    path: Optional[str] = Field(default=None, min_length=1, description="Single file path")
+    files: list[str] = Field(default_factory=list, description="Multiple file paths (alternative to 'path')")
     old_name: str = Field(..., min_length=1)
     new_name: str = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def check_path_or_files(self):
+        if not self.path and not self.files:
+            raise ValueError("Either 'path' or 'files' must be provided")
+        return self
+
+
+class ASTRefactorFileResult(BaseModel):
+    """Result of renaming in a single file."""
+
+    path: str
+    success: bool
+    replacements: int
+    error: Optional[str] = None
 
 
 class ASTRefactorRenameResponse(BaseModel):
     """Response after AST rename operation."""
 
     success: bool = True
-    path: str
+    path: str = ""  # backward compat for single file
     old_name: str
     new_name: str
-    replacements: int
-    code: str
+    replacements: int = 0
+    code: str = ""
+    files: list[ASTRefactorFileResult] = Field(default_factory=list, description="Results per file when 'files' array used")
+    total_files: int = 0
+    files_changed: int = 0
 
 
 class ASTRefactorExtractRequest(BaseModel):
