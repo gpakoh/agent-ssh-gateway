@@ -958,7 +958,26 @@ Docker: 66 контейнеров
 
 ## 9. PYTHON SDK
 
-Упрощённая работа с API через Python SDK:
+### Загрузка SDK
+
+```bash
+# Способ 1: Скачать с сервера
+curl -O https://ssh.xloud.ru/api/sdk/download
+
+# Способ 2: Из GitHub
+git clone https://github.com/gpakoh/ssh-gateway-ai.git
+cp ssh-gateway-ai/sdk/ssh_gateway.py .
+
+# Способ 3: Напрямую через API
+python3 -c "
+import requests
+r = requests.get('https://ssh.xloud.ru/api/sdk/download', verify=False)
+open('ssh_gateway.py', 'w').write(r.text)
+print('SDK downloaded')
+"
+```
+
+### Использование SDK
 
 ```python
 from sdk.ssh_gateway import SSHGatewayClient
@@ -1327,6 +1346,10 @@ curl -X POST /api/ssh/execute -d '{"command": "ls -la"}'
 ---
 
 ## 4. ИСТОРИЯ ИЗМЕНЕНИЙ
+
+### v4.6.2 (2026-05-19) — SDK Download
+- **Добавлено**: `GET /api/sdk/download` — скачивание Python SDK напрямую с сервера
+- **Обновлено**: Документация — 3 способа загрузки SDK (с сервера, GitHub, curl)
 
 ### v4.6.1 (2026-05-19) — Swarm Mode Fixes
 - **Исправлено**: Bulk execute endpoint — использует `session_id` вместо `context_id`
