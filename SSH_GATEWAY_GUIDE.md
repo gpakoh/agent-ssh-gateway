@@ -1176,17 +1176,26 @@ curl https://ssh.xloud.ru/metrics
 Массовые операции с concurrency control:
 
 ```python
-# Массовое выполнение команд
+# Массовое выполнение команд (до 100 команд, concurrency=10)
 r = s.post("/api/bulk/execute", json={
     "session_id": sid,
-    "commands": ["cmd1", "cmd2", "cmd3", ...],  # до 100 команд
+    "commands": ["echo 'cmd1'", "echo 'cmd2'", "echo 'cmd3'"],
 })
-# → {"results": [{"success": True, "result": {...}}, ...]}
+# → {
+#   "results": [
+#     {"command": "echo 'cmd1'", "success": True, "stdout": "cmd1\n", "exit_code": 0, "error": None},
+#     {"command": "echo 'cmd2'", "success": True, "stdout": "cmd2\n", "exit_code": 0, "error": None},
+#   ],
+#   "total_commands": 3,
+#   "successful": 3,
+#   "failed": 0,
+#   "total_duration": 1.8
+# }
 
-# Массовое чтение файлов
+# Массовое чтение файлов (до 50 файлов, concurrency=20)
 r = s.post("/api/bulk/read", json={
     "session_id": sid,
-    "paths": ["app/main.py", "app/config.py", ...],  # до 50 файлов
+    "paths": ["app/main.py", "app/config.py", ...],
 })
 # → {"files": {"app/main.py": "...", ...}, "errors": {}}
 ```
@@ -1310,7 +1319,7 @@ curl -X POST /api/ssh/execute -d '{"command": "ls -la"}'
 
 
 > Написано: 2026-05-18
-> Версия: 4.6.0 (35 фич: +Swarm Mode — Redis Job Queue, Circuit Breaker, Distributed Locks, Prometheus Metrics, Bulk Operations, Persistent Sessions)
+> Версия: 4.6.1 (35 фич: +Swarm Mode — Redis Job Queue, Circuit Breaker, Distributed Locks, Prometheus Metrics, Bulk Operations, Persistent Sessions, +create operation fix)
 > Домен: https://ssh.xloud.ru
 > GitHub: https://github.com/gpakoh/ssh-gateway-ai
 > Gitea: http://git.example.com:3005/gpakoh/ssh-gateway-ai
@@ -1318,6 +1327,12 @@ curl -X POST /api/ssh/execute -d '{"command": "ls -la"}'
 ---
 
 ## 4. ИСТОРИЯ ИЗМЕНЕНИЙ
+
+### v4.6.1 (2026-05-19) — Swarm Mode Fixes
+- **Исправлено**: Bulk execute endpoint — использует `session_id` вместо `context_id`
+- **Исправлено**: PATCH `create` операция — создает файл если не существует (не падает с "No such file")
+- **Исправлено**: Bulk execute response — правильная структура с `results`, `successful`, `failed`
+- **Добавлено**: `BulkExecuteRequest` и `BulkExecuteResponse` модели для `/api/bulk/execute`
 
 ### v4.6.0 (2026-05-19) — Swarm Mode
 - **Добавлено**: Redis Job Queue — персистентная очередь задач с retries и dead letter queue
