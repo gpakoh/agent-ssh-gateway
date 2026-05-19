@@ -163,6 +163,7 @@ from app.models import (
     FileTreeResponse,
     ASTRefactorRenameRequest,
     ASTRefactorRenameResponse,
+    ASTRefactorFileResult,
     ASTRefactorExtractRequest,
     ASTRefactorExtractResponse,
     ASTAnalyzeRequest,
@@ -1150,29 +1151,81 @@ async def file_write(req: FileWriteRequest):
 
 @app.post("/api/ast/rename", response_model=ASTRefactorRenameResponse)
 async def ast_rename(req: ASTRefactorRenameRequest):
-    """Rename a symbol (function, class, variable) using AST."""
-    try:
-        code = await file_editor.read_file(req.session_id, req.path)
-        refactored, count = ASTRefactor.rename_symbol(
-            code, req.old_name, req.new_name
-        )
+    """Rename a symbol (function, class, variable) using AST.
 
-        # Write back
-        await file_editor.write_file(
-            req.session_id,
-            req.path,
-            refactored,
-        )
+    Supports single file ('path') or multiple files ('files' array).
+    """
+    if req.files:
+        # Multi-file rename
+        results = []
+        total_replacements = 0
+        files_changed = 0
+
+        for file_path in req.files:
+            try:
+                code = await file_editor.read_file(req.session_id, file_path)
+                refactored, count = ASTRefactor.rename_symbol(
+                    code, req.old_name, req.new_name
+                )
+
+                if count > 0:
+                    await file_editor.write_file(
+                        req.session_id, file_path, refactored
+                    )
+                    total_replacements += count
+                    files_changed += 1
+                    results.append({
+                        "path": file_path,
+                        "success": True,
+                        "replacements": count,
+                    })
+                else:
+                    results.append({
+                        "path": file_path,
+                        "success": True,
+                        "replacements": 0,
+                    })
+            except Exception as exc:
+                results.append({
+                    "path": file_path,
+                    "success": False,
+                    "replacements": 0,
+                    "error": str(exc),
+                })
 
         return ASTRefactorRenameResponse(
-            path=req.path,
             old_name=req.old_name,
             new_name=req.new_name,
-            replacements=count,
-            code=refactored,
+            replacements=total_replacements,
+            files=results,
+            total_files=len(req.files),
+            files_changed=files_changed,
         )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"AST rename failed: {exc}")
+
+    else:
+        # Single file rename (backward compat)
+        try:
+            code = await file_editor.read_file(req.session_id, req.path)
+            refactored, count = ASTRefactor.rename_symbol(
+                code, req.old_name, req.new_name
+            )
+
+            if count > 0:
+                await file_editor.write_file(
+                    req.session_id, req.path, refactored
+                )
+
+            return ASTRefactorRenameResponse(
+                path=req.path,
+                old_name=req.old_name,
+                new_name=req.new_name,
+                replacements=count,
+                code=refactored,
+                total_files=1,
+                files_changed=1 if count > 0 else 0,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"AST rename failed: {exc}")
 
 
 @app.post("/api/refactor/rename", response_model=ASTRefactorRenameResponse)
