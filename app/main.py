@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Header, Response, UploadFile, File, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -40,6 +41,9 @@ from app.models import (
     SessionInfo,
     HealthResponse,
     ErrorResponse,
+    SessionTimeoutRequest,
+    SessionTimeoutResponse,
+    SessionConfigResponse,
     JobRunRequest,
     JobRunResponse,
     JobStatusResponse,
@@ -147,6 +151,12 @@ from app.models import (
     FileUploadRequest,
     FileUploadResponse,
     FileDownloadRequest,
+    ASTRefactorRenameRequest,
+    ASTRefactorRenameResponse,
+    ASTRefactorExtractRequest,
+    ASTRefactorExtractResponse,
+    ASTAnalyzeRequest,
+    ASTAnalyzeResponse,
 )
 from app.ssh_manager import (
     SSHSessionManager,
@@ -159,6 +169,7 @@ from app.ssh_manager import (
 )
 from app.job_manager import JobManager
 from app.file_editor import FileEditor
+from app.ast_refactor import ASTRefactor
 from app.context_manager import ContextManager
 from app.git_manager import GitStatus
 from app.batch_operations import BatchOperationsManager
@@ -366,6 +377,47 @@ async def ssh_exception_handler(request, exc: SSHManagerError):
     raise HTTPException(status_code=status_code, detail=str(exc))
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc: RequestValidationError):
+    """Convert Pydantic validation errors to clear field-specific messages."""
+    errors = exc.errors()
+    field_errors = []
+    
+    for error in errors:
+        loc = error.get("loc", [])
+        field = ".".join(str(x) for x in loc if x != "body")
+        msg = error.get("msg", "")
+        error_type = error.get("type", "")
+        
+        # Create human-readable message
+        if "missing" in error_type or "required" in error_type:
+            message = f"Field '{field}' is required but was not provided"
+        elif "type_error" in error_type:
+            input_val = error.get("input", "")
+            message = f"Field '{field}' has invalid type. Expected: {msg}, got: {type(input_val).__name__ if input_val else 'none'}"
+        elif "value_error" in error_type:
+            message = f"Field '{field}' validation failed: {msg}"
+        elif "min_length" in error_type or "max_length" in error_type:
+            message = f"Field '{field}' length validation failed: {msg}"
+        else:
+            message = f"Field '{field}': {msg}"
+        
+        field_errors.append({
+            "field": field,
+            "error": message,
+            "type": error_type,
+        })
+    
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "message": "Request validation failed",
+            "errors": field_errors,
+            "total_errors": len(field_errors),
+        }
+    )
+
+
 # ---------------------------------------------------------------------------
 # API Routes
 # ---------------------------------------------------------------------------
@@ -374,6 +426,29 @@ async def ssh_exception_handler(request, exc: SSHManagerError):
 async def health_check():
     """Health check endpoint."""
     return HealthResponse(status="ok")
+
+
+@app.get("/api/config/session", response_model=SessionConfigResponse)
+async def get_session_config():
+    """Get current session configuration."""
+    active = await manager.list_sessions()
+    return SessionConfigResponse(
+        session_timeout=manager._session_timeout,
+        cleanup_interval=manager._cleanup_interval,
+        max_sessions_per_ip=settings.max_sessions_per_ip,
+        active_sessions=len(active),
+    )
+
+
+@app.patch("/api/config/session/timeout", response_model=SessionTimeoutResponse)
+async def update_session_timeout(req: SessionTimeoutRequest):
+    """Update session timeout dynamically."""
+    previous = manager._session_timeout
+    manager._session_timeout = req.timeout
+    return SessionTimeoutResponse(
+        timeout=req.timeout,
+        previous_timeout=previous,
+    )
 
 
 @app.post("/api/ssh/connect", response_model=ConnectResponse)
@@ -1020,6 +1095,77 @@ async def file_download(session_id: str = Query(...), path: str = Query(...)):
     """Download file from remote server."""
     content = await file_editor.read_file(session_id, path)
     return Response(content=content, media_type="application/octet-stream")
+
+
+# ---------------------------------------------------------------------------
+# AST Refactor API
+# ---------------------------------------------------------------------------
+
+@app.post("/api/ast/rename", response_model=ASTRefactorRenameResponse)
+async def ast_rename(req: ASTRefactorRenameRequest):
+    """Rename a symbol (function, class, variable) using AST."""
+    try:
+        code = await file_editor.read_file(req.session_id, req.path)
+        refactored, count = ASTRefactor.rename_symbol(
+            code, req.old_name, req.new_name
+        )
+
+        # Write back
+        await file_editor.write_file(
+            req.session_id,
+            req.path,
+            refactored,
+        )
+
+        return ASTRefactorRenameResponse(
+            path=req.path,
+            old_name=req.old_name,
+            new_name=req.new_name,
+            replacements=count,
+            code=refactored,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"AST rename failed: {exc}")
+
+
+@app.post("/api/ast/extract", response_model=ASTRefactorExtractResponse)
+async def ast_extract(req: ASTRefactorExtractRequest):
+    """Extract a block of code into a new function."""
+    try:
+        code = await file_editor.read_file(req.session_id, req.path)
+        refactored = ASTRefactor.extract_function(
+            code, req.start_line, req.end_line, req.func_name
+        )
+
+        # Write back
+        await file_editor.write_file(
+            req.session_id,
+            req.path,
+            refactored,
+        )
+
+        return ASTRefactorExtractResponse(
+            path=req.path,
+            func_name=req.func_name,
+            code=refactored,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"AST extract failed: {exc}")
+
+
+@app.post("/api/ast/analyze", response_model=ASTAnalyzeResponse)
+async def ast_analyze(req: ASTAnalyzeRequest):
+    """Analyze Python code structure using AST."""
+    try:
+        code = await file_editor.read_file(req.session_id, req.path)
+        analysis = ASTRefactor.analyze_code(code)
+
+        return ASTAnalyzeResponse(
+            path=req.path,
+            **analysis,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"AST analysis failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
