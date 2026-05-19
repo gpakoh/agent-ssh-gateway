@@ -34,6 +34,7 @@ services:
       - CORS_ORIGINS=["https://ssh.xloud.ru"]
       - OPENCODE_ADAPTER_URL=http://172.17.0.1:8008
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+      - API_KEY=${API_KEY:-}
       - REDIS_URL=redis://redis:6379/0
       - REDIS_JOB_QUEUE_ENABLED=true
     volumes:

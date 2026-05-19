@@ -1460,7 +1460,7 @@ curl -X POST /api/ssh/execute -d '{"command": "ls -la"}'
 - **Добавлено**: `POST /api/ast/rename` + `POST /api/refactor/rename` (alias) + `POST /api/ast/analyze` — AST-aware рефакторинг
 - **Добавлено**: `GET /api/jobs/{id}/events` — alias для SSE stream
 - **Добавлено**: `POST /api/scaffold/python-class` — генерация Python class + test из шаблона
-- **Добавлено**: `GET /api/sdk/download` поддерживает `?api_key=` и `X-API-Key` header
+- **Добавлено**: `GET /api/sdk/download` поддерживает `?api_key=` и `X-API-Key` header (env `API_KEY`)
 - **Исправлено**: PATCH `append` операция — добавлена валидация `text` поля
 - **Исправлено**: Graceful shutdown — drain active jobs перед рестартом
 
