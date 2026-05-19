@@ -357,7 +357,7 @@ r = s.post("https://ssh.xloud.ru/api/git/diff", json={
 | POST | /api/refactor/rename | Alias для /api/ast/rename |
 | POST | /api/ast/analyze | Анализ структуры Python файла |
 
-**Rename symbol:**
+**Rename symbol (single file):**
 r = s.post("https://ssh.xloud.ru/api/ast/rename", json={
     "session_id": session_id,
     "path": "/project/app/services.py",
@@ -365,6 +365,28 @@ r = s.post("https://ssh.xloud.ru/api/ast/rename", json={
     "new_name": "new_function"
 })
 # → {"success": true, "replacements": 3, "code": "def new_function():..."}
+
+**Multi-file rename (batch refactoring):**
+r = s.post("https://ssh.xloud.ru/api/ast/rename", json={
+    "session_id": session_id,
+    "files": [
+        "/project/app/core/interfaces.py",
+        "/project/app/core/result.py",
+        "/project/app/services.py"
+    ],
+    "old_name": "old_function",
+    "new_name": "new_function"
+})
+# → {
+#     "success": true,
+#     "files": [
+#         {"path": "app/core/interfaces.py", "success": true, "replacements": 1},
+#         {"path": "app/core/result.py", "success": true, "replacements": 1},
+#         {"path": "app/services.py", "success": true, "replacements": 3}
+#     ],
+#     "total_files": 3,
+#     "files_changed": 3
+# }
 
 **Analyze code:**
 r = s.post("https://ssh.xloud.ru/api/ast/analyze", json={
@@ -1457,7 +1479,7 @@ curl -X POST /api/ssh/execute -d '{"command": "ls -la"}'
 - **Добавлено**: `POST /api/file/write` — atomic write через JSON body (без heredoc escaping)
 - **Добавлено**: `GET /api/project/tree` — упрощённое дерево проекта
 - **Добавлено**: `GET /api/git/simple-status` + `POST /api/git/diff` — Git integration endpoints
-- **Добавлено**: `POST /api/ast/rename` + `POST /api/refactor/rename` (alias) + `POST /api/ast/analyze` — AST-aware рефакторинг
+- **Добавлено**: `POST /api/ast/rename` + `POST /api/refactor/rename` (alias) + `POST /api/ast/analyze` — AST-aware рефакторинг (single + multi-file)
 - **Добавлено**: `GET /api/jobs/{id}/events` — alias для SSE stream
 - **Добавлено**: `POST /api/scaffold/python-class` — генерация Python class + test из шаблона
 - **Добавлено**: `GET /api/sdk/download` поддерживает `?api_key=` и `X-API-Key` header (env `API_KEY`)
