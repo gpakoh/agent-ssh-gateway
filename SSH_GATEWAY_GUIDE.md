@@ -122,6 +122,7 @@ r = s.post("https://ssh.xloud.ru/api/ssh/heartbeat", json={"session_id": session
 | GET | /api/jobs/{id}/status | Статус выполнения |
 | GET | /api/jobs/{id}/result | Полный результат |
 | GET | /api/jobs/{id}/stream | SSE поток вывода |
+| GET | /api/jobs/{id}/events | SSE поток (alias для /stream) |
 | POST | /api/jobs/{id}/cancel | Отмена задачи |
 
 **Запуск:**
@@ -353,6 +354,7 @@ r = s.post("https://ssh.xloud.ru/api/git/diff", json={
 ### 2.5 AST Refactor API
 | Method | Path | Описание |
 | POST | /api/ast/rename | Переименовать символ (AST-aware) |
+| POST | /api/refactor/rename | Alias для /api/ast/rename |
 | POST | /api/ast/analyze | Анализ структуры Python файла |
 
 **Rename symbol:**
@@ -1455,7 +1457,8 @@ curl -X POST /api/ssh/execute -d '{"command": "ls -la"}'
 - **Добавлено**: `POST /api/file/write` — atomic write через JSON body (без heredoc escaping)
 - **Добавлено**: `GET /api/project/tree` — упрощённое дерево проекта
 - **Добавлено**: `GET /api/git/simple-status` + `POST /api/git/diff` — Git integration endpoints
-- **Добавлено**: `POST /api/ast/rename` + `POST /api/ast/analyze` — AST-aware рефакторинг
+- **Добавлено**: `POST /api/ast/rename` + `POST /api/refactor/rename` (alias) + `POST /api/ast/analyze` — AST-aware рефакторинг
+- **Добавлено**: `GET /api/jobs/{id}/events` — alias для SSE stream
 - **Добавлено**: `POST /api/scaffold/python-class` — генерация Python class + test из шаблона
 - **Добавлено**: `GET /api/sdk/download` поддерживает `?api_key=` и `X-API-Key` header
 - **Исправлено**: PATCH `append` операция — добавлена валидация `text` поля

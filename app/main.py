@@ -964,6 +964,12 @@ async def jobs_stream(job_id: str):
     )
 
 
+@app.get("/api/jobs/{job_id}/events")
+async def jobs_events(job_id: str):
+    """Alias for /api/jobs/{job_id}/stream — SSE job progress events."""
+    return await jobs_stream(job_id)
+
+
 # ---------------------------------------------------------------------------
 # File Edit API
 # ---------------------------------------------------------------------------
@@ -1167,6 +1173,12 @@ async def ast_rename(req: ASTRefactorRenameRequest):
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"AST rename failed: {exc}")
+
+
+@app.post("/api/refactor/rename", response_model=ASTRefactorRenameResponse)
+async def refactor_rename(req: ASTRefactorRenameRequest):
+    """Alias for /api/ast/rename — AST-aware symbol renaming."""
+    return await ast_rename(req)
 
 
 @app.post("/api/ast/extract", response_model=ASTRefactorExtractResponse)
