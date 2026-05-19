@@ -1093,7 +1093,147 @@ git push github master
 - [ ] Готов к работе!
 
 
-## 12. БЕЗОПАСНОСТЬ
+## 12. SWARM MODE (300+ агентов)
+
+Для работы с большим количеством агентов доступны дополнительные компоненты:
+
+### Redis Job Queue
+
+Персистентная очередь задач с ретраями:
+
+```python
+# Поставить задачу в очередь
+job_id = await redis_queue.enqueue(
+    session_id="...",
+    command="pytest tests/",
+    priority=0,           # 0 = высший приоритет
+    max_retries=3,
+    timeout=3600,
+)
+
+# Получить статистику очереди
+r = s.get("/api/jobs/queue/stats")
+# → {"pending": 42, "processing": 5, "completed": 128, "dead_letter": 2}
+
+# Получить failed jobs
+r = s.get("/api/jobs/queue/dead?limit=100")
+# → {"jobs": [...], "count": 2}
+```
+
+### Circuit Breaker
+
+Защита от каскадных отказов:
+
+```python
+# Проверить статус circuit breaker'ов
+r = s.get("/api/circuit-breaker/stats")
+# → {
+#   "192.168.1.103": {"state": "closed", "failure_count": 0},
+#   "192.0.2.10": {"state": "open", "failure_count": 5}
+# }
+```
+
+**Состояния:**
+- `closed` — нормальная работа
+- `open` — сервер недоступен, запросы блокируются
+- `half_open` — тестирование восстановления
+
+### Distributed Locks
+
+Блокировки файлов при concurrent editing:
+
+```python
+from app.distributed_lock import DistributedLock
+
+lock = DistributedLock()
+
+# Захватить блокировку
+token = await lock.acquire("app/main.py", ttl=30)
+if token:
+    try:
+        # Редактировать файл
+        await file_editor.edit_file(session_id, "app/main.py", [...])
+    finally:
+        # Освободить блокировку
+        await lock.release("app/main.py", token)
+```
+
+### Prometheus Metrics
+
+```bash
+# Получить метрики
+curl https://ssh.xloud.ru/metrics
+
+# Доступные метрики:
+# ssh_gateway_requests_total — RPS по endpoint'ам
+# ssh_gateway_ssh_connections_active — активные SSH-сессии
+# ssh_gateway_queue_depth — глубина очереди
+# ssh_gateway_circuit_breaker_state — состояние circuit breaker'ов
+```
+
+### Bulk Operations
+
+Массовые операции с concurrency control:
+
+```python
+# Массовое выполнение команд
+r = s.post("/api/bulk/execute", json={
+    "session_id": sid,
+    "commands": ["cmd1", "cmd2", "cmd3", ...],  # до 100 команд
+})
+# → {"results": [{"success": True, "result": {...}}, ...]}
+
+# Массовое чтение файлов
+r = s.post("/api/bulk/read", json={
+    "session_id": sid,
+    "paths": ["app/main.py", "app/config.py", ...],  # до 50 файлов
+})
+# → {"files": {"app/main.py": "...", ...}, "errors": {}}
+```
+
+### Persistent Sessions
+
+Сессии хранятся в PostgreSQL и переживают перезапуск gateway:
+
+```bash
+# Включить в docker-compose.yml
+environment:
+  - PERSISTENT_SESSIONS_ENABLED=true
+  - DATABASE_URL=postgresql+asyncpg://user:pass@postgres:5432/ssh_gateway
+```
+
+### Настройка инфраструктуры Swarm
+
+```yaml
+# docker-compose.yml
+services:
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: ssh_gateway
+      POSTGRES_USER: ssh_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  web-ssh-gateway:
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://ssh_user:${DB_PASSWORD}@postgres:5432/ssh_gateway
+      - PERSISTENT_SESSIONS_ENABLED=true
+      - REDIS_JOB_QUEUE_ENABLED=true
+    depends_on:
+      - redis
+      - postgres
+```
+
+## 13. БЕЗОПАСНОСТЬ
 
 ### Встроенные защиты
 
@@ -1170,7 +1310,7 @@ curl -X POST /api/ssh/execute -d '{"command": "ls -la"}'
 
 
 > Написано: 2026-05-18
-> Версия: 4.5.1 (29 фич: +PATCH create operation, +reconnect_reason, docs fixes)
+> Версия: 4.6.0 (35 фич: +Swarm Mode — Redis Job Queue, Circuit Breaker, Distributed Locks, Prometheus Metrics, Bulk Operations, Persistent Sessions)
 > Домен: https://ssh.xloud.ru
 > GitHub: https://github.com/gpakoh/ssh-gateway-ai
 > Gitea: http://git.xloud.ru:3005/gpakoh/ssh-gateway-ai
@@ -1178,6 +1318,16 @@ curl -X POST /api/ssh/execute -d '{"command": "ls -la"}'
 ---
 
 ## 4. ИСТОРИЯ ИЗМЕНЕНИЙ
+
+### v4.6.0 (2026-05-19) — Swarm Mode
+- **Добавлено**: Redis Job Queue — персистентная очередь задач с retries и dead letter queue
+- **Добавлено**: Circuit Breaker — защита от каскадных отказов SSH-серверов
+- **Добавлено**: Distributed Locks — redlock для concurrent file editing
+- **Добавлено**: Prometheus Metrics — /metrics endpoint (RPS, latency, queue depth, SSH stats)
+- **Добавлено**: Bulk Operations — массовое выполнение команд и чтение файлов
+- **Добавлено**: Persistent Sessions — PostgreSQL storage для сессий
+- **Добавлено**: Docker Compose с Redis и PostgreSQL
+- **Обновлено**: Документация — раздел Swarm Mode с примерами
 
 ### v4.5.1 (2026-05-19)
 - **Добавлено**: PATCH операция `create` — создание/перезапись файла

@@ -1,6 +1,21 @@
 version: "3.8"
 
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: ssh-gateway-redis
+    networks:
+      internal_net: {}
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
   web-ssh-gateway:
     build: .
     container_name: web-ssh-gateway
@@ -19,6 +34,8 @@ services:
       - CORS_ORIGINS=["https://ssh.xloud.ru"]
       - OPENCODE_ADAPTER_URL=http://172.17.0.1:8008
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_JOB_QUEUE_ENABLED=true
     volumes:
       - ssh_keys:/app/ssh_keys:ro
       - gateway_logs:/app/logs
@@ -45,6 +62,9 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+    depends_on:
+      redis:
+        condition: service_healthy
 
 networks:
   proxmox_macvlan:
@@ -56,4 +76,6 @@ volumes:
   ssh_keys:
     driver: local
   gateway_logs:
+    driver: local
+  redis_data:
     driver: local
