@@ -25,6 +25,9 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 # Security: Copy application with proper ownership
 COPY --chown=appuser:appuser app/ ./app/
 
+# Copy SDK for download endpoint
+COPY --chown=appuser:appuser sdk/ ./sdk/
+
 # Security: Create necessary directories
 RUN mkdir -p /app/ssh_keys /app/logs /tmp && \
     chown -R appuser:appuser /app /tmp
