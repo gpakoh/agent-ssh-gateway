@@ -1961,34 +1961,42 @@ async def context_file_edit(req: FileEditWithContextRequest):
     )
     logger.info(f"Response object: success={response.success}, changed={response.changed}")
 
-    # Generate diff if file was changed
-    if result.get("changed", False):
+    # Generate diff if file was changed and git is initialized
+    if result.get("changed", False) and ctx.git_info and ctx.git_info.status.value != "not_initialized":
         try:
-            # Read old content from git
-            git_result = await manager.execute(
+            # Quick check if file is tracked in git
+            check_result = await manager.execute(
                 ctx.session_id,
-                f"cd {ctx.path} && git show HEAD:{req.path} 2>/dev/null || echo ''",
-                timeout=10
+                f"cd {ctx.path} && git ls-files --error-unmatch '{req.path}' 2>/dev/null || echo 'NOT_TRACKED'",
+                timeout=2
             )
-            old_content = git_result["stdout"]
             
-            # Read new content
-            new_content = await file_editor.read_file(ctx.session_id, req.path)
-            
-            # Generate diff
-            unified_diff = DiffGenerator.generate_unified_diff(
-                old_content, new_content, req.path, req.path
-            )
-            inline_diff = DiffGenerator.generate_inline_diff(old_content, new_content)
-            changes = DiffGenerator.count_changes(unified_diff)
-            
-            response.diff = DiffResponse(
-                unified_diff=unified_diff,
-                inline_diff=[DiffLine(**line) for line in inline_diff],
-                changes=changes,
-                old_path=req.path,
-                new_path=req.path,
-            )
+            if check_result["stdout"].strip() != "NOT_TRACKED":
+                # Read old content from git (fast, file is tracked)
+                git_result = await manager.execute(
+                    ctx.session_id,
+                    f"cd {ctx.path} && git show HEAD:'{req.path}' 2>/dev/null || echo ''",
+                    timeout=2
+                )
+                old_content = git_result["stdout"]
+                
+                # Read new content
+                new_content = await file_editor.read_file(ctx.session_id, req.path)
+                
+                # Generate diff
+                unified_diff = DiffGenerator.generate_unified_diff(
+                    old_content, new_content, req.path, req.path
+                )
+                inline_diff = DiffGenerator.generate_inline_diff(old_content, new_content)
+                changes = DiffGenerator.count_changes(unified_diff)
+                
+                response.diff = DiffResponse(
+                    unified_diff=unified_diff,
+                    inline_diff=[DiffLine(**line) for line in inline_diff],
+                    changes=changes,
+                    old_path=req.path,
+                    new_path=req.path,
+                )
         except Exception as exc:
             logger.warning("Diff generation failed: %s", exc)
 
