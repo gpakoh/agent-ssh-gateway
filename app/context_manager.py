@@ -109,14 +109,20 @@ class ContextManager:
     async def create_context(
         self,
         session_id: str,
-        name: str,
-        path: str,
+        name: Optional[str] = None,
+        path: str = ".",
         branch: Optional[str] = None,
         auto_commit: bool = False,
         auto_validate: bool = False,
     ) -> Context:
         """Create a new development context."""
         context_id = str(uuid.uuid4())
+        
+        # Auto-generate name if not provided
+        if not name:
+            import os
+            base_name = os.path.basename(os.path.normpath(path)) or "context"
+            name = f"{base_name}_{context_id[:8]}"
 
         # Check git status
         git_info = await self._git.check_git_status(session_id, path)
