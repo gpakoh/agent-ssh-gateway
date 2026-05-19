@@ -45,8 +45,21 @@ class FileEditor:
         return result["stdout"]
 
     async def write_file(self, session_id: str, path: str, content: str) -> None:
-        """Write content to a remote file using base64 encoding via heredoc."""
+        """Write content to a remote file using base64 encoding via heredoc.
+        
+        Automatically creates parent directories if they don't exist.
+        """
         import base64
+        import os
+
+        # Create parent directories
+        parent_dir = os.path.dirname(path)
+        if parent_dir:
+            mkdir_result = await self._ssh.execute(
+                session_id, f"mkdir -p '{self._escape(parent_dir)}'", timeout=10
+            )
+            if mkdir_result["exit_code"] != 0:
+                raise ExecutionError(f"Cannot create directory {parent_dir}: {mkdir_result['stderr']}")
 
         encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
         # Use heredoc to avoid command line length limits with echo
