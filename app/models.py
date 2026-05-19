@@ -282,7 +282,7 @@ class ContextCreateRequest(BaseModel):
     """Request to create a development context."""
 
     session_id: str = Field(..., min_length=1)
-    name: str = Field(..., min_length=1, description="Context name (e.g., 'gateway_refactor')")
+    name: Optional[str] = Field(default=None, min_length=1, description="Context name (e.g., 'gateway_refactor'). Auto-generated if not provided.")
     path: str = Field(..., min_length=1, description="Working directory path")
     branch: Optional[str] = Field(default=None, description="Git branch to checkout/create")
     auto_commit: bool = Field(default=False, description="Auto-commit on successful edits")

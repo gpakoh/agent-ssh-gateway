@@ -39,6 +39,13 @@ class FileEditor:
 
     async def read_file(self, session_id: str, path: str) -> str:
         """Read a remote file."""
+        # Check if path is a directory
+        check = await self._ssh.execute(
+            session_id, f"test -d '{self._escape(path)}' && echo 'DIR' || echo 'FILE'", timeout=10
+        )
+        if check["stdout"].strip() == "DIR":
+            raise ExecutionError(f"Cannot read {path}: it is a directory, not a file")
+
         result = await self._ssh.execute(session_id, f"cat '{self._escape(path)}'", timeout=30)
         if result["exit_code"] != 0:
             raise ExecutionError(f"Cannot read {path}: {result['stderr']}")
