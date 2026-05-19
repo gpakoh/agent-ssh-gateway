@@ -1463,6 +1463,7 @@ curl -X POST /api/ssh/execute -d '{"command": "ls -la"}'
 - **Добавлено**: `GET /api/sdk/download` поддерживает `?api_key=` и `X-API-Key` header (env `API_KEY`)
 - **Исправлено**: PATCH `append` операция — добавлена валидация `text` поля
 - **Исправлено**: Graceful shutdown — drain active jobs перед рестартом
+- **Исправлено**: Auto-directory creation — write_file и scaffold создают parent directories автоматически
 
 ### v4.6.2 (2026-05-19) — SDK Download
 - **Добавлено**: `GET /api/sdk/download` — скачивание Python SDK напрямую с сервера
