@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     rate_limit_requests: int = Field(default=100, alias="RATE_LIMIT_REQUESTS")
     rate_limit_window: int = Field(default=60, alias="RATE_LIMIT_WINDOW")
 
+    # Redis
+    redis_url: str = Field(default="redis://redis:6379/0", alias="REDIS_URL")
+    redis_job_queue_enabled: bool = Field(default=False, alias="REDIS_JOB_QUEUE_ENABLED")
+
+    # PostgreSQL
+    database_url: str = Field(default="", alias="DATABASE_URL")
+    persistent_sessions_enabled: bool = Field(default=False, alias="PERSISTENT_SESSIONS_ENABLED")
+
     class Config:
         env_file = ".env"
         populate_by_name = True

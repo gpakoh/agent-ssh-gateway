@@ -23,6 +23,12 @@ from app.security import (
     SessionSecurity,
     SECURITY_HEADERS,
 )
+from app.metrics import metrics
+from app.redis_queue import RedisJobQueue
+from app.circuit_breaker import CircuitBreakerRegistry
+from app.distributed_lock import DistributedLock
+from app.session_store import SessionStore
+from app.bulk_operations_v2 import BulkOperationsManager
 from app.models import (
     ConnectRequest,
     ConnectResponse,
@@ -184,12 +190,17 @@ webhook_manager: WebhookManager
 analytics: ProjectAnalytics
 secret_manager: SecretManager
 audit_logger: AuditLogger
+redis_queue: RedisJobQueue
+circuit_breakers: CircuitBreakerRegistry
+dist_lock: DistributedLock
+session_store: SessionStore
+bulk_ops: BulkOperationsManager
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    global manager, job_manager, file_editor, context_manager, batch_manager, code_intelligence, search_replace, file_tree, server_manager, snapshot_manager, webhook_manager, analytics, secret_manager, audit_logger
+    global manager, job_manager, file_editor, context_manager, batch_manager, code_intelligence, search_replace, file_tree, server_manager, snapshot_manager, webhook_manager, analytics, secret_manager, audit_logger, redis_queue, circuit_breakers, dist_lock, session_store, bulk_ops
     manager = SSHSessionManager(
         session_timeout=settings.session_timeout,
         cleanup_interval=settings.cleanup_interval,
@@ -240,14 +251,48 @@ async def lifespan(app: FastAPI):
     secret_manager = SecretManager(settings.encryption_key if settings.encryption_key else None)
     audit_logger = AuditLogger()
     
+    # Initialize Swarm components
+    redis_queue = RedisJobQueue(settings.redis_url)
+    circuit_breakers = CircuitBreakerRegistry()
+    dist_lock = DistributedLock(settings.redis_url)
+    bulk_ops = BulkOperationsManager(max_concurrency=50)
+    
+    try:
+        await redis_queue.connect()
+        await dist_lock.connect()
+        logger.info("Redis components connected")
+    except Exception as exc:
+        logger.warning("Redis not available: %s", exc)
+    
+    # Initialize persistent sessions if configured
+    session_store = None
+    if settings.persistent_sessions_enabled and settings.database_url:
+        try:
+            session_store = SessionStore(settings.database_url)
+            await session_store.connect()
+            logger.info("Persistent session store connected")
+        except Exception as exc:
+            logger.warning("PostgreSQL not available: %s", exc)
+    
     logger.info("Security components initialized")
+    logger.info("Swarm mode ready (Redis Job Queue, Circuit Breaker, Distributed Locks)")
 
     logger.info("Web SSH Gateway started on %s:%d", settings.uvicorn_host, settings.uvicorn_port)
     yield
+    
+    # Cleanup
     await context_manager.stop_cleanup_task()
     await job_manager.stop_cleanup_task()
     await manager.stop_cleanup_task()
     await manager.close_all()
+    
+    if redis_queue:
+        await redis_queue.disconnect()
+    if dist_lock:
+        await dist_lock.disconnect()
+    if session_store:
+        await session_store.disconnect()
+    
     logger.info("Web SSH Gateway shutdown complete")
 
 
@@ -566,6 +611,63 @@ async def jobs_result(job_id: str):
     """Get full job result."""
     result = await job_manager.get_job_result(job_id)
     return JobResultResponse(**result)
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus metrics endpoint."""
+    from fastapi.responses import Response
+    return Response(content=metrics.get_metrics(), media_type="text/plain")
+
+
+@app.get("/api/jobs/queue/stats")
+async def jobs_queue_stats():
+    """Get Redis job queue statistics."""
+    if not redis_queue or not redis_queue._redis:
+        return {"error": "Redis not available"}
+    
+    stats = await redis_queue.get_queue_stats()
+    return stats
+
+
+@app.get("/api/jobs/queue/dead")
+async def jobs_dead_letter(limit: int = 100):
+    """Get dead letter queue jobs."""
+    if not redis_queue or not redis_queue._redis:
+        return {"error": "Redis not available"}
+    
+    jobs = await redis_queue.get_dead_letter_jobs(limit)
+    return {"jobs": jobs, "count": len(jobs)}
+
+
+@app.post("/api/bulk/execute")
+async def bulk_execute(req: BatchExecuteRequest):
+    """Execute multiple commands concurrently."""
+    results = await bulk_ops.execute_batch_commands(
+        req.session_id,
+        req.commands,
+        manager,
+        max_concurrency=10,
+    )
+    return BatchExecuteResponse(results=results)
+
+
+@app.post("/api/bulk/read")
+async def bulk_read_files(req: BatchReadRequest):
+    """Read multiple files concurrently."""
+    files = await bulk_ops.read_files_bulk(
+        req.session_id,
+        req.paths,
+        file_editor,
+        max_concurrency=20,
+    )
+    return BatchReadResponse(files=files, errors={})
+
+
+@app.get("/api/circuit-breaker/stats")
+async def circuit_breaker_stats():
+    """Get circuit breaker statistics."""
+    return circuit_breakers.get_all_stats()
 
 
 @app.get("/api/jobs", response_model=JobListResponse)
