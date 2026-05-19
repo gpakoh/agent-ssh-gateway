@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.config import settings
+import secrets
 from app.security import (
     limiter,
     sanitize_command,
@@ -62,6 +63,11 @@ from app.models import (
     GitInitRequest,
     GitCommitRequest,
     GitActionResponse,
+    GitStatusResponse,
+    GitDiffRequest,
+    GitDiffResponse,
+    ScaffoldRequest,
+    ScaffoldResponse,
     FileEditWithContextRequest,
     FileEditWithContextResponse,
     ValidateRequest,
@@ -151,6 +157,10 @@ from app.models import (
     FileUploadRequest,
     FileUploadResponse,
     FileDownloadRequest,
+    FileWriteRequest,
+    FileWriteResponse,
+    FileTreeRequest,
+    FileTreeResponse,
     ASTRefactorRenameRequest,
     ASTRefactorRenameResponse,
     ASTRefactorExtractRequest,
@@ -735,8 +745,20 @@ async def jobs_dead_letter(limit: int = 100):
 
 
 @app.get("/api/sdk/download")
-async def download_sdk():
-    """Download Python SDK."""
+async def download_sdk(
+    api_key: str = Query(default=""),
+    x_api_key: str = Header(default="", alias="X-API-Key"),
+):
+    """Download Python SDK. Supports API key auth via query param or header."""
+    # Check API key if configured
+    if settings.api_key:
+        provided = api_key or x_api_key
+        if not secrets.compare_digest(provided, settings.api_key):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or missing API key. Provide via ?api_key=... or X-API-Key header"
+            )
+    
     sdk_path = "/app/sdk/ssh_gateway.py"
     try:
         with open(sdk_path, "r") as f:
@@ -1097,6 +1119,25 @@ async def file_download(session_id: str = Query(...), path: str = Query(...)):
     return Response(content=content, media_type="application/octet-stream")
 
 
+@app.post("/api/file/write", response_model=FileWriteResponse)
+async def file_write(req: FileWriteRequest):
+    """Write file via JSON body (atomic, no heredoc escaping).
+
+    Use for Python code with quotes, special chars, or large content.
+    Mode: 'write' (overwrite) or 'append' (append to end).
+    """
+    if req.mode == "append":
+        existing = await file_editor.read_file(req.session_id, req.path)
+        content = existing + req.content
+    else:
+        content = req.content
+
+    await file_editor.write_file(req.session_id, req.path, content)
+    return FileWriteResponse(
+        path=req.path, size=len(content), mode=req.mode
+    )
+
+
 # ---------------------------------------------------------------------------
 # AST Refactor API
 # ---------------------------------------------------------------------------
@@ -1171,6 +1212,44 @@ async def ast_analyze(req: ASTAnalyzeRequest):
 # ---------------------------------------------------------------------------
 # Project Introspection API
 # ---------------------------------------------------------------------------
+
+@app.get("/api/project/tree")
+async def project_tree(
+    session_id: str = Query(...),
+    path: str = Query(default="."),
+    max_depth: int = Query(default=3, ge=1, le=10),
+):
+    """Simple project tree — list files and directories.
+
+    Returns flat list with type, path, size for quick introspection.
+    """
+    cmd = f"cd '{path}' && find . -maxdepth {max_depth} -not -path '*/\\.*' -not -path '*/node_modules/*' -not -path '*/__pycache__/*' -not -path '*/venv/*' -printf '%y|%p|%s\\n' 2>/dev/null || echo 'ERROR'"
+    result = await manager.execute(session_id, cmd, timeout=30)
+
+    if result["exit_code"] != 0 or "ERROR" in result["stdout"]:
+        raise HTTPException(status_code=500, detail=f"Cannot read directory: {result['stderr']}")
+
+    items = []
+    for line in result["stdout"].strip().split("\n"):
+        if not line or line == "ERROR":
+            continue
+        parts = line.split("|", 3)
+        if len(parts) < 3:
+            continue
+
+        ftype, fpath, fsize = parts
+        fpath = fpath.lstrip("./")
+        if not fpath:
+            continue
+
+        items.append({
+            "type": "directory" if ftype == "d" else "file",
+            "path": fpath,
+            "size": int(fsize) if fsize and ftype == "f" else None,
+        })
+
+    return {"items": items, "count": len(items)}
+
 
 @app.post("/api/project/structure", response_model=ProjectStructureResponse)
 async def project_structure(req: ProjectStructureRequest):
@@ -1614,6 +1693,129 @@ async def git_status(context_id: str):
         remote_url=git_info.remote_url,
         message=git_info.message,
         can_commit=git_info.can_commit,
+    )
+
+
+@app.get("/api/git/simple-status")
+async def git_simple_status(
+    session_id: str = Query(...),
+    path: str = Query(default="."),
+):
+    """Simple git status — branch, modified, staged, untracked files."""
+    # Branch
+    branch_res = await manager.execute(
+        session_id, f"cd '{path}' && git branch --show-current 2>/dev/null || echo 'main'", timeout=10
+    )
+    branch = branch_res["stdout"].strip() or "main"
+
+    # Status
+    status_res = await manager.execute(
+        session_id,
+        f"cd '{path}' && git status --porcelain 2>/dev/null || echo 'ERROR'",
+        timeout=10,
+    )
+
+    modified = []
+    staged = []
+    untracked = []
+
+    for line in status_res["stdout"].strip().split("\n"):
+        if not line or line == "ERROR":
+            continue
+        if len(line) < 3:
+            continue
+        status_code = line[:2]
+        file_path = line[3:].strip()
+
+        if status_code[0] in "MADRC":
+            staged.append(file_path)
+        if status_code[1] in "MADRC":
+            modified.append(file_path)
+        if status_code == "??":
+            untracked.append(file_path)
+
+    return GitStatusResponse(
+        branch=branch,
+        clean=not (modified or staged or untracked),
+        modified=modified,
+        staged=staged,
+        untracked=untracked,
+    )
+
+
+@app.post("/api/git/diff", response_model=GitDiffResponse)
+async def git_diff(req: GitDiffRequest):
+    """Get git diff for working directory or staged changes."""
+    flag = "--cached" if req.cached else ""
+    result = await manager.execute(
+        req.session_id,
+        f"cd '{req.path}' && git diff {flag} 2>/dev/null || echo 'ERROR'",
+        timeout=30,
+    )
+
+    if "ERROR" in result["stdout"]:
+        raise HTTPException(status_code=500, detail="Git diff failed")
+
+    diff = result["stdout"]
+    files_changed = diff.count("diff --git")
+
+    return GitDiffResponse(
+        path=req.path,
+        diff=diff,
+        files_changed=files_changed,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scaffold API
+# ---------------------------------------------------------------------------
+
+@app.post("/api/scaffold/python-class", response_model=ScaffoldResponse)
+async def scaffold_python_class(req: ScaffoldRequest):
+    """Scaffold a Python class + test file from template."""
+    files_created = []
+    module_dir = req.module_path.rstrip("/")
+
+    # Ensure directory exists
+    await manager.execute(
+        req.session_id, f"mkdir -p '{module_dir}'", timeout=10
+    )
+
+    # Generate class file
+    methods_str = ""
+    for method in req.methods:
+        methods_str += f"""
+    async def {method}(self):
+        \"\"\"TODO: Implement {method}.\"\"\"
+        raise NotImplementedError("{method} not implemented")
+"""
+
+    class_content = f"\"\"\"{req.class_name} module.\"\"\"\n\n\nclass {req.class_name}:\n    \"\"\"{req.class_name} service.\"\"\"\n\n    def __init__(self) -> None:\n        pass\n{methods_str}\n"
+
+    class_path = f"{module_dir}/{req.class_name.lower()}.py"
+    await file_editor.write_file(req.session_id, class_path, class_content)
+    files_created.append(class_path)
+
+    # Generate test file
+    if req.include_test:
+        test_methods = ""
+        for method in req.methods:
+            test_methods += f"""
+    async def test_{method}(self):
+        \"\"\"Test {method}.\"\"\"
+        # TODO: implement test
+        pass
+"""
+
+        test_content = f"\"\"\"Tests for {req.class_name}.\"\"\"\n\nimport pytest\nfrom {module_dir.replace('/', '.')}.{req.class_name.lower()} import {req.class_name}\n\n\nclass Test{req.class_name}:\n    \"\"\"Test suite for {req.class_name}.\"\"\"\n{test_methods}\n"
+
+        test_path = f"{module_dir}/test_{req.class_name.lower()}.py"
+        await file_editor.write_file(req.session_id, test_path, test_content)
+        files_created.append(test_path)
+
+    return ScaffoldResponse(
+        files_created=files_created,
+        message=f"Created {req.class_name} class with {len(req.methods)} methods",
     )
 
 
