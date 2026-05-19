@@ -1193,3 +1193,31 @@ class BulkExecuteResponse(BaseModel):
     successful: int
     failed: int
     total_duration: float
+
+
+# ---------------------------------------------------------------------------
+# Upload/Download (JSON body fallback)
+# ---------------------------------------------------------------------------
+
+class FileUploadRequest(BaseModel):
+    """Request to upload file via JSON body."""
+
+    session_id: str = Field(..., min_length=1)
+    path: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1, description="Base64-encoded content")
+
+
+class FileUploadResponse(BaseModel):
+    """Response after file upload."""
+
+    success: bool = True
+    path: str
+    size: int
+    method: str = "json"
+
+
+class FileDownloadRequest(BaseModel):
+    """Request to download file via JSON body."""
+
+    session_id: str = Field(..., min_length=1)
+    path: str = Field(..., min_length=1)

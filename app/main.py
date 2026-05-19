@@ -144,6 +144,9 @@ from app.models import (
     BulkExecuteRequest,
     BulkExecuteResult,
     BulkExecuteResponse,
+    FileUploadRequest,
+    FileUploadResponse,
+    FileDownloadRequest,
 )
 from app.ssh_manager import (
     SSHSessionManager,
@@ -282,6 +285,19 @@ async def lifespan(app: FastAPI):
 
     logger.info("Web SSH Gateway started on %s:%d", settings.uvicorn_host, settings.uvicorn_port)
     yield
+    
+    # Graceful shutdown: drain active jobs
+    logger.info("Starting graceful shutdown...")
+    
+    # Wait for active jobs to complete (max 30s)
+    if job_manager:
+        active_jobs = [j for j in job_manager._jobs.values() if j.status == "running"]
+        if active_jobs:
+            logger.info("Waiting for %d active jobs to complete...", len(active_jobs))
+            await asyncio.wait_for(
+                job_manager.wait_for_all_jobs(),
+                timeout=30.0
+            )
     
     # Cleanup
     await context_manager.stop_cleanup_task()
@@ -715,6 +731,66 @@ async def bulk_read_files(req: BatchReadRequest):
     return BatchReadResponse(files=files, errors={})
 
 
+@app.post("/api/bulk/edit", response_model=BatchEditResponse)
+async def bulk_edit_files(req: BatchEditRequest):
+    """Edit multiple files concurrently.
+
+    Example:
+        {
+            "session_id": "...",
+            "files": [
+                {
+                    "path": "app/main.py",
+                    "operations": [
+                        {"type": "replace", "old": "def old():", "new": "def new():"}
+                    ]
+                },
+                {
+                    "path": "app/config.py",
+                    "operations": [
+                        {"type": "replace", "old": "DEBUG = True", "new": "DEBUG = False"}
+                    ]
+                }
+            ]
+        }
+    """
+    results = []
+    files_changed = 0
+    total_operations = 0
+
+    for file_op in req.files:
+        try:
+            result = await file_editor.edit_file(
+                req.session_id,
+                file_op.path,
+                [op.model_dump() for op in file_op.operations],
+            )
+            results.append(BatchEditResult(
+                path=file_op.path,
+                success=True,
+                operations_applied=result.get("operations_applied", 0),
+                changed=result.get("changed", False),
+            ))
+            total_operations += result.get("operations_applied", 0)
+            if result.get("changed", False):
+                files_changed += 1
+        except Exception as exc:
+            results.append(BatchEditResult(
+                path=file_op.path,
+                success=False,
+                operations_applied=0,
+                changed=False,
+                error=str(exc),
+            ))
+
+    return BatchEditResponse(
+        results=results,
+        total_files=len(req.files),
+        files_changed=files_changed,
+        total_operations=total_operations,
+    )
+
+
 @app.get("/api/circuit-breaker/stats")
 async def circuit_breaker_stats():
     """Get circuit breaker statistics."""
@@ -913,12 +989,30 @@ async def batch_read(req: BatchReadRequest):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/file/upload")
-async def file_upload(session_id: str = Query(...), path: str = Query(...), content: str = Query(...)):
-    """Upload file to remote server (base64 encoded)."""
+async def file_upload(
+    session_id: str = Query(...),
+    path: str = Query(...),
+    content: str = Query(...),
+):
+    """Upload file to remote server (base64 encoded via query params)."""
     import base64
+
     decoded = base64.b64decode(content).decode("utf-8", errors="replace")
     await file_editor.write_file(session_id, path, decoded)
     return {"success": True, "path": path, "size": len(decoded)}
+
+
+@app.post("/api/file/upload/json", response_model=FileUploadResponse)
+async def file_upload_json(req: FileUploadRequest):
+    """Upload file via JSON body (base64 encoded).
+
+    Preferred for large files (>2KB) where query params may fail.
+    """
+    import base64
+
+    decoded = base64.b64decode(req.content).decode("utf-8", errors="replace")
+    await file_editor.write_file(req.session_id, req.path, decoded)
+    return FileUploadResponse(path=req.path, size=len(decoded))
 
 
 @app.get("/api/file/download")
