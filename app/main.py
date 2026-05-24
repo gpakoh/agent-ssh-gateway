@@ -12,9 +12,10 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Quer
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse, PlainTextResponse, HTMLResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, PlainTextResponse, HTMLResponse
 
 from app.config import settings
+from app.auth_middleware import auth_check, ws_auth_check
 import secrets
 from app.security import (
     limiter,
@@ -722,7 +723,6 @@ def custom_openapi():
     }
 
     schema["components"]["securitySchemes"] = {
-        "ApiKeyQuery": {"type": "apiKey", "in": "query", "name": "api_key"},
         "ApiKeyHeader": {"type": "apiKey", "in": "header", "name": "X-API-Key"},
     }
 
@@ -864,9 +864,12 @@ def custom_openapi():
                 elif not param.get("description"):
                     param["description"] = name.replace("_", " ").title()
 
-    # Security on /api/sdk/download
-    sdk = schema.get("paths", {}).get("/api/sdk/download", {}).get("get", {})
-    sdk["security"] = [{"ApiKeyQuery": []}, {"ApiKeyHeader": []}]
+    # Security: only /health is public; everything else requires X-API-Key
+    for path, methods in schema.get("paths", {}).items():
+        for method, op in methods.items():
+            if path == "/health":
+                continue
+            op["security"] = [{"ApiKeyHeader": []}]
 
     app.openapi_schema = schema
     return app.openapi_schema
@@ -893,6 +896,17 @@ async def security_headers_middleware(request, call_next):
     for header, value in SECURITY_HEADERS.items():
         response.headers[header] = value
     return response
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    exc = await auth_check(request, settings)
+    if exc is not None:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+        )
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -1279,17 +1293,22 @@ async def jobs_dead_letter(limit: int = 100):
 
 @app.get("/api/sdk/download", response_class=PlainTextResponse)
 async def download_sdk(
-    api_key: str = Query(default=""),
     x_api_key: str = Header(default="", alias="X-API-Key"),
 ):
-    """Download Python SDK. Supports API key auth via query param or header."""
+    """Download Python SDK. Requires X-API-Key header.
+
+    Note: when API_AUTH_ENABLED=true, the global auth middleware also
+    accepts Authorization: Bearer before reaching this endpoint.
+    """
     # Check API key if configured
     if settings.api_key:
-        provided = api_key or x_api_key
-        if not secrets.compare_digest(provided, settings.api_key):
+        if not secrets.compare_digest(x_api_key, settings.api_key):
             raise HTTPException(
                 status_code=401,
-                detail=_err(401, "Invalid or missing API key. Provide via ?api_key=... or X-API-Key header")
+                detail=_err(
+                    401,
+                    "Invalid or missing API key",
+                ),
             )
     
     sdk_path = "/app/sdk/ssh_gateway.py"
@@ -2018,6 +2037,10 @@ async def file_upload_stream(
 @app.websocket("/api/ssh/execute/stream")
 async def ssh_execute_stream(websocket: WebSocket):
     """Execute a command and stream output via WebSocket."""
+    ws_err = await ws_auth_check(websocket, settings)
+    if ws_err is not None:
+        await websocket.close(code=ws_err[0], reason=ws_err[1])
+        return
     await websocket.accept()
     try:
         # First message must contain session_id and command
@@ -2051,12 +2074,16 @@ async def ssh_execute_stream(websocket: WebSocket):
 @app.websocket("/api/file/watch")
 async def file_watch_stream(websocket: WebSocket):
     """Watch file changes in real-time via WebSocket.
-    
+
     Usage:
     1. Connect to /api/file/watch
     2. Send: {"session_id": "...", "path": "/var/log/app.log", "tail": true}
     3. Receive file updates as they happen
     """
+    ws_err = await ws_auth_check(websocket, settings)
+    if ws_err is not None:
+        await websocket.close(code=ws_err[0], reason=ws_err[1])
+        return
     await websocket.accept()
     session_id = None
     watch_task = None
