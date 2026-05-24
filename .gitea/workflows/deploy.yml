@@ -139,8 +139,8 @@ jobs:
             test -s /tmp/web-ssh-api-key.env
             api_key="$(awk -F= '$1=="API_KEY" {print substr($0, 9); exit}' /tmp/web-ssh-api-key.env)"
             test -n "$api_key"
-            docker compose --env-file /tmp/web-ssh-api-key.env -f docker/docker-compose.yml down --remove-orphans
-            docker compose --env-file /tmp/web-ssh-api-key.env -f docker/docker-compose.yml up -d --build
+            docker compose -p web-ssh-gateway --env-file /tmp/web-ssh-api-key.env -f docker/docker-compose.yml down --remove-orphans
+            docker compose -p web-ssh-gateway --env-file /tmp/web-ssh-api-key.env -f docker/docker-compose.yml up -d --build
             rm -f /tmp/web-ssh-api-key.env
             docker inspect web-ssh-gateway --format '{{range .Config.Env}}{{println .}}{{end}}' \
               | awk -F= '$1=="API_KEY" {found=1; if (length($2) < 16) exit 42} END {if (!found) exit 43}'
