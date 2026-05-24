@@ -43,10 +43,36 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Deploy nginx config
+        shell: bash
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
         run: |
+          set -euo pipefail
+          test -n "${API_KEY:-}" || { echo "API_KEY secret is missing or empty"; exit 1; }
           apt-get update -qq
-          apt-get install -y -qq openssh-client sed
-          sed -i 's/__API_KEY__/${{ secrets.API_KEY }}/g' nginx-ssh.xloud.ru.conf
+          apt-get install -y -qq openssh-client python3
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          api_key = os.environ["API_KEY"]
+          if len(api_key) < 16:
+              raise SystemExit("API_KEY secret is too short")
+          if any(ch in api_key for ch in "\r\n"):
+              raise SystemExit("API_KEY must be a single-line value")
+
+          escaped = api_key.replace("\\", "\\\\").replace('"', '\\"')
+          path = Path("nginx-ssh.xloud.ru.conf")
+          text = path.read_text()
+          if "__API_KEY__" not in text:
+              raise SystemExit("nginx template does not contain __API_KEY__ placeholder")
+          text = text.replace("__API_KEY__", escaped)
+          values = re.findall(r'proxy_set_header\s+X-API-Key\s+"([^"]*)";', text)
+          if len(values) != 4 or any(not value for value in values):
+              raise SystemExit("nginx X-API-Key replacement failed")
+          path.write_text(text)
+          PY
           ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$NGINX_HOST "
             mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
           "
@@ -55,10 +81,25 @@ jobs:
           scp -o BatchMode=yes -o StrictHostKeyChecking=no \
             scripts/migrate-nginx-ssh-block.py root@$NGINX_HOST:/tmp/
           ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$NGINX_HOST "python3 /tmp/migrate-nginx-ssh-block.py"
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$NGINX_HOST "
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$NGINX_HOST "bash -se" <<'REMOTE'
+            set -euo pipefail
             ln -sfn /etc/nginx/sites-available/ssh.xloud.ru /etc/nginx/sites-enabled/ssh.xloud.ru
-            nginx -t && nginx -s reload
-          "
+            python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          text = Path('/etc/nginx/sites-enabled/ssh.xloud.ru').read_text()
+          values = re.findall(r'proxy_set_header\s+X-API-Key\s+"([^"]*)";', text)
+          if len(values) != 4 or any(len(value) < 16 for value in values):
+              raise SystemExit('deployed nginx X-API-Key is missing or too short')
+          if '__API_KEY__' in text:
+              raise SystemExit('deployed nginx still contains __API_KEY__ placeholder')
+          PY
+            nginx -t
+            nginx -s reload
+            code=$(curl -k -sS -o /tmp/web-ssh-noauth.out -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 https://ssh.xloud.ru/api/servers || true)
+            test "$code" = "302" || { echo "expected unauthenticated https /api/servers to redirect to Authelia, got $code"; cat /tmp/web-ssh-noauth.out; exit 1; }
+          REMOTE
 
   deploy-backend:
     needs: test
@@ -69,15 +110,56 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Deploy backend
+        shell: bash
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
         run: |
+          set -euo pipefail
+          test -n "${API_KEY:-}" || { echo "API_KEY secret is missing or empty"; exit 1; }
+          test "${#API_KEY}" -ge 16 || { echo "API_KEY secret is too short"; exit 1; }
           apt-get update -qq
           apt-get install -y -qq openssh-client rsync
+          umask 077
+          printf 'API_KEY=%s\n' "$API_KEY" > .ci-api-key.env
           rsync -avz \
             -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=no" \
-            --exclude=.git --exclude=__pycache__ --exclude=.gitea \
+            --exclude=.git --exclude=__pycache__ --exclude=.gitea --exclude=.ci-api-key.env \
             ./ root@$BACKEND_HOST:$BACKEND_DIR/
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$BACKEND_HOST "
-            cd $BACKEND_DIR
-            API_KEY='${{ secrets.API_KEY }}' docker compose -f docker/docker-compose.yml up -d --build
+          scp -o BatchMode=yes -o StrictHostKeyChecking=no \
+            .ci-api-key.env root@$BACKEND_HOST:/tmp/web-ssh-api-key.env
+          rm -f .ci-api-key.env
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$BACKEND_HOST "BACKEND_DIR='$BACKEND_DIR' bash -se" <<'REMOTE'
+            set -euo pipefail
+            cd "$BACKEND_DIR"
+            test -s /tmp/web-ssh-api-key.env
+            api_key="$(awk -F= '$1=="API_KEY" {print substr($0, 9); exit}' /tmp/web-ssh-api-key.env)"
+            test -n "$api_key"
+            docker compose --env-file /tmp/web-ssh-api-key.env -f docker/docker-compose.yml up -d --build
+            rm -f /tmp/web-ssh-api-key.env
+            docker inspect web-ssh-gateway --format '{{range .Config.Env}}{{println .}}{{end}}' \
+              | awk -F= '$1=="API_KEY" {found=1; if (length($2) < 16) exit 42} END {if (!found) exit 43}'
             curl -sf http://127.0.0.1:8085/health
-          "
+            API_KEY="$api_key" python3 - <<'PY'
+          import os
+          import urllib.error
+          import urllib.request
+
+          def status(path, key=None):
+              req = urllib.request.Request('http://127.0.0.1:8085' + path)
+              if key:
+                  req.add_header('X-API-Key', key)
+              try:
+                  with urllib.request.urlopen(req, timeout=5) as resp:
+                      return resp.status
+              except urllib.error.HTTPError as exc:
+                  return exc.code
+
+          api_key = os.environ.get('API_KEY', '')
+          if len(api_key) < 16:
+              raise SystemExit('container API_KEY is missing or too short')
+          if status('/api/servers') != 401:
+              raise SystemExit('unauthenticated backend request must return 401')
+          if status('/api/servers', api_key) in (401, 403, 503):
+              raise SystemExit('authenticated backend request was rejected')
+          PY
+          REMOTE
