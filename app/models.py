@@ -117,6 +117,22 @@ class ErrorResponse(BaseModel):
     error_type: Optional[str] = None
 
 
+class ValidationFieldItem(BaseModel):
+    field: str
+    error: str
+    type: str
+
+
+class ValidationDetail(BaseModel):
+    message: str
+    errors: list[ValidationFieldItem]
+    total_errors: int
+
+
+class ValidationErrorResponse(BaseModel):
+    detail: ValidationDetail
+
+
 # ---------------------------------------------------------------------------
 # Session Configuration
 # ---------------------------------------------------------------------------
@@ -1011,7 +1027,6 @@ class AddServerRequest(BaseModel):
 class ConnectServerRequest(BaseModel):
     """Request to connect to server."""
 
-    server_id: str = Field(..., min_length=1)
     password: Optional[str] = Field(default=None)
     private_key: Optional[str] = Field(default=None)
 
@@ -1032,7 +1047,6 @@ class ServerConnectResponse(BaseModel):
 class PTYCreateRequest(BaseModel):
     """Request to create PTY session."""
 
-    session_id: str = Field(..., min_length=1)
     term: str = Field(default="xterm-256color")
     rows: int = Field(default=24, ge=1)
     cols: int = Field(default=80, ge=1)
@@ -1144,7 +1158,6 @@ class CreateWebhookRequest(BaseModel):
 class DeployRequest(BaseModel):
     """Request to trigger deployment."""
 
-    webhook_id: str = Field(..., min_length=1)
     session_id: str = Field(..., min_length=1)
 
 
