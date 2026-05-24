@@ -9,14 +9,7 @@ env:
   BACKEND_HOST: 10.10.10.145
 
 jobs:
-  debug:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Dump env
-        run: env | sort -u
-
   test:
-    needs: debug
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
