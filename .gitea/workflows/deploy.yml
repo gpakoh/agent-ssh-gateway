@@ -11,7 +11,7 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: lxc100-runner
     container:
       image: node:20-bookworm
     steps:
@@ -31,7 +31,7 @@ jobs:
 
   deploy-nginx:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: lxc100-runner
     container:
       image: node:20-bookworm
     steps:
@@ -53,7 +53,7 @@ jobs:
 
   deploy-backend:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: lxc100-runner
     container:
       image: node:20-bookworm
     steps:
