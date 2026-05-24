@@ -397,7 +397,7 @@ def sdk_auth(monkeypatch):
 
 
 class TestSdkAuth:
-    """/api/sdk/download auth — header-based only, query string rejected."""
+    """/api/sdk/download auth — header and Bearer accepted, query string rejected."""
 
     def test_header_valid_passes_auth(self, sdk_auth):
         """Valid X-API-Key header → auth passes (404 from missing file is OK)."""
@@ -405,8 +405,16 @@ class TestSdkAuth:
             resp = client.get(SDK_URL, headers={"X-API-Key": "sdk-key-77"})
         assert resp.status_code not in (401, 403)
 
+    def test_bearer_valid_passes_auth(self, sdk_auth):
+        """Authorization: Bearer → middleware accepts, passes to endpoint."""
+        with _client() as client:
+            resp = client.get(
+                SDK_URL, headers={"Authorization": "Bearer sdk-key-77"}
+            )
+        assert resp.status_code not in (401, 403)
+
     def test_query_only_returns_401(self, sdk_auth):
-        """?api_key=... without X-API-Key header → middleware denies at key
+        """?api_key=... without header → middleware denies at key
         check (verify_api_key does not inspect query params)."""
         with _client() as client:
             resp = client.get(f"{SDK_URL}?api_key=sdk-key-77")
