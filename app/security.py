@@ -6,6 +6,7 @@ import logging
 import secrets
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 from cryptography.fernet import Fernet
@@ -168,6 +169,14 @@ class AuditLogger:
     
     def __init__(self, log_file: str = "/app/logs/audit.log"):
         self.logger = logging.getLogger("audit")
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        if any(
+            isinstance(existing, logging.FileHandler)
+            and Path(existing.baseFilename) == log_path.resolve()
+            for existing in self.logger.handlers
+        ):
+            return
         handler = logging.FileHandler(log_file)
         formatter = logging.Formatter(
             "%(asctime)s | %(levelname)s | %(message)s"
