@@ -17,7 +17,9 @@ services:
       retries: 3
 
   web-ssh-gateway:
-    build: .
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     container_name: web-ssh-gateway
     hostname: ssh-gateway
     networks:
