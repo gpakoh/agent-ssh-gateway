@@ -9,6 +9,5 @@ SSH_GATEWAY_GUIDE.md
 scripts
 tests
 .gitea
-sdk
 nix
 AGENTS.md
