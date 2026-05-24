@@ -20,10 +20,11 @@ web-ssh-gateway/
 │       ├── index.html       # Web terminal UI
 │       ├── style.css        # Dark terminal theme
 │       └── app.js           # Frontend logic
-├── Dockerfile
-├── docker-compose.yml       # Docker @ LXC 103, IP 10.10.10.145
+├── docker/
+│   ├── Dockerfile           # Container image definition
+│   ├── docker-compose.yml   # Docker @ LXC 103, IP 10.10.10.145
+│   └── requirements.txt     # Python dependencies
 ├── nginx-ssh.xloud.ru.conf  # Nginx config for LXC 100
-├── requirements.txt
 ├── deploy.md                # Deployment instructions
 └── .dockerignore
 ```
@@ -32,7 +33,7 @@ web-ssh-gateway/
 
 ```bash
 cd /media/1TB/Docker/web-ssh-gateway
-docker-compose up -d
+docker compose -f docker/docker-compose.yml up -d
 ```
 
 ## API Endpoints
