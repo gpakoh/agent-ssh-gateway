@@ -18,7 +18,7 @@ RUN groupadd -r -g 1000 appuser && \
 WORKDIR /app
 
 # Security: Install Python dependencies
-COPY requirements.txt .
+COPY docker/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && \
     rm -rf /root/.cache/pip
 

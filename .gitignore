@@ -11,3 +11,9 @@ ENV/
 .pytest_cache/
 .mypy_cache/
 *.egg-info/
+
+# Moved to docker/ directory
+/docker-compose.yml
+/Dockerfile
+/requirements.txt
+/docker-compose.override.yml

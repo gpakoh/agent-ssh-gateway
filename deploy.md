@@ -36,14 +36,14 @@ ssh root@10.255.255.101
 cd /media/1TB/Docker/web-ssh-gateway
 
 # Build image
-docker-compose build
+docker compose -f docker/docker-compose.yml build
 
 # Start
-docker-compose up -d
+docker compose -f docker/docker-compose.yml up -d
 
 # Verify it's running
-docker-compose ps
-docker-compose logs -f
+docker compose -f docker/docker-compose.yml ps
+docker compose -f docker/docker-compose.yml logs -f
 ```
 
 The container should be accessible internally at `http://10.255.255.145:8080`.
@@ -127,12 +127,12 @@ cd /media/1TB/Docker/web-ssh-gateway
 git pull
 
 # Rebuild and restart
-docker-compose down
-docker-compose build --no-cache
-docker-compose up -d
+docker compose -f docker/docker-compose.yml down
+docker compose -f docker/docker-compose.yml build --no-cache
+docker compose -f docker/docker-compose.yml up -d
 
 # Check logs
-docker-compose logs -f
+docker compose -f docker/docker-compose.yml logs -f
 ```
 
 ---
@@ -174,9 +174,9 @@ docker-compose logs -f
 | `app/static/index.html` | Frontend page |
 | `app/static/style.css` | Terminal theme |
 | `app/static/app.js` | Frontend logic (API, WebSocket, terminal) |
-| `Dockerfile` | Container image |
-| `docker-compose.yml` | Docker Compose config (macvlan 10.255.255.145) |
+| `docker/Dockerfile` | Container image |
+| `docker/docker-compose.yml` | Docker Compose config (macvlan 10.255.255.145) |
+| `docker/requirements.txt` | Python dependencies |
 | `nginx-gateway.example.com.conf` | Nginx site config for LXC EXAMPLE |
-| `requirements.txt` | Python dependencies |
 | `.dockerignore` | Build exclusions |
 | `deploy.md` | This file |
