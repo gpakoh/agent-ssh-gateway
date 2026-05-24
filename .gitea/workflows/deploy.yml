@@ -5,8 +5,9 @@ on:
 
 env:
   GITEA_HOST: 192.168.1.103
-  PROXMOX_HOST: 192.168.1.103
-  BACKEND_HOST: 10.10.10.145
+  NGINX_HOST: 192.0.2.10
+  BACKEND_HOST: 192.168.1.103
+  BACKEND_DIR: /media/1TB/Python/web_ssh/web-ssh-gateway
 
 jobs:
   test:
@@ -37,12 +38,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Deploy nginx config
+        env:
+          SSHPASS: ${{ vars.NGINX_PASS }}
         run: |
           apt-get update -qq
           apt-get install -y -qq openssh-client sshpass
-          sshpass -p "${{ vars.NGINX_PASS }}" scp -o StrictHostKeyChecking=no \
-            nginx-ssh.xloud.ru.conf root@$PROXMOX_HOST:/etc/nginx/sites-available/AI-Docker.conf
-          sshpass -p "${{ vars.NGINX_PASS }}" ssh -o StrictHostKeyChecking=no root@$PROXMOX_HOST "
+          sshpass -e ssh -o StrictHostKeyChecking=no root@$NGINX_HOST "
+            mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+          "
+          sshpass -e scp -o StrictHostKeyChecking=no \
+            nginx-ssh.xloud.ru.conf root@$NGINX_HOST:/etc/nginx/sites-available/ssh.xloud.ru
+          sshpass -e ssh -o StrictHostKeyChecking=no root@$NGINX_HOST "
+            ln -sfn /etc/nginx/sites-available/ssh.xloud.ru /etc/nginx/sites-enabled/ssh.xloud.ru
             nginx -t && nginx -s reload
           "
 
@@ -55,14 +62,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Deploy backend
+        env:
+          SSHPASS: ${{ vars.BACKEND_PASS }}
         run: |
           apt-get update -qq
           apt-get install -y -qq openssh-client sshpass rsync
-          sshpass -p "${{ vars.BACKEND_PASS }}" rsync -avz \
+          sshpass -e rsync -avz \
             -e "ssh -o StrictHostKeyChecking=no" \
             --exclude=.git --exclude=__pycache__ --exclude=.gitea \
-            ./ root@$BACKEND_HOST:/srv/ssh-gateway/
-          sshpass -p "${{ vars.BACKEND_PASS }}" ssh -o StrictHostKeyChecking=no root@$BACKEND_HOST "
-            pip install -r /srv/ssh-gateway/requirements.txt
-            systemctl restart webssh-server 2>&1 || echo 'webssh-server not found'
+            ./ root@$BACKEND_HOST:$BACKEND_DIR/
+          sshpass -e ssh -o StrictHostKeyChecking=no root@$BACKEND_HOST "
+            cd $BACKEND_DIR
+            API_KEY=\$(docker inspect web-ssh-gateway --format '{{range .Config.Env}}{{println .}}{{end}}' | awk -F= '\$1 == \"API_KEY\" {print \$2; exit}')
+            test -n \"\$API_KEY\"
+            API_KEY=\"\$API_KEY\" docker compose up -d --build
+            curl -sf http://127.0.0.1:8085/health
           "
