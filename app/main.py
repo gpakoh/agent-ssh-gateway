@@ -1292,25 +1292,11 @@ async def jobs_dead_letter(limit: int = 100):
 
 
 @app.get("/api/sdk/download", response_class=PlainTextResponse)
-async def download_sdk(
-    x_api_key: str = Header(default="", alias="X-API-Key"),
-):
-    """Download Python SDK. Requires X-API-Key header.
+async def download_sdk():
+    """Download Python SDK.
 
-    Note: when API_AUTH_ENABLED=true, the global auth middleware also
-    accepts Authorization: Bearer before reaching this endpoint.
+    Note: auth is handled by the global middleware.
     """
-    # Check API key if configured
-    if settings.api_key:
-        if not secrets.compare_digest(x_api_key, settings.api_key):
-            raise HTTPException(
-                status_code=401,
-                detail=_err(
-                    401,
-                    "Invalid or missing API key",
-                ),
-            )
-    
     sdk_path = "/app/sdk/ssh_gateway.py"
     try:
         with open(sdk_path, "r") as f:
