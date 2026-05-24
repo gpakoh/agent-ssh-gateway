@@ -18,31 +18,32 @@ jobs:
   test:
     needs: debug
     runs-on: ubuntu-latest
-    container:
-      image: python:3.13-slim
     steps:
       - name: Checkout
-        run: |
-          apt-get update -qq && apt-get install -y -qq git ca-certificates
-          git clone http://git:${{ github.token }}@$GITEA_HOST:3005/gpakoh/ssh-gateway-ai.git /repo
+        uses: actions/checkout@v4
       - name: Run tests
         run: |
-          cd /repo
-          pip install -r requirements.txt 2>/dev/null || true
-          python -m pytest tests/ -v --timeout=30 || echo "Tests completed (exit: $?)"
+          apt-get update -qq
+          apt-get install -y -qq python3 python3-venv python3-pip
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest pytest-timeout httpx
+          python -m pytest tests/ -v --timeout=30
 
   deploy-nginx:
     needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        run: |
-          apt-get update -qq && apt-get install -y -qq git ca-certificates sshpass
-          git clone http://git:${{ github.token }}@$GITEA_HOST:3005/gpakoh/ssh-gateway-ai.git /repo
+        uses: actions/checkout@v4
       - name: Deploy nginx config
         run: |
+          apt-get update -qq
+          apt-get install -y -qq openssh-client sshpass
+          sshpass -p "${{ vars.NGINX_PASS }}" scp -o StrictHostKeyChecking=no \
+            nginx-ssh.xloud.ru.conf root@$PROXMOX_HOST:/etc/nginx/sites-available/AI-Docker.conf
           sshpass -p "${{ vars.NGINX_PASS }}" ssh -o StrictHostKeyChecking=no root@$PROXMOX_HOST "
-            cp /media/1TB/Python/web_ssh/web-ssh-gateway/nginx-ssh.xloud.ru.conf /etc/nginx/sites-available/AI-Docker.conf
             nginx -t && nginx -s reload
           "
 
@@ -51,15 +52,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        run: |
-          apt-get update -qq && apt-get install -y -qq git ca-certificates sshpass rsync
-          git clone http://git:${{ github.token }}@$GITEA_HOST:3005/gpakoh/ssh-gateway-ai.git /repo
+        uses: actions/checkout@v4
       - name: Deploy backend
         run: |
-          cd /repo
-          rsync -avz --exclude=.git --exclude=__pycache__ --exclude=.gitea \
-            . root@$BACKEND_HOST:/srv/ssh-gateway/
+          apt-get update -qq
+          apt-get install -y -qq openssh-client sshpass rsync
+          sshpass -p "${{ vars.BACKEND_PASS }}" rsync -avz \
+            -e "ssh -o StrictHostKeyChecking=no" \
+            --exclude=.git --exclude=__pycache__ --exclude=.gitea \
+            ./ root@$BACKEND_HOST:/srv/ssh-gateway/
           sshpass -p "${{ vars.BACKEND_PASS }}" ssh -o StrictHostKeyChecking=no root@$BACKEND_HOST "
-            pip install -r /srv/ssh-gateway/app/requirements.txt 2>/dev/null || true
+            pip install -r /srv/ssh-gateway/requirements.txt
             systemctl restart webssh-server 2>&1 || echo 'webssh-server not found'
           "
