@@ -4,136 +4,369 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Web SSH Gateway</title>
-    <link rel="stylesheet" href="/static/style.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.44.0/min/vs/loader.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css?v=4">
+    <link rel="icon" type="image/png" href="/static/favicon.png">
+    <script>var require = { paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs' } };</script>
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs/loader.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 </head>
 <body>
-    <div class="app-container">
-        <!-- Header -->
-        <header class="app-header">
-            <h1>Web SSH Gateway</h1>
-            <span class="status-indicator" id="connectionStatus">Disconnected</span>
+    <div class="app-shell" id="appShell">
+        <!-- ============================================ -->
+        <!-- HEADER BAR (full width, 48px)                -->
+        <!-- ============================================ -->
+        <header class="app-header" id="appHeader">
+            <div class="header-left">
+                <i data-lucide="terminal" class="header-logo-icon"></i>
+                <h1>Web SSH Gateway</h1>
+                <span class="version-badge">v2.0</span>
+            </div>
+            <div class="header-right">
+                <div class="status-group" id="statusGroup">
+                    <span class="status-dot" id="statusDot"></span>
+                    <span class="status-text" id="connectionStatus">Disconnected</span>
+                    <span class="status-info" id="statusInfo"></span>
+                </div>
+            </div>
         </header>
 
-    <!-- Main Content -->
-    <main class="main-grid">
-        <!-- File Editor Panel (Left - New) -->
-        <aside class="editor-panel" id="editorPanel" style="display: none;">
-            <div class="editor-toolbar">
-                <span class="toolbar-title" id="editorFilename">No file</span>
-                <div class="toolbar-buttons">
-                    <button class="btn-icon" id="saveFileBtn" title="Save file" disabled>Save</button>
-                    <button class="btn-icon" id="closeEditorBtn" title="Close editor">Close</button>
+        <!-- ============================================ -->
+        <!-- LEFT COLUMN (260px): Connection + Sessions   -->
+        <!-- ============================================ -->
+        <aside class="left-column" id="leftColumn">
+            <!-- Connection Form (compact, auto-height) -->
+            <section class="connection-section" id="connectionSection">
+                <div class="panel-header connection-header">
+                    <div class="panel-header-left">
+                        <i data-lucide="server" class="icon-14"></i>
+                        <span class="panel-header-title">SSH Connection</span>
+                    </div>
+                    <div class="panel-header-right">
+                        <span class="status-badge" id="connectionBadge">
+                            <span class="status-badge-dot"></span>
+                            <span class="status-badge-text">Disconnected</span>
+                        </span>
+                    </div>
                 </div>
-            </div>
-            <div class="editor-container" id="editorContainer">
-                <div class="editor-placeholder">
-                    <p>Select a file from the file tree or use the File API to open files</p>
+
+                <div class="connection-body">
+                    <form id="connectForm" class="connection-form">
+                        <div class="form-grid">
+                            <!-- Row 1: Host + Port -->
+                            <div class="form-row">
+                                <div class="form-field form-field-host">
+                                    <label for="host">Host</label>
+                                    <div class="input-wrapper">
+                                        <i data-lucide="globe" class="input-icon icon-14"></i>
+                                        <input type="text" id="host" placeholder="e.g., 192.0.2.10" required>
+                                    </div>
+                                </div>
+                                <div class="form-field form-field-port">
+                                    <label for="port">Port</label>
+                                    <div class="input-wrapper">
+                                        <input type="number" id="port" value="22" min="1" max="65535" placeholder="22" required>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Row 2: Username -->
+                            <div class="form-field">
+                                <label for="username">Username</label>
+                                <div class="input-wrapper">
+                                    <i data-lucide="user" class="input-icon icon-14"></i>
+                                    <input type="text" id="username" placeholder="e.g., root" required>
+                                </div>
+                            </div>
+                            <!-- Row 3: Auth Tabs -->
+                            <div class="auth-tabs" id="authTabs">
+                                <button type="button" class="auth-tab active" data-tab="password" id="passwordTabBtn">
+                                    <i data-lucide="lock" class="icon-12"></i>
+                                    <span>Password</span>
+                                </button>
+                                <button type="button" class="auth-tab" data-tab="key" id="keyTabBtn">
+                                    <i data-lucide="key" class="icon-12"></i>
+                                    <span>Private Key</span>
+                                </button>
+                            </div>
+                            <!-- Password Tab Content -->
+                            <div class="auth-content active" id="passwordTab">
+                                <div class="form-field">
+                                    <label for="password">Password</label>
+                                    <div class="input-wrapper">
+                                        <i data-lucide="lock" class="input-icon icon-14"></i>
+                                        <input type="password" id="password" placeholder="Enter password">
+                                        <button type="button" class="input-action-btn" id="togglePasswordBtn" aria-label="Toggle password visibility">
+                                            <i data-lucide="eye" class="icon-14" id="passwordEyeIcon"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Private Key Tab Content -->
+                            <div class="auth-content" id="keyTab">
+                                <div class="form-field">
+                                    <label for="privateKey">Private Key</label>
+                                    <textarea id="privateKey" rows="3" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;Paste your private key here...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
+                                    <input type="file" id="keyFile" accept=".key,.pem,.txt" class="file-input">
+                                </div>
+                                <div class="form-field">
+                                    <label for="keyPassphrase">Passphrase (optional)</label>
+                                    <div class="input-wrapper">
+                                        <i data-lucide="shield" class="input-icon icon-14"></i>
+                                        <input type="password" id="keyPassphrase" placeholder="Enter passphrase">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Action Buttons -->
+                        <div class="form-actions">
+                            <button type="submit" class="btn btn-primary" id="connectBtn">
+                                <i data-lucide="plug" class="icon-14"></i>
+                                <span>Connect</span>
+                            </button>
+                            <button type="button" class="btn btn-danger btn-outline" id="disconnectBtn" disabled>
+                                <i data-lucide="power" class="icon-14"></i>
+                                <span>Disconnect</span>
+                            </button>
+                        </div>
+                    </form>
+
+                    <!-- Error Message -->
+                    <div class="error-message" id="errorMessage">
+                        <i data-lucide="alert-circle" class="icon-16"></i>
+                        <span class="error-text"></span>
+                    </div>
                 </div>
-            </div>
+            </section>
+
+            <!-- Sessions Panel (flex:1, fills remaining) -->
+            <section class="sessions-section" id="sessionsSection">
+                <div class="panel-header sessions-header">
+                    <div class="panel-header-left">
+                        <i data-lucide="users" class="icon-14"></i>
+                        <span class="panel-header-title">Active Sessions</span>
+                        <span class="count-badge" id="sessionsBadge"></span>
+                    </div>
+                </div>
+                <div class="panel-body">
+                    <div class="sessions-list" id="sessionsList">
+                        <div class="empty-state">
+                            <i data-lucide="users" class="icon-24"></i>
+                            <p>No active sessions</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
         </aside>
 
-        <!-- Connection Panel (Left) -->
-            <aside class="connection-panel">
-                <h2>Connection</h2>
-                <form id="connectForm">
-                    <div class="form-group">
-                        <label for="host">Host</label>
-                        <input type="text" id="host" placeholder="192.168.1.1" required>
+        <!-- ============================================ -->
+        <!-- CENTER COLUMN (flex:1): Terminal             -->
+        <!-- ============================================ -->
+        <main class="center-column" id="centerColumn">
+            <section class="terminal-section" id="terminalSection">
+                <div class="panel-header terminal-header">
+                    <div class="panel-header-left">
+                        <i data-lucide="terminal-square" class="icon-14 terminal-header-icon"></i>
+                        <span class="panel-header-title">Terminal</span>
                     </div>
-                    <div class="form-group">
-                        <label for="port">Port</label>
-                        <input type="number" id="port" value="22" min="1" max="65535" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="username">Username</label>
-                        <input type="text" id="username" placeholder="root" required>
-                    </div>
-
-                    <!-- Auth Method Tabs -->
-                    <div class="auth-tabs">
-                        <button type="button" class="auth-tab active" data-tab="password">Password</button>
-                        <button type="button" class="auth-tab" data-tab="key">Private Key</button>
-                    </div>
-
-                    <div class="auth-content active" id="passwordTab">
-                        <div class="form-group">
-                            <label for="password">Password</label>
-                            <input type="password" id="password" placeholder="Enter password">
-                        </div>
-                    </div>
-
-                    <div class="auth-content" id="keyTab">
-                        <div class="form-group">
-                            <label for="privateKey">Private Key</label>
-                            <textarea id="privateKey" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..."></textarea>
-                            <input type="file" id="keyFile" accept=".key,.pem,.txt">
-                        </div>
-                        <div class="form-group">
-                            <label for="keyPassphrase">Key Passphrase (optional)</label>
-                            <input type="password" id="keyPassphrase" placeholder="Enter passphrase">
-                        </div>
-                    </div>
-
-                    <div class="form-buttons">
-                        <button type="submit" class="btn btn-primary" id="connectBtn">Connect</button>
-                        <button type="button" class="btn btn-danger" id="disconnectBtn" disabled>Disconnect</button>
-                    </div>
-                </form>
-
-                <div class="error-message" id="errorMessage"></div>
-            </aside>
-
-            <!-- Terminal Area (Center) -->
-            <section class="terminal-section">
-                <div class="terminal-toolbar">
-                    <span class="toolbar-title">Terminal</span>
-                    <div class="toolbar-buttons">
-                        <button class="btn-icon" id="copyBtn" title="Copy output">Copy</button>
-                        <button class="btn-icon" id="clearBtn" title="Clear terminal">Clear</button>
+                    <div class="panel-header-right">
+                        <button type="button" class="btn-icon btn-icon-sm" id="copyBtn" aria-label="Copy terminal output" title="Copy terminal output">
+                            <i data-lucide="copy" class="icon-16"></i>
+                        </button>
+                        <button type="button" class="btn-icon btn-icon-sm" id="clearBtn" aria-label="Clear terminal" title="Clear terminal">
+                            <i data-lucide="trash-2" class="icon-16"></i>
+                        </button>
                     </div>
                 </div>
+
+                <!-- Terminal Output -->
                 <div class="terminal" id="terminal">
                     <div class="terminal-welcome">
                         <p class="ansi-green">Web SSH Gateway v1.0</p>
                         <p>Configure connection on the left panel and click <strong>Connect</strong>.</p>
                         <p>Supports password and SSH key authentication.</p>
+                        <p class="hint">Tip: Prefix commands with <code>bg:</code> to run in background</p>
                     </div>
                 </div>
-                <div class="command-input-bar">
+
+                <!-- Terminal Input Bar -->
+                <div class="terminal-input-bar">
                     <span class="prompt" id="prompt">$</span>
-                    <input type="text" id="commandInput" placeholder="Enter command..." autocomplete="off" disabled>
-                    <button class="btn btn-primary" id="executeBtn" disabled>Execute</button>
-                    <button class="btn btn-warning" id="ctrlCBtn" disabled>Ctrl+C</button>
+                    <input type="text" id="commandInput" placeholder="Type command... (prefix with bg: to run in background)" autocomplete="off" disabled>
+                    <button type="button" class="btn btn-primary btn-compact" id="executeBtn" disabled>
+                        <i data-lucide="play" class="icon-14"></i>
+                        <span>Execute</span>
+                    </button>
+                    <button type="button" class="btn btn-danger btn-outline btn-compact" id="ctrlCBtn" disabled>
+                        <i data-lucide="square" class="icon-14"></i>
+                        <span>Ctrl+C</span>
+                    </button>
+                </div>
+            </section>
+        </main>
+
+        <!-- ============================================ -->
+        <!-- RIGHT COLUMN (280px): Editor + Jobs/History  -->
+        <!-- ============================================ -->
+        <aside class="right-column" id="rightColumn">
+            <!-- File Editor Panel (auto-height) -->
+            <section class="editor-section" id="editorSection">
+                <div class="panel-header editor-header">
+                    <div class="panel-header-left">
+                        <i data-lucide="file-code-2" class="icon-14"></i>
+                        <span class="panel-header-title">File Editor</span>
+                    </div>
+                    <div class="panel-header-right">
+                        <button type="button" class="btn-icon" id="fileEditBtn" aria-label="Open file" title="Open file">
+                            <i data-lucide="folder-open" class="icon-16"></i>
+                        </button>
+                    </div>
+                </div>
+                <!-- Editor panel -->
+                <div class="editor-panel" id="editorPanel" style="display: none;">
+                    <div class="editor-toolbar">
+                        <span class="editor-filename" id="editorFilename">No file</span>
+                        <div class="editor-toolbar-actions">
+                            <button type="button" class="btn btn-primary btn-compact" id="saveFileBtn" disabled>
+                                <i data-lucide="save" class="icon-14"></i>
+                                <span>Save</span>
+                            </button>
+                            <button type="button" class="btn-icon" id="closeEditorBtn" aria-label="Close editor" title="Close editor">
+                                <i data-lucide="x" class="icon-16"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="editor-container" id="editorContainer">
+                        <div class="editor-placeholder">
+                            <i data-lucide="file-code-2" class="placeholder-icon"></i>
+                            <p>Select a file from the file tree or use the File API to open files</p>
+                        </div>
+                    </div>
+                </div>
+                <!-- Welcome message (shown when editor is closed) -->
+                <div class="editor-welcome" id="editorWelcome">
+                    <div class="editor-welcome-content">
+                        <i data-lucide="file-code-2" class="placeholder-icon"></i>
+                        <p>Welcome to Web SSH Gateway</p>
+                        <p class="editor-welcome-sub">Open a file to edit, or use the terminal to navigate.</p>
+                    </div>
                 </div>
             </section>
 
-            <!-- Sessions Panel (Right) -->
-            <aside class="sessions-panel">
-                <h2>Sessions</h2>
-                <div class="sessions-list" id="sessionsList">
-                    <p class="empty-text">No active sessions</p>
-                </div>
+            <!-- Jobs + History (side by side, flex:1) -->
+            <section class="meta-section" id="metaSection">
+                <div class="meta-panels">
+                    <!-- Jobs Panel -->
+                    <div class="meta-panel jobs-panel">
+                        <div class="panel-header meta-panel-header">
+                            <div class="panel-header-left">
+                                <i data-lucide="clock" class="icon-14"></i>
+                                <span class="panel-header-title">Jobs</span>
+                                <span class="count-badge" id="jobsBadge"></span>
+                            </div>
+                        </div>
+                        <div class="panel-body">
+                            <div class="jobs-list" id="jobsList">
+                                <div class="empty-state">
+                                    <i data-lucide="clock" class="icon-24"></i>
+                                    <p>No background jobs</p>
+                                    <p class="empty-sub">Prefix commands with <code>bg:</code> to run in background</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
 
-                <div class="jobs-section">
-                    <h3>Background Jobs</h3>
-                    <p class="hint-text">Prefix command with <code>bg:</code> to run in background</p>
-                    <div class="jobs-list" id="jobsList">
-                        <p class="empty-text">No jobs</p>
+                    <!-- History Panel -->
+                    <div class="meta-panel history-panel">
+                        <div class="panel-header meta-panel-header">
+                            <div class="panel-header-left">
+                                <i data-lucide="history" class="icon-14"></i>
+                                <span class="panel-header-title">History</span>
+                                <span class="count-badge" id="historyBadge"></span>
+                            </div>
+                        </div>
+                        <div class="panel-body">
+                            <div class="history-list" id="historyList">
+                                <div class="empty-state">
+                                    <i data-lucide="history" class="icon-24"></i>
+                                    <p>No commands yet</p>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
-
-                <div class="history-section">
-                    <h3>Command History</h3>
-                    <div class="history-list" id="historyList"></div>
-                </div>
-            </aside>
-        </main>
-
-        <!-- Toast Container -->
-        <div class="toast-container" id="toastContainer"></div>
+            </section>
+        </aside>
     </div>
 
-    <script src="/static/app.js"></script>
+    <!-- Toast Container -->
+    <div class="toast-container" id="toastContainer" aria-live="polite"></div>
+
+    <script src="/static/app.js?v=4"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            if (typeof lucide !== 'undefined') {
+                lucide.createIcons();
+            }
+
+            // ============================================
+            // Auth tab switching (enhanced, preserves JS)
+            // ============================================
+            const authTabEls = document.querySelectorAll('.auth-tab');
+            const authContentEls = document.querySelectorAll('.auth-content');
+
+            authTabEls.forEach(tab => {
+                tab.addEventListener('click', () => {
+                    authTabEls.forEach(t => t.classList.remove('active'));
+                    authContentEls.forEach(c => c.classList.remove('active'));
+                    tab.classList.add('active');
+                    const targetId = tab.dataset.tab + 'Tab';
+                    const target = document.getElementById(targetId);
+                    if (target) target.classList.add('active');
+                });
+            });
+
+            // ============================================
+            // Password visibility toggle
+            // ============================================
+            const togglePasswordBtn = document.getElementById('togglePasswordBtn');
+            const passwordInput = document.getElementById('password');
+            const passwordEyeIcon = document.getElementById('passwordEyeIcon');
+
+            if (togglePasswordBtn && passwordInput) {
+                togglePasswordBtn.addEventListener('click', () => {
+                    const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
+                    passwordInput.setAttribute('type', type);
+                    if (passwordEyeIcon) {
+                        passwordEyeIcon.setAttribute('data-lucide', type === 'password' ? 'eye' : 'eye-off');
+                        lucide.createIcons();
+                    }
+                });
+            }
+
+            // ============================================
+            // File editor open/close toggle
+            // ============================================
+            const fileEditBtn = document.getElementById('fileEditBtn');
+            const editorPanel = document.getElementById('editorPanel');
+            const editorWelcome = document.getElementById('editorWelcome');
+
+            if (fileEditBtn) {
+                fileEditBtn.addEventListener('click', () => {
+                    if (editorPanel) editorPanel.style.display = 'flex';
+                    if (editorWelcome) editorWelcome.style.display = 'none';
+                });
+            }
+
+            const closeEditorBtn = document.getElementById('closeEditorBtn');
+            if (closeEditorBtn) {
+                closeEditorBtn.addEventListener('click', () => {
+                    if (editorPanel) editorPanel.style.display = 'none';
+                    if (editorWelcome) editorWelcome.style.display = 'flex';
+                });
+            }
+        });
+    </script>
 </body>
 </html>

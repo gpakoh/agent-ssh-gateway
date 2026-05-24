@@ -1,1568 +1,739 @@
-# SSH GATEWAY — ПОЛНАЯ ИНСТРУКЦИЯ
+# Web SSH Gateway: практический гайд
 
-## 1. БЫСТРЫЙ СТАРТ (30 секунд)
-import requests, urllib3, json, time
-urllib3.disable_warnings()
+Версия API: `1.0.0`
+Обновлено: `2026-05-24 09:47 UTC`
 
-# Step 1: Authelia SSO
-s = requests.Session()
-s.verify = False
-s.post("https://auth.xloud.ru/api/firstfactor", json={
-    "username": "agent",
-    "password": "NpvSBhi7ag1X8stB3kFMnCcxM9PKE9R",
+## 1) Как подключаться
+
+### 1.1 Доступ из локальной сети (без SSO)
+
+- Базовый URL: `http://192.168.1.103:8085`
+- `Authelia` не требуется.
+- Рекомендуемый режим для внутренних агентов и CI в LAN.
+
+### 1.2 Доступ из интернета (через Authelia SSO)
+
+- Базовый URL API: `https://ssh.xloud.ru`
+- Перед вызовами API нужна SSO-аутентификация в `Authelia` (cookie-сессия).
+- Используйте только свои учетные данные; не храните логины/пароли в документации и скриптах.
+
+Пример (интернет через SSO):
+
+```bash
+# 1) Логин в Authelia (сохраняем cookie)
+curl -k -c cookies.txt -X POST https://auth.xloud.ru/api/firstfactor \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "<YOUR_LOGIN>",
+    "password": "<YOUR_PASSWORD>",
     "request_method": "GET",
     "request_uri": "https://ssh.xloud.ru/"
-})
+  }'
 
-# Step 2: SSH Connect
-r = s.post("https://ssh.xloud.ru/api/ssh/connect", json={
-    "host": "192.168.1.103",
+# 2) Вызов API через ту же cookie-сессию
+curl -k -b cookies.txt -X POST https://ssh.xloud.ru/api/ssh/connect \
+  -H "Content-Type: application/json" \
+  -d '{
+    "host": "192.0.2.10",
     "port": 22,
     "username": "root",
-    "password": "CHANGEME"
-})
-session_id = r.json()["session_id"]
-
-# Step 3: Heartbeat (каждые 30 сек)
-s.post("https://ssh.xloud.ru/api/ssh/heartbeat", json={"session_id": session_id})
-
-# Готово! Можно работать.
-
-**Session ID** — главная переменная. Все API требуют её.
-
-## 2. API ENDPOINTS — ПОЛНЫЙ СПИСОК
-
-### 2.0 Context Management (Git-aware)
-
-**Создать контекст разработки:**
-r = s.post("https://ssh.xloud.ru/api/context/create", json={
-    "session_id": session_id,
-    "name": "gateway_refactor",
-    "path": "/media/1TB/Python/NOD_gateway/gateway_client",
-    "branch": "feature/new-api",  # опционально
-    "auto_commit": True,          # автокоммит после изменений
-    "auto_validate": True         # автопроверка mypy+tests
-})
-context_id = r.json()["context_id"]
-# → {"context_id": "...", "git": {"status": "clean|not_initialized", ...}}
-
-**Git-статус:**
-- `clean` — всё ок, можно коммитить
-- `not_initialized` — проект не в Git, работа продолжается
-- `has_changes` — есть незакоммиченные изменения
-
-**Инициализировать Git (если не был):**
-r = s.post("https://ssh.xloud.ru/api/git/init", json={
-    "context_id": context_id,
-    "remote_url": "https://github.com/user/repo.git"  # опционально
-})
-
-**Создать коммит:**
-r = s.post("https://ssh.xloud.ru/api/git/commit", json={
-    "context_id": context_id,
-    "message": "Add new feature",
-    "files": ["app/main.py"]  # опционально, по умолчанию все
-})
-
-**Бэкап / восстановление:**
-s.post("https://ssh.xloud.ru/api/git/backup", params={"context_id": context_id, "backup_name": "before_refactor"})
-s.post("https://ssh.xloud.ru/api/git/restore", params={"context_id": context_id})
-
-**Работа с файлами через контекст:**
-# Чтение
-r = s.post("https://ssh.xloud.ru/api/context/file/read", json={
-    "session_id": context_id,  # ← используем context_id как session_id
-    "path": "app/main.py"
-})
-
-# Редактирование с автокоммитом
-r = s.patch("https://ssh.xloud.ru/api/context/file/edit", json={
-    "context_id": context_id,
-    "path": "app/main.py",  # относительный путь (относительно ctx.path) или абсолютный
-    "operations": [{"type": "replace", "old": "...", "new": "..."}],
-    "commit_message": "Update main.py",  # опционально
-    "run_validation": True               # опционально
-})
-# → {"success": true, "git_commit": "abc123", "warning": null}
-# Примечание: path может быть относительным (относительно ctx.path) или абсолютным
-
-### 2.1 SSH Sessions
-
-| Method | Path | Описание |
-| POST | /api/ssh/connect | Создать SSH-сессию |
-| POST | /api/ssh/disconnect | Закрыть сессию |
-| POST | /api/ssh/heartbeat | Продлить сессию (каждые 30с) |
-| GET | /api/ssh/sessions | Список активных сессий |
-| GET | /api/ssh/session/{id}/health | Проверить здоровье сессии и авто-реконнект |
-
-**Auto-reconnect:**
-Сессия автоматически восстанавливается при обрыве соединения:
-- Сохраняются все параметры подключения (host, port, username, password/key)
-- При `execute()` или `get_session()` проверяется соединение
-- Если disconnected — происходит автоматический reconnect
-- Счётчик reconnect'ов: `record.reconnect_count`
-- Ручная проверка: `GET /api/ssh/session/{id}/health`
-
-**Connect:**
-r = s.post("https://ssh.xloud.ru/api/ssh/connect", json={
-    "host": "192.168.1.103",
-    "port": 22,
-    "username": "root",
-    "password": "CHANGEME"
-})
-session_id = r.json()["session_id"]
-
-**Heartbeat:**
-r = s.post("https://ssh.xloud.ru/api/ssh/heartbeat", json={"session_id": session_id})
-# → {"status": "ok", "idle_time": 0.5}
-
-### 2.2 Background Jobs API
-| Method | Path | Описание |
-| POST | /api/jobs/run | Запуск команды в фоне |
-| GET | /api/jobs/{id}/status | Статус выполнения |
-| GET | /api/jobs/{id}/result | Полный результат |
-| GET | /api/jobs/{id}/stream | SSE поток вывода |
-| GET | /api/jobs/{id}/events | SSE поток (alias для /stream) |
-| POST | /api/jobs/{id}/cancel | Отмена задачи |
-
-**Запуск:**
-r = s.post("https://ssh.xloud.ru/api/jobs/run", json={
-    "session_id": session_id,
-    "command": "cd /media/1TB/Python/NOD_gateway/gateway_client && python -m pytest tests/ -x -q",
-    "timeout": 300,
-    "description": "pytest gateway"
-})
-job_id = r.json()["job_id"]
-
-**Статус:**
-r = s.get(f"https://ssh.xloud.ru/api/jobs/{job_id}/status")
-# → {"job_id": "...", "status": "running|completed|failed|cancelled", "duration": 45.2}
-
-**Результат:**
-r = s.get(f"https://ssh.xloud.ru/api/jobs/{job_id}/result")
-# → {"status": "completed", "exit_code": 0, "output": "...", "duration": 120.5}
-
-**SSE Stream (реальное время):**
-r = s.get(f"https://ssh.xloud.ru/api/jobs/{job_id}/stream", stream=True)
-for line in r.iter_lines():
-    if line:
-        data = json.loads(line.decode('utf-8').replace('data: ', ''))
-        print(data.get("output", ""), end="")
-
-**Отмена:**
-s.post(f"https://ssh.xloud.ru/api/jobs/{job_id}/cancel")
-# → {"status": "cancelled"}
-
-
-### 2.3 File Edit API
-| Method | Path | Описание |
-| POST | /api/file/read | Чтение файла (JSON) |
-| GET | /api/file/raw | Чтение файла (text/plain, Range support) |
-| POST | /api/batch/read | Массовое чтение файлов |
-| PATCH | /api/file/edit | Операции: replace/insert_after/insert_before/delete/append |
-| POST | /api/file/patch | Unified diff patch |
-| POST | /api/file/upload | Загрузка файла (base64 query params) |
-| POST | /api/file/upload/json | Загрузка файла (JSON body, base64) |
-| GET | /api/file/download | Скачивание файла (octet-stream) |
-| POST | /api/file/write | Atomic write через JSON body (no heredoc) |
-
-**Чтение (JSON):**
-r = s.post("https://ssh.xloud.ru/api/file/read", json={
-    "session_id": session_id,
-    "path": "/media/1TB/Python/NOD_gateway/gateway_client/app/main.py",
-    "offset": 1,
-    "limit": 30
-})
-# → {"path": "...", "total_lines": 150, "content": "строка целиком\nвторая строка\n..."}
-
-**Чтение RAW (text/plain):**
-r = s.get("https://ssh.xloud.ru/api/file/raw", params={
-    "session_id": session_id,
-    "path": "/media/1TB/Python/NOD_gateway/gateway_client/app/main.py"
-})
-# → text/plain, без JSON-обёртки
-
-**Чтение с Range (часть файла):**
-r = s.get("https://ssh.xloud.ru/api/file/raw", params={
-    "session_id": session_id,
-    "path": "/media/1TB/Python/NOD_gateway/gateway_client/app/main.py",
-    "offset": 100,
-    "limit": 50
-})
-# → строки 100-150
-
-**Массовое чтение (до 20 файлов):**
-r = s.post("https://ssh.xloud.ru/api/batch/read", json={
-    "session_id": session_id,
-    "paths": [
-        "app/main.py",
-        "app/config.py",
-        "app/models.py"
-    ]
-})
-# → {"files": {"app/main.py": "...", ...}, "errors": {}}
-
-**Редактирование:**
-r = s.patch("https://ssh.xloud.ru/api/file/edit", json={
-    "session_id": session_id,
-    "path": "/media/1TB/Python/NOD_gateway/gateway_client/app/core/config.py",
-    "operations": [
-        {"type": "replace", "old": "def get(self, key):", "new": "def get(self, key, default=None) -> Any:"},
-        {"type": "insert_after", "after": "class Settings:", "text": "    # validated"},
-        {"type": "delete", "old": "# TODO: remove this line"},
-        {"type": "append", "text": "# End of file"}
-    ]
-})
-# → {"success": true, "path": "...", "operations_applied": 4, "changed": true}
-
-**Важно: PATCH принимает типы операций:**
-- `replace` — заменить текст (требуется `old`, `new`)
-- `insert_after` — вставить после (требуется `after`, `text`)
-- `insert_before` — вставить перед (требуется `before`, `text`)
-- `delete` — удалить текст (требуется `old`)
-- `append` — добавить в конец файла (требуется `text`)
-- `create` — перезаписать файл полностью (требуется `text`)
-
-**PATCH с Unicode:**
-r = s.patch("https://ssh.xloud.ru/api/file/edit", json={
-    "session_id": session_id,
-    "path": "/tmp/test.txt",
-    "operations": [
-        {"type": "replace", "old": "привет", "new": "hello"},
-        {"type": "insert_after", "after": "line 1", "text": "\ninserted line"},
-        {"type": "append", "text": "# End of file"},
-        {"type": "create", "text": "полностью новый контент\n🎉 Unicode работает!"}
-    ]
-})
-
-**Загрузка файла (Upload):**
-import base64
-content = base64.b64encode(open("local_file.txt", "rb").read()).decode("ascii")
-r = s.post("https://ssh.xloud.ru/api/file/upload", params={
-    "session_id": session_id,
-    "path": "/remote/path/file.txt",
-    "content": content
-})
-# → {"success": true, "path": "...", "size": 1234}
-
-**Скачивание файла (Download):**
-r = s.get("https://ssh.xloud.ru/api/file/download", params={
-    "session_id": session_id,
-    "path": "/remote/path/file.txt"
-})
-# → application/octet-stream, raw bytes
-with open("downloaded_file.txt", "wb") as f:
-    f.write(r.content)
-
-**Atomic Write через JSON (без heredoc escaping):**
-r = s.post("https://ssh.xloud.ru/api/file/write", json={
-    "session_id": session_id,
-    "path": "/remote/path/file.py",
-    "content": 'def hello():\n    print("Hello, World!")\n',
-    "mode": "write"  # или "append" для добавления в конец
-})
-# → {"success": true, "path": "...", "size": 42, "mode": "write"}
-
-**JSON Upload (для файлов >2KB):**
-import base64
-content = base64.b64encode(open("local_file.txt", "rb").read()).decode("ascii")
-r = s.post("https://ssh.xloud.ru/api/file/upload/json", json={
-    "session_id": session_id,
-    "path": "/remote/path/file.txt",
-    "content": content
-})
-# → {"success": true, "path": "...", "size": 1234, "method": "json"}
-
-**Потоковая загрузка (для файлов 1MB+):**
-r = s.post("https://ssh.xloud.ru/api/file/upload/stream", 
-    params={"session_id": session_id, "path": "/remote/big_file.zip"},
-    files={"file": open("local_big_file.zip", "rb")}
-)
-# → {"success": true, "path": "...", "size": 1048576, "method": "multipart"}
-
-**Массовое редактирование файлов:**
-r = s.patch("https://ssh.xloud.ru/api/batch/edit", json={
-    "session_id": session_id,
-    "files": [
-        {
-            "path": "app/main.py",
-            "operations": [
-                {"type": "replace", "old": "def old():", "new": "def new():"}
-            ]
-        },
-        {
-            "path": "app/config.py",
-            "operations": [
-                {"type": "replace", "old": "DEBUG = True", "new": "DEBUG = False"}
-            ]
-        }
-    ]
-})
-# → {"results": [{"path": "...", "success": true, "changed": true}], "total_files": 2, "files_changed": 2}
-
-**Интроспекция проекта (структура + метаданные):**
-r = s.post("https://ssh.xloud.ru/api/project/structure", json={
-    "session_id": session_id,
-    "path": "/media/1TB/Python/NOD_gateway/gateway_client",
-    "include_git_status": true,
-    "max_depth": 3
-})
-# → {"path": "...", "total_files": 42, "total_directories": 15, "files": [...], "tree": {...}}
-
-**Pre-commit hooks (автоматическая валидация):**
-# При создании контекста включить auto_validate
-r = s.post("https://ssh.xloud.ru/api/context/create", json={
-    "session_id": session_id,
-    "name": "my_project",
-    "path": "/project/path",
-    "auto_commit": true,
-    "auto_validate": true  # ← mypy + pytest перед каждым коммитом
-})
-# Если валидация не пройдёт — коммит будет отменён с ошибкой
-
-
-**Простое дерево проекта:**
-r = s.get("https://ssh.xloud.ru/api/project/tree", params={
-    "session_id": session_id,
-    "path": "/project/path",
-    "max_depth": 3
-})
-# → {"items": [{"type": "file", "path": "app/main.py", "size": 1234}, ...], "count": 42}
-
-
-### 2.4 Git Integration (простые операции)
-| Method | Path | Описание |
-| GET | /api/git/simple-status | Git status (branch, modified, staged, untracked) |
-| POST | /api/git/diff | Git diff (working или staged) |
-
-**Git status:**
-r = s.get("https://ssh.xloud.ru/api/git/simple-status", params={
-    "session_id": session_id,
-    "path": "/project/path"
-})
-# → {"branch": "main", "clean": false, "modified": ["app/main.py"], "staged": [], "untracked": []}
-
-**Git diff:**
-r = s.post("https://ssh.xloud.ru/api/git/diff", json={
-    "session_id": session_id,
-    "path": "/project/path",
-    "cached": false  # true для staged изменений
-})
-# → {"path": "...", "diff": "diff --git a/app/main.py...", "files_changed": 2}
-
-
-### 2.5 AST Refactor API
-| Method | Path | Описание |
-| POST | /api/ast/rename | Переименовать символ (AST-aware) |
-| POST | /api/refactor/rename | Alias для /api/ast/rename |
-| POST | /api/ast/analyze | Анализ структуры Python файла |
-
-**Rename symbol (single file):**
-r = s.post("https://ssh.xloud.ru/api/ast/rename", json={
-    "session_id": session_id,
-    "path": "/project/app/services.py",
-    "old_name": "old_function",
-    "new_name": "new_function"
-})
-# → {"success": true, "replacements": 3, "code": "def new_function():..."}
-
-**Multi-file rename (batch refactoring):**
-r = s.post("https://ssh.xloud.ru/api/ast/rename", json={
-    "session_id": session_id,
-    "files": [
-        "/project/app/core/interfaces.py",
-        "/project/app/core/result.py",
-        "/project/app/services.py"
-    ],
-    "old_name": "old_function",
-    "new_name": "new_function"
-})
-# → {
-#     "success": true,
-#     "files": [
-#         {"path": "app/core/interfaces.py", "success": true, "replacements": 1},
-#         {"path": "app/core/result.py", "success": true, "replacements": 1},
-#         {"path": "app/services.py", "success": true, "replacements": 3}
-#     ],
-#     "total_files": 3,
-#     "files_changed": 3
-# }
-
-**Analyze code:**
-r = s.post("https://ssh.xloud.ru/api/ast/analyze", json={
-    "session_id": session_id,
-    "path": "/project/app/services.py"
-})
-# → {"functions": [...], "classes": [...], "imports": [...], "variables": [...]}
-
-
-### 2.6 Session Configuration
-| Method | Path | Описание |
-| GET | /api/config/session | Текущая конфигурация сессий |
-| PATCH | /api/config/session/timeout | Изменить session timeout |
-
-**Конфигурация:**
-r = s.get("https://ssh.xloud.ru/api/config/session")
-# → {"session_timeout": 3600, "cleanup_interval": 300, "max_sessions_per_ip": 10, "active_sessions": 5}
-
-**Изменить timeout:**
-r = s.patch("https://ssh.xloud.ru/api/config/session/timeout", json={"timeout": 7200})
-# → {"timeout": 7200, "previous_timeout": 3600}
-
-
-### 2.7 Scaffold API
-| Method | Path | Описание |
-| POST | /api/scaffold/python-class | Создать Python class + test |
-
-**Создать класс:**
-r = s.post("https://ssh.xloud.ru/api/scaffold/python-class", json={
-    "session_id": session_id,
-    "module_path": "app/services",
-    "class_name": "UserService",
-    "methods": ["get_user", "create_user", "delete_user"],
-    "include_test": true
-})
-# → {"files_created": ["app/services/user_service.py", "app/services/test_user_service.py"]}
-
-
-### 2.8 PTY (интерактивный терминал)
-| Method | Path | Описание |
-| POST | /api/ssh/pty/{session_id}/create | Создать PTY |
-| POST | /api/ssh/pty/{session_id}/input | Отправить ввод |
-| GET | /api/ssh/pty/{session_id}/output | Получить вывод |
-| POST | /api/ssh/pty/{session_id}/close | Закрыть PTY |
-
-**Когда использовать:** Интерактивные программы (htop, vim, opencode)
-
-s.post(f"https://ssh.xloud.ru/api/ssh/pty/{session_id}/create")
-time.sleep(2)
-
-s.post(f"https://ssh.xloud.ru/api/ssh/pty/{session_id}/input", json={"data": "docker ps\n"})
-time.sleep(1)
-
-r = s.get(f"https://ssh.xloud.ru/api/ssh/pty/{session_id}/output")
-print(r.json().get("output", ""))
-
-
-### 2.5 Exec Command (одиночные команды)
-| Method | Path | Описание |
-| POST | /api/ssh/execute | Выполнить команду, получить результат |
-
-r = s.post("https://ssh.xloud.ru/api/ssh/execute", json={
-    "session_id": session_id,
-    "command": "docker ps --format '{{.Names}}'",
-    "timeout": 30
-})
-print(r.json()["stdout"])
-
-**ВАЖНО:** Таймаут API = 60 секунд. Для длительных команд — Background Jobs API!
-
-### 2.4 Validation API
-
-**Запустить валидацию (mypy + pytest):**
-r = s.post("https://ssh.xloud.ru/api/validate", json={
-    "context_id": context_id,
-    "run_mypy": True,      # типизация
-    "run_tests": True      # тесты
-})
-result = r.json()
-print(result["summary"])
-# → "✅ Валидация пройдена: 2 шагов, 0 ошибок"
-# или
-# → "❌ Валидация не пройдена: 3 ошибок"
-
-# Детали по шагам:
-for step in result["steps"]:
-    print(f"  {step['name']}: {step['status']} ({step['duration']}s)")
-    if step['errors'] > 0:
-        print(f"    {step['output'][:500]}")
-
-**Автовалидация при редактировании:**
-r = s.patch("https://ssh.xloud.ru/api/context/file/edit", json={
-    "context_id": context_id,
-    "path": "app/main.py",
-    "operations": [...],
-    "run_validation": True,  # ← запустить mypy+tests после изменений
-    "commit_message": "Fix bug"
-})
-result = r.json()
-# Если валидация не пройдена — коммит не создаётся!
-if result.get("validation_result"):
-    print(result["validation_result"]["summary"])
-
-**Автовалидация в контексте:**
-# При создании контекста
-r = s.post("https://ssh.xloud.ru/api/context/create", json={
-    "session_id": session_id,
-    "name": "my_project",
-    "path": "/path/to/project",
-    "auto_validate": True  # ← валидация после каждого edit
-})
-
-### 2.5 Smart Context (состояние работы)
-
-**Открыть файл (создать вкладку):**
-s.post("https://ssh.xloud.ru/api/context/file/open", json={
-    "context_id": context_id,
-    "path": "app/main.py"
-})
-
-**Закрыть файл:**
-s.post("https://ssh.xloud.ru/api/context/file/close", json={
-    "context_id": context_id,
-    "path": "app/main.py"
-})
-
-**Обновить позицию курсора:**
-s.post("https://ssh.xloud.ru/api/context/cursor", json={
-    "context_id": context_id,
-    "path": "app/main.py",
-    "line": 42,
-    "column": 5
-})
-
-**Добавить команду в историю:**
-s.post("https://ssh.xloud.ru/api/context/command", json={
-    "context_id": context_id,
-    "command": "docker ps",
-    "directory": "/media/1TB/Python/NOD_gateway"
-})
-
-**Добавить поиск в историю:**
-s.post("https://ssh.xloud.ru/api/context/search", json={
-    "context_id": context_id,
-    "query": "class Context",
-    "path": "app"
-})
-
-**Добавить закладку:**
-s.post("https://ssh.xloud.ru/api/context/bookmark", json={
-    "context_id": context_id,
-    "path": "app/main.py",
-    "line": 42,
-    "note": "Важная функция"
-})
-
-**Удалить закладку:**
-s.delete("https://ssh.xloud.ru/api/context/bookmark", params={
-    "context_id": context_id,
-    "path": "app/main.py",
-    "line": 42
-})
-
-**Получить состояние контекста:**
-r = s.get(f"https://ssh.xloud.ru/api/context/{context_id}/state")
-state = r.json()
-print(f"Открытые файлы: {[t['path'] for t in state['tabs']]}")
-print(f"Активный файл: {state['active_tab']}")
-print(f"Последняя команда: {state['command_history'][-1] if state['command_history'] else 'нет'}")
-print(f"Закладки: {len(state['bookmarks'])}")
-
-## 2.6 Workflow с Context API (рекомендуемый)
-
-import requests, urllib3
-urllib3.disable_warnings()
-
-# 1. Авторизация
-s = requests.Session()
-s.verify = False
-s.post("https://auth.xloud.ru/api/firstfactor", json={
-    "username": "agent",
-    "password": "NpvSBhi7ag1X8stB3kFMnCcxM9PKE9R",
-    "request_method": "GET",
-    "request_uri": "https://ssh.xloud.ru/"
-})
-
-# 2. SSH Connect
-r = s.post("https://ssh.xloud.ru/api/ssh/connect", json={
-    "host": "192.168.1.103",
-    "port": 22,
-    "username": "root",
-    "password": "CHANGEME"
-})
-session_id = r.json()["session_id"]
-
-# 3. Создать контекст (один раз на проект!)
-r = s.post("https://ssh.xloud.ru/api/context/create", json={
-    "session_id": session_id,
-    "name": "nod_gateway",
-    "path": "/media/1TB/Python/NOD_gateway/gateway_client",
-    "auto_commit": True,
-    "auto_validate": False  # пока не реализовано
-})
-ctx = r.json()
-context_id = ctx["context_id"]
-
-# 4. Проверить git-статус
-if ctx["git"]["status"] == "not_initialized":
-    print("⚠️ Проект не в Git. Инициализируем...")
-    s.post("https://ssh.xloud.ru/api/git/init", json={
-        "context_id": context_id,
-        "remote_url": "https://github.com/user/repo.git"  # если есть
-    })
-
-# 5. Работа с файлами через контекст
-r = s.patch("https://ssh.xloud.ru/api/context/file/edit", json={
-    "context_id": context_id,
-    "path": "app/main.py",
-    "operations": [
-        {"type": "insert_after", "after": "from fastapi import", "text": "    BackgroundTasks,"}
-    ],
-    "commit_message": "Add BackgroundTasks import"
-})
-result = r.json()
-print(f"✅ Коммит: {result.get('git_commit', 'нет')}")
-
-# 6. Завершение
-s.delete(f"https://ssh.xloud.ru/api/context/{context_id}")
-s.post("https://ssh.xloud.ru/api/ssh/disconnect", json={"session_id": session_id})
-
-### 2.7 Batch Operations (множественные операции)
-
-**Выполнить несколько операций за один запрос:**
-r = s.post("https://ssh.xloud.ru/api/batch/execute", json={
-    "context_id": context_id,
-    "operations": [
-        {
-            "type": "read",
-            "path": "app/main.py"
-        },
-        {
-            "type": "edit",
-            "path": "app/models.py",
-            "operations": [
-                {"type": "replace", "old": "class OldName", "new": "class NewName"}
-            ]
-        },
-        {
-            "type": "create",
-            "path": "app/new_module.py",
-            "content": "# New module\nprint('Hello')\n"
-        },
-        {
-            "type": "execute",
-            "command": "python -m pytest tests/ -x"
-        }
-    ],
-    "auto_commit": True,
-    "commit_message": "Refactor: rename classes",
-    "run_validation": True
-})
-result = r.json()
-print(result["summary"])
-# → "✅ Все 4 операций выполнены успешно"
-print(f"Коммит: {result.get('git_commit', 'нет')}")
-
-# Детали по каждой операции:
-for op in result["operations"]:
-    status = "✅" if op["success"] else "❌"
-    print(f"  {status} {op['operation']}: {op['path']} ({op['duration']}s)")
-
-**Типы batch операций:**
-- `read` — прочитать файл
-- `edit` — отредактировать файл (с operations)
-- `create` — создать новый файл
-- `delete` — удалить файл
-- `rename` — переименовать файл (new_path)
-- `copy` — скопировать файл (dest_path)
-- `execute` — выполнить shell команду
-
-**Ошибки и continue_on_error:**
-{
-    "type": "edit",
-    "path": "app/main.py",
-    "operations": [...],
-    "continue_on_error": True  # ← продолжить даже если эта операция упадёт
-}
-
-## 3. КОГДА ЧТО ИСПОЛЬЗОВАТЬ
-| Задача | API |
-| Работа с проектом (рекомендуется) | `POST /api/context/create` → `context_id` |
-| Чтение файла через контекст | `POST /api/context/file/read` |
-| Редактирование с автокоммитом | `PATCH /api/context/file/edit` |
-| Валидация (mypy + pytest) | `POST /api/validate` |
-| Множественные операции (batch) | `POST /api/batch/execute` |
-| Рефакторинг нескольких файлов | `POST /api/batch/execute` (auto_commit) |
-| Поиск кода в проекте | `POST /api/code/search` |
-| Генерация кода по описанию | `POST /api/code/generate` |
-| Умная вставка кода | `POST /api/code/insert` |
-| Шаблоны кода | `GET /api/templates` + `POST /api/templates/render` |
-| Бэкап перед изменениями | `POST /api/recovery/backup` |
-| Восстановление из бэкапа | `POST /api/recovery/restore` |
-| Метрики проекта | `POST /api/analytics` |
-| Инициализировать git | `POST /api/git/init` |
-| Создать коммит | `POST /api/git/commit` |
-| Бэкап перед рефакторингом | `POST /api/git/backup` |
-| Прочитать файл (legacy) | `POST /api/file/read` |
-| Отредактировать файл (legacy) | `PATCH /api/file/edit` |
-| Запустить pytest (5 мин) | `POST /api/jobs/run` + `/result` |
-| Смотреть логи в реальном времени | `GET /api/jobs/{id}/stream` |
-| Интерактивная программа | `PTY` |
-| Простая команда (< 30с) | `POST /api/ssh/execute` |
-| Docker команды | `POST /api/ssh/execute` |
-| Работать с opencode | `PTY` |
-| Перезапустить сервис | `POST /api/jobs/run` |
-| Проверить типизацию | `POST /api/validate` (mypy) |
-| Проверить тесты | `POST /api/validate` (pytest) |
-| Поиск по всему проекту | `POST /api/search/global` |
-| Глобальная замена | `POST /api/replace/global` |
-| Дерево файлов | `POST /api/tree` |
-| Управление серверами | `GET /api/servers` |
-| Подключиться к серверу | `POST /api/servers/{id}/connect` |
-| Снапшот проекта | `POST /api/snapshots` |
-| Восстановить снапшот | `POST /api/snapshots/restore` |
-| CI/CD Webhook | `POST /api/webhooks` |
-| Автодеплой | `POST /api/webhooks/{id}/deploy` |
-| Редактор с подсветкой | Monaco Editor в UI |
-
-
-## 4. ОПАСНЫЕ ПАТТЕРНЫ (не делай!)
-| Не делай | Делай вместо |
-| `cat > file << 'EOF'` | `PATCH /api/context/file/edit` |
-| `sed -i` без проверки | `POST /api/context/file/read` потом `PATCH` |
-| `exec_command` на 5 минут | `POST /api/jobs/run` |
-| `time.sleep(120)` в коде | SSE stream + polling status |
-| Не делать heartbeat | `POST /api/ssh/heartbeat` каждые 30с |
-| Править тесты без проверки | `POST /api/validate` после изменений |
-| Править без контекста | `POST /api/context/create` + работать через context_id |
-| Забывать коммитить | Включить `auto_commit: true` в контексте |
-| Потерять изменения | `POST /api/git/backup` перед рефакторингом |
-| Не проверять типизацию | `POST /api/validate` (mypy) |
-| Коммитить с ошибками | `auto_validate: true` в контексте |
-
-
-## 5. ПРОКСИ ДЛЯ OPENCODE/Бесплатная модель BIG PICKLE
-### Постоянные прокси (3 штуки):
-| Прокси | Назначение |
-| `http://192.168.1.199:3128` | Основной — ротируемый (адреса меняются при исчерпании лимитов) |
-| `http://192.168.1.199:20170` | Запасной #1 |
-| `http://192.168.1.103:20190` | Запасной #2 |
-
-### Использование:
-# Пробуй по очереди, если один пишет о конце лимита — переключайся
-PROXIES = [
-    "http://192.168.1.199:3128",   # Основной (ротируемый)
-    "http://192.168.1.199:20170",  # Запасной #1
-    "http://192.168.1.103:20190",  # Запасной #2
-]
-def run_opencode_with_proxy(question: str):
-    for proxy in PROXIES:
-        env = {
-            "HTTP_PROXY": proxy,
-            "HTTPS_PROXY": proxy,
-            "http_proxy": proxy,
-            "https_proxy": proxy,
-        }
-        try:
-            r = s.post("https://ssh.xloud.ru/api/jobs/run", json={
-                "session_id": session_id,
-                "command": f"cd /media/1TB/Python/NOD_gateway && HTTP_PROXY={proxy} HTTPS_PROXY={proxy} http_proxy={proxy} https_proxy={proxy} opencode run '{question}'",
-                "timeout": 600,
-                "description": "opencode analysis"
-            })
-            job_id = r.json()["job_id"]
-            print(f"Started with proxy {proxy}, job {job_id}")
-            return job_id
-        except Exception as e:
-            print(f"Proxy {proxy} failed: {e}")
-            continue
-    raise RuntimeError("All proxies exhausted!")
-Важно:
-3128 — ротируемый прокси. Если лимиты кончились — скажи пользователю, он поменяет адреса на этом порту
-Пробуй прокси по очереди, если один не отвечает — бери следующий
-Прокси дают бесконечный доступ — за счёт ротации 3128 + 2 запасных
-Без прокси opencode быстро исчерпывает лимиты
-
-Итоговая команда для запуска выглядит так
-http_proxy=http://192.168.1.199:3128 https_proxy=http://192.168.1.199:3128 opencode
-
-
-## 6. БЫСТРЫЕ ШАБЛОНЫ
-### Шаблон 1: Запуск тестов
-def run_tests(component, marker=""):
-    cmd = f"cd /media/1TB/Python/NOD_gateway/{component} && python -m pytest tests/ {marker} -x -q"
-    r = s.post("https://ssh.xloud.ru/api/jobs/run", json={
-        "session_id": session_id, "command": cmd, "timeout": 300
-    })
-    job_id = r.json()["job_id"]
-    
-    while True:
-        time.sleep(10)
-        r = s.get(f"https://ssh.xloud.ru/api/jobs/{job_id}/status")
-        if r.json()["status"] in ("completed", "failed", "cancelled"):
-            break
-    
-    r = s.get(f"https://ssh.xloud.ru/api/jobs/{job_id}/result")
-    return r.json()
-
-result = run_tests("gateway_client")
-output = result.get("stdout", "") + result.get("stderr", "")
-print(output)
-print(f"Exit: {result['exit_code']}, Duration: {result['duration']:.1f}s")
-
-### Шаблон 2: Безопасное редактирование
-def edit_file(path, old_text, new_text):
-    r = s.post("https://ssh.xloud.ru/api/file/read", json={
-        "session_id": session_id, "path": path
-    })
-    content = r.json().get("content", "")
-    
-    if old_text not in content:
-        raise ValueError(f"'{old_text}' not found in {path}")
-    
-    r = s.patch("https://ssh.xloud.ru/api/file/edit", json={
-        "session_id": session_id, "path": path,
-        "operations": [{"type": "replace", "old": old_text, "new": new_text}]
-    })
-    
-    r = s.post("https://ssh.xloud.ru/api/file/read", json={
-        "session_id": session_id, "path": path
-    })
-    new_content = r.json().get("content", "")
-    assert new_text in new_content, "Edit not applied!"
-    return True
-
-### Шаблон 3: Проверка mypy
-def check_mypy(component):
-    r = s.post("https://ssh.xloud.ru/api/jobs/run", json={
-        "session_id": session_id,
-        "command": f"cd /media/1TB/Python/NOD_gateway/{component} && python -m mypy app/ --strict --ignore-missing-imports --no-error-summary",
-        "timeout": 120
-    })
-    result = s.get(f"https://ssh.xloud.ru/api/jobs/{r.json()['job_id']}/result").json()
-    errors = (result.get("stdout", "") + result.get("stderr", "")).strip()
-    if errors:
-        print(f"mypy errors:\n{errors}")
-        return False
-    print(f"mypy: 0 errors")
-    return True
-
-
-### 2.8 Code Intelligence (умный поиск и генерация)
-
-**Поиск кода в проекте:**
-r = s.post("https://ssh.xloud.ru/api/code/search", json={
-    "session_id": session_id,
-    "path": "/media/1TB/Python/NOD_gateway/gateway_client",
-    "query": "class TransportEngine",
-    "language": "py"
-})
-results = r.json()["results"]
-for res in results:
-    print(f"{res['path']}:{res['line']} - {res['content']}")
-
-**Генерация кода по описанию:**
-r = s.post("https://ssh.xloud.ru/api/code/generate", json={
-    "instruction": "Создать FastAPI endpoint для health check",
-    "language": "python"
-})
-code = r.json()["code"]
-print(code)
-
-**Умная вставка кода:**
-r = s.post("https://ssh.xloud.ru/api/code/insert", json={
-    "context_id": context_id,
-    "path": "app/main.py",
-    "instruction": "Добавить endpoint /api/status",
-    "auto_commit": True
-})
-print(r.json()["suggestion"]["explanation"])
-
-### 2.9 Template Library (шаблоны кода)
-
-**Список шаблонов:**
-r = s.get("https://ssh.xloud.ru/api/templates")
-for t in r.json()["templates"]:
-    print(f"{t['id']}: {t['name']} ({t['language']})")
-
-**Использование шаблона:**
-r = s.post("https://ssh.xloud.ru/api/templates/render", json={
-    "context_id": context_id,
-    "template_id": "fastapi_endpoint",
-    "params": {
-        "method": "get",
-        "path": "/api/users",
-        "name": "get_users",
-        "description": "Get all users"
-    },
-    "target_path": "/media/1TB/Python/NOD_gateway/gateway_client/app/endpoints/users.py",
-    "auto_commit": True
-})
-
-### 2.10 Error Recovery (восстановление)
-
-**Создать бэкап перед изменениями:**
-s.post("https://ssh.xloud.ru/api/recovery/backup", json={
-    "context_id": context_id,
-    "name": "before_refactor"
-})
-
-**Восстановить из бэкапа:**
-s.post("https://ssh.xloud.ru/api/recovery/restore", json={
-    "context_id": context_id
-})
-
-**Список бэкапов:**
-r = s.get("https://ssh.xloud.ru/api/recovery/backups", params={"context_id": context_id})
-for backup in r.json()["backups"]:
-    print(f"{backup['id']}: {backup['name']}")
-
-### 2.11 Project Analytics (метрики проекта)
-
-**Анализ проекта:**
-r = s.post("https://ssh.xloud.ru/api/analytics", json={
-    "session_id": session_id,
-    "path": "/media/1TB/Python/NOD_gateway/gateway_client"
-})
-data = r.json()
-print(f"Файлов: {data['files']['total_files']}")
-print(f"Строк кода: {data['code']['python_lines_of_code']}")
-print(f"Классов: {data['code']['classes']}")
-print(f"Функций: {data['code']['functions']}")
-print(f"Тестов: {data['tests']['total_tests']}")
-print(f"Коммитов: {data['git']['total_commits']}")
-print(f"Устаревших пакетов: {data['dependencies']['outdated_packages']}")
-
-### 2.12 Global Search & Replace (поиск и замена)
-
-**Поиск по всему проекту:**
-r = s.post("https://ssh.xloud.ru/api/search/global", json={
-    "session_id": session_id,
-    "path": "/media/1TB/Python/NOD_gateway/gateway_client",
-    "query": "class TransportEngine",
-    "use_regex": False,
-    "case_sensitive": True
-})
-for match in r.json()["matches"]:
-    print(f"{match['path']}:{match['line']} - {match['content']}")
-
-**Глобальная замена (dry_run сначала!):**
-# Сначала проверим что будет изменено
-r = s.post("https://ssh.xloud.ru/api/replace/global", json={
-    "session_id": session_id,
-    "path": "/media/1TB/Python/NOD_gateway/gateway_client",
-    "search": "old_function_name",
-    "replace": "new_function_name",
-    "dry_run": True
-})
-print(f"Будет изменено файлов: {r.json()['files_modified']}")
-
-# Теперь выполним замену
-r = s.post("https://ssh.xloud.ru/api/replace/global", json={
-    "session_id": session_id,
-    "path": "/media/1TB/Python/NOD_gateway/gateway_client",
-    "search": "old_function_name",
-    "replace": "new_function_name",
-    "auto_commit": True,
-    "context_id": context_id
-})
-print(f"Изменено файлов: {r.json()['files_modified']}")
-print(f"Всего замен: {r.json()['total_replacements']}")
-
-### 2.13 File Tree Explorer (дерево файлов)
-
-**Получить структуру директории:**
-r = s.post("https://ssh.xloud.ru/api/tree", json={
-    "session_id": session_id,
-    "path": "/media/1TB/Python/NOD_gateway/gateway_client",
-    "depth": 2,
-    "show_hidden": False
-})
-tree = r.json()
-print(f"Файлов: {tree['total_files']}, Директорий: {tree['total_directories']}")
-
-def print_tree(node, indent=0):
-    prefix = "  " * indent
-    icon = "📁" if node['type'] == 'directory' else "📄"
-    print(f"{prefix}{icon} {node['name']}")
-    for child in node.get('children', []):
-        print_tree(child, indent + 1)
-
-print_tree(tree['root'])
-
-### 2.14 Multi-Server Management (управление серверами)
-
-**Список серверов:**
-r = s.get("https://ssh.xloud.ru/api/servers")
-for server in r.json()["servers"]:
-    print(f"{server['name']}: {server['host']} ({server['status']})")
-
-**Подключиться к серверу:**
-r = s.post("https://ssh.xloud.ru/api/servers/lxc103/connect", json={
-    "server_id": "lxc103",
-    "password": "CHANGEME"
-})
-session_id = r.json()["session_id"]
-print(f"Подключено к {r.json()['message']}")
-
-**Добавить новый сервер:**
-r = s.post("https://ssh.xloud.ru/api/servers", json={
-    "id": "new_server",
-    "name": "New Server",
-    "host": "192.168.1.200",
-    "port": 22,
-    "username": "root",
-    "tags": ["web", "production"]
-})
-
-### 2.15 Snapshot System (точки восстановления)
-
-**Создать снапшот:**
-r = s.post("https://ssh.xloud.ru/api/snapshots", json={
-    "context_id": context_id,
-    "name": "before_major_refactor",
-    "description": "Перед большим рефакторингом"
-})
-print(r.json()["message"])
-
-**Восстановить из снапшота:**
-r = s.post("https://ssh.xloud.ru/api/snapshots/restore", json={
-    "context_id": context_id,
-    "snapshot_id": "snap_1234567890"
-})
-print(f"Восстановлено файлов: {len(r.json()['restored_files'])}")
-
-**Список снапшотов:**
-r = s.get("https://ssh.xloud.ru/api/snapshots", params={"context_id": context_id})
-for snap in r.json()["snapshots"]:
-    print(f"{snap['id']}: {snap['name']} ({len(snap['files'])} files)")
-
-### 2.16 CI/CD Webhooks (автодеплой)
-
-**Создать webhook:**
-r = s.post("https://ssh.xloud.ru/api/webhooks", json={
-    "name": "Auto-deploy gateway",
-    "webhook_type": "gitea",
-    "secret": "my_webhook_secret",
-    "target_path": "/media/1TB/Python/NOD_gateway/gateway_client",
-    "deploy_command": "docker-compose up -d",
-    "context_id": context_id
-})
-webhook_id = r.json()["id"]
-print(f"Webhook URL: https://ssh.xloud.ru/api/webhooks/{webhook_id}/deploy")
-
-**Ручной деплой:**
-r = s.post(f"https://ssh.xloud.ru/api/webhooks/{webhook_id}/deploy", json={
-    "session_id": session_id
-})
-print(f"Deploy job: {r.json()['job_id']}")
-
-### 2.17 Monaco Editor (встроенный редактор)
-
-**Использование через UI:**
-- Открой https://ssh.xloud.ru в браузере
-- Подключись к серверу
-- Используй File Tree слева для навигации
-- Кликни на файл чтобы открыть в Monaco Editor
-- Поддерживаются языки: Python, JavaScript, TypeScript, HTML, CSS, JSON, YAML, Markdown, Shell, Dockerfile
-- Нажми **Save** (Ctrl+S) чтобы сохранить файл
-
-**API для открытия файла в редакторе:**javascript
-// Через JavaScript в браузере
-window.loadFileIntoEditor('/path/to/file.py', 'file content here');
-
-## 7. КЛЮЧЕВЫЕ ПУТИ
-| Что | Путь |
-| Проект | `/media/1TB/Python/NOD_gateway/` |
-| Gateway client | `/media/1TB/Python/NOD_gateway/gateway_client/` |
-| Payment service | `/media/1TB/Python/NOD_gateway/payment_service/` |
-| Master server | `/media/1TB/Python/NOD_gateway/master_server/` |
-| Docker Compose | `/media/1TB/Docker/compose/` |
-| Манифест | `/media/1TB/Python/NOD_gateway/MANIFEST.md` |
-
-## 8. СЕРВЕРЫ
-
-| IP | Роль | Логин | Пароль |
-| 192.168.1.103 | AI (Docker Host) | root | CHANGEME |
-| 192.0.2.10 | Nginx Proxy | root | CHANGEME |
-| 192.168.1.101 | Bitrix | root | CHANGEME |
-| 192.168.1.102 | Minecraft | root | CHANGEME |
-
-RAM: 192 GB (swap выключен)
-Docker: 66 контейнеров
-
-
-## 9. PYTHON SDK
-
-### Загрузка SDK
+    "password": "<SSH_PASSWORD>"
+  }'
+```
+
+Пример (локальная сеть):
 
 ```bash
-# Способ 1: Скачать с сервера
-curl -O https://ssh.xloud.ru/api/sdk/download
-
-# Способ 2: Из GitHub
-git clone https://github.com/gpakoh/ssh-gateway-ai.git
-cp ssh-gateway-ai/sdk/ssh_gateway.py .
-
-# Способ 3: Напрямую через API
-python3 -c "
-import requests
-r = requests.get('https://ssh.xloud.ru/api/sdk/download', verify=False)
-open('ssh_gateway.py', 'w').write(r.text)
-print('SDK downloaded')
-"
+curl -X GET http://192.168.1.103:8085/health
 ```
 
-### Использование SDK
-
-```python
-from sdk.ssh_gateway import SSHGatewayClient
-
-# Создать клиент
-client = SSHGatewayClient("https://ssh.xloud.ru")
-
-# Подключиться (с авто-reconnect и heartbeat)
-session = client.ssh_connect("192.168.1.103", username="root", password="CHANGEME")
-
-# Выполнить команду
-result = client.execute("docker ps")
-print(result["stdout"])
-
-# Редактировать файл
-client.edit_file("app/main.py", [
-    {"type": "replace", "old": "def old():", "new": "def new():"}
-])
-
-# Читать файлы
-content = client.read_file("app/main.py")
-files = client.batch_read(["app/main.py", "app/config.py"])
-
-# Загрузить / скачать файл
-client.upload_file("local.txt", "/remote/path/file.txt")
-client.download_file("/remote/path/file.txt", "local.txt")
-
-# Фоновые задачи
-job = client.run_background("pytest tests/", timeout=300)
-for log in job.stream_logs():
-    print(log)
-result = job.wait()
-
-# Работа с контекстом
-ctx_id = client.create_context("my_project", "/path/to/project", auto_commit=True)
-client.context_edit("app/main.py", [...], commit_message="Update")
-
-# Отключиться
-client.disconnect()
-```
-
-**Особенности SDK:**
-- Авто-reconnect при обрыве SSH-соединения
-- Heartbeat каждые 30 сек (фоновый поток)
-- Поддержка Unicode и многобайтовых символов
-- Бинарные файлы через base64
-
-
-## 10. GIT WORKFLOW (GitHub + Gitea)
-
-### Настройка remotes
-
-```bash
-# Проверить текущие remotes
-git remote -v
-
-# Добавить GitHub (если нет)
-git remote add github https://github.com/gpakoh/ssh-gateway-ai.git
-
-# Добавить Gitea (если нет)
-git remote add gitea http://git.xloud.ru:3005/gpakoh/ssh-gateway-ai.git
-```
-
-### Ежедневный workflow
-
-```bash
-# 1. Сделать изменения
-# ... редактируете код ...
-
-# 2. Проверить статус
-git status
-
-# 3. Добавить изменения
-git add -A
-# или конкретные файлы:
-git add app/main.py app/models.py
-
-# 4. Закоммитить
-git commit -m "Описание изменений"
-
-# 5. Запушить в ОБА репозитория
-git push github master
-git push gitea master
-
-# Или одной командой:
-git push github master && git push gitea master
-```
-
-### Работа с ветками
-
-```bash
-# Создать новую ветку
-git checkout -b feature/new-endpoint
-
-# Работать в ветке, коммитить, пушить
-git push github feature/new-endpoint
-
-# Смержить в master
-git checkout master
-git merge feature/new-endpoint
-git push github master && git push gitea master
-```
-
-### Клонирование репозитория
-
-```bash
-# С GitHub
-git clone https://github.com/gpakoh/ssh-gateway-ai.git
-
-# С Gitea
-git clone http://git.xloud.ru:3005/gpakoh/ssh-gateway-ai.git
-```
-
-### Решение конфликтов
-
-```bash
-# Если push отклонён (изменения на сервере)
-git pull github master --rebase
-# исправить конфликты если есть
-git push github master
-```
-
-
-## 11. ЧЕКЛИСТ ПЕРЕД РАБОТОЙ
-
-- [ ] Authelia login
-- [ ] SSH connect → получить session_id
-- [ ] Создать контекст: `POST /api/context/create`
-- [ ] Проверить git-статус контекста
-- [ ] Если git не инициализирован — решить: init или работать без git
-- [ ] Heartbeat (каждые 30 сек)
-- [ ] Готов к работе!
-
-
-## 12. SWARM MODE (300+ агентов)
-
-Для работы с большим количеством агентов доступны дополнительные компоненты:
-
-### Redis Job Queue
-
-Персистентная очередь задач с ретраями:
-
-```python
-# Поставить задачу в очередь
-job_id = await redis_queue.enqueue(
-    session_id="...",
-    command="pytest tests/",
-    priority=0,           # 0 = высший приоритет
-    max_retries=3,
-    timeout=3600,
-)
-
-# Получить статистику очереди
-r = s.get("/api/jobs/queue/stats")
-# → {"pending": 42, "processing": 5, "completed": 128, "dead_letter": 2}
-
-# Получить failed jobs
-r = s.get("/api/jobs/queue/dead?limit=100")
-# → {"jobs": [...], "count": 2}
-```
-
-### Circuit Breaker
-
-Защита от каскадных отказов:
-
-```python
-# Проверить статус circuit breaker'ов
-r = s.get("/api/circuit-breaker/stats")
-# → {
-#   "192.168.1.103": {"state": "closed", "failure_count": 0},
-#   "192.0.2.10": {"state": "open", "failure_count": 5}
-# }
-```
-
-**Состояния:**
-- `closed` — нормальная работа
-- `open` — сервер недоступен, запросы блокируются
-- `half_open` — тестирование восстановления
-
-### Distributed Locks
-
-Блокировки файлов при concurrent editing:
-
-```python
-from app.distributed_lock import DistributedLock
-
-lock = DistributedLock()
-
-# Захватить блокировку
-token = await lock.acquire("app/main.py", ttl=30)
-if token:
-    try:
-        # Редактировать файл
-        await file_editor.edit_file(session_id, "app/main.py", [...])
-    finally:
-        # Освободить блокировку
-        await lock.release("app/main.py", token)
-```
-
-### Prometheus Metrics
-
-```bash
-# Получить метрики
-curl https://ssh.xloud.ru/metrics
-
-# Доступные метрики:
-# ssh_gateway_requests_total — RPS по endpoint'ам
-# ssh_gateway_ssh_connections_active — активные SSH-сессии
-# ssh_gateway_queue_depth — глубина очереди
-# ssh_gateway_circuit_breaker_state — состояние circuit breaker'ов
-```
-
-### Bulk Operations
-
-Массовые операции с concurrency control:
-
-```python
-# Массовое выполнение команд (до 100 команд, concurrency=10)
-r = s.post("/api/bulk/execute", json={
-    "session_id": sid,
-    "commands": ["echo 'cmd1'", "echo 'cmd2'", "echo 'cmd3'"],
-})
-# → {
-#   "results": [
-#     {"command": "echo 'cmd1'", "success": True, "stdout": "cmd1\n", "exit_code": 0, "error": None},
-#     {"command": "echo 'cmd2'", "success": True, "stdout": "cmd2\n", "exit_code": 0, "error": None},
-#   ],
-#   "total_commands": 3,
-#   "successful": 3,
-#   "failed": 0,
-#   "total_duration": 1.8
-# }
-
-# Массовое чтение файлов (до 50 файлов, concurrency=20)
-r = s.post("/api/bulk/read", json={
-    "session_id": sid,
-    "paths": ["app/main.py", "app/config.py", ...],
-})
-# → {"files": {"app/main.py": "...", ...}, "errors": {}}
-```
-
-### Persistent Sessions
-
-Сессии хранятся в PostgreSQL и переживают перезапуск gateway:
-
-```bash
-# Включить в docker-compose.yml
-environment:
-  - PERSISTENT_SESSIONS_ENABLED=true
-  - DATABASE_URL=postgresql+asyncpg://user:pass@postgres:5432/ssh_gateway
-```
-
-### Настройка инфраструктуры Swarm
-
-```yaml
-# docker-compose.yml
-services:
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes --maxmemory 256mb
-
-  postgres:
-    image: postgres:15-alpine
-    environment:
-      POSTGRES_DB: ssh_gateway
-      POSTGRES_USER: ssh_user
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-  web-ssh-gateway:
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgresql+asyncpg://ssh_user:${DB_PASSWORD}@postgres:5432/ssh_gateway
-      - PERSISTENT_SESSIONS_ENABLED=true
-      - REDIS_JOB_QUEUE_ENABLED=true
-    depends_on:
-      - redis
-      - postgres
-```
-
-## 13. БЕЗОПАСНОСТЬ
-
-### Встроенные защиты
-
-**Rate Limiting:**
-- 100 запросов/минута с одного IP
-- 10 сессий на один IP
-
-**Санитизация команд:**
-- Блокировка опасных команд: `rm -rf /`, fork bomb, reverse shell
-- Проверка паттернов: `curl | bash`, `nc -e`, `mkfifo`
-- Возврат ошибки 400 с описанием
-
-**Валидация путей:**
-- Запрет directory traversal (`../`, `~`)
-- Запрет доступа к системным файлам (`/etc/passwd`, `/root/.ssh`)
-- Ограничение base_path для контекстных операций
-
-**Security Headers:**
-- `X-Content-Type-Options: nosniff`
-- `X-Frame-Options: DENY`
-- `X-XSS-Protection: 1; mode=block`
-- `Strict-Transport-Security`
-- `Content-Security-Policy`
-
-**Audit Logging:**
-- Все команды логируются в `/app/logs/audit.log`
-- Все операции с файлами логируются
-- Попытки атак фиксируются
-
-**Docker Hardening:**
-- Non-root user (appuser:1000)
-- Read-only filesystem
-- Drop all capabilities
-- No new privileges
-- Resource limits (2 CPU, 512MB RAM)
-
-**Шифрование:**
-- SSH credentials шифруются через Fernet
-- Master key через ENV `ENCRYPTION_KEY`
-
-### Примеры блокировок
-
-```bash
-# Блокируется: опасная команда
-curl -X POST /api/ssh/execute -d '{"command": "rm -rf /"}'
-# → 400: "Command contains dangerous pattern: rm -rf /"
-
-# Блокируется: path traversal
-curl -X POST /api/file/read -d '{"path": "../../../etc/passwd"}'
-# → 400: "Path contains directory traversal characters"
-
-# Работает: нормальная команда
-curl -X POST /api/ssh/execute -d '{"command": "ls -la"}'
-# → 200: {"stdout": "...", "exit_code": 0}
-```
-
-## 13. 16 ПРАВИЛ (полный набор)
-1. **Heartbeat каждые 30 сек** — иначе сессия отвалится
-2. **Background Jobs для всего > 60 сек** — exec_command таймаутит
-3. **File Edit API вместо cat/sed** — безопаснее, есть rollback
-4. **SSE Stream для логов** — видишь прогресс в реальном времени
-5. **Прокси для opencode** — иначе лимиты кончатся
-6. **Валидация после каждого изменения** — `POST /api/validate` или `auto_validate: true`
-7. **Swap выключен** — 192 GB RAM, не экономь
-8. **Все интерфейсы async** — не миксуй sync/async
-9. **Конкретные except** — не используй широкие Exception
-10. **auto_commit + auto_validate** — настрой один раз, работай спокойно
-11. **Global Search для рефакторинга** — `POST /api/search/global` вместо ручного поиска
-12. **File Tree для навигации** — `POST /api/tree` вместо `ls -R`
-13. **Snapshots перед большими изменениями** — `POST /api/snapshots` для безопасности
-14. **Multi-Server для управления инфраструктурой** — `GET /api/servers`
-15. **Monaco Editor для редактирования** — встроенный редактор с подсветкой
-16. **Webhooks для CI/CD** — автодеплой при push на git
-
-
-> Написано: 2026-05-18
-> Версия: 4.6.1 (35 фич: +Swarm Mode — Redis Job Queue, Circuit Breaker, Distributed Locks, Prometheus Metrics, Bulk Operations, Persistent Sessions, +create operation fix)
-> Домен: https://ssh.xloud.ru
-> GitHub: https://github.com/gpakoh/ssh-gateway-ai
-> Gitea: http://git.xloud.ru:3005/gpakoh/ssh-gateway-ai
-
----
-
-## 4. ИСТОРИЯ ИЗМЕНЕНИЙ
-
-### v4.6.4 (2026-05-19) — DX Improvements
-- **Добавлено**: Custom validation errors — field-specific сообщения (какое поле отсутствует/невалидно)
-- **Добавлено**: `GET /api/config/session` + `PATCH /api/config/session/timeout` — настраиваемый session timeout
-- **Добавлено**: `POST /api/file/write` — atomic write через JSON body (без heredoc escaping)
-- **Добавлено**: `GET /api/project/tree` — упрощённое дерево проекта
-- **Добавлено**: `GET /api/git/simple-status` + `POST /api/git/diff` — Git integration endpoints
-- **Добавлено**: `POST /api/ast/rename` + `POST /api/refactor/rename` (alias) + `POST /api/ast/analyze` — AST-aware рефакторинг (single + multi-file)
-- **Добавлено**: `GET /api/jobs/{id}/events` — alias для SSE stream
-- **Добавлено**: `POST /api/scaffold/python-class` — генерация Python class + test из шаблона
-- **Добавлено**: `GET /api/sdk/download` поддерживает `?api_key=` и `X-API-Key` header (env `API_KEY`)
-- **Исправлено**: PATCH `append` операция — добавлена валидация `text` поля
-- **Исправлено**: Graceful shutdown — drain active jobs перед рестартом
-- **Исправлено**: Auto-directory creation — write_file и scaffold создают parent directories автоматически
-
-### v4.6.2 (2026-05-19) — SDK Download
-- **Добавлено**: `GET /api/sdk/download` — скачивание Python SDK напрямую с сервера
-- **Обновлено**: Документация — 3 способа загрузки SDK (с сервера, GitHub, curl)
-
-### v4.6.1 (2026-05-19) — Swarm Mode Fixes
-- **Исправлено**: Bulk execute endpoint — использует `session_id` вместо `context_id`
-- **Исправлено**: PATCH `create` операция — создает файл если не существует (не падает с "No such file")
-- **Исправлено**: Bulk execute response — правильная структура с `results`, `successful`, `failed`
-- **Добавлено**: `BulkExecuteRequest` и `BulkExecuteResponse` модели для `/api/bulk/execute`
-
-### v4.6.0 (2026-05-19) — Swarm Mode
-- **Добавлено**: Redis Job Queue — персистентная очередь задач с retries и dead letter queue
-- **Добавлено**: Circuit Breaker — защита от каскадных отказов SSH-серверов
-- **Добавлено**: Distributed Locks — redlock для concurrent file editing
-- **Добавлено**: Prometheus Metrics — /metrics endpoint (RPS, latency, queue depth, SSH stats)
-- **Добавлено**: Bulk Operations — массовое выполнение команд и чтение файлов
-- **Добавлено**: Persistent Sessions — PostgreSQL storage для сессий
-- **Добавлено**: Docker Compose с Redis и PostgreSQL
-- **Обновлено**: Документация — раздел Swarm Mode с примерами
-
-### v4.5.1 (2026-05-19)
-- **Добавлено**: PATCH операция `create` — создание/перезапись файла
-- **Добавлено**: `reconnect_reason` в health endpoint ("timeout", "connection_reset")
-- **Исправлено**: Документация PATCH — добавлены все типы операций с примерами
-- **Исправлено**: Upload/download примеры с query params
-
-### v4.5 (2026-05-19)
-- **Добавлено**: Rate limiting — 100 req/min, 10 сессий/IP
-- **Добавлено**: Санитизация команд — блокировка rm -rf, fork bomb, reverse shell
-- **Добавлено**: Валидация путей — защита от directory traversal
-- **Добавлено**: Security headers — X-Content-Type-Options, X-Frame-Options, CSP
-- **Добавлено**: Audit logging — /app/logs/audit.log
-- **Добавлено**: Docker hardening — non-root, read-only fs, cap_drop, resource limits
-- **Добавлено**: Шифрование credentials через Fernet (ENCRYPTION_KEY)
-- **Обновлено**: Dockerfile — security-first подход
-- **Обновлено**: docker-compose.yml — security_opt, read_only, resource limits
-
-### v4.4 (2026-05-19)
-- **Добавлено**: POST /api/project/structure — интроспекция проекта (дерево файлов, метаданные, git status)
-- **Добавлено**: PATCH /api/batch/edit — массовое редактирование файлов (1 запрос = N файлов)
-- **Добавлено**: POST /api/file/upload/stream — потоковая загрузка файлов (multipart/form-data)
-- **Добавлено**: Pre-commit hooks — автоматический mypy/pytest перед коммитом (auto_validate)
-- **Обновлено**: Python SDK — новые методы project_structure(), batch_edit(), upload_file_stream()
-
-### v4.3.1 (2026-05-18)
-- **Исправлено**: PATCH /api/context/file/edit — `success: null` → `success: true`
-- **Исправлено**: Порядок полей в Pydantic v2 (default после required)
-- **Исправлено**: Относительные пути в context/file/edit (объединение с ctx.path)
-- **Добавлено**: Логирование для отладки context/file/edit
-
-### v4.3 (2026-05-18)
-- **Добавлено**: POST /api/file/upload — загрузка файлов на сервер (base64)
-- **Добавлено**: GET /api/file/download — скачивание файлов (application/octet-stream)
-- **Добавлено**: Python SDK (sdk/ssh_gateway.py) — удобная работа с API
-- **Добавлено**: Auto-reconnect — автоматическое восстановление SSH-соединения
-- **Добавлено**: GET /api/ssh/session/{id}/health — проверка здоровья сессии
-- **Исправлено**: PATCH /api/file/edit — Unicode и многобайтовые символы работают корректно
-- **Исправлено**: write_file — использование heredoc вместо echo (большие файлы)
-- **Исправлено**: Удалён дублирующийся класс FileEditWithContextResponse
-
-### v4.2 (2026-05-18)
-- **Добавлено**: GET /api/file/raw — чтение файлов как text/plain (без JSON-обёртки)
-- **Добавлено**: POST /api/batch/read — массовое чтение до 20 файлов за 1 запрос
-- **Добавлено**: Поддержка Range: bytes= для частичного чтения файлов (206 Partial Content)
-- **Добавлено**: offset/limit query params для raw endpoint
-- **Увеличено**: SSH window size до 2^32 для поддержки файлов 50KB+
-- **Исправлено**: Документация приведена в соответствие с реальным API
-
-### v4.1 (2026-05-18)
-- **Исправлено**: Все 69 endpoint'ов работают корректно
-- **Исправлено**: Git API — экранирование путей, query params для backup/restore
-- **Исправлено**: PTY API — все 4 endpoint'а работают
-- **Исправлено**: Bookmark Delete — работает через query params
-- **Исправлено**: Analytics — try-except с safe defaults
-- **Исправлено**: Server Add — корректное имя параметра
-- **Добавлено**: OpenCode Adapter для интеграции с Big Pickle
-
-### v4.0 (2026-05-17)
-- Первый релиз с 16 фичами
+## 2) Общие правила API
+
+- Формат ошибок унифицирован: `detail.message`, `detail.code`, `detail.retryable`, `detail.hint`, `detail.http_status`.
+- Для long-running задач используйте `/api/jobs/*` и SSE endpoints `/stream`/`/events`.
+- Для `session_id` сначала создайте сессию через `POST /api/ssh/connect` или `POST /api/servers/{server_id}/connect`.
+- `X-Request-ID` и rate-limit headers описаны в контракте для всех методов.
+
+## 3) Карта API
+
+- Всего методов: **98**
+- Всего разделов: **11**
+
+- `system`: 7 методов
+- `ssh`: 10 методов
+- `jobs`: 9 методов
+- `files`: 16 методов
+- `context`: 18 методов
+- `git`: 8 методов
+- `templates`: 4 методов
+- `code`: 13 методов
+- `servers`: 4 методов
+- `snapshots`: 4 методов
+- `webhooks`: 5 методов
+
+## 4) Полный список методов
+
+Формат записи:
+- `METHOD PATH` — краткое назначение
+- `Обязательные:` path/query/header + обязательные поля body
+- `200:` content-type успешного ответа
+- `Ошибки:` коды ошибок
+- `Auth:` используемая схема авторизации из OpenAPI
+
+### system
+
+Системные endpoint'ы и инфраструктура (health, metrics, конфиг, SDK).
+
+- `GET /` — Root
+  Описание: Serve the main page.
+  Обязательные: -
+  200: text/html, application/json
+  Ошибки: 422, 500
+  Auth: нет
+- `GET /api/circuit-breaker/stats` — Circuit Breaker Stats
+  Описание: Get circuit breaker statistics.
+  Обязательные: -
+  200: application/json
+  Ошибки: 422, 500
+  Auth: нет
+- `GET /api/config/session` — Get Session Config
+  Описание: Get current session configuration.
+  Обязательные: -
+  200: application/json
+  Ошибки: 422, 500
+  Auth: нет
+- `PATCH /api/config/session/timeout` — Update Session Timeout
+  Описание: Update session timeout dynamically.
+  Обязательные: body: application/json: timeout
+  200: application/json
+  Ошибки: 422, 500
+  Auth: нет
+- `GET /api/sdk/download` — Download Sdk
+  Описание: Download Python SDK. Supports API key auth via query param or header.
+  Обязательные: -
+  200: text/x-python
+  Ошибки: 422, 500
+  Auth: ApiKeyQuery, ApiKeyHeader
+- `GET /health` — Health Check
+  Описание: Health check endpoint.
+  Обязательные: -
+  200: application/json
+  Ошибки: 422, 500
+  Auth: нет
+- `GET /metrics` — Prometheus Metrics
+  Описание: Prometheus metrics endpoint.
+  Обязательные: -
+  200: text/plain
+  Ошибки: 422, 500
+  Auth: нет
+
+### ssh
+
+Управление SSH-сессиями, команды и интерактивный PTY.
+
+- `POST /api/ssh/connect` — Ssh Connect
+  Описание: Create a new SSH session.
+  Обязательные: body: application/json: host, username
+  200: application/json
+  Ошибки: 400, 401, 404, 422, 500, 502, 504
+  Auth: нет
+- `POST /api/ssh/disconnect` — Ssh Disconnect
+  Описание: Close an SSH session.
+  Обязательные: body: application/json: session_id
+  200: application/json
+  Ошибки: 400, 401, 404, 422, 500, 502, 504
+  Auth: нет
+- `POST /api/ssh/execute` — Ssh Execute
+  Описание: Execute a command on an existing SSH session.
+  Обязательные: body: application/json: session_id, command
+  200: application/json
+  Ошибки: 400, 401, 404, 422, 500, 502, 504
+  Auth: нет
+- `POST /api/ssh/heartbeat` — Ssh Heartbeat
+  Описание: Refresh session timeout by touching it.
+  Обязательные: body: application/json: session_id
+  200: application/json
+  Ошибки: 400, 401, 404, 422, 500, 502, 504
+  Auth: нет
+- `POST /api/ssh/pty/{session_id}/close` — Pty Close
+  Описание: Close PTY session.
+  Обязательные: params: path.session_id
+  200: application/json
+  Ошибки: 400, 401, 404, 422, 500, 502, 504
+  Auth: нет
+- `POST /api/ssh/pty/{session_id}/create` — Pty Create
+  Описание: Create PTY session.
+  Обязательные: params: path.session_id | body: application/json: model=PTYCreateRequest
+  200: application/json
+  Ошибки: 400, 401, 404, 422, 500, 502, 504
+  Auth: нет
+- `POST /api/ssh/pty/{session_id}/input` — Pty Input
+  Описание: Send input to PTY.
+  Обязательные: params: path.session_id | body: application/json: data
+  200: application/json
+  Ошибки: 400, 401, 404, 422, 500, 502, 504
+  Auth: нет
+- `GET /api/ssh/pty/{session_id}/output` — Pty Output
+  Описание: Get PTY output.
+  Обязательные: params: path.session_id
+  200: application/json
+  Ошибки: 400, 401, 404, 422, 500, 502, 504
+  Auth: нет
+- `GET /api/ssh/session/{session_id}/health` — Session Health
+  Описание: Check session health and auto-reconnect if needed.
+  Обязательные: params: path.session_id
+  200: application/json
+  Ошибки: 400, 401, 404, 422, 500, 502, 504
+  Auth: нет
+- `GET /api/ssh/sessions` — Ssh Sessions
+  Описание: List all active SSH sessions.
+  Обязательные: -
+  200: application/json
+  Ошибки: 400, 401, 404, 422, 500, 502, 504
+  Auth: нет
+
+### jobs
+
+Фоновые задачи, статусы, результаты и SSE-потоки.
+
+- `GET /api/jobs` — Jobs List
+  Описание: List background jobs.
+  Обязательные: -
+  200: application/json
+  Ошибки: 404, 422, 500
+  Auth: нет
+- `GET /api/jobs/queue/dead` — Jobs Dead Letter
+  Описание: Get dead letter queue jobs.
+  Обязательные: -
+  200: application/json
+  Ошибки: 404, 422, 500
+  Auth: нет
+- `GET /api/jobs/queue/stats` — Jobs Queue Stats
+  Описание: Get Redis job queue statistics.
+  Обязательные: -
+  200: application/json
+  Ошибки: 404, 422, 500
+  Auth: нет
+- `POST /api/jobs/run` — Jobs Run
+  Описание: Start a background job on an SSH session.
+  Обязательные: body: application/json: session_id, command
+  200: application/json
+  Ошибки: 404, 422, 500
+  Auth: нет
+- `POST /api/jobs/{job_id}/cancel` — Jobs Cancel
+  Описание: Cancel a running job.
+  Обязательные: params: path.job_id
+  200: application/json
+  Ошибки: 404, 422, 500
+  Auth: нет
+- `GET /api/jobs/{job_id}/events` — Jobs Events
+  Описание: Alias for /api/jobs/{job_id}/stream — SSE job progress events.
+  Обязательные: params: path.job_id
+  200: text/event-stream
+  Ошибки: 404, 422, 500
+  Auth: нет
+- `GET /api/jobs/{job_id}/result` — Jobs Result
+  Описание: Get full job result.
+  Обязательные: params: path.job_id
+  200: application/json
+  Ошибки: 404, 422, 500
+  Auth: нет
+- `GET /api/jobs/{job_id}/status` — Jobs Status
+  Описание: Get job status.
+  Обязательные: params: path.job_id
+  200: application/json
+  Ошибки: 404, 422, 500
+  Auth: нет
+- `GET /api/jobs/{job_id}/stream` — Jobs Stream
+  Описание: Stream job output via Server-Sent Events.
+  Обязательные: params: path.job_id
+  200: text/event-stream
+  Ошибки: 404, 422, 500
+  Auth: нет
+
+### files
+
+Чтение, запись, патчи, загрузка/выгрузка и дерево файлов.
+
+- `PATCH /api/batch/edit` — Batch Edit
+  Описание: Edit multiple files in a single request.
+  Обязательные: body: application/json: session_id, files
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/batch/execute` — Batch Execute
+  Описание: Execute multiple file operations in a single transaction.
+  Обязательные: body: application/json: context_id, operations
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/batch/read` — Batch Read
+  Описание: Read multiple files in a single request.
+  Обязательные: body: application/json: session_id, paths
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/bulk/edit` — Bulk Edit Files
+  Описание: Edit multiple files concurrently. Example: { "session_id": "...", "files": [ { "path": "app/main.py", "operations": [ {"type": "replace", "old": "def old():", "new": "def new():"} ] }, { "path": "app/config.py", "operations": [ {"type": "replace", "old": "DEBUG = True", "new": "DEBUG = False"} ] } ] }
+  Обязательные: body: application/json: session_id, files
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/bulk/execute` — Bulk Execute
+  Описание: Execute multiple commands concurrently.
+  Обязательные: body: application/json: session_id, commands
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/bulk/read` — Bulk Read Files
+  Описание: Read multiple files concurrently.
+  Обязательные: body: application/json: session_id, paths
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `GET /api/file/download` — File Download
+  Описание: Download file from remote server.
+  Обязательные: params: query.session_id, query.path
+  200: application/octet-stream
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `PATCH /api/file/edit` — File Edit
+  Описание: Edit a remote file using patch operations.
+  Обязательные: body: application/json: session_id, path, operations
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/file/patch` — File Patch
+  Описание: Apply a unified diff patch.
+  Обязательные: body: application/json: session_id, patch
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `GET /api/file/raw` — File Raw
+  Описание: Read a remote file and return raw content as text/plain. Supports Range header (bytes=start-end) or offset/limit query params.
+  Обязательные: params: query.session_id, query.path
+  200: text/plain
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/file/read` — File Read
+  Описание: Read a file from a remote server.
+  Обязательные: body: application/json: session_id, path
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/file/upload` — File Upload
+  Описание: Upload file to remote server (base64 encoded via query params).
+  Обязательные: params: query.session_id, query.path, query.content
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/file/upload/json` — File Upload Json
+  Описание: Upload file via JSON body (base64 encoded). Preferred for large files (>2KB) where query params may fail.
+  Обязательные: body: application/json: session_id, path, content
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/file/upload/stream` — File Upload Stream
+  Описание: Upload file using multipart/form-data for large files (1MB+).
+  Обязательные: params: query.session_id, query.path | body: multipart/form-data: file
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/file/write` — File Write
+  Описание: Write file via JSON body (atomic, no heredoc escaping). Use for Python code with quotes, special chars, or large content. Mode: 'write' (overwrite) or 'append' (append to end).
+  Обязательные: body: application/json: session_id, path, content
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/tree` — Get File Tree
+  Описание: Get directory tree structure.
+  Обязательные: body: application/json: session_id, path
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+
+### context
+
+Умный контекст проекта, вкладки, курсор, история, аналитика.
+
+- `POST /api/context/bookmark` — Context Add Bookmark
+  Описание: Add bookmark.
+  Обязательные: body: application/json: context_id, path, line
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `DELETE /api/context/bookmark` — Context Remove Bookmark
+  Описание: Remove bookmark.
+  Обязательные: params: query.context_id, query.path, query.line
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/context/command` — Context Add Command
+  Описание: Add command to history.
+  Обязательные: body: application/json: context_id, command
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/context/create` — Context Create
+  Описание: Create a new development context with git awareness.
+  Обязательные: body: application/json: session_id, path
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/context/cursor` — Context Update Cursor
+  Описание: Update cursor position in file.
+  Обязательные: body: application/json: context_id, path, line
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/context/file/close` — Context File Close
+  Описание: Close file in smart context (closes tab).
+  Обязательные: body: application/json: context_id, path
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `PATCH /api/context/file/edit` — Context File Edit
+  Описание: Edit a file with context awareness (auto-commit, validation).
+  Обязательные: body: application/json: context_id, path, operations
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/context/file/open` — Context File Open
+  Описание: Open file in smart context (creates tab).
+  Обязательные: body: application/json: context_id, path
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/context/file/read` — Context File Read
+  Описание: Read a file using context (session_id extracted from context).
+  Обязательные: body: application/json: session_id, path
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `GET /api/context/list` — Context List
+  Описание: List all active contexts.
+  Обязательные: -
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/context/search` — Context Add Search
+  Описание: Add search query to history.
+  Обязательные: body: application/json: context_id, query
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `GET /api/context/{context_id}` — Context Get
+  Описание: Get context details.
+  Обязательные: params: path.context_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `DELETE /api/context/{context_id}` — Context Delete
+  Описание: Delete a context.
+  Обязательные: params: path.context_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `GET /api/context/{context_id}/state` — Context Get State
+  Описание: Get smart context state.
+  Обязательные: params: path.context_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/recovery/backup` — Recovery Create Backup
+  Описание: Create a backup before making changes.
+  Обязательные: body: application/json: context_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `GET /api/recovery/backups` — Recovery List Backups
+  Описание: List available backups.
+  Обязательные: params: query.context_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/recovery/restore` — Recovery Restore Backup
+  Описание: Restore from backup.
+  Обязательные: body: application/json: context_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/validate` — Validate Context
+  Описание: Run validation pipeline (mypy + pytest) for context.
+  Обязательные: body: application/json: context_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+
+### git
+
+Git-операции и diff в рамках сессии/контекста.
+
+- `POST /api/git/backup` — Git Backup
+  Описание: Create a git stash backup.
+  Обязательные: params: query.context_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/git/commit` — Git Commit
+  Описание: Create a git commit for context.
+  Обязательные: body: application/json: context_id, message
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `GET /api/git/diff` — Git Diff
+  Описание: Get git diff for context.
+  Обязательные: params: query.context_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/git/diff` — Git Diff
+  Описание: Get git diff for working directory or staged changes.
+  Обязательные: body: application/json: session_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/git/init` — Git Init
+  Описание: Initialize git repository for context.
+  Обязательные: body: application/json: context_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/git/restore` — Git Restore
+  Описание: Restore from stash.
+  Обязательные: params: query.context_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `GET /api/git/simple-status` — Git Simple Status
+  Описание: Simple git status — branch, modified, staged, untracked files.
+  Обязательные: params: query.session_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/git/status` — Git Status
+  Описание: Refresh git status for context.
+  Обязательные: params: query.context_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+
+### templates
+
+Шаблоны и рендеринг кода/файлов.
+
+- `POST /api/scaffold/python-class` — Scaffold Python Class
+  Описание: Scaffold a Python class + test file from template.
+  Обязательные: body: application/json: session_id, module_path, class_name
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `GET /api/templates` — List Templates
+  Описание: List all available code templates.
+  Обязательные: -
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/templates/render` — Render Template
+  Описание: Render template and save to file.
+  Обязательные: body: application/json: context_id, template_id, target_path
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `GET /api/templates/{template_id}` — Get Template
+  Описание: Get template details.
+  Обязательные: params: path.template_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+
+### code
+
+Поиск по коду, вставки, генерация и автодополнение.
+
+- `POST /api/analytics` — Get Project Analytics
+  Описание: Analyze project and return metrics.
+  Обязательные: body: application/json: session_id, path
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/ast/analyze` — Ast Analyze
+  Описание: Analyze Python code structure using AST.
+  Обязательные: body: application/json: session_id, path
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/ast/extract` — Ast Extract
+  Описание: Extract a block of code into a new function.
+  Обязательные: body: application/json: session_id, path, start_line, end_line, func_name
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/ast/rename` — Ast Rename
+  Описание: Rename a symbol (function, class, variable) using AST. Supports single file ('path') or multiple files ('files' array).
+  Обязательные: body: application/json: session_id, old_name, new_name
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/code/complete` — Code Complete
+  Описание: Suggest code completion.
+  Обязательные: body: application/json: session_id, path, partial_code
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/code/generate` — Code Generate
+  Описание: Generate code based on natural language instruction.
+  Обязательные: body: application/json: instruction
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/code/insert` — Code Insert
+  Описание: Intelligently insert code based on natural language instruction.
+  Обязательные: body: application/json: context_id, path, instruction
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/code/search` — Code Search
+  Описание: Search for code pattern in project.
+  Обязательные: body: application/json: session_id, path, query
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/project/structure` — Project Structure
+  Описание: Get project structure with metadata and git status.
+  Обязательные: body: application/json: session_id, path
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `GET /api/project/tree` — Project Tree
+  Описание: Simple project tree — list files and directories. Returns flat list with type, path, size for quick introspection.
+  Обязательные: params: query.session_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/refactor/rename` — Refactor Rename
+  Описание: Alias for /api/ast/rename — AST-aware symbol renaming.
+  Обязательные: body: application/json: session_id, old_name, new_name
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/replace/global` — Global Replace
+  Описание: Replace across all project files.
+  Обязательные: body: application/json: session_id, path, search
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/search/global` — Global Search
+  Описание: Search across all project files.
+  Обязательные: body: application/json: session_id, path, query
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+
+### servers
+
+Реестр серверов и быстрые подключения.
+
+- `GET /api/servers` — List Servers
+  Описание: List all configured servers.
+  Обязательные: -
+  200: application/json
+  Ошибки: 400, 404, 409, 422, 500
+  Auth: нет
+- `POST /api/servers` — Add Server
+  Описание: Add a new server.
+  Обязательные: body: application/json: id, name, host
+  200: application/json
+  Ошибки: 400, 404, 409, 422, 500
+  Auth: нет
+- `DELETE /api/servers/{server_id}` — Remove Server
+  Описание: Remove a server.
+  Обязательные: params: path.server_id
+  200: application/json
+  Ошибки: 400, 404, 409, 422, 500
+  Auth: нет
+- `POST /api/servers/{server_id}/connect` — Connect Server
+  Описание: Connect to a server and return session.
+  Обязательные: params: path.server_id | body: application/json: model=ConnectServerRequest
+  200: application/json
+  Ошибки: 400, 404, 409, 422, 500
+  Auth: нет
+
+### snapshots
+
+Снимки состояния проекта и восстановление.
+
+- `GET /api/snapshots` — List Snapshots
+  Описание: List all snapshots for context.
+  Обязательные: params: query.context_id
+  200: application/json
+  Ошибки: 404, 422, 500
+  Auth: нет
+- `POST /api/snapshots` — Create Snapshot
+  Описание: Create a snapshot of current project state.
+  Обязательные: body: application/json: context_id, name
+  200: application/json
+  Ошибки: 404, 422, 500
+  Auth: нет
+- `POST /api/snapshots/restore` — Restore Snapshot
+  Описание: Restore project from snapshot.
+  Обязательные: body: application/json: context_id, snapshot_id
+  200: application/json
+  Ошибки: 404, 422, 500
+  Auth: нет
+- `DELETE /api/snapshots/{snapshot_id}` — Delete Snapshot
+  Описание: Delete a snapshot.
+  Обязательные: params: path.snapshot_id, query.context_id
+  200: application/json
+  Ошибки: 404, 422, 500
+  Auth: нет
+
+### webhooks
+
+Webhook-конфигурации и деплой-триггеры.
+
+- `GET /api/webhooks` — List Webhooks
+  Описание: List all webhooks.
+  Обязательные: -
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/webhooks` — Create Webhook
+  Описание: Create a new webhook for auto-deployment.
+  Обязательные: body: application/json: name, target_path, deploy_command, context_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `DELETE /api/webhooks/{webhook_id}` — Delete Webhook
+  Описание: Delete a webhook.
+  Обязательные: params: path.webhook_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `POST /api/webhooks/{webhook_id}/deploy` — Trigger Deploy
+  Описание: Manually trigger deployment.
+  Обязательные: params: path.webhook_id | body: application/json: session_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+- `GET /api/webhooks/{webhook_id}/deployments` — List Deployments
+  Описание: List deployment history.
+  Обязательные: params: path.webhook_id
+  200: application/json
+  Ошибки: 400, 404, 422, 500
+  Auth: нет
+
+## 5) Минимальный рабочий сценарий
+
+1. `POST /api/ssh/connect` — получить `session_id`.
+2. `POST /api/ssh/execute` или `POST /api/jobs/run` — выполнить команду.
+3. Для фоновых задач: `GET /api/jobs/{job_id}/status` и `GET /api/jobs/{job_id}/result`.
+4. Для файлов: `POST /api/file/read`, `POST /api/file/write`, `POST /api/file/patch`.
+5. По завершении: `POST /api/ssh/disconnect`.
+
+## 6) Рекомендации для агентных клиентов
+
+- Всегда обрабатывайте `detail.code` и `retryable`, а не только HTTP-статус.
+- Для нестабильных ошибок делайте backoff-retry, для `VALIDATION_ERROR` — не ретраить.
+- Для больших операций используйте jobs + SSE вместо polling в tight-loop.
+- В проде логируйте `X-Request-ID` для трассировки.
