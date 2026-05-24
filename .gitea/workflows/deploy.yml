@@ -3,18 +3,31 @@ on:
   push:
     branches: [master]
 
+env:
+  GITEA_HOST: 192.168.1.103
+  PROXMOX_HOST: 192.168.1.103
+  BACKEND_HOST: 10.10.10.145
+
 jobs:
-  test:
+  debug:
     runs-on: ubuntu-latest
+    steps:
+      - name: Dump env
+        run: env | sort -u
+
+  test:
+    needs: debug
+    runs-on: ubuntu-latest
+    container:
+      image: python:3.13-slim
     steps:
       - name: Checkout
         run: |
-          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no -p 2222"
-          git clone ssh://git@192.168.1.103:2222/gpakoh/ssh-gateway-ai.git /tmp/repo
-          cd /tmp/repo && git checkout $GITHUB_SHA
+          apt-get update -qq && apt-get install -y -qq git ca-certificates
+          git clone http://git:${{ github.token }}@$GITEA_HOST:3005/gpakoh/ssh-gateway-ai.git /repo
       - name: Run tests
         run: |
-          cd /tmp/repo
+          cd /repo
           pip install -r requirements.txt 2>/dev/null || true
           python -m pytest tests/ -v --timeout=30 || echo "Tests completed (exit: $?)"
 
@@ -24,13 +37,14 @@ jobs:
     steps:
       - name: Checkout
         run: |
-          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no -p 2222"
-          git clone ssh://git@192.168.1.103:2222/gpakoh/ssh-gateway-ai.git /tmp/repo-nginx
-          cd /tmp/repo-nginx && git checkout $GITHUB_SHA
+          apt-get update -qq && apt-get install -y -qq git ca-certificates sshpass
+          git clone http://git:${{ github.token }}@$GITEA_HOST:3005/gpakoh/ssh-gateway-ai.git /repo
       - name: Deploy nginx config
         run: |
-          cp /tmp/repo-nginx/nginx-ssh.xloud.ru.conf /etc/nginx/sites-available/AI-Docker.conf
-          nginx -t && nginx -s reload
+          sshpass -p "${{ vars.NGINX_PASS }}" ssh -o StrictHostKeyChecking=no root@$PROXMOX_HOST "
+            cp /media/1TB/Python/web_ssh/web-ssh-gateway/nginx-ssh.xloud.ru.conf /etc/nginx/sites-available/AI-Docker.conf
+            nginx -t && nginx -s reload
+          "
 
   deploy-backend:
     needs: test
@@ -38,15 +52,14 @@ jobs:
     steps:
       - name: Checkout
         run: |
-          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no -p 2222"
-          git clone ssh://git@192.168.1.103:2222/gpakoh/ssh-gateway-ai.git /tmp/repo-be
-          cd /tmp/repo-be && git checkout $GITHUB_SHA
+          apt-get update -qq && apt-get install -y -qq git ca-certificates sshpass rsync
+          git clone http://git:${{ github.token }}@$GITEA_HOST:3005/gpakoh/ssh-gateway-ai.git /repo
       - name: Deploy backend
         run: |
-          rsync -avz --exclude=.git --exclude=__pycache__ \
-            /tmp/repo-be/ root@10.10.10.145:/srv/ssh-gateway/ || \
-          echo "Backend sync skipped, trying git pull"
-          ssh root@10.10.10.145 "
-            cd /srv/ssh-gateway 2>/dev/null || mkdir -p /srv/ssh-gateway
-            if [ -d .git ]; then git pull; else echo 'No git repo'; fi
-          " 2>&1 || echo "Backend deploy skipped"
+          cd /repo
+          rsync -avz --exclude=.git --exclude=__pycache__ --exclude=.gitea \
+            . root@$BACKEND_HOST:/srv/ssh-gateway/
+          sshpass -p "${{ vars.BACKEND_PASS }}" ssh -o StrictHostKeyChecking=no root@$BACKEND_HOST "
+            pip install -r /srv/ssh-gateway/app/requirements.txt 2>/dev/null || true
+            systemctl restart webssh-server 2>&1 || echo 'webssh-server not found'
+          "
