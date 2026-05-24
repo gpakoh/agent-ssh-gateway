@@ -798,9 +798,10 @@ console.log('%cWeb SSH Gateway%c v1.0', 'color:#00ff88;font-weight:bold;', 'colo
 let monacoEditor = null;
 let currentFilePath = null;
 
-// Initialize Monaco Editor
+// Initialize Monaco Editor (lazy: called on first editor panel open)
 function initMonacoEditor() {
-    require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.44.0/min/vs' }});
+    if (window.__monacoInitialized) return;
+    window.__monacoInitialized = true;
     
     require(['vs/editor/editor.main'], function() {
         monacoEditor = monaco.editor.create(document.getElementById('editorContainer'), {

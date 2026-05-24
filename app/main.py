@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Quer
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, PlainTextResponse, HTMLResponse
 
 from app.config import settings
 import secrets
@@ -168,6 +168,7 @@ from app.models import (
     ASTRefactorExtractResponse,
     ASTAnalyzeRequest,
     ASTAnalyzeResponse,
+    ValidationErrorResponse,
 )
 from app.ssh_manager import (
     SSHSessionManager,
@@ -346,7 +347,531 @@ app = FastAPI(
     description="Execute SSH commands through a web browser",
     version="1.0.0",
     lifespan=lifespan,
+    responses={
+        422: {
+            "model": ValidationErrorResponse,
+            "description": "Request validation failed",
+        }
+    },
 )
+
+# Tags
+TAGS_META = {
+    "ssh": "SSH session management (connect, execute, disconnect)",
+    "files": "File operations (read, edit, upload, download)",
+    "jobs": "Background job execution and monitoring",
+    "git": "Git repository operations",
+    "context": "Development contexts with git awareness",
+    "templates": "Code templates",
+    "servers": "Saved server management",
+    "snapshots": "Project snapshots for recovery",
+    "webhooks": "CI/CD webhooks",
+    "code": "Code intelligence (search, insert, complete)",
+    "system": "System endpoints (health, metrics, config)",
+}
+
+def _path_tag(path: str) -> str:
+    if path == "/" or path == "/health" or path == "/metrics":
+        return "system"
+    if path.startswith("/api/servers"):
+        return "servers"
+    if path.startswith("/api/jobs"):
+        return "jobs"
+    if path.startswith("/api/file") or path.startswith("/api/batch") or path.startswith("/api/file"):
+        return "files"
+    if path.startswith("/api/ssh"):
+        return "ssh"
+    if path.startswith("/api/git"):
+        return "git"
+    if path.startswith("/api/context") or path.startswith("/api/validate"):
+        return "context"
+    if path.startswith("/api/templates"):
+        return "templates"
+    if path.startswith("/api/snapshots"):
+        return "snapshots"
+    if path.startswith("/api/webhooks"):
+        return "webhooks"
+    if path.startswith("/api/code") or path.startswith("/api/ast") or path.startswith("/api/refactor"):
+        return "code"
+    if path.startswith("/api/sdk"):
+        return "system"
+    if path.startswith("/api/search") or path.startswith("/api/replace"):
+        return "code"
+    if path.startswith("/api/project") or path.startswith("/api/analytics"):
+        return "code"
+    if path.startswith("/api/scaffold"):
+        return "templates"
+    if path.startswith("/api/recovery"):
+        return "context"
+    if path.startswith("/api/tree"):
+        return "files"
+    if path.startswith("/api/config"):
+        return "system"
+    if path.startswith("/api/circuit"):
+        return "system"
+    if path.startswith("/api/bulk"):
+        return "files"
+    return "system"
+
+ERROR_SCHEMA_REF = "#/components/schemas/ErrorResponse"
+
+TAG_ERROR_CODES = {
+    "ssh": [400, 401, 404, 500, 502, 504],
+    "files": [400, 404, 500],
+    "jobs": [404, 500],
+    "git": [400, 404, 500],
+    "context": [400, 404, 500],
+    "templates": [400, 404, 500],
+    "servers": [400, 404, 409, 500],
+    "snapshots": [404, 500],
+    "webhooks": [400, 404, 500],
+    "code": [400, 404, 500],
+    "system": [500],
+}
+
+# Examples for key operations
+EXAMPLES: dict[tuple[str, str], dict] = {
+    ("/api/ssh/connect", "post"): {
+        "summary": "Connect to SSH server",
+        "value": {"host": "192.0.2.10", "port": 22, "username": "root", "password": "secret"},
+    },
+    ("/api/ssh/execute", "post"): {
+        "summary": "Execute a command",
+        "value": {"session_id": "abc123", "command": "ls -la", "timeout": 30},
+    },
+    ("/api/file/read", "post"): {
+        "summary": "Read file content",
+        "value": {"session_id": "abc123", "path": "/etc/hostname"},
+    },
+    ("/api/file/write", "post"): {
+        "summary": "Write file content",
+        "value": {"session_id": "abc123", "path": "/root/test.txt", "content": "hello", "mode": "write"},
+    },
+    ("/api/jobs/run", "post"): {
+        "summary": "Start a background job",
+        "value": {"session_id": "abc123", "command": "apt update", "timeout": 3600},
+    },
+    ("/api/context/create", "post"): {
+        "summary": "Create a development context",
+        "value": {"session_id": "abc123", "path": "/root/project", "name": "my_project"},
+    },
+}
+
+ERROR_DESC = {
+    400: "Bad request",
+    401: "Unauthorized",
+    404: "Not found",
+    409: "Conflict",
+    429: "Too many requests",
+    500: "Internal server error",
+    502: "Bad gateway",
+    504: "Gateway timeout",
+}
+
+# Structured error codes
+ERROR_CODE_MAP: dict[tuple[int, str], str] = {
+    (404, "session"): "SESSION_NOT_FOUND",
+    (404, "pty"): "SESSION_NOT_FOUND",
+    (404, "server"): "SERVER_NOT_FOUND",
+    (404, "context"): "CONTEXT_NOT_FOUND",
+    (404, "template"): "TEMPLATE_NOT_FOUND",
+    (404, "job"): "JOB_NOT_FOUND",
+    (404, "sdk"): "SDK_NOT_FOUND",
+    (404, "webhook"): "WEBHOOK_NOT_FOUND",
+    (404, "snapshot"): "SNAPSHOT_NOT_FOUND",
+    (409, "already exists"): "ALREADY_EXISTS",
+    (502, "connection"): "UPSTREAM_CONNECTION_FAILED",
+    (502, ""): "BAD_GATEWAY",
+    (504, ""): "GATEWAY_TIMEOUT",
+    (401, ""): "UNAUTHORIZED",
+    (400, ""): "BAD_REQUEST",
+    (500, ""): "INTERNAL_ERROR",
+    (422, ""): "VALIDATION_ERROR",
+}
+
+HINTS: dict[str, str] = {
+    "SESSION_NOT_FOUND": "Create a session first via POST /api/ssh/connect",
+    "SERVER_NOT_FOUND": "Use POST /api/servers to create one",
+    "CONTEXT_NOT_FOUND": "Use POST /api/context/create to create a context",
+    "TEMPLATE_NOT_FOUND": "Check available templates via GET /api/templates",
+    "JOB_NOT_FOUND": "Use GET /api/jobs to list active jobs",
+    "WEBHOOK_NOT_FOUND": "Use GET /api/webhooks to list registered webhooks",
+    "SNAPSHOT_NOT_FOUND": "Use GET /api/snapshots to list snapshots",
+    "SDK_NOT_FOUND": "Check that SDK was built and deployed",
+    "ALREADY_EXISTS": "The resource already exists; pick a different identifier",
+    "UPSTREAM_CONNECTION_FAILED": "The SSH server may be unreachable or refusing connections",
+    "BAD_GATEWAY": "The upstream SSH server returned an error",
+    "GATEWAY_TIMEOUT": "The upstream SSH server did not respond in time; retry may help",
+    "UNAUTHORIZED": "Provide valid credentials (password or private key)",
+    "BAD_REQUEST": "Check request parameters and try again",
+    "INTERNAL_ERROR": "The server encountered an internal error; retry or contact support",
+    "VALIDATION_ERROR": "Check the missing or invalid fields listed in errors[]",
+    "RATE_LIMIT_EXCEEDED": "Reduce request frequency and retry after the indicated wait time",
+}
+
+RETRYABLE_CODES = {"BAD_GATEWAY", "GATEWAY_TIMEOUT", "INTERNAL_ERROR", "UPSTREAM_CONNECTION_FAILED", "RATE_LIMIT_EXCEEDED"}
+
+def _auto_code(status_code: int, message: str) -> str:
+    for (code, keyword), err_code in ERROR_CODE_MAP.items():
+        if status_code == code and (not keyword or keyword in message.lower()):
+            return err_code
+    return "INTERNAL_ERROR"
+
+def _hint(code: str) -> str:
+    return HINTS.get(code, "")
+
+def _err(status_code: int, message: str, *, code: str | None = None, retryable: bool | None = None, hint: str | None = None) -> dict:
+    if code is None:
+        code = _auto_code(status_code, message)
+    if retryable is None:
+        retryable = code in RETRYABLE_CODES
+    if hint is None:
+        hint = _hint(code)
+    return {
+        "message": message,
+        "code": code,
+        "retryable": retryable,
+        "hint": hint,
+        "http_status": status_code,
+    }
+
+def _set_errors(op: dict, path: str):
+    tag = _path_tag(path)
+    codes = TAG_ERROR_CODES.get(tag, [])
+    for code in codes:
+        if str(code) not in op.setdefault("responses", {}):
+            op["responses"][str(code)] = {
+                "description": ERROR_DESC.get(code, "Error"),
+                "content": {"application/json": {"schema": {"$ref": ERROR_SCHEMA_REF}}},
+            }
+
+def custom_openapi():
+    from fastapi.openapi.utils import get_openapi
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+
+    schema["tags"] = [{"name": k, "description": v} for k, v in TAGS_META.items()]
+
+    # Server metadata for codegen
+    schema["servers"] = [{"url": "/", "description": "Web SSH Gateway API"}]
+
+    # --- Error response schemas with agent-friendly format ---
+    schema["components"]["schemas"]["ErrorResponse"] = {
+        "type": "object",
+        "properties": {
+            "detail": {
+                "oneOf": [
+                    {"type": "string"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "message": {"type": "string", "description": "Human-readable error message"},
+                            "code": {"type": "string", "description": "Machine-readable error code (e.g. SESSION_NOT_FOUND)"},
+                            "retryable": {"type": "boolean", "description": "Whether the operation can be retried"},
+                            "hint": {"type": "string", "description": "Guidance for resolving the error"},
+                            "http_status": {"type": "integer", "description": "HTTP status code"},
+                            "errors": {
+                                "type": "array",
+                                "items": {"$ref": "#/components/schemas/ValidationFieldItem"},
+                                "description": "Field-level validation errors (422 only)",
+                            },
+                            "total_errors": {"type": "integer", "description": "Total number of validation errors"},
+                        },
+                    },
+                ],
+            },
+        },
+    }
+    schema["components"]["schemas"]["ValidationFieldItem"] = {
+        "type": "object",
+        "properties": {
+            "field": {"type": "string", "description": "Field name that failed validation"},
+            "error": {"type": "string", "description": "Human-readable validation error"},
+            "type": {"type": "string", "description": "Machine-readable error type"},
+        },
+    }
+    schema["components"]["schemas"]["ValidationErrorResponse"] = {
+        "type": "object",
+        "properties": {
+            "detail": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "Error summary"},
+                    "code": {"type": "string", "description": "Always VALIDATION_ERROR"},
+                    "retryable": {"type": "boolean", "description": "Always false for validation errors"},
+                    "hint": {"type": "string", "description": "Guidance to fix validation errors"},
+                    "http_status": {"type": "integer", "description": "Always 422"},
+                    "errors": {
+                        "type": "array",
+                        "items": {"$ref": "#/components/schemas/ValidationFieldItem"},
+                        "description": "Per-field validation errors",
+                    },
+                    "total_errors": {"type": "integer", "description": "Count of validation errors"},
+                },
+            },
+        },
+    }
+
+    # --- SSE event schema ---
+    schema["components"]["schemas"]["SSEEvent"] = {
+        "type": "object",
+        "properties": {
+            "type": {
+                "type": "string",
+                "enum": ["status", "stdout", "stderr", "exit", "error"],
+                "description": "Event type discriminator",
+            },
+            "data": {"type": "string", "description": "Event payload as JSON string"},
+        },
+        "discriminator": {"propertyName": "type"},
+        "oneOf": [
+            {
+                "$ref": "#/components/schemas/SSEStatusEvent",
+                "description": "Job status update (started/running/completed/cancelled)",
+            },
+            {
+                "$ref": "#/components/schemas/SSEStdoutEvent",
+                "description": "Stdout output chunk",
+            },
+            {
+                "$ref": "#/components/schemas/SSEStderrEvent",
+                "description": "Stderr output chunk",
+            },
+            {
+                "$ref": "#/components/schemas/SSEExitEvent",
+                "description": "Job exit code",
+            },
+            {
+                "$ref": "#/components/schemas/SSEErrorEvent",
+                "description": "Job-level error (timeout, connection lost)",
+            },
+        ],
+    }
+    schema["components"]["schemas"]["SSEStatusEvent"] = {
+        "type": "object",
+        "properties": {
+            "type": {"type": "string", "enum": ["status"], "description": "Event type"},
+            "data": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "enum": ["started", "running", "completed", "cancelled"]},
+                    "job_id": {"type": "string"},
+                    "ts": {"type": "number", "description": "Unix timestamp"},
+                },
+            },
+        },
+    }
+    schema["components"]["schemas"]["SSEStdoutEvent"] = {
+        "type": "object",
+        "properties": {
+            "type": {"type": "string", "enum": ["stdout"], "description": "Event type"},
+            "data": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Stdout text chunk"},
+                    "ts": {"type": "number", "description": "Unix timestamp"},
+                },
+            },
+        },
+    }
+    schema["components"]["schemas"]["SSEStderrEvent"] = {
+        "type": "object",
+        "properties": {
+            "type": {"type": "string", "enum": ["stderr"], "description": "Event type"},
+            "data": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Stderr text chunk"},
+                    "ts": {"type": "number", "description": "Unix timestamp"},
+                },
+            },
+        },
+    }
+    schema["components"]["schemas"]["SSEExitEvent"] = {
+        "type": "object",
+        "properties": {
+            "type": {"type": "string", "enum": ["exit"], "description": "Event type"},
+            "data": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "integer", "description": "Exit code (0 = success)"},
+                    "ts": {"type": "number", "description": "Unix timestamp"},
+                },
+            },
+        },
+    }
+    schema["components"]["schemas"]["SSEErrorEvent"] = {
+        "type": "object",
+        "properties": {
+            "type": {"type": "string", "enum": ["error"], "description": "Event type"},
+            "data": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "Error message"},
+                    "code": {"type": "string", "description": "Error code (e.g. TIMEOUT, CONNECTION_LOST)"},
+                    "ts": {"type": "number", "description": "Unix timestamp"},
+                },
+            },
+        },
+    }
+
+    schema["components"]["securitySchemes"] = {
+        "ApiKeyQuery": {"type": "apiKey", "in": "query", "name": "api_key"},
+        "ApiKeyHeader": {"type": "apiKey", "in": "header", "name": "X-API-Key"},
+    }
+
+    # --- Default response headers ---
+    COMMON_RESPONSE_HEADERS = {
+        "X-Request-ID": {"schema": {"type": "string"}, "description": "Unique request identifier for tracing"},
+        "X-RateLimit-Limit": {"schema": {"type": "integer"}, "description": "Rate limit ceiling (requests per window)"},
+        "X-RateLimit-Remaining": {"schema": {"type": "integer"}, "description": "Requests remaining in current window"},
+        "X-RateLimit-Reset": {"schema": {"type": "integer"}, "description": "Unix timestamp when rate limit resets"},
+    }
+
+    content_type_map = {
+        "/": {"get": "text/html"},
+        "/metrics": {"get": "text/plain"},
+        "/api/sdk/download": {"get": "text/x-python"},
+        "/api/jobs/{job_id}/stream": {"get": "text/event-stream"},
+        "/api/jobs/{job_id}/events": {"get": "text/event-stream"},
+        "/api/file/raw": {"get": "text/plain"},
+        "/api/file/download": {"get": "application/octet-stream"},
+    }
+
+    # Param description overrides by name
+    PARAM_DESC: dict[str, str] = {
+        "session_id": "Active SSH session identifier returned from POST /api/ssh/connect",
+        "server_id": "Target server identifier",
+        "job_id": "Background job identifier returned from POST /api/jobs/run",
+        "context_id": "Development context identifier returned from POST /api/context/create",
+        "template_id": "Template identifier from GET /api/templates",
+        "webhook_id": "Webhook identifier from GET /api/webhooks",
+        "snapshot_id": "Snapshot identifier from GET /api/snapshots",
+        "deployment_id": "Deployment identifier from GET /api/webhooks/{webhook_id}/deployments",
+        "api_key": "API key for authentication",
+        "format": "Output format (json, text)",
+        "path": "Absolute file path on the remote server",
+        "timeout": "Operation timeout in seconds",
+        "force": "Force operation even if destructive",
+        "recursive": "Process directories recursively",
+    }
+
+    response_examples: dict[tuple[str, str], dict] = {
+        ("/api/ssh/connect", "post"): {"session_id": "abc123", "host": "192.0.2.10", "port": 22, "username": "root"},
+        ("/api/ssh/execute", "post"): {"session_id": "abc123", "exit_code": 0, "stdout": "total 42\n-rw-r--r-- 1 root root ...", "stderr": "", "duration_ms": 150},
+        ("/api/context/create", "post"): {"context_id": "ctx_abc123", "name": "my_project", "path": "/root/project", "status": "ready"},
+        ("/api/jobs/run", "post"): {"job_id": "job_abc123", "status": "queued"},
+        ("/api/file/read", "post"): {"path": "/etc/hostname", "content": "my-server\n", "size": 10, "encoding": "utf-8"},
+        ("/api/file/write", "post"): {"path": "/root/test.txt", "size": 5, "encoding": "utf-8"},
+        ("/", "get"): {"service": "Web SSH Gateway", "version": "3.0.0", "status": "running"},
+    }
+
+    # Helper to generate example from JSON schema
+    def _gen_example(schema_def: dict) -> object:
+        if "example" in schema_def:
+            return schema_def["example"]
+        if "default" in schema_def:
+            return schema_def["default"]
+        if schema_def.get("type") == "string":
+            if "enum" in schema_def:
+                return schema_def["enum"][0]
+            if "format" in schema_def:
+                return {"date-time": "2026-01-01T00:00:00Z", "uri": "https://example.com", "email": "user@example.com"}.get(schema_def["format"], "string")
+            return "string"
+        if schema_def.get("type") == "integer":
+            return 0
+        if schema_def.get("type") == "number":
+            return 0.0
+        if schema_def.get("type") == "boolean":
+            return True
+        if schema_def.get("type") == "array":
+            items = schema_def.get("items", {})
+            item = _gen_example(items) if items else "string"
+            return [item]
+        if schema_def.get("type") == "object":
+            props = schema_def.get("properties", {})
+            return {k: _gen_example(v) for k, v in props.items()}
+        if "oneOf" in schema_def:
+            return _gen_example(schema_def["oneOf"][0])
+        if "anyOf" in schema_def:
+            return _gen_example(schema_def["anyOf"][0])
+        if "$ref" in schema_def:
+            ref_name = schema_def["$ref"].rsplit("/", 1)[-1]
+            referenced = schema.get("components", {}).get("schemas", {}).get(ref_name, {})
+            return _gen_example(referenced) if referenced else "string"
+        return "string"
+
+    for path, methods in schema.get("paths", {}).items():
+        for method, op in methods.items():
+            tag = _path_tag(path)
+            op.setdefault("tags", [tag])
+
+            # Content types for non-JSON endpoints
+            if path in content_type_map and method in content_type_map[path]:
+                ct = content_type_map[path][method]
+                resp = op.setdefault("responses", {}).setdefault("200", {})
+                resp["content"] = {ct: {}}
+
+            # 422 references ValidationErrorResponse
+            for code, resp in op.get("responses", {}).items():
+                if code == "422":
+                    resp["content"] = {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/ValidationErrorResponse"}
+                        }
+                    }
+
+            # Add extra error codes
+            _set_errors(op, path)
+
+            # Add response headers to all responses
+            for resp in op.get("responses", {}).values():
+                resp.setdefault("headers", {}).update(COMMON_RESPONSE_HEADERS)
+
+            # --- Request body examples (auto-generated for all body ops) ---
+            req_body = op.get("requestBody", {}).get("content", {}).get("application/json", {})
+            if req_body.get("schema"):
+                if "example" not in req_body:
+                    req_body["example"] = _gen_example(req_body["schema"])
+
+            # Multipart form-data example
+            mp = op.get("requestBody", {}).get("content", {}).get("multipart/form-data", {})
+            if mp.get("schema") and "example" not in mp:
+                mp["example"] = _gen_example(mp["schema"])
+
+            # --- Response 200 examples ---
+            key = (path, method)
+            if key in response_examples:
+                resp200 = op.get("responses", {}).get("200", {})
+                if resp200.get("content", {}).get("application/json", {}) is not None:
+                    ct_content = resp200.get("content", {}).get("application/json")
+                    if ct_content and "example" not in ct_content:
+                        ct_content["example"] = response_examples[key]
+                    elif ct_content is None:
+                        resp200.setdefault("content", {}).setdefault("application/json", {})["example"] = response_examples[key]
+
+            # --- Parameter descriptions ---
+            for param in op.get("parameters", []):
+                name = param.get("name", "")
+                if name in PARAM_DESC and not param.get("description"):
+                    param["description"] = PARAM_DESC[name]
+                elif not param.get("description"):
+                    param["description"] = name.replace("_", " ").title()
+
+    # Security on /api/sdk/download
+    sdk = schema.get("paths", {}).get("/api/sdk/download", {}).get("get", {})
+    sdk["security"] = [{"ApiKeyQuery": []}, {"ApiKeyHeader": []}]
+
+    app.openapi_schema = schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
 
 # Rate limiting
 app.state.limiter = limiter
@@ -376,7 +901,7 @@ async def security_headers_middleware(request, call_next):
 
 @app.exception_handler(SSHManagerError)
 async def ssh_exception_handler(request, exc: SSHManagerError):
-    """Convert SSH manager exceptions to HTTP responses."""
+    """Convert SSH manager exceptions to structured HTTP responses."""
     status_map = {
         ConnectionError: 502,
         AuthenticationError: 401,
@@ -385,7 +910,8 @@ async def ssh_exception_handler(request, exc: SSHManagerError):
         ExecutionError: 500,
     }
     status_code = status_map.get(type(exc), 500)
-    raise HTTPException(status_code=status_code, detail=str(exc))
+    message = str(exc)
+    raise HTTPException(status_code=status_code, detail=_err(status_code, message))
 
 
 @app.exception_handler(RequestValidationError)
@@ -423,6 +949,10 @@ async def validation_exception_handler(request, exc: RequestValidationError):
         status_code=422,
         detail={
             "message": "Request validation failed",
+            "code": "VALIDATION_ERROR",
+            "retryable": False,
+            "hint": "Check missing and invalid fields listed in errors[]",
+            "http_status": 422,
             "errors": field_errors,
             "total_errors": len(field_errors),
         }
@@ -487,7 +1017,7 @@ async def ssh_execute(req: ExecuteRequest, request: Request):
         audit_logger.log_security_event(
             "BLOCKED_COMMAND", str(exc), request.client.host
         )
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
     
     # Audit log
     audit_logger.log_command(req.session_id, sanitized, request.client.host)
@@ -540,7 +1070,7 @@ async def pty_create(session_id: str, req: PTYCreateRequest):
     
     record = await manager.get_session(session_id)
     if not record:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail=_err(404, "Session not found"))
     
     pty_id = str(uuid.uuid4())
     _pty_sessions[pty_id] = {
@@ -567,7 +1097,7 @@ async def pty_create(session_id: str, req: PTYCreateRequest):
             "message": "PTY session created",
         }
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"PTY creation failed: {exc}")
+        raise HTTPException(status_code=500, detail=_err(500, f"PTY creation failed: {exc}"))
 
 
 @app.post("/api/ssh/pty/{session_id}/input")
@@ -583,7 +1113,7 @@ async def pty_input(session_id: str, req: PTYInputRequest):
             break
     
     if not pty_info or not pty_info.get("channel"):
-        raise HTTPException(status_code=404, detail="PTY session not found")
+        raise HTTPException(status_code=404, detail=_err(404, "PTY session not found"))
     
     try:
         channel = pty_info["channel"]
@@ -591,7 +1121,7 @@ async def pty_input(session_id: str, req: PTYInputRequest):
         
         return {"status": "sent", "pty_id": pty_id}
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Input failed: {exc}")
+        raise HTTPException(status_code=500, detail=_err(500, f"Input failed: {exc}"))
 
 
 @app.get("/api/ssh/pty/{session_id}/output")
@@ -604,7 +1134,7 @@ async def pty_output(session_id: str):
             break
     
     if not pty_info or not pty_info.get("channel"):
-        raise HTTPException(status_code=404, detail="PTY session not found")
+        raise HTTPException(status_code=404, detail=_err(404, "PTY session not found"))
     
     try:
         channel = pty_info["channel"]
@@ -621,7 +1151,7 @@ async def pty_output(session_id: str):
             eof=channel.eof_received or channel.closed,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Output read failed: {exc}")
+        raise HTTPException(status_code=500, detail=_err(500, f"Output read failed: {exc}"))
 
 
 @app.post("/api/ssh/pty/{session_id}/close")
@@ -642,7 +1172,7 @@ async def pty_close(session_id: str):
         del _pty_sessions[pty_id_to_remove]
         return {"status": "closed", "session_id": session_id}
     
-    raise HTTPException(status_code=404, detail="PTY session not found")
+    raise HTTPException(status_code=404, detail=_err(404, "PTY session not found"))
 
 
 # ---------------------------------------------------------------------------
@@ -697,6 +1227,9 @@ async def session_health(session_id: str):
 @app.post("/api/jobs/run", response_model=JobRunResponse)
 async def jobs_run(req: JobRunRequest):
     """Start a background job on an SSH session."""
+    session = await manager.get_session(req.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=_err(404, f"Session {req.session_id} not found"))
     job_id = await job_manager.create_job(
         session_id=req.session_id,
         command=req.command,
@@ -718,10 +1251,9 @@ async def jobs_result(job_id: str):
     return JobResultResponse(**result)
 
 
-@app.get("/metrics")
+@app.get("/metrics", response_class=PlainTextResponse)
 async def prometheus_metrics():
     """Prometheus metrics endpoint."""
-    from fastapi.responses import Response
     return Response(content=metrics.get_metrics(), media_type="text/plain")
 
 
@@ -745,7 +1277,7 @@ async def jobs_dead_letter(limit: int = 100):
     return {"jobs": jobs, "count": len(jobs)}
 
 
-@app.get("/api/sdk/download")
+@app.get("/api/sdk/download", response_class=PlainTextResponse)
 async def download_sdk(
     api_key: str = Query(default=""),
     x_api_key: str = Header(default="", alias="X-API-Key"),
@@ -757,7 +1289,7 @@ async def download_sdk(
         if not secrets.compare_digest(provided, settings.api_key):
             raise HTTPException(
                 status_code=401,
-                detail="Invalid or missing API key. Provide via ?api_key=... or X-API-Key header"
+                detail=_err(401, "Invalid or missing API key. Provide via ?api_key=... or X-API-Key header")
             )
     
     sdk_path = "/app/sdk/ssh_gateway.py"
@@ -772,7 +1304,7 @@ async def download_sdk(
             }
         )
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="SDK not found")
+        raise HTTPException(status_code=404, detail=_err(404, "SDK not found"))
 
 
 @app.post("/api/bulk/execute", response_model=BulkExecuteResponse)
@@ -919,12 +1451,12 @@ async def jobs_cancel(job_id: str):
 # Job Stream (SSE)
 # ---------------------------------------------------------------------------
 
-@app.get("/api/jobs/{job_id}/stream")
+@app.get("/api/jobs/{job_id}/stream", response_class=StreamingResponse)
 async def jobs_stream(job_id: str):
     """Stream job output via Server-Sent Events."""
     job = await job_manager.get_job(job_id)
     if not job:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+        raise HTTPException(status_code=404, detail=_err(404, f"Job {job_id} not found"))
 
     queue: asyncio.Queue = asyncio.Queue()
     job.add_listener(queue)
@@ -965,7 +1497,7 @@ async def jobs_stream(job_id: str):
     )
 
 
-@app.get("/api/jobs/{job_id}/events")
+@app.get("/api/jobs/{job_id}/events", response_class=StreamingResponse)
 async def jobs_events(job_id: str):
     """Alias for /api/jobs/{job_id}/stream — SSE job progress events."""
     return await jobs_stream(job_id)
@@ -981,7 +1513,7 @@ async def file_read(req: FileReadRequest, request: Request):
     try:
         validated = validate_path(req.path)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
     
     audit_logger.log_file_access(req.session_id, validated, "READ", request.client.host)
     content = await file_editor.read_file(req.session_id, validated)
@@ -1002,7 +1534,7 @@ async def file_edit(req: FileEditRequest):
         return FileEditResponse(**result)
     except Exception as exc:
         logger.error(f"File edit failed: {exc}")
-        raise HTTPException(status_code=500, detail=f"File edit failed: {exc}")
+        raise HTTPException(status_code=500, detail=_err(500, f"File edit failed: {exc}"))
 
 
 @app.post("/api/file/patch", response_model=PatchApplyResponse)
@@ -1020,7 +1552,7 @@ async def file_patch(req: PatchApplyRequest):
 # Raw File API
 # ---------------------------------------------------------------------------
 
-@app.get("/api/file/raw")
+@app.get("/api/file/raw", response_class=PlainTextResponse)
 async def file_raw(
     session_id: str = Query(...),
     path: str = Query(...),
@@ -1119,7 +1651,7 @@ async def file_upload_json(req: FileUploadRequest):
     return FileUploadResponse(path=req.path, size=len(decoded))
 
 
-@app.get("/api/file/download")
+@app.get("/api/file/download", response_class=Response)
 async def file_download(session_id: str = Query(...), path: str = Query(...)):
     """Download file from remote server."""
     content = await file_editor.read_file(session_id, path)
@@ -1225,7 +1757,7 @@ async def ast_rename(req: ASTRefactorRenameRequest):
                 files_changed=1 if count > 0 else 0,
             )
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"AST rename failed: {exc}")
+            raise HTTPException(status_code=500, detail=_err(500, f"AST rename failed: {exc}"))
 
 
 @app.post("/api/refactor/rename", response_model=ASTRefactorRenameResponse)
@@ -1256,7 +1788,7 @@ async def ast_extract(req: ASTRefactorExtractRequest):
             code=refactored,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"AST extract failed: {exc}")
+        raise HTTPException(status_code=500, detail=_err(500, f"AST extract failed: {exc}"))
 
 
 @app.post("/api/ast/analyze", response_model=ASTAnalyzeResponse)
@@ -1271,7 +1803,7 @@ async def ast_analyze(req: ASTAnalyzeRequest):
             **analysis,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"AST analysis failed: {exc}")
+        raise HTTPException(status_code=500, detail=_err(500, f"AST analysis failed: {exc}"))
 
 
 # ---------------------------------------------------------------------------
@@ -1292,7 +1824,7 @@ async def project_tree(
     result = await manager.execute(session_id, cmd, timeout=30)
 
     if result["exit_code"] != 0 or "ERROR" in result["stdout"]:
-        raise HTTPException(status_code=500, detail=f"Cannot read directory: {result['stderr']}")
+        raise HTTPException(status_code=500, detail=_err(500, f"Cannot read directory: {result['stderr']}"))
 
     items = []
     for line in result["stdout"].strip().split("\n"):
@@ -1326,7 +1858,7 @@ async def project_structure(req: ProjectStructureRequest):
     result = await manager.execute(req.session_id, cmd, timeout=30)
     
     if result["exit_code"] != 0 or "ERROR" in result["stdout"]:
-        raise HTTPException(status_code=500, detail=f"Cannot read directory: {result['stderr']}")
+        raise HTTPException(status_code=500, detail=_err(500, f"Cannot read directory: {result['stderr']}"))
     
     files = []
     total_files = 0
@@ -1671,7 +2203,7 @@ async def context_get(context_id: str):
     """Get context details."""
     ctx = await context_manager.get_context(context_id)
     if not ctx:
-        raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+        raise HTTPException(status_code=404, detail=_err(404, f"Context {context_id} not found"))
 
     resp = _context_to_response(ctx)
     resp.message = "Context active"
@@ -1693,7 +2225,7 @@ async def context_delete(context_id: str):
     """Delete a context."""
     success = await context_manager.delete_context(context_id)
     if not success:
-        raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+        raise HTTPException(status_code=404, detail=_err(404, f"Context {context_id} not found"))
     return {"status": "deleted", "context_id": context_id}
 
 
@@ -1738,7 +2270,7 @@ async def git_diff(context_id: str):
     """Get git diff for context."""
     ctx = await context_manager.get_context(context_id)
     if not ctx:
-        raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+        raise HTTPException(status_code=404, detail=_err(404, f"Context {context_id} not found"))
 
     from app.git_manager import GitManager
     git = GitManager(manager)
@@ -1819,7 +2351,7 @@ async def git_diff(req: GitDiffRequest):
     )
 
     if "ERROR" in result["stdout"]:
-        raise HTTPException(status_code=500, detail="Git diff failed")
+        raise HTTPException(status_code=500, detail=_err(500, "Git diff failed"))
 
     diff = result["stdout"]
     files_changed = diff.count("diff --git")
@@ -1893,7 +2425,7 @@ async def recovery_create_backup(req: CreateBackupRequest):
     """Create a backup before making changes."""
     ctx = await context_manager.get_context(req.context_id)
     if not ctx:
-        raise HTTPException(status_code=404, detail="Context not found")
+        raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
     
     # Create git stash as backup
     result = await context_manager.create_backup(req.context_id, req.name)
@@ -1910,7 +2442,7 @@ async def recovery_restore_backup(req: RestoreBackupRequest):
     """Restore from backup."""
     ctx = await context_manager.get_context(req.context_id)
     if not ctx:
-        raise HTTPException(status_code=404, detail="Context not found")
+        raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
     
     # Restore git stash
     result = await context_manager.restore_backup(req.context_id)
@@ -1927,7 +2459,7 @@ async def recovery_list_backups(context_id: str):
     """List available backups."""
     ctx = await context_manager.get_context(context_id)
     if not ctx:
-        raise HTTPException(status_code=404, detail="Context not found")
+        raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
     
     # List git stashes
     result = await manager.execute(
@@ -1962,7 +2494,7 @@ async def context_file_read(req: FileReadRequest):
     """Read a file using context (session_id extracted from context)."""
     ctx = await context_manager.get_context(req.session_id)
     if not ctx:
-        raise HTTPException(status_code=404, detail="Context not found")
+        raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
 
     content = await file_editor.read_file(ctx.session_id, req.path)
     await context_manager.add_file_to_context(req.session_id, req.path)
@@ -1974,7 +2506,7 @@ async def context_file_edit(req: FileEditWithContextRequest):
     """Edit a file with context awareness (auto-commit, validation)."""
     ctx = await context_manager.get_context(req.context_id)
     if not ctx:
-        raise HTTPException(status_code=404, detail="Context not found")
+        raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
 
     logger.info(f"Context edit: ctx={req.context_id}, path={req.path}, ops={len(req.operations)}")
 
@@ -2001,7 +2533,7 @@ async def context_file_edit(req: FileEditWithContextRequest):
         logger.info(f"Edit result: {result}")
     except Exception as exc:
         logger.error(f"Edit failed: {exc}")
-        raise HTTPException(status_code=500, detail=f"Edit failed: {exc}")
+        raise HTTPException(status_code=500, detail=_err(500, f"Edit failed: {exc}"))
 
     await context_manager.record_edit(req.context_id, req.path, "edit")
     await context_manager.add_file_to_context(req.context_id, req.path)
@@ -2140,10 +2672,10 @@ async def validate_context(req: ValidateRequest):
             ]
         )
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(status_code=404, detail=_err(404, str(exc)))
     except Exception as exc:
         logger.error("Validation error: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Validation failed: {exc}")
+        raise HTTPException(status_code=500, detail=_err(500, f"Validation failed: {exc}"))
 
 
 # ---------------------------------------------------------------------------
@@ -2165,7 +2697,7 @@ async def get_template(template_id: str):
     """Get template details."""
     template = TemplateLibrary.get_template(template_id)
     if not template:
-        raise HTTPException(status_code=404, detail=f"Template {template_id} not found")
+        raise HTTPException(status_code=404, detail=_err(404, f"Template {template_id} not found"))
     return template
 
 
@@ -2174,15 +2706,15 @@ async def render_template(req: TemplateRenderRequest):
     """Render template and save to file."""
     ctx = await context_manager.get_context(req.context_id)
     if not ctx:
-        raise HTTPException(status_code=404, detail="Context not found")
+        raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
     
     try:
         code = TemplateLibrary.render_template(req.template_id, req.params)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
     
     if not code:
-        raise HTTPException(status_code=404, detail=f"Template {req.template_id} not found")
+        raise HTTPException(status_code=404, detail=_err(404, f"Template {req.template_id} not found"))
     
     # Create file with rendered code
     result = await manager.execute(
@@ -2192,7 +2724,7 @@ async def render_template(req: TemplateRenderRequest):
     )
     
     if result["exit_code"] != 0:
-        raise HTTPException(status_code=500, detail=f"Failed to create file: {result['stderr']}")
+        raise HTTPException(status_code=500, detail=_err(500, f"Failed to create file: {result['stderr']}"))
     
     # Auto-commit if enabled
     git_commit = None
@@ -2352,7 +2884,7 @@ async def add_server(req: AddServerRequest):
     # Check if server ID already exists
     existing = server_manager.get_server(req.id)
     if existing:
-        raise HTTPException(status_code=409, detail=f"Server with ID '{req.id}' already exists")
+        raise HTTPException(status_code=409, detail=_err(409, f"Server with ID '{req.id}' already exists"))
     
     server = server_manager.add_server(
         server_id=req.id,
@@ -2369,8 +2901,10 @@ async def add_server(req: AddServerRequest):
 @app.delete("/api/servers/{server_id}")
 async def remove_server(server_id: str):
     """Remove a server."""
-    success = server_manager.remove_server(server_id)
-    return {"status": "removed" if success else "not_found", "server_id": server_id}
+    if not server_manager.get_server(server_id):
+        raise HTTPException(status_code=404, detail=_err(404, f"Server {server_id} not found"))
+    server_manager.remove_server(server_id)
+    return {"status": "removed", "server_id": server_id}
 
 
 @app.post("/api/servers/{server_id}/connect", response_model=ServerConnectResponse)
@@ -2378,7 +2912,7 @@ async def connect_server(server_id: str, req: ConnectServerRequest):
     """Connect to a server and return session."""
     server = server_manager.get_server(server_id)
     if not server:
-        raise HTTPException(status_code=404, detail=f"Server {server_id} not found")
+        raise HTTPException(status_code=404, detail=_err(404, f"Server {server_id} not found"))
     
     try:
         session_id = await manager.create_session(
@@ -2403,7 +2937,7 @@ async def connect_server(server_id: str, req: ConnectServerRequest):
         )
     except Exception as exc:
         server_manager.update_server_status(server_id, ServerStatus.ERROR)
-        raise HTTPException(status_code=502, detail=f"Connection failed: {exc}")
+        raise HTTPException(status_code=502, detail=_err(502, f"Connection failed: {exc}"))
 
 
 # ---------------------------------------------------------------------------
@@ -2415,7 +2949,7 @@ async def create_snapshot(req: CreateSnapshotRequest):
     """Create a snapshot of current project state."""
     ctx = await context_manager.get_context(req.context_id)
     if not ctx:
-        raise HTTPException(status_code=404, detail="Context not found")
+        raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
     
     try:
         snapshot = await snapshot_manager.create_snapshot(
@@ -2431,7 +2965,7 @@ async def create_snapshot(req: CreateSnapshotRequest):
             snapshot_id=snapshot.id,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Snapshot creation failed: {exc}")
+        raise HTTPException(status_code=500, detail=_err(500, f"Snapshot creation failed: {exc}"))
 
 
 @app.get("/api/snapshots")
@@ -2439,7 +2973,7 @@ async def list_snapshots(context_id: str):
     """List all snapshots for context."""
     ctx = await context_manager.get_context(context_id)
     if not ctx:
-        raise HTTPException(status_code=404, detail="Context not found")
+        raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
     
     snapshots = await snapshot_manager.list_snapshots(ctx.session_id, context_id)
     
@@ -2466,7 +3000,7 @@ async def restore_snapshot(req: RestoreSnapshotRequest):
     """Restore project from snapshot."""
     ctx = await context_manager.get_context(req.context_id)
     if not ctx:
-        raise HTTPException(status_code=404, detail="Context not found")
+        raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
     
     try:
         result = await snapshot_manager.restore_snapshot(
@@ -2482,7 +3016,7 @@ async def restore_snapshot(req: RestoreSnapshotRequest):
             restored_files=result["restored_files"],
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Restore failed: {exc}")
+        raise HTTPException(status_code=500, detail=_err(500, f"Restore failed: {exc}"))
 
 
 @app.delete("/api/snapshots/{snapshot_id}")
@@ -2490,7 +3024,7 @@ async def delete_snapshot(snapshot_id: str, context_id: str):
     """Delete a snapshot."""
     ctx = await context_manager.get_context(context_id)
     if not ctx:
-        raise HTTPException(status_code=404, detail="Context not found")
+        raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
     
     success = await snapshot_manager.delete_snapshot(
         session_id=ctx.session_id,
@@ -2636,7 +3170,7 @@ async def context_get_state(context_id: str):
     """Get smart context state."""
     state = await context_manager.get_smart_state(context_id)
     if not state:
-        raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+        raise HTTPException(status_code=404, detail=_err(404, f"Context {context_id} not found"))
     return state
 
 
@@ -2675,7 +3209,7 @@ async def batch_execute(req: BatchExecuteRequest):
     
     ctx = await context_manager.get_context(req.context_id)
     if not ctx:
-        raise HTTPException(status_code=404, detail="Context not found")
+        raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
 
     # Convert Pydantic models to dicts for batch manager
     operations = []
@@ -2764,7 +3298,7 @@ async def code_insert(req: CodeInsertRequest):
     """Intelligently insert code based on natural language instruction."""
     ctx = await context_manager.get_context(req.context_id)
     if not ctx:
-        raise HTTPException(status_code=404, detail="Context not found")
+        raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
     
     # Find insertion point
     suggestion = await code_intelligence.find_insertion_point(
@@ -2775,7 +3309,7 @@ async def code_insert(req: CodeInsertRequest):
     )
     
     if not suggestion:
-        raise HTTPException(status_code=400, detail="Could not find insertion point")
+        raise HTTPException(status_code=400, detail=_err(400, "Could not find insertion point"))
     
     # Apply the insertion
     try:
@@ -2861,7 +3395,7 @@ async def code_complete(req: CodeCompleteRequest):
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 async def root():
     """Serve the main page."""
     return FileResponse("app/static/index.html")
