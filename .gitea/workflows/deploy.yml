@@ -9,7 +9,8 @@ jobs:
     steps:
       - name: Checkout
         run: |
-          git clone http://192.168.1.103:3005/gpakoh/ssh-gateway-ai.git /tmp/repo
+          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no -p 2222"
+          git clone ssh://git@192.168.1.103:2222/gpakoh/ssh-gateway-ai.git /tmp/repo
           cd /tmp/repo && git checkout $GITHUB_SHA
       - name: Run tests
         run: |
@@ -23,7 +24,8 @@ jobs:
     steps:
       - name: Checkout
         run: |
-          git clone http://192.168.1.103:3005/gpakoh/ssh-gateway-ai.git /tmp/repo-nginx
+          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no -p 2222"
+          git clone ssh://git@192.168.1.103:2222/gpakoh/ssh-gateway-ai.git /tmp/repo-nginx
           cd /tmp/repo-nginx && git checkout $GITHUB_SHA
       - name: Deploy nginx config
         run: |
@@ -36,7 +38,8 @@ jobs:
     steps:
       - name: Checkout
         run: |
-          git clone http://192.168.1.103:3005/gpakoh/ssh-gateway-ai.git /tmp/repo-be
+          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no -p 2222"
+          git clone ssh://git@192.168.1.103:2222/gpakoh/ssh-gateway-ai.git /tmp/repo-be
           cd /tmp/repo-be && git checkout $GITHUB_SHA
       - name: Deploy backend
         run: |
