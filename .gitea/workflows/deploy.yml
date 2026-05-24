@@ -97,8 +97,13 @@ jobs:
           PY
             nginx -t
             nginx -s reload
-            code=$(curl -k -sS -o /tmp/web-ssh-noauth.out -w '%{http_code}' --resolve ssh.xloud.ru:443:$NGINX_HOST https://ssh.xloud.ru/api/servers || true)
-            test "$code" = "302" || { echo "expected unauthenticated https /api/servers to redirect to Authelia, got $code"; cat /tmp/web-ssh-noauth.out; exit 1; }
+            for i in 1 2 3; do
+              sleep 1
+              code=$(curl -k -sS -o /tmp/web-ssh-noauth.out -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 https://ssh.xloud.ru/api/servers || true)
+              test "$code" = "302" && break
+              echo "attempt $i: expected 302, got $code"
+            done
+            test "$code" = "302" || { echo "unauthenticated https /api/servers did not redirect to Authelia after 3 tries"; cat /tmp/web-ssh-noauth.out; exit 1; }
           REMOTE
 
   deploy-backend:
