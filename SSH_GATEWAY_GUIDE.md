@@ -1,11 +1,15 @@
 # Web SSH Gateway: практический гайд
 
 Версия API: `1.0.0`
-Обновлено: `2026-05-24 09:47 UTC`
+Обновлено: `2026-05-25 02:00 UTC`
 
 ## 0) Аутентификация
 
 **В production public только `GET /health`. Все остальные endpoint'ы требуют API-ключ.**
+
+На выбор три способа аутентификации:
+
+### 0.1 API-ключ (для всех клиентов)
 
 - API-ключ передаётся **только в заголовке `X-API-Key`** или через `Authorization: Bearer <token>`.
 - Передача ключа в query string (`?api_key=...`) **не поддерживается** ни для HTTP, ни для WebSocket.
@@ -13,6 +17,35 @@
 - Если `API_AUTH_ENABLED=false` (режим по умолчанию для LAN-разработки), аутентификация отключена.
 - В production (интернет) `API_AUTH_ENABLED=true` — ключ обязателен для всех endpoint'ов, кроме `/health`.
 - Swagger UI (`/docs`, `/redoc`) и OpenAPI-схема (`/openapi.json`) также защищены.
+
+### 0.2 mTLS-сертификат (для агентов без SSO)
+
+Автоматизированные агенты могут обходить Authelia через mTLS:
+
+1. Сгенерируйте клиентский сертификат через CA на сервере (LXC 100):
+   ```bash
+   ssh root@192.0.2.10
+   cd /etc/nginx/certs
+   openssl genpkey -algorithm ed25519 -out client.key
+   openssl req -new -key client.key -out client.csr -subj "/CN=agent-name"
+   openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key \
+     -CAcreateserial -out client.crt -days 3650 -sha256
+   rm client.csr
+   ```
+2. Скопируйте `client.crt` и `client.key` на машину агента.
+3. При запросе к `https://ssh.xloud.ru` передавайте сертификат:
+   ```bash
+   curl --cert client.crt --key client.key https://ssh.xloud.ru/api/ssh/connect \
+     -H "Content-Type: application/json" \
+     -d '{"host":"192.0.2.10","username":"root","password":"..."}'
+   ```
+4. Nginx проверяет сертификат (`ssl_verify_client optional`):
+   - **SUCCESS** → прямой `proxy_pass` на бэкенд (Authelia не вызывается)
+   - **NONE** (нет сертификата) → `rewrite` на `/authelia` → 302 на страницу логина
+
+### 0.3 Authelia SSO (для людей через браузер)
+
+Стандартная форма логина на `auth.xloud.ru`. После входа — cookie-сессия для всех запросов.
 
 > `Auth:` в списке ниже: `нет` — только `GET /health`. Для всех остальных endpoint'ов — `ApiKeyHeader`.
 
@@ -24,13 +57,24 @@
 - `Authelia` не требуется.
 - Рекомендуемый режим для внутренних агентов и CI в LAN.
 
-### 1.2 Доступ из интернета (через Authelia SSO)
+### 1.2 Доступ из интернета через mTLS (для агентов)
+
+- Клиентский сертификат + ключ (`client.crt` / `client.key`).
+- Не требует Authelia, cookies или API-ключа (nginx сам подставляет `X-API-Key`).
+- Подходит для CI/CD, скриптов, автоматизированных агентов.
+
+```bash
+curl --cert client.crt --key client.key \
+  https://ssh.xloud.ru/api/ssh/connect \
+  -H "Content-Type: application/json" \
+  -d '{"host":"192.0.2.10","username":"root","password":"<SSH_PASS>"}'
+```
+
+### 1.3 Доступ из интернета через Authelia SSO (для людей)
 
 - Базовый URL API: `https://ssh.xloud.ru`
 - Перед вызовами API нужна SSO-аутентификация в `Authelia` (cookie-сессия).
 - Используйте только свои учетные данные; не храните логины/пароли в документации и скриптах.
-
-Пример (интернет через SSO):
 
 ```bash
 # 1) Логин в Authelia (сохраняем cookie)
@@ -54,7 +98,11 @@ curl -k -b cookies.txt -X POST https://ssh.xloud.ru/api/ssh/connect \
   }'
 ```
 
-Пример (локальная сеть):
+### 1.4 Прямой доступ в LAN (без аутентификации, без mTLS)
+
+- Базовый URL: `http://10.0.1.103:8085`
+- `Authelia` не требуется, `API_AUTH_ENABLED` можно отключить.
+- Рекомендуемый режим для разработки и отладки.
 
 ```bash
 curl -X GET http://10.0.1.103:8085/health
