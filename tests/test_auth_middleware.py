@@ -1,0 +1,413 @@
+"""Tests for auth middleware: IP allowlist + API key."""
+
+from contextlib import contextmanager
+from unittest.mock import MagicMock
+import pytest
+from starlette.testclient import TestClient
+
+from app.main import app
+from app.config import settings
+from app.auth_middleware import (
+    get_client_ip,
+    is_ip_allowed,
+    verify_api_key,
+    parse_cidrs,
+    ws_auth_check,
+    CLOSE_POLICY_VIOLATION,
+)
+
+
+@contextmanager
+def _client(**kw):
+    """TestClient with patched client IP 127.0.0.1 so IP
+    allowlist does not reject 'testclient' hostname from httpx."""
+    with TestClient(app, **kw) as c:
+        yield c
+
+
+def _mock_request(client_host="127.0.0.1", xff=None):
+    req = MagicMock()
+    req.client.host = client_host
+    headers = {}
+    if xff:
+        headers["X-Forwarded-For"] = xff
+    req.headers = headers
+    return req
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for individual middleware functions
+# ---------------------------------------------------------------------------
+
+
+class TestGetClientIp:
+    def test_direct_ip(self):
+        req = _mock_request(client_host="10.0.0.5")
+        assert get_client_ip(req, []) == "10.0.0.5"
+
+    def test_trusted_proxy_xff(self):
+        req = _mock_request(client_host="10.0.0.1", xff="10.0.1.50")
+        trusted = parse_cidrs("10.0.0.0/8")
+        assert get_client_ip(req, trusted) == "10.0.1.50"
+
+    def test_untrusted_proxy_ignores_xff(self):
+        req = _mock_request(client_host="192.0.2.10", xff="10.0.0.99")
+        trusted = parse_cidrs("10.0.0.0/8")
+        assert get_client_ip(req, trusted) == "192.0.2.10"
+
+
+class TestIsIpAllowed:
+    def test_allowed_ip(self):
+        nets = parse_cidrs("10.0.0.0/8")
+        assert is_ip_allowed("10.0.0.5", nets) is True
+
+    def test_forbidden_ip(self):
+        nets = parse_cidrs("10.0.0.0/8")
+        assert is_ip_allowed("192.0.2.10", nets) is False
+
+    def test_invalid_ip_returns_false(self):
+        nets = parse_cidrs("0.0.0.0/0")
+        assert is_ip_allowed("not-an-ip", nets) is False
+
+
+class TestVerifyApiKey:
+    def test_header_match(self):
+        req = _mock_request()
+        req.headers = {"X-API-Key": "secret-42"}
+        assert verify_api_key(req, "secret-42") is True
+
+    def test_header_mismatch(self):
+        req = _mock_request()
+        req.headers = {"X-API-Key": "wrong"}
+        assert verify_api_key(req, "secret-42") is False
+
+    def test_bearer_token(self):
+        req = _mock_request()
+        req.headers = {"Authorization": "Bearer my-token"}
+        assert verify_api_key(req, "my-token") is True
+
+    def test_no_key(self):
+        req = _mock_request()
+        req.headers = {}
+        assert verify_api_key(req, "secret-42") is False
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — auth disabled
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def auth_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "api_auth_enabled", False)
+    monkeypatch.setattr(settings, "api_key", "")
+
+
+class TestAuthDisabled:
+    def test_health_without_key(self, auth_disabled):
+        with _client() as client:
+            resp = client.get("/health")
+        assert resp.status_code == 200
+
+    def test_api_servers_without_key(self, auth_disabled):
+        with _client() as client:
+            resp = client.get("/api/servers")
+        assert resp.status_code != 401
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — auth enabled, API key
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def api_key_auth(monkeypatch):
+    monkeypatch.setattr(settings, "api_auth_enabled", True)
+    monkeypatch.setattr(settings, "api_key", "secret-42")
+    monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
+    monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+    monkeypatch.setattr(
+        "app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1"
+    )
+
+
+class TestApiKey:
+    def test_health_is_public(self, api_key_auth):
+        with TestClient(app) as client:
+            resp = client.get("/health")
+        assert resp.status_code == 200
+
+    def test_api_servers_without_key_returns_401(self, api_key_auth):
+        with TestClient(app) as client:
+            resp = client.get("/api/servers")
+        assert resp.status_code == 401
+
+    def test_api_servers_with_wrong_key_returns_401(self, api_key_auth):
+        with TestClient(app) as client:
+            resp = client.get("/api/servers", headers={"X-API-Key": "wrong-key"})
+        assert resp.status_code == 401
+
+    def test_api_servers_with_correct_key_not_401(self, api_key_auth):
+        with TestClient(app) as client:
+            resp = client.get("/api/servers", headers={"X-API-Key": "secret-42"})
+        assert resp.status_code not in (401, 403)
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — IP allowlist
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ip_allowlist_auth(monkeypatch):
+    monkeypatch.setattr(settings, "api_auth_enabled", True)
+    monkeypatch.setattr(settings, "api_key", "secret-42")
+    monkeypatch.setattr(settings, "allowed_client_cidrs", "10.0.0.0/8")
+    monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+
+
+class TestIpAllowlist:
+    def test_forbidden_ip_returns_403(self, ip_allowlist_auth, monkeypatch):
+        monkeypatch.setattr(
+            "app.auth_middleware.get_client_ip", lambda req, trusted: "192.0.2.10"
+        )
+        with TestClient(app) as client:
+            resp = client.get("/api/servers", headers={"X-API-Key": "secret-42"})
+        assert resp.status_code == 403
+
+    def test_allowed_ip_with_correct_key_succeeds(self, ip_allowlist_auth, monkeypatch):
+        monkeypatch.setattr(
+            "app.auth_middleware.get_client_ip", lambda req, trusted: "10.0.0.5"
+        )
+        with TestClient(app) as client:
+            resp = client.get("/api/servers", headers={"X-API-Key": "secret-42"})
+        assert resp.status_code not in (401, 403)
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed tests
+# ---------------------------------------------------------------------------
+
+
+class TestFailClosed:
+    def test_auth_enabled_no_key_returns_503(self, monkeypatch):
+        monkeypatch.setattr(settings, "api_auth_enabled", True)
+        monkeypatch.setattr(settings, "api_key", "")
+        with _client() as client:
+            resp = client.get("/api/servers")
+        assert resp.status_code == 503
+
+    def test_invalid_allowed_cidr_returns_503(self, monkeypatch):
+        monkeypatch.setattr(settings, "api_auth_enabled", True)
+        monkeypatch.setattr(settings, "api_key", "secret-42")
+        monkeypatch.setattr(settings, "allowed_client_cidrs", "not-a-cidr,also-bogus")
+        with _client() as client:
+            resp = client.get("/api/servers", headers={"X-API-Key": "secret-42"})
+        assert resp.status_code == 503
+
+    def test_invalid_trusted_cidr_returns_503(self, monkeypatch):
+        monkeypatch.setattr(settings, "api_auth_enabled", True)
+        monkeypatch.setattr(settings, "api_key", "secret-42")
+        monkeypatch.setattr(settings, "trusted_proxy_cidrs", "bad,,,crap")
+        with _client() as client:
+            resp = client.get("/api/servers", headers={"X-API-Key": "secret-42"})
+        assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# WebSocket auth — ws_auth_check unit tests + integration
+# ---------------------------------------------------------------------------
+
+import asyncio
+from unittest.mock import MagicMock
+
+
+@pytest.fixture
+def ws_settings(monkeypatch):
+    """Enable API auth with a known key and allow everything."""
+    monkeypatch.setattr(settings, "api_auth_enabled", True)
+    monkeypatch.setattr(settings, "api_key", "ws-secret-99")
+    monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
+    monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+
+
+@pytest.fixture
+def ws_ip_deny_settings(monkeypatch):
+    """Auth enabled with IP allowlist that blocks 'testclient'."""
+    monkeypatch.setattr(settings, "api_auth_enabled", True)
+    monkeypatch.setattr(settings, "api_key", "ws-secret-99")
+    monkeypatch.setattr(settings, "allowed_client_cidrs", "10.0.0.0/8")
+    monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+
+
+class TestWsAuthCheckUnit:
+    """Direct unit tests for ws_auth_check() — no TestClient needed."""
+
+    def _mock_ws(self, host="127.0.0.1", headers=None, query=None):
+        ws = MagicMock()
+        ws.client.host = host
+        ws.headers = headers or {}
+        ws.query_params = query or {}
+        return ws
+
+    def test_no_key_returns_1008(self, ws_settings):
+        ws = self._mock_ws()
+        result = asyncio.run(ws_auth_check(ws, settings))
+        assert result is not None
+        assert result[0] == CLOSE_POLICY_VIOLATION
+
+    def test_wrong_key_returns_1008(self, ws_settings):
+        ws = self._mock_ws(headers={"X-API-Key": "wrong"})
+        result = asyncio.run(ws_auth_check(ws, settings))
+        assert result is not None
+        assert result[0] == CLOSE_POLICY_VIOLATION
+
+    def test_correct_key_returns_none(self, ws_settings):
+        ws = self._mock_ws(headers={"X-API-Key": "ws-secret-99"})
+        result = asyncio.run(ws_auth_check(ws, settings))
+        assert result is None
+
+    def test_ip_denied_returns_1008(self, ws_ip_deny_settings):
+        ws = self._mock_ws(host="192.0.2.10", headers={"X-API-Key": "ws-secret-99"})
+        result = asyncio.run(ws_auth_check(ws, settings))
+        assert result is not None
+        assert result[0] == CLOSE_POLICY_VIOLATION
+
+    def test_bearer_token_accepted(self, ws_settings):
+        ws = self._mock_ws(headers={"Authorization": "Bearer ws-secret-99"})
+        result = asyncio.run(ws_auth_check(ws, settings))
+        assert result is None
+
+    def test_auth_disabled_returns_none(self, monkeypatch):
+        monkeypatch.setattr(settings, "api_auth_enabled", False)
+        ws = self._mock_ws()
+        result = asyncio.run(ws_auth_check(ws, settings))
+        assert result is None
+
+    def test_query_string_key_not_accepted(self, ws_settings):
+        """Query string ?api_key=... must NOT work — only header auth."""
+        ws = self._mock_ws(query={"api_key": "ws-secret-99"})
+        result = asyncio.run(ws_auth_check(ws, settings))
+        assert result is not None
+        assert result[0] == CLOSE_POLICY_VIOLATION
+
+
+WS_STREAM = "/api/ssh/execute/stream"
+WS_FILE_WATCH = "/api/file/watch"
+
+
+class TestWebSocketAuthIntegration:
+    """Integration tests against the real /api/ssh/execute/stream and
+    /api/file/watch endpoints.  Auth is tested directly; after auth passes
+    we send empty session_id/command so the handler returns a business error
+    without reaching external dependencies (manager)."""
+
+    @pytest.fixture
+    def ws_auth(self, monkeypatch):
+        """Enable API auth, patch is_ip_allowed so TestClient's
+        'testclient' hostname is not rejected."""
+        monkeypatch.setattr(settings, "api_auth_enabled", True)
+        monkeypatch.setattr(settings, "api_key", "ws-secret-99")
+        monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
+        monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+        monkeypatch.setattr("app.auth_middleware.is_ip_allowed", lambda ip, nets: True)
+
+    @pytest.fixture
+    def ws_ip_deny(self, monkeypatch):
+        """Enable API auth with a restrictive IP allowlist that
+        blocks 'testclient'.  is_ip_allowed is NOT patched."""
+        monkeypatch.setattr(settings, "api_auth_enabled", True)
+        monkeypatch.setattr(settings, "api_key", "ws-secret-99")
+        monkeypatch.setattr(settings, "allowed_client_cidrs", "10.0.0.0/8")
+        monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+
+    # -- ssh/execute/stream ------------------------------------------------
+
+    def test_stream_without_key_denied(self, ws_auth):
+        self._expect_reject(WS_STREAM, 1008)
+
+    def test_stream_wrong_key_denied(self, ws_auth):
+        self._expect_reject(WS_STREAM, 1008, headers={"X-API-Key": "wrong"})
+
+    def test_stream_correct_key_passes_auth(self, ws_auth):
+        """Valid key + IP → auth OK, then empty session → business error."""
+        self._expect_business_error(
+            WS_STREAM,
+            headers={"X-API-Key": "ws-secret-99"},
+            request={"session_id": "", "command": ""},
+        )
+
+    def test_stream_ip_deny_even_with_correct_key(self, ws_ip_deny):
+        """IP allowlist blocks → 1008 even with a valid key."""
+        self._expect_reject(
+            WS_STREAM,
+            1008,
+            headers={"X-API-Key": "ws-secret-99"},
+        )
+
+    # -- file/watch --------------------------------------------------------
+
+    def test_file_watch_without_key_denied(self, ws_auth):
+        self._expect_reject(WS_FILE_WATCH, 1008)
+
+    def test_file_watch_correct_key_passes_auth(self, ws_auth):
+        """Valid key + IP → auth OK, then empty session → business error."""
+        self._expect_business_error(
+            WS_FILE_WATCH,
+            headers={"X-API-Key": "ws-secret-99"},
+            request={"session_id": "", "path": ""},
+        )
+
+    # -- helpers -----------------------------------------------------------
+
+    def _expect_reject(self, url, code, headers=None):
+        from starlette.websockets import WebSocketDisconnect
+
+        with TestClient(app) as client:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                with client.websocket_connect(url, headers=headers or {}):
+                    pass
+            assert exc.value.code == code
+
+    def _expect_business_error(self, url, headers, request):
+        with TestClient(app) as client:
+            with client.websocket_connect(url, headers=headers) as ws:
+                ws.send_json(request)
+                resp = ws.receive_json()
+                assert resp.get("type") == "error"
+
+
+# ---------------------------------------------------------------------------
+# SDK download auth tests
+# ---------------------------------------------------------------------------
+
+SDK_URL = "/api/sdk/download"
+
+
+@pytest.fixture
+def sdk_auth(monkeypatch):
+    """Auth enabled with known key, IP patched so "testclient" passes."""
+    monkeypatch.setattr(settings, "api_auth_enabled", True)
+    monkeypatch.setattr(settings, "api_key", "sdk-key-77")
+    monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
+    monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+    monkeypatch.setattr(
+        "app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1"
+    )
+
+
+class TestSdkAuth:
+    """/api/sdk/download auth — header-based only, query string rejected."""
+
+    def test_header_valid_passes_auth(self, sdk_auth):
+        """Valid X-API-Key header → auth passes (404 from missing file is OK)."""
+        with _client() as client:
+            resp = client.get(SDK_URL, headers={"X-API-Key": "sdk-key-77"})
+        assert resp.status_code not in (401, 403)
+
+    def test_query_only_returns_401(self, sdk_auth):
+        """?api_key=... without X-API-Key header → middleware denies at key
+        check (verify_api_key does not inspect query params)."""
+        with _client() as client:
+            resp = client.get(f"{SDK_URL}?api_key=sdk-key-77")
+        assert resp.status_code == 401

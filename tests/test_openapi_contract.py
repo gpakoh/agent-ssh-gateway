@@ -3,6 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
+from app.config import settings
 
 
 @pytest.fixture
@@ -15,7 +16,12 @@ def _op(schema, path, method="get"):
 
 
 def _content(schema, path, method, status=200):
-    return _op(schema, path, method).get("responses", {}).get(str(status), {}).get("content", {})
+    return (
+        _op(schema, path, method)
+        .get("responses", {})
+        .get(str(status), {})
+        .get("content", {})
+    )
 
 
 class TestMediaTypes:
@@ -32,18 +38,16 @@ class TestMediaTypes:
     def test_critical_endpoints_have_correct_content_type(self, schema):
         for path, method, expected in self.CRITICAL:
             c = _content(schema, path, method)
-            assert expected in c, f"{method.upper()} {path}: expected {expected}, got {list(c)}"
+            assert expected in c, (
+                f"{method.upper()} {path}: expected {expected}, got {list(c)}"
+            )
 
     def test_422_refers_to_validation_error_response(self, schema):
         for path, methods in schema["paths"].items():
             for method, op in methods.items():
                 resp = op.get("responses", {}).get("422", {})
                 ct = resp.get("content", {})
-                ref = (
-                    ct.get("application/json", {})
-                    .get("schema", {})
-                    .get("$ref", "")
-                )
+                ref = ct.get("application/json", {}).get("schema", {}).get("$ref", "")
                 if resp:
                     assert ref == "#/components/schemas/ValidationErrorResponse", (
                         f"{method.upper()} {path}: 422 ref={ref}"
@@ -53,16 +57,41 @@ class TestMediaTypes:
 class TestSecurity:
     def test_security_schemes_defined(self, schema):
         schemes = schema["components"].get("securitySchemes", {})
-        assert "ApiKeyQuery" in schemes
         assert "ApiKeyHeader" in schemes
-        assert schemes["ApiKeyQuery"] == {"type": "apiKey", "in": "query", "name": "api_key"}
-        assert schemes["ApiKeyHeader"] == {"type": "apiKey", "in": "header", "name": "X-API-Key"}
+        assert "ApiKeyQuery" not in schemes, "ApiKeyQuery is not supported at runtime"
+        assert schemes["ApiKeyHeader"] == {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-API-Key",
+        }
 
-    def test_sdk_download_has_security(self, schema):
-        sec = _op(schema, "/api/sdk/download", "get").get("security", [])
-        assert len(sec) == 2
-        assert sec[0] == {"ApiKeyQuery": []}
-        assert sec[1] == {"ApiKeyHeader": []}
+    def test_protected_endpoints_have_security(self, schema):
+        """Only /health GET is public; everything else requires X-API-Key."""
+        for path, methods in schema["paths"].items():
+            for method, op in methods.items():
+                key = (path, method.upper())
+                if key == ("/health", "GET"):
+                    assert "security" not in op or op["security"] == [], (
+                        f"/health GET should be public, got security={op.get('security')}"
+                    )
+                else:
+                    assert "security" in op, f"{method.upper()} {path} missing security"
+                    assert op["security"] == [{"ApiKeyHeader": []}], (
+                        f"{method.upper()} {path} expected ApiKeyHeader security, "
+                        f"got {op['security']}"
+                    )
+
+    def test_health_is_public(self, schema):
+        """/health is always public, even when API_AUTH_ENABLED=true."""
+        sec = _op(schema, "/health", "get").get("security", [])
+        assert sec == [], f"/health GET should not require security, got {sec}"
+
+    def test_metrics_requires_security(self, schema):
+        """/metrics is protected (not public)."""
+        sec = _op(schema, "/metrics", "get").get("security", [])
+        assert sec == [{"ApiKeyHeader": []}], (
+            f"/metrics GET should require ApiKeyHeader security, got {sec}"
+        )
 
 
 class TestErrorResponses:
@@ -75,19 +104,22 @@ class TestErrorResponses:
 
     def test_ssh_endpoint_has_404_and_500(self, schema):
         self._check_has_errors(
-            "/api/ssh/connect", "post",
+            "/api/ssh/connect",
+            "post",
             _op(schema, "/api/ssh/connect", "post"),
         )
 
     def test_servers_delete_has_404_and_500(self, schema):
         self._check_has_errors(
-            "/api/servers/{server_id}", "delete",
+            "/api/servers/{server_id}",
+            "delete",
             _op(schema, "/api/servers/{server_id}", "delete"),
         )
 
     def test_jobs_run_has_404_and_500(self, schema):
         self._check_has_errors(
-            "/api/jobs/run", "post",
+            "/api/jobs/run",
+            "post",
             _op(schema, "/api/jobs/run", "post"),
         )
 
@@ -108,21 +140,37 @@ class TestTags:
             for method, op in methods.items():
                 tags = op.get("tags", [])
                 assert tags, f"{method.upper()} {path}: no tag"
-                assert len(tags) == 1, f"{method.upper()} {path}: expected 1 tag, got {tags}"
+                assert len(tags) == 1, (
+                    f"{method.upper()} {path}: expected 1 tag, got {tags}"
+                )
 
     def test_top_level_tags_defined(self, schema):
         tags = {t["name"] for t in schema.get("tags", [])}
-        expected = {"ssh", "files", "jobs", "git", "context", "templates",
-                     "servers", "snapshots", "webhooks", "code", "system"}
+        expected = {
+            "ssh",
+            "files",
+            "jobs",
+            "git",
+            "context",
+            "templates",
+            "servers",
+            "snapshots",
+            "webhooks",
+            "code",
+            "system",
+        }
         missing = expected - tags
         assert not missing, f"Missing top-level tags: {missing}"
 
 
 class TestExamples:
     KEY_EXAMPLES = [
-        "/api/ssh/connect", "/api/ssh/execute",
-        "/api/file/read", "/api/file/write",
-        "/api/jobs/run", "/api/context/create",
+        "/api/ssh/connect",
+        "/api/ssh/execute",
+        "/api/file/read",
+        "/api/file/write",
+        "/api/jobs/run",
+        "/api/context/create",
     ]
 
     def test_key_endpoints_have_request_examples(self, schema):
@@ -135,7 +183,11 @@ class TestExamples:
         missing = []
         for path, methods in schema["paths"].items():
             for method, op in methods.items():
-                req_body = op.get("requestBody", {}).get("content", {}).get("application/json", {})
+                req_body = (
+                    op.get("requestBody", {})
+                    .get("content", {})
+                    .get("application/json", {})
+                )
                 if req_body.get("schema") and "example" not in req_body:
                     missing.append(f"{method.upper()} {path}")
         assert not missing, f"Endpoints without request example: {missing}"
@@ -143,8 +195,17 @@ class TestExamples:
 
 class TestSSE:
     def test_sse_schemas_exist(self, schema):
-        for name in ("SSEEvent", "SSEStatusEvent", "SSEStdoutEvent", "SSEStderrEvent", "SSEExitEvent", "SSEErrorEvent"):
-            assert name in schema["components"]["schemas"], f"Missing SSE schema: {name}"
+        for name in (
+            "SSEEvent",
+            "SSEStatusEvent",
+            "SSEStdoutEvent",
+            "SSEStderrEvent",
+            "SSEExitEvent",
+            "SSEErrorEvent",
+        ):
+            assert name in schema["components"]["schemas"], (
+                f"Missing SSE schema: {name}"
+            )
 
     def test_sse_event_has_discriminator(self, schema):
         ev = schema["components"]["schemas"]["SSEEvent"]
@@ -165,7 +226,12 @@ class TestParameters:
 
 
 class TestResponseHeaders:
-    REQUIRED_HEADERS = {"X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"}
+    REQUIRED_HEADERS = {
+        "X-Request-ID",
+        "X-RateLimit-Limit",
+        "X-RateLimit-Remaining",
+        "X-RateLimit-Reset",
+    }
 
     def test_operations_have_response_headers(self, schema):
         missing = []
@@ -175,15 +241,23 @@ class TestResponseHeaders:
                     hdrs = resp.get("headers", {})
                     missing_set = self.REQUIRED_HEADERS - set(hdrs.keys())
                     if missing_set:
-                        missing.append(f"{method.upper()} {path} [{resp_code}]: missing {missing_set}")
-        assert not missing, f"Response headers missing:\n" + "\n".join(missing[:10])
+                        missing.append(
+                            f"{method.upper()} {path} [{resp_code}]: missing {missing_set}"
+                        )
+        assert not missing, "Response headers missing:\n" + "\n".join(missing[:10])
 
 
 class TestRuntimeBehavior:
+    def setup_method(self):
+        settings.api_auth_enabled = False
+        settings.api_key = ""
+
     def test_delete_unknown_server_returns_404(self):
         with TestClient(app) as client:
             resp = client.delete("/api/servers/nonexistent-12345")
-        assert resp.status_code == 404, f"Expected 404, got {resp.status_code}: {resp.text}"
+        assert resp.status_code == 404, (
+            f"Expected 404, got {resp.status_code}: {resp.text}"
+        )
 
     def test_jobs_run_bad_session_returns_404(self):
         with TestClient(app) as client:
@@ -191,7 +265,9 @@ class TestRuntimeBehavior:
                 "/api/jobs/run",
                 json={"session_id": "fake-session-999", "command": "ls"},
             )
-        assert resp.status_code == 404, f"Expected 404, got {resp.status_code}: {resp.text}"
+        assert resp.status_code == 404, (
+            f"Expected 404, got {resp.status_code}: {resp.text}"
+        )
 
     def test_delete_unknown_returns_structured_error(self):
         with TestClient(app) as client:
