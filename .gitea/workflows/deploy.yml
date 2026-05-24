@@ -46,6 +46,23 @@ jobs:
           "
           scp -o BatchMode=yes -o StrictHostKeyChecking=no \
             nginx-gateway.example.com.conf root@$NGINX_HOST:/etc/nginx/sites-available/gateway.example.com
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$NGINX_HOST "python3 - <<'PY'
+from pathlib import Path
+from time import strftime
+
+path = Path('/etc/nginx/sites-available/AI-Docker.conf')
+marker = '# --- Web SSH Gateway (gateway.example.com) ---'
+if path.exists():
+    text = path.read_text()
+    start = text.find(marker)
+    if start != -1:
+        end = text.find('\n# --- ', start + len(marker))
+        if end == -1:
+            raise SystemExit('cannot locate end of legacy gateway.example.com block in AI-Docker.conf')
+        backup = path.with_suffix(path.suffix + '.bak-' + strftime('%Y%m%d%H%M%S'))
+        backup.write_text(text)
+        path.write_text(text[:start].rstrip() + '\n\n' + text[end + 1:].lstrip())
+PY"
           ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$NGINX_HOST "
             ln -sfn /etc/nginx/sites-available/gateway.example.com /etc/nginx/sites-enabled/gateway.example.com
             nginx -t && nginx -s reload
