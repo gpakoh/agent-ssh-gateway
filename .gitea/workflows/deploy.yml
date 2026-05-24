@@ -16,13 +16,15 @@ jobs:
         uses: actions/checkout@v4
       - name: Run tests
         run: |
-          apt-get update -qq
-          apt-get install -y -qq python3 python3-venv python3-pip
+          export DEBIAN_FRONTEND=noninteractive
+          export PIP_PROGRESS_BAR=off
+          apt-get update -qq >/dev/null
+          apt-get install -y -qq python3 python3-venv python3-pip >/dev/null
           python3 -m venv .venv
           . .venv/bin/activate
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pytest pytest-timeout httpx
-          python -m pytest tests/ -v --timeout=30
+          python -m pip install --upgrade pip >/dev/null
+          python -m pip install -q -r requirements.txt pytest pytest-timeout httpx
+          python -m pytest tests/ -q --timeout=30
 
   deploy-nginx:
     needs: test
