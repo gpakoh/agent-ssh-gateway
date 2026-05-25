@@ -95,14 +95,15 @@ jobs:
             echo "1/5: link config"
             ln -sfn /etc/nginx/sites-available/ssh.xloud.ru /etc/nginx/sites-enabled/ssh.xloud.ru
             echo "2/5: validate"
-            python3 -c "
-text = open('/etc/nginx/sites-enabled/ssh.xloud.ru').read()
-import re
-vals = re.findall(r'proxy_set_header\s+X-API-Key\s+\"([^\"]*)\";', text)
-assert len(vals) == 4 and all(len(v) >= 16 for v in vals), 'API_KEY check failed'
-assert '__API_KEY__' not in text, 'placeholder still present'
-print('API_KEY OK')
-"
+            python3 - <<'PYEOF'
+          from pathlib import Path
+          import re
+          text = Path('/etc/nginx/sites-enabled/ssh.xloud.ru').read_text()
+          vals = re.findall(r'proxy_set_header\s+X-API-Key\s+"([^"]*)";', text)
+          assert len(vals) == 4 and all(len(v) >= 16 for v in vals), 'API_KEY check failed'
+          assert '__API_KEY__' not in text, 'placeholder still present'
+          print('API_KEY OK')
+          PYEOF
             echo "3/5: nginx test"
             nginx -t
             echo "4/5: reload"
@@ -116,7 +117,7 @@ print('API_KEY OK')
             done
             test "$code" = "302" || { echo "FAIL: expected 302 got $code"; exit 1; }
             echo "nginx deploy OK"
-CFGEOF
+          CFGEOF
           echo "::endgroup::"
 
   deploy-backend:
