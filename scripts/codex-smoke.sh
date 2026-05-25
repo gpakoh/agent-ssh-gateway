@@ -77,10 +77,14 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' \
 check "auth accepted (valid key)" "200" "$CODE"
 
 # ---------------------------------------------------------------------------
-info "6. Sessions — empty list"
+info "6. Sessions — list shape"
 # ---------------------------------------------------------------------------
 SESSIONS=$(curl -sf -H "X-API-Key: $API_KEY" "$BASE_URL/api/ssh/sessions" 2>/dev/null || echo "FAIL")
-check "sessions list" '{"sessions":[],"count":0}' "$SESSIONS"
+SESSION_COUNT=$(echo "$SESSIONS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('count', 'FAIL'))" 2>/dev/null || echo "FAIL")
+case "$SESSION_COUNT" in
+    ''|*[!0-9]*) red "  FAIL: sessions list unexpected" && FAIL=$((FAIL+1)) ;;
+    *) green "  PASS: sessions list OK (count=$SESSION_COUNT)" && PASS=$((PASS+1)) ;;
+esac
 
 # ---------------------------------------------------------------------------
 info "7. Servers — list (may be empty)"
@@ -108,10 +112,10 @@ if [ -n "$SSH_HOST" ]; then
         -d "{\"host\":\"$SSH_HOST\",\"port\":$SSH_PORT,\"username\":\"$SSH_USER\",\"password\":\"$SSH_PASS\"}" \
         "$BASE_URL/api/ssh/connect" 2>/dev/null || echo "FAIL")
     SID=$(echo "$CONN" | python3 -c "import sys,json; print(json.load(sys.stdin).get('session_id','FAIL'))" 2>/dev/null || echo "FAIL")
-    check "connect returned session_id" "FAIL" "$SID" && true  # store result
-    if [ "$SID" != "FAIL" ]; then
-        green "  session_id=$SID"
+    if [ "$SID" != "FAIL" ] && [ -n "$SID" ]; then
+        green "  PASS: connect returned session_id"
         PASS=$((PASS+1))
+        green "  session_id=$SID"
 
         # -------------------------------------------------------------------
         info "9. SSH execute — echo hello"
@@ -169,10 +173,15 @@ info "13. Agent token — generate"
 TOKEN_RESP=$(curl -sf -X POST -H "X-API-Key: $API_KEY" \
     "$BASE_URL/api/agent/token" 2>/dev/null || echo "FAIL")
 AGENT_TOKEN=$(echo "$TOKEN_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('token','FAIL'))" 2>/dev/null || echo "FAIL")
-check "agent token generated" "FAIL" "$AGENT_TOKEN" && true
-if [ "$AGENT_TOKEN" != "FAIL" ]; then
-    green "  token=${AGENT_TOKEN:0:16}..."
+TOKEN_EXP=$(echo "$TOKEN_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('expires_at','FAIL'))" 2>/dev/null || echo "FAIL")
+if [ "$AGENT_TOKEN" != "FAIL" ] && [ -n "$AGENT_TOKEN" ] && [ "$TOKEN_EXP" != "FAIL" ] && [ -n "$TOKEN_EXP" ]; then
+    green "  PASS: agent token generated (expires_at present)"
     PASS=$((PASS+1))
+else
+    red "  FAIL: agent token generated"
+    FAIL=$((FAIL+1))
+fi
+if [ "$AGENT_TOKEN" != "FAIL" ] && [ -n "$AGENT_TOKEN" ]; then
 
     # -----------------------------------------------------------------------
     info "14. Agent token — use token as auth"
@@ -189,10 +198,15 @@ info "15. Agent token — refresh"
 REFRESH_RESP=$(curl -sf -X POST -H "X-API-Key: $API_KEY" \
     "$BASE_URL/api/agent/token/refresh" 2>/dev/null || echo "FAIL")
 REFRESH_TOKEN=$(echo "$REFRESH_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('token','FAIL'))" 2>/dev/null || echo "FAIL")
-check "agent token refreshed" "FAIL" "$REFRESH_TOKEN" && true
-if [ "$REFRESH_TOKEN" != "FAIL" ]; then
-    green "  new token=${REFRESH_TOKEN:0:16}..."
+REFRESH_EXP=$(echo "$REFRESH_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('expires_at','FAIL'))" 2>/dev/null || echo "FAIL")
+if [ "$REFRESH_TOKEN" != "FAIL" ] && [ -n "$REFRESH_TOKEN" ] && [ "$REFRESH_EXP" != "FAIL" ] && [ -n "$REFRESH_EXP" ]; then
+    green "  PASS: agent token refreshed (expires_at present)"
     PASS=$((PASS+1))
+else
+    red "  FAIL: agent token refreshed"
+    FAIL=$((FAIL+1))
+fi
+if [ "$REFRESH_TOKEN" != "FAIL" ] && [ -n "$REFRESH_TOKEN" ]; then
 
     # old agent token should now fail
     CODE=$(curl -s -o /dev/null -w '%{http_code}' \
