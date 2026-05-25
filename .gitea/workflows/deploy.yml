@@ -32,7 +32,7 @@ jobs:
           . .venv/bin/activate
           python -m pip install --upgrade pip >/dev/null
           python -m pip install -q -r docker/requirements.txt pytest pytest-timeout httpx
-          python -m pytest tests/ -q --timeout=30
+          python -m pytest tests/ -q --timeout=30 --ignore=tests/test_mtls_e2e.py
 
   deploy-nginx:
     needs: test
@@ -129,6 +129,16 @@ jobs:
             code=$(curl -k -sS -o /tmp/mtls-test-cert.out -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 --cert /etc/nginx/certs/client.crt --key /etc/nginx/certs/client.key https://ssh.xloud.ru/api/servers || true)
             test "$code" != "302" || { echo "FAIL: valid cert was redirected ($code)"; exit 1; }
             echo "mTLS cert request returned HTTP $code (expected: not 302)"
+
+            echo "=== mTLS: cert + health -> 200 ==="
+            code=$(curl -k -sS -o /tmp/mtls-test-cert-health.out -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 --cert /etc/nginx/certs/client.crt --key /etc/nginx/certs/client.key https://ssh.xloud.ru/health || true)
+            test "$code" = "200" || { echo "FAIL: health with cert returned $code"; exit 1; }
+
+            echo "=== mTLS: invalid cert -> 302 ==="
+            code=$(curl -k -sS -o /tmp/mtls-test-badcert.out -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 --cert /etc/nginx/certs/ca.crt https://ssh.xloud.ru/api/servers || true)
+            test "$code" = "302" || { echo "FAIL: invalid cert did not redirect ($code)"; exit 1; }
+
+            echo "=== mTLS: all checks passed ==="
           REMOTE
 
   deploy-backend:
