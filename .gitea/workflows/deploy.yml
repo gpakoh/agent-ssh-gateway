@@ -118,13 +118,15 @@ jobs:
             test "$code" = "302" || { echo "FAIL: expected 302 got $code"; exit 1; }
             echo "OK"
             echo "6/6: mTLS checks"
-            body=$(curl -k -sS --resolve ssh.xloud.ru:443:127.0.0.1 https://ssh.xloud.ru/health || true)
-            code=$(curl -k -sS -o /dev/null -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 --cert /etc/nginx/certs/client.crt --key /etc/nginx/certs/client.key https://ssh.xloud.ru/api/servers || true)
-            bad=$(curl -k -sS -o /dev/null -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 --cert /etc/nginx/certs/ca.crt https://ssh.xloud.ru/api/servers || true)
-            echo "health=$body valid_cert=$code invalid_cert=$bad"
-            echo "$body" | grep -q '"status":"ok"' || { echo "FAIL: health=$body"; exit 1; }
-            test "$code" != "302" || { echo "FAIL: valid cert got 302"; exit 1; }
-            test "$bad" = "302" || { echo "FAIL: invalid cert got $bad"; exit 1; }
+            openssl req -x509 -newkey rsa:2048 -keyout /tmp/mtls-bad.key -out /tmp/mtls-bad.crt -days 1 -nodes -subj '/CN=Bad-Client' 2>/dev/null
+            health=$(curl -k -sS --resolve ssh.xloud.ru:443:127.0.0.1 https://ssh.xloud.ru/health || true)
+            valid=$(curl -k -sS -o /dev/null -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 --cert /etc/nginx/certs/client.crt --key /etc/nginx/certs/client.key https://ssh.xloud.ru/api/servers || true)
+            bad=$(curl -k -sS -o /dev/null -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 --cert /tmp/mtls-bad.crt --key /tmp/mtls-bad.key https://ssh.xloud.ru/api/servers || true)
+            echo "health=${health} valid=${valid} bad=${bad}"
+            echo "${health}" | grep -q '"status":"ok"' || { echo "FAIL: health=${health}"; exit 1; }
+            test "${valid}" != "302" || { echo "FAIL: valid cert got 302"; exit 1; }
+            test "${bad}" = "400" || { echo "FAIL: invalid cert expected 400 got ${bad}"; exit 1; }
+            rm -f /tmp/mtls-bad.key /tmp/mtls-bad.crt
             echo "mTLS OK"
           CFGEOF
           echo "::endgroup::"
