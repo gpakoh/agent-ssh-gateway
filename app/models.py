@@ -127,6 +127,7 @@ class AgentTokenResponse(BaseModel):
 
     token: str
     ttl: int
+    expires_at: str
     message: str = "Agent token generated"
 
 
@@ -136,6 +137,7 @@ class AgentTokenRefreshResponse(BaseModel):
 
     token: str
     ttl: int
+    expires_at: str
     message: str = "Agent token refreshed"
 
 
