@@ -1,7 +1,7 @@
 # Web SSH Gateway: практический гайд
 
 Версия API: `1.0.0`
-Обновлено: `2026-05-25 02:00 UTC`
+Обновлено: `2026-05-25 03:00 UTC`
 
 ## 0) Аутентификация
 
@@ -47,7 +47,18 @@
 
 Стандартная форма логина на `auth.xloud.ru`. После входа — cookie-сессия для всех запросов.
 
-> `Auth:` в списке ниже: `нет` — только `GET /health`. Для всех остальных endpoint'ов — `ApiKeyHeader`.
+### 0.4 Agent token (short-lived, для агентов)
+
+Отдельный от `API_KEY` токен с TTL, который можно ротировать без перезапуска бэкенда.
+
+- Токен передаётся в заголовке `X-API-Key` (аналогично `API_KEY`).
+- `POST /api/agent/token` — создаёт новый токен (требует `API_KEY`).
+- `POST /api/agent/token/refresh` — ротирует токен, старый перестаёт работать.
+- TTL (по умолчанию 3600с) проверяется при каждом запросе: HTTP и WebSocket.
+- При старте бэкенда `AGENT_TOKEN` из env тоже получает expiry.
+- Предназначение: агент получает короткоживущий токен на сессию, после завершения — ротация.
+
+> `Auth:` в списке ниже: `нет` — `GET /health` и `GET /api/capabilities`. Для всех остальных endpoint'ов — `ApiKeyHeader` (принимает как `API_KEY`, так и agent token).
 
 ## 1) Как подключаться
 
@@ -117,10 +128,10 @@ curl -X GET http://192.168.1.103:8085/health
 
 ## 3) Карта API
 
-- Всего методов: **98**
+- Всего методов: **101**
 - Всего разделов: **11**
 
-- `system`: 7 методов
+- `system`: 10 методов
 - `ssh`: 10 методов
 - `jobs`: 9 методов
 - `files`: 16 методов
@@ -156,6 +167,24 @@ curl -X GET http://192.168.1.103:8085/health
   Обязательные: -
   200: application/json
   Ошибки: 422, 500
+  Auth: ApiKeyHeader
+- `GET /api/capabilities` — Get Capabilities
+  Описание: Return API capabilities and environment information. Публичный — не требует auth.
+  Обязательные: -
+  200: application/json
+  Ошибки: 422
+  Auth: нет
+- `POST /api/agent/token` — Generate Agent Token
+  Описание: Создать short-lived agent token. Требует API_KEY.
+  Обязательные: -
+  200: application/json
+  Ошибки: 401, 422
+  Auth: ApiKeyHeader
+- `POST /api/agent/token/refresh` — Refresh Agent Token
+  Описание: Ротировать agent token. Старый токен перестаёт работать.
+  Обязательные: -
+  200: application/json
+  Ошибки: 401, 422
   Auth: ApiKeyHeader
 - `GET /api/config/session` — Get Session Config
   Описание: Get current session configuration.
@@ -798,3 +827,31 @@ Webhook-конфигурации и деплой-триггеры.
 - Для нестабильных ошибок делайте backoff-retry, для `VALIDATION_ERROR` — не ретраить.
 - Для больших операций используйте jobs + SSE вместо polling в tight-loop.
 - В проде логируйте `X-Request-ID` для трассировки.
+
+## 7) Smoke-тестирование
+
+Скрипт `scripts/codex-smoke.sh` проверяет базовую работоспособность gateway без внешних зависимостей (кроме `bash`, `curl`, `python3`).
+
+```bash
+export API_KEY="afdvw9..."
+bash scripts/codex-smoke.sh [BASE_URL]
+```
+
+Что проверяет:
+
+- health, capabilities — без auth
+- auth rejected (401) без ключа и с неверным ключом
+- auth accepted (200) с валидным ключом
+- sessions, servers — пустые/корректные ответы
+- SSH connect → execute (stdout, exit_code) → heartbeat → disconnect (если задан `SSH_HOST`)
+- agent token generate → auth → refresh → старый токен rejected
+- session config endpoint
+
+Опционально (для полного цикла):
+
+```bash
+export SSH_HOST="192.0.2.10"
+export SSH_USER="root"
+export SSH_PASS="secret"
+bash scripts/codex-smoke.sh http://127.0.0.1:8085
+```
