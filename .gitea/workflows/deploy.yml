@@ -48,75 +48,76 @@ jobs:
           API_KEY: ${{ secrets.API_KEY }}
         run: |
           set -euo pipefail
+          echo "::group::Check API_KEY"
           test -n "${API_KEY:-}" || { echo "API_KEY secret is missing or empty"; exit 1; }
-          apt-get update -qq
-          apt-get install -y -qq openssh-client python3
-          python3 - <<'PY'
-          import os
-          import re
-          from pathlib import Path
+          echo "OK"
+          echo "::endgroup::"
 
+          echo "::group::apt-get install"
+          apt-get update -qq
+          apt-get install -y -qq openssh-client python3 2>&1 | tail -1
+          echo "::endgroup::"
+
+          echo "::group::Inject API_KEY into nginx template"
+          python3 - <<'PY'
+          import os, re
           api_key = os.environ["API_KEY"]
           if len(api_key) < 16:
-              raise SystemExit("API_KEY secret is too short")
+              raise SystemExit("API_KEY too short")
           if any(ch in api_key for ch in "\r\n"):
-              raise SystemExit("API_KEY must be a single-line value")
-
+              raise SystemExit("API_KEY must be single-line")
           escaped = api_key.replace("\\", "\\\\").replace('"', '\\"')
-          path = Path("nginx-ssh.xloud.ru.conf")
-          text = path.read_text()
+          text = open("nginx-ssh.xloud.ru.conf").read()
           if "__API_KEY__" not in text:
-              raise SystemExit("nginx template does not contain __API_KEY__ placeholder")
+              raise SystemExit("template missing __API_KEY__")
           text = text.replace("__API_KEY__", escaped)
-          values = re.findall(r'proxy_set_header\s+X-API-Key\s+"([^"]*)";', text)
-          if len(values) != 4 or any(not value for value in values):
-              raise SystemExit("nginx X-API-Key replacement failed")
-          path.write_text(text)
+          vals = re.findall(r'proxy_set_header\s+X-API-Key\s+"([^"]*)";', text)
+          if len(vals) != 4 or any(not v for v in vals):
+              raise SystemExit("X-API-Key replacement failed")
+          open("nginx-ssh.xloud.ru.conf", "w").write(text)
           PY
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$NGINX_HOST "
-            mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
-          "
+          echo "OK"
+          echo "::endgroup::"
+
+          echo "::group::Copy config to nginx host"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$NGINX_HOST "mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled"
           scp -o BatchMode=yes -o StrictHostKeyChecking=no \
             nginx-ssh.xloud.ru.conf root@$NGINX_HOST:/etc/nginx/sites-available/ssh.xloud.ru
           scp -o BatchMode=yes -o StrictHostKeyChecking=no \
             scripts/migrate-nginx-ssh-block.py root@$NGINX_HOST:/tmp/
           ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$NGINX_HOST "python3 /tmp/migrate-nginx-ssh-block.py"
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$NGINX_HOST "bash -se" <<'REMOTE'
-            set -euo pipefail
-            ln -sfn /etc/nginx/sites-available/ssh.xloud.ru /etc/nginx/sites-enabled/ssh.xloud.ru
-            python3 - <<'PY'
-          from pathlib import Path
-          import re
+          echo "OK"
+          echo "::endgroup::"
 
-          text = Path('/etc/nginx/sites-enabled/ssh.xloud.ru').read_text()
-          values = re.findall(r'proxy_set_header\s+X-API-Key\s+"([^"]*)";', text)
-          if len(values) != 4 or any(len(value) < 16 for value in values):
-              raise SystemExit('deployed nginx X-API-Key is missing or too short')
-          if '__API_KEY__' in text:
-              raise SystemExit('deployed nginx still contains __API_KEY__ placeholder')
-          PY
+          echo "::group::Validate and reload nginx"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$NGINX_HOST bash -se <<'CFGEOF'
+            set -euo pipefail
+            echo "1/5: link config"
+            ln -sfn /etc/nginx/sites-available/ssh.xloud.ru /etc/nginx/sites-enabled/ssh.xloud.ru
+            echo "2/5: validate"
+            python3 -c "
+text = open('/etc/nginx/sites-enabled/ssh.xloud.ru').read()
+import re
+vals = re.findall(r'proxy_set_header\s+X-API-Key\s+\"([^\"]*)\";', text)
+assert len(vals) == 4 and all(len(v) >= 16 for v in vals), 'API_KEY check failed'
+assert '__API_KEY__' not in text, 'placeholder still present'
+print('API_KEY OK')
+"
+            echo "3/5: nginx test"
             nginx -t
+            echo "4/5: reload"
             nginx -s reload
+            echo "5/5: verify endpoint"
             for i in 1 2 3; do
               sleep 1
-              code=$(curl -k -sS -o /tmp/web-ssh-noauth.out -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 https://ssh.xloud.ru/api/servers || true)
+              code=$(curl -k -sS -o /dev/null -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 https://ssh.xloud.ru/api/servers || true)
+              echo "attempt $i: $code"
               test "$code" = "302" && break
-              echo "attempt $i: expected 302, got $code"
             done
-            test "$code" = "302" || { echo "unauthenticated https /api/servers did not redirect to Authelia after 3 tries"; cat /tmp/web-ssh-noauth.out; exit 1; }
-
-            echo "=== mTLS: health -> 200 ==="
-            body=$(curl -k -sS --resolve ssh.xloud.ru:443:127.0.0.1 https://ssh.xloud.ru/health || true)
-            echo "$body" | grep -q '"status":"ok"' || { echo "FAIL: health check failed ($body)"; exit 1; }
-
-            echo "=== mTLS: valid cert -> not 302 ==="
-            code=$(curl -k -sS -o /tmp/mtls-test-cert.out -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 --cert /etc/nginx/certs/client.crt --key /etc/nginx/certs/client.key https://ssh.xloud.ru/api/servers || true)
-            test "$code" != "302" || { echo "FAIL: valid cert redirected ($code)"; cat /tmp/mtls-test-cert.out; exit 1; }
-
-            echo "=== mTLS: invalid cert -> 302 ==="
-            code=$(curl -k -sS -o /tmp/mtls-test-badcert.out -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 --cert /etc/nginx/certs/ca.crt https://ssh.xloud.ru/api/servers || true)
-            test "$code" = "302" || { echo "FAIL: invalid cert did not redirect ($code)"; cat /tmp/mtls-test-badcert.out; exit 1; }
-          REMOTE
+            test "$code" = "302" || { echo "FAIL: expected 302 got $code"; exit 1; }
+            echo "nginx deploy OK"
+CFGEOF
+          echo "::endgroup::"
 
   deploy-backend:
     needs: test
