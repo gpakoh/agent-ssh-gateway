@@ -106,6 +106,39 @@ class HealthResponse(BaseModel):
     status: str = "ok"
 
 
+class CapabilitiesResponse(BaseModel):
+    """API capabilities / environment information."""
+
+    version: str
+    auth_mode: str
+    session_timeout: int
+    cleanup_interval: int
+    ssh_default_timeout: int
+    max_sessions_per_ip: int
+    rate_limit_requests: int
+    rate_limit_window: int
+    server_count: int
+    agent_token_enabled: bool
+    agent_token_ttl: int
+
+
+class AgentTokenResponse(BaseModel):
+    """Response after agent token generation."""
+
+    token: str
+    ttl: int
+    message: str = "Agent token generated"
+
+
+
+class AgentTokenRefreshResponse(BaseModel):
+    """Response after agent token refresh."""
+
+    token: str
+    ttl: int
+    message: str = "Agent token refreshed"
+
+
 # ---------------------------------------------------------------------------
 # Error
 # ---------------------------------------------------------------------------
