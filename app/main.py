@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, PlainTextResponse, HTMLResponse
 
 from app.config import settings
-from app.auth_middleware import auth_check, ws_auth_check
+from app.auth_middleware import auth_check, ws_auth_check, is_agent_token_valid
 import secrets
 from app.security import (
     limiter,
@@ -1003,7 +1003,7 @@ async def get_capabilities():
         rate_limit_requests=settings.rate_limit_requests,
         rate_limit_window=settings.rate_limit_window,
         server_count=len(servers),
-        agent_token_enabled=bool(settings.agent_token),
+        agent_token_enabled=is_agent_token_valid(settings, settings.agent_token),
         agent_token_ttl=settings.agent_token_ttl,
     )
 
@@ -1016,12 +1016,17 @@ async def agent_token_generate():
     without affecting the main API_KEY.
     """
     import secrets as _secrets
+    from datetime import timedelta
+
     token = _secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.agent_token_ttl)
     settings.agent_token = token
+    settings.agent_token_expires_at = expires_at
     logger.info("Agent token generated (ttl=%ds)", settings.agent_token_ttl)
     return AgentTokenResponse(
         token=token,
         ttl=settings.agent_token_ttl,
+        expires_at=expires_at.isoformat(),
     )
 
 
@@ -1032,12 +1037,17 @@ async def agent_token_refresh():
     Invalidates the previous agent token and issues a new one.
     """
     import secrets as _secrets
+    from datetime import timedelta
+
     token = _secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.agent_token_ttl)
     settings.agent_token = token
+    settings.agent_token_expires_at = expires_at
     logger.info("Agent token refreshed (ttl=%ds)", settings.agent_token_ttl)
     return AgentTokenRefreshResponse(
         token=token,
         ttl=settings.agent_token_ttl,
+        expires_at=expires_at.isoformat(),
     )
 
 

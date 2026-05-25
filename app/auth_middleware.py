@@ -3,6 +3,7 @@
 import ipaddress
 import logging
 import secrets
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import Request, WebSocket, HTTPException
@@ -52,7 +53,21 @@ def is_ip_allowed(ip_str: str, allowed_networks: list) -> bool:
     return any(addr in net for net in allowed_networks)
 
 
-def verify_api_key(request: Request, expected_key: str, extra_key: str = "") -> bool:
+def is_agent_token_valid(settings, provided: str) -> bool:
+    if not provided or not settings.agent_token:
+        return False
+    expires_at = getattr(settings, "agent_token_expires_at", None)
+    if expires_at is not None:
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) >= expires_at:
+            return False
+    return secrets.compare_digest(provided, settings.agent_token)
+
+
+def verify_api_key(
+    request: Request, expected_key: str, extra_key: str = "", settings=None
+) -> bool:
     provided = request.headers.get("X-API-Key", "")
     if not provided:
         auth_header = request.headers.get("Authorization", "")
@@ -62,6 +77,8 @@ def verify_api_key(request: Request, expected_key: str, extra_key: str = "") -> 
         return False
     if secrets.compare_digest(provided, expected_key):
         return True
+    if settings is not None:
+        return is_agent_token_valid(settings, provided)
     if extra_key and secrets.compare_digest(provided, extra_key):
         return True
     return False
@@ -162,7 +179,7 @@ async def auth_check(request: Request, settings) -> Optional[HTTPException]:
         )
 
     # API key check (also accept agent_token)
-    if not verify_api_key(request, settings.api_key, settings.agent_token):
+    if not verify_api_key(request, settings.api_key, settings.agent_token, settings):
         return HTTPException(
             status_code=401,
             detail={
@@ -233,6 +250,6 @@ async def ws_auth_check(websocket: WebSocket, settings) -> tuple[int, str] | Non
         return (CLOSE_POLICY_VIOLATION, "Invalid or missing API key")
     if secrets.compare_digest(provided, settings.api_key):
         return None
-    if settings.agent_token and secrets.compare_digest(provided, settings.agent_token):
+    if is_agent_token_valid(settings, provided):
         return None
     return (CLOSE_POLICY_VIOLATION, "Invalid or missing API key")
