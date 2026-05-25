@@ -106,7 +106,8 @@ jobs:
             test "$code" = "302" || { echo "unauthenticated https /api/servers did not redirect to Authelia after 3 tries"; cat /tmp/web-ssh-noauth.out; exit 1; }
 
             echo "=== mTLS: health -> 200 ==="
-            curl -k -sS --resolve ssh.xloud.ru:443:127.0.0.1 https://ssh.xloud.ru/health | grep -q '"status":"ok"'
+            body=$(curl -k -sS --resolve ssh.xloud.ru:443:127.0.0.1 https://ssh.xloud.ru/health || true)
+            echo "$body" | grep -q '"status":"ok"' || { echo "FAIL: health check failed ($body)"; exit 1; }
 
             echo "=== mTLS: valid cert -> not 302 ==="
             code=$(curl -k -sS -o /tmp/mtls-test-cert.out -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 --cert /etc/nginx/certs/client.crt --key /etc/nginx/certs/client.key https://ssh.xloud.ru/api/servers || true)
@@ -115,8 +116,6 @@ jobs:
             echo "=== mTLS: invalid cert -> 302 ==="
             code=$(curl -k -sS -o /tmp/mtls-test-badcert.out -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 --cert /etc/nginx/certs/ca.crt https://ssh.xloud.ru/api/servers || true)
             test "$code" = "302" || { echo "FAIL: invalid cert did not redirect ($code)"; cat /tmp/mtls-test-badcert.out; exit 1; }
-
-            echo "=== mTLS: all checks passed ==="
           REMOTE
 
   deploy-backend:
