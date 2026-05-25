@@ -116,7 +116,16 @@ jobs:
               test "$code" = "302" && break
             done
             test "$code" = "302" || { echo "FAIL: expected 302 got $code"; exit 1; }
-            echo "nginx deploy OK"
+            echo "OK"
+            echo "6/6: mTLS checks"
+            body=$(curl -k -sS --resolve ssh.xloud.ru:443:127.0.0.1 https://ssh.xloud.ru/health || true)
+            code=$(curl -k -sS -o /dev/null -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 --cert /etc/nginx/certs/client.crt --key /etc/nginx/certs/client.key https://ssh.xloud.ru/api/servers || true)
+            bad=$(curl -k -sS -o /dev/null -w '%{http_code}' --resolve ssh.xloud.ru:443:127.0.0.1 --cert /etc/nginx/certs/ca.crt https://ssh.xloud.ru/api/servers || true)
+            echo "health=$body valid_cert=$code invalid_cert=$bad"
+            echo "$body" | grep -q '"status":"ok"' || { echo "FAIL: health=$body"; exit 1; }
+            test "$code" != "302" || { echo "FAIL: valid cert got 302"; exit 1; }
+            test "$bad" = "302" || { echo "FAIL: invalid cert got $bad"; exit 1; }
+            echo "mTLS OK"
           CFGEOF
           echo "::endgroup::"
 
