@@ -42,6 +42,9 @@ from app.models import (
     SessionsResponse,
     SessionInfo,
     HealthResponse,
+    CapabilitiesResponse,
+    AgentTokenResponse,
+    AgentTokenRefreshResponse,
     ErrorResponse,
     SessionTimeoutRequest,
     SessionTimeoutResponse,
@@ -864,10 +867,10 @@ def custom_openapi():
                 elif not param.get("description"):
                     param["description"] = name.replace("_", " ").title()
 
-    # Security: only /health is public; everything else requires X-API-Key
+    # Security: /health and /api/capabilities are public; everything else requires X-API-Key
     for path, methods in schema.get("paths", {}).items():
         for method, op in methods.items():
-            if path == "/health":
+            if path in ("/health", "/api/capabilities"):
                 continue
             op["security"] = [{"ApiKeyHeader": []}]
 
@@ -981,6 +984,61 @@ async def validation_exception_handler(request, exc: RequestValidationError):
 async def health_check():
     """Health check endpoint."""
     return HealthResponse(status="ok")
+
+
+@app.get("/api/capabilities", response_model=CapabilitiesResponse)
+async def get_capabilities():
+    """Return API capabilities and environment information.
+
+    Unauthenticated — used by agents to discover server settings.
+    """
+    servers = server_manager.list_servers() if server_manager else []
+    return CapabilitiesResponse(
+        version="4.5.1",
+        auth_mode="api_key" if settings.api_auth_enabled else "none",
+        session_timeout=settings.session_timeout,
+        cleanup_interval=settings.cleanup_interval,
+        ssh_default_timeout=settings.ssh_default_timeout,
+        max_sessions_per_ip=settings.max_sessions_per_ip,
+        rate_limit_requests=settings.rate_limit_requests,
+        rate_limit_window=settings.rate_limit_window,
+        server_count=len(servers),
+        agent_token_enabled=bool(settings.agent_token),
+        agent_token_ttl=settings.agent_token_ttl,
+    )
+
+
+@app.post("/api/agent/token", response_model=AgentTokenResponse)
+async def agent_token_generate():
+    """Generate a short-lived agent token (separate from API_KEY).
+
+    Requires API_KEY auth. The generated token can be rotated
+    without affecting the main API_KEY.
+    """
+    import secrets as _secrets
+    token = _secrets.token_urlsafe(32)
+    settings.agent_token = token
+    logger.info("Agent token generated (ttl=%ds)", settings.agent_token_ttl)
+    return AgentTokenResponse(
+        token=token,
+        ttl=settings.agent_token_ttl,
+    )
+
+
+@app.post("/api/agent/token/refresh", response_model=AgentTokenRefreshResponse)
+async def agent_token_refresh():
+    """Refresh (rotate) the agent token.
+
+    Invalidates the previous agent token and issues a new one.
+    """
+    import secrets as _secrets
+    token = _secrets.token_urlsafe(32)
+    settings.agent_token = token
+    logger.info("Agent token refreshed (ttl=%ds)", settings.agent_token_ttl)
+    return AgentTokenRefreshResponse(
+        token=token,
+        ttl=settings.agent_token_ttl,
+    )
 
 
 @app.get("/api/config/session", response_model=SessionConfigResponse)

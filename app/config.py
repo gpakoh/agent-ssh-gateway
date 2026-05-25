@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     encryption_key: str = Field(default="", alias="ENCRYPTION_KEY")
     api_key: str = Field(default="", alias="API_KEY")
     api_auth_enabled: bool = Field(default=False, alias="API_AUTH_ENABLED")
+    agent_token: str = Field(default="", alias="AGENT_TOKEN")
+    agent_token_ttl: int = Field(default=3600, alias="AGENT_TOKEN_TTL")
     allowed_client_cidrs: str = Field(
         default="127.0.0.1/32,::1/128,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12",
         alias="ALLOWED_CLIENT_CIDRS",

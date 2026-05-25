@@ -52,7 +52,7 @@ def is_ip_allowed(ip_str: str, allowed_networks: list) -> bool:
     return any(addr in net for net in allowed_networks)
 
 
-def verify_api_key(request: Request, expected_key: str) -> bool:
+def verify_api_key(request: Request, expected_key: str, extra_key: str = "") -> bool:
     provided = request.headers.get("X-API-Key", "")
     if not provided:
         auth_header = request.headers.get("Authorization", "")
@@ -60,14 +60,18 @@ def verify_api_key(request: Request, expected_key: str) -> bool:
             provided = auth_header[7:]
     if not provided:
         return False
-    return secrets.compare_digest(provided, expected_key)
+    if secrets.compare_digest(provided, expected_key):
+        return True
+    if extra_key and secrets.compare_digest(provided, extra_key):
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
 # Always‑public paths (even when auth is enabled)
 # ---------------------------------------------------------------------------
 
-ALWAYS_PUBLIC = frozenset({"/health"})
+ALWAYS_PUBLIC = frozenset({"/health", "/api/capabilities"})
 
 
 def _normalise_path(path: str) -> str:
@@ -157,8 +161,8 @@ async def auth_check(request: Request, settings) -> Optional[HTTPException]:
             },
         )
 
-    # API key check
-    if not verify_api_key(request, settings.api_key):
+    # API key check (also accept agent_token)
+    if not verify_api_key(request, settings.api_key, settings.agent_token):
         return HTTPException(
             status_code=401,
             detail={
@@ -225,7 +229,10 @@ async def ws_auth_check(websocket: WebSocket, settings) -> tuple[int, str] | Non
         auth_header = websocket.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             provided = auth_header[7:]
-    if not provided or not secrets.compare_digest(provided, settings.api_key):
+    if not provided:
         return (CLOSE_POLICY_VIOLATION, "Invalid or missing API key")
-
-    return None
+    if secrets.compare_digest(provided, settings.api_key):
+        return None
+    if settings.agent_token and secrets.compare_digest(provided, settings.agent_token):
+        return None
+    return (CLOSE_POLICY_VIOLATION, "Invalid or missing API key")
