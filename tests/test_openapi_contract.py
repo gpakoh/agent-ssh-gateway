@@ -65,14 +65,16 @@ class TestSecurity:
             "name": "X-API-Key",
         }
 
+    PUBLIC_GET = frozenset({"/health", "/api/capabilities"})
+
     def test_protected_endpoints_have_security(self, schema):
-        """Only /health GET is public; everything else requires X-API-Key."""
+        """Only /health and /api/capabilities are public; everything else requires X-API-Key."""
         for path, methods in schema["paths"].items():
             for method, op in methods.items():
                 key = (path, method.upper())
-                if key == ("/health", "GET"):
+                if key in (("/health", "GET"), ("/api/capabilities", "GET")):
                     assert "security" not in op or op["security"] == [], (
-                        f"/health GET should be public, got security={op.get('security')}"
+                        f"{path} GET should be public, got security={op.get('security')}"
                     )
                 else:
                     assert "security" in op, f"{method.upper()} {path} missing security"
