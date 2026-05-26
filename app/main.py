@@ -198,6 +198,7 @@ from app.file_tree import FileTreeExplorer
 from app.server_manager import ServerManager, ServerStatus
 from app.snapshot_manager import SnapshotManager
 from app.webhook_manager import WebhookManager, WebhookType
+from app.known_hosts import create_host_key_store, NullHostKeyStore, HostKeyStore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -228,15 +229,23 @@ circuit_breakers: CircuitBreakerRegistry
 dist_lock: DistributedLock
 session_store: SessionStore
 bulk_ops: BulkOperationsManager
+host_key_store: Optional[HostKeyStore] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    global manager, job_manager, file_editor, context_manager, batch_manager, code_intelligence, search_replace, file_tree, server_manager, snapshot_manager, webhook_manager, analytics, secret_manager, audit_logger, redis_queue, circuit_breakers, dist_lock, session_store, bulk_ops
+    global manager, job_manager, file_editor, context_manager, batch_manager, code_intelligence, search_replace, file_tree, server_manager, snapshot_manager, webhook_manager, analytics, secret_manager, audit_logger, redis_queue, circuit_breakers, dist_lock, session_store, bulk_ops, host_key_store
+
+    # Initialize Host Key Store
+    host_key_store = create_host_key_store(settings)
+    if not isinstance(host_key_store, NullHostKeyStore):
+        logger.info("Host key store initialized: %s", type(host_key_store).__name__)
+
     manager = SSHSessionManager(
         session_timeout=settings.session_timeout,
         cleanup_interval=settings.cleanup_interval,
+        host_key_store=host_key_store,
     )
     await manager.start_cleanup_task()
 
@@ -332,13 +341,15 @@ async def lifespan(app: FastAPI):
     await manager.stop_cleanup_task()
     await manager.close_all()
     
+    if host_key_store:
+        await host_key_store.disconnect()
     if redis_queue:
         await redis_queue.disconnect()
     if dist_lock:
         await dist_lock.disconnect()
     if session_store:
         await session_store.disconnect()
-    
+
     logger.info("Web SSH Gateway shutdown complete")
 
 
@@ -371,12 +382,15 @@ TAGS_META = {
     "snapshots": "Project snapshots for recovery",
     "webhooks": "CI/CD webhooks",
     "code": "Code intelligence (search, insert, complete)",
+    "known-hosts": "Host key store management",
     "system": "System endpoints (health, metrics, config)",
 }
 
 def _path_tag(path: str) -> str:
     if path == "/" or path == "/health" or path == "/metrics":
         return "system"
+    if path.startswith("/api/known-hosts"):
+        return "known-hosts"
     if path.startswith("/api/servers"):
         return "servers"
     if path.startswith("/api/jobs"):
@@ -3480,6 +3494,31 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 async def root():
     """Serve the main page."""
     return FileResponse("app/static/index.html")
+
+
+# ---------------------------------------------------------------------------
+# Host Key Store API
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/known-hosts", tags=["known-hosts"])
+async def list_known_hosts():
+    entries = await host_key_store.list_keys()
+    return {"hosts": entries}
+
+
+@app.delete("/api/known-hosts/{host}", tags=["known-hosts"])
+async def delete_known_host(host: str):
+    count = await host_key_store.delete_host(host)
+    if count == 0:
+        raise HTTPException(status_code=404, detail=f"No known hosts found for {host}")
+    return {"deleted": count}
+
+
+@app.delete("/api/known-hosts", tags=["known-hosts"])
+async def clear_known_hosts():
+    count = await host_key_store.delete_all()
+    return {"deleted": count}
 
 
 # ---------------------------------------------------------------------------

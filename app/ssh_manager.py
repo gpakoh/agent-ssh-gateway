@@ -16,6 +16,9 @@ from paramiko.ssh_exception import (
     NoValidConnectionsError,
 )
 
+from app.config import settings
+from app.known_hosts import HostKeyStore, KnownHostsPolicy, NullHostKeyStore
+
 logger = logging.getLogger(__name__)
 
 
@@ -99,12 +102,15 @@ class SessionRecord:
 class SSHSessionManager:
     """Manages multiple SSH sessions with automatic cleanup."""
 
-    def __init__(self, session_timeout: int = 300, cleanup_interval: int = 60) -> None:
+    def __init__(self, session_timeout: int = 300, cleanup_interval: int = 60,
+                 host_key_store: Optional[HostKeyStore] = None) -> None:
         self._sessions: dict[str, SessionRecord] = {}
         self._lock = asyncio.Lock()
         self._session_timeout = session_timeout
         self._cleanup_interval = cleanup_interval
         self._cleanup_task: Optional[asyncio.Task] = None
+        self._strict_host_key = settings.ssh_strict_host_key_checking
+        self._host_key_store = host_key_store or NullHostKeyStore()
 
     async def start_cleanup_task(self) -> None:
         """Start the background cleanup coroutine."""
@@ -159,6 +165,14 @@ class SSHSessionManager:
             except Exception as exc:
                 logger.error("Error closing session %s: %s", sid, exc)
 
+    def _get_host_key_policy(self, port: int = 22):
+        """Return host key policy based on configuration."""
+        if self._strict_host_key:
+            return paramiko.RejectPolicy()
+        if not isinstance(self._host_key_store, NullHostKeyStore):
+            return KnownHostsPolicy(self._host_key_store, port=port)
+        return paramiko.AutoAddPolicy()
+
     # ------------------------------------------------------------------
     # Create session
     # ------------------------------------------------------------------
@@ -174,7 +188,7 @@ class SSHSessionManager:
     ) -> str:
         """Create a new SSH session and return its session ID."""
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.set_missing_host_key_policy(self._get_host_key_policy(port=port))
 
         pkey = None
         if private_key:
@@ -252,7 +266,7 @@ class SSHSessionManager:
         
         # Create new client
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.set_missing_host_key_policy(self._get_host_key_policy(port=record.port))
         
         pkey = None
         if record.private_key:
