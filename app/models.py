@@ -1444,3 +1444,15 @@ class ASTAnalyzeResponse(BaseModel):
     classes: list[dict]
     imports: list[str]
     variables: list[dict]
+
+
+# ---------------------------------------------------------------------------
+# Known Hosts
+# ---------------------------------------------------------------------------
+
+class KnownHostEntry(BaseModel):
+    """Host key entry from the known-hosts store."""
+    host: str
+    port: int
+    key_type: str
+    fingerprint: str
