@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+*.egg
+dist/
+build/
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific
+*.log
+/app/logs/
+/app/ssh_keys/
+ssh_keys/
+
+# CI
+.ci-api-key.env
+
+# Tests
+.coverage
+htmlcov/
+.pytest_cache/
+
+# SDK build
+sdk/dist/
+sdk/build/
+
+# Infrastructure-specific migration scripts (replaced by nginx-gateway.conf.example)
+scripts/migrate-nginx-ssh-block.py
+tests/test_migrate_nginx_ssh_block.py

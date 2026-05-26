@@ -1,0 +1,128 @@
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ssh-gateway-redis
+    networks:
+      internal_net: {}
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  web-ssh-gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: web-ssh-gateway
+    hostname: ssh-gateway
+    networks:
+      internal_net: {}
+    ports:
+      - "8085:8085"
+    environment:
+      - UVICORN_HOST=0.0.0.0
+      - UVICORN_PORT=8085
+      - SESSION_TIMEOUT=3600
+      - CLEANUP_INTERVAL=300
+      - CORS_ORIGINS=${CORS_ORIGINS:-["http://localhost:8085"]}
+      - OPENCODE_ADAPTER_URL=${OPENCODE_ADAPTER_URL:-}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+      - API_AUTH_ENABLED=${API_AUTH_ENABLED:-true}
+      - API_KEY=${API_KEY:?set API_KEY for web-ssh-gateway}
+      - ALLOWED_CLIENT_CIDRS=${ALLOWED_CLIENT_CIDRS:-127.0.0.1/32,::1/128,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12}
+      - TRUSTED_PROXY_CIDRS=${TRUSTED_PROXY_CIDRS:-127.0.0.1/32,172.16.0.0/12}
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_JOB_QUEUE_ENABLED=true
+      - DATABASE_URL=${DATABASE_URL:-}
+      - PERSISTENT_SESSIONS_ENABLED=${PERSISTENT_SESSIONS_ENABLED:-false}
+    volumes:
+      - ssh_keys:/app/ssh_keys:ro
+      - gateway_logs:/app/logs
+      - /tmp:/tmp
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8085/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_started
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: ssh-gateway-postgres
+    networks:
+      internal_net: {}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-ssh_gateway}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  test-sshd:
+    profiles: ["demo"]
+    image: alpine:latest
+    container_name: ssh-gateway-test-sshd
+    networks:
+      internal_net: {}
+    command: >
+      sh -c "
+        apk add --no-cache openssh-server >/dev/null &&
+        ssh-keygen -A >/dev/null 2>&1 &&
+        echo 'root:test123' | chpasswd &&
+        sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config &&
+        /usr/sbin/sshd -D
+      "
+    restart: unless-stopped
+
+networks:
+  internal_net:
+    driver: bridge
+
+volumes:
+  ssh_keys:
+    driver: local
+  gateway_logs:
+    driver: local
+  redis_data:
+    driver: local
+  postgres_data:
+    driver: local

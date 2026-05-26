@@ -1,0 +1,13 @@
+.git
+__pycache__
+*.pyc
+.env
+.venv
+.gitignore
+README.md
+SSH_GATEWAY_GUIDE.md
+scripts
+tests
+.gitea
+nix
+AGENTS.md

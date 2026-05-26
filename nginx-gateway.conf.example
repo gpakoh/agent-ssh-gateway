@@ -1,0 +1,150 @@
+# Web SSH Gateway — Nginx reverse proxy configuration
+# Place in: /etc/nginx/sites-available/ssh-gateway
+# Enable: ln -s /etc/nginx/sites-available/ssh-gateway /etc/nginx/sites-enabled/
+
+server {
+    listen 80;
+    server_name gateway.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+http2 on;
+    server_name gateway.example.com;
+
+    # SSL certificates
+    ssl_certificate /etc/ssl/certs/gateway.example.com.pem;
+    ssl_certificate_key /etc/ssl/private/gateway.example.com.pem;
+
+    # SSL settings
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # ---- mTLS for agent certificates ----
+    ssl_client_certificate /etc/nginx/certs/ca.crt;
+    ssl_verify_client       optional;
+    ssl_verify_depth        2;
+
+    proxy_set_header X-SSL-Client-Verify $ssl_client_verify;
+    proxy_set_header X-SSL-Client-DN     $ssl_client_s_dn;
+    proxy_set_header X-SSL-Client-Serial $ssl_client_serial;
+
+    # Authelia authentication (one_factor - только пароль, без 2FA)
+    include /etc/nginx/snippets/authelia-location.conf;
+
+    # Health endpoint — no auth required
+    location /health {
+        access_log off;
+        add_header Content-Type application/json;
+        return 200 '{"status":"ok"}';
+    }
+
+    # Default location — mTLS bypass, otherwise Authelia auth
+    location / {
+        if ($ssl_client_verify != "SUCCESS") {
+            rewrite ^(.*)$ /_mtls-auth$1 last;
+        }
+        proxy_pass http://127.0.0.1:8085;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_set_header X-API-Key "__API_KEY__";
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $http_connection;
+    }
+
+    # WebSocket: execute/stream — mTLS bypass or Authelia fallback
+    location /api/ssh/execute/stream {
+        if ($ssl_client_verify != "SUCCESS") {
+            rewrite ^ /_mtls-auth/api/ssh/execute/stream last;
+        }
+        proxy_pass http://127.0.0.1:8085;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-SSL-Client-Verify $ssl_client_verify;
+        proxy_set_header X-SSL-Client-DN     $ssl_client_s_dn;
+        proxy_set_header X-SSL-Client-Serial $ssl_client_serial;
+        proxy_set_header X-API-Key "__API_KEY__";
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_buffering off;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    # WebSocket: PTY — mTLS bypass or Authelia fallback
+    location /api/ssh/pty/ {
+        if ($ssl_client_verify != "SUCCESS") {
+            rewrite ^ /_mtls-auth/api/ssh/pty/ last;
+        }
+        proxy_pass http://127.0.0.1:8085;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-SSL-Client-Verify $ssl_client_verify;
+        proxy_set_header X-SSL-Client-DN     $ssl_client_s_dn;
+        proxy_set_header X-SSL-Client-Serial $ssl_client_serial;
+        proxy_set_header X-API-Key "__API_KEY__";
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_buffering off;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_connect_timeout 60s;
+    }
+
+    # Auth-required fallback for requests without valid client cert
+    location /_mtls-auth/ {
+        internal;
+        auth_request /authelia;
+        error_page 401 =302 https://auth.example.com/?rd=$scheme://$host$request_uri;
+
+        rewrite ^/_mtls-auth/(.*)$ /$1 break;
+        proxy_pass http://127.0.0.1:8085;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-SSL-Client-Verify $ssl_client_verify;
+        proxy_set_header X-SSL-Client-DN     $ssl_client_s_dn;
+        proxy_set_header X-SSL-Client-Serial $ssl_client_serial;
+        proxy_set_header X-API-Key "__API_KEY__";
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_buffering off;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_connect_timeout 60s;
+    }
+}

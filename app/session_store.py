@@ -1,0 +1,234 @@
+"""Persistent session storage using PostgreSQL."""
+
+import json
+import logging
+from datetime import datetime, timedelta
+from typing import Optional
+
+from sqlalchemy import (
+    create_engine, Column, String, Integer, DateTime, 
+    Boolean, Text, ForeignKey, JSON
+)
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import declarative_base, relationship
+
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+Base = declarative_base()
+
+
+class PersistentSession(Base):
+    """Persistent SSH session storage."""
+    __tablename__ = "ssh_sessions"
+    
+    session_id = Column(String(36), primary_key=True)
+    host = Column(String(255), nullable=False)
+    port = Column(Integer, default=22)
+    username = Column(String(255), nullable=False)
+    password_encrypted = Column(Text, nullable=True)
+    private_key_encrypted = Column(Text, nullable=True)
+    key_passphrase_encrypted = Column(Text, nullable=True)
+    connected_at = Column(DateTime, default=datetime.utcnow)
+    last_activity = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    is_active = Column(Boolean, default=True)
+    reconnect_count = Column(Integer, default=0)
+    metadata_json = Column(JSON, default=dict)
+    
+    def to_dict(self) -> dict:
+        return {
+            "session_id": self.session_id,
+            "host": self.host,
+            "port": self.port,
+            "username": self.username,
+            "connected_at": self.connected_at.isoformat() if self.connected_at else None,
+            "last_activity": self.last_activity.isoformat() if self.last_activity else None,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "is_active": self.is_active,
+            "reconnect_count": self.reconnect_count,
+        }
+
+
+class SessionStore:
+    """Async session store using PostgreSQL."""
+    
+    def __init__(self, database_url: str):
+        self._database_url = database_url
+        self._engine = None
+        self._session_maker = None
+    
+    async def connect(self):
+        """Initialize database connection."""
+        try:
+            self._engine = create_async_engine(self._database_url, echo=False)
+            self._session_maker = async_sessionmaker(
+                self._engine, 
+                class_=AsyncSession,
+                expire_on_commit=False
+            )
+            
+            # Create Tables
+            async with self._engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            
+            logger.info("Connected To Postgresql Session Store")
+        except Exception as exc:
+            logger.error("Failed to connect to PostgreSQL: %s", exc)
+            raise
+    
+    async def disconnect(self):
+        """Close database connection."""
+        if self._engine:
+            await self._engine.dispose()
+            logger.info("Disconnected From Postgresql")
+    
+    async def save_session(
+        self,
+        session_id: str,
+        host: str,
+        port: int,
+        username: str,
+        password: Optional[str] = None,
+        private_key: Optional[str] = None,
+        key_passphrase: Optional[str] = None,
+        ttl: int = 3600,
+    ) -> None:
+        """Save session to database."""
+        async with self._session_maker() as session:
+            from app.security import SecretManager
+
+            # Encrypt Credentials
+            secret_manager = SecretManager(settings.encryption_key)
+            
+            db_session = PersistentSession(
+                session_id=session_id,
+                host=host,
+                port=port,
+                username=username,
+                password_encrypted=secret_manager.encrypt(password) if password else None,
+                private_key_encrypted=secret_manager.encrypt(private_key) if private_key else None,
+                key_passphrase_encrypted=secret_manager.encrypt(key_passphrase) if key_passphrase else None,
+                expires_at=datetime.utcnow() + timedelta(seconds=ttl),
+                is_active=True,
+            )
+            
+            await session.merge(db_session)
+            await session.commit()
+            
+            logger.info("Session %s saved to database", session_id)
+    
+    async def get_session(self, session_id: str) -> Optional[dict]:
+        """Get session from database."""
+        async with self._session_maker() as session:
+            from sqlalchemy import select
+            
+            result = await session.execute(
+                select(PersistentSession).where(
+                    PersistentSession.session_id == session_id,
+                    PersistentSession.is_active == True,
+                    PersistentSession.expires_at > datetime.utcnow()
+                )
+            )
+            db_session = result.scalar_one_or_none()
+            
+            if db_session:
+                # Update Last Activity
+                db_session.last_activity = datetime.utcnow()
+                await session.commit()
+                return db_session.to_dict()
+            
+            return None
+    
+    async def update_session_activity(self, session_id: str) -> None:
+        """Update session last activity."""
+        async with self._session_maker() as session:
+            from sqlalchemy import select
+            
+            result = await session.execute(
+                select(PersistentSession).where(
+                    PersistentSession.session_id == session_id
+                )
+            )
+            db_session = result.scalar_one_or_none()
+            
+            if db_session:
+                db_session.last_activity = datetime.utcnow()
+                await session.commit()
+    
+    async def deactivate_session(self, session_id: str) -> None:
+        """Deactivate session."""
+        async with self._session_maker() as session:
+            from sqlalchemy import select
+            
+            result = await session.execute(
+                select(PersistentSession).where(
+                    PersistentSession.session_id == session_id
+                )
+            )
+            db_session = result.scalar_one_or_none()
+            
+            if db_session:
+                db_session.is_active = False
+                await session.commit()
+                logger.info("Session %s deactivated", session_id)
+    
+    async def list_active_sessions(self) -> list[dict]:
+        """List all active sessions."""
+        async with self._session_maker() as session:
+            from sqlalchemy import select
+            
+            result = await session.execute(
+                select(PersistentSession).where(
+                    PersistentSession.is_active == True,
+                    PersistentSession.expires_at > datetime.utcnow()
+                )
+            )
+            sessions = result.scalars().all()
+            return [s.to_dict() for s in sessions]
+    
+    async def cleanup_expired_sessions(self) -> int:
+        """Remove expired sessions. Returns count removed."""
+        async with self._session_maker() as session:
+            from sqlalchemy import select, delete
+            
+            result = await session.execute(
+                delete(PersistentSession).where(
+                    PersistentSession.expires_at < datetime.utcnow()
+                )
+            )
+            await session.commit()
+            
+            count = result.rowcount
+            if count > 0:
+                logger.info("Cleaned up %d expired sessions", count)
+            return count
+    
+    async def get_session_credentials(self, session_id: str) -> Optional[dict]:
+        """Get decrypted credentials for session."""
+        async with self._session_maker() as session:
+            from sqlalchemy import select
+            
+            result = await session.execute(
+                select(PersistentSession).where(
+                    PersistentSession.session_id == session_id,
+                    PersistentSession.is_active == True
+                )
+            )
+            db_session = result.scalar_one_or_none()
+            
+            if not db_session:
+                return None
+            
+            from app.security import SecretManager
+            secret_manager = SecretManager(settings.encryption_key)
+            
+            return {
+                "host": db_session.host,
+                "port": db_session.port,
+                "username": db_session.username,
+                "password": secret_manager.decrypt(db_session.password_encrypted) if db_session.password_encrypted else None,
+                "private_key": secret_manager.decrypt(db_session.private_key_encrypted) if db_session.private_key_encrypted else None,
+                "key_passphrase": secret_manager.decrypt(db_session.key_passphrase_encrypted) if db_session.key_passphrase_encrypted else None,
+            }

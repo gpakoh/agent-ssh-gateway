@@ -1,0 +1,247 @@
+name: Deploy
+on:
+  push:
+    branches: [master]
+
+env:
+  NGINX_HOST: ${{ vars.NGINX_HOST || '10.0.0.1' }}
+  BACKEND_HOST: ${{ vars.BACKEND_HOST || '10.0.0.2' }}
+  BACKEND_DIR: ${{ vars.BACKEND_DIR || '/opt/web-ssh-gateway' }}
+  GATEWAY_DOMAIN: ${{ vars.GATEWAY_DOMAIN || 'gateway.example.com' }}
+
+jobs:
+  test:
+    runs-on: lxc100-runner
+    container:
+      image: node:20-bookworm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('docker/requirements.txt') }}
+          restore-keys: pip-
+      - name: Run tests
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          export PIP_PROGRESS_BAR=off
+          apt-get update -qq >/dev/null
+          apt-get install -y -qq python3 python3-venv python3-pip >/dev/null
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip >/dev/null
+          python -m pip install -q -r docker/requirements.txt pytest pytest-timeout httpx
+          python -m pytest tests/ -q --timeout=30 --ignore=tests/test_mtls_e2e.py
+      - name: Run integration tests
+        run: |
+          apt-get install -y -qq openssh-server >/dev/null
+          service ssh start
+          . .venv/bin/activate
+          python -m pytest tests/ -m integration -q --timeout=60
+
+  sbom-scan:
+    needs: test
+    runs-on: lxc100-runner
+    container:
+      image: node:20-bookworm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Generate SBOM and audit dependencies
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          export PIP_PROGRESS_BAR=off
+          apt-get update -qq >/dev/null
+          apt-get install -y -qq python3 python3-venv python3-pip >/dev/null
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip >/dev/null
+          echo "::group::Install audit tools"
+          python -m pip install -q pip-audit cyclonedx-bom
+          echo "::endgroup::"
+          echo "::group::Generated SBOM"
+          mkdir -p sbom
+          cyclonedx-py -r docker/requirements.txt --format json -o sbom/sbom.json 2>&1
+          echo "SBOM generated: $(wc -c < sbom/sbom.json) bytes"
+          echo "::endgroup::"
+          echo "::group::pip-audit scan"
+          pip-audit -r docker/requirements.txt --desc --strict || true
+          echo "::endgroup::"
+          echo "::group::Save report"
+          pip-audit -r docker/requirements.txt --desc --strict --format json -o sbom/audit.json 2>/dev/null || true
+          echo "Reports saved to sbom/"
+          echo "::endgroup::"
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom/
+
+  deploy-nginx:
+    needs: test
+    runs-on: lxc100-runner
+    container:
+      image: node:20-bookworm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Deploy nginx config
+        shell: bash
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+        run: |
+          set -euo pipefail
+          echo "::group::Check API_KEY"
+          test -n "${API_KEY:-}" || { echo "API_KEY secret is missing or empty"; exit 1; }
+          echo "OK"
+          echo "::endgroup::"
+
+          echo "::group::apt-get install"
+          apt-get update -qq
+          apt-get install -y -qq openssh-client python3 2>&1 | tail -1
+          echo "::endgroup::"
+
+          echo "::group::Inject API_KEY into nginx template"
+          python3 - <<'PY'
+          import os, re
+          api_key = os.environ["API_KEY"]
+          if len(api_key) < 16:
+              raise SystemExit("API_KEY too short")
+          if any(ch in api_key for ch in "\r\n"):
+              raise SystemExit("API_KEY must be single-line")
+          escaped = api_key.replace("\\", "\\\\").replace('"', '\\"')
+          text = open("nginx-gateway.conf.example").read()
+          if "__API_KEY__" not in text:
+              raise SystemExit("template missing __API_KEY__")
+          text = text.replace("__API_KEY__", escaped)
+          vals = re.findall(r'proxy_set_header\s+X-API-Key\s+"([^"]*)";', text)
+          if len(vals) != 4 or any(not v for v in vals):
+              raise SystemExit("X-API-Key replacement failed")
+          open("nginx-gateway.conf.example", "w").write(text)
+          PY
+          echo "OK"
+          echo "::endgroup::"
+
+          echo "::group::Copy config to nginx host"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$NGINX_HOST "mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=no \
+            nginx-gateway.conf.example root@$NGINX_HOST:/etc/nginx/sites-available/$GATEWAY_DOMAIN
+          echo "  (migration logic placeholder — customize for your setup)"
+          echo "OK"
+          echo "::endgroup::"
+
+          echo "::group::Validate and reload nginx"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$NGINX_HOST "GATEWAY_DOMAIN='$GATEWAY_DOMAIN' bash -se" <<'CFGEOF'
+            set -euo pipefail
+            G="$GATEWAY_DOMAIN"
+            echo "1/5: link config"
+            ln -sfn "/etc/nginx/sites-available/$G" "/etc/nginx/sites-enabled/$G"
+            echo "2/5: validate"
+            python3 - "$G" <<'PYEOF'
+          import sys, re
+          from pathlib import Path
+          site = '/etc/nginx/sites-enabled/' + sys.argv[1]
+          text = Path(site).read_text()
+          vals = re.findall(r'proxy_set_header\s+X-API-Key\s+"([^"]*)";', text)
+          assert len(vals) == 4 and all(len(v) >= 16 for v in vals), 'API_KEY check failed'
+          assert '__API_KEY__' not in text, 'placeholder still present'
+          print('API_KEY OK')
+          PYEOF
+            echo "3/5: nginx test"
+            nginx -t
+            echo "4/5: reload"
+            nginx -s reload
+            echo "5/5: verify endpoint"
+            for i in 1 2 3; do
+              sleep 1
+              code=$(curl -k -sS -o /dev/null -w '%{http_code}' --resolve "$G:443:127.0.0.1" "https://$G/api/servers" || true)
+              echo "attempt $i: $code"
+              test "$code" = "302" && break
+            done
+            test "$code" = "302" || { echo "FAIL: expected 302 got $code"; exit 1; }
+            echo "OK"
+            echo "6/6: mTLS checks"
+            openssl req -x509 -newkey rsa:2048 -keyout /tmp/mtls-bad.key -out /tmp/mtls-bad.crt -days 1 -nodes -subj '/CN=Bad-Client' 2>/dev/null
+            health=$(curl -k -sS --resolve "$G:443:127.0.0.1" "https://$G/health" || true)
+            valid=$(curl -k -sS -o /dev/null -w '%{http_code}' --resolve "$G:443:127.0.0.1" --cert /etc/nginx/certs/client.crt --key /etc/nginx/certs/client.key "https://$G/api/servers" || true)
+            bad=$(curl -k -sS -o /dev/null -w '%{http_code}' --resolve "$G:443:127.0.0.1" --cert /tmp/mtls-bad.crt --key /tmp/mtls-bad.key "https://$G/api/servers" || true)
+            echo "health=${health} valid=${valid} bad=${bad}"
+            echo "${health}" | grep -q '"status":"ok"' || { echo "FAIL: health=${health}"; exit 1; }
+            test "${valid}" != "302" || { echo "FAIL: valid cert got 302"; exit 1; }
+            test "${bad}" = "400" || { echo "FAIL: invalid cert expected 400 got ${bad}"; exit 1; }
+            rm -f /tmp/mtls-bad.key /tmp/mtls-bad.crt
+            echo "mTLS OK"
+          CFGEOF
+          echo "::endgroup::"
+
+  deploy-backend:
+    needs: test
+    runs-on: lxc100-runner
+    container:
+      image: node:20-bookworm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Deploy backend
+        shell: bash
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${API_KEY:-}" || { echo "API_KEY secret is missing or empty"; exit 1; }
+          test "${#API_KEY}" -ge 16 || { echo "API_KEY secret is too short"; exit 1; }
+          apt-get update -qq
+          apt-get install -y -qq openssh-client rsync
+          umask 077
+          printf 'API_KEY=%s\n' "$API_KEY" > .ci-api-key.env
+          rsync -avz \
+            -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=no" \
+            --exclude=.git --exclude=__pycache__ --exclude=.gitea --exclude=.ci-api-key.env \
+            ./ root@$BACKEND_HOST:$BACKEND_DIR/
+          scp -o BatchMode=yes -o StrictHostKeyChecking=no \
+            .ci-api-key.env root@$BACKEND_HOST:/tmp/web-ssh-api-key.env
+          rm -f .ci-api-key.env
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$BACKEND_HOST "BACKEND_DIR='$BACKEND_DIR' bash -se" <<'REMOTE'
+            set -euo pipefail
+            cd "$BACKEND_DIR"
+            test -s /tmp/web-ssh-api-key.env
+            api_key="$(awk -F= '$1=="API_KEY" {print substr($0, 9); exit}' /tmp/web-ssh-api-key.env)"
+            test -n "$api_key"
+            docker compose -p web-ssh-gateway --env-file /tmp/web-ssh-api-key.env -f docker/docker-compose.yml down --remove-orphans
+            docker compose -p web-ssh-gateway --env-file /tmp/web-ssh-api-key.env -f docker/docker-compose.yml up -d --build
+            rm -f /tmp/web-ssh-api-key.env
+            docker inspect web-ssh-gateway --format '{{range .Config.Env}}{{println .}}{{end}}' \
+              | awk -F= '$1=="API_KEY" {found=1; if (length($2) < 16) exit 42} END {if (!found) exit 43}'
+            for i in 1 2 3 4 5; do
+              curl -sf http://127.0.0.1:8085/health && break
+              echo "health check attempt $i failed, retrying..."
+              sleep 2
+            done
+            curl -sf http://127.0.0.1:8085/health || { echo "backend health check failed after 5 tries"; exit 1; }
+            API_KEY="$api_key" python3 - <<'PY'
+          import os
+          import urllib.error
+          import urllib.request
+
+          def status(path, key=None):
+              req = urllib.request.Request('http://127.0.0.1:8085' + path)
+              if key:
+                  req.add_header('X-API-Key', key)
+              try:
+                  with urllib.request.urlopen(req, timeout=5) as resp:
+                      return resp.status
+              except urllib.error.HTTPError as exc:
+                  return exc.code
+
+          api_key = os.environ.get('API_KEY', '')
+          if len(api_key) < 16:
+              raise SystemExit('container API_KEY is missing or too short')
+          if status('/api/servers') != 401:
+              raise SystemExit('unauthenticated backend request must return 401')
+          if status('/api/servers', api_key) in (401, 403, 503):
+              raise SystemExit('authenticated backend request was rejected')
+          PY
+          REMOTE
