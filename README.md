@@ -16,12 +16,10 @@ A stateful SSH session runtime with API access for AI agents and automation syst
 
 ## Mental model
 
-Think of it as:
-
-- SSH sessions → database-like resources
-- Commands → API calls
-- PTY → streaming response channel
-- Session lifecycle → managed by the runtime, not by the user
+- A session is a persistent API resource stored in PostgreSQL.
+- A command is an HTTP request executed over SSH.
+- A PTY is a WebSocket stream attached to a session.
+- A job is a Redis-backed background execution task.
 
 ## Why this exists
 
@@ -65,6 +63,18 @@ AI agents and CI/CD pipelines need SSH access, but raw SSH doesn't fit their mod
 | `DELETE` | `/api/known-hosts/{host}` | Remove host key |
 | `DELETE` | `/api/known-hosts` | Clear all host keys |
 
+## SDK
+
+Python SDK for AI agents: [`sdk/ssh_gateway.py`](sdk/ssh_gateway.py)
+
+```python
+from sdk.ssh_gateway import SSHGateway
+
+gw = SSHGateway("https://ssh.example.com", api_key="...")
+session = gw.connect("my-server", username="root", password="...")
+output = gw.execute(session, "uptime")
+```
+
 ## Features
 
 - **API-first SSH** — connect, execute, stream over HTTP/WebSocket
@@ -76,7 +86,7 @@ AI agents and CI/CD pipelines need SSH access, but raw SSH doesn't fit their mod
 - **Audit logging** — every command recorded
 - **Command guardrails** — blocklist for dangerous operations (not a security boundary)
 - **Rate limiting** — per-IP, configurable
-- **Persistent sessions** — optional PostgreSQL backend with encrypted credentials
+- **Persistent sessions** — optional PostgreSQL backend restores session context after gateway restart
 - **CI/CD integration** — Gitea Actions pipeline with SBOM scanning
 
 ## Dependencies
@@ -134,18 +144,6 @@ Environment configuration via `.env` file:
 | `ENCRYPTION_KEY` | — | Required if `PERSISTENT_SESSIONS_ENABLED=true` |
 | `KNOWN_HOSTS_STORE` | `""` | `file`, `postgres`, or empty (auto-add) |
 | `SSH_STRICT_HOST_KEY_CHECKING` | `false` | Reject unknown host keys when `true` |
-
-## SDK
-
-Python SDK for AI agents: [`sdk/ssh_gateway.py`](sdk/ssh_gateway.py)
-
-```python
-from sdk.ssh_gateway import SSHGateway
-
-gw = SSHGateway("https://ssh.example.com", api_key="...")
-session = gw.connect("my-server", username="root", password="...")
-output = gw.execute(session, "uptime")
-```
 
 ## Project status
 
