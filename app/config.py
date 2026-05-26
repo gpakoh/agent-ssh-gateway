@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     # SSH defaults
     ssh_default_port: int = 22
     ssh_default_timeout: int = 120  # seconds
+    ssh_strict_host_key_checking: bool = Field(
+        default=False, alias="SSH_STRICT_HOST_KEY_CHECKING"
+    )
+    known_hosts_store: str = Field(default="", alias="KNOWN_HOSTS_STORE")
+    known_hosts_file: str = Field(default="/app/known_hosts", alias="KNOWN_HOSTS_FILE")
 
     # Security
     encryption_key: str = Field(default="", alias="ENCRYPTION_KEY")
