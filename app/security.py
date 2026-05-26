@@ -22,6 +22,18 @@ logger = logging.getLogger(__name__)
 
 limiter = Limiter(key_func=get_remote_address)
 
+
+def rate_limit_mutation(requests: int = 30, period: str = "minute"):
+    """Rate-limit decorator for mutation endpoints.
+
+    Usage:
+        @rate_limit_mutation(10, "minute")
+        async def my_endpoint(req: SomeRequest, request: Request):
+            ...
+    """
+    return limiter.limit(f"{requests}/{period}")
+
+
 # ---------------------------------------------------------------------------
 # Command Sanitization
 # ---------------------------------------------------------------------------
