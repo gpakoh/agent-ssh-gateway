@@ -133,6 +133,7 @@ async def emit_event(
                     event_id=payload["event_id"],
                     hook_id=hook.id,
                     event_type=event,
+                    url=hook.url,
                     payload_json=payload_json,
                 )
             except Exception:

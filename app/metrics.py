@@ -97,6 +97,26 @@ class MetricsCollector:
             ['operation', 'status']
         )
         
+        # Event hook metrics
+        self.event_hook_deliveries_total = Counter(
+            'ssh_gateway_event_hook_deliveries_total',
+            'Event hook deliveries',
+            ['status', 'event'],
+        )
+        self.event_hook_delivery_attempts_total = Counter(
+            'ssh_gateway_event_hook_delivery_attempts_total',
+            'Event hook delivery attempts',
+        )
+        self.event_hook_delivery_latency = Histogram(
+            'ssh_gateway_event_hook_delivery_latency_seconds',
+            'Event hook delivery latency',
+            buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0],
+        )
+        self.event_hook_dead_letter = Gauge(
+            'ssh_gateway_event_hook_dead_letter_count',
+            'Dead letter deliveries',
+        )
+
         # System info
         self.info = Info('ssh_gateway', 'SSH Gateway information')
         self.info.info({'version': '4.5.1'})
@@ -137,6 +157,22 @@ class MetricsCollector:
     def record_file_operation(self, operation: str, status: str = "success"):
         """Record file operation."""
         self.file_operations.labels(operation=operation, status=status).inc()
+
+    def record_event_hook_delivery(self, status: str = "success", event: str = "unknown"):
+        """Record event hook delivery."""
+        self.event_hook_deliveries_total.labels(status=status, event=event).inc()
+
+    def record_event_hook_attempt(self):
+        """Record a delivery attempt."""
+        self.event_hook_delivery_attempts_total.inc()
+
+    def record_event_hook_latency(self, seconds: float):
+        """Record delivery latency."""
+        self.event_hook_delivery_latency.observe(seconds)
+
+    def set_event_hook_dead_letter_count(self, count: int):
+        """Set dead letter delivery count."""
+        self.event_hook_dead_letter.set(count)
     
     def get_metrics(self) -> bytes:
         """Get Prometheus metrics in text format."""
