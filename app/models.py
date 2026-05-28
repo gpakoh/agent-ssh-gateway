@@ -125,6 +125,59 @@ class TemplateRunResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Event Hooks
+# ---------------------------------------------------------------------------
+
+
+class EventHookCreate(BaseModel):
+    url: str = Field(..., min_length=1, max_length=2048)
+    events: list[str] = Field(..., min_length=1)
+    session_id: str | None = None
+    headers: dict[str, str] | None = None
+    secret: str | None = None
+    include_output: bool = False
+
+
+class EventHookUpdate(BaseModel):
+    url: str | None = None
+    events: list[str] | None = None
+    session_id: str | None = None
+    headers: dict[str, str] | None = None
+    secret: str | None = None
+    include_output: bool | None = None
+    is_active: bool | None = None
+
+
+class EventHookResponse(BaseModel):
+    id: str
+    url: str
+    events: list[str]
+    session_id: str | None = None
+    include_output: bool = False
+    is_active: bool = True
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class EventHookListResponse(BaseModel):
+    hooks: list[EventHookResponse]
+    count: int
+
+
+class EventHookDeliveryResponse(BaseModel):
+    delivery_id: str
+    event_id: str
+    hook_id: str
+    event_type: str
+    status: str
+    attempts: int
+    http_status: int | None = None
+    last_error: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 
