@@ -113,7 +113,16 @@ async def api_help(request: Request):
 
     openapi = request.app.openapi()
     paths = openapi.get("paths", {})
+    schemas = openapi.get("components", {}).get("schemas", {})
     groups: dict[str, list[dict]] = {}
+
+    def _resolve(s: dict) -> dict:
+        if "$ref" in s:
+            name = s["$ref"].split("/")[-1]
+            resolved = schemas.get(name, {})
+            if resolved.get("properties"):
+                return resolved
+        return s
 
     for path, methods in paths.items():
         for method, details in methods.items():
@@ -132,7 +141,7 @@ async def api_help(request: Request):
             if body:
                 content = body.get("content", {})
                 for media_type, media_body in content.items():
-                    schema = media_body.get("schema", {})
+                    schema = _resolve(media_body.get("schema", {}))
                     props = schema.get("properties", {})
                     required_set = set(schema.get("required", []))
                     for pname, pdetails in props.items():
