@@ -5,6 +5,12 @@ import pytest_asyncio
 
 from app.session_store import EventHook, WebhookDelivery
 from app.event_hook_store import EventHookStore
+from app.event_hook_security import (
+    validate_webhook_url,
+    validate_destination_ip,
+    sign_payload,
+    mask_sensitive_headers,
+)
 
 
 def test_orm_models_defined():
@@ -123,3 +129,88 @@ async def test_find_matching_hooks(store):
     matches = await store.find_matching("session.connected", session_id="sess-2")
     assert len(matches) == 1
     assert matches[0].id == h3.id
+
+
+# ---------------------------------------------------------------------------
+# Security — URL validation, HMAC, log masking
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("url,ok", [
+    ("https://hooks.example.com/callback", True),
+    ("https://10.0.0.1/hook", False),
+    ("https://127.0.0.1/hook", False),
+    ("https://10.0.1.1/hook", False),
+    ("https://169.254.169.254/latest", False),
+    ("https://[::1]/hook", False),
+    ("http://example.com/hook", False),
+    ("https://example.com:22/hook", True),
+    ("file:///etc/passwd", False),
+    ("", False),
+])
+def test_validate_url(url, ok):
+    result = validate_webhook_url(url, allow_http=False)
+    assert result.valid is ok, f"{url}: expected valid={ok}, got {result.reason}"
+
+
+@pytest.mark.parametrize("url,ok", [
+    ("http://example.com/hook", True),
+    ("https://example.com/hook", True),
+])
+def test_validate_url_allow_http(url, ok):
+    result = validate_webhook_url(url, allow_http=True)
+    assert result.valid is ok
+
+
+def test_validate_destination_ip_loopback():
+    assert validate_destination_ip("127.0.0.1").valid is False
+    assert validate_destination_ip("::1").valid is False
+
+
+def test_validate_destination_ip_private():
+    assert validate_destination_ip("10.0.0.10").valid is False
+    assert validate_destination_ip("10.0.1.1").valid is False
+
+
+def test_validate_destination_ip_public():
+    assert validate_destination_ip("8.8.8.8").valid is True
+    assert validate_destination_ip("93.184.216.34").valid is True
+
+
+def test_validate_destination_ip_invalid():
+    assert validate_destination_ip("not-an-ip").valid is False
+
+
+def test_sign_payload():
+    secret = "test-secret-key"
+    payload = b'{"event":"command.completed"}'
+    timestamp = "1716800000"
+    signature = sign_payload(secret, payload, timestamp)
+    assert signature.startswith("sha256=")
+    assert len(signature) > 50
+
+
+def test_sign_payload_deterministic():
+    secret = "test-secret"
+    payload = b"{}"
+    ts = "1716800000"
+    assert sign_payload(secret, payload, ts) == sign_payload(secret, payload, ts)
+
+
+def test_sign_payload_no_secret():
+    assert sign_payload("", b"{}", "0") is None
+    assert sign_payload(None, b"{}", "0") is None
+
+
+def test_mask_sensitive_headers():
+    masked = {"Authorization": "Bearer secret123", "X-API-Key": "key456"}
+    unmasked = {"Content-Type": "application/json"}
+    result = mask_sensitive_headers({**masked, **unmasked})
+    for key in masked:
+        assert result[key] == "****"
+    assert result["Content-Type"] == "application/json"
+
+
+def test_mask_sensitive_headers_none():
+    assert mask_sensitive_headers(None) == {}
+    assert mask_sensitive_headers({}) == {}
