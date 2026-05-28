@@ -2,9 +2,13 @@
 
 import asyncio
 import logging
+import os
+import time
+import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Query
+
 
 from app.config import settings
 from app.state import _err
@@ -192,8 +196,9 @@ async def ssh_disconnect(req: DisconnectRequest):
 
 @router.get("/api/ssh/sessions", response_model=SessionsResponse)
 async def ssh_sessions():
-    """List all active SSH sessions."""
+    """List all active SSH sessions with details."""
     records = await _state.manager.list_sessions()
+    now = time.time()
     sessions = [
         SessionInfo(
             session_id=r.session_id,
@@ -201,7 +206,8 @@ async def ssh_sessions():
             port=r.port,
             username=r.username,
             connected_at=time_to_iso(r.connected_at),
-            last_activity=time_to_iso(r.last_activity),
+            last_command_at=time_to_iso(r.last_activity) if r.last_activity else None,
+            idle_seconds=round(now - r.last_activity, 1),
         )
         for r in records
     ]
@@ -356,3 +362,89 @@ async def pty_stream(websocket: WebSocket, session_id: str):
                 channel.close()
             except Exception:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Port Checker
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/ssh/check-port")
+async def check_port(
+    host: str = Query(..., description="Target hostname or IP"),
+    port: int = Query(22, ge=1, le=65535, description="Target port"),
+    timeout: float = Query(5.0, ge=0.5, le=30.0, description="Connection timeout in seconds"),
+):
+    """Check if a remote TCP port is reachable. No auth required."""
+    start = time.monotonic()
+    try:
+        _reader, _writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=timeout,
+        )
+        _writer.close()
+        await _writer.wait_closed()
+        elapsed = int((time.monotonic() - start) * 1000)
+        return {"host": host, "port": port, "reachable": True, "duration_ms": elapsed}
+    except (OSError, asyncio.TimeoutError, ConnectionError):
+        elapsed = int((time.monotonic() - start) * 1000)
+        return {"host": host, "port": port, "reachable": False, "duration_ms": elapsed}
+
+
+# ---------------------------------------------------------------------------
+# Environment Inspect
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/ssh/session/{session_id}/env")
+async def session_env(
+    session_id: str,
+    prefix: str = Query(None, description="Filter env vars by prefix (e.g. PATH)"),
+):
+    """Read environment variables from an active SSH session."""
+    result = await _state.manager.execute(session_id=session_id, command="printenv", timeout=10)
+    if result["exit_code"] != 0:
+        raise HTTPException(status_code=502, detail=_err(502, f"Failed to read env: {result['stderr']}"))
+
+    env = {}
+    for line in result["stdout"].splitlines():
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        if prefix and not key.startswith(prefix):
+            continue
+        env[key] = val
+    return env
+
+
+# ---------------------------------------------------------------------------
+# SSH Key Upload
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/ssh/keys")
+async def upload_ssh_key(
+    file: UploadFile = File(...),
+):
+    """Upload an SSH private key. Stored in /app/ssh_keys/."""
+    content = await file.read()
+    if len(content) > 64 * 1024:
+        raise HTTPException(status_code=400, detail=_err(400, "Key file too large (max 64KB)"))
+    try:
+        text = content.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail=_err(400, "Key must be valid UTF-8 text"))
+
+    if not text.startswith("-----BEGIN"):
+        raise HTTPException(status_code=400, detail=_err(400, "Not a valid private key format"))
+
+    keys_dir = "/app/ssh_keys"
+    os.makedirs(keys_dir, exist_ok=True)
+    name = file.filename or f"key-{uuid.uuid4().hex[:8]}.pem"
+    fpath = os.path.join(keys_dir, name)
+
+    with open(fpath, "w") as f:
+        f.write(text)
+    os.chmod(fpath, 0o600)
+
+    return {"name": name, "path": fpath, "size": len(content)}

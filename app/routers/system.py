@@ -106,6 +106,26 @@ async def get_capabilities():
     )
 
 
+@router.get("/api/config", tags=["system"])
+async def get_config():
+    """Return runtime configuration (secrets masked)."""
+    from app.config import settings
+    return {
+        "session_timeout": settings.session_timeout,
+        "cleanup_interval": settings.cleanup_interval,
+        "ssh_default_timeout": settings.ssh_default_timeout,
+        "max_sessions_per_ip": settings.max_sessions_per_ip,
+        "rate_limit_requests": settings.rate_limit_requests,
+        "rate_limit_window": settings.rate_limit_window,
+        "persistent_sessions_enabled": settings.persistent_sessions_enabled,
+        "known_hosts_store": settings.known_hosts_store or "null",
+        "api_auth_enabled": settings.api_auth_enabled,
+        "agent_token_enabled": bool(settings.agent_token),
+        "agent_token_ttl": settings.agent_token_ttl,
+        "read_only": getattr(settings, "read_only", False),
+    }
+
+
 @router.get("/api/help", tags=["help"])
 async def api_help(request: Request):
     """List all API endpoints grouped by tag for agent consumption."""
