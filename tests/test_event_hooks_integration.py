@@ -21,8 +21,8 @@ def _setup_globals():
     from app.config import settings
     settings.event_hooks_max = 10
     yield store, ds
-    del state_module.event_hook_store
-    del state_module.delivery_service
+    state_module.event_hook_store = None
+    state_module.delivery_service = None
 
 
 @pytest.mark.asyncio
