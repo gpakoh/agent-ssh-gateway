@@ -2,6 +2,7 @@
 
 import pytest
 import pytest_asyncio
+from datetime import datetime, timedelta, timezone
 
 from app.session_store import EventHook, WebhookDelivery
 from app.event_hook_store import EventHookStore
@@ -11,6 +12,7 @@ from app.event_hook_security import (
     sign_payload,
     mask_sensitive_headers,
 )
+from app.event_hook_delivery import DeliveryService
 
 
 def test_orm_models_defined():
@@ -214,3 +216,130 @@ def test_mask_sensitive_headers():
 def test_mask_sensitive_headers_none():
     assert mask_sensitive_headers(None) == {}
     assert mask_sensitive_headers({}) == {}
+
+
+# ---------------------------------------------------------------------------
+# Delivery Service — outbox, lease, retry, cleanup
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def delivery_service():
+    ds = DeliveryService(
+        database_url="sqlite+aiosqlite:///:memory:",
+        instance_id="test-1",
+    )
+    await ds.create_tables()
+    yield ds
+    await ds.close()
+
+
+@pytest.mark.asyncio
+async def test_delivery_enqueue(delivery_service):
+    delivery_id = await delivery_service.enqueue(
+        event_id="evt-1",
+        hook_id="hook-1",
+        event_type="command.completed",
+        payload_json='{"event":"command.completed"}',
+    )
+    assert delivery_id is not None
+
+
+@pytest.mark.asyncio
+async def test_delivery_claim_pending(delivery_service):
+    delivery_id = await delivery_service.enqueue(
+        event_id="evt-2", hook_id="hook-2",
+        event_type="session.connected",
+        payload_json="{}",
+    )
+    # Manually age the record so it's claimable (>2s old)
+    async with delivery_service._session_factory() as session:
+        from sqlalchemy import select as sel
+        result = await session.execute(
+            sel(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
+        )
+        rec = result.scalar_one()
+        rec.created_at = datetime.utcnow() - timedelta(seconds=10)
+        await session.commit()
+
+    claimed = await delivery_service.claim_deliveries(limit=10, lease_ttl=30.0)
+    assert len(claimed) == 1
+    assert claimed[0].delivery_id == delivery_id
+    assert claimed[0].status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_delivery_complete(delivery_service):
+    d_id = await delivery_service.enqueue("evt-3", "h-3", "a", "{}")
+    result = await delivery_service.complete(d_id, http_status=200)
+    assert result is True
+
+    rec = await delivery_service._get_record(d_id)
+    assert rec.status == "sent"
+
+
+@pytest.mark.asyncio
+async def test_delivery_fail_with_retry(delivery_service):
+    d_id = await delivery_service.enqueue("evt-4", "h-4", "a", "{}")
+    result = await delivery_service.fail(
+        d_id, last_error="timeout",
+        max_attempts=5, retry_base_sec=2.0, retry_max_sec=300.0,
+    )
+    assert result is True
+
+    rec = await delivery_service._get_record(d_id)
+    assert rec.attempts == 1
+    assert rec.status == "failed"
+    assert rec.next_retry_at is not None
+
+
+@pytest.mark.asyncio
+async def test_delivery_fail_dead_after_max(delivery_service):
+    d_id = await delivery_service.enqueue("evt-5", "h-5", "a", "{}")
+    await delivery_service.fail(
+        d_id, last_error="first",
+        max_attempts=3, retry_base_sec=2.0, retry_max_sec=300.0,
+    )
+    await delivery_service.fail(
+        d_id, last_error="second",
+        max_attempts=3, retry_base_sec=2.0, retry_max_sec=300.0,
+    )
+    await delivery_service.fail(
+        d_id, last_error="third",
+        max_attempts=3, retry_base_sec=2.0, retry_max_sec=300.0,
+    )
+    rec = await delivery_service._get_record(d_id)
+    assert rec.status == "dead"
+    assert rec.attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_delivery_claim_skips_young_pending(delivery_service):
+    await delivery_service.enqueue("evt-6", "h-6", "a", "{}")
+
+    claimed = await delivery_service.claim_deliveries(limit=10, lease_ttl=30.0)
+    assert len(claimed) == 0
+
+
+@pytest.mark.asyncio
+async def test_delivery_cleanup(delivery_service):
+    d_id = await delivery_service.enqueue("evt-7", "h-7", "a", "{}")
+    await delivery_service.complete(d_id, 200)
+
+    # Should not be cleaned (not old enough)
+    count = await delivery_service.cleanup_old(sent_days=7, dead_days=30)
+    assert count == 0
+
+    # Manually age the record
+    async with delivery_service._session_factory() as s:
+        from sqlalchemy import select as sel
+        result = await s.execute(sel(WebhookDelivery).where(
+            WebhookDelivery.delivery_id == d_id
+        ))
+        d = result.scalar_one()
+        d.updated_at = datetime.now(timezone.utc) - timedelta(days=10)
+        await s.commit()
+
+    # Now it should be cleaned
+    count = await delivery_service.cleanup_old(sent_days=7, dead_days=30)
+    assert count == 1
