@@ -1017,6 +1017,7 @@ from app.routers.git import router as git_router
 from app.routers.context import router as context_router
 from app.routers.system import router as system_router
 from app.routers.logs import router as logs_router
+from app.routers.templates import router as templates_router
 
 app.include_router(ssh_router)
 app.include_router(files_router)
@@ -1025,6 +1026,7 @@ app.include_router(git_router)
 app.include_router(context_router)
 app.include_router(system_router)
 app.include_router(logs_router)
+app.include_router(templates_router)
 
 # Static files mount (after all router includes so static routes take precedence)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")

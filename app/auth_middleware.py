@@ -88,7 +88,7 @@ def verify_api_key(
 # Always‑public paths (even when auth is enabled)
 # ---------------------------------------------------------------------------
 
-ALWAYS_PUBLIC = frozenset({"/health", "/api/capabilities"})
+ALWAYS_PUBLIC = frozenset({"/health", "/api/capabilities", "/api/ssh/check-port"})
 
 
 def _normalise_path(path: str) -> str:
