@@ -386,6 +386,7 @@ TAGS_META = {
     "snapshots": "Project snapshots for recovery",
     "webhooks": "CI/CD webhooks",
     "known-hosts": "Host key store management",
+    "logs": "Remote log reading (journald, docker)",
     "help": "API help and endpoint discovery",
     "code": "Code intelligence (search, insert, complete)",
     "system": "System endpoints (health, metrics, config)",
@@ -396,6 +397,8 @@ def _path_tag(path: str) -> str:
         return "system"
     if path.startswith("/api/known-hosts"):
         return "known-hosts"
+    if path.startswith("/api/logs"):
+        return "logs"
     if path.startswith("/api/help"):
         return "help"
     if path.startswith("/api/servers"):
@@ -1013,6 +1016,7 @@ from app.routers.jobs import router as jobs_router
 from app.routers.git import router as git_router
 from app.routers.context import router as context_router
 from app.routers.system import router as system_router
+from app.routers.logs import router as logs_router
 
 app.include_router(ssh_router)
 app.include_router(files_router)
@@ -1020,6 +1024,7 @@ app.include_router(jobs_router)
 app.include_router(git_router)
 app.include_router(context_router)
 app.include_router(system_router)
+app.include_router(logs_router)
 
 # Static files mount (after all router includes so static routes take precedence)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
