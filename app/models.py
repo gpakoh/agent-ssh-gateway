@@ -86,7 +86,8 @@ class SessionInfo(BaseModel):
     port: int
     username: str
     connected_at: str
-    last_activity: str
+    last_command_at: str | None = None
+    idle_seconds: float = 0.0
 
 
 class SessionsResponse(BaseModel):
@@ -94,6 +95,33 @@ class SessionsResponse(BaseModel):
 
     sessions: list[SessionInfo]
     count: int
+
+
+class CommandTemplate(BaseModel):
+    """Predefined SSH command template."""
+
+    id: str
+    name: str
+    description: str
+    command: str
+    params: list[dict] = []
+
+
+class TemplateRunRequest(BaseModel):
+    """Request to execute a command template."""
+
+    session_id: str = Field(..., min_length=1)
+    template: str = Field(..., min_length=1)
+    params: dict[str, str] = {}
+
+
+class TemplateRunResponse(BaseModel):
+    """Response after template execution."""
+
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int = -1
+    duration: float = 0.0
 
 
 # ---------------------------------------------------------------------------
