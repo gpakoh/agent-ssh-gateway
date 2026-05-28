@@ -21,6 +21,8 @@ from app.distributed_lock import DistributedLock
 from app.session_store import SessionStore
 from app.bulk_operations_v2 import BulkOperationsManager
 from app.known_hosts import HostKeyStore
+from app.event_hook_store import EventHookStore
+from app.event_hook_delivery import DeliveryService
 
 manager: Optional[SSHSessionManager] = None
 job_manager: Optional[JobManager] = None
@@ -42,6 +44,8 @@ dist_lock: Optional[DistributedLock] = None
 session_store: Optional[SessionStore] = None
 host_key_store: Optional[HostKeyStore] = None
 bulk_ops: Optional[BulkOperationsManager] = None
+event_hook_store: Optional[EventHookStore] = None
+delivery_service: Optional[DeliveryService] = None
 
 # ---------------------------------------------------------------------------
 # Error helpers (shared across routers)

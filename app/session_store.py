@@ -49,6 +49,54 @@ class PersistentSession(Base):
         }
 
 
+class EventHook(Base):
+    """Event hook registration for webhook notifications."""
+    __tablename__ = "event_hooks"
+
+    id = Column(String(36), primary_key=True)
+    url = Column(String(2048), nullable=False)
+    events = Column(JSON, nullable=False)
+    session_id = Column(String(36), nullable=True)
+    headers_encrypted = Column(Text, nullable=True)
+    secret_encrypted = Column(Text, nullable=True)
+    include_output = Column(Boolean, default=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "url": self.url,
+            "events": self.events,
+            "session_id": self.session_id,
+            "include_output": self.include_output,
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class WebhookDelivery(Base):
+    """Outbox delivery record for event hooks."""
+    __tablename__ = "webhook_deliveries"
+
+    delivery_id = Column(String(36), primary_key=True)
+    event_id = Column(String(36), nullable=False, index=True)
+    hook_id = Column(String(36), nullable=False, index=True)
+    event_type = Column(String(64), nullable=False)
+    payload_json = Column(Text, nullable=False)
+    status = Column(String(16), default="pending", index=True)
+    attempts = Column(Integer, default=0)
+    next_retry_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    http_status = Column(Integer, nullable=True)
+    leased_by = Column(String(64), nullable=True)
+    leased_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class SessionStore:
     """Async session store using PostgreSQL."""
     
