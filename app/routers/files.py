@@ -389,7 +389,7 @@ async def project_tree(
 
 
 @router.post("/api/project/structure", response_model=ProjectStructureResponse)
-async def project_structure(req: ProjectStructureRequest):
+async def project_structure_files(req: ProjectStructureRequest):
     """Get project structure with metadata and git status."""
     import json
 

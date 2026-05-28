@@ -106,6 +106,58 @@ async def get_capabilities():
     )
 
 
+@router.get("/api/help", tags=["help"])
+async def api_help(request: Request):
+    """List all API endpoints grouped by tag for agent consumption."""
+    from app.main import TAGS_META
+
+    openapi = request.app.openapi()
+    paths = openapi.get("paths", {})
+    groups: dict[str, list[dict]] = {}
+
+    for path, methods in paths.items():
+        for method, details in methods.items():
+            if method == "parameters":
+                continue
+            tags = details.get("tags", ["other"])
+            tag = next((t for t in tags if t in TAGS_META), tags[0] if tags else "other")
+
+            entry = {"method": method.upper(), "path": path, "summary": details.get("summary", "")}
+            params = []
+
+            for p in details.get("parameters", []):
+                params.append(_clean_param(p.get("name", ""), p.get("in", "query"), p.get("schema", {}), p.get("required", False), p.get("description", "")))
+
+            body = details.get("requestBody", {})
+            if body:
+                content = body.get("content", {})
+                for media_type, media_body in content.items():
+                    schema = media_body.get("schema", {})
+                    props = schema.get("properties", {})
+                    required_set = set(schema.get("required", []))
+                    for pname, pdetails in props.items():
+                        params.append(_clean_param(pname, "body", pdetails, pname in required_set, pdetails.get("description", "")))
+
+            if params:
+                entry["params"] = params
+            groups.setdefault(tag, []).append(entry)
+
+    return groups
+
+
+def _clean_param(name: str, location: str, schema: dict, required: bool, description: str) -> dict:
+    ptype = schema.get("type", "string")
+    if not ptype and "$ref" in schema:
+        ptype = schema["$ref"].split("/")[-1]
+    if isinstance(ptype, list):
+        ptype = ptype[0] if ptype else "string"
+    p = {"name": name, "in": location, "type": ptype, "required": required}
+    desc = (description or "").strip().split(".")[0].strip()
+    if desc:
+        p["desc"] = desc
+    return p
+
+
 @router.get("/metrics", response_class=PlainTextResponse)
 async def prometheus_metrics():
     """Prometheus metrics endpoint."""

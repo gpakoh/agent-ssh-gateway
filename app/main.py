@@ -386,6 +386,7 @@ TAGS_META = {
     "snapshots": "Project snapshots for recovery",
     "webhooks": "CI/CD webhooks",
     "known-hosts": "Host key store management",
+    "help": "API help and endpoint discovery",
     "code": "Code intelligence (search, insert, complete)",
     "system": "System endpoints (health, metrics, config)",
 }
@@ -395,6 +396,8 @@ def _path_tag(path: str) -> str:
         return "system"
     if path.startswith("/api/known-hosts"):
         return "known-hosts"
+    if path.startswith("/api/help"):
+        return "help"
     if path.startswith("/api/servers"):
         return "servers"
     if path.startswith("/api/jobs"):
