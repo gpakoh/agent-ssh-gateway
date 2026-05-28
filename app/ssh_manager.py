@@ -19,6 +19,14 @@ from paramiko.ssh_exception import (
 from app.config import settings
 from app.known_hosts import HostKeyStore, KnownHostsPolicy, NullHostKeyStore
 
+# Lazy import to avoid circular dependency
+_emit_event_fn = None
+def _emit(event: str, **kw):
+    global _emit_event_fn
+    if _emit_event_fn is None:
+        from app.event_hook_emitter import emit_event as _emit_event_fn
+    asyncio.ensure_future(_emit_event_fn(event, **kw))
+
 logger = logging.getLogger(__name__)
 
 
@@ -240,6 +248,13 @@ class SSHSessionManager:
             self._sessions[session_id] = record
 
         logger.info("SSH session %s created for %s@%s:%d", session_id, username, host, port)
+        _emit(
+            "session.connected",
+            session_id=session_id,
+            host=host,
+            port=port,
+            username=username,
+        )
         return session_id
 
     async def reconnect(self, session_id: str) -> bool:
@@ -361,9 +376,19 @@ class SSHSessionManager:
                 raise ConnectionError(f"Session {session_id} is disconnected and reconnection failed")
 
         record.touch()
+        host, port, username = record.host, record.port, record.username
         client = record.client
         loop = asyncio.get_event_loop()
         start = time.time()
+
+        _emit(
+            "command.started",
+            session_id=session_id,
+            host=host,
+            port=port,
+            username=username,
+            command=command,
+        )
 
         try:
             stdin, stdout, stderr = await loop.run_in_executor(
@@ -395,9 +420,25 @@ class SSHSessionManager:
         duration = time.time() - start
         record.touch()
 
+        out_text = out_data.decode("utf-8", errors="replace")
+        err_text = err_data.decode("utf-8", errors="replace")
+
+        _emit(
+            "command.completed" if exit_code == 0 else "command.failed",
+            session_id=session_id,
+            host=host,
+            port=port,
+            username=username,
+            command=command,
+            exit_code=exit_code,
+            duration=duration,
+            stdout=out_text,
+            stderr=err_text,
+        )
+
         return {
-            "stdout": out_data.decode("utf-8", errors="replace"),
-            "stderr": err_data.decode("utf-8", errors="replace"),
+            "stdout": out_text,
+            "stderr": err_text,
             "exit_code": exit_code,
             "duration": round(duration, 3),
         }
@@ -414,8 +455,18 @@ class SSHSessionManager:
             raise SessionNotFoundError(f"Session {session_id} not found")
 
         record.touch()
+        host, port, username = record.host, record.port, record.username
         client = record.client
         loop = asyncio.get_event_loop()
+
+        _emit(
+            "command.started",
+            session_id=session_id,
+            host=host,
+            port=port,
+            username=username,
+            command=command,
+        )
 
         try:
             stdin, stdout, stderr = await loop.run_in_executor(
@@ -452,9 +503,35 @@ class SSHSessionManager:
             exit_code = out_channel.recv_exit_status()
             yield ("exit", str(exit_code))
 
+            _emit(
+                "command.completed" if exit_code == 0 else "command.failed",
+                session_id=session_id,
+                host=host,
+                port=port,
+                username=username,
+                command=command,
+                exit_code=exit_code,
+            )
+
         except SSHException as exc:
+            _emit(
+                "command.failed",
+                session_id=session_id,
+                host=host,
+                port=port,
+                username=username,
+                command=command,
+            )
             yield ("error", str(exc))
         except Exception as exc:
+            _emit(
+                "command.failed",
+                session_id=session_id,
+                host=host,
+                port=port,
+                username=username,
+                command=command,
+            )
             yield ("error", str(exc))
         finally:
             record.touch()
@@ -471,12 +548,22 @@ class SSHSessionManager:
         if not record:
             raise SessionNotFoundError(f"Session {session_id} not found")
 
+        host, port, username = record.host, record.port, record.username
+
         try:
             record.client.close()
         except Exception as exc:
             logger.warning("Error closing client for session %s: %s", session_id, exc)
 
         logger.info("SSH session %s disconnected", session_id)
+        _emit(
+            "session.disconnected",
+            session_id=session_id,
+            host=host,
+            port=port,
+            username=username,
+            reason="manual",
+        )
 
     # ------------------------------------------------------------------
     # List sessions
