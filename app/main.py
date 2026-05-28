@@ -378,8 +378,9 @@ async def lifespan(app: FastAPI):
         await state.redis_queue.disconnect()
     if state.dist_lock:
         await state.dist_lock.disconnect()
-    if state.delivery_service:
-        await state.delivery_service.close()
+    ds = getattr(state, 'delivery_service', None)
+    if ds:
+        await ds.close()
         logger.info("Event hook delivery service shut down")
     if state.session_store:
         await state.session_store.disconnect()
