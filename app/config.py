@@ -61,6 +61,20 @@ class Settings(BaseSettings):
         default=False, alias="PERSISTENT_SESSIONS_ENABLED"
     )
 
+    event_hooks_enabled: bool = Field(default=True, alias="EVENT_HOOKS_ENABLED")
+    event_hooks_max: int = Field(default=50, alias="EVENT_HOOKS_MAX")
+    event_hooks_timeout_connect: float = Field(default=5.0, alias="EVENT_HOOKS_TIMEOUT_CONNECT")
+    event_hooks_timeout_read: float = Field(default=10.0, alias="EVENT_HOOKS_TIMEOUT_READ")
+    event_hooks_max_attempts: int = Field(default=5, alias="EVENT_HOOKS_MAX_ATTEMPTS")
+    event_hooks_retry_base_sec: float = Field(default=2.0, alias="EVENT_HOOKS_RETRY_BASE_SEC")
+    event_hooks_retry_max_sec: float = Field(default=300.0, alias="EVENT_HOOKS_RETRY_MAX_SEC")
+    event_hooks_max_output_bytes: int = Field(default=65536, alias="EVENT_HOOKS_MAX_OUTPUT_BYTES")
+    event_hooks_allow_http: bool = Field(default=False, alias="EVENT_HOOKS_ALLOW_HTTP")
+    event_hooks_poll_interval: float = Field(default=5.0, alias="EVENT_HOOKS_POLL_INTERVAL")
+    event_hooks_lease_ttl: float = Field(default=30.0, alias="EVENT_HOOKS_LEASE_TTL")
+    event_hooks_retention_sent_days: int = Field(default=7, alias="EVENT_HOOKS_RETENTION_SENT_DAYS")
+    event_hooks_retention_dead_days: int = Field(default=30, alias="EVENT_HOOKS_RETENTION_DEAD_DAYS")
+
     class Config:
         env_file = ".env"
         populate_by_name = True
