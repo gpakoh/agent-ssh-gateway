@@ -9,10 +9,11 @@ import random
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
-from sqlalchemy import select, and_, text
+from sqlalchemy import select, and_, func, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 from app.session_store import Base, WebhookDelivery
+from app.metrics import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,7 @@ class DeliveryService:
     # ------------------------------------------------------------------
 
     async def enqueue(
-        self, event_id: str, hook_id: str, event_type: str, payload_json: str
+        self, event_id: str, hook_id: str, event_type: str, url: str, payload_json: str
     ) -> str:
         delivery_id = uuid.uuid4().hex
         delivery = WebhookDelivery(
@@ -95,6 +96,7 @@ class DeliveryService:
             event_id=event_id,
             hook_id=hook_id,
             event_type=event_type,
+            url=url,
             payload_json=payload_json,
             status="pending",
             attempts=0,
@@ -185,6 +187,12 @@ class DeliveryService:
             if d.attempts >= max_attempts:
                 d.status = "dead"
                 d.next_retry_at = None
+                dead_count = await session.scalar(
+                    select(func.count()).select_from(WebhookDelivery).where(
+                        WebhookDelivery.status == "dead"
+                    ),
+                )
+                metrics.set_event_hook_dead_letter_count(dead_count or 0)
             else:
                 d.status = "failed"
                 d.next_retry_at = _compute_retry_at(
@@ -247,6 +255,8 @@ class DeliveryService:
         retry_base_sec: float,
         retry_max_sec: float,
     ):
+        start = datetime.now(timezone.utc)
+        metrics.record_event_hook_attempt()
         try:
             async with self._http_session.post(
                 delivery.url,
@@ -255,6 +265,7 @@ class DeliveryService:
             ) as resp:
                 if 200 <= resp.status < 300:
                     await self.complete(delivery.delivery_id, resp.status)
+                    metrics.record_event_hook_delivery(status="success", event=delivery.event_type)
                 elif resp.status == 429 or resp.status >= 500:
                     await self.fail(
                         delivery.delivery_id,
@@ -263,6 +274,7 @@ class DeliveryService:
                         retry_base_sec,
                         retry_max_sec,
                     )
+                    metrics.record_event_hook_delivery(status="retryable", event=delivery.event_type)
                 else:
                     await self.fail(
                         delivery.delivery_id,
@@ -271,6 +283,7 @@ class DeliveryService:
                         retry_base_sec,
                         retry_max_sec,
                     )
+                    metrics.record_event_hook_delivery(status="failed", event=delivery.event_type)
         except Exception as exc:
             await self.fail(
                 delivery.delivery_id,
@@ -279,6 +292,10 @@ class DeliveryService:
                 retry_base_sec,
                 retry_max_sec,
             )
+            metrics.record_event_hook_delivery(status="error", event=delivery.event_type)
+        finally:
+            elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+            metrics.record_event_hook_latency(elapsed)
 
     async def _cleanup_loop(
         self, interval: float, sent_days: int, dead_days: int

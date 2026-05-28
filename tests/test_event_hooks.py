@@ -240,6 +240,7 @@ async def test_delivery_enqueue(delivery_service):
         event_id="evt-1",
         hook_id="hook-1",
         event_type="command.completed",
+        url="http://example.com/hook",
         payload_json='{"event":"command.completed"}',
     )
     assert delivery_id is not None
@@ -250,6 +251,7 @@ async def test_delivery_claim_pending(delivery_service):
     delivery_id = await delivery_service.enqueue(
         event_id="evt-2", hook_id="hook-2",
         event_type="session.connected",
+        url="http://example.com/hook",
         payload_json="{}",
     )
     # Manually age the record so it's claimable (>2s old)
@@ -270,7 +272,7 @@ async def test_delivery_claim_pending(delivery_service):
 
 @pytest.mark.asyncio
 async def test_delivery_complete(delivery_service):
-    d_id = await delivery_service.enqueue("evt-3", "h-3", "a", "{}")
+    d_id = await delivery_service.enqueue("evt-3", "h-3", "a", "http://x.co/h", "{}")
     result = await delivery_service.complete(d_id, http_status=200)
     assert result is True
 
@@ -280,7 +282,7 @@ async def test_delivery_complete(delivery_service):
 
 @pytest.mark.asyncio
 async def test_delivery_fail_with_retry(delivery_service):
-    d_id = await delivery_service.enqueue("evt-4", "h-4", "a", "{}")
+    d_id = await delivery_service.enqueue("evt-4", "h-4", "a", "http://x.co/h", "{}")
     result = await delivery_service.fail(
         d_id, last_error="timeout",
         max_attempts=5, retry_base_sec=2.0, retry_max_sec=300.0,
@@ -295,7 +297,7 @@ async def test_delivery_fail_with_retry(delivery_service):
 
 @pytest.mark.asyncio
 async def test_delivery_fail_dead_after_max(delivery_service):
-    d_id = await delivery_service.enqueue("evt-5", "h-5", "a", "{}")
+    d_id = await delivery_service.enqueue("evt-5", "h-5", "a", "http://x.co/h", "{}")
     await delivery_service.fail(
         d_id, last_error="first",
         max_attempts=3, retry_base_sec=2.0, retry_max_sec=300.0,
@@ -315,7 +317,8 @@ async def test_delivery_fail_dead_after_max(delivery_service):
 
 @pytest.mark.asyncio
 async def test_delivery_claim_skips_young_pending(delivery_service):
-    await delivery_service.enqueue("evt-6", "h-6", "a", "{}")
+    await delivery_service.enqueue("evt-6", "h-6", "a", "http://x.co/h", "{}")
+
 
     claimed = await delivery_service.claim_deliveries(limit=10, lease_ttl=30.0)
     assert len(claimed) == 0
@@ -323,7 +326,7 @@ async def test_delivery_claim_skips_young_pending(delivery_service):
 
 @pytest.mark.asyncio
 async def test_delivery_cleanup(delivery_service):
-    d_id = await delivery_service.enqueue("evt-7", "h-7", "a", "{}")
+    d_id = await delivery_service.enqueue("evt-7", "h-7", "a", "http://x.co/h", "{}")
     await delivery_service.complete(d_id, 200)
 
     # Should not be cleaned (not old enough)
