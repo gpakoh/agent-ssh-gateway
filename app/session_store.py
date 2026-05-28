@@ -85,6 +85,7 @@ class WebhookDelivery(Base):
     event_id = Column(String(36), nullable=False, index=True)
     hook_id = Column(String(36), nullable=False, index=True)
     event_type = Column(String(64), nullable=False)
+    url = Column(String(2048), nullable=False)
     payload_json = Column(Text, nullable=False)
     status = Column(String(16), default="pending", index=True)
     attempts = Column(Integer, default=0)

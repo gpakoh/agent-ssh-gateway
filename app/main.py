@@ -4,6 +4,7 @@ import json
 import logging
 import asyncio
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -319,6 +320,34 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("PostgreSQL not available: %s", exc)
     
+    # Initialize Event Hook Components
+    if settings.event_hooks_enabled and settings.database_url:
+        try:
+            from app.event_hook_store import EventHookStore
+            from app.event_hook_delivery import DeliveryService
+
+            state.event_hook_store = EventHookStore(settings.database_url)
+            await state.event_hook_store.create_tables()
+
+            state.delivery_service = DeliveryService(settings.database_url, instance_id=uuid.uuid4().hex)
+            await state.delivery_service.create_tables()
+
+            s = settings
+            await state.delivery_service.start(
+                poll_interval=s.event_hooks_poll_interval,
+                connect_timeout=s.event_hooks_connect_timeout,
+                read_timeout=s.event_hooks_read_timeout,
+                max_attempts=s.event_hooks_max_attempts,
+                retry_base_sec=s.event_hooks_retry_base_sec,
+                retry_max_sec=s.event_hooks_retry_max_sec,
+                lease_ttl=s.event_hooks_lease_ttl,
+                retention_sent_days=s.event_hooks_retention_sent_days,
+                retention_dead_days=s.event_hooks_retention_dead_days,
+            )
+            logger.info("Event hook delivery service started")
+        except Exception as exc:
+            logger.warning("Event hooks not available: %s", exc)
+
     logger.info("Security Components Initialized")
     logger.info("Swarm Mode Ready (redis Job Queue, Circuit Breaker, Distributed Locks)")
 
@@ -349,6 +378,9 @@ async def lifespan(app: FastAPI):
         await state.redis_queue.disconnect()
     if state.dist_lock:
         await state.dist_lock.disconnect()
+    if state.delivery_service:
+        await state.delivery_service.close()
+        logger.info("Event hook delivery service shut down")
     if state.session_store:
         await state.session_store.disconnect()
     if state.host_key_store:
@@ -1018,6 +1050,7 @@ from app.routers.context import router as context_router
 from app.routers.system import router as system_router
 from app.routers.logs import router as logs_router
 from app.routers.templates import router as templates_router
+from app.routers.event_hooks import router as event_hooks_router
 
 app.include_router(ssh_router)
 app.include_router(files_router)
@@ -1027,6 +1060,7 @@ app.include_router(context_router)
 app.include_router(system_router)
 app.include_router(logs_router)
 app.include_router(templates_router)
+app.include_router(event_hooks_router)
 
 # Static files mount (after all router includes so static routes take precedence)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
