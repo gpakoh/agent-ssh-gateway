@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, PlainTextResponse, HTMLResponse
 
 from app.config import settings
-from app.auth_middleware import auth_check, ws_auth_check, is_agent_token_valid
+from app.auth_middleware import auth_check, ws_auth_check, is_agent_token_valid, is_ip_allowed, parse_cidrs
 import secrets
 from app.security import (
     limiter,
@@ -30,10 +30,12 @@ from app.security import (
 )
 from app.metrics import metrics
 from app.redis_queue import RedisJobQueue
+from app.agent_token_store import AgentTokenStore
 from app.circuit_breaker import CircuitBreakerRegistry
 from app.distributed_lock import DistributedLock
 from app.session_store import SessionStore
 from app.bulk_operations_v2 import BulkOperationsManager
+from app.state import _err
 from app.models import (
     ConnectRequest,
     ConnectResponse,
@@ -205,7 +207,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Lifespan — initializes globals in app.state
+# Lifespan — Initializes Globals In App.state
 # ---------------------------------------------------------------------------
 
 import app.state as state
@@ -285,6 +287,13 @@ async def lifespan(app: FastAPI):
         logger.info("Redis Components Connected")
     except Exception as exc:
         logger.warning("Redis not available: %s", exc)
+
+    # Initialize Agent Token Store (requires Redis)
+    state.agent_token_store = AgentTokenStore(settings.redis_url)
+    try:
+        await state.agent_token_store.connect()
+    except Exception as exc:
+        logger.warning("AgentTokenStore not available (agent token rotation will fail): %s", exc)
     
     # Initialize Persistent Sessions If Configured
     state.session_store = None
@@ -294,16 +303,16 @@ async def lifespan(app: FastAPI):
             await state.session_store.connect()
             logger.info("Persistent Session Store Connected")
 
-            # Restore active sessions from previous run
+            # Restore Active Sessions From Previous Run
+            allowed_nets = parse_cidrs(settings.allowed_client_cidrs)
             active_sessions = await state.session_store.list_active_sessions()
             restored = 0
             failed = 0
             for sess in active_sessions:
                 try:
                     creds = await state.session_store.get_session_credentials(sess["session_id"])
-                    if creds:
-                        await state.manager.restore_session(
-                            session_id=sess["session_id"],
+                    if creds and is_ip_allowed(creds.get("host", ""), allowed_nets):
+                        new_id = await state.manager.create_session(
                             host=creds["host"],
                             port=creds.get("port", 22),
                             username=creds["username"],
@@ -311,6 +320,7 @@ async def lifespan(app: FastAPI):
                             private_key=creds.get("private_key"),
                             key_passphrase=creds.get("key_passphrase"),
                         )
+                        await state.session_store.deactivate_session(sess["session_id"])
                         restored += 1
                 except Exception as exc:
                     logger.warning("Failed to restore session %s: %s", sess["session_id"], exc)
@@ -376,16 +386,38 @@ async def lifespan(app: FastAPI):
     await state.context_manager.stop_cleanup_task()
     await state.job_manager.stop_cleanup_task()
     await state.manager.stop_cleanup_task()
-    await state.manager.close_all()
-    
+
+    sessions = await state.manager.list_sessions()
+    if sessions:
+        tasks = [
+            asyncio.wait_for(state.manager.disconnect(s.session_id), timeout=5.0)
+            for s in sessions
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for sid, err in zip([s.session_id for s in sessions], results):
+            if err:
+                logger.warning("Force close session %s: %s", sid, err)
+
+    ws_count = len(state.active_websockets)
+    if ws_count:
+        logger.info("Closing %d active WebSocket connections...", ws_count)
+        for ws in list(state.active_websockets):
+            try:
+                await ws.close(code=1001, reason="Server shutting down")
+            except Exception:
+                pass
+        state.active_websockets.clear()
+
     if state.redis_queue:
         await state.redis_queue.disconnect()
     if state.dist_lock:
         await state.dist_lock.disconnect()
+    if state.agent_token_store:
+        await state.agent_token_store.disconnect()
     ds = getattr(state, 'delivery_service', None)
     if ds:
         await ds.close()
-        logger.info("Event hook delivery service shut down")
+        logger.info("Event Hook Delivery Service Shut Down")
     if state.session_store:
         await state.session_store.disconnect()
     if state.host_key_store:
@@ -968,7 +1000,7 @@ async def security_headers_middleware(request, call_next):
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    exc = await auth_check(request, settings)
+    exc = await auth_check(request, settings, state.agent_token_store)
     if exc is not None:
         return JSONResponse(
             status_code=exc.status_code,
