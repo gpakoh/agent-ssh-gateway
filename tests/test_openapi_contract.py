@@ -284,6 +284,8 @@ class TestRuntimeBehavior:
         with TestClient(app) as client:
             resp = client.post("/api/ssh/connect", json={})
         body = resp.json()
-        assert body["detail"]["code"] == "VALIDATION_ERROR"
-        assert body["detail"]["retryable"] is False
-        assert "hint" in body["detail"]
+        assert body["code"] == "VALIDATION_ERROR"
+        assert body["retryable"] is False
+        assert "hint" in body
+
+
