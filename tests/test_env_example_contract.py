@@ -99,3 +99,17 @@ def test_event_hooks_are_disabled_by_default() -> None:
         "EVENT_HOOKS_ENABLED must default to False. "
         "Event hooks should be enabled explicitly because they require DATABASE_URL."
     )
+
+
+def test_default_server_configs_are_empty_by_default() -> None:
+    config_text = CONFIG_PATH.read_text(encoding="utf-8")
+
+    pattern = (
+        r"server_default_configs:\s*str\s*=\s*Field"
+        r"\(\s*default=\"\{\}\",\s*alias=\"SERVER_DEFAULT_CONFIGS\""
+    )
+
+    assert re.search(pattern, config_text), (
+        "SERVER_DEFAULT_CONFIGS must default to an empty JSON object. "
+        "Do not hardcode infrastructure hosts in source code."
+    )
