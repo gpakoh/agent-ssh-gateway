@@ -14,8 +14,8 @@
 - API-ключ передаётся **только в заголовке `X-API-Key`** или через `Authorization: Bearer <token>`.
 - Передача ключа в query string (`?api_key=...`) **не поддерживается** ни для HTTP, ни для WebSocket.
 - WebSocket-соединения также требуют API-ключ (в заголовке `X-API-Key` или `Authorization: Bearer`).
-- Если `API_AUTH_ENABLED=false` (режим по умолчанию для LAN-разработки), аутентификация отключена.
-- В production (интернет) `API_AUTH_ENABLED=true` — ключ обязателен для всех endpoint'ов, кроме `/health`.
+- `API_AUTH_ENABLED=true` по умолчанию — ключ обязателен для всех endpoint'ов, кроме `/health`.
+- Отключать авторизацию (`API_AUTH_ENABLED=false`) допустимо только в изолированной локальной среде для отладки.
 - Swagger UI (`/docs`, `/redoc`) и OpenAPI-схема (`/openapi.json`) также защищены.
 
 ### 0.2 mTLS-сертификат (для агентов без SSO)
@@ -112,7 +112,7 @@ curl -k -b cookies.txt -X POST https://ssh.xloud.ru/api/ssh/connect \
 ### 1.4 Прямой доступ в LAN (без аутентификации, без mTLS)
 
 - Базовый URL: `http://10.0.1.103:8085`
-- `Authelia` не требуется, `API_AUTH_ENABLED` можно отключить.
+- `Authelia` не требуется. `API_AUTH_ENABLED` можно отключить только для отладки в изолированной среде.
 - Рекомендуемый режим для разработки и отладки.
 
 ```bash
