@@ -4,23 +4,23 @@ Usage:
     from ssh_gateway import SSHGatewayClient
     
     client = SSHGatewayClient("https://ssh.xloud.ru")
-    client.auth("agent", "NpvSBhi7ag1X8stB3kFMnCcxM9PKE9R")
+    client.auth("agent", "change-me-agent-token")
     
-    # Connect and persist session
-    session = client.ssh_connect("10.0.1.103", username="root", password="...")
+    # Connect And Persist Session
+    session = client.ssh_connect("192.0.2.10", username="root", password="...")
     
-    # Execute command
+    # Execute Command
     result = client.execute("ls -la")
     
-    # Batch read files
+    # Batch Read Files
     files = client.batch_read(["app/main.py", "app/config.py"])
     
-    # Edit file
+    # Edit File
     client.edit_file("app/main.py", [
         {"type": "replace", "old": "def old():", "new": "def new():"}
     ])
     
-    # Background job
+    # Background Job
     job = client.run_background("pytest", timeout=300)
     for log in job.stream_logs():
         print(log)
@@ -91,7 +91,7 @@ class SSHGatewayClient:
             port=port
         )
         
-        # Start heartbeat thread
+        # Start Heartbeat Thread
         self._start_heartbeat()
         
         return self._ssh_session
@@ -135,7 +135,7 @@ class SSHGatewayClient:
         if not self._ssh_session:
             raise RuntimeError("Not connected. Call ssh_connect() first.")
         
-        # Use raw endpoint for better performance
+        # Use Raw Endpoint For Better Performance
         r = self.session.get(
             f"{self.base_url}/api/file/raw",
             params={
@@ -390,7 +390,7 @@ class BackgroundJob:
             time.sleep(poll_interval)
 
 
-# Convenience functions for quick usage
+# Convenience Functions For Quick Usage
 def connect(host: str, username: str, password: str = "", 
             base_url: str = "https://ssh.xloud.ru") -> SSHGatewayClient:
     """Quick connect helper."""
