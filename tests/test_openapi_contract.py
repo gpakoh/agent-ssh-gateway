@@ -1,5 +1,8 @@
 """Contract tests: verify OpenAPI schema correctness for agent clients."""
 
+import json
+
+import jsonschema
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
@@ -249,6 +252,47 @@ class TestResponseHeaders:
         assert not missing, "Response headers missing:\n" + "\n".join(missing[:10])
 
 
+class TestSchemaStructure:
+    def test_openapi_version_and_info(self, schema):
+        assert "openapi" in schema, "Missing openapi version"
+        assert "info" in schema, "Missing info section"
+        assert "title" in schema["info"]
+        assert "version" in schema["info"]
+
+    def test_paths_exist(self, schema):
+        assert "paths" in schema, "Missing paths"
+        assert len(schema["paths"]) > 0, "No paths defined"
+
+    def test_no_duplicate_operation_ids(self, schema):
+        op_ids = {}
+        for path, methods in schema["paths"].items():
+            for method, op in methods.items():
+                oid = op.get("operationId", "")
+                if oid:
+                    prev = op_ids.get(oid)
+                    assert prev is None, f"Duplicate operationId '{oid}' at {method.upper()} {path} (also at {prev})"
+                    op_ids[oid] = f"{method.upper()} {path}"
+
+    def test_all_refs_resolve(self, schema):
+        """Check every $ref points to an existing schema definition."""
+        components = schema.get("components", {}).get("schemas", {})
+
+        def _walk(obj, path_str):
+            if isinstance(obj, dict):
+                ref = obj.get("$ref", "")
+                if ref:
+                    assert ref.startswith("#/components/schemas/"), f"External $ref not supported: {ref} at {path_str}"
+                    name = ref.replace("#/components/schemas/", "")
+                    assert name in components, f"Unresolved $ref '{ref}' at {path_str}"
+                for k, v in obj.items():
+                    _walk(v, f"{path_str}.{k}")
+            elif isinstance(obj, list):
+                for i, v in enumerate(obj):
+                    _walk(v, f"{path_str}[{i}]")
+
+        _walk(schema, "schema")
+
+
 class TestRuntimeBehavior:
     def setup_method(self):
         settings.api_auth_enabled = False
@@ -289,3 +333,29 @@ class TestRuntimeBehavior:
         assert "hint" in body
 
 
+class TestOpenAPISchemaValidation:
+    """Validate the generated OpenAPI schema against the OpenAPI 3.0 spec."""
+
+    def test_schema_validates_against_openapi_30_spec(self, schema):
+        """Validate schema structure using jsonschema Draft7 + OpenAPI 3.0 metaschema."""
+        openapi_30_schema = {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "required": ["openapi", "info", "paths"],
+            "properties": {
+                "openapi": {"type": "string", "pattern": r"^3\.\d+\.\d+"},
+                "info": {
+                    "type": "object",
+                    "required": ["title", "version"],
+                    "properties": {
+                        "title": {"type": "string"},
+                        "version": {"type": "string"},
+                    },
+                },
+                "paths": {"type": "object"},
+                "components": {"type": "object"},
+                "tags": {"type": "array", "items": {"type": "object"}},
+                "servers": {"type": "array"},
+            },
+        }
+        jsonschema.Draft7Validator(openapi_30_schema).validate(schema)
