@@ -3,9 +3,11 @@
 import asyncio
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Query
 
@@ -13,7 +15,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Re
 from app.config import settings
 from app.state import _err
 from app import state as _state
-from app.auth_middleware import ws_auth_check, is_agent_token_valid
+from app.auth_middleware import ws_auth_check, is_agent_token_valid, verify_api_key
 from app.security import sanitize_command, rate_limit_mutation
 from app.ssh_manager import SSHManagerError, ConnectionError as SSHConnError, AuthenticationError, SessionNotFoundError, TimeoutError, ExecutionError
 from app.models import (
@@ -34,7 +36,7 @@ from app.models import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["ssh"])
 
 
 # ---------------------------------------------------------------------------
@@ -51,19 +53,31 @@ def time_to_iso(timestamp: float) -> str:
 # ---------------------------------------------------------------------------
 
 @router.post("/api/agent/token", response_model=AgentTokenResponse)
-async def agent_token_generate():
+@rate_limit_mutation(5, "minute")
+async def agent_token_generate(request: Request):
     """Generate a short-lived agent token (separate from API_KEY).
 
     Requires API_KEY auth. The generated token can be rotated
-    without affecting the main API_KEY.
+    without affecting the main API_KEY. Token stored in Redis with TTL.
     """
+    if not await verify_api_key(request, settings.api_key, settings.agent_token, settings, _state.agent_token_store):
+        raise HTTPException(
+            status_code=401,
+            detail=_err(401, "Invalid or missing API key"),
+        )
+
     import secrets as _secrets
     from datetime import timedelta
 
+    if not _state.agent_token_store:
+        raise HTTPException(
+            status_code=503,
+            detail=_err(503, "Agent token store not available (Redis required)"),
+        )
+
     token = _secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.agent_token_ttl)
-    settings.agent_token = token
-    settings.agent_token_expires_at = expires_at
+    await _state.agent_token_store.set_token(token, settings.agent_token_ttl)
     logger.info("Agent token generated (ttl=%ds)", settings.agent_token_ttl)
     return AgentTokenResponse(
         token=token,
@@ -73,18 +87,30 @@ async def agent_token_generate():
 
 
 @router.post("/api/agent/token/refresh", response_model=AgentTokenRefreshResponse)
-async def agent_token_refresh():
+@rate_limit_mutation(5, "minute")
+async def agent_token_refresh(request: Request):
     """Refresh (rotate) the agent token.
 
-    Invalidates the previous agent token and issues a new one.
+    Invalidates the previous agent token and issues a new one atomically.
     """
+    if not await verify_api_key(request, settings.api_key, settings.agent_token, settings, _state.agent_token_store):
+        raise HTTPException(
+            status_code=401,
+            detail=_err(401, "Invalid or missing API key"),
+        )
+
     import secrets as _secrets
     from datetime import timedelta
 
+    if not _state.agent_token_store:
+        raise HTTPException(
+            status_code=503,
+            detail=_err(503, "Agent token store not available (Redis required)"),
+        )
+
     token = _secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.agent_token_ttl)
-    settings.agent_token = token
-    settings.agent_token_expires_at = expires_at
+    await _state.agent_token_store.set_token(token, settings.agent_token_ttl)
     logger.info("Agent token refreshed (ttl=%ds)", settings.agent_token_ttl)
     return AgentTokenRefreshResponse(
         token=token,
@@ -112,6 +138,11 @@ async def get_session_config():
 @router.patch("/api/config/session/timeout", response_model=SessionTimeoutResponse)
 async def update_session_timeout(req: SessionTimeoutRequest):
     """Update session timeout dynamically."""
+    if not 60 <= req.timeout <= 86400:
+        raise HTTPException(
+            status_code=422,
+            detail=_err(422, "Timeout must be between 60 and 86400 seconds"),
+        )
     previous = _state.manager._session_timeout
     _state.manager._session_timeout = req.timeout
     return SessionTimeoutResponse(
@@ -137,7 +168,7 @@ async def ssh_connect(req: ConnectRequest, request: Request):
         key_passphrase=req.key_passphrase,
     )
 
-    # Persist session if store is available
+    # Persist Session If Store Is Available
     if _state.session_store:
         try:
             await _state.session_store.save_session(
@@ -266,14 +297,15 @@ async def session_health(session_id: str):
 @router.websocket("/api/ssh/execute/stream")
 async def ssh_execute_stream(websocket: WebSocket):
     """Execute a command and stream output via WebSocket."""
-    ws_err = await ws_auth_check(websocket, settings)
+    ws_err = await ws_auth_check(websocket, settings, _state.agent_token_store)
     if ws_err is not None:
         await websocket.close(code=ws_err[0], reason=ws_err[1])
         return
     await websocket.accept()
+    _state.active_websockets.add(websocket)
     try:
         # First Message Must Contain Session_id And Command
-        data = await websocket.receive_json()
+        data = await asyncio.wait_for(websocket.receive_json(), timeout=30)
         session_id = data.get("session_id", "")
         command = data.get("command", "")
 
@@ -304,20 +336,23 @@ async def ssh_execute_stream(websocket: WebSocket):
         except Exception:
             pass
         await websocket.close()
+    finally:
+        _state.active_websockets.discard(websocket)
 
 
 @router.websocket("/api/ssh/pty/{session_id}/stream")
 async def pty_stream(websocket: WebSocket, session_id: str):
     """Interactive PTY via WebSocket."""
-    ws_err = await ws_auth_check(websocket, settings)
+    ws_err = await ws_auth_check(websocket, settings, _state.agent_token_store)
     if ws_err is not None:
         await websocket.close(code=ws_err[0], reason=ws_err[1])
         return
     await websocket.accept()
+    _state.active_websockets.add(websocket)
 
     channel = None
     try:
-        init_data = await websocket.receive_json()
+        init_data = await asyncio.wait_for(websocket.receive_json(), timeout=30)
         term = init_data.get("term", "xterm-256color")
         rows = init_data.get("rows", 24)
         cols = init_data.get("cols", 80)
@@ -357,6 +392,7 @@ async def pty_stream(websocket: WebSocket, session_id: str):
     except Exception as exc:
         logger.error("PTY WebSocket error: %s", exc)
     finally:
+        _state.active_websockets.discard(websocket)
         if channel:
             try:
                 channel.close()
@@ -375,7 +411,7 @@ async def check_port(
     port: int = Query(22, ge=1, le=65535, description="Target port"),
     timeout: float = Query(5.0, ge=0.5, le=30.0, description="Connection timeout in seconds"),
 ):
-    """Check if a remote TCP port is reachable. No auth required."""
+    """Check if a remote TCP port is reachable. Requires API authentication."""
     start = time.monotonic()
     try:
         _reader, _writer = await asyncio.wait_for(
@@ -440,11 +476,19 @@ async def upload_ssh_key(
 
     keys_dir = "/app/ssh_keys"
     os.makedirs(keys_dir, exist_ok=True)
-    name = file.filename or f"key-{uuid.uuid4().hex[:8]}.pem"
-    fpath = os.path.join(keys_dir, name)
+
+    raw_name = file.filename or f"key-{uuid.uuid4().hex[:8]}.pem"
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "", raw_name)
+    if not safe_name or safe_name.startswith("."):
+        raise HTTPException(status_code=400, detail=_err(400, "Invalid key filename"))
+
+    keys_dir_path = Path(keys_dir).resolve()
+    fpath = keys_dir_path / safe_name
+    if not str(fpath.resolve()).startswith(str(keys_dir_path)):
+        raise HTTPException(status_code=400, detail=_err(400, "Path traversal detected"))
 
     with open(fpath, "w") as f:
         f.write(text)
     os.chmod(fpath, 0o600)
 
-    return {"name": name, "path": fpath, "size": len(content)}
+    return {"name": safe_name, "path": str(fpath), "size": len(content)}

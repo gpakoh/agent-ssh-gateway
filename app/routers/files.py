@@ -4,10 +4,11 @@ import json
 import logging
 import asyncio
 import time
+import shlex
 
 from fastapi import APIRouter, HTTPException, Query, Header, Response, UploadFile, File, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
-from typing import Optional
+from typing import Any, Optional
 
 from app.state import _err
 from app import state as _state
@@ -45,7 +46,7 @@ from app.auth_middleware import ws_auth_check
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["files"])
 
 
 # ---------------------------------------------------------------------------
@@ -70,10 +71,14 @@ async def file_read(req: FileReadRequest, request: Request):
 async def file_edit(req: FileEditRequest, request: Request):
     """Edit a remote file using patch operations."""
     try:
-        logger.info(f"File edit request: session={req.session_id}, path={req.path}, ops={len(req.operations)}")
+        validated = validate_path(req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+    try:
+        logger.info(f"File edit request: session={req.session_id}, path={validated}, ops={len(req.operations)}")
         result = await _state.file_editor.edit_file(
             req.session_id,
-            req.path,
+            validated,
             [op.model_dump() for op in req.operations],
         )
         logger.info(f"File edit result: {result}")
@@ -110,21 +115,26 @@ async def file_raw(
 
     Supports Range header (bytes=start-end) or offset/limit query params.
     """
+    try:
+        path = validate_path(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
     content = await _state.file_editor.read_file(session_id, path)
 
     if range_header and range_header.startswith("bytes="):
         try:
             range_str = range_header[6:]
-            start, end = range_str.split("-")
-            start = int(start) if start else 0
-            end = int(end) if end else len(content)
-            content = content[start:end]
+            raw_start, raw_end = range_str.split("-")
+            rstart = int(raw_start) if raw_start else 0
+            rend = int(raw_end) if raw_end else len(content)
+            original_len = len(content)
+            content = content[rstart:rend]
             return Response(
                 content=content,
                 media_type="text/plain",
                 status_code=206,
                 headers={
-                    "Content-Range": f"bytes {start}-{end-1}/{len(content)}",
+                    "Content-Range": f"bytes {rstart}-{rend-1}/{original_len}",
                     "Accept-Ranges": "bytes",
                 },
             )
@@ -140,7 +150,6 @@ async def file_raw(
     return Response(
         content=content,
         media_type="text/plain",
-        headers={"Accept-Ranges": "bytes"},
     )
 
 
@@ -156,8 +165,11 @@ async def batch_read(req: BatchReadRequest):
 
     for path in req.paths:
         try:
-            content = await _state.file_editor.read_file(req.session_id, path)
+            validated = validate_path(path)
+            content = await _state.file_editor.read_file(req.session_id, validated)
             files[path] = content
+        except ValueError as exc:
+            errors[path] = str(exc)
         except Exception as exc:
             errors[path] = str(exc)
 
@@ -165,18 +177,24 @@ async def batch_read(req: BatchReadRequest):
 
 
 # ---------------------------------------------------------------------------
-# File Upload/Download
+# File Upload/download
 # ---------------------------------------------------------------------------
 
 @router.post("/api/file/upload")
+@rate_limit_mutation(20, "minute")
 async def file_upload(
     session_id: str = Query(...),
     path: str = Query(...),
     content: str = Query(...),
+    request: Request = None,
 ):
     """Upload file to remote server (base64 encoded via query params)."""
     import base64
 
+    try:
+        path = validate_path(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
     decoded = base64.b64decode(content).decode("utf-8", errors="replace")
     await _state.file_editor.write_file(session_id, path, decoded)
     return {"success": True, "path": path, "size": len(decoded), "deprecated": True}
@@ -190,14 +208,22 @@ async def file_upload_json(req: FileUploadRequest):
     """
     import base64
 
+    try:
+        validated = validate_path(req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
     decoded = base64.b64decode(req.content).decode("utf-8", errors="replace")
-    await _state.file_editor.write_file(req.session_id, req.path, decoded)
-    return FileUploadResponse(path=req.path, size=len(decoded))
+    await _state.file_editor.write_file(req.session_id, validated, decoded)
+    return FileUploadResponse(path=validated, size=len(decoded))
 
 
 @router.get("/api/file/download", response_class=Response)
 async def file_download(session_id: str = Query(...), path: str = Query(...)):
     """Download file from remote server."""
+    try:
+        path = validate_path(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
     content = await _state.file_editor.read_file(session_id, path)
     return Response(content=content, media_type="application/octet-stream")
 
@@ -209,15 +235,20 @@ async def file_write(req: FileWriteRequest):
     Use for Python code with quotes, special chars, or large content.
     Mode: 'write' (overwrite) or 'append' (append to end).
     """
+    try:
+        validated = validate_path(req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+
     if req.mode == "append":
-        existing = await _state.file_editor.read_file(req.session_id, req.path)
+        existing = await _state.file_editor.read_file(req.session_id, validated)
         content = existing + req.content
     else:
         content = req.content
 
-    await _state.file_editor.write_file(req.session_id, req.path, content)
+    await _state.file_editor.write_file(req.session_id, validated, content)
     return FileWriteResponse(
-        path=req.path, size=len(content), mode=req.mode
+        path=validated, size=len(content), mode=req.mode
     )
 
 
@@ -231,6 +262,16 @@ async def ast_rename(req: ASTRefactorRenameRequest):
 
     Supports single file ('path') or multiple files ('files' array).
     """
+    # Validate All Paths First
+    try:
+        if req.files:
+            for file_path in req.files:
+                validate_path(file_path)
+        else:
+            validate_path(req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+
     if req.files:
         results = []
         total_replacements = 0
@@ -311,19 +352,23 @@ async def refactor_rename(req: ASTRefactorRenameRequest):
 async def ast_extract(req: ASTRefactorExtractRequest):
     """Extract a block of code into a new function."""
     try:
-        code = await _state.file_editor.read_file(req.session_id, req.path)
+        validated = validate_path(req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+    try:
+        code = await _state.file_editor.read_file(req.session_id, validated)
         refactored = ASTRefactor.extract_function(
             code, req.start_line, req.end_line, req.func_name
         )
 
         await _state.file_editor.write_file(
             req.session_id,
-            req.path,
+            validated,
             refactored,
         )
 
         return ASTRefactorExtractResponse(
-            path=req.path,
+            path=validated,
             func_name=req.func_name,
             code=refactored,
         )
@@ -335,11 +380,15 @@ async def ast_extract(req: ASTRefactorExtractRequest):
 async def ast_analyze(req: ASTAnalyzeRequest):
     """Analyze Python code structure using AST."""
     try:
-        code = await _state.file_editor.read_file(req.session_id, req.path)
+        validated = validate_path(req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+    try:
+        code = await _state.file_editor.read_file(req.session_id, validated)
         analysis = ASTRefactor.analyze_code(code)
 
         return ASTAnalyzeResponse(
-            path=req.path,
+            path=validated,
             **analysis,
         )
     except Exception as exc:
@@ -360,7 +409,7 @@ async def project_tree(
 
     Returns flat list with type, path, size for quick introspection.
     """
-    cmd = f"cd '{path}' && find . -maxdepth {max_depth} -not -path '*/\\.*' -not -path '*/node_modules/*' -not -path '*/__pycache__/*' -not -path '*/venv/*' -printf '%y|%p|%s\\n' 2>/dev/null || echo 'ERROR'"
+    cmd = f"cd {shlex.quote(path)} && find . -maxdepth {max_depth} -not -path '*/\\.*' -not -path '*/node_modules/*' -not -path '*/__pycache__/*' -not -path '*/venv/*' -printf '%y|%p|%s\\n' 2>/dev/null || echo 'ERROR'"
     result = await _state.manager.execute(session_id, cmd, timeout=30)
 
     if result["exit_code"] != 0 or "ERROR" in result["stdout"]:
@@ -393,7 +442,7 @@ async def project_structure_files(req: ProjectStructureRequest):
     """Get project structure with metadata and git status."""
     import json
 
-    cmd = f"cd '{req.path}' && find . -maxdepth {req.max_depth} -printf '%y|%p|%s|%m|%TY-%Tm-%Td %TH:%TM:%TS\\n' 2>/dev/null || echo 'ERROR'"
+    cmd = f"cd {shlex.quote(req.path)} && find . -maxdepth {req.max_depth} -printf '%y|%p|%s|%m|%TY-%Tm-%Td %TH:%TM:%TS\\n' 2>/dev/null || echo 'ERROR'"
     result = await _state.manager.execute(req.session_id, cmd, timeout=30)
 
     if result["exit_code"] != 0 or "ERROR" in result["stdout"]:
@@ -439,7 +488,7 @@ async def project_structure_files(req: ProjectStructureRequest):
         ))
 
     if req.include_git_status:
-        git_cmd = f"cd '{req.path}' && git status --short 2>/dev/null || echo ''"
+        git_cmd = f"cd {shlex.quote(req.path)} && git status --short 2>/dev/null || echo ''"
         git_result = await _state.manager.execute(req.session_id, git_cmd, timeout=10)
 
         git_status_map = {}
@@ -453,7 +502,7 @@ async def project_structure_files(req: ProjectStructureRequest):
             if file_meta.path in git_status_map:
                 file_meta.git_status = git_status_map[file_meta.path]
 
-    tree = {"name": ".", "type": "directory", "children": {}}
+    tree: dict[str, Any] = {"name": ".", "type": "directory", "children": {}}
 
     for file_meta in files:
         parts = file_meta.path.split("/")
@@ -497,23 +546,32 @@ async def batch_edit(req: BatchEditRequest):
 
     for file_op in req.files:
         try:
+            validate_path(file_op.path)
+        except ValueError as exc:
+            results.append(BatchEditResult(
+                path=file_op.path,
+                success=False,
+                operations_applied=0,
+                changed=False,
+                error=str(exc),
+            ))
+            continue
+
+        try:
             result = await _state.file_editor.edit_file(
                 req.session_id,
                 file_op.path,
                 [op.model_dump() for op in file_op.operations],
             )
-
             results.append(BatchEditResult(
                 path=file_op.path,
                 success=True,
                 operations_applied=result.get("operations_applied", 0),
                 changed=result.get("changed", False),
             ))
-
             total_operations += result.get("operations_applied", 0)
             if result.get("changed", False):
                 files_changed += 1
-
         except Exception as exc:
             results.append(BatchEditResult(
                 path=file_op.path,
@@ -532,23 +590,7 @@ async def batch_edit(req: BatchEditRequest):
 
 
 # ---------------------------------------------------------------------------
-# Streaming Upload
-# ---------------------------------------------------------------------------
-
-@router.post("/api/file/upload/stream")
-async def file_upload_stream(
-    session_id: str = Query(...),
-    path: str = Query(...),
-    file: UploadFile = File(...),
-):
-    """Upload file using multipart/form-data for large files (1MB+)."""
-    content = await file.read()
-    await _state.file_editor.write_file(session_id, path, content.decode("utf-8", errors="replace"))
-    return {"success": True, "path": path, "size": len(content), "method": "multipart"}
-
-
-# ---------------------------------------------------------------------------
-# Bulk Read/Edit
+# Bulk Read/edit
 # ---------------------------------------------------------------------------
 
 @router.post("/api/bulk/read")
@@ -557,7 +599,7 @@ async def bulk_read_files(req: BatchReadRequest):
     files = await _state.bulk_ops.read_files_bulk(
         req.session_id,
         req.paths,
-        file_editor,
+        _state.file_editor,
         max_concurrency=20,
     )
     return BatchReadResponse(files=files, errors={})
@@ -624,7 +666,7 @@ async def bulk_edit_files(req: BatchEditRequest):
 
 
 # ---------------------------------------------------------------------------
-# File Watch WebSocket
+# File Watch Websocket
 # ---------------------------------------------------------------------------
 
 @router.websocket("/api/file/watch")
@@ -636,16 +678,17 @@ async def file_watch_stream(websocket: WebSocket):
     2. Send: {"session_id": "...", "path": "/var/log/app.log", "tail": true}
     3. Receive file updates as they happen
     """
-    ws_err = await ws_auth_check(websocket, settings)
+    ws_err = await ws_auth_check(websocket, settings, _state.agent_token_store)
     if ws_err is not None:
         await websocket.close(code=ws_err[0], reason=ws_err[1])
         return
     await websocket.accept()
+    _state.active_websockets.add(websocket)
     session_id = None
     watch_task = None
 
     try:
-        data = await websocket.receive_json()
+        data = await asyncio.wait_for(websocket.receive_json(), timeout=30)
         session_id = data.get("session_id", "")
         path = data.get("path", "")
         tail = data.get("tail", True)
@@ -681,7 +724,7 @@ async def file_watch_stream(websocket: WebSocket):
 
                 result = await _state.manager.execute(
                     session_id,
-                    f"cat '{path}' 2>/dev/null || echo '__FILE_NOT_FOUND__'",
+                    f"cat {shlex.quote(path)} 2>/dev/null || echo '__FILE_NOT_FOUND__'",
                     timeout=10
                 )
 
@@ -726,6 +769,7 @@ async def file_watch_stream(websocket: WebSocket):
     except Exception as exc:
         logger.error("File watch error: %s", exc)
     finally:
+        _state.active_websockets.discard(websocket)
         if watch_task:
             watch_task.cancel()
         try:
