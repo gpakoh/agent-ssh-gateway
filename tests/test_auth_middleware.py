@@ -39,7 +39,7 @@ def _mock_request(client_host="127.0.0.1", xff=None):
 
 
 # ---------------------------------------------------------------------------
-# Unit tests for individual middleware functions
+# Unit Tests For Individual Middleware Functions
 # ---------------------------------------------------------------------------
 
 
@@ -74,29 +74,33 @@ class TestIsIpAllowed:
 
 
 class TestVerifyApiKey:
-    def test_header_match(self):
+    @pytest.mark.asyncio
+    async def test_header_match(self):
         req = _mock_request()
         req.headers = {"X-API-Key": "secret-42"}
-        assert verify_api_key(req, "secret-42") is True
+        assert await verify_api_key(req, "secret-42") is True
 
-    def test_header_mismatch(self):
+    @pytest.mark.asyncio
+    async def test_header_mismatch(self):
         req = _mock_request()
         req.headers = {"X-API-Key": "wrong"}
-        assert verify_api_key(req, "secret-42") is False
+        assert await verify_api_key(req, "secret-42") is False
 
-    def test_bearer_token(self):
+    @pytest.mark.asyncio
+    async def test_bearer_token(self):
         req = _mock_request()
         req.headers = {"Authorization": "Bearer my-token"}
-        assert verify_api_key(req, "my-token") is True
+        assert await verify_api_key(req, "my-token") is True
 
-    def test_no_key(self):
+    @pytest.mark.asyncio
+    async def test_no_key(self):
         req = _mock_request()
         req.headers = {}
-        assert verify_api_key(req, "secret-42") is False
+        assert await verify_api_key(req, "secret-42") is False
 
 
 # ---------------------------------------------------------------------------
-# Integration tests — auth disabled
+# Integration Tests — Auth Disabled
 # ---------------------------------------------------------------------------
 
 
@@ -119,7 +123,7 @@ class TestAuthDisabled:
 
 
 # ---------------------------------------------------------------------------
-# Integration tests — auth enabled, API key
+# Integration Tests — Auth Enabled, API Key
 # ---------------------------------------------------------------------------
 
 
@@ -155,9 +159,22 @@ class TestApiKey:
             resp = client.get("/api/servers", headers={"X-API-Key": "secret-42"})
         assert resp.status_code not in (401, 403)
 
+    def test_check_port_without_key_returns_401(self, api_key_auth):
+        with TestClient(app) as client:
+            resp = client.get("/api/ssh/check-port?host=127.0.0.1&port=22")
+        assert resp.status_code == 401
+
+    def test_check_port_with_correct_key_not_401(self, api_key_auth):
+        with TestClient(app) as client:
+            resp = client.get(
+                "/api/ssh/check-port?host=127.0.0.1&port=22",
+                headers={"X-API-Key": "secret-42"},
+            )
+        assert resp.status_code not in (401, 403)
+
 
 # ---------------------------------------------------------------------------
-# Integration tests — IP allowlist
+# Integration Tests — IP Allowlist
 # ---------------------------------------------------------------------------
 
 
@@ -188,7 +205,7 @@ class TestIpAllowlist:
 
 
 # ---------------------------------------------------------------------------
-# Fail-closed tests
+# Fail-closed Tests
 # ---------------------------------------------------------------------------
 
 
@@ -218,7 +235,7 @@ class TestFailClosed:
 
 
 # ---------------------------------------------------------------------------
-# WebSocket auth — ws_auth_check unit tests + integration
+# Websocket Auth — Ws_auth_check Unit Tests + Integration
 # ---------------------------------------------------------------------------
 
 
@@ -321,7 +338,7 @@ class TestWebSocketAuthIntegration:
         monkeypatch.setattr(settings, "allowed_client_cidrs", "10.0.0.0/8")
         monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
 
-    # -- ssh/execute/stream ------------------------------------------------
+    # -- Ssh/execute/stream ------------------------------------------------
 
     def test_stream_without_key_denied(self, ws_auth):
         self._expect_reject(WS_STREAM, 1008)
@@ -345,7 +362,7 @@ class TestWebSocketAuthIntegration:
             headers={"X-API-Key": "ws-secret-99"},
         )
 
-    # -- file/watch --------------------------------------------------------
+    # -- File/watch --------------------------------------------------------
 
     def test_file_watch_without_key_denied(self, ws_auth):
         self._expect_reject(WS_FILE_WATCH, 1008)
@@ -358,7 +375,7 @@ class TestWebSocketAuthIntegration:
             request={"session_id": "", "path": ""},
         )
 
-    # -- helpers -----------------------------------------------------------
+    # -- Helpers -----------------------------------------------------------
 
     def _expect_reject(self, url, code, headers=None):
         from starlette.websockets import WebSocketDisconnect
@@ -378,7 +395,7 @@ class TestWebSocketAuthIntegration:
 
 
 # ---------------------------------------------------------------------------
-# SDK download auth tests
+# SDK Download Auth Tests
 # ---------------------------------------------------------------------------
 
 SDK_URL = "/api/sdk/download"
@@ -420,7 +437,7 @@ class TestSdkAuth:
 
 
 # ---------------------------------------------------------------------------
-# Agent token TTL
+# Agent Token TTL
 # ---------------------------------------------------------------------------
 
 
@@ -430,7 +447,8 @@ def test_settings_env_agent_token_gets_startup_expiry():
     assert cfg.agent_token_expires_at > datetime.now(timezone.utc)
 
 
-def test_verify_api_key_accepts_non_expired_agent_token(monkeypatch):
+@pytest.mark.asyncio
+async def test_verify_api_key_accepts_non_expired_agent_token(monkeypatch):
     req = _mock_request()
     req.headers = {"X-API-Key": "agent-live"}
     monkeypatch.setattr(settings, "agent_token", "agent-live")
@@ -439,10 +457,11 @@ def test_verify_api_key_accepts_non_expired_agent_token(monkeypatch):
         "agent_token_expires_at",
         datetime.now(timezone.utc) + timedelta(seconds=60),
     )
-    assert verify_api_key(req, "main-key", settings=settings) is True
+    assert await verify_api_key(req, "main-key", settings=settings) is True
 
 
-def test_verify_api_key_rejects_expired_agent_token(monkeypatch):
+@pytest.mark.asyncio
+async def test_verify_api_key_rejects_expired_agent_token(monkeypatch):
     req = _mock_request()
     req.headers = {"X-API-Key": "agent-expired"}
     monkeypatch.setattr(settings, "agent_token", "agent-expired")
@@ -451,7 +470,7 @@ def test_verify_api_key_rejects_expired_agent_token(monkeypatch):
         "agent_token_expires_at",
         datetime.now(timezone.utc) - timedelta(seconds=1),
     )
-    assert verify_api_key(req, "main-key", settings=settings) is False
+    assert await verify_api_key(req, "main-key", settings=settings) is False
 
 
 def test_ws_auth_rejects_expired_agent_token(ws_settings, monkeypatch):
