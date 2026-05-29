@@ -21,6 +21,7 @@ class EventHookStore:
         self._session_factory = async_sessionmaker(self._engine, class_=AsyncSession)
 
     async def create_tables(self):
+        logger.warning("Auto-creating Event Hook Tables Via Base.metadata.create_all — Use Alembic For Production Migrations")
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 

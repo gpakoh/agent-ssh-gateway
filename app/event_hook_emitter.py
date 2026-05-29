@@ -24,7 +24,7 @@ def _build_payload(
         "event": event,
         "event_id": uuid.uuid4().hex,
         "event_version": EVENT_VERSION,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "session_id": session_id,
     }
     payload.update({k: v for k, v in extra.items() if v is not None})
@@ -97,7 +97,7 @@ async def emit_event(
         payload = _build_payload(event, session_id, **extra)
         payload_json = json.dumps(payload, default=str)
 
-        # Sign payload
+        # Sign Payload
         secret = None
         if hook.secret_encrypted and _state.secret_manager:
             try:
@@ -105,7 +105,7 @@ async def emit_event(
             except Exception:
                 logger.exception("Failed to decrypt hook secret %s", hook.id)
 
-        timestamp = str(int(datetime.utcnow().timestamp()))
+        timestamp = str(int(datetime.now(timezone.utc).timestamp()))
         signature = sign_payload(secret, payload_json.encode("utf-8"), timestamp)
         delivery_headers = {"Content-Type": "application/json"}
         if signature:
@@ -114,7 +114,7 @@ async def emit_event(
         delivery_headers["X-Event-Id"] = payload["event_id"]
         delivery_headers["X-Delivery-Id"] = uuid.uuid4().hex
 
-        # Add custom headers
+        # Add Custom Headers
         if hook.headers_encrypted and _state.secret_manager:
             try:
                 custom = json.loads(
@@ -125,7 +125,7 @@ async def emit_event(
             except Exception:
                 logger.exception("Failed to decrypt hook headers %s", hook.id)
 
-        # Enqueue delivery
+        # Enqueue Delivery
         ds = _state.delivery_service
         if ds:
             try:

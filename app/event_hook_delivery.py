@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def _now() -> datetime:
-    return datetime.utcnow()
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _compute_retry_at(attempts: int, base_sec: float, max_sec: float) -> datetime:
@@ -41,6 +41,7 @@ class DeliveryService:
         self._running = False
 
     async def create_tables(self):
+        logger.warning("Auto-creating Delivery Tables Via Base.metadata.create_all — Use Alembic For Production Migrations")
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
@@ -84,7 +85,7 @@ class DeliveryService:
         )
 
     # ------------------------------------------------------------------
-    # Outbox operations
+    # Outbox Operations
     # ------------------------------------------------------------------
 
     async def enqueue(
@@ -113,8 +114,8 @@ class DeliveryService:
         now = _now()
         stale = now - timedelta(seconds=lease_ttl)
         async with self._session_factory() as session:
-            # Load candidate deliveries; filtering by state is done in Python
-            # for SQLite compatibility (FOR UPDATE SKIP LOCKED in PG would be ideal)
+            # Load Candidate Deliveries; Filtering By State Is Done In PYTHON
+            # For Sqlite Compatibility (FOR UPDATE SKIP LOCKED In PG Would Be Ideal)
             result = await session.execute(
                 select(WebhookDelivery)
                 .where(WebhookDelivery.status.in_(["pending", "failed"]))
@@ -123,16 +124,16 @@ class DeliveryService:
             deliveries: list[WebhookDelivery] = list(result.scalars().all())
             claimed = []
             for d in deliveries:
-                # Skip if leased by another instance and lease is still active
+                # Skip If Leased By Another Instance And Lease Is Still Active
                 if d.leased_by and d.leased_by != self._instance_id:
                     if d.leased_at and d.leased_at > stale:
                         continue
-                # Skip pending deliveries that are too young (avoid races)
+                # Skip Pending Deliveries That Are Too Young (avoid Races)
                 if d.status == "pending":
                     age = (now - d.created_at).total_seconds()
                     if age < 2.0:
                         continue
-                # Skip failed deliveries whose retry time hasn't come yet
+                # Skip Failed Deliveries Whose Retry Time Hasn't Come Yet
                 if d.status == "failed" and d.next_retry_at and d.next_retry_at > now:
                     continue
 
@@ -222,7 +223,7 @@ class DeliveryService:
         return total
 
     # ------------------------------------------------------------------
-    # Internal — background worker
+    # Internal — Background Worker
     # ------------------------------------------------------------------
 
     async def _worker_loop(
@@ -245,7 +246,7 @@ class DeliveryService:
                         )
                     )
             except Exception:
-                logger.exception("Delivery worker error")
+                logger.exception("Delivery Worker Error")
             await asyncio.sleep(poll_interval)
 
     async def _send_delivery(
@@ -306,7 +307,7 @@ class DeliveryService:
                 if count:
                     logger.info("Cleaned up %d old delivery records", count)
             except Exception:
-                logger.exception("Delivery cleanup error")
+                logger.exception("Delivery Cleanup Error")
             await asyncio.sleep(interval)
 
     async def _get_record(self, delivery_id: str) -> WebhookDelivery | None:

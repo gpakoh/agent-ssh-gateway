@@ -151,11 +151,11 @@ async def test_delivery_enqueue_and_claim(_setup_globals):
 
     from sqlalchemy import select as sel
     from app.session_store import WebhookDelivery
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
     async with ds._session_factory() as session:
         result = await session.execute(sel(WebhookDelivery).limit(1))
         rec = result.scalar_one()
-        rec.created_at = datetime.utcnow() - timedelta(seconds=10)
+        rec.created_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=10)
         await session.commit()
 
     claimed = await ds.claim_deliveries(limit=10, lease_ttl=30.0)
