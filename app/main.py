@@ -1023,9 +1023,9 @@ async def validation_exception_handler(request, exc: RequestValidationError):
             "type": error_type,
         })
     
-    raise HTTPException(
+    return JSONResponse(
         status_code=422,
-        detail={
+        content={
             "message": "Request validation failed",
             "code": "VALIDATION_ERROR",
             "retryable": False,
@@ -1037,10 +1037,8 @@ async def validation_exception_handler(request, exc: RequestValidationError):
     )
 
 
-from app.state import _err
-
 # ---------------------------------------------------------------------------
-# Router registration — route handlers live in app/routers/
+# Router Registration — Route Handlers Live In App/routers/
 # ---------------------------------------------------------------------------
 
 from app.routers.ssh import router as ssh_router
