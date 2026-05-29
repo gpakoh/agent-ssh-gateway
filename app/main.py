@@ -321,8 +321,11 @@ async def lifespan(app: FastAPI):
             logger.warning("PostgreSQL not available: %s", exc)
     
     # Initialize Event Hook Components
-    if settings.event_hooks_enabled and settings.database_url:
+    if settings.event_hooks_enabled:
         try:
+            if not settings.database_url:
+                raise RuntimeError("EVENT_HOOKS_ENABLED=true requires DATABASE_URL")
+
             from app.event_hook_store import EventHookStore
             from app.event_hook_delivery import DeliveryService
 
@@ -335,8 +338,8 @@ async def lifespan(app: FastAPI):
             s = settings
             await state.delivery_service.start(
                 poll_interval=s.event_hooks_poll_interval,
-                connect_timeout=s.event_hooks_connect_timeout,
-                read_timeout=s.event_hooks_read_timeout,
+                connect_timeout=s.event_hooks_timeout_connect,
+                read_timeout=s.event_hooks_timeout_read,
                 max_attempts=s.event_hooks_max_attempts,
                 retry_base_sec=s.event_hooks_retry_base_sec,
                 retry_max_sec=s.event_hooks_retry_max_sec,
@@ -344,9 +347,10 @@ async def lifespan(app: FastAPI):
                 retention_sent_days=s.event_hooks_retention_sent_days,
                 retention_dead_days=s.event_hooks_retention_dead_days,
             )
-            logger.info("Event hook delivery service started")
-        except Exception as exc:
-            logger.warning("Event hooks not available: %s", exc)
+            logger.info("Event Hook Delivery Service Started")
+        except Exception:
+            logger.exception("Event hooks are enabled but failed to initialize")
+            raise
 
     logger.info("Security Components Initialized")
     logger.info("Swarm Mode Ready (redis Job Queue, Circuit Breaker, Distributed Locks)")
