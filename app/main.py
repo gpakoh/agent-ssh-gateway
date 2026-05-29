@@ -441,74 +441,25 @@ app = FastAPI(
             "description": "Request validation failed",
         }
     },
+    openapi_tags=[
+        {"name": "ssh", "description": "SSH session management (connect, execute, disconnect)"},
+        {"name": "files", "description": "File operations (read, edit, upload, download)"},
+        {"name": "jobs", "description": "Background job execution and monitoring"},
+        {"name": "git", "description": "Git repository operations"},
+        {"name": "context", "description": "Development contexts with git awareness"},
+        {"name": "templates", "description": "Code templates"},
+        {"name": "servers", "description": "Saved server management"},
+        {"name": "snapshots", "description": "Project snapshots for recovery"},
+        {"name": "webhooks", "description": "CI/CD webhooks"},
+        {"name": "known-hosts", "description": "Host key store management"},
+        {"name": "logs", "description": "Remote log reading (journald, docker)"},
+        {"name": "help", "description": "API help and endpoint discovery"},
+        {"name": "code", "description": "Code intelligence (search, insert, complete)"},
+        {"name": "system", "description": "System endpoints (health, metrics, config)"},
+    ],
 )
 
-# Tags
-TAGS_META = {
-    "ssh": "SSH session management (connect, execute, disconnect)",
-    "files": "File operations (read, edit, upload, download)",
-    "jobs": "Background job execution and monitoring",
-    "git": "Git repository operations",
-    "context": "Development contexts with git awareness",
-    "templates": "Code templates",
-    "servers": "Saved server management",
-    "snapshots": "Project snapshots for recovery",
-    "webhooks": "CI/CD webhooks",
-    "known-hosts": "Host key store management",
-    "logs": "Remote log reading (journald, docker)",
-    "help": "API help and endpoint discovery",
-    "code": "Code intelligence (search, insert, complete)",
-    "system": "System endpoints (health, metrics, config)",
-}
 
-def _path_tag(path: str) -> str:
-    if path == "/" or path == "/health" or path == "/metrics":
-        return "system"
-    if path.startswith("/api/known-hosts"):
-        return "known-hosts"
-    if path.startswith("/api/logs"):
-        return "logs"
-    if path.startswith("/api/help"):
-        return "help"
-    if path.startswith("/api/servers"):
-        return "servers"
-    if path.startswith("/api/jobs"):
-        return "jobs"
-    if path.startswith("/api/file") or path.startswith("/api/batch") or path.startswith("/api/file"):
-        return "files"
-    if path.startswith("/api/ssh"):
-        return "ssh"
-    if path.startswith("/api/git"):
-        return "git"
-    if path.startswith("/api/context") or path.startswith("/api/validate"):
-        return "context"
-    if path.startswith("/api/templates"):
-        return "templates"
-    if path.startswith("/api/snapshots"):
-        return "snapshots"
-    if path.startswith("/api/webhooks"):
-        return "webhooks"
-    if path.startswith("/api/code") or path.startswith("/api/ast") or path.startswith("/api/refactor"):
-        return "code"
-    if path.startswith("/api/sdk"):
-        return "system"
-    if path.startswith("/api/search") or path.startswith("/api/replace"):
-        return "code"
-    if path.startswith("/api/project") or path.startswith("/api/analytics"):
-        return "code"
-    if path.startswith("/api/scaffold"):
-        return "templates"
-    if path.startswith("/api/recovery"):
-        return "context"
-    if path.startswith("/api/tree"):
-        return "files"
-    if path.startswith("/api/config"):
-        return "system"
-    if path.startswith("/api/circuit"):
-        return "system"
-    if path.startswith("/api/bulk"):
-        return "files"
-    return "system"
 
 ERROR_SCHEMA_REF = "#/components/schemas/ErrorResponse"
 
@@ -526,34 +477,6 @@ TAG_ERROR_CODES = {
     "system": [500],
 }
 
-# Examples For Key Operations
-EXAMPLES: dict[tuple[str, str], dict] = {
-    ("/api/ssh/connect", "post"): {
-        "summary": "Connect to SSH server",
-        "value": {"host": "10.0.0.1", "port": 22, "username": "deploy", "password": "secret"},
-    },
-    ("/api/ssh/execute", "post"): {
-        "summary": "Execute a command",
-        "value": {"session_id": "abc123", "command": "ls -la", "timeout": 30},
-    },
-    ("/api/file/read", "post"): {
-        "summary": "Read file content",
-        "value": {"session_id": "abc123", "path": "/etc/hostname"},
-    },
-    ("/api/file/write", "post"): {
-        "summary": "Write file content",
-        "value": {"session_id": "abc123", "path": "/root/test.txt", "content": "hello", "mode": "write"},
-    },
-    ("/api/jobs/run", "post"): {
-        "summary": "Start a background job",
-        "value": {"session_id": "abc123", "command": "apt update", "timeout": 3600},
-    },
-    ("/api/context/create", "post"): {
-        "summary": "Create a development context",
-        "value": {"session_id": "abc123", "path": "/root/project", "name": "my_project"},
-    },
-}
-
 ERROR_DESC = {
     400: "Bad request",
     401: "Unauthorized",
@@ -565,75 +488,8 @@ ERROR_DESC = {
     504: "Gateway timeout",
 }
 
-# Structured Error Codes
-ERROR_CODE_MAP: dict[tuple[int, str], str] = {
-    (404, "session"): "SESSION_NOT_FOUND",
-    (404, "pty"): "SESSION_NOT_FOUND",
-    (404, "server"): "SERVER_NOT_FOUND",
-    (404, "context"): "CONTEXT_NOT_FOUND",
-    (404, "template"): "TEMPLATE_NOT_FOUND",
-    (404, "job"): "JOB_NOT_FOUND",
-    (404, "sdk"): "SDK_NOT_FOUND",
-    (404, "webhook"): "WEBHOOK_NOT_FOUND",
-    (404, "snapshot"): "SNAPSHOT_NOT_FOUND",
-    (409, "already exists"): "ALREADY_EXISTS",
-    (502, "connection"): "UPSTREAM_CONNECTION_FAILED",
-    (502, ""): "BAD_GATEWAY",
-    (504, ""): "GATEWAY_TIMEOUT",
-    (401, ""): "UNAUTHORIZED",
-    (400, ""): "BAD_REQUEST",
-    (500, ""): "INTERNAL_ERROR",
-    (422, ""): "VALIDATION_ERROR",
-}
-
-HINTS: dict[str, str] = {
-    "SESSION_NOT_FOUND": "Create a session first via POST /api/ssh/connect",
-    "SERVER_NOT_FOUND": "Use POST /api/servers to create one",
-    "CONTEXT_NOT_FOUND": "Use POST /api/context/create to create a context",
-    "TEMPLATE_NOT_FOUND": "Check available templates via GET /api/templates",
-    "JOB_NOT_FOUND": "Use GET /api/jobs to list active jobs",
-    "WEBHOOK_NOT_FOUND": "Use GET /api/webhooks to list registered webhooks",
-    "SNAPSHOT_NOT_FOUND": "Use GET /api/snapshots to list snapshots",
-    "SDK_NOT_FOUND": "Check that SDK was built and deployed",
-    "ALREADY_EXISTS": "The resource already exists; pick a different identifier",
-    "UPSTREAM_CONNECTION_FAILED": "The SSH server may be unreachable or refusing connections",
-    "BAD_GATEWAY": "The upstream SSH server returned an error",
-    "GATEWAY_TIMEOUT": "The upstream SSH server did not respond in time; retry may help",
-    "UNAUTHORIZED": "Provide valid credentials (password or private key)",
-    "BAD_REQUEST": "Check request parameters and try again",
-    "INTERNAL_ERROR": "The server encountered an internal error; retry or contact support",
-    "VALIDATION_ERROR": "Check the missing or invalid fields listed in errors[]",
-    "RATE_LIMIT_EXCEEDED": "Reduce request frequency and retry after the indicated wait time",
-}
-
-RETRYABLE_CODES = {"BAD_GATEWAY", "GATEWAY_TIMEOUT", "INTERNAL_ERROR", "UPSTREAM_CONNECTION_FAILED", "RATE_LIMIT_EXCEEDED"}
-
-def _auto_code(status_code: int, message: str) -> str:
-    for (code, keyword), err_code in ERROR_CODE_MAP.items():
-        if status_code == code and (not keyword or keyword in message.lower()):
-            return err_code
-    return "INTERNAL_ERROR"
-
-def _hint(code: str) -> str:
-    return HINTS.get(code, "")
-
-def _err(status_code: int, message: str, *, code: str | None = None, retryable: bool | None = None, hint: str | None = None) -> dict:
-    if code is None:
-        code = _auto_code(status_code, message)
-    if retryable is None:
-        retryable = code in RETRYABLE_CODES
-    if hint is None:
-        hint = _hint(code)
-    return {
-        "message": message,
-        "code": code,
-        "retryable": retryable,
-        "hint": hint,
-        "http_status": status_code,
-    }
-
-def _set_errors(op: dict, path: str):
-    tag = _path_tag(path)
+def _set_errors(op: dict):
+    tag = (op.get("tags") or ["system"])[0]
     codes = TAG_ERROR_CODES.get(tag, [])
     for code in codes:
         if str(code) not in op.setdefault("responses", {}):
@@ -651,9 +507,8 @@ def custom_openapi():
         version=app.version,
         description=app.description,
         routes=app.routes,
+        tags=app.openapi_tags,
     )
-
-    schema["tags"] = [{"name": k, "description": v} for k, v in TAGS_META.items()]
 
     # Server Metadata For Codegen
     schema["servers"] = [{"url": "/", "description": "Web SSH Gateway API"}]
@@ -820,6 +675,11 @@ def custom_openapi():
 
     schema["components"]["securitySchemes"] = {
         "ApiKeyHeader": {"type": "apiKey", "in": "header", "name": "X-API-Key"},
+        "MutualTLS": {
+            "type": "http",
+            "scheme": "mutual",
+            "description": "mTLS client certificate authentication via X-SSL-Client-Cert header (configured in nginx)",
+        },
     }
 
     # --- Default Response Headers ---
@@ -905,9 +765,6 @@ def custom_openapi():
 
     for path, methods in schema.get("paths", {}).items():
         for method, op in methods.items():
-            tag = _path_tag(path)
-            op.setdefault("tags", [tag])
-
             # Deprecate Old Query-param Upload Endpoint
             if path == "/api/file/upload" and method == "post":
                 op["deprecated"] = True
@@ -928,7 +785,7 @@ def custom_openapi():
                     }
 
             # Add Extra Error Codes
-            _set_errors(op, path)
+            _set_errors(op)
 
             # Add Response Headers To All Responses
             for resp in op.get("responses", {}).values():
@@ -1024,8 +881,10 @@ async def ssh_exception_handler(request, exc: SSHManagerError):
         ExecutionError: 500,
     }
     status_code = status_map.get(type(exc), 500)
-    message = str(exc)
-    raise HTTPException(status_code=status_code, detail=_err(status_code, message))
+    return JSONResponse(
+        status_code=status_code,
+        content=_err(status_code, str(exc)),
+    )
 
 
 @app.exception_handler(RequestValidationError)
@@ -1097,5 +956,5 @@ app.include_router(logs_router)
 app.include_router(templates_router)
 app.include_router(event_hooks_router)
 
-# Static files mount (after all router includes so static routes take precedence)
+# Static Files Mount (after All Router Includes So Static Routes Take Precedence)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
