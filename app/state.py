@@ -46,9 +46,19 @@ host_key_store: Optional[HostKeyStore] = None
 bulk_ops: Optional[BulkOperationsManager] = None
 event_hook_store: Optional[EventHookStore] = None
 delivery_service: Optional[DeliveryService] = None
+from app.agent_token_store import AgentTokenStore
+from fastapi import WebSocket
+agent_token_store: Optional[AgentTokenStore] = None
+active_websockets: set[WebSocket] = set()
+
+
+def get_agent_token_store() -> AgentTokenStore:
+    if agent_token_store is None:
+        raise RuntimeError("AgentTokenStore not initialized")
+    return agent_token_store
 
 # ---------------------------------------------------------------------------
-# Error helpers (shared across routers)
+# Error Helpers (shared Across Routers)
 # ---------------------------------------------------------------------------
 
 RETRYABLE_CODES = {"BAD_GATEWAY", "GATEWAY_TIMEOUT", "INTERNAL_ERROR", "UPSTREAM_CONNECTION_FAILED", "RATE_LIMIT_EXCEEDED"}
