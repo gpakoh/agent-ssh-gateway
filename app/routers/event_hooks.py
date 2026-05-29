@@ -20,7 +20,7 @@ from app.event_hook_security import validate_webhook_url
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["event-hooks"])
+router = APIRouter(tags=["webhooks"])
 
 
 @router.get("/api/event-hooks", response_model=EventHookListResponse)
@@ -42,7 +42,8 @@ async def create_event_hook(body: EventHookCreate):
     if not store:
         raise HTTPException(status_code=503, detail=_err(503, "Event hook store not available"))
 
-    result = validate_webhook_url(body.url, allow_http=False)
+    url_str = str(body.url)
+    result = validate_webhook_url(url_str, allow_http=False)
     if not result.valid:
         raise HTTPException(status_code=422, detail=_err(422, f"Invalid URL: {result.reason}"))
 
@@ -64,7 +65,7 @@ async def create_event_hook(body: EventHookCreate):
             raise HTTPException(status_code=500, detail=_err(500, f"Failed to encrypt secret: {exc}"))
 
     hook = await store.create(
-        url=body.url,
+        url=url_str,
         events=body.events,
         session_id=body.session_id,
         headers_encrypted=headers_encrypted,
@@ -97,9 +98,12 @@ async def update_event_hook(hook_id: str, body: EventHookUpdate):
         raise HTTPException(status_code=404, detail=_err(404, f"Event hook not found: {hook_id}"))
 
     if body.url is not None:
-        result = validate_webhook_url(body.url, allow_http=False)
+        url_str = str(body.url)
+        result = validate_webhook_url(url_str, allow_http=False)
         if not result.valid:
             raise HTTPException(status_code=422, detail=_err(422, f"Invalid URL: {result.reason}"))
+    else:
+        url_str = None
 
     headers_encrypted = None
     if body.headers is not None:
@@ -119,7 +123,7 @@ async def update_event_hook(hook_id: str, body: EventHookUpdate):
 
     updated = await store.update(
         hook_id,
-        url=body.url,
+        url=url_str,
         events=body.events,
         session_id=body.session_id,
         headers_encrypted=headers_encrypted if body.headers is not None else None,

@@ -1,6 +1,7 @@
 """Git and recovery routes."""
 
 import time
+import shlex
 
 from fastapi import APIRouter, Query, HTTPException
 
@@ -24,7 +25,18 @@ from app.models import (
     BackupInfo,
 )
 
-router = APIRouter()
+router = APIRouter(tags=["git"])
+
+
+async def _get_context_or_404(context_id: str):
+    """Get context and verify its session is active."""
+    ctx = await _state.context_manager.get_context(context_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail=_err(404, f"Context {context_id} not found"))
+    session = await _state.manager.get_session(ctx.session_id)
+    if not session:
+        raise HTTPException(status_code=403, detail=_err(403, "Context session is no longer active"))
+    return ctx
 
 
 @router.post("/api/git/init", response_model=GitActionResponse)
@@ -48,6 +60,7 @@ async def git_commit(req: GitCommitRequest):
 @router.post("/api/git/backup", response_model=GitActionResponse)
 async def git_backup(context_id: str, backup_name: str = "auto_backup"):
     """Create a git stash backup."""
+    await _get_context_or_404(context_id)
     result = await _state.context_manager.create_backup(context_id, backup_name)
     return GitActionResponse(**result)
 
@@ -55,6 +68,7 @@ async def git_backup(context_id: str, backup_name: str = "auto_backup"):
 @router.post("/api/git/restore", response_model=GitActionResponse)
 async def git_restore(context_id: str):
     """Restore from stash."""
+    await _get_context_or_404(context_id)
     result = await _state.context_manager.restore_backup(context_id)
     return GitActionResponse(**result)
 
@@ -62,9 +76,7 @@ async def git_restore(context_id: str):
 @router.get("/api/git/diff")
 async def git_diff_query(context_id: str):
     """Get git diff for context."""
-    ctx = await _state.context_manager.get_context(context_id)
-    if not ctx:
-        raise HTTPException(status_code=404, detail=_err(404, f"Context {context_id} not found"))
+    ctx = await _get_context_or_404(context_id)
 
     from app.git_manager import GitManager
     git = GitManager(_state.manager)
@@ -75,6 +87,7 @@ async def git_diff_query(context_id: str):
 @router.post("/api/git/status")
 async def git_status(context_id: str):
     """Refresh git status for context."""
+    await _get_context_or_404(context_id)
     git_info = await _state.context_manager.update_git_status(context_id)
     return GitInfoResponse(
         status=git_info.status.value,
@@ -94,13 +107,13 @@ async def git_simple_status(
 ):
     """Simple git status — branch, modified, staged, untracked files."""
     branch_res = await _state.manager.execute(
-        session_id, f"cd '{path}' && git branch --show-current 2>/dev/null || echo 'main'", timeout=10
+        session_id, f"cd {shlex.quote(path)} && git branch --show-current 2>/dev/null || echo 'main'", timeout=10
     )
     branch = branch_res["stdout"].strip() or "main"
 
     status_res = await _state.manager.execute(
         session_id,
-        f"cd '{path}' && git status --porcelain 2>/dev/null || echo 'ERROR'",
+        f"cd {shlex.quote(path)} && git status --porcelain 2>/dev/null || echo 'ERROR'",
         timeout=10,
     )
 
@@ -138,7 +151,7 @@ async def git_diff(req: GitDiffRequest):
     flag = "--cached" if req.cached else ""
     result = await _state.manager.execute(
         req.session_id,
-        f"cd '{req.path}' && git diff {flag} 2>/dev/null || echo 'ERROR'",
+        f"cd {shlex.quote(req.path)} && git diff {flag} 2>/dev/null || echo 'ERROR'",
         timeout=30,
     )
 
@@ -158,9 +171,7 @@ async def git_diff(req: GitDiffRequest):
 @router.post("/api/recovery/backup", response_model=RecoveryActionResponse)
 async def recovery_backup(req: CreateBackupRequest):
     """Create a backup before making changes."""
-    ctx = await _state.context_manager.get_context(req.context_id)
-    if not ctx:
-        raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
+    await _get_context_or_404(req.context_id)
 
     result = await _state.context_manager.create_backup(req.context_id, req.name)
 
@@ -174,9 +185,7 @@ async def recovery_backup(req: CreateBackupRequest):
 @router.post("/api/recovery/restore", response_model=RecoveryActionResponse)
 async def recovery_restore(req: RestoreBackupRequest):
     """Restore from backup."""
-    ctx = await _state.context_manager.get_context(req.context_id)
-    if not ctx:
-        raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
+    await _get_context_or_404(req.context_id)
 
     result = await _state.context_manager.restore_backup(req.context_id)
 
@@ -190,13 +199,11 @@ async def recovery_restore(req: RestoreBackupRequest):
 @router.get("/api/recovery/backups")
 async def recovery_list_backups(context_id: str):
     """List available backups."""
-    ctx = await _state.context_manager.get_context(context_id)
-    if not ctx:
-        raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
+    ctx = await _get_context_or_404(context_id)
 
     result = await _state.manager.execute(
         ctx.session_id,
-        f"cd {ctx.path} && git stash list",
+        f"cd {shlex.quote(ctx.path)} && git stash list",
         timeout=10
     )
 
