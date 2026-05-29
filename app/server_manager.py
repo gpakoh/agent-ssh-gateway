@@ -1,9 +1,14 @@
 """Multi-server management for SSH connections."""
 
+import json
 import logging
+import threading
+import time
 from typing import Optional
 from dataclasses import dataclass, field
 from enum import Enum
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -34,53 +39,30 @@ class ServerConfig:
 class ServerManager:
     """Manage multiple SSH servers."""
 
-    # Predefined servers from SSH_GATEWAY_GUIDE.md
-    DEFAULT_SERVERS = {
-        "lxc100": {
-            "name": "Nginx Proxy",
-            "host": "192.0.2.10",
-            "port": 22,
-            "username": "root",
-            "description": "Nginx-прокси + Certbot",
-            "tags": ["proxy", "nginx"],
-        },
-        "lxc101": {
-            "name": "Bitrix",
-            "host": "10.0.1.101",
-            "port": 22,
-            "username": "root",
-            "description": "Bitrix сервер",
-            "tags": ["bitrix", "web"],
-        },
-        "lxc102": {
-            "name": "Minecraft",
-            "host": "10.0.1.102",
-            "port": 22,
-            "username": "root",
-            "description": "Minecraft сервер",
-            "tags": ["minecraft", "game"],
-        },
-        "lxc103": {
-            "name": "AI Docker Host",
-            "host": "10.0.1.103",
-            "port": 22,
-            "username": "root",
-            "description": "Docker Host, GPU, Portainer",
-            "tags": ["docker", "ai", "gpu"],
-        },
-    }
-
     def __init__(self):
         self._servers: dict[str, ServerConfig] = {}
+        self._lock = threading.Lock()
         self._load_default_servers()
 
     def _load_default_servers(self):
-        """Load predefined servers."""
-        for server_id, config in self.DEFAULT_SERVERS.items():
-            self._servers[server_id] = ServerConfig(
-                id=server_id,
-                **config
-            )
+        """Load predefined servers from config (SERVER_DEFAULT_CONFIGS env var)."""
+        raw = settings.server_default_configs or "{}"
+        try:
+            configs = json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Invalid SERVER_DEFAULT_CONFIGS, Skipping")
+            return
+        with self._lock:
+            for server_id, cfg in configs.items():
+                self._servers[server_id] = ServerConfig(
+                    id=server_id,
+                    name=cfg.get("name", server_id),
+                    host=cfg.get("host", ""),
+                    port=cfg.get("port", 22),
+                    username=cfg.get("username", ""),
+                    description=cfg.get("description", ""),
+                    tags=cfg.get("tags", []),
+                )
 
     def add_server(
         self,
@@ -102,23 +84,27 @@ class ServerManager:
             description=description,
             tags=tags or [],
         )
-        self._servers[server_id] = server
+        with self._lock:
+            self._servers[server_id] = server
         return server
 
     def get_server(self, server_id: str) -> Optional[ServerConfig]:
         """Get server by ID."""
-        return self._servers.get(server_id)
+        with self._lock:
+            return self._servers.get(server_id)
 
     def list_servers(self) -> list[ServerConfig]:
         """List all servers."""
-        return list(self._servers.values())
+        with self._lock:
+            return list(self._servers.values())
 
     def remove_server(self, server_id: str) -> bool:
         """Remove a server."""
-        if server_id in self._servers:
-            del self._servers[server_id]
-            return True
-        return False
+        with self._lock:
+            if server_id in self._servers:
+                del self._servers[server_id]
+                return True
+            return False
 
     def update_server_status(
         self,
@@ -127,16 +113,18 @@ class ServerManager:
         session_id: str = None,
     ):
         """Update server status."""
-        server = self._servers.get(server_id)
-        if server:
-            server.status = status
-            server.last_check = logging.time.time() if hasattr(logging, 'time') else 0
-            if session_id:
-                server.session_id = session_id
+        with self._lock:
+            server = self._servers.get(server_id)
+            if server:
+                server.status = status
+                server.last_check = time.time()
+                if session_id:
+                    server.session_id = session_id
 
     def get_servers_by_tag(self, tag: str) -> list[ServerConfig]:
         """Get servers by tag."""
-        return [s for s in self._servers.values() if tag in s.tags]
+        with self._lock:
+            return [s for s in self._servers.values() if tag in s.tags]
 
     def to_dict(self, server: ServerConfig) -> dict:
         """Convert server to dictionary."""
@@ -149,6 +137,6 @@ class ServerManager:
             "description": server.description,
             "tags": server.tags,
             "status": server.status.value,
-            "last_check": server.last_check,
+            "last_check": server.last_check or 0,
             "has_session": server.session_id is not None,
         }
