@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     known_hosts_store: str = Field(default="", alias="KNOWN_HOSTS_STORE")
     known_hosts_file: str = Field(default="/app/known_hosts", alias="KNOWN_HOSTS_FILE")
 
+    server_default_configs: str = Field(
+        default="{}",
+        alias="SERVER_DEFAULT_CONFIGS",
+        description="JSON object with default server connection presets",
+    )
+
     # Security
     encryption_key: str = Field(default="", alias="ENCRYPTION_KEY")
     api_key: str = Field(default="", alias="API_KEY")
