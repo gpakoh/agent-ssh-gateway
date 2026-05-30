@@ -49,14 +49,14 @@ class CodeIntelligence:
         """Search for code pattern in project."""
         results = []
         
-        # Use grep to find matches
+        # Use Grep To Find Matches
         cmd = f"cd {path} && grep -rn -C {context_lines} '{query}' --include='*.{language}' 2>/dev/null || true"
         result = await self._ssh.execute(session_id, cmd, timeout=30)
         
         if result["exit_code"] != 0:
             return results
         
-        # Parse grep output
+        # Parse Grep Output
         lines = result["stdout"].split("\n")
         current_file = None
         current_line = 0
@@ -65,7 +65,7 @@ class CodeIntelligence:
             if line.startswith("--"):
                 continue
             
-            # Match: filename:line:content
+            # Match: Filename:line:content
             match = re.match(r'^(.+):(\d+):(.*)$', line)
             if match:
                 file_path = match.group(1)
@@ -90,14 +90,14 @@ class CodeIntelligence:
     ) -> Optional[CodeInsertion]:
         """Find best insertion point based on instruction."""
         
-        # Read file
+        # Read File
         content = await self._file_editor.read_file(session_id, path)
         lines = content.split("\n")
         
-        # Parse instruction
+        # Parse Instruction
         instruction_lower = instruction.lower()
         
-        # Determine insertion strategy based on instruction
+        # Determine Insertion Strategy Based On Instruction
         if "endpoint" in instruction_lower or "route" in instruction_lower:
             return await self._find_endpoint_insertion(session_id, path, lines, instruction)
         
@@ -114,7 +114,7 @@ class CodeIntelligence:
             return await self._find_middleware_insertion(lines, instruction)
         
         else:
-            # Default: append to end of file
+            # Default: Append To End Of File
             return CodeInsertion(
                 path=path,
                 insert_after=lines[-1] if lines else "",
@@ -127,7 +127,7 @@ class CodeIntelligence:
         self, session_id: str, path: str, lines: list[str], instruction: str
     ) -> CodeInsertion:
         """Find best place to insert FastAPI endpoint."""
-        # Look for existing endpoints
+        # Look For Existing Endpoints
         last_endpoint_line = 0
         in_endpoint = False
         
@@ -140,10 +140,10 @@ class CodeIntelligence:
             elif in_endpoint and i > last_endpoint_line:
                 last_endpoint_line = i
         
-        # Find a good place after last endpoint
+        # Find A Good Place After Last Endpoint
         insert_line = last_endpoint_line + 1 if last_endpoint_line > 0 else len(lines)
         
-        # Generate endpoint code
+        # Generate Endpoint Code
         endpoint_code = self._generate_endpoint_code(instruction)
         
         return CodeInsertion(
@@ -172,7 +172,7 @@ class CodeIntelligence:
 
     async def _find_class_insertion(self, lines: list[str], instruction: str) -> CodeInsertion:
         """Find best place to insert class."""
-        # Find end of last class or module level
+        # Find End Of Last Class Or Module Level
         last_class_end = 0
         indent_level = 0
         
@@ -211,7 +211,7 @@ class CodeIntelligence:
 
     async def _find_middleware_insertion(self, lines: list[str], instruction: str) -> CodeInsertion:
         """Find best place to insert middleware."""
-        # Look for app.add_middleware or similar
+        # Look For App.add_middleware Or Similar
         last_middleware_line = 0
         
         for i, line in enumerate(lines):
@@ -264,7 +264,7 @@ async def create_item(request: Request):
 '''
         
         else:
-            # Generic endpoint
+            # Generic Endpoint
             return f'''
 @app.get("/api/new-endpoint")
 async def new_endpoint():
@@ -295,7 +295,10 @@ Rules:
 
 Code:"""
 
-        adapter_url = os.environ.get("OPENCODE_ADAPTER_URL", "http://10.0.0.137:8007")
+        adapter_url = os.environ.get("OPENCODE_ADAPTER_URL", "")
+        if not adapter_url:
+            logger.warning("OPENCODE_ADAPTER_URL is not set, skipping adapter code generation")
+            return ""
         
         # Делаем до 3 попыток с задержкой
         for attempt in range(3):
@@ -320,7 +323,7 @@ Code:"""
                                 await asyncio.sleep(5 * (attempt + 1))
                                 continue
                             
-                            # Clean up markdown code blocks
+                            # Clean Up Markdown Code Blocks
                             if generated.startswith("```"):
                                 lines = generated.split("\n")
                                 if lines[0].startswith("```"):
@@ -355,8 +358,8 @@ Code:"""
                     await asyncio.sleep(3)
                     continue
         
-        # Fallback to template generation
-        logger.info("🔄 Using fallback code generation after all attempts failed")
+        # Fallback To Template Generation
+        logger.info("🔄 Using Fallback Code Generation After All Attempts Failed")
         return self._generate_fallback(instruction, language)
 
     def _generate_fallback(self, instruction: str, language: str) -> str:
@@ -418,21 +421,21 @@ Code:"""
         language: str = "python",
     ) -> str:
         """Suggest code completion based on partial code."""
-        # Simple pattern matching for completions
+        # Simple Pattern Matching For Completions
         if partial_code.strip().endswith('('):
-            # Function call - suggest parameters
+            # Function Call - Suggest Parameters
             return "self, *args, **kwargs"
         
         elif 'class ' in partial_code and ':' not in partial_code:
-            # Class definition - suggest inheritance
+            # Class Definition - Suggest Inheritance
             return "(object):\n    \"\"\"Description\"\"\"\n    \n    def __init__(self):\n        pass"
         
         elif 'def ' in partial_code and ':' not in partial_code:
-            # Function definition - suggest body
+            # Function Definition - Suggest Body
             return ":\n    \"\"\"Description\"\"\"\n    pass"
         
         elif partial_code.strip().endswith('.'):
-            # Method call - suggest common methods
+            # Method Call - Suggest Common Methods
             return "method()"
         
         else:
