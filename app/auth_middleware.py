@@ -92,6 +92,24 @@ async def verify_api_key(
     return False
 
 
+async def verify_master_api_key(
+    request: Request, expected_key: str
+) -> bool:
+    """Verify only the master API key — rejects agent tokens.
+
+    Use this for privileged operations like agent token management.
+    Agent tokens must not be able to create or refresh other tokens.
+    """
+    provided = request.headers.get("X-API-Key", "")
+    if not provided:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            provided = auth_header[7:]
+    if not provided:
+        return False
+    return secrets.compare_digest(provided, expected_key)
+
+
 # ---------------------------------------------------------------------------
 # Always‑public Paths (even When Auth Is Enabled)
 # ---------------------------------------------------------------------------

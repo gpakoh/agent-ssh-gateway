@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Re
 from app.config import settings
 from app.state import _err
 from app import state as _state
-from app.auth_middleware import ws_auth_check, is_agent_token_valid, verify_api_key
+from app.auth_middleware import ws_auth_check, is_agent_token_valid, verify_master_api_key
 from app.security import sanitize_command, rate_limit_mutation, validate_target_host
 from app.ssh_manager import SSHManagerError, ConnectionError as SSHConnError, AuthenticationError, SessionNotFoundError, TimeoutError, ExecutionError
 from app.models import (
@@ -60,10 +60,10 @@ async def agent_token_generate(request: Request):
     Requires API_KEY auth. The generated token can be rotated
     without affecting the main API_KEY. Token stored in Redis with TTL.
     """
-    if not await verify_api_key(request, settings.api_key, settings.agent_token, settings, _state.agent_token_store):
+    if not await verify_master_api_key(request, settings.api_key):
         raise HTTPException(
             status_code=401,
-            detail=_err(401, "Invalid or missing API key"),
+            detail=_err(401, "Only master API key can create agent tokens"),
         )
 
     import secrets as _secrets
@@ -92,11 +92,12 @@ async def agent_token_refresh(request: Request):
     """Refresh (rotate) the agent token.
 
     Invalidates the previous agent token and issues a new one atomically.
+    Only master API key can refresh tokens.
     """
-    if not await verify_api_key(request, settings.api_key, settings.agent_token, settings, _state.agent_token_store):
+    if not await verify_master_api_key(request, settings.api_key):
         raise HTTPException(
             status_code=401,
-            detail=_err(401, "Invalid or missing API key"),
+            detail=_err(401, "Only master API key can create agent tokens"),
         )
 
     import secrets as _secrets
