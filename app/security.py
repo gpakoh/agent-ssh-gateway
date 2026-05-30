@@ -3,11 +3,12 @@
 import hashlib
 import hmac
 import logging
+import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from cryptography.fernet import Fernet
 from fastapi import Request, HTTPException
@@ -182,6 +183,81 @@ class SecretManager:
 
 
 # ---------------------------------------------------------------------------
+# Secret Redaction
+# ---------------------------------------------------------------------------
+
+SECRET_REDACTION_PLACEHOLDER = "[REDACTED]"
+
+_SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # Specific patterns first (before generic key=value to avoid partial matches)
+    (
+        re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[A-Za-z0-9._~+/=-]+"),
+        r"\1" + SECRET_REDACTION_PLACEHOLDER,
+    ),
+    (
+        re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{16,}"),
+        r"\1" + SECRET_REDACTION_PLACEHOLDER,
+    ),
+    (
+        re.compile(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+            re.DOTALL,
+        ),
+        SECRET_REDACTION_PLACEHOLDER,
+    ),
+    # Generic KEY=value / KEY: value (runs last)
+    # authorization/bearer omitted here — covered by specific patterns above.
+    (
+        re.compile(
+            r"(?i)\b("
+            r"api[_-]?key|token|access[_-]?token|refresh[_-]?token|"
+            r"secret|password|passwd|pwd|"
+            r"private[_-]?key|client[_-]?secret|webhook[_-]?secret"
+            r")\b\s*[:=]\s*([^\s\"']+)"
+        ),
+        r"\1=" + SECRET_REDACTION_PLACEHOLDER,
+    ),
+]
+
+
+def redact_secrets(value: Any) -> Any:
+    """Redact obvious secrets from strings, dicts and lists.
+
+    This is a safety net for logs, audit records and event hook payloads.
+    It is not a full DLP system.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        redacted = value
+        for pattern, replacement in _SECRET_PATTERNS:
+            redacted = pattern.sub(replacement, redacted)
+        return redacted
+
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if re.search(
+                r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|authorization|private[_-]?key)",
+                key_text,
+            ):
+                result[key] = SECRET_REDACTION_PLACEHOLDER
+            else:
+                result[key] = redact_secrets(item)
+        return result
+
+    if isinstance(value, list):
+        return [redact_secrets(item) for item in value]
+
+    if isinstance(value, tuple):
+        return tuple(redact_secrets(item) for item in value)
+
+    return value
+
+
+# ---------------------------------------------------------------------------
 # Audit Logging
 # ---------------------------------------------------------------------------
 
@@ -210,28 +286,28 @@ class AuditLogger:
         """Log command execution."""
         self.logger.info(
             "COMMAND | session=%s | ip=%s | cmd=%s",
-            session_id, source_ip, command
+            session_id, source_ip, redact_secrets(command)
         )
-    
+
     def log_file_access(self, session_id: str, path: str, operation: str, source_ip: str):
         """Log file access."""
         self.logger.info(
             "FILE | session=%s | ip=%s | op=%s | path=%s",
-            session_id, source_ip, operation, path
+            session_id, source_ip, operation, redact_secrets(path)
         )
-    
+
     def log_auth(self, username: str, success: bool, source_ip: str):
         """Log authentication attempt."""
         self.logger.info(
             "AUTH | user=%s | ip=%s | success=%s",
-            username, source_ip, success
+            redact_secrets(username), source_ip, success
         )
-    
+
     def log_security_event(self, event_type: str, details: str, source_ip: str):
         """Log generic security event."""
         self.logger.warning(
             "SECURITY | type=%s | ip=%s | %s",
-            event_type, source_ip, details
+            event_type, source_ip, redact_secrets(details)
         )
 
 
