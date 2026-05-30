@@ -1,7 +1,7 @@
 """Pydantic models for API requests and responses."""
 
 from typing import Optional
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator, HttpUrl
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +62,7 @@ class ExecuteResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Session management
+# Session Management
 # ---------------------------------------------------------------------------
 
 class DisconnectRequest(BaseModel):
@@ -130,7 +130,7 @@ class TemplateRunResponse(BaseModel):
 
 
 class EventHookCreate(BaseModel):
-    url: str = Field(..., min_length=1, max_length=2048)
+    url: HttpUrl = Field(...)
     events: list[str] = Field(..., min_length=1)
     session_id: str | None = None
     headers: dict[str, str] | None = None
@@ -139,7 +139,7 @@ class EventHookCreate(BaseModel):
 
 
 class EventHookUpdate(BaseModel):
-    url: str | None = None
+    url: HttpUrl | None = None
     events: list[str] | None = None
     session_id: str | None = None
     headers: dict[str, str] | None = None
@@ -185,6 +185,9 @@ class HealthResponse(BaseModel):
     """Health check response."""
 
     status: str = "ok"
+    redis: bool = False
+    postgres: bool = False
+    ready: bool = False
 
 
 class CapabilitiesResponse(BaseModel):
@@ -668,6 +671,14 @@ class BatchOperation(BaseModel):
     dest_path: str = Field(default="", description="Destination path (for type=copy)")
     command: str = Field(default="", description="Shell command (for type=execute)")
     continue_on_error: bool = Field(default=False, description="Continue if this operation fails")
+
+    @field_validator("command")
+    @classmethod
+    def validate_command(cls, v):
+        if v:
+            from app.security import sanitize_command
+            sanitize_command(v)
+        return v
 
 
 class BatchExecuteRequest(BaseModel):
@@ -1157,7 +1168,7 @@ class ServerConnectResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# PTY (Interactive Terminal)
+# PTY (interactive Terminal)
 # ---------------------------------------------------------------------------
 
 class PTYCreateRequest(BaseModel):
@@ -1400,7 +1411,7 @@ class BulkExecuteResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Upload/Download (JSON body fallback)
+# Upload/download (JSON Body Fallback)
 # ---------------------------------------------------------------------------
 
 class FileUploadRequest(BaseModel):
@@ -1408,7 +1419,7 @@ class FileUploadRequest(BaseModel):
 
     session_id: str = Field(..., min_length=1)
     path: str = Field(..., min_length=1)
-    content: str = Field(..., min_length=1, description="Base64-encoded content")
+    content: str = Field(..., min_length=1, max_length=10_000_000, description="Base64-encoded content")
 
 
 class FileUploadResponse(BaseModel):
