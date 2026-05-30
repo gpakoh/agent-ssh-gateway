@@ -167,7 +167,7 @@ class TestApiKey:
     def test_check_port_with_correct_key_not_401(self, api_key_auth):
         with TestClient(app) as client:
             resp = client.get(
-                "/api/ssh/check-port?host=127.0.0.1&port=22",
+                "/api/ssh/check-port?host=10.0.0.1&port=22",
                 headers={"X-API-Key": "secret-42"},
             )
         assert resp.status_code not in (401, 403)
