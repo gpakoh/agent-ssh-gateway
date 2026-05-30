@@ -484,3 +484,59 @@ def test_ws_auth_rejects_expired_agent_token(ws_settings, monkeypatch):
     result = asyncio.run(ws_auth_check(ws, settings))
     assert result is not None
     assert result[0] == CLOSE_POLICY_VIOLATION
+
+
+# ---------------------------------------------------------------------------
+# Agent Token Management — Master API Key Required
+# ---------------------------------------------------------------------------
+
+
+class TestAgentTokenManagement:
+    """Agent token create/refresh endpoints require master API key, not agent tokens."""
+
+    def test_master_key_can_create_agent_token(self, api_key_auth):
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = client.post(
+                "/api/agent/token",
+                headers={"X-API-Key": "secret-42"},
+                json={"name": "test-agent", "ttl_seconds": 3600},
+            )
+        assert resp.status_code not in (401, 403)
+
+    def test_agent_token_cannot_create_another_token(self, api_key_auth, monkeypatch):
+        monkeypatch.setattr(settings, "agent_token", "agent-live-token")
+        monkeypatch.setattr(
+            settings, "agent_token_expires_at",
+            datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/agent/token",
+                headers={"X-API-Key": "agent-live-token"},
+                json={"name": "second-agent", "ttl_seconds": 3600},
+            )
+        assert resp.status_code == 401
+
+    def test_agent_token_cannot_refresh_another_token(self, api_key_auth, monkeypatch):
+        monkeypatch.setattr(settings, "agent_token", "agent-live-token")
+        monkeypatch.setattr(
+            settings, "agent_token_expires_at",
+            datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/agent/token/refresh",
+                headers={"X-API-Key": "agent-live-token"},
+                json={"token": "agent-live-token", "ttl_seconds": 3600},
+            )
+        assert resp.status_code == 401
+
+    def test_no_key_returns_401_on_create(self, api_key_auth):
+        with TestClient(app) as client:
+            resp = client.post("/api/agent/token", json={"name": "test"})
+        assert resp.status_code == 401
+
+    def test_no_key_returns_401_on_refresh(self, api_key_auth):
+        with TestClient(app) as client:
+            resp = client.post("/api/agent/token/refresh", json={"token": "x"})
+        assert resp.status_code == 401
