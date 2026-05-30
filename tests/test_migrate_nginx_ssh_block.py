@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-MARKER = '# --- Web SSH Gateway ---'
+MARKER = '# --- agent-ssh-gateway ---'
 
 
 def run_migrate(text: str) -> str:
@@ -29,7 +29,7 @@ server {
     listen 443 ssl;
 }
 
-# --- Web SSH Gateway ---
+# --- agent-ssh-gateway ---
 server {
     listen 443 ssl;
 }
@@ -57,7 +57,7 @@ server {
     listen 443 ssl;
 }
 
-# --- Web SSH Gateway ---
+# --- agent-ssh-gateway ---
 server {
     listen 443 ssl;
 }
@@ -67,7 +67,7 @@ server {
 
 
 def test_marker_at_start():
-    text = "# --- Web SSH Gateway ---\nblock\n# --- Next ---\nend\n"
+    text = "# --- agent-ssh-gateway ---\nblock\n# --- Next ---\nend\n"
     assert run_migrate(text) == "# --- Next ---\nend\n"
 
 
@@ -77,7 +77,7 @@ server {
     listen 443 ssl;
 }
 
-# --- Web SSH Gateway ---
+# --- agent-ssh-gateway ---
 server {
     listen 443 ssl;
 }
@@ -92,7 +92,7 @@ def test_indentation_preserved():
         'server {',
         '   listen 80;',
         '}',
-        '# --- Web SSH Gateway ---',
+        '# --- agent-ssh-gateway ---',
         'server {',
         '   listen 443;',
         '}',
@@ -102,12 +102,12 @@ def test_indentation_preserved():
     result = run_migrate(text)
     assert '# --- Nginx Config ---' in result
     assert '# --- Another Section ---' in result
-    assert '# --- Web SSH Gateway' not in result
+    assert '# --- agent-ssh-gateway' not in result
     assert result.startswith('# --- Nginx Config ---')
 
 
 def test_trailing_blank_lines_raises():
-    text = 'server { listen 80; }\n\n# --- Web SSH Gateway ---\nblock\n\n\n'
+    text = 'server { listen 80; }\n\n# --- agent-ssh-gateway ---\nblock\n\n\n'
     with pytest.raises(SystemExit, match='cannot locate end'):
         run_migrate(text)
 
@@ -117,16 +117,16 @@ def test_multiple_markers_only_first_removed():
 # --- Opening ---
 start
 
-# --- Web SSH Gateway ---
+# --- agent-ssh-gateway ---
 middle
 
-# --- Web SSH Gateway ---
+# --- agent-ssh-gateway ---
 end
 """
     result = run_migrate(text)
     assert '# --- Opening ---' in result
-    assert '# --- Web SSH Gateway ---' in result  # second instance remains
-    assert result.count('# --- Web SSH Gateway') == 1
+    assert '# --- agent-ssh-gateway ---' in result  # second instance remains
+    assert result.count('# --- agent-ssh-gateway') == 1
     assert 'middle' not in result
 
 
@@ -137,7 +137,7 @@ server {
     listen 443 ssl;
 }
 
-# --- Web SSH Gateway ---
+# --- agent-ssh-gateway ---
 server {
     listen 443 ssl;
 }
@@ -162,4 +162,4 @@ server {
     assert backup.exists()
     assert backup.read_text() == content
     assert '# --- Another Section ---' in src.read_text()
-    assert '# --- Web SSH Gateway' not in src.read_text()
+    assert '# --- agent-ssh-gateway' not in src.read_text()

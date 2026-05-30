@@ -1,4 +1,4 @@
-"""Auth middleware: API key + IP allowlist for Web SSH Gateway."""
+"""Auth middleware: API key + IP allowlist for agent-ssh-gateway."""
 
 import ipaddress
 import logging

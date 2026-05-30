@@ -1,4 +1,4 @@
-"""FastAPI entry point for Web SSH Gateway."""
+"""FastAPI entry point for agent-ssh-gateway."""
 
 import json
 import logging
@@ -365,7 +365,7 @@ async def lifespan(app: FastAPI):
     logger.info("Security Components Initialized")
     logger.info("Swarm Mode Ready (redis Job Queue, Circuit Breaker, Distributed Locks)")
 
-    logger.info("Web SSH Gateway started on %s:%d", settings.uvicorn_host, settings.uvicorn_port)
+    logger.info("agent-ssh-gateway started on %s:%d", settings.uvicorn_host, settings.uvicorn_port)
     yield
     
     # Graceful Shutdown: Drain Active Jobs
@@ -423,7 +423,7 @@ async def lifespan(app: FastAPI):
     if state.host_key_store:
         await state.host_key_store.disconnect()
     
-    logger.info("Web SSH Gateway Shutdown Complete")
+    logger.info("agent-ssh-gateway Shutdown Complete")
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +431,7 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="Web SSH Gateway",
+    title="agent-ssh-gateway",
     description="Execute SSH commands through a web browser",
     version="1.0.0",
     lifespan=lifespan,
@@ -511,7 +511,7 @@ def custom_openapi():
     )
 
     # Server Metadata For Codegen
-    schema["servers"] = [{"url": "/", "description": "Web SSH Gateway API"}]
+    schema["servers"] = [{"url": "/", "description": "agent-ssh-gateway API"}]
 
     # --- Error Response Schemas With Agent-friendly Format ---
     schema["components"]["schemas"]["ErrorResponse"] = {
@@ -725,7 +725,7 @@ def custom_openapi():
         ("/api/jobs/run", "post"): {"job_id": "job_abc123", "status": "queued"},
         ("/api/file/read", "post"): {"path": "/etc/hostname", "content": "my-server\n", "size": 10, "encoding": "utf-8"},
         ("/api/file/write", "post"): {"path": "/root/test.txt", "size": 5, "encoding": "utf-8"},
-        ("/", "get"): {"service": "Web SSH Gateway", "version": "3.0.0", "status": "running"},
+        ("/", "get"): {"service": "agent-ssh-gateway", "version": "3.0.0", "status": "running"},
     }
 
     # Helper To Generate Example From JSON Schema

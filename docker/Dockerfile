@@ -1,8 +1,6 @@
-# Web SSH Gateway — Hardened Docker Image
-FROM python:3.11-slim
-
-LABEL maintainer="NOD Team"
-LABEL description="Web SSH Gateway — browser-based SSH client"
+# agent-ssh-gateway — Hardened Docker Image
+FROM python:3.12-slim
+LABEL description="agent-ssh-gateway — SSH control plane"
 
 # Security: Install only necessary packages
 RUN apt-get update && apt-get install -y --no-install-recommends \

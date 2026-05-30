@@ -1,5 +1,5 @@
 #!/bin/bash
-# Smoke tests for Web SSH Gateway — designed to run from any agent session.
+# Smoke tests for agent-ssh-gateway — designed to run from any agent session.
 #
 # Usage:
 #   export API_KEY="afdvw9..."
