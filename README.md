@@ -331,8 +331,8 @@ Before using this in production:
 * [ ] Enable SSO for browser access.
 * [ ] Use API keys or short-lived tokens for automation.
 * [ ] Configure allowed client networks.
-* [ ] Configure allowed target networks.
-* [ ] Deny loopback, link-local and metadata IP ranges.
+* [x] Configure allowed target networks (`ALLOWED_TARGET_CIDRS` / `DENIED_TARGET_CIDRS`).
+* [x] Deny loopback, link-local and metadata IP ranges (built into default `DENIED_TARGET_CIDRS`).
 * [ ] Use dedicated low-privilege SSH users.
 * [x] Private key upload disabled by default (`SSH_KEY_UPLOAD_ENABLED=false`).
 * [ ] Enable audit logging.
