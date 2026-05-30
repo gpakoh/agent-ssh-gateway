@@ -232,6 +232,35 @@ Recommended protections:
 
 ---
 
+## Command policy
+
+`agent-ssh-gateway` includes a basic command policy engine.
+
+```env
+COMMAND_POLICY_MODE=audit
+COMMAND_POLICY_PROFILE=default
+```
+
+Modes:
+
+- `off` — command policy disabled;
+- `audit` — log decisions but do not block;
+- `enforce` — block commands that do not match the selected profile.
+
+Profiles:
+
+- `default` — blocks obviously dangerous root commands;
+- `readonly` — allows only inspection/read-only commands;
+- `ops` — allows read-only commands plus limited `systemctl`, `service` and `docker` actions.
+
+Recommended rollout:
+
+1. Start with `COMMAND_POLICY_MODE=audit`.
+2. Review audit logs.
+3. Move selected environments to `COMMAND_POLICY_MODE=enforce`.
+
+---
+
 ## Target allowlist
 
 A production deployment should restrict which hosts the gateway can access.
@@ -337,7 +366,7 @@ Before using this in production:
 * [x] Private key upload disabled by default (`SSH_KEY_UPLOAD_ENABLED=false`).
 * [ ] Enable audit logging.
 * [ ] Enable output redaction for secrets.
-* [ ] Limit command execution by role or profile.
+* [x] Command policy engine with `readonly`/`ops`/`default` profiles (`COMMAND_POLICY_MODE=enforce`).
 * [ ] Rotate tokens regularly.
 * [ ] Review event hooks before enabling command output forwarding.
 * [ ] Keep deployment-specific files out of the public repository.

@@ -17,6 +17,7 @@ from app.state import _err
 from app import state as _state
 from app.auth_middleware import ws_auth_check, is_agent_token_valid, verify_master_api_key
 from app.security import sanitize_command, rate_limit_mutation, validate_target_host
+from app.command_policy import evaluate_command_policy
 from app.ssh_manager import SSHManagerError, ConnectionError as SSHConnError, AuthenticationError, SessionNotFoundError, TimeoutError, ExecutionError
 from app.models import (
     ConnectRequest,
@@ -214,6 +215,33 @@ async def ssh_execute(req: ExecuteRequest, request: Request):
             "BLOCKED_COMMAND", str(exc), request.client.host
         )
         raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+
+    # Command Policy Evaluation
+    decision = evaluate_command_policy(
+        req.command,
+        mode=settings.command_policy_mode,
+        profile=settings.command_policy_profile,
+    )
+
+    _state.audit_logger.log_security_event(
+        "COMMAND_POLICY_DECISION",
+        (
+            f"session_id={req.session_id}; "
+            f"command={req.command}; "
+            f"allowed={decision.allowed}; "
+            f"reason={decision.reason}; "
+            f"profile={decision.profile}; "
+            f"mode={decision.mode}; "
+            f"command_root={decision.command_root}"
+        ),
+        request.client.host if request.client else "unknown",
+    )
+
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=_err(403, f"Command denied by policy: {decision.reason}"),
+        )
 
     # Audit Log
     _state.audit_logger.log_command(req.session_id, sanitized, request.client.host)
