@@ -12,6 +12,7 @@ from app.security import (
     IPFilter,
     SessionSecurity,
     validate_target_host,
+    redact_secrets,
 )
 from cryptography.fernet import Fernet
 from app.search_replace import _is_safe_regex
@@ -292,3 +293,57 @@ def test_validate_target_host_denies_non_allowed_public_ip():
             allowed_cidrs="10.0.0.0/8",
             denied_cidrs="127.0.0.0/8",
         )
+
+
+# ---------------------------------------------------------------------------
+# Secret redaction
+# ---------------------------------------------------------------------------
+
+def test_redact_secrets_masks_key_value_tokens():
+    text = "API_KEY=super-secret TOKEN=abc123 PASSWORD=hunter2"
+    redacted = redact_secrets(text)
+
+    assert "super-secret" not in redacted
+    assert "abc123" not in redacted
+    assert "hunter2" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_secrets_masks_bearer_token():
+    text = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456"
+    redacted = redact_secrets(text)
+
+    assert "abcdefghijklmnopqrstuvwxyz123456" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_secrets_masks_private_key_block():
+    text = """
+-----BEGIN OPENSSH PRIVATE KEY-----
+very-secret-private-key-content
+-----END OPENSSH PRIVATE KEY-----
+"""
+    redacted = redact_secrets(text)
+
+    assert "very-secret-private-key-content" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_secrets_masks_nested_dict_values_by_key():
+    payload = {
+        "event": "command.finished",
+        "stdout": "ok",
+        "meta": {
+            "api_key": "secret-value",
+            "nested": {
+                "password": "hunter2",
+            },
+        },
+    }
+
+    redacted = redact_secrets(payload)
+
+    assert redacted["event"] == "command.finished"
+    assert redacted["stdout"] == "ok"
+    assert redacted["meta"]["api_key"] == "[REDACTED]"
+    assert redacted["meta"]["nested"]["password"] == "[REDACTED]"
