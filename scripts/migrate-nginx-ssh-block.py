@@ -15,7 +15,7 @@ import os
 import sys
 
 path = Path(os.environ.get('NGINX_CONFIG_PATH', '/etc/nginx/sites-available/example.conf'))
-marker = os.environ.get('NGINX_BLOCK_MARKER', '# --- Web SSH Gateway ---')
+marker = os.environ.get('NGINX_BLOCK_MARKER', '# --- agent-ssh-gateway ---')
 
 if not path.exists():
     print(f'{path} not found, nothing to migrate')
