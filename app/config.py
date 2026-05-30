@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     encryption_key: str = Field(default="", alias="ENCRYPTION_KEY")
     api_key: str = Field(default="", alias="API_KEY")
     api_auth_enabled: bool = Field(default=True, alias="API_AUTH_ENABLED")
+    ssh_key_upload_enabled: bool = Field(default=False, alias="SSH_KEY_UPLOAD_ENABLED")
     agent_token: str = Field(default="", alias="AGENT_TOKEN")
     agent_token_ttl: int = Field(default=3600, alias="AGENT_TOKEN_TTL")
     agent_token_expires_at: datetime | None = None
