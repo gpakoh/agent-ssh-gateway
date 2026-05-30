@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-MARKER = '# --- Web SSH Gateway (ssh.xloud.ru) ---'
+MARKER = '# --- Web SSH Gateway ---'
 
 
 def run_migrate(text: str) -> str:
@@ -11,7 +11,7 @@ def run_migrate(text: str) -> str:
         return text
     end = text.find('\n# --- ', start + len(MARKER))
     if end == -1:
-        raise SystemExit('cannot locate end of legacy ssh.xloud.ru block')
+        raise SystemExit('cannot locate end of legacy block')
     before = text[:start].rstrip()
     after = text[end + 1:].lstrip()
     if before:
@@ -29,10 +29,9 @@ server {
     listen 443 ssl;
 }
 
-# --- Web SSH Gateway (ssh.xloud.ru) ---
+# --- Web SSH Gateway ---
 server {
     listen 443 ssl;
-    server_name ssh.xloud.ru;
 }
 # --- Another Section ---
 server {
@@ -58,10 +57,9 @@ server {
     listen 443 ssl;
 }
 
-# --- Web SSH Gateway (ssh.xloud.ru) ---
+# --- Web SSH Gateway ---
 server {
     listen 443 ssl;
-    server_name ssh.xloud.ru;
 }
 """
     with pytest.raises(SystemExit, match='cannot locate end'):
@@ -69,7 +67,7 @@ server {
 
 
 def test_marker_at_start():
-    text = "# --- Web SSH Gateway (ssh.xloud.ru) ---\nblock\n# --- Next ---\nend\n"
+    text = "# --- Web SSH Gateway ---\nblock\n# --- Next ---\nend\n"
     assert run_migrate(text) == "# --- Next ---\nend\n"
 
 
@@ -79,10 +77,9 @@ server {
     listen 443 ssl;
 }
 
-# --- Web SSH Gateway (ssh.xloud.ru) ---
+# --- Web SSH Gateway ---
 server {
     listen 443 ssl;
-    server_name ssh.xloud.ru;
 }
 """
     with pytest.raises(SystemExit, match='cannot locate end'):
@@ -95,10 +92,9 @@ def test_indentation_preserved():
         'server {',
         '   listen 80;',
         '}',
-        '# --- Web SSH Gateway (ssh.xloud.ru) ---',
+        '# --- Web SSH Gateway ---',
         'server {',
         '   listen 443;',
-        '   server_name ssh.xloud.ru;',
         '}',
         '# --- Another Section ---',
         '',
@@ -111,7 +107,7 @@ def test_indentation_preserved():
 
 
 def test_trailing_blank_lines_raises():
-    text = 'server { listen 80; }\n\n# --- Web SSH Gateway (ssh.xloud.ru) ---\nblock\n\n\n'
+    text = 'server { listen 80; }\n\n# --- Web SSH Gateway ---\nblock\n\n\n'
     with pytest.raises(SystemExit, match='cannot locate end'):
         run_migrate(text)
 
@@ -121,29 +117,28 @@ def test_multiple_markers_only_first_removed():
 # --- Opening ---
 start
 
-# --- Web SSH Gateway (ssh.xloud.ru) ---
+# --- Web SSH Gateway ---
 middle
 
-# --- Web SSH Gateway (ssh.xloud.ru) ---
+# --- Web SSH Gateway ---
 end
 """
     result = run_migrate(text)
     assert '# --- Opening ---' in result
-    assert '# --- Web SSH Gateway (ssh.xloud.ru) ---' in result  # second instance remains
+    assert '# --- Web SSH Gateway ---' in result  # second instance remains
     assert result.count('# --- Web SSH Gateway') == 1
     assert 'middle' not in result
 
 
 def test_realistic_file(tmp_path: Path):
-    src = tmp_path / 'AI-Docker.conf'
+    src = tmp_path / 'example.conf'
     content = """\
 server {
     listen 443 ssl;
 }
 
-# --- Web SSH Gateway (ssh.xloud.ru) ---
+# --- Web SSH Gateway ---
 server {
-    server_name ssh.xloud.ru;
     listen 443 ssl;
 }
 # --- Another Section ---

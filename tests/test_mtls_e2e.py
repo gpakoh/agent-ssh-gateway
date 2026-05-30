@@ -1,6 +1,6 @@
 """mTLS e2e tests — verify mTLS bypass and Authelia fallback.
 
-These tests run via SSH on the nginx host (LXC 100) and require:
+These tests run via SSH on the nginx host and require:
   - SSH access (BatchMode) to NGINX_HOST
   - Client cert at /etc/nginx/certs/client.{crt,key}
   - CA cert at /etc/nginx/certs/ca.crt
@@ -21,7 +21,7 @@ NGINX_HOST = os.environ.get("NGINX_HOST", "")
 if not NGINX_HOST:
     pytest.skip("NGINX_HOST is not set — skipping mTLS e2e tests", allow_module_level=True)
 
-BASE_URL = "https://ssh.xloud.ru"
+BASE_URL = "https://gateway.example.com"
 CLIENT_CERT = "/etc/nginx/certs/client.crt"
 CLIENT_KEY = "/etc/nginx/certs/client.key"
 BAD_CERT = "/tmp/ssh-gateway-bad-client.crt"
@@ -58,7 +58,7 @@ def _ensure_bad_client_cert() -> None:
 def _curl(
     extra_args: str = "", path: str = "/api/servers", resolve: bool = True
 ) -> tuple[int, str]:
-    resolve_flag = "--resolve ssh.xloud.ru:443:127.0.0.1" if resolve else ""
+    resolve_flag = "--resolve gateway.example.com:443:127.0.0.1" if resolve else ""
     cmd = (
         f'code=$(curl -k -sS -o /tmp/mtls-test.out -w "%{{http_code}}" '
         f'{resolve_flag} {extra_args} {BASE_URL}{path} 2>/dev/null || echo "FAIL") '
@@ -134,7 +134,7 @@ def test_mtls_x_headers_present():
 def test_nginx_config_contains_mtls_bypass():
     """nginx config must contain mTLS bypass logic."""
     result = _ssh_cmd(
-        "grep -R 'ssl_client_verify' /etc/nginx/sites-enabled/ssh.xloud.ru"
+        "grep -R 'ssl_client_verify' /etc/nginx/sites-enabled/gateway.example.com"
     )
     assert result.returncode == 0
     assert "SUCCESS" in result.stdout
@@ -143,7 +143,7 @@ def test_nginx_config_contains_mtls_bypass():
 def test_nginx_config_injects_api_key():
     """nginx must inject X-API-Key to backend for mTLS clients."""
     result = _ssh_cmd(
-        "grep -R 'proxy_set_header X-API-Key' /etc/nginx/sites-enabled/ssh.xloud.ru"
+        "grep -R 'proxy_set_header X-API-Key' /etc/nginx/sites-enabled/gateway.example.com"
     )
     assert result.returncode == 0
     assert "X-API-Key" in result.stdout

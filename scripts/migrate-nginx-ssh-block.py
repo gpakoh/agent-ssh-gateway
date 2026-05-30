@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""Remove the legacy ssh.xloud.ru server block from AI-Docker.conf.
+"""Remove a legacy nginx server block identified by a marker comment.
 
-The block is identified by the marker comment:
-    # --- Web SSH Gateway (ssh.xloud.ru) ---
-
-The script removes everything from that marker up to the next section
+The script removes everything from the marker up to the next section
 marker (# --- ...), creates a backup, and writes the cleaned file.
+
+Use environment variables to configure:
+  NGINX_CONFIG_PATH   Path to nginx config (default: /etc/nginx/sites-available/example.conf)
+  NGINX_BLOCK_MARKER  Marker string to identify the block start
 """
 
 from pathlib import Path
 from time import strftime
+import os
 import sys
 
-path = Path('/etc/nginx/sites-available/AI-Docker.conf')
-marker = '# --- Web SSH Gateway (ssh.xloud.ru) ---'
+path = Path(os.environ.get('NGINX_CONFIG_PATH', '/etc/nginx/sites-available/example.conf'))
+marker = os.environ.get('NGINX_BLOCK_MARKER', '# --- Web SSH Gateway ---')
 
 if not path.exists():
     print(f'{path} not found, nothing to migrate')
@@ -28,7 +30,7 @@ if start == -1:
 
 end = text.find('\n# --- ', start + len(marker))
 if end == -1:
-    print('Cannot locate end of legacy ssh.xloud.ru block')
+    print('Cannot locate end of legacy block')
     sys.exit(1)
 
 backup = path.with_suffix(path.suffix + '.bak-' + strftime('%Y%m%d%H%M%S'))
@@ -37,4 +39,4 @@ print(f'Backup saved to {backup}')
 
 new_text = text[:start].rstrip() + '\n\n' + text[end + 1:].lstrip()
 path.write_text(new_text)
-print(f'Removed old ssh.xloud.ru block from {path}')
+print(f'Removed old block from {path}')

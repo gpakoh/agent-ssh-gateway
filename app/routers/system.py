@@ -14,6 +14,7 @@ from app import state as _state
 from app.state import _err
 from app.config import settings
 from app.auth_middleware import is_agent_token_valid
+from app.security import validate_target_host
 from app.metrics import metrics
 from app.server_manager import ServerManager, ServerStatus
 from app.models import (
@@ -282,6 +283,15 @@ async def connect_server(server_id: str, req: ConnectServerRequest):
     if not server:
         raise HTTPException(status_code=404, detail=_err(404, f"Server {server_id} not found"))
     
+    try:
+        validate_target_host(
+            server.host,
+            settings.allowed_target_cidrs,
+            settings.denied_target_cidrs,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=_err(403, str(exc)))
+
     try:
         session_id = await _state.manager.create_session(
             host=server.host,

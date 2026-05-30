@@ -8,7 +8,7 @@ BACKUP_BASE="${BACKUP_DIR:-/var/backups/gitea}"
 RETENTION_DAYS="${RETENTION_DAYS:-14}"
 DATE="$(date +%Y%m%d%H%M%S)"
 BACKUP_PATH="${BACKUP_BASE}/${DATE}"
-GITEA_HOST="${GITEA_HOST:-192.168.1.103}"
+GITEA_HOST="${GITEA_HOST:-}"
 SSH_KEY="${SSH_KEY:-/root/.ssh/id_ed25519}"
 
 mkdir -p "${BACKUP_PATH}"

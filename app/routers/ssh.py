@@ -16,7 +16,7 @@ from app.config import settings
 from app.state import _err
 from app import state as _state
 from app.auth_middleware import ws_auth_check, is_agent_token_valid, verify_api_key
-from app.security import sanitize_command, rate_limit_mutation
+from app.security import sanitize_command, rate_limit_mutation, validate_target_host
 from app.ssh_manager import SSHManagerError, ConnectionError as SSHConnError, AuthenticationError, SessionNotFoundError, TimeoutError, ExecutionError
 from app.models import (
     ConnectRequest,
@@ -159,6 +159,20 @@ async def update_session_timeout(req: SessionTimeoutRequest):
 @rate_limit_mutation(10, "minute")
 async def ssh_connect(req: ConnectRequest, request: Request):
     """Create a new SSH session."""
+    try:
+        validate_target_host(
+            req.host,
+            settings.allowed_target_cidrs,
+            settings.denied_target_cidrs,
+        )
+    except ValueError as exc:
+        _state.audit_logger.log_security_event(
+            "BLOCKED_TARGET_HOST",
+            str(exc),
+            request.client.host if request.client else "unknown",
+        )
+        raise HTTPException(status_code=403, detail=_err(403, str(exc)))
+
     session_id = await _state.manager.create_session(
         host=req.host,
         port=req.port,
@@ -412,6 +426,15 @@ async def check_port(
     timeout: float = Query(5.0, ge=0.5, le=30.0, description="Connection timeout in seconds"),
 ):
     """Check if a remote TCP port is reachable. Requires API authentication."""
+    try:
+        validate_target_host(
+            host,
+            settings.allowed_target_cidrs,
+            settings.denied_target_cidrs,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=_err(403, str(exc)))
+
     start = time.monotonic()
     try:
         _reader, _writer = await asyncio.wait_for(

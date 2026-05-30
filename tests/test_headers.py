@@ -96,10 +96,10 @@ async def test_cors_origin_on_health():
     transport = ASGITransport(app=main_module.app)
     async with AsyncClient(transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}) as client:
         r = await client.options("/health", headers={
-            "Origin": "https://ssh.xloud.ru",
+            "Origin": "https://gateway.example.com",
             "Access-Control-Request-Method": "GET",
         })
-        assert r.headers.get("access-control-allow-origin") == "https://ssh.xloud.ru"
+        assert r.headers.get("access-control-allow-origin") == "https://gateway.example.com"
 
 
 @pytest.mark.asyncio
@@ -107,7 +107,7 @@ async def test_cors_allow_headers():
     transport = ASGITransport(app=main_module.app)
     async with AsyncClient(transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}) as client:
         r = await client.options("/health", headers={
-            "Origin": "https://ssh.xloud.ru",
+            "Origin": "https://gateway.example.com",
             "Access-Control-Request-Method": "GET",
         })
         ac_headers = r.headers.get("access-control-allow-headers", "")
@@ -121,7 +121,7 @@ async def test_cors_allow_methods():
     transport = ASGITransport(app=main_module.app)
     async with AsyncClient(transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}) as client:
         r = await client.options("/health", headers={
-            "Origin": "https://ssh.xloud.ru",
+            "Origin": "https://gateway.example.com",
             "Access-Control-Request-Method": "GET",
         })
         ac_methods = r.headers.get("access-control-allow-methods", "")
