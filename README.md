@@ -334,7 +334,7 @@ Before using this in production:
 * [ ] Configure allowed target networks.
 * [ ] Deny loopback, link-local and metadata IP ranges.
 * [ ] Use dedicated low-privilege SSH users.
-* [ ] Disable or restrict private key upload.
+* [x] Private key upload disabled by default (`SSH_KEY_UPLOAD_ENABLED=false`).
 * [ ] Enable audit logging.
 * [ ] Enable output redaction for secrets.
 * [ ] Limit command execution by role or profile.

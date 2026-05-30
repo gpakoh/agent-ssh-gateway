@@ -487,6 +487,12 @@ async def upload_ssh_key(
     file: UploadFile = File(...),
 ):
     """Upload an SSH private key. Stored in /app/ssh_keys/."""
+    if not settings.ssh_key_upload_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail=_err(403, "SSH key upload is disabled"),
+        )
+
     content = await file.read()
     if len(content) > 64 * 1024:
         raise HTTPException(status_code=400, detail=_err(400, "Key file too large (max 64KB)"))
