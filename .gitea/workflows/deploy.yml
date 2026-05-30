@@ -6,7 +6,7 @@ on:
 env:
   NGINX_HOST: ${{ vars.NGINX_HOST }}
   BACKEND_HOST: ${{ vars.BACKEND_HOST }}
-  BACKEND_DIR: ${{ vars.BACKEND_DIR || '/media/1TB/Python/web_ssh/web-ssh-gateway' }}
+  BACKEND_DIR: ${{ vars.BACKEND_DIR || '/media/1TB/Python/agent-ssh-gateway' }}
   DOMAIN: ${{ vars.DOMAIN || 'ssh.xloud.ru' }}
   AUTH_DOMAIN: ${{ vars.AUTH_DOMAIN || 'auth.xloud.ru' }}
   GATEWAY_IP: ${{ vars.GATEWAY_IP || '10.0.0.10' }}
@@ -200,10 +200,10 @@ jobs:
             test -s /tmp/web-ssh-api-key.env
             api_key="$(awk -F= '$1=="API_KEY" {print substr($0, 9); exit}' /tmp/web-ssh-api-key.env)"
             test -n "$api_key"
-            docker compose -p web-ssh-gateway --env-file /tmp/web-ssh-api-key.env -f docker/docker-compose.yml down --remove-orphans
-            docker compose -p web-ssh-gateway --env-file /tmp/web-ssh-api-key.env -f docker/docker-compose.yml up -d --build
+            docker compose -p agent-ssh-gateway --env-file /tmp/web-ssh-api-key.env -f docker/docker-compose.yml down --remove-orphans
+            docker compose -p agent-ssh-gateway --env-file /tmp/web-ssh-api-key.env -f docker/docker-compose.yml up -d --build
             rm -f /tmp/web-ssh-api-key.env
-            docker inspect web-ssh-gateway --format '{{range .Config.Env}}{{println .}}{{end}}' \
+            docker inspect agent-ssh-gateway --format '{{range .Config.Env}}{{println .}}{{end}}' \
               | awk -F= '$1=="API_KEY" {found=1; if (length($2) < 16) exit 42} END {if (!found) exit 43}'
             for i in 1 2 3 4 5; do
               curl -sf http://127.0.0.1:8085/health && break

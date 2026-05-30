@@ -1,4 +1,4 @@
-# Web SSH Gateway — Deployment Guide
+# agent-ssh-gateway — Deployment Guide
 
 > Real infrastructure details (domains, IPs, internal architecture) are kept
 > in a private repository. This file contains a generic deployment walkthrough.
@@ -6,7 +6,7 @@
 
 ## Overview
 
-Deploy Web SSH Gateway behind an Nginx reverse proxy with optional SSO/mTLS.
+Deploy agent-ssh-gateway behind an Nginx reverse proxy with optional SSO/mTLS.
 The gateway runs as a Docker container with Redis for session and token storage.
 
 ## Prerequisites
@@ -21,8 +21,8 @@ The gateway runs as a Docker container with Redis for session and token storage.
 
 ```bash
 # 1. Clone the repository
-git clone <repo-url> web-ssh-gateway
-cd web-ssh-gateway
+git clone <repo-url> agent-ssh-gateway
+cd agent-ssh-gateway
 
 # 2. Configure environment
 cp .env.example .env

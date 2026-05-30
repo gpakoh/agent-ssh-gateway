@@ -1,5 +1,5 @@
 /**
- * Web SSH Gateway — Frontend Application
+ * agent-ssh-gateway — Frontend Application
  * Vanilla JS, no frameworks
  */
 
@@ -789,7 +789,7 @@ function escapeHtml(text) {
 // ============================================
 
 updatePrompt();
-console.log('%cWeb SSH Gateway%c v1.0', 'color:#00ff88;font-weight:bold;', 'color:#888;');
+console.log('%cagent-ssh-gateway%c v1.0', 'color:#00ff88;font-weight:bold;', 'color:#888;');
 
 // ============================================
 // Monaco Editor Integration
