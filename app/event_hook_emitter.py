@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from app import state as _state
 from app.event_hook_security import sign_payload
+from app.security import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,7 @@ async def emit_event(
                             extra["output_truncated"] = truncated
 
         payload = _build_payload(event, session_id, **extra)
+        payload = redact_secrets(payload)
         payload_json = json.dumps(payload, default=str)
 
         # Sign Payload
