@@ -51,6 +51,14 @@ class Settings(BaseSettings):
         default="127.0.0.1/32,172.16.0.0/12",
         alias="TRUSTED_PROXY_CIDRS",
     )
+    allowed_target_cidrs: str = Field(
+        default="10.0.0.0/8,192.168.0.0/16,172.16.0.0/12",
+        alias="ALLOWED_TARGET_CIDRS",
+    )
+    denied_target_cidrs: str = Field(
+        default="127.0.0.0/8,::1/128,169.254.0.0/16,0.0.0.0/8,224.0.0.0/4",
+        alias="DENIED_TARGET_CIDRS",
+    )
     max_sessions_per_ip: int = Field(default=10, alias="MAX_SESSIONS_PER_IP")
     rate_limit_requests: int = Field(default=100, alias="RATE_LIMIT_REQUESTS")
     rate_limit_window: int = Field(default=60, alias="RATE_LIMIT_WINDOW")

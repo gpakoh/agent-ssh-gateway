@@ -11,6 +11,7 @@ from app.security import (
     SecretManager,
     IPFilter,
     SessionSecurity,
+    validate_target_host,
 )
 from cryptography.fernet import Fernet
 from app.search_replace import _is_safe_regex
@@ -260,3 +261,34 @@ def test_security_headers_defined():
 def test_security_headers_values_not_empty():
     for key, val in SECURITY_HEADERS.items():
         assert val, f"{key} has empty value"
+
+
+# ---------------------------------------------------------------------------
+# Target Host Policy (SSRF Protection)
+# ---------------------------------------------------------------------------
+
+def test_validate_target_host_allows_private_ip():
+    resolved = validate_target_host(
+        "10.0.0.5",
+        allowed_cidrs="10.0.0.0/8",
+        denied_cidrs="127.0.0.0/8,169.254.0.0/16",
+    )
+    assert resolved == ["10.0.0.5"]
+
+
+def test_validate_target_host_denies_loopback_even_if_allowed():
+    with pytest.raises(ValueError, match="denied IP"):
+        validate_target_host(
+            "127.0.0.1",
+            allowed_cidrs="0.0.0.0/0",
+            denied_cidrs="127.0.0.0/8",
+        )
+
+
+def test_validate_target_host_denies_non_allowed_public_ip():
+    with pytest.raises(ValueError, match="non-allowed IP"):
+        validate_target_host(
+            "8.8.8.8",
+            allowed_cidrs="10.0.0.0/8",
+            denied_cidrs="127.0.0.0/8",
+        )

@@ -1,6 +1,6 @@
 """mTLS e2e tests — verify mTLS bypass and Authelia fallback.
 
-These tests run via SSH on the nginx host (LXC EXAMPLE) and require:
+These tests run via SSH on the nginx host and require:
   - SSH access (BatchMode) to NGINX_HOST
   - Client cert at /etc/nginx/certs/client.{crt,key}
   - CA cert at /etc/nginx/certs/ca.crt

@@ -287,6 +287,79 @@ class IPFilter:
 
 
 # ---------------------------------------------------------------------------
+# Target Host Validation (SSRF Protection)
+# ---------------------------------------------------------------------------
+
+import ipaddress
+import socket
+
+
+def parse_networks(raw: str) -> list[ipaddress._BaseNetwork]:
+    """Parse comma-separated CIDR list into ipaddress networks."""
+    networks: list[ipaddress._BaseNetwork] = []
+
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        networks.append(ipaddress.ip_network(item, strict=False))
+
+    return networks
+
+
+def resolve_host_ips(host: str) -> list[ipaddress._BaseAddress]:
+    """Resolve hostname/IP into a list of IP addresses."""
+    try:
+        direct_ip = ipaddress.ip_address(host)
+        return [direct_ip]
+    except ValueError:
+        pass
+
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"Could not resolve target host: {host}") from exc
+
+    ips: list[ipaddress._BaseAddress] = []
+    seen: set[str] = set()
+
+    for info in infos:
+        ip_raw = info[4][0]
+        if ip_raw in seen:
+            continue
+        seen.add(ip_raw)
+        ips.append(ipaddress.ip_address(ip_raw))
+
+    if not ips:
+        raise ValueError(f"Could not resolve target host: {host}")
+
+    return ips
+
+
+def validate_target_host(
+    host: str,
+    allowed_cidrs: str,
+    denied_cidrs: str,
+) -> list[str]:
+    """Validate that target host resolves only to allowed IP ranges.
+
+    Returns resolved IPs as strings for audit/debug.
+    """
+    ips = resolve_host_ips(host)
+    allowed = parse_networks(allowed_cidrs)
+    denied = parse_networks(denied_cidrs)
+
+    for ip in ips:
+        if any(ip in network for network in denied):
+            raise ValueError(f"Target host {host} resolved to denied IP {ip}")
+
+        if allowed and not any(ip in network for network in allowed):
+            raise ValueError(f"Target host {host} resolved to non-allowed IP {ip}")
+
+    return [str(ip) for ip in ips]
+
+
+# ---------------------------------------------------------------------------
 # Security Headers
 # ---------------------------------------------------------------------------
 

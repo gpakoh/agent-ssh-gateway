@@ -1,182 +1,59 @@
 # Web SSH Gateway — Deployment Guide
 
+> Real infrastructure details (domains, IPs, internal architecture) are kept
+> in a private repository. This file contains a generic deployment walkthrough.
+> See `deploy.example.md` for a public-friendly version.
+
 ## Overview
-Deploy Web SSH Gateway on NOD infrastructure (LXC 103 Docker Host, proxied via LXC EXAMPLE Nginx).
 
-**Domain:** `gateway.example.com`
-**Docker IP:** `10.255.255.145` (docker_macvlan_example)
-**Target LXC:** LXC 103 (10.255.255.101) — Docker Host
-
----
+Deploy Web SSH Gateway behind an Nginx reverse proxy with optional SSO/mTLS.
+The gateway runs as a Docker container with Redis for session and token storage.
 
 ## Prerequisites
-- SSH access to LXC 103 (Debian 12, Docker installed)
-- SSH access to LXC EXAMPLE (Nginx proxy, certbot installed)
-- Authelia configured and running (10.0.0.106)
 
----
+- Docker host with Docker Compose
+- Nginx reverse proxy (separate host or same)
+- SSL certificate for your domain (certbot / ACME)
+- Optional: Authelia or another SSO provider
+- Optional: mTLS CA certificate for agent authentication
 
-## Step 1: Copy Project to LXC 103
+## Quick Start
 
 ```bash
-# From your workstation, copy project to LXC 103
-scp -r ./web-ssh-gateway/ root@10.255.255.101:/media/1TB/Docker/
-
-# Or on LXC 103 directly
-cd /media/1TB/Docker/
+# 1. Clone the repository
 git clone <repo-url> web-ssh-gateway
+cd web-ssh-gateway
+
+# 2. Configure environment
+cp .env.example .env
+# Edit .env with your secrets
+
+# 3. Configure target networks
+# See docker-compose.yml — create the required Docker networks
+# for your infrastructure.
+
+# 4. Build and start
+docker compose -f docker/docker-compose.yml up -d --build
+
+# 5. Verify
+curl http://localhost:8085/health
 ```
 
----
+## Nginx Configuration
 
-## Step 2: Build and Start Container
+See `nginx-gateway.conf.example` for SSL + mTLS configuration template.
+Real deploy configs use CI template injection with placeholders replaced.
 
-```bash
-ssh root@10.255.255.101
-cd /media/1TB/Docker/web-ssh-gateway
+## CI/CD
 
-# Build image
-docker compose -f docker/docker-compose.yml build
+The `.gitea/workflows/deploy.yml` workflow:
+1. Runs tests
+2. Replaces template placeholders (`__DOMAIN__`, `__BACKEND_IP__`, `__API_KEY__`)
+3. Copies nginx config to the proxy host
+4. Deploys the Docker stack to the backend host
 
-# Start
-docker compose -f docker/docker-compose.yml up -d
-
-# Verify it's running
-docker compose -f docker/docker-compose.yml ps
-docker compose -f docker/docker-compose.yml logs -f
-```
-
-The container should be accessible internally at `http://10.255.255.145:8080`.
-
----
-
-## Step 3: Configure Nginx on LXC EXAMPLE
-
-```bash
-ssh root@192.0.2.10
-
-# Copy nginx config
-cp /media/1TB/Docker/web-ssh-gateway/nginx-gateway.example.com.conf /etc/nginx/sites-available/gateway.example.com
-
-# Enable site
-ln -s /etc/nginx/sites-available/gateway.example.com /etc/nginx/sites-enabled/
-
-# Test config
-nginx -t
-
-# Reload
-systemctl reload nginx
-```
-
----
-
-## Step 4: Obtain SSL Certificate
-
-```bash
-ssh root@192.0.2.10
-
-# Add gateway.example.com to certbot
-certbot --nginx -d gateway.example.com
-
-# Or expand existing certificate
-certbot --expand -d example.com,www.example.com,gateway.example.com
-
-# Verify auto-renewal
-certbot renew --dry-run
-```
-
----
-
-## Step 5: Verify Deployment
-
-### 5.1 Check container health
-```bash
-# On LXC 103
-curl http://10.255.255.145:8080/health
-# Expected: {"status":"ok"}
-```
-
-### 5.2 Check from Nginx
-```bash
-# On LXC EXAMPLE
-curl -k https://localhost/health -H "Host: gateway.example.com"
-# Expected: {"status":"ok"}
-```
-
-### 5.3 Check from outside (Authelia will redirect to login)
-```bash
-curl -I https://gateway.example.com
-# Expected: 302 redirect to Authelia auth
-```
-
-### 5.4 Browser test
-Open `https://gateway.example.com` in browser:
-1. You should see Authelia login page
-2. After SSO auth — the Web SSH Gateway terminal
-3. Test connection to a local server (e.g., 10.255.255.101)
-
----
-
-## Step 6: Update / Redeploy
-
-```bash
-ssh root@10.255.255.101
-cd /media/1TB/Docker/web-ssh-gateway
-
-# Pull latest code
-git pull
-
-# Rebuild and restart
-docker compose -f docker/docker-compose.yml down
-docker compose -f docker/docker-compose.yml build --no-cache
-docker compose -f docker/docker-compose.yml up -d
-
-# Check logs
-docker compose -f docker/docker-compose.yml logs -f
-```
-
----
-
-## Troubleshooting
-
-| Problem | Solution |
-|---------|----------|
-| Container won't start | Check `docker-compose logs` for errors |
-| 502 Bad Gateway | Verify container IP (10.255.255.145) is reachable from LXC EXAMPLE: `ping 10.255.255.145` |
-| WebSocket disconnects | Check Nginx config has Upgrade/Connection headers for /api/ssh/execute/stream |
-| SSL error | Verify certbot generated certs for gateway.example.com: `certbot certificates` |
-| Authelia blocks | Check authelia-authrequest.conf is included; verify Authelia config allows gateway.example.com |
-| SSH connection fails | Target server must allow SSH from 10.255.255.145 (LXC 103 Docker network) |
-| Can't reach 10.255.255.145 | Verify docker_macvlan_example network exists: `docker network ls` and check subnet |
-
----
-
-## Architecture Reminder
-
-```
-[Browser] → DDOS-GUARD → Tenda (:443)
-    → Nginx LXC EXAMPLE (:443, SSL)
-        → Authelia auth check
-            → Proxy Pass → 10.255.255.145:8080 (Docker LXC 103)
-                → FastAPI + Paramiko → SSH Target Server
-```
-
----
-
-## Files Summary
-
-| File | Purpose |
-|------|---------|
-| `app/main.py` | FastAPI entry point |
-| `app/ssh_manager.py` | SSH session management (Paramiko) |
-| `app/models.py` | Pydantic request/response models |
-| `app/config.py` | Settings (env vars) |
-| `app/static/index.html` | Frontend page |
-| `app/static/style.css` | Terminal theme |
-| `app/static/app.js` | Frontend logic (API, WebSocket, terminal) |
-| `docker/Dockerfile` | Container image |
-| `docker/docker-compose.yml` | Docker Compose config (macvlan 10.255.255.145) |
-| `docker/requirements.txt` | Python dependencies |
-| `nginx-gateway.example.com.conf` | Nginx site config for LXC EXAMPLE |
-| `.dockerignore` | Build exclusions |
-| `deploy.md` | This file |
+Required Gitea variables:
+- `NGINX_HOST` — Nginx proxy host IP
+- `BACKEND_HOST` — Backend Docker host IP
+- `DOMAIN` — Your domain (e.g., `gateway.example.com`)
+- `API_KEY` — (as secret) API authentication key
