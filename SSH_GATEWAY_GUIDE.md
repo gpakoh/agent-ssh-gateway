@@ -24,7 +24,7 @@
 
 1. Сгенерируйте клиентский сертификат через CA на сервере (nginx host):
    ```bash
-   ssh root@192.168.1.100
+   ssh root@192.0.2.10
    cd /etc/nginx/certs
    openssl genpkey -algorithm ed25519 -out client.key
    openssl req -new -key client.key -out client.csr -subj "/CN=agent-name"
@@ -33,11 +33,11 @@
    rm client.csr
    ```
 2. Скопируйте `client.crt` и `client.key` на машину агента.
-3. При запросе к `https://ssh.xloud.ru` передавайте сертификат:
+3. При запросе к `https://gateway.example.com` передавайте сертификат:
    ```bash
-   curl --cert client.crt --key client.key https://ssh.xloud.ru/api/ssh/connect \
+   curl --cert client.crt --key client.key https://gateway.example.com/api/ssh/connect \
      -H "Content-Type: application/json" \
-     -d '{"host":"192.168.1.100","username":"root","password":"..."}'
+     -d '{"host":"192.0.2.10","username":"root","password":"..."}'
    ```
 4. Nginx проверяет сертификат (`ssl_verify_client optional`):
    - **SUCCESS** → прямой `proxy_pass` на бэкенд (Authelia не вызывается)
@@ -45,7 +45,7 @@
 
 ### 0.3 Authelia SSO (для людей через браузер)
 
-Стандартная форма логина на `auth.xloud.ru`. После входа — cookie-сессия для всех запросов.
+Стандартная форма логина на `auth.example.com`. После входа — cookie-сессия для всех запросов.
 
 ### 0.4 Agent token (short-lived, для агентов)
 
@@ -64,7 +64,7 @@
 
 ### 1.1 Доступ из локальной сети (без SSO)
 
-- Базовый URL: `http://192.168.1.103:8085`
+- Базовый URL: `http://192.0.2.20:8085`
 - `Authelia` не требуется.
 - Рекомендуемый режим для внутренних агентов и CI в LAN.
 
@@ -76,33 +76,33 @@
 
 ```bash
 curl --cert client.crt --key client.key \
-  https://ssh.xloud.ru/api/ssh/connect \
+  https://gateway.example.com/api/ssh/connect \
   -H "Content-Type: application/json" \
-  -d '{"host":"192.168.1.100","username":"root","password":"<SSH_PASS>"}'
+  -d '{"host":"192.0.2.10","username":"root","password":"<SSH_PASS>"}'
 ```
 
 ### 1.3 Доступ из интернета через Authelia SSO (для людей)
 
-- Базовый URL API: `https://ssh.xloud.ru`
+- Базовый URL API: `https://gateway.example.com`
 - Перед вызовами API нужна SSO-аутентификация в `Authelia` (cookie-сессия).
 - Используйте только свои учетные данные; не храните логины/пароли в документации и скриптах.
 
 ```bash
 # 1) Логин в Authelia (сохраняем cookie)
-curl -k -c cookies.txt -X POST https://auth.xloud.ru/api/firstfactor \
+curl -k -c cookies.txt -X POST https://auth.example.com/api/firstfactor \
   -H "Content-Type: application/json" \
   -d '{
     "username": "<YOUR_LOGIN>",
     "password": "<YOUR_PASSWORD>",
     "request_method": "GET",
-    "request_uri": "https://ssh.xloud.ru/"
+    "request_uri": "https://gateway.example.com/"
   }'
 
 # 2) Вызов API через ту же cookie-сессию
-curl -k -b cookies.txt -X POST https://ssh.xloud.ru/api/ssh/connect \
+curl -k -b cookies.txt -X POST https://gateway.example.com/api/ssh/connect \
   -H "Content-Type: application/json" \
   -d '{
-    "host": "192.168.1.100",
+    "host": "192.0.2.10",
     "port": 22,
     "username": "root",
     "password": "<SSH_PASSWORD>"
@@ -111,12 +111,12 @@ curl -k -b cookies.txt -X POST https://ssh.xloud.ru/api/ssh/connect \
 
 ### 1.4 Прямой доступ в LAN (без аутентификации, без mTLS)
 
-- Базовый URL: `http://192.168.1.103:8085`
+- Базовый URL: `http://192.0.2.20:8085`
 - `Authelia` не требуется. `API_AUTH_ENABLED` можно отключить только для отладки в изолированной среде.
 - Рекомендуемый режим для разработки и отладки.
 
 ```bash
-curl -X GET http://192.168.1.103:8085/health
+curl -X GET http://192.0.2.20:8085/health
 ```
 
 ## 2) Общие правила API
@@ -850,7 +850,7 @@ bash scripts/codex-smoke.sh [BASE_URL]
 Опционально (для полного цикла):
 
 ```bash
-export SSH_HOST="192.168.1.100"
+export SSH_HOST="192.0.2.10"
 export SSH_USER="root"
 export SSH_PASS="secret"
 bash scripts/codex-smoke.sh http://127.0.0.1:8085
