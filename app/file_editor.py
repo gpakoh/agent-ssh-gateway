@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Edit operations
+# Edit Operations
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -39,7 +39,7 @@ class FileEditor:
 
     async def read_file(self, session_id: str, path: str) -> str:
         """Read a remote file."""
-        # Check if path is a directory
+        # Check If Path Is A Directory
         check = await self._ssh.execute(
             session_id, f"test -d '{self._escape(path)}' && echo 'DIR' || echo 'FILE'", timeout=10
         )
@@ -59,7 +59,7 @@ class FileEditor:
         import base64
         import os
 
-        # Create parent directories
+        # Create Parent Directories
         parent_dir = os.path.dirname(path)
         if parent_dir:
             mkdir_result = await self._ssh.execute(
@@ -68,8 +68,14 @@ class FileEditor:
             if mkdir_result["exit_code"] != 0:
                 raise ExecutionError(f"Cannot create directory {parent_dir}: {mkdir_result['stderr']}")
 
-        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-        # Use heredoc to avoid command line length limits with echo
+        MAX_HEREDOC_SIZE = 500 * 1024
+        raw = content.encode("utf-8")
+        if len(raw) > MAX_HEREDOC_SIZE:
+            raise ExecutionError(
+                f"File too large for heredoc write: {len(raw)} bytes. Use upload endpoint."
+            )
+        encoded = base64.b64encode(raw).decode("ascii")
+        # Use Heredoc To Avoid Command Line Length Limits With Echo
         cmd = f"base64 -d << 'EOF_BASE64' > '{self._escape(path)}'\n{encoded}\nEOF_BASE64"
         result = await self._ssh.execute(session_id, cmd, timeout=30)
         if result["exit_code"] != 0:
@@ -86,15 +92,15 @@ class FileEditor:
         Returns:
             {"success": True, "path": str, "operations_applied": int}
         """
-        # Check if first operation is create (creates new file)
+        # Check If First Operation Is Create (creates New File)
         is_create = operations and operations[0].get("type") == "create"
         
         if is_create:
-            # Start with empty content for create operation
+            # Start With Empty Content For Create Operation
             content = ""
             original = ""
         else:
-            # Read current content
+            # Read Current Content
             content = await self.read_file(session_id, path)
             original = content
 
@@ -111,8 +117,18 @@ class FileEditor:
         if errors:
             raise ExecutionError("; ".join(errors))
 
-        # Write back only if changed or create
+        # Write Back Only If Changed Or Create
         if content != original or is_create:
+            if not is_create and original:
+                backup_result = await self._ssh.execute(
+                    session_id,
+                    f"cp '{self._escape(path)}' '{self._escape(path)}.bak'",
+                    timeout=10,
+                )
+                if backup_result["exit_code"] != 0:
+                    raise ExecutionError(
+                        f"Backup failed: {backup_result['stderr']}"
+                    )
             await self.write_file(session_id, path, content)
 
         return {
@@ -146,8 +162,8 @@ class FileEditor:
         new = op.get("new", "")
         count = op.get("count", 0)
 
-        if old is None:
-            raise ValueError("replace requires 'old'")
+        if not old:
+            raise ValueError("replace requires non-empty 'old'")
 
         if count == 0:
             return content.replace(old, new)
@@ -205,7 +221,7 @@ class FileEditor:
         return path.replace("'", "'\"'\"'")
 
     # ------------------------------------------------------------------
-    # Diff / Patch utilities
+    # Diff / Patch Utilities
     # ------------------------------------------------------------------
 
     async def diff_files(

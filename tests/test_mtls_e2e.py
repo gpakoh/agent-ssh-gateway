@@ -6,7 +6,7 @@ These tests run via SSH on the nginx host (LXC 100) and require:
   - CA cert at /etc/nginx/certs/ca.crt
 
 Usage:
-  NGINX_HOST=192.168.1.100 python -m pytest tests/test_mtls_e2e.py -v --timeout=30
+  NGINX_HOST=<nginx-host> python -m pytest tests/test_mtls_e2e.py -v --timeout=30
 """
 
 import json
@@ -16,7 +16,11 @@ import sys
 
 import pytest
 
-NGINX_HOST = os.environ.get("NGINX_HOST", "192.168.1.100")
+NGINX_HOST = os.environ.get("NGINX_HOST", "")
+
+if not NGINX_HOST:
+    pytest.skip("NGINX_HOST is not set — skipping mTLS e2e tests", allow_module_level=True)
+
 BASE_URL = "https://ssh.xloud.ru"
 CLIENT_CERT = "/etc/nginx/certs/client.crt"
 CLIENT_KEY = "/etc/nginx/certs/client.key"

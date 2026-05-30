@@ -11,6 +11,8 @@ ENV/
 .pytest_cache/
 .mypy_cache/
 *.egg-info/
+report-*.md
+test-coverage-plan.md
 
 # Moved to docker/ directory
 /docker-compose.yml

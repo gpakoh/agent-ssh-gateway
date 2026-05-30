@@ -18,20 +18,21 @@ from paramiko.ssh_exception import (
 
 from app.config import settings
 from app.known_hosts import HostKeyStore, KnownHostsPolicy, NullHostKeyStore
+from app.security import SecretManager
 
-# Lazy import to avoid circular dependency
+# Lazy Import To Avoid Circular Dependency
 _emit_event_fn = None
 def _emit(event: str, **kw):
     global _emit_event_fn
     if _emit_event_fn is None:
         from app.event_hook_emitter import emit_event as _emit_event_fn
-    asyncio.ensure_future(_emit_event_fn(event, **kw))
-
+    task = asyncio.ensure_future(_emit_event_fn(event, **kw))
+    task.add_done_callback(lambda t: t.exception() and logger.error("_emit failed: %s", t.exception()))
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Custom exceptions
+# Custom Exceptions
 # ---------------------------------------------------------------------------
 
 class SSHManagerError(Exception):
@@ -65,7 +66,7 @@ class ExecutionError(SSHManagerError):
 
 
 # ---------------------------------------------------------------------------
-# Session record
+# Session Record
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -119,12 +120,19 @@ class SSHSessionManager:
         self._cleanup_task: Optional[asyncio.Task] = None
         self._strict_host_key = settings.ssh_strict_host_key_checking
         self._host_key_store = host_key_store or NullHostKeyStore()
+        try:
+            self._secret_manager = SecretManager(settings.encryption_key) if settings.encryption_key else None
+        except Exception:
+            self._secret_manager = None
+        if self._secret_manager is None:
+            logger.warning("No Encryption Key Configured — SSH Credentials Stored In Plaintext In Memory")
+            self._secret_manager = None
 
     async def start_cleanup_task(self) -> None:
         """Start the background cleanup coroutine."""
         if self._cleanup_task is None or self._cleanup_task.done():
             self._cleanup_task = asyncio.create_task(self._cleanup_loop())
-            logger.info("Session cleanup task started")
+            logger.info("Session Cleanup Task Started")
 
     async def stop_cleanup_task(self) -> None:
         """Stop the background cleanup coroutine."""
@@ -134,7 +142,7 @@ class SSHSessionManager:
                 await self._cleanup_task
             except asyncio.CancelledError:
                 pass
-            logger.info("Session cleanup task stopped")
+            logger.info("Session Cleanup Task Stopped")
 
     async def _cleanup_loop(self) -> None:
         """Periodically remove stale sessions."""
@@ -149,19 +157,26 @@ class SSHSessionManager:
 
     async def cleanup_stale_sessions(self) -> int:
         """Close sessions that have been idle longer than timeout. Returns count of closed."""
-        stale_ids: list[str] = []
+        stale: list[SessionRecord] = []
         now = time.time()
 
         async with self._lock:
             for sid, record in list(self._sessions.items()):
                 if now - record.last_activity > self._session_timeout:
-                    stale_ids.append(sid)
+                    del self._sessions[sid]
+                    stale.append(record)
 
-        for sid in stale_ids:
-            logger.info("Closing stale session %s (idle %.0fs)", sid, self._sessions.get(sid, SessionRecord("", None, "", 0, "")).idle_time)
-            await self.disconnect(sid)
+        for record in stale:
+            logger.info("Closing stale session %s (idle %.0fs)", record.session_id, record.idle_time)
+            record.password = None
+            record.private_key = None
+            record.key_passphrase = None
+            try:
+                record.client.close()
+            except Exception as exc:
+                logger.warning("Error closing stale session %s: %s", record.session_id, exc)
 
-        return len(stale_ids)
+        return len(stale)
 
     async def close_all(self) -> None:
         """Close all active sessions."""
@@ -179,10 +194,20 @@ class SSHSessionManager:
             return paramiko.RejectPolicy()
         if not isinstance(self._host_key_store, NullHostKeyStore):
             return KnownHostsPolicy(self._host_key_store, port=port)
-        return paramiko.AutoAddPolicy()
+        return paramiko.RejectPolicy()
+
+    def _encrypt_cred(self, value: Optional[str]) -> Optional[str]:
+        if value is None or self._secret_manager is None:
+            return value
+        return self._secret_manager.encrypt(value)
+
+    def _decrypt_cred(self, value: Optional[str]) -> Optional[str]:
+        if value is None or self._secret_manager is None:
+            return value
+        return self._secret_manager.decrypt(value)
 
     # ------------------------------------------------------------------
-    # Create session
+    # Create Session
     # ------------------------------------------------------------------
 
     async def create_session(
@@ -225,12 +250,12 @@ class SSHSessionManager:
             client.close()
             raise ConnectionError(f"Could not connect to {host}:{port}: {exc}")
 
-        # Увеличить размер окна SSH для больших файлов (50KB+)
+        # Увеличить размер окна ssh для потоковой передачи
         transport = client.get_transport()
         if transport:
-            transport.window_size = 2**32
-            transport.packetizer.REKEY_BYTES = 2**40
-            transport.packetizer.REKEY_PACKETS = 2**40
+            transport.window_size = 2**20
+            transport.packetizer.REKEY_BYTES = 2**30
+            transport.packetizer.REKEY_PACKETS = 2**30
 
         session_id = str(uuid.uuid4())
         record = SessionRecord(
@@ -239,9 +264,9 @@ class SSHSessionManager:
             host=host,
             port=port,
             username=username,
-            password=password,
-            private_key=private_key,
-            key_passphrase=key_passphrase,
+            password=self._encrypt_cred(password),
+            private_key=self._encrypt_cred(private_key),
+            key_passphrase=self._encrypt_cred(key_passphrase),
         )
 
         async with self._lock:
@@ -273,19 +298,22 @@ class SSHSessionManager:
         logger.info("Attempting to reconnect session %s (%s@%s:%d)", 
                    session_id, record.username, record.host, record.port)
         
-        # Close old client if exists
+        # Close Old Client If Exists
         try:
             record.client.close()
         except Exception:
             pass
         
-        # Create new client
+        # Create New Client
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(self._get_host_key_policy(port=record.port))
         
         pkey = None
-        if record.private_key:
-            pkey = await self._load_private_key(record.private_key, record.key_passphrase)
+        pk_decrypted = self._decrypt_cred(record.private_key)
+        pp_decrypted = self._decrypt_cred(record.key_passphrase)
+        pw_decrypted = self._decrypt_cred(record.password)
+        if pk_decrypted:
+            pkey = await self._load_private_key(pk_decrypted, pp_decrypted)
         
         try:
             loop = asyncio.get_event_loop()
@@ -295,7 +323,7 @@ class SSHSessionManager:
                     hostname=record.host,
                     port=record.port,
                     username=record.username,
-                    password=record.password,
+                    password=pw_decrypted,
                     pkey=pkey,
                     timeout=30,
                     banner_timeout=30,
@@ -304,14 +332,14 @@ class SSHSessionManager:
                 ),
             )
             
-            # Configure window size for large files
+            # Configure Window Size
             transport = client.get_transport()
             if transport:
-                transport.window_size = 2**32
-                transport.packetizer.REKEY_BYTES = 2**40
-                transport.packetizer.REKEY_PACKETS = 2**40
+                transport.window_size = 2**20
+                transport.packetizer.REKEY_BYTES = 2**30
+                transport.packetizer.REKEY_PACKETS = 2**30
             
-            # Update record with new client
+            # Update Record With New Client
             record.client = client
             record.reconnect_count += 1
             record.last_reconnect_reason = "timeout"  # или можно определить точнее
@@ -368,7 +396,7 @@ class SSHSessionManager:
         if not record:
             raise SessionNotFoundError(f"Session {session_id} not found")
 
-        # Auto-reconnect if needed
+        # Auto-reconnect If Needed
         if not record.is_connected():
             logger.warning("Session %s disconnected, attempting auto-reconnect", session_id)
             reconnected = await self.reconnect(session_id)
@@ -395,10 +423,10 @@ class SSHSessionManager:
                 None,
                 lambda: client.exec_command(command, timeout=timeout),
             )
-            # Close stdin immediately since we don't need it
+            # Close Stdin Immediately Since We Don't Need It
             stdin.channel.shutdown_write()
 
-            # Read stdout and stderr with timeout
+            # Read Stdout And Stderr With Timeout
             out_data = await asyncio.wait_for(
                 loop.run_in_executor(None, stdout.read),
                 timeout=timeout,
@@ -411,7 +439,7 @@ class SSHSessionManager:
         except asyncio.TimeoutError:
             raise TimeoutError(f"Command timed out after {timeout}s: {command}")
         except SSHException as exc:
-            # Try to reconnect on SSH errors
+            # Try To Reconnect On SSH Errors
             logger.warning("SSH error during execution for session %s: %s", session_id, exc)
             raise ExecutionError(f"SSH error during execution: {exc}")
         except Exception as exc:
@@ -444,11 +472,15 @@ class SSHSessionManager:
         }
 
     # ------------------------------------------------------------------
-    # Streaming execute (WebSocket)
+    # Streaming Execute (websocket)
     # ------------------------------------------------------------------
 
-    async def execute_stream(self, session_id: str, command: str):
-        """Execute a command and yield (type, data) tuples for WebSocket streaming."""
+    async def execute_stream(self, session_id: str, command: str, timeout: int = 600,
+                             cancel_event: Optional[asyncio.Event] = None):
+        """Execute a command and yield (type, data) tuples for WebSocket streaming.
+
+        If cancel_event is provided and set, closes the channel and stops streaming.
+        """
         async with self._lock:
             record = self._sessions.get(session_id)
         if not record:
@@ -477,9 +509,16 @@ class SSHSessionManager:
 
             out_channel = stdout.channel
             err_channel = stderr.channel
+            deadline = time.monotonic() + timeout
 
-            # Stream output in chunks
+            # Stream Output In Chunks
             while not out_channel.exit_status_ready():
+                if cancel_event and cancel_event.is_set():
+                    out_channel.close()
+                    yield ("exit", "-1")
+                    return
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"Command execution timed out after {timeout}s")
                 record.touch()
 
                 if out_channel.recv_ready():
@@ -492,7 +531,7 @@ class SSHSessionManager:
 
                 await asyncio.sleep(0.05)
 
-            # Drain remaining output
+            # Drain Remaining Output
             while out_channel.recv_ready():
                 data = out_channel.recv(4096).decode("utf-8", errors="replace")
                 yield ("stdout", data)
@@ -537,6 +576,26 @@ class SSHSessionManager:
             record.touch()
 
     # ------------------------------------------------------------------
+    # PTY Channel
+    # ------------------------------------------------------------------
+
+    async def create_pty_channel(self, session_id: str, term: str, rows: int, cols: int):
+        async with self._lock:
+            record = self._sessions.get(session_id)
+        if not record:
+            raise SessionNotFoundError(f"Session {session_id} not found")
+        if not record.is_connected():
+            raise ConnectionError(f"Session {session_id} is not connected")
+        transport = record.client.get_transport()
+        if transport is None:
+            raise ConnectionError(f"Session {session_id} has no transport")
+        channel = transport.open_session()
+        channel.get_pty(term=term, width=cols, height=rows)
+        channel.invoke_shell()
+        record.touch()
+        return channel
+
+    # ------------------------------------------------------------------
     # Disconnect
     # ------------------------------------------------------------------
 
@@ -547,6 +606,11 @@ class SSHSessionManager:
 
         if not record:
             raise SessionNotFoundError(f"Session {session_id} not found")
+
+        # Clear Credentials From Memory
+        record.password = None
+        record.private_key = None
+        record.key_passphrase = None
 
         host, port, username = record.host, record.port, record.username
 
@@ -566,7 +630,7 @@ class SSHSessionManager:
         )
 
     # ------------------------------------------------------------------
-    # List sessions
+    # List Sessions
     # ------------------------------------------------------------------
 
     async def get_session(self, session_id: str) -> Optional[SessionRecord]:

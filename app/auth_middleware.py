@@ -11,7 +11,7 @@ from fastapi import Request, WebSocket, HTTPException
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# CIDR helpers
+# CIDR Helpers
 # ---------------------------------------------------------------------------
 
 
@@ -32,7 +32,11 @@ def get_client_ip(request: Request, trusted_proxy_networks: list) -> str:
 
     forwarded = request.headers.get("X-Forwarded-For", "")
     if forwarded and _is_trusted(client_host, trusted_proxy_networks):
-        return forwarded.split(",")[0].strip()
+        ips = [ip.strip() for ip in forwarded.split(",")]
+        for ip in reversed(ips):
+            if not _is_trusted(ip, trusted_proxy_networks):
+                return ip
+        return ips[-1]
 
     return client_host
 
@@ -53,8 +57,12 @@ def is_ip_allowed(ip_str: str, allowed_networks: list) -> bool:
     return any(addr in net for net in allowed_networks)
 
 
-def is_agent_token_valid(settings, provided: str) -> bool:
-    if not provided or not settings.agent_token:
+async def is_agent_token_valid(settings, provided: str, token_store=None) -> bool:
+    if not provided:
+        return False
+    if token_store is not None and token_store.connected:
+        return await token_store.validate_token(provided)
+    if not settings.agent_token:
         return False
     expires_at = getattr(settings, "agent_token_expires_at", None)
     if expires_at is not None:
@@ -65,8 +73,8 @@ def is_agent_token_valid(settings, provided: str) -> bool:
     return secrets.compare_digest(provided, settings.agent_token)
 
 
-def verify_api_key(
-    request: Request, expected_key: str, extra_key: str = "", settings=None
+async def verify_api_key(
+    request: Request, expected_key: str, extra_key: str = "", settings=None, token_store=None
 ) -> bool:
     provided = request.headers.get("X-API-Key", "")
     if not provided:
@@ -78,17 +86,17 @@ def verify_api_key(
     if secrets.compare_digest(provided, expected_key):
         return True
     if settings is not None:
-        return is_agent_token_valid(settings, provided)
+        return await is_agent_token_valid(settings, provided, token_store)
     if extra_key and secrets.compare_digest(provided, extra_key):
         return True
     return False
 
 
 # ---------------------------------------------------------------------------
-# Always‑public paths (even when auth is enabled)
+# Always‑public Paths (even When Auth Is Enabled)
 # ---------------------------------------------------------------------------
 
-ALWAYS_PUBLIC = frozenset({"/health", "/api/capabilities", "/api/ssh/check-port"})
+ALWAYS_PUBLIC = frozenset({"/health", "/api/capabilities"})
 
 
 def _normalise_path(path: str) -> str:
@@ -96,27 +104,27 @@ def _normalise_path(path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Main auth check
+# Main Auth Check
 # ---------------------------------------------------------------------------
 
 
-async def auth_check(request: Request, settings) -> Optional[HTTPException]:
+async def auth_check(request: Request, settings, token_store=None) -> Optional[HTTPException]:
     if request.method == "OPTIONS":
         return None
 
     path = _normalise_path(request.url.path)
 
-    # Auth disabled — everything is public
+    # Auth Disabled — Everything Is Public
     if not settings.api_auth_enabled:
         return None
 
-    # Always‑public health endpoint
+    # Always‑public Health Endpoint
     if request.method == "GET" and path in ALWAYS_PUBLIC:
         return None
 
-    # Fail-closed: auth enabled but no key configured
+    # Fail-closed: Auth Enabled But No Key Configured
     if not settings.api_key:
-        logger.error("API_AUTH_ENABLED=true but API_KEY is not configured")
+        logger.error("Api_auth_enabled=true But API_KEY Is Not Configured")
         return HTTPException(
             status_code=503,
             detail={
@@ -128,7 +136,7 @@ async def auth_check(request: Request, settings) -> Optional[HTTPException]:
             },
         )
 
-    # IP allowlist
+    # IP Allowlist
     allowed_nets = parse_cidrs(settings.allowed_client_cidrs)
     trusted_nets = parse_cidrs(settings.trusted_proxy_cidrs)
 
@@ -178,8 +186,8 @@ async def auth_check(request: Request, settings) -> Optional[HTTPException]:
             },
         )
 
-    # API key check (also accept agent_token)
-    if not verify_api_key(request, settings.api_key, settings.agent_token, settings):
+    # API Key Check (also Accept Agent_token)
+    if not await verify_api_key(request, settings.api_key, settings.agent_token, settings, token_store):
         return HTTPException(
             status_code=401,
             detail={
@@ -195,13 +203,13 @@ async def auth_check(request: Request, settings) -> Optional[HTTPException]:
 
 
 # ---------------------------------------------------------------------------
-# WebSocket auth check
+# Websocket Auth Check
 # ---------------------------------------------------------------------------
 
 CLOSE_POLICY_VIOLATION = 1008
 
 
-async def ws_auth_check(websocket: WebSocket, settings) -> tuple[int, str] | None:
+async def ws_auth_check(websocket: WebSocket, settings, token_store=None) -> tuple[int, str] | None:
     """WebSocket auth guard — call before accept().
 
     Returns None if allowed, or a (close_code, reason) tuple to reject.
@@ -211,7 +219,7 @@ async def ws_auth_check(websocket: WebSocket, settings) -> tuple[int, str] | Non
         return None
 
     if not settings.api_key:
-        logger.error("API_AUTH_ENABLED=true but API_KEY is not configured")
+        logger.error("Api_auth_enabled=true But API_KEY Is Not Configured")
         return (CLOSE_POLICY_VIOLATION, "Server configuration error")
 
     allowed_nets = parse_cidrs(settings.allowed_client_cidrs)
@@ -233,7 +241,13 @@ async def ws_auth_check(websocket: WebSocket, settings) -> tuple[int, str] | Non
     client_host = websocket.client.host if websocket.client else "127.0.0.1"
     forwarded = websocket.headers.get("X-Forwarded-For", "")
     if forwarded and _is_trusted(client_host, trusted_nets):
-        client_ip = forwarded.split(",")[0].strip()
+        ips = [ip.strip() for ip in forwarded.split(",")]
+        for ip in reversed(ips):
+            if not _is_trusted(ip, trusted_nets):
+                client_ip = ip
+                break
+        else:
+            client_ip = ips[-1]
     else:
         client_ip = client_host
 
@@ -250,6 +264,6 @@ async def ws_auth_check(websocket: WebSocket, settings) -> tuple[int, str] | Non
         return (CLOSE_POLICY_VIOLATION, "Invalid or missing API key")
     if secrets.compare_digest(provided, settings.api_key):
         return None
-    if is_agent_token_valid(settings, provided):
+    if await is_agent_token_valid(settings, provided, token_store):
         return None
     return (CLOSE_POLICY_VIOLATION, "Invalid or missing API key")

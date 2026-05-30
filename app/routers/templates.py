@@ -11,7 +11,7 @@ from app.security import sanitize_command
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["templates"])
 
 TEMPLATES: list[CommandTemplate] = [
     CommandTemplate(

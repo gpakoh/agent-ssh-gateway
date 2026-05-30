@@ -12,7 +12,7 @@ from app.security import sanitize_command
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["logs"])
 
 
 def _check_session(session_id: str) -> None:
@@ -20,7 +20,7 @@ def _check_session(session_id: str) -> None:
         raise HTTPException(status_code=404, detail=_err(404, f"Session not found: {session_id}"))
 
 
-@router.get("/api/logs/journal", tags=["logs"])
+@router.get("/api/logs/journal")
 async def journal_logs(
     session_id: str = Query(..., description="Active SSH session ID"),
     unit: str = Query(None, description="systemd unit name (e.g. nginx, sshd)"),
@@ -49,7 +49,7 @@ async def journal_logs(
     return result
 
 
-@router.get("/api/logs/docker", tags=["logs"])
+@router.get("/api/logs/docker")
 async def docker_logs(
     session_id: str = Query(..., description="Active SSH session ID"),
     container: str = Query(..., description="Container name or ID"),
