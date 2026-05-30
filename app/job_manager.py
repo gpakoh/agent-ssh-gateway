@@ -16,9 +16,11 @@ from app.ssh_manager import (
 
 logger = logging.getLogger(__name__)
 
+MAX_STDOUT_SIZE = 10 * 1024 * 1024  # 10 MB per job
+
 
 # ---------------------------------------------------------------------------
-# Job record
+# Job Record
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -38,6 +40,9 @@ class JobRecord:
     error_message: Optional[str] = None
     progress: dict = field(default_factory=dict)
     _listeners: list = field(default_factory=list, repr=False)
+    _listener_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    completed_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    cancel_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     def touch(self) -> None:
         """Update last activity timestamp (for progress)."""
@@ -80,14 +85,15 @@ class JobRecord:
 
     async def notify_listeners(self, event: dict) -> None:
         """Notify all SSE listeners."""
-        dead = []
-        for queue in self._listeners:
-            try:
-                await queue.put(event)
-            except Exception:
-                dead.append(queue)
-        for q in dead:
-            self.remove_listener(q)
+        async with self._listener_lock:
+            dead = []
+            for queue in self._listeners:
+                try:
+                    await queue.put(event)
+                except Exception:
+                    dead.append(queue)
+            for q in dead:
+                self._listeners.remove(q)
 
 
 # ---------------------------------------------------------------------------
@@ -109,12 +115,13 @@ class JobManager:
         self._max_jobs = max_jobs
         self._job_timeout = job_timeout
         self._cleanup_task: Optional[asyncio.Task] = None
+        self._job_tasks: dict[str, asyncio.Task] = {}
 
     async def start_cleanup_task(self) -> None:
         """Start background cleanup of old jobs."""
         if self._cleanup_task is None or self._cleanup_task.done():
             self._cleanup_task = asyncio.create_task(self._cleanup_loop())
-            logger.info("Job cleanup task started")
+            logger.info("Job Cleanup Task Started")
 
     async def stop_cleanup_task(self) -> None:
         """Stop background cleanup."""
@@ -124,7 +131,7 @@ class JobManager:
                 await self._cleanup_task
             except asyncio.CancelledError:
                 pass
-            logger.info("Job cleanup task stopped")
+            logger.info("Job Cleanup Task Stopped")
 
     async def _cleanup_loop(self) -> None:
         """Remove completed jobs older than 1 hour."""
@@ -154,8 +161,25 @@ class JobManager:
 
         return len(to_remove)
 
+    async def force_cleanup(self) -> int:
+        """Cancel all active tasks and remove all jobs."""
+        async with self._lock:
+            for job in self._jobs.values():
+                job.cancel_event.set()
+                job.completed_event.set()
+            tasks = list(self._job_tasks.values())
+            self._job_tasks.clear()
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            count = len(self._jobs)
+            self._jobs.clear()
+            logger.warning("Force-cleaned %d jobs (%d tasks cancelled)", count, len(tasks))
+            return count
+
     # ------------------------------------------------------------------
-    # Create and run job
+    # Create And Run Job
     # ------------------------------------------------------------------
 
     async def create_job(self, session_id: str, command: str) -> str:
@@ -172,8 +196,15 @@ class JobManager:
             )
             self._jobs[job_id] = job
 
-        # Start the job in background
-        asyncio.create_task(self._run_job(job_id))
+        # Start The Job In Background
+        task = asyncio.create_task(self._run_job(job_id))
+        task.add_done_callback(
+            lambda t: t.exception() and logger.error(
+                "Job %s crashed: %s", job_id, t.exception()
+            )
+        )
+        self._job_tasks[job_id] = task
+        task.add_done_callback(lambda _: self._job_tasks.pop(job_id, None))
         return job_id
 
     async def _run_job(self, job_id: str) -> None:
@@ -192,20 +223,28 @@ class JobManager:
         })
 
         try:
-            # Use streaming execution for real-time output
+            # Use Streaming Execution For Real-time Output
             async for msg_type, msg_data in self._ssh_manager.execute_stream(
-                job.session_id, job.command
+                job.session_id, job.command, cancel_event=job.cancel_event
             ):
                 job.touch()
 
                 if msg_type == "stdout":
-                    job.stdout += msg_data
+                    remaining = MAX_STDOUT_SIZE - len(job.stdout)
+                    if remaining > 0:
+                        job.stdout += msg_data[:remaining]
+                        if remaining < len(msg_data) and "[truncated]" not in job.stdout:
+                            job.stdout += "\n... [output truncated, exceeded 10MB]"
                     await job.notify_listeners({
                         "type": "stdout",
                         "data": msg_data,
                     })
                 elif msg_type == "stderr":
-                    job.stderr += msg_data
+                    remaining = MAX_STDOUT_SIZE - len(job.stderr)
+                    if remaining > 0:
+                        job.stderr += msg_data[:remaining]
+                        if remaining < len(msg_data) and "[truncated]" not in job.stderr:
+                            job.stderr += "\n... [output truncated, exceeded 10MB]"
                     await job.notify_listeners({
                         "type": "stderr",
                         "data": msg_data,
@@ -237,6 +276,7 @@ class JobManager:
             })
         finally:
             job.completed_at = time.time()
+            job.completed_event.set()
             await job.notify_listeners({
                 "type": "status",
                 "status": job.status,
@@ -245,7 +285,7 @@ class JobManager:
             })
 
     # ------------------------------------------------------------------
-    # Get job
+    # Get Job
     # ------------------------------------------------------------------
 
     async def get_job(self, job_id: str) -> Optional[JobRecord]:
@@ -273,7 +313,7 @@ class JobManager:
         return job.to_dict()
 
     # ------------------------------------------------------------------
-    # List jobs
+    # List Jobs
     # ------------------------------------------------------------------
 
     async def list_jobs(
@@ -293,7 +333,7 @@ class JobManager:
         return jobs
 
     # ------------------------------------------------------------------
-    # Cancel job
+    # Cancel Job
     # ------------------------------------------------------------------
 
     async def cancel_job(self, job_id: str) -> None:
@@ -306,7 +346,9 @@ class JobManager:
             raise ExecutionError(f"Cannot cancel job with status: {job.status}")
 
         job.status = "cancelled"
+        job.cancel_event.set()
         job.completed_at = time.time()
+        job.completed_event.set()
         await job.notify_listeners({
             "type": "status",
             "status": "cancelled",
@@ -316,11 +358,12 @@ class JobManager:
         """Wait for all active (pending/running) jobs to complete."""
         while True:
             async with self._lock:
-                active = [
-                    job for job in self._jobs.values()
+                active_events = [
+                    job.completed_event
+                    for job in self._jobs.values()
                     if job.status in ("pending", "running")
                 ]
-            if not active:
-                break
-            logger.info("Waiting for %d active jobs to complete...", len(active))
-            await asyncio.sleep(0.5)
+            if not active_events:
+                return
+            logger.info("Waiting for %d active jobs to complete...", len(active_events))
+            await asyncio.wait(active_events, return_when=asyncio.FIRST_COMPLETED)

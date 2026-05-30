@@ -119,12 +119,14 @@ curl -X POST -H "X-API-Key: $API_KEY" \
 ## Security
 
 - **Encryption**: credentials encrypted with Fernet (symmetric, key required at startup)
-- **Host key verification**: configurable — `RejectPolicy` (strict) or known_hosts store (warn + auto-update)
+- **Host key verification**: configurable — `RejectPolicy` (strict) when `SSH_STRICT_HOST_KEY_CHECKING=true`
 - **mTLS**: nginx verifies client certificates before requests reach the gateway
 - **Read-only filesystem** in production container
 - **No-new-privileges**, all capabilities dropped
 - **Rate limiting**: per-IP, CIDR allowlist
 - **Command guardrails**: blocklist-based protection against dangerous commands
+  ⚠️ This is a **blocklist**, not a whitelist — it detects known dangerous patterns but does not guarantee safety. Not a security boundary.
+- **Alembic**: tables auto-created via `Base.metadata.create_all` with a startup warning. Use Alembic for production schema migrations.
 
 See [SECURITY.md](SECURITY.md) for threat model and disclosure process.
 
@@ -143,7 +145,7 @@ Environment configuration via `.env` file:
 | `API_KEY` | — | Required. Auth key for API access |
 | `ENCRYPTION_KEY` | — | Required if `PERSISTENT_SESSIONS_ENABLED=true` |
 | `KNOWN_HOSTS_STORE` | `""` | `file`, `postgres`, or empty (auto-add) |
-| `SSH_STRICT_HOST_KEY_CHECKING` | `false` | Reject unknown host keys when `true` |
+| `SSH_STRICT_HOST_KEY_CHECKING` | `true` | Reject unknown host keys when `true` |
 
 ## Project status
 

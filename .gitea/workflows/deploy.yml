@@ -4,8 +4,8 @@ on:
     branches: [master]
 
 env:
-  NGINX_HOST: ${{ vars.NGINX_HOST || '192.0.2.10' }}
-  BACKEND_HOST: ${{ vars.BACKEND_HOST || '192.168.1.103' }}
+  NGINX_HOST: ${{ vars.NGINX_HOST }}
+  BACKEND_HOST: ${{ vars.BACKEND_HOST }}
   BACKEND_DIR: ${{ vars.BACKEND_DIR || '/media/1TB/Python/web_ssh/web-ssh-gateway' }}
 
 jobs:
@@ -31,7 +31,10 @@ jobs:
           python3 -m venv .venv
           . .venv/bin/activate
           python -m pip install --upgrade pip >/dev/null
-          python -m pip install -q -r docker/requirements.txt pytest pytest-timeout httpx
+          python -m pip install -q -r docker/requirements.txt pytest pytest-timeout httpx mypy
+          echo "::group::mypy type check"
+          python -m mypy app/ --no-error-summary || echo "mypy: pre-existing errors (non-blocking)"
+          echo "::endgroup::"
           python -m pytest tests/ -q --timeout=30 --ignore=tests/test_mtls_e2e.py
 
   deploy-nginx:
@@ -42,6 +45,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Validate deploy host variables
+        run: |
+          test -n "$NGINX_HOST" || { echo "NGINX_HOST is not set"; exit 1; }
       - name: Deploy nginx config
         shell: bash
         env:
@@ -139,6 +145,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Validate deploy host variables
+        run: |
+          test -n "$BACKEND_HOST" || { echo "BACKEND_HOST is not set"; exit 1; }
       - name: Deploy backend
         shell: bash
         env:

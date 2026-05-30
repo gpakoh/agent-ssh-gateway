@@ -25,15 +25,21 @@ class Settings(BaseSettings):
     ssh_default_port: int = 22
     ssh_default_timeout: int = 120  # seconds
     ssh_strict_host_key_checking: bool = Field(
-        default=False, alias="SSH_STRICT_HOST_KEY_CHECKING"
+        default=True, alias="SSH_STRICT_HOST_KEY_CHECKING"
     )
     known_hosts_store: str = Field(default="", alias="KNOWN_HOSTS_STORE")
     known_hosts_file: str = Field(default="/app/known_hosts", alias="KNOWN_HOSTS_FILE")
 
+    server_default_configs: str = Field(
+        default="{}",
+        alias="SERVER_DEFAULT_CONFIGS",
+        description="JSON object with default server connection presets",
+    )
+
     # Security
     encryption_key: str = Field(default="", alias="ENCRYPTION_KEY")
     api_key: str = Field(default="", alias="API_KEY")
-    api_auth_enabled: bool = Field(default=False, alias="API_AUTH_ENABLED")
+    api_auth_enabled: bool = Field(default=True, alias="API_AUTH_ENABLED")
     agent_token: str = Field(default="", alias="AGENT_TOKEN")
     agent_token_ttl: int = Field(default=3600, alias="AGENT_TOKEN_TTL")
     agent_token_expires_at: datetime | None = None
@@ -61,7 +67,7 @@ class Settings(BaseSettings):
         default=False, alias="PERSISTENT_SESSIONS_ENABLED"
     )
 
-    event_hooks_enabled: bool = Field(default=True, alias="EVENT_HOOKS_ENABLED")
+    event_hooks_enabled: bool = Field(default=False, alias="EVENT_HOOKS_ENABLED")
     event_hooks_max: int = Field(default=50, alias="EVENT_HOOKS_MAX")
     event_hooks_timeout_connect: float = Field(default=5.0, alias="EVENT_HOOKS_TIMEOUT_CONNECT")
     event_hooks_timeout_read: float = Field(default=10.0, alias="EVENT_HOOKS_TIMEOUT_READ")
