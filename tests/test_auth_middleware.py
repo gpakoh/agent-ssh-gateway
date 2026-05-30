@@ -540,3 +540,44 @@ class TestAgentTokenManagement:
         with TestClient(app) as client:
             resp = client.post("/api/agent/token/refresh", json={"token": "x"})
         assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# SSH Key Upload — Disabled by Default
+# ---------------------------------------------------------------------------
+
+
+class TestSshKeyUpload:
+    """SSH key upload endpoint respects ssh_key_upload_enabled flag."""
+
+    def test_upload_disabled_by_default(self, api_key_auth):
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/ssh/keys",
+                headers={"X-API-Key": "secret-42"},
+                files={
+                    "file": (
+                        "id_test",
+                        b"-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----",
+                        "text/plain",
+                    )
+                },
+            )
+        assert resp.status_code == 403
+        assert "disabled" in resp.text.lower()
+
+    def test_upload_can_be_enabled(self, api_key_auth, monkeypatch):
+        monkeypatch.setattr(settings, "ssh_key_upload_enabled", True)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/ssh/keys",
+                headers={"X-API-Key": "secret-42"},
+                files={
+                    "file": (
+                        "id_test",
+                        b"-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----",
+                        "text/plain",
+                    )
+                },
+            )
+        assert resp.status_code != 403
