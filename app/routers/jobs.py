@@ -24,7 +24,7 @@ from app.models import (
     BulkExecuteResponse,
 )
 
-router = APIRouter()
+router = APIRouter(tags=["jobs"])
 
 
 @router.post("/api/jobs/run", response_model=JobRunResponse)
@@ -144,7 +144,8 @@ async def jobs_cancel(job_id: str):
 
 
 @router.get("/api/jobs/{job_id}/stream", response_class=StreamingResponse)
-async def jobs_stream(job_id: str):
+@rate_limit_mutation(20, "minute")
+async def jobs_stream(job_id: str, request: Request):
     """Stream job output via Server-Sent Events."""
     job = await _state.job_manager.get_job(job_id)
     if not job:
@@ -155,6 +156,9 @@ async def jobs_stream(job_id: str):
 
     async def event_generator():
         try:
+            stream_start = time.time()
+            MAX_SSE_DURATION = 3600
+
             # Send Initial Status
             yield f"data: {json.dumps({'type': 'status', 'status': job.status})}\n\n"
 
@@ -166,6 +170,9 @@ async def jobs_stream(job_id: str):
 
             # Stream New Events
             while job.status in ("pending", "running"):
+                if time.time() - stream_start > MAX_SSE_DURATION:
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Stream timeout'})}\n\n"
+                    break
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=1.0)
                     yield f"data: {json.dumps(event)}\n\n"
@@ -190,6 +197,7 @@ async def jobs_stream(job_id: str):
 
 
 @router.get("/api/jobs/{job_id}/events", response_class=StreamingResponse)
-async def jobs_events(job_id: str):
+@rate_limit_mutation(20, "minute")
+async def jobs_events(job_id: str, request: Request):
     """Alias for /api/jobs/{job_id}/stream — SSE job progress events."""
-    return await jobs_stream(job_id)
+    return await jobs_stream(job_id, request)

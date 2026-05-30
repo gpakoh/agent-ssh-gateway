@@ -172,6 +172,7 @@ class PostgresHostKeyStore(HostKeyStore):
             engine, class_=AsyncSession, expire_on_commit=False,
         )
         async with engine.begin() as conn:
+            logger.warning("Auto-creating Host Key Tables Via Base.metadata.create_all — Use Alembic For Production Migrations")
             await conn.run_sync(Base.metadata.create_all)
         self._engine = engine
         self._session_maker = session_maker
@@ -311,19 +312,20 @@ class KnownHostsPolicy(paramiko.MissingHostKeyPolicy):
         future = asyncio.run_coroutine_threadsafe(
             self._check_or_store(hostname, key), loop
         )
-        future.result(timeout=30)
+        future.result(timeout=5)
 
     async def _check_or_store(self, hostname, key):
         known = await self._store.check(hostname, self._port, key)
         if known is None:
-            await self._store.store(hostname, self._port, key)
-            logger.info("Stored host key for %s (%s)", hostname, key.get_name())
-        elif not known:
-            logger.warning(
-                "Host key for %s changed (%s). Auto-updating.",
-                hostname, key.get_name(),
+            raise paramiko.SSHException(
+                f"Unknown host {hostname}:{self._port}. "
+                "Add the host key manually via SSHConnectResponse or the known-hosts API."
             )
-            await self._store.store(hostname, self._port, key)
+        if not known:
+            raise paramiko.SSHException(
+                f"Host key for {hostname}:{self._port} changed — possible MITM attack. "
+                "Remove the old key via the known-hosts API and re-add if the change was legitimate."
+            )
 
 
 def create_host_key_store(settings) -> HostKeyStore:

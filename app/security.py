@@ -5,14 +5,16 @@ import hmac
 import logging
 import secrets
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 from cryptography.fernet import Fernet
 from fastapi import Request, HTTPException
 from slowapi import Limiter
-from slowapi.util import get_remote_address
+
+from app.auth_middleware import get_client_ip, parse_cidrs
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +22,13 @@ logger = logging.getLogger(__name__)
 # Rate Limiting
 # ---------------------------------------------------------------------------
 
-limiter = Limiter(key_func=get_remote_address)
+def _rate_limit_key(request: Request) -> str:
+    """Extract real client IP for rate limiting, respecting trusted proxies."""
+    trusted = parse_cidrs(settings.trusted_proxy_cidrs)
+    return get_client_ip(request, trusted)
+
+
+limiter = Limiter(key_func=_rate_limit_key)
 
 
 def rate_limit_mutation(requests: int = 30, period: str = "minute"):
@@ -65,18 +73,22 @@ DANGEROUS_PATTERNS = [
 
 def sanitize_command(command: str) -> str:
     """Sanitize command to prevent dangerous operations.
-    
-    Raises ValueError if command is dangerous.
+
+    WARNING: This is a basic blocklist guardrail, NOT a security boundary.
+    It can be bypassed (e.g., encoded payloads, obfuscation).
+    Do not rely on this as the sole protection against untrusted users.
+
+    Raises ValueError if command matches a known dangerous pattern.
     """
     command_lower = command.lower().strip()
     
-    # Check exact matches
+    # Check Exact Matches
     for dangerous in DANGEROUS_COMMANDS:
         if dangerous.lower() in command_lower:
             logger.warning("Blocked dangerous command: %s", command)
             raise ValueError(f"Command contains dangerous pattern: {dangerous}")
     
-    # Check regex patterns
+    # Check Regex Patterns
     import re
     for pattern in DANGEROUS_PATTERNS:
         if re.search(pattern, command_lower):
@@ -91,10 +103,12 @@ def sanitize_command(command: str) -> str:
 # ---------------------------------------------------------------------------
 
 FORBIDDEN_PATHS = {
-    '/etc/passwd', '/etc/shadow', '/etc/hosts',
+    '/etc/passwd', '/etc/shadow', '/etc/hosts', '/etc/crontab',
+    '/var/spool/cron',
     '/root/.ssh', '/root/.bash_history',
     '/var/log/auth.log', '/var/log/secure',
-    '/proc', '/sys', '/dev',
+    '/usr/bin',
+    '/proc', '/sys', '/dev', '/boot',
     '..', '../', '/..',
 }
 
@@ -116,18 +130,18 @@ def validate_path(path: str, base_path: Optional[str] = None) -> str:
     
     path = path.strip()
     
-    # Check for obvious traversal attempts
+    # Check For Obvious Traversal Attempts
     if '..' in path or '~' in path:
         logger.warning("Blocked path with traversal: %s", path)
         raise ValueError("Path contains directory traversal characters")
     
-    # Check forbidden paths
+    # Check Forbidden Paths
     for forbidden in FORBIDDEN_PATHS:
         if forbidden in path:
             logger.warning("Blocked forbidden path: %s", path)
             raise ValueError(f"Access to {forbidden} is forbidden")
     
-    # If base_path provided, ensure path is within it
+    # If Base_path Provided, Ensure Path Is Within It
     if base_path:
         abs_path = os.path.abspath(path)
         abs_base = os.path.abspath(base_path)
@@ -145,19 +159,14 @@ def validate_path(path: str, base_path: Optional[str] = None) -> str:
 class SecretManager:
     """Encrypt/decrypt sensitive data like SSH credentials."""
     
-    def __init__(self, master_key: Optional[str] = None):
-        """Initialize with master key.
-        
-        Args:
-            master_key: Base64-encoded Fernet key. If None, generates new one.
-        """
-        if master_key:
-            self._fernet = Fernet(master_key.encode())
-        else:
-            # Generate new key - WARNING: store this securely!
-            key = Fernet.generate_key()
-            self._fernet = Fernet(key)
-            logger.warning("Generated new encryption key: %s", key.decode())
+    def __init__(self, master_key: str):
+        if not master_key:
+            raise RuntimeError(
+                "ENCRYPTION_KEY is required. Generate one with: "
+                "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            )
+        self._master_key = master_key
+        self._fernet = Fernet(master_key.encode())
     
     def encrypt(self, data: str) -> str:
         """Encrypt string data."""
@@ -168,8 +177,8 @@ class SecretManager:
         return self._fernet.decrypt(encrypted.encode()).decode()
     
     def hash_secret(self, data: str) -> str:
-        """One-way hash for verification (not reversible)."""
-        return hashlib.sha256(data.encode()).hexdigest()
+        """One-way hash for verification using HMAC-SHA256."""
+        return hmac.new(self._master_key.encode(), data.encode(), hashlib.sha256).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +210,7 @@ class AuditLogger:
         """Log command execution."""
         self.logger.info(
             "COMMAND | session=%s | ip=%s | cmd=%s",
-            session_id, source_ip, command[:100]
+            session_id, source_ip, command
         )
     
     def log_file_access(self, session_id: str, path: str, operation: str, source_ip: str):
@@ -250,7 +259,7 @@ class SessionSecurity:
 
 
 # ---------------------------------------------------------------------------
-# IP Whitelist/Blacklist
+# IP Whitelist/blacklist
 # ---------------------------------------------------------------------------
 
 class IPFilter:
@@ -284,7 +293,7 @@ class IPFilter:
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
-    "X-XSS-Protection": "1; mode=block",
+    "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'",
     "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
     "Referrer-Policy": "strict-origin-when-cross-origin",
 }

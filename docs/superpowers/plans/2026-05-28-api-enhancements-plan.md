@@ -79,7 +79,7 @@ async def check_port(
     port: int = Query(22, ge=1, le=65535, description="Target port"),
     timeout: float = Query(5.0, ge=0.5, le=30.0, description="Connection timeout in seconds"),
 ):
-    """Check if a remote TCP port is reachable. No auth required."""
+    """Check if a remote TCP port is reachable. Requires API authentication."""
     start = time.monotonic()
     try:
         reader, writer = await asyncio.wait_for(
@@ -324,8 +324,8 @@ if path.startswith("/api/templates"):
 
 ```bash
 cd /media/1TB/Python/web_ssh/web-ssh-gateway
-API_KEY=AFdvw9WxVNT5PTEle8PLGzDUUC8V5eA1yAeYOmrurPc docker compose -p web-ssh-gateway -f docker/docker-compose.yml build --no-cache web-ssh-gateway
-API_KEY=AFdvw9WxVNT5PTEle8PLGzDUUC8V5eA1yAeYOmrurPc docker compose -p web-ssh-gateway -f docker/docker-compose.yml up -d --no-deps --force-recreate web-ssh-gateway
+API_KEY=<your-api-key> docker compose -p web-ssh-gateway -f docker/docker-compose.yml build --no-cache web-ssh-gateway
+API_KEY=<your-api-key> docker compose -p web-ssh-gateway -f docker/docker-compose.yml up -d --no-deps --force-recreate web-ssh-gateway
 git add -A && git commit -m "feat: add port checker, session info, env inspect, config, ssh keys, command templates"
 git push github master && git push gitea master
 ```
