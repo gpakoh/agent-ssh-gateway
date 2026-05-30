@@ -134,7 +134,7 @@ async def test_find_matching_hooks(store):
 
 
 # ---------------------------------------------------------------------------
-# Security — URL validation, HMAC, log masking
+# Security — URL Validation, HMAC, Log Masking
 # ---------------------------------------------------------------------------
 
 
@@ -219,7 +219,7 @@ def test_mask_sensitive_headers_none():
 
 
 # ---------------------------------------------------------------------------
-# Delivery Service — outbox, lease, retry, cleanup
+# Delivery Service — Outbox, Lease, Retry, Cleanup
 # ---------------------------------------------------------------------------
 
 
@@ -254,14 +254,14 @@ async def test_delivery_claim_pending(delivery_service):
         url="http://example.com/hook",
         payload_json="{}",
     )
-    # Manually age the record so it's claimable (>2s old)
+    # Manually Age The Record So It's Claimable (>2s Old)
     async with delivery_service._session_factory() as session:
         from sqlalchemy import select as sel
         result = await session.execute(
             sel(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
         )
         rec = result.scalar_one()
-        rec.created_at = datetime.utcnow() - timedelta(seconds=10)
+        rec.created_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=10)
         await session.commit()
 
     claimed = await delivery_service.claim_deliveries(limit=10, lease_ttl=30.0)
@@ -329,11 +329,11 @@ async def test_delivery_cleanup(delivery_service):
     d_id = await delivery_service.enqueue("evt-7", "h-7", "a", "http://x.co/h", "{}")
     await delivery_service.complete(d_id, 200)
 
-    # Should not be cleaned (not old enough)
+    # Should Not Be Cleaned (not Old Enough)
     count = await delivery_service.cleanup_old(sent_days=7, dead_days=30)
     assert count == 0
 
-    # Manually age the record
+    # Manually Age The Record
     async with delivery_service._session_factory() as s:
         from sqlalchemy import select as sel
         result = await s.execute(sel(WebhookDelivery).where(
@@ -343,6 +343,6 @@ async def test_delivery_cleanup(delivery_service):
         d.updated_at = datetime.now(timezone.utc) - timedelta(days=10)
         await s.commit()
 
-    # Now it should be cleaned
+    # Now It Should Be Cleaned
     count = await delivery_service.cleanup_old(sent_days=7, dead_days=30)
     assert count == 1

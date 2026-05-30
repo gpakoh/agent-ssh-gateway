@@ -104,13 +104,13 @@ class WebhookManager:
         if not config.enabled:
             return {"status": "error", "message": "Webhook disabled"}
         
-        # Verify secret (simple check)
-        # In production, use HMAC signature verification
+        # Verify Secret (simple Check)
+        # In Production, Use HMAC Signature Verification
         
-        # Trigger deployment
+        # Trigger Deployment
         deploy_id = f"deploy_{len(self._deployments)}"
         
-        # Log deployment
+        # Log Deployment
         deployment = {
             "id": deploy_id,
             "webhook_id": webhook_id,
@@ -143,7 +143,7 @@ class WebhookManager:
         if not config:
             return {"status": "error", "message": "Webhook not found"}
         
-        # Run deploy command as background job
+        # Run Deploy Command As Background Job
         job_id = await self._job.create_job(
             session_id=session_id,
             command=f"cd {config.target_path} && {config.deploy_command}",

@@ -5,7 +5,7 @@ import os
 import json
 import time
 
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Query, HTTPException
 
@@ -52,7 +52,7 @@ from app.diff_generator import DiffGenerator
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["context"])
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +328,7 @@ async def context_file_edit(req: FileEditWithContextRequest):
 
 
 # ---------------------------------------------------------------------------
-# Smart Context API (tabs, cursors, bookmarks, history)
+# Smart Context API (tabs, Cursors, Bookmarks, History)
 # ---------------------------------------------------------------------------
 
 
@@ -621,7 +621,7 @@ async def project_structure(req: ProjectStructureRequest):
                 file_meta.git_status = git_status_map[file_meta.path]
 
     # Build Tree Structure
-    tree = {"name": ".", "type": "directory", "children": {}}
+    tree: dict[str, Any] = {"name": ".", "type": "directory", "children": {}}
 
     for file_meta in files:
         parts = file_meta.path.split("/")

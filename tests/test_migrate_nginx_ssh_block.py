@@ -34,7 +34,7 @@ server {
     listen 443 ssl;
     server_name gateway.example.com;
 }
-# --- Another section ---
+# --- Another Section ---
 server {
     listen 80;
 }
@@ -44,7 +44,7 @@ server {
     listen 443 ssl;
 }
 
-# --- Another section ---
+# --- Another Section ---
 server {
     listen 80;
 }
@@ -146,7 +146,7 @@ server {
     server_name gateway.example.com;
     listen 443 ssl;
 }
-# --- Another section ---
+# --- Another Section ---
 server {
     listen 80;
 }
@@ -166,5 +166,5 @@ server {
 
     assert backup.exists()
     assert backup.read_text() == content
-    assert '# --- Another section ---' in src.read_text()
+    assert '# --- Another Section ---' in src.read_text()
     assert '# --- Web SSH Gateway' not in src.read_text()

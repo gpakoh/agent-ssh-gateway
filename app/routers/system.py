@@ -78,13 +78,20 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 
-@router.get("/health", response_model=HealthResponse)
+@router.get("/health", tags=["system"], response_model=HealthResponse)
 async def health_check():
     """Health check endpoint."""
-    return HealthResponse(status="ok")
+    redis_ok = _state.redis_queue is not None and _state.redis_queue._redis is not None
+    pg_ok = _state.session_store is not None
+    return HealthResponse(
+        status="ok" if redis_ok or not settings.redis_url else "degraded",
+        redis=redis_ok,
+        postgres=pg_ok,
+        ready=redis_ok or pg_ok or True,
+    )
 
 
-@router.get("/api/capabilities", response_model=CapabilitiesResponse)
+@router.get("/api/capabilities", tags=["system"], response_model=CapabilitiesResponse)
 async def get_capabilities():
     """Return API capabilities and environment information.
 
@@ -101,7 +108,7 @@ async def get_capabilities():
         rate_limit_requests=settings.rate_limit_requests,
         rate_limit_window=settings.rate_limit_window,
         server_count=len(servers),
-        agent_token_enabled=is_agent_token_valid(settings, settings.agent_token),
+        agent_token_enabled=await is_agent_token_valid(settings, settings.agent_token, _state.agent_token_store),
         agent_token_ttl=settings.agent_token_ttl,
     )
 
@@ -129,11 +136,10 @@ async def get_config():
 @router.get("/api/help", tags=["help"])
 async def api_help(request: Request):
     """List all API endpoints grouped by tag for agent consumption."""
-    from app.main import TAGS_META
-
     openapi = request.app.openapi()
     paths = openapi.get("paths", {})
     schemas = openapi.get("components", {}).get("schemas", {})
+    known_tags = {t["name"] for t in (request.app.openapi_tags or [])}
     groups: dict[str, list[dict]] = {}
 
     def _resolve(s: dict) -> dict:
@@ -149,7 +155,7 @@ async def api_help(request: Request):
             if method == "parameters":
                 continue
             tags = details.get("tags", ["other"])
-            tag = next((t for t in tags if t in TAGS_META), tags[0] if tags else "other")
+            tag = next((t for t in tags if t in known_tags), tags[0] if tags else "other")
 
             entry = {"method": method.upper(), "path": path, "summary": details.get("summary", "")}
             params = []
@@ -187,13 +193,13 @@ def _clean_param(name: str, location: str, schema: dict, required: bool, descrip
     return p
 
 
-@router.get("/metrics", response_class=PlainTextResponse)
+@router.get("/metrics", tags=["system"], response_class=PlainTextResponse)
 async def prometheus_metrics():
     """Prometheus metrics endpoint."""
     return Response(content=metrics.get_metrics(), media_type="text/plain")
 
 
-@router.get("/api/sdk/download", response_class=PlainTextResponse)
+@router.get("/api/sdk/download", tags=["system"], response_class=PlainTextResponse)
 async def download_sdk():
     """Download Python SDK.
 
@@ -214,13 +220,13 @@ async def download_sdk():
         raise HTTPException(status_code=404, detail=_err(404, "SDK not found"))
 
 
-@router.get("/api/circuit-breaker/stats")
+@router.get("/api/circuit-breaker/stats", tags=["system"])
 async def circuit_breaker_stats():
     """Get circuit breaker statistics."""
-    return _state.circuit_breakers.get_all_stats()
+    return await _state.circuit_breakers.get_all_stats()
 
 
-@router.get("/", response_class=HTMLResponse)
+@router.get("/", tags=["system"], response_class=HTMLResponse)
 async def root():
     """Serve the main page."""
     return FileResponse("app/static/index.html")
@@ -231,7 +237,7 @@ async def root():
 # ---------------------------------------------------------------------------
 
 
-@router.get("/api/servers", response_model=ServerListResponse)
+@router.get("/api/servers", tags=["servers"], response_model=ServerListResponse)
 async def list_servers():
     """List all configured servers."""
     servers = _state.server_manager.list_servers()
@@ -241,7 +247,7 @@ async def list_servers():
     )
 
 
-@router.post("/api/servers")
+@router.post("/api/servers", tags=["servers"])
 async def add_server(req: AddServerRequest):
     """Add a new server."""
     existing = _state.server_manager.get_server(req.id)
@@ -260,7 +266,7 @@ async def add_server(req: AddServerRequest):
     return _state.server_manager.to_dict(server)
 
 
-@router.delete("/api/servers/{server_id}")
+@router.delete("/api/servers/{server_id}", tags=["servers"])
 async def delete_server(server_id: str):
     """Remove a server."""
     if not _state.server_manager.get_server(server_id):
@@ -269,7 +275,7 @@ async def delete_server(server_id: str):
     return {"status": "removed", "server_id": server_id}
 
 
-@router.post("/api/servers/{server_id}/connect", response_model=ServerConnectResponse)
+@router.post("/api/servers/{server_id}/connect", tags=["servers"], response_model=ServerConnectResponse)
 async def connect_server(server_id: str, req: ConnectServerRequest):
     """Connect to a server and return session."""
     server = _state.server_manager.get_server(server_id)
@@ -307,7 +313,7 @@ async def connect_server(server_id: str, req: ConnectServerRequest):
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/snapshots", response_model=SnapshotActionResponse)
+@router.post("/api/snapshots", tags=["snapshots"], response_model=SnapshotActionResponse)
 async def create_snapshot(req: CreateSnapshotRequest):
     """Create a snapshot of current project state."""
     ctx = await _state.context_manager.get_context(req.context_id)
@@ -331,7 +337,7 @@ async def create_snapshot(req: CreateSnapshotRequest):
         raise HTTPException(status_code=500, detail=_err(500, f"Snapshot creation failed: {exc}"))
 
 
-@router.get("/api/snapshots")
+@router.get("/api/snapshots", tags=["snapshots"])
 async def list_snapshots(context_id: str):
     """List all snapshots for context."""
     ctx = await _state.context_manager.get_context(context_id)
@@ -358,7 +364,7 @@ async def list_snapshots(context_id: str):
     )
 
 
-@router.post("/api/snapshots/restore", response_model=SnapshotActionResponse)
+@router.post("/api/snapshots/restore", tags=["snapshots"], response_model=SnapshotActionResponse)
 async def restore_snapshot(req: RestoreSnapshotRequest):
     """Restore project from snapshot."""
     ctx = await _state.context_manager.get_context(req.context_id)
@@ -382,7 +388,7 @@ async def restore_snapshot(req: RestoreSnapshotRequest):
         raise HTTPException(status_code=500, detail=_err(500, f"Restore failed: {exc}"))
 
 
-@router.delete("/api/snapshots/{snapshot_id}")
+@router.delete("/api/snapshots/{snapshot_id}", tags=["snapshots"])
 async def delete_snapshot(snapshot_id: str, context_id: str):
     """Delete a snapshot."""
     ctx = await _state.context_manager.get_context(context_id)
@@ -403,7 +409,7 @@ async def delete_snapshot(snapshot_id: str, context_id: str):
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/webhooks")
+@router.post("/api/webhooks", tags=["webhooks"])
 async def create_webhook(req: CreateWebhookRequest):
     """Create a new webhook for auto-deployment."""
     config = _state.webhook_manager.add_webhook(
@@ -428,7 +434,7 @@ async def create_webhook(req: CreateWebhookRequest):
     )
 
 
-@router.get("/api/webhooks", response_model=WebhookListResponse)
+@router.get("/api/webhooks", tags=["webhooks"], response_model=WebhookListResponse)
 async def list_webhooks():
     """List all webhooks."""
     configs = _state.webhook_manager.list_webhooks()
@@ -450,14 +456,14 @@ async def list_webhooks():
     )
 
 
-@router.delete("/api/webhooks/{webhook_id}")
+@router.delete("/api/webhooks/{webhook_id}", tags=["webhooks"])
 async def delete_webhook(webhook_id: str):
     """Delete a webhook."""
     success = _state.webhook_manager.remove_webhook(webhook_id)
     return {"status": "deleted" if success else "not_found", "webhook_id": webhook_id}
 
 
-@router.post("/api/webhooks/{webhook_id}/deploy", response_model=DeployResponse)
+@router.post("/api/webhooks/{webhook_id}/deploy", tags=["webhooks"], response_model=DeployResponse)
 async def deploy_webhook(webhook_id: str, req: DeployRequest):
     """Manually trigger deployment."""
     result = await _state.webhook_manager.execute_deploy(
@@ -472,7 +478,7 @@ async def deploy_webhook(webhook_id: str, req: DeployRequest):
     )
 
 
-@router.get("/api/webhooks/{webhook_id}/deployments")
+@router.get("/api/webhooks/{webhook_id}/deployments", tags=["webhooks"])
 async def webhook_deployments(webhook_id: str):
     """List deployment history."""
     deployments = _state.webhook_manager.get_deployments(webhook_id)
@@ -487,7 +493,7 @@ async def webhook_deployments(webhook_id: str):
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/search/global", response_model=GlobalSearchResponse)
+@router.post("/api/search/global", tags=["code"], response_model=GlobalSearchResponse)
 async def global_search(req: GlobalSearchRequest):
     """Search across all project files."""
     matches = await _state.search_replace.search(
@@ -518,7 +524,7 @@ async def global_search(req: GlobalSearchRequest):
     )
 
 
-@router.post("/api/replace/global", response_model=GlobalReplaceResponse)
+@router.post("/api/replace/global", tags=["code"], response_model=GlobalReplaceResponse)
 async def global_replace(req: GlobalReplaceRequest):
     """Replace across all project files."""
     results = await _state.search_replace.replace(
@@ -569,7 +575,7 @@ async def global_replace(req: GlobalReplaceRequest):
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/code/search", response_model=CodeSearchResponse)
+@router.post("/api/code/search", tags=["code"], response_model=CodeSearchResponse)
 async def code_search(req: CodeSearchRequest):
     """Search for code pattern in project."""
     results = await _state.code_intelligence.search_code(
@@ -595,7 +601,7 @@ async def code_search(req: CodeSearchRequest):
     )
 
 
-@router.post("/api/code/insert", response_model=CodeInsertResponse)
+@router.post("/api/code/insert", tags=["code"], response_model=CodeInsertResponse)
 async def code_insert(req: CodeInsertRequest):
     """Intelligently insert code based on natural language instruction."""
     ctx = await _state.context_manager.get_context(req.context_id)
@@ -656,7 +662,7 @@ async def code_insert(req: CodeInsertRequest):
         )
 
 
-@router.post("/api/code/generate", response_model=CodeGenerateResponse)
+@router.post("/api/code/generate", tags=["code"], response_model=CodeGenerateResponse)
 async def code_generate(req: CodeGenerateRequest):
     """Generate code based on natural language instruction."""
     code = await _state.code_intelligence.generate_code(
@@ -672,7 +678,7 @@ async def code_generate(req: CodeGenerateRequest):
     )
 
 
-@router.post("/api/code/complete", response_model=CodeCompleteResponse)
+@router.post("/api/code/complete", tags=["code"], response_model=CodeCompleteResponse)
 async def code_complete(req: CodeCompleteRequest):
     """Suggest code completion."""
     completion = await _state.code_intelligence.suggest_completion(
@@ -693,7 +699,7 @@ async def code_complete(req: CodeCompleteRequest):
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/analytics", response_model=ProjectAnalyticsResponse)
+@router.post("/api/analytics", tags=["code"], response_model=ProjectAnalyticsResponse)
 async def run_analytics(req: ProjectAnalyticsRequest):
     """Analyze project and return metrics."""
     metrics_data = await _state.analytics.analyze_project(
@@ -711,7 +717,7 @@ async def run_analytics(req: ProjectAnalyticsRequest):
     )
 
 
-@router.get("/api/project/tree")
+@router.get("/api/project/tree", tags=["code"])
 async def get_file_tree(
     session_id: str = Query(...),
     path: str = Query(default="."),
@@ -749,7 +755,7 @@ async def get_file_tree(
     return {"items": items, "count": len(items)}
 
 
-@router.post("/api/tree", response_model=FileTreeResponse)
+@router.post("/api/tree", tags=["files"], response_model=FileTreeResponse)
 async def get_file_tree_v2(req: FileTreeRequest):
     """Get directory tree structure."""
     tree = await _state.file_tree.get_tree(
@@ -787,7 +793,7 @@ async def get_file_tree_v2(req: FileTreeRequest):
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/batch/execute", response_model=BatchExecuteResponse)
+@router.post("/api/batch/execute", tags=["files"], response_model=BatchExecuteResponse)
 async def batch_execute(req: BatchExecuteRequest, request: Request):
     """Execute multiple file operations in a single transaction."""
     import uuid
