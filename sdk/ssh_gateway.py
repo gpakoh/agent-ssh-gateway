@@ -3,7 +3,7 @@
 Usage:
     from ssh_gateway import SSHGatewayClient
     
-    client = SSHGatewayClient("https://ssh.xloud.ru")
+    client = SSHGatewayClient("https://gateway.example.com")
     client.auth("agent", "change-me-agent-token")
     
     # Connect And Persist Session
@@ -48,7 +48,7 @@ class SSHSession:
 class SSHGatewayClient:
     """Python SDK for SSH Gateway API."""
     
-    def __init__(self, base_url: str = "https://ssh.xloud.ru"):
+    def __init__(self, base_url: str = "https://gateway.example.com"):
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
         self.session.verify = False
@@ -392,7 +392,7 @@ class BackgroundJob:
 
 # Convenience Functions For Quick Usage
 def connect(host: str, username: str, password: str = "", 
-            base_url: str = "https://ssh.xloud.ru") -> SSHGatewayClient:
+            base_url: str = "https://gateway.example.com") -> SSHGatewayClient:
     """Quick connect helper."""
     client = SSHGatewayClient(base_url)
     client.ssh_connect(host, username, password)
