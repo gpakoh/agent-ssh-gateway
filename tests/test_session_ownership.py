@@ -182,6 +182,17 @@ class TestSessionOwnershipHTTP:
             "app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1"
         )
 
+        # Bypass pydantic-settings 2.6.0 __setattr__ issues in CI
+        for k, v in {
+            "api_key": "secret-42",
+            "api_auth_enabled": True,
+            "allowed_client_cidrs": "0.0.0.0/0,::1/128",
+            "trusted_proxy_cidrs": "127.0.0.1/32",
+            "agent_token_scopes": ["ssh:connect", "ssh:execute", "ssh:disconnect", "ssh:files"],
+            "agent_token_expires_at": None,
+        }.items():
+            object.__setattr__(settings, k, v)
+
     def _override_manager(self, client, mock_mgr):
         """Replace manager on the live app after TestClient lifespan."""
         from app import state as _app_state
@@ -197,8 +208,8 @@ class TestSessionOwnershipHTTP:
 
     def test_master_can_execute_on_agent_session(self, monkeypatch):
         self._patch_base(monkeypatch)
-        monkeypatch.setattr(settings, "agent_token", "agent-token-a")
-        monkeypatch.setattr(settings, "agent_token_ttl", 3600)
+        object.__setattr__(settings, "agent_token", "agent-token-a")
+        object.__setattr__(settings, "agent_token_ttl", 3600)
 
         with TestClient(app) as client:
             self._override_manager(client, self._make_session_mock())
@@ -211,8 +222,8 @@ class TestSessionOwnershipHTTP:
 
     def test_agent_can_execute_on_own_session(self, monkeypatch):
         self._patch_base(monkeypatch)
-        monkeypatch.setattr(settings, "agent_token", "agent-token-a")
-        monkeypatch.setattr(settings, "agent_token_ttl", 3600)
+        object.__setattr__(settings, "agent_token", "agent-token-a")
+        object.__setattr__(settings, "agent_token_ttl", 3600)
 
         with TestClient(app) as client:
             self._override_manager(client, self._make_session_mock())
@@ -225,8 +236,8 @@ class TestSessionOwnershipHTTP:
 
     def test_agent_cannot_execute_on_other_agent_session(self, monkeypatch):
         self._patch_base(monkeypatch)
-        monkeypatch.setattr(settings, "agent_token", "agent-token-a")
-        monkeypatch.setattr(settings, "agent_token_ttl", 3600)
+        object.__setattr__(settings, "agent_token", "agent-token-a")
+        object.__setattr__(settings, "agent_token_ttl", 3600)
 
         with TestClient(app) as client:
             self._override_manager(client, self._make_cross_tenant_session_mock())
@@ -240,8 +251,8 @@ class TestSessionOwnershipHTTP:
 
     def test_agent_cannot_execute_on_master_session(self, monkeypatch):
         self._patch_base(monkeypatch)
-        monkeypatch.setattr(settings, "agent_token", "agent-token-a")
-        monkeypatch.setattr(settings, "agent_token_ttl", 3600)
+        object.__setattr__(settings, "agent_token", "agent-token-a")
+        object.__setattr__(settings, "agent_token_ttl", 3600)
 
         with TestClient(app) as client:
             self._override_manager(client, self._make_master_session_mock())
@@ -254,8 +265,8 @@ class TestSessionOwnershipHTTP:
 
     def test_disconnect_ownership_agent_blocked(self, monkeypatch):
         self._patch_base(monkeypatch)
-        monkeypatch.setattr(settings, "agent_token", "agent-token-a")
-        monkeypatch.setattr(settings, "agent_token_ttl", 3600)
+        object.__setattr__(settings, "agent_token", "agent-token-a")
+        object.__setattr__(settings, "agent_token_ttl", 3600)
 
         with TestClient(app) as client:
             self._override_manager(client, self._make_cross_tenant_session_mock())
@@ -268,8 +279,8 @@ class TestSessionOwnershipHTTP:
 
     def test_disconnect_ownership_master_bypasses(self, monkeypatch):
         self._patch_base(monkeypatch)
-        monkeypatch.setattr(settings, "agent_token", "agent-token-b")
-        monkeypatch.setattr(settings, "agent_token_ttl", 3600)
+        object.__setattr__(settings, "agent_token", "agent-token-b")
+        object.__setattr__(settings, "agent_token_ttl", 3600)
 
         with TestClient(app) as client:
             self._override_manager(client, self._make_cross_tenant_session_mock())
@@ -282,8 +293,8 @@ class TestSessionOwnershipHTTP:
 
     def test_file_read_ownership_agent_blocked(self, monkeypatch):
         self._patch_base(monkeypatch)
-        monkeypatch.setattr(settings, "agent_token", "agent-token-a")
-        monkeypatch.setattr(settings, "agent_token_ttl", 3600)
+        object.__setattr__(settings, "agent_token", "agent-token-a")
+        object.__setattr__(settings, "agent_token_ttl", 3600)
 
         with TestClient(app) as client:
             mock_mgr = self._make_cross_tenant_session_mock()
@@ -299,8 +310,8 @@ class TestSessionOwnershipHTTP:
 
     def test_file_read_ownership_master_bypasses(self, monkeypatch):
         self._patch_base(monkeypatch)
-        monkeypatch.setattr(settings, "agent_token", "agent-token-b")
-        monkeypatch.setattr(settings, "agent_token_ttl", 3600)
+        object.__setattr__(settings, "agent_token", "agent-token-b")
+        object.__setattr__(settings, "agent_token_ttl", 3600)
 
         with TestClient(app) as client:
             mock_mgr = self._make_cross_tenant_session_mock()
