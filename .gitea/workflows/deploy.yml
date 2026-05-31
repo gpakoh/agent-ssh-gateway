@@ -63,7 +63,7 @@ jobs:
         run: |
           test -n "${API_KEY:-}" || { echo "API_KEY secret is missing"; exit 1; }
           echo "::group::Build agent-ssh-gateway image"
-          docker build -t agent-ssh-gateway:latest \
+          DOCKER_BUILDKIT=1 docker build --network host -t agent-ssh-gateway:latest \
             -f docker/Dockerfile \
             .
           echo "::endgroup::"
