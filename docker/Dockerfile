@@ -17,7 +17,7 @@ WORKDIR /app
 
 # Security: Install Python dependencies
 COPY docker/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt && \
+RUN pip install --default-timeout=120 --no-cache-dir -r requirements.txt && \
     rm -rf /root/.cache/pip
 
 # Security: Copy application with proper ownership
