@@ -84,13 +84,13 @@ jobs:
           API_KEY: ${{ secrets.API_KEY }}
         run: |
           echo "::group::Wait for backend health"
-          for i in 1 2 3 4 5 6; do
+          for i in 1 2 3 4 5 6 7 8 9 10; do
             sleep 3
-            health=$(curl -sf http://10.10.10.145:8085/health 2>/dev/null || echo '{"status":"fail"}')
+            health=$(curl -sf --connect-timeout 3 http://10.10.10.145:8085/health 2>/dev/null || echo '{"status":"fail"}')
             echo "attempt $i: $(echo "$health" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)"
             echo "$health" | grep -q '"status":"ok"' && break
           done
-          echo "$health" | grep -q '"status":"ok"' || { echo "FAIL: backend not healthy after 6 tries"; exit 1; }
+          echo "$health" | grep -q '"status":"ok"' || { echo "FAIL: backend not healthy after 10 tries"; exit 1; }
           echo "Backend healthy"
           echo "::endgroup::"
           echo "::group::Smoke test"
