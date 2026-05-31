@@ -4,9 +4,12 @@ import json
 
 import jsonschema
 import pytest
+from unittest.mock import patch
+
 from fastapi.testclient import TestClient
-from app.main import app
+
 from app.config import settings
+from app.main import app
 
 
 @pytest.fixture
@@ -295,18 +298,27 @@ class TestSchemaStructure:
 
 class TestRuntimeBehavior:
     def setup_method(self):
-        self._saved_api_auth_enabled = settings.api_auth_enabled
-        self._saved_api_key = settings.api_key
-        settings.api_auth_enabled = False
-        settings.api_key = ""
+        self._saved = {}
+        for attr in ("api_auth_enabled", "api_key", "allowed_client_cidrs", "trusted_proxy_cidrs"):
+            self._saved[attr] = getattr(settings, attr)
+        settings.api_auth_enabled = True
+        settings.api_key = "test-key"
+        settings.allowed_client_cidrs = "0.0.0.0/0,::1/128"
+        settings.trusted_proxy_cidrs = ""
+        self._ip_patch = patch("app.auth_middleware.get_client_ip", return_value="127.0.0.1")
+        self._ip_patch.start()
 
     def teardown_method(self):
-        settings.api_auth_enabled = self._saved_api_auth_enabled
-        settings.api_key = self._saved_api_key
+        self._ip_patch.stop()
+        for attr, val in self._saved.items():
+            setattr(settings, attr, val)
+
+    def _auth_headers(self):
+        return {"X-API-Key": "test-key"}
 
     def test_delete_unknown_server_returns_404(self):
         with TestClient(app) as client:
-            resp = client.delete("/api/servers/nonexistent-12345")
+            resp = client.delete("/api/servers/nonexistent-12345", headers=self._auth_headers())
         assert resp.status_code == 404, (
             f"Expected 404, got {resp.status_code}: {resp.text}"
         )
@@ -316,6 +328,7 @@ class TestRuntimeBehavior:
             resp = client.post(
                 "/api/jobs/run",
                 json={"session_id": "fake-session-999", "command": "ls"},
+                headers=self._auth_headers(),
             )
         assert resp.status_code == 404, (
             f"Expected 404, got {resp.status_code}: {resp.text}"
@@ -323,7 +336,7 @@ class TestRuntimeBehavior:
 
     def test_delete_unknown_returns_structured_error(self):
         with TestClient(app) as client:
-            resp = client.delete("/api/servers/nonexistent-12345")
+            resp = client.delete("/api/servers/nonexistent-12345", headers=self._auth_headers())
         body = resp.json()
         assert body["detail"]["code"] == "SERVER_NOT_FOUND"
         assert body["detail"]["retryable"] is False
@@ -332,11 +345,14 @@ class TestRuntimeBehavior:
 
     def test_validation_error_has_code_and_hint(self):
         with TestClient(app) as client:
-            resp = client.post("/api/ssh/connect", json={})
+            resp = client.post("/api/ssh/connect", json={}, headers=self._auth_headers())
+        assert resp.status_code == 422
         body = resp.json()
         assert body["code"] == "VALIDATION_ERROR"
         assert body["retryable"] is False
-        assert "hint" in body
+        assert body["hint"]
+        errors = body.get("errors", [])
+        assert any(e.get("field") in ("host", "username") for e in errors)
 
 
 class TestOpenAPISchemaValidation:
