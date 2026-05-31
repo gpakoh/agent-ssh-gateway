@@ -88,7 +88,7 @@ jobs:
           echo "::group::Wait for backend health"
           for i in 1 2 3 4 5 6 7 8 9 10; do
             sleep 3
-            health=$(curl -sf --connect-timeout 3 http://10.0.0.145:8085/health 2>/dev/null || echo '{"status":"fail"}')
+            health=$(curl -sf --connect-timeout 3 http://agent-ssh-gateway:8085/health 2>/dev/null || echo '{"status":"fail"}')
             echo "attempt $i: $(echo "$health" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)"
             echo "$health" | grep -q '"status":"ok"' && break
           done
@@ -99,7 +99,7 @@ jobs:
           API_KEY="${API_KEY:-$(grep ^API_KEY /deploy/.env 2>/dev/null | cut -d= -f2)}"
           test -n "$API_KEY" || { echo "FAIL: cannot determine API_KEY"; exit 1; }
           code=$(curl -sf --header "X-API-Key: $API_KEY" \
-            http://10.0.0.145:8085/api/capabilities 2>/dev/null | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+            http://agent-ssh-gateway:8085/api/capabilities 2>/dev/null | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
           test -n "$code" && echo "Capabilities OK (version: $code)" || { echo "FAIL: capabilities failed"; exit 1; }
           echo "::endgroup::"
 
