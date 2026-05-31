@@ -176,6 +176,8 @@ class TestSessionOwnershipHTTP:
         monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
         monkeypatch.setattr(settings, "agent_token_scopes",
                             ["ssh:connect", "ssh:execute", "ssh:disconnect", "ssh:files"])
+        monkeypatch.setattr(settings, "agent_token_expires_at", None)
+
         monkeypatch.setattr(
             "app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1"
         )
