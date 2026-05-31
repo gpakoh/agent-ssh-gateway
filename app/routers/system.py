@@ -293,12 +293,14 @@ async def connect_server(server_id: str, req: ConnectServerRequest):
         raise HTTPException(status_code=403, detail=_err(403, str(exc)))
 
     try:
+        _password = req.password.get_secret_value() if req.password else None
+        _private_key = req.private_key.get_secret_value() if req.private_key else None
         session_id = await _state.manager.create_session(
             host=server.host,
             port=server.port,
             username=server.username,
-            password=req.password,
-            private_key=req.private_key,
+            password=_password,
+            private_key=_private_key,
         )
         
         _state.server_manager.update_server_status(

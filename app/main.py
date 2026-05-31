@@ -320,6 +320,7 @@ async def lifespan(app: FastAPI):
                             private_key=creds.get("private_key"),
                             key_passphrase=creds.get("key_passphrase"),
                         )
+
                         await state.session_store.deactivate_session(sess["session_id"])
                         restored += 1
                 except Exception as exc:

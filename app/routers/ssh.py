@@ -51,6 +51,15 @@ def time_to_iso(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
 
+def get_connect_auth_method(req: ConnectRequest) -> str:
+    """Return the authentication method that will be used."""
+    if req.private_key:
+        return "private_key"
+    if req.password:
+        return "password"
+    return "agent_or_default"
+
+
 # ---------------------------------------------------------------------------
 # Agent Token
 # ---------------------------------------------------------------------------
@@ -202,19 +211,22 @@ async def ssh_connect(
         )
         raise HTTPException(status_code=403, detail=_err(403, str(exc)))
 
+    _password = req.password.get_secret_value() if req.password else None
+    _private_key = req.private_key.get_secret_value() if req.private_key else None
+    _passphrase = req.key_passphrase.get_secret_value() if req.key_passphrase else None
+
     session_id = await _state.manager.create_session(
         host=req.host,
         port=req.port,
         username=req.username,
-        password=req.password,
-        private_key=req.private_key,
-        key_passphrase=req.key_passphrase,
+        password=_password,
+        private_key=_private_key,
+        key_passphrase=_passphrase,
         owner_type=_identity.token_type,
         owner_name=_identity.name,
         owner_token_fingerprint=_identity.fingerprint,
     )
 
-    # Persist Session If Store Is Available
     if _state.session_store:
         try:
             await _state.session_store.save_session(
@@ -222,9 +234,9 @@ async def ssh_connect(
                 host=req.host,
                 port=req.port,
                 username=req.username,
-                password=req.password,
-                private_key=req.private_key,
-                key_passphrase=req.key_passphrase,
+                password=_password,
+                private_key=_private_key,
+                key_passphrase=_passphrase,
                 ttl=settings.session_timeout,
             )
         except Exception as exc:
