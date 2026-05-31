@@ -123,6 +123,9 @@ Useful for homelabs, small infrastructure clusters, internal DevOps setups and p
 * **Agent tokens**
   Use short-lived tokens for automation instead of long-lived master credentials.
 
+* **Session ownership**
+  Each session is bound to the token that created it. Agent tokens cannot execute commands, transfer files, or disconnect sessions owned by other tokens. Master API keys bypass session ownership restrictions.
+
 * **Audit logging**
   Track who connected, where, when and what was executed.
 

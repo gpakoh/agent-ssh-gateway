@@ -88,6 +88,8 @@ class SessionInfo(BaseModel):
     connected_at: str
     last_command_at: str | None = None
     idle_seconds: float = 0.0
+    owner_type: str = "master"
+    owner_name: str | None = None
 
 
 class SessionsResponse(BaseModel):
@@ -206,14 +208,32 @@ class CapabilitiesResponse(BaseModel):
     agent_token_ttl: int
 
 
+class AgentTokenRequest(BaseModel):
+    """Request body for creating an agent token."""
+
+    name: str = Field(default="agent", min_length=1, description="Token name")
+    ttl_seconds: int = Field(default=3600, ge=60, le=86400, description="Token TTL")
+    scopes: list[str] = Field(
+        default_factory=lambda: ["ssh:connect", "ssh:execute"],
+        description="Allowed scopes for this agent token",
+    )
+
+
+class AgentTokenRefreshRequest(BaseModel):
+    """Request body for refreshing an agent token."""
+
+    token: str = Field(..., min_length=1, description="Existing token to refresh")
+    ttl_seconds: int = Field(default=3600, ge=60, le=86400, description="New token TTL")
+
+
 class AgentTokenResponse(BaseModel):
     """Response after agent token generation."""
 
     token: str
     ttl: int
     expires_at: str
+    scopes: list[str] = Field(default_factory=list)
     message: str = "Agent token generated"
-
 
 
 class AgentTokenRefreshResponse(BaseModel):
@@ -222,6 +242,7 @@ class AgentTokenRefreshResponse(BaseModel):
     token: str
     ttl: int
     expires_at: str
+    scopes: list[str] = Field(default_factory=list)
     message: str = "Agent token refreshed"
 
 
