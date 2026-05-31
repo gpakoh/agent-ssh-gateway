@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: node:20-bookworm
+    env:
+      API_KEY: placeholder-dummy-for-tests
     steps:
       - name: Checkout
         uses: actions/checkout@v4
