@@ -1,7 +1,7 @@
 """Pydantic models for API requests and responses."""
 
 from typing import Optional
-from pydantic import BaseModel, Field, field_validator, model_validator, HttpUrl
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator, HttpUrl
 
 
 # ---------------------------------------------------------------------------
@@ -14,13 +14,21 @@ class ConnectRequest(BaseModel):
     host: str = Field(..., min_length=1, description="Target hostname or IP")
     port: int = Field(default=22, ge=1, le=65535)
     username: str = Field(..., min_length=1)
-    password: Optional[str] = Field(default=None)
-    private_key: Optional[str] = Field(default=None)
-    key_passphrase: Optional[str] = Field(default=None)
+    password: SecretStr | None = Field(
+        default=None,
+        description="SSH password. Hidden from repr/model dumps.",
+    )
+    private_key: SecretStr | None = Field(
+        default=None,
+        description="Private SSH key content. Hidden from repr/model dumps.",
+    )
+    key_passphrase: SecretStr | None = Field(
+        default=None,
+        description="Private key passphrase. Hidden from repr/model dumps.",
+    )
 
     @model_validator(mode="after")
     def check_auth_method(self):
-        """Ensure at least one auth method is provided."""
         if not self.password and not self.private_key:
             raise ValueError("Either password or private_key must be provided")
         return self
@@ -1175,8 +1183,14 @@ class AddServerRequest(BaseModel):
 class ConnectServerRequest(BaseModel):
     """Request to connect to server."""
 
-    password: Optional[str] = Field(default=None)
-    private_key: Optional[str] = Field(default=None)
+    password: SecretStr | None = Field(
+        default=None,
+        description="SSH password. Hidden from repr/model dumps.",
+    )
+    private_key: SecretStr | None = Field(
+        default=None,
+        description="Private SSH key content. Hidden from repr/model dumps.",
+    )
 
 
 class ServerConnectResponse(BaseModel):

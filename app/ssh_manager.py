@@ -71,16 +71,17 @@ class ExecutionError(SSHManagerError):
 
 @dataclass
 class SessionRecord:
-    """Stores an active SSH session and its metadata."""
+    """Stores an active SSH session and its metadata.
+
+    Credentials are used only for the initial connection and are not stored.
+    Reconnect requires credentials to be provided again by the caller.
+    """
 
     session_id: str
     client: paramiko.SSHClient
     host: str
     port: int
     username: str
-    password: Optional[str] = None
-    private_key: Optional[str] = None
-    key_passphrase: Optional[str] = None
     connected_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     reconnect_count: int = 0
@@ -171,9 +172,6 @@ class SSHSessionManager:
 
         for record in stale:
             logger.info("Closing stale session %s (idle %.0fs)", record.session_id, record.idle_time)
-            record.password = None
-            record.private_key = None
-            record.key_passphrase = None
             try:
                 record.client.close()
             except Exception as exc:
@@ -270,9 +268,6 @@ class SSHSessionManager:
             host=host,
             port=port,
             username=username,
-            password=self._encrypt_cred(password),
-            private_key=self._encrypt_cred(private_key),
-            key_passphrase=self._encrypt_cred(key_passphrase),
             owner_type=owner_type,
             owner_name=owner_name,
             owner_token_fingerprint=owner_token_fingerprint,
@@ -292,80 +287,28 @@ class SSHSessionManager:
         return session_id
 
     async def reconnect(self, session_id: str) -> bool:
-        """Reconnect a disconnected session using stored credentials.
-        
-        Returns True if reconnection was successful.
+        """Reconnect a disconnected session.
+
+        Credentials are not stored on SessionRecord, so reconnect requires
+        fresh credentials via create_session().  In-memory reconnect is
+        no longer supported as part of credential hygiene.
+
+        Returns True if the session is already connected.
         """
         async with self._lock:
             record = self._sessions.get(session_id)
         if not record:
             raise SessionNotFoundError(f"Session {session_id} not found")
-        
+
         if record.is_connected():
             return True
-        
-        logger.info("Attempting to reconnect session %s (%s@%s:%d)", 
-                   session_id, record.username, record.host, record.port)
-        
-        # Close Old Client If Exists
-        try:
-            record.client.close()
-        except Exception:
-            pass
-        
-        # Create New Client
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(self._get_host_key_policy(port=record.port))
-        
-        pkey = None
-        pk_decrypted = self._decrypt_cred(record.private_key)
-        pp_decrypted = self._decrypt_cred(record.key_passphrase)
-        pw_decrypted = self._decrypt_cred(record.password)
-        if pk_decrypted:
-            pkey = await self._load_private_key(pk_decrypted, pp_decrypted)
-        
-        try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                lambda: client.connect(
-                    hostname=record.host,
-                    port=record.port,
-                    username=record.username,
-                    password=pw_decrypted,
-                    pkey=pkey,
-                    timeout=30,
-                    banner_timeout=30,
-                    auth_timeout=30,
-                    look_for_keys=False,
-                ),
-            )
-            
-            # Configure Window Size
-            transport = client.get_transport()
-            if transport:
-                transport.window_size = 2**20
-                transport.packetizer.REKEY_BYTES = 2**30
-                transport.packetizer.REKEY_PACKETS = 2**30
-            
-            # Update Record With New Client
-            record.client = client
-            record.reconnect_count += 1
-            record.last_reconnect_reason = "timeout"  # или можно определить точнее
-            record.touch()
-            
-            logger.info("Session %s reconnected successfully (reconnect #%d)", 
-                       session_id, record.reconnect_count)
-            return True
-            
-        except AuthenticationException as exc:
-            client.close()
-            logger.error("Reconnection failed for session %s: Authentication failed: %s", session_id, exc)
-            return False
-        except (NoValidConnectionsError, SSHException, OSError) as exc:
-            client.close()
-            logger.error("Reconnection failed for session %s: %s", session_id, exc)
-            return False
+
+        logger.warning(
+            "Session %s (%s@%s:%d) is disconnected. Credentials are not "
+            "stored — call create_session() again with fresh credentials.",
+            session_id, record.username, record.host, record.port,
+        )
+        return False
 
     async def _load_private_key(
         self, key_data: str, passphrase: Optional[str] = None
@@ -615,11 +558,6 @@ class SSHSessionManager:
 
         if not record:
             raise SessionNotFoundError(f"Session {session_id} not found")
-
-        # Clear Credentials From Memory
-        record.password = None
-        record.private_key = None
-        record.key_passphrase = None
 
         host, port, username = record.host, record.port, record.username
 
