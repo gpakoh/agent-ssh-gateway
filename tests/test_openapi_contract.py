@@ -295,8 +295,14 @@ class TestSchemaStructure:
 
 class TestRuntimeBehavior:
     def setup_method(self):
+        self._saved_api_auth_enabled = settings.api_auth_enabled
+        self._saved_api_key = settings.api_key
         settings.api_auth_enabled = False
         settings.api_key = ""
+
+    def teardown_method(self):
+        settings.api_auth_enabled = self._saved_api_auth_enabled
+        settings.api_key = self._saved_api_key
 
     def test_delete_unknown_server_returns_404(self):
         with TestClient(app) as client:
