@@ -47,11 +47,16 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     container:
-      image: docker:cli
+      image: node:20-bookworm
       volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
         - /media/1TB/Docker/compose/ssh-gateway:/deploy:ro
         - /media/1TB/Python/web_ssh/web-ssh-gateway:/project_source:ro
     steps:
+      - name: Install Docker CLI
+        run: |
+          apt-get update -qq && apt-get install -y -qq docker.io curl >/dev/null 2>&1
+          echo "Docker CLI installed"
       - name: Checkout
         uses: actions/checkout@v4
       - name: Build image
@@ -81,7 +86,7 @@ jobs:
           echo "::group::Wait for backend health"
           for i in 1 2 3 4 5 6; do
             sleep 3
-            health=$(wget -qO- http://10.0.0.145:8085/health 2>/dev/null || echo '{"status":"fail"}')
+            health=$(curl -sf http://10.0.0.145:8085/health 2>/dev/null || echo '{"status":"fail"}')
             echo "attempt $i: $(echo "$health" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)"
             echo "$health" | grep -q '"status":"ok"' && break
           done
@@ -89,7 +94,7 @@ jobs:
           echo "Backend healthy"
           echo "::endgroup::"
           echo "::group::Smoke test"
-          code=$(wget -qO- --header="X-API-Key: $API_KEY" \
+          code=$(curl -sf --header "X-API-Key: $API_KEY" \
             http://10.0.0.145:8085/api/capabilities 2>/dev/null | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
           test -n "$code" && echo "Capabilities OK (version: $code)" || { echo "FAIL: capabilities failed"; exit 1; }
           echo "::endgroup::"
