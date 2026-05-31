@@ -73,12 +73,9 @@ jobs:
             .
           echo "::endgroup::"
       - name: Deploy stack
-        env:
-          API_KEY: ${{ secrets.API_KEY }}
         run: |
           echo "::group::Deploy"
           cd /deploy
-          export API_KEY
           docker-compose -p ssh-gateway down --remove-orphans
           docker-compose -p ssh-gateway up -d
           echo "::endgroup::"
@@ -97,6 +94,8 @@ jobs:
           echo "Backend healthy"
           echo "::endgroup::"
           echo "::group::Smoke test"
+          API_KEY="${API_KEY:-$(grep ^API_KEY /deploy/.env 2>/dev/null | cut -d= -f2)}"
+          test -n "$API_KEY" || { echo "FAIL: cannot determine API_KEY"; exit 1; }
           code=$(curl -sf --header "X-API-Key: $API_KEY" \
             http://10.0.0.145:8085/api/capabilities 2>/dev/null | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
           test -n "$code" && echo "Capabilities OK (version: $code)" || { echo "FAIL: capabilities failed"; exit 1; }
