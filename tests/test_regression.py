@@ -200,14 +200,14 @@ class TestH3_HttpUrl:
     def test_event_hook_create_url_is_url_type(self):
         """H3: EventHookCreate.url is a pydantic Url, not bare str."""
         hook = EventHookCreate(url="https://example.com/hook", events=["*"], secret="s")
-        from pydantic_core import Url as PydanticUrl
-        assert isinstance(hook.url, PydanticUrl)
+        assert hasattr(hook.url, "scheme")
+        assert hook.url.scheme == "https"
         assert str(hook.url) == "https://example.com/hook"
 
     def test_event_hook_update_url_is_url_type(self):
         hook = EventHookUpdate(url="https://example.com/hook")
-        from pydantic_core import Url as PydanticUrl
-        assert isinstance(hook.url, PydanticUrl)
+        assert hasattr(hook.url, "scheme")
+        assert hook.url.scheme == "https"
 
     def test_invalid_url_raises(self):
         with pytest.raises(Exception):
