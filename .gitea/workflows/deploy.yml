@@ -9,6 +9,10 @@ env:
   GATEWAY_IP: ${{ vars.GATEWAY_IP || '10.0.0.145' }}
   NGINX_HOST: ${{ vars.NGINX_HOST || '' }}
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   test:
     runs-on: ubuntu-latest
