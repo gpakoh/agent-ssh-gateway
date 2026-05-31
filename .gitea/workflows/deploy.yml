@@ -57,7 +57,8 @@ jobs:
     steps:
       - name: Install Docker CLI
         run: |
-          apt-get update -qq && apt-get install -y -qq docker.io docker-compose-v2 curl >/dev/null 2>&1
+          apt-get update -qq
+          apt-get install -y -qq docker.io docker-compose curl
           echo "Docker CLI installed"
       - name: Checkout
         uses: actions/checkout@v4
@@ -78,8 +79,8 @@ jobs:
           echo "::group::Deploy"
           cd /deploy
           export API_KEY
-          docker compose -p ssh-gateway down --remove-orphans
-          docker compose -p ssh-gateway up -d
+          docker-compose -p ssh-gateway down --remove-orphans
+          docker-compose -p ssh-gateway up -d
           echo "::endgroup::"
       - name: Verify health
         env:
