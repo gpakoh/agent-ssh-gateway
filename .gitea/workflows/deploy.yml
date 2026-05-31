@@ -57,7 +57,7 @@ jobs:
     steps:
       - name: Install Docker CLI
         run: |
-          apt-get update -qq && apt-get install -y -qq docker.io curl >/dev/null 2>&1
+          apt-get update -qq && apt-get install -y -qq docker.io docker-compose-v2 curl >/dev/null 2>&1
           echo "Docker CLI installed"
       - name: Checkout
         uses: actions/checkout@v4
