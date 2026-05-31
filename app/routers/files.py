@@ -42,11 +42,22 @@ from app.models import (
     FileMetadata,
 )
 from app.ast_refactor import ASTRefactor
-from app.auth_middleware import ws_auth_check
+from app.auth_middleware import ws_auth_check, AuthIdentity, ensure_session_owner
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["files"])
+
+
+async def _check_session_ownership(session_id: str, request: Request) -> None:
+    """Check session ownership if caller identity is available."""
+    _identity: AuthIdentity = getattr(request.state, "auth_identity", None)
+    if _identity is None:
+        return
+    session = await _state.manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=_err(404, "Session not found"))
+    ensure_session_owner(session, _identity)
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +67,8 @@ router = APIRouter(tags=["files"])
 @router.post("/api/file/read", response_model=FileReadResponse)
 async def file_read(req: FileReadRequest, request: Request):
     """Read a file from a remote server."""
+    await _check_session_ownership(req.session_id, request)
+
     try:
         validated = validate_path(req.path)
     except ValueError as exc:
@@ -70,6 +83,8 @@ async def file_read(req: FileReadRequest, request: Request):
 @rate_limit_mutation(30, "minute")
 async def file_edit(req: FileEditRequest, request: Request):
     """Edit a remote file using patch operations."""
+    await _check_session_ownership(req.session_id, request)
+
     try:
         validated = validate_path(req.path)
     except ValueError as exc:
@@ -89,8 +104,10 @@ async def file_edit(req: FileEditRequest, request: Request):
 
 
 @router.post("/api/file/patch", response_model=PatchApplyResponse)
-async def file_patch(req: PatchApplyRequest):
+async def file_patch(req: PatchApplyRequest, request: Request):
     """Apply a unified diff patch."""
+    await _check_session_ownership(req.session_id, request)
+
     result = await _state.file_editor.apply_patch(
         req.session_id,
         req.patch,
@@ -110,11 +127,15 @@ async def file_raw(
     offset: int = Query(0, ge=0),
     limit: int = Query(0, ge=0),
     range_header: Optional[str] = Header(None, alias="range"),
+    request: Request = None,
 ):
     """Read a remote file and return raw content as text/plain.
 
     Supports Range header (bytes=start-end) or offset/limit query params.
     """
+    if request is not None:
+        await _check_session_ownership(session_id, request)
+
     try:
         path = validate_path(path)
     except ValueError as exc:
@@ -158,8 +179,10 @@ async def file_raw(
 # ---------------------------------------------------------------------------
 
 @router.post("/api/batch/read", response_model=BatchReadResponse)
-async def batch_read(req: BatchReadRequest):
+async def batch_read(req: BatchReadRequest, request: Request):
     """Read multiple files in a single request."""
+    await _check_session_ownership(req.session_id, request)
+
     files = {}
     errors = {}
 
@@ -189,6 +212,9 @@ async def file_upload(
     request: Request = None,
 ):
     """Upload file to remote server (base64 encoded via query params)."""
+    if request is not None:
+        await _check_session_ownership(session_id, request)
+
     import base64
 
     try:
@@ -201,11 +227,13 @@ async def file_upload(
 
 
 @router.post("/api/file/upload/json", response_model=FileUploadResponse)
-async def file_upload_json(req: FileUploadRequest):
+async def file_upload_json(req: FileUploadRequest, request: Request):
     """Upload file via JSON body (base64 encoded).
 
     Preferred for large files (>2KB) where query params may fail.
     """
+    await _check_session_ownership(req.session_id, request)
+
     import base64
 
     try:
@@ -218,8 +246,11 @@ async def file_upload_json(req: FileUploadRequest):
 
 
 @router.get("/api/file/download", response_class=Response)
-async def file_download(session_id: str = Query(...), path: str = Query(...)):
+async def file_download(session_id: str = Query(...), path: str = Query(...), request: Request = None):
     """Download file from remote server."""
+    if request is not None:
+        await _check_session_ownership(session_id, request)
+
     try:
         path = validate_path(path)
     except ValueError as exc:
@@ -229,12 +260,14 @@ async def file_download(session_id: str = Query(...), path: str = Query(...)):
 
 
 @router.post("/api/file/write", response_model=FileWriteResponse)
-async def file_write(req: FileWriteRequest):
+async def file_write(req: FileWriteRequest, request: Request):
     """Write file via JSON body (atomic, no heredoc escaping).
 
     Use for Python code with quotes, special chars, or large content.
     Mode: 'write' (overwrite) or 'append' (append to end).
     """
+    await _check_session_ownership(req.session_id, request)
+
     try:
         validated = validate_path(req.path)
     except ValueError as exc:
@@ -438,8 +471,10 @@ async def project_tree(
 
 
 @router.post("/api/project/structure", response_model=ProjectStructureResponse)
-async def project_structure_files(req: ProjectStructureRequest):
+async def project_structure_files(req: ProjectStructureRequest, request: Request):
     """Get project structure with metadata and git status."""
+    await _check_session_ownership(req.session_id, request)
+
     import json
 
     cmd = f"cd {shlex.quote(req.path)} && find . -maxdepth {req.max_depth} -printf '%y|%p|%s|%m|%TY-%Tm-%Td %TH:%TM:%TS\\n' 2>/dev/null || echo 'ERROR'"
@@ -538,8 +573,10 @@ async def project_structure_files(req: ProjectStructureRequest):
 # ---------------------------------------------------------------------------
 
 @router.patch("/api/batch/edit", response_model=BatchEditResponse)
-async def batch_edit(req: BatchEditRequest):
+async def batch_edit(req: BatchEditRequest, request: Request):
     """Edit multiple files in a single request."""
+    await _check_session_ownership(req.session_id, request)
+
     results = []
     files_changed = 0
     total_operations = 0

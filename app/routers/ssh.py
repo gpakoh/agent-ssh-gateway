@@ -9,13 +9,13 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Query
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Query
 
 
 from app.config import settings
 from app.state import _err
 from app import state as _state
-from app.auth_middleware import ws_auth_check, is_agent_token_valid, verify_master_api_key
+from app.auth_middleware import ws_auth_check, is_agent_token_valid, verify_master_api_key, VALID_AGENT_SCOPES, require_scope, AuthIdentity, ensure_session_owner
 from app.security import sanitize_command, rate_limit_mutation, validate_target_host
 from app.command_policy import evaluate_command_policy
 from app.ssh_manager import SSHManagerError, ConnectionError as SSHConnError, AuthenticationError, SessionNotFoundError, TimeoutError, ExecutionError
@@ -28,6 +28,8 @@ from app.models import (
     DisconnectResponse,
     SessionsResponse,
     SessionInfo,
+    AgentTokenRequest,
+    AgentTokenRefreshRequest,
     AgentTokenResponse,
     AgentTokenRefreshResponse,
     SessionTimeoutRequest,
@@ -55,16 +57,24 @@ def time_to_iso(timestamp: float) -> str:
 
 @router.post("/api/agent/token", response_model=AgentTokenResponse)
 @rate_limit_mutation(5, "minute")
-async def agent_token_generate(request: Request):
+async def agent_token_generate(req: AgentTokenRequest, request: Request):
     """Generate a short-lived agent token (separate from API_KEY).
 
     Requires API_KEY auth. The generated token can be rotated
     without affecting the main API_KEY. Token stored in Redis with TTL.
+    The token carries a scope list that limits which endpoints it can access.
     """
     if not await verify_master_api_key(request, settings.api_key):
         raise HTTPException(
             status_code=401,
             detail=_err(401, "Only master API key can create agent tokens"),
+        )
+
+    invalid_scopes = sorted(set(req.scopes) - VALID_AGENT_SCOPES)
+    if invalid_scopes:
+        raise HTTPException(
+            status_code=400,
+            detail=_err(400, f"Invalid scopes: {', '.join(invalid_scopes)}"),
         )
 
     import secrets as _secrets
@@ -77,23 +87,26 @@ async def agent_token_generate(request: Request):
         )
 
     token = _secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.agent_token_ttl)
-    await _state.agent_token_store.set_token(token, settings.agent_token_ttl)
-    logger.info("Agent token generated (ttl=%ds)", settings.agent_token_ttl)
+    ttl = req.ttl_seconds
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl)
+    await _state.agent_token_store.set_token(token, ttl, scopes=req.scopes)
+    logger.info("Agent token generated (ttl=%ds, scopes=%s)", ttl, req.scopes)
     return AgentTokenResponse(
         token=token,
-        ttl=settings.agent_token_ttl,
+        ttl=ttl,
         expires_at=expires_at.isoformat(),
+        scopes=req.scopes,
     )
 
 
 @router.post("/api/agent/token/refresh", response_model=AgentTokenRefreshResponse)
 @rate_limit_mutation(5, "minute")
-async def agent_token_refresh(request: Request):
+async def agent_token_refresh(req: AgentTokenRefreshRequest, request: Request):
     """Refresh (rotate) the agent token.
 
     Invalidates the previous agent token and issues a new one atomically.
     Only master API key can refresh tokens.
+    The new token preserves the scopes of the old token — refresh never expands rights.
     """
     if not await verify_master_api_key(request, settings.api_key):
         raise HTTPException(
@@ -110,14 +123,24 @@ async def agent_token_refresh(request: Request):
             detail=_err(503, "Agent token store not available (Redis required)"),
         )
 
+    # Validate old token and preserve its scopes
+    old_valid, old_scopes = await _state.agent_token_store.validate_token(req.token)
+    if not old_valid:
+        raise HTTPException(
+            status_code=400,
+            detail=_err(400, "Old token is invalid or expired"),
+        )
+
     token = _secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.agent_token_ttl)
-    await _state.agent_token_store.set_token(token, settings.agent_token_ttl)
-    logger.info("Agent token refreshed (ttl=%ds)", settings.agent_token_ttl)
+    ttl = req.ttl_seconds
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl)
+    await _state.agent_token_store.set_token(token, ttl, scopes=old_scopes)
+    logger.info("Agent token refreshed (ttl=%ds, scopes=%s)", ttl, old_scopes)
     return AgentTokenRefreshResponse(
         token=token,
-        ttl=settings.agent_token_ttl,
+        ttl=ttl,
         expires_at=expires_at.isoformat(),
+        scopes=old_scopes or [],
     )
 
 
@@ -159,7 +182,11 @@ async def update_session_timeout(req: SessionTimeoutRequest):
 
 @router.post("/api/ssh/connect", response_model=ConnectResponse)
 @rate_limit_mutation(10, "minute")
-async def ssh_connect(req: ConnectRequest, request: Request):
+async def ssh_connect(
+    req: ConnectRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:connect")),
+):
     """Create a new SSH session."""
     try:
         validate_target_host(
@@ -182,6 +209,9 @@ async def ssh_connect(req: ConnectRequest, request: Request):
         password=req.password,
         private_key=req.private_key,
         key_passphrase=req.key_passphrase,
+        owner_type=_identity.token_type,
+        owner_name=_identity.name,
+        owner_token_fingerprint=_identity.fingerprint,
     )
 
     # Persist Session If Store Is Available
@@ -205,7 +235,11 @@ async def ssh_connect(req: ConnectRequest, request: Request):
 
 @router.post("/api/ssh/execute", response_model=ExecuteResponse)
 @rate_limit_mutation(60, "minute")
-async def ssh_execute(req: ExecuteRequest, request: Request):
+async def ssh_execute(
+    req: ExecuteRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:execute")),
+):
     """Execute a command on an existing SSH session."""
     # Sanitize Command
     try:
@@ -246,6 +280,12 @@ async def ssh_execute(req: ExecuteRequest, request: Request):
     # Audit Log
     _state.audit_logger.log_command(req.session_id, sanitized, request.client.host)
 
+    # Session Ownership Check
+    session = await _state.manager.get_session(req.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=_err(404, "Session not found"))
+    ensure_session_owner(session, _identity)
+
     result = await _state.manager.execute(
         session_id=req.session_id,
         command=sanitized,
@@ -255,8 +295,14 @@ async def ssh_execute(req: ExecuteRequest, request: Request):
 
 
 @router.post("/api/ssh/disconnect", response_model=DisconnectResponse)
-async def ssh_disconnect(req: DisconnectRequest):
+async def ssh_disconnect(req: DisconnectRequest, request: Request):
     """Close an SSH session."""
+    _identity: AuthIdentity = getattr(request.state, "auth_identity", None)
+    if _identity is not None:
+        session = await _state.manager.get_session(req.session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail=_err(404, "Session not found"))
+        ensure_session_owner(session, _identity)
     await _state.manager.disconnect(req.session_id)
 
     if _state.session_store:
@@ -282,6 +328,8 @@ async def ssh_sessions():
             connected_at=time_to_iso(r.connected_at),
             last_command_at=time_to_iso(r.last_activity) if r.last_activity else None,
             idle_seconds=round(now - r.last_activity, 1),
+            owner_type=r.owner_type,
+            owner_name=r.owner_name,
         )
         for r in records
     ]
@@ -453,6 +501,7 @@ async def check_port(
     host: str = Query(..., description="Target hostname or IP"),
     port: int = Query(22, ge=1, le=65535, description="Target port"),
     timeout: float = Query(5.0, ge=0.5, le=30.0, description="Connection timeout in seconds"),
+    _identity: AuthIdentity = Depends(require_scope("ssh:port-check")),
 ):
     """Check if a remote TCP port is reachable. Requires API authentication."""
     try:

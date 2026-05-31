@@ -1,11 +1,12 @@
-"""Tests for auth middleware: IP allowlist + API key."""
+"""Tests for auth middleware: IP allowlist + API key + scope enforcement."""
 
 import asyncio
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 from starlette.testclient import TestClient
 
 from app.main import app
@@ -16,7 +17,10 @@ from app.auth_middleware import (
     verify_api_key,
     parse_cidrs,
     ws_auth_check,
+    require_scope,
+    AuthIdentity,
     CLOSE_POLICY_VIOLATION,
+    VALID_AGENT_SCOPES,
 )
 
 
@@ -78,25 +82,29 @@ class TestVerifyApiKey:
     async def test_header_match(self):
         req = _mock_request()
         req.headers = {"X-API-Key": "secret-42"}
-        assert await verify_api_key(req, "secret-42") is True
+        identity = await verify_api_key(req, "secret-42")
+        assert identity is not None
+        assert identity.token_type == "master"
 
     @pytest.mark.asyncio
     async def test_header_mismatch(self):
         req = _mock_request()
         req.headers = {"X-API-Key": "wrong"}
-        assert await verify_api_key(req, "secret-42") is False
+        assert await verify_api_key(req, "secret-42") is None
 
     @pytest.mark.asyncio
     async def test_bearer_token(self):
         req = _mock_request()
         req.headers = {"Authorization": "Bearer my-token"}
-        assert await verify_api_key(req, "my-token") is True
+        identity = await verify_api_key(req, "my-token")
+        assert identity is not None
+        assert identity.token_type == "master"
 
     @pytest.mark.asyncio
     async def test_no_key(self):
         req = _mock_request()
         req.headers = {}
-        assert await verify_api_key(req, "secret-42") is False
+        assert await verify_api_key(req, "secret-42") is None
 
 
 # ---------------------------------------------------------------------------
@@ -457,7 +465,9 @@ async def test_verify_api_key_accepts_non_expired_agent_token(monkeypatch):
         "agent_token_expires_at",
         datetime.now(timezone.utc) + timedelta(seconds=60),
     )
-    assert await verify_api_key(req, "main-key", settings=settings) is True
+    identity = await verify_api_key(req, "main-key", settings=settings)
+    assert identity is not None
+    assert identity.token_type == "agent"
 
 
 @pytest.mark.asyncio
@@ -470,7 +480,7 @@ async def test_verify_api_key_rejects_expired_agent_token(monkeypatch):
         "agent_token_expires_at",
         datetime.now(timezone.utc) - timedelta(seconds=1),
     )
-    assert await verify_api_key(req, "main-key", settings=settings) is False
+    assert await verify_api_key(req, "main-key", settings=settings) is None
 
 
 def test_ws_auth_rejects_expired_agent_token(ws_settings, monkeypatch):
@@ -581,3 +591,131 @@ class TestSshKeyUpload:
                 },
             )
         assert resp.status_code != 403
+
+
+# ---------------------------------------------------------------------------
+# Scope Enforcement Tests
+# ---------------------------------------------------------------------------
+
+
+class TestScopeEnforcement:
+    """require_scope() — master key bypasses, agent token needs matching scope."""
+
+    def _make_identity(self, token_type="master", scopes=("*",)):
+        return AuthIdentity(token_type=token_type, name="test", token="x", scopes=scopes)
+
+    async def _make_scope_req(self, identity):
+        req = _mock_request()
+        req.state.auth_identity = identity
+        return req
+
+    @pytest.mark.asyncio
+    async def test_master_key_bypasses_any_scope(self):
+        ident = self._make_identity(token_type="master")
+        dep = require_scope("ssh:connect")
+        req = await self._make_scope_req(ident)
+        result = await dep(req)
+        assert result is ident
+
+    @pytest.mark.asyncio
+    async def test_wildcard_scope_grants_all(self):
+        ident = self._make_identity(token_type="agent", scopes=("*",))
+        dep = require_scope("ssh:execute")
+        req = await self._make_scope_req(ident)
+        result = await dep(req)
+        assert result is ident
+
+    @pytest.mark.asyncio
+    async def test_matching_scope_grants_access(self):
+        ident = self._make_identity(token_type="agent", scopes=("ssh:connect",))
+        dep = require_scope("ssh:connect")
+        req = await self._make_scope_req(ident)
+        result = await dep(req)
+        assert result is ident
+
+    @pytest.mark.asyncio
+    async def test_missing_scope_raises_403(self):
+        ident = self._make_identity(token_type="agent", scopes=("ssh:connect",))
+        dep = require_scope("ssh:execute")
+        req = await self._make_scope_req(ident)
+        with pytest.raises(HTTPException) as exc:
+            await dep(req)
+        assert exc.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_no_identity_raises_401(self):
+        dep = require_scope("ssh:connect")
+        req = await self._make_scope_req(None)
+        with pytest.raises(HTTPException) as exc:
+            await dep(req)
+        assert exc.value.status_code == 401
+
+    def test_valid_agent_scopes_defined(self):
+        assert "ssh:connect" in VALID_AGENT_SCOPES
+        assert "ssh:execute" in VALID_AGENT_SCOPES
+        assert "ssh:port-check" in VALID_AGENT_SCOPES
+        assert "ssh:disconnect" in VALID_AGENT_SCOPES
+        assert "ssh:files" in VALID_AGENT_SCOPES
+        assert "jobs:read" in VALID_AGENT_SCOPES
+        assert "jobs:run" in VALID_AGENT_SCOPES
+
+
+# ---------------------------------------------------------------------------
+# Agent Token with Scopes — Integration Tests
+# ---------------------------------------------------------------------------
+
+
+class TestAgentTokenWithScopes:
+    """Agent token requests with scopes are validated and stored."""
+
+    @staticmethod
+    def _mock_store():
+        store = MagicMock()
+        store.connected = True
+        store.set_token = AsyncMock()
+        store.validate_token = AsyncMock(return_value=(True, ["ssh:port-check"]))
+        store.disconnect = AsyncMock()
+        return store
+
+    def test_create_token_with_default_scopes(self, api_key_auth, monkeypatch):
+        with TestClient(app) as client:
+            monkeypatch.setattr("app.state.agent_token_store", self._mock_store())
+            resp = client.post(
+                "/api/agent/token",
+                headers={"X-API-Key": "secret-42"},
+                json={"name": "agent", "ttl_seconds": 3600},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "scopes" in data
+        assert data["scopes"] == ["ssh:connect", "ssh:execute"]
+
+    def test_create_token_with_custom_scopes(self, api_key_auth, monkeypatch):
+        with TestClient(app) as client:
+            monkeypatch.setattr("app.state.agent_token_store", self._mock_store())
+            resp = client.post(
+                "/api/agent/token",
+                headers={"X-API-Key": "secret-42"},
+                json={
+                    "name": "agent",
+                    "ttl_seconds": 3600,
+                    "scopes": ["ssh:port-check"],
+                },
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["scopes"] == ["ssh:port-check"]
+
+    def test_create_token_with_invalid_scope_returns_400(self, api_key_auth, monkeypatch):
+        with TestClient(app) as client:
+            monkeypatch.setattr("app.state.agent_token_store", self._mock_store())
+            resp = client.post(
+                "/api/agent/token",
+                headers={"X-API-Key": "secret-42"},
+                json={
+                    "name": "agent",
+                    "ttl_seconds": 3600,
+                    "scopes": ["invalid:scope"],
+                },
+            )
+        assert resp.status_code == 400

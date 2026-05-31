@@ -85,6 +85,9 @@ class SessionRecord:
     last_activity: float = field(default_factory=time.time)
     reconnect_count: int = 0
     last_reconnect_reason: Optional[str] = None
+    owner_type: str = "master"
+    owner_name: str | None = None
+    owner_token_fingerprint: str | None = None
 
     def touch(self) -> None:
         """Update last activity timestamp."""
@@ -218,6 +221,9 @@ class SSHSessionManager:
         password: Optional[str] = None,
         private_key: Optional[str] = None,
         key_passphrase: Optional[str] = None,
+        owner_type: str = "master",
+        owner_name: str | None = None,
+        owner_token_fingerprint: str | None = None,
     ) -> str:
         """Create a new SSH session and return its session ID."""
         client = paramiko.SSHClient()
@@ -267,6 +273,9 @@ class SSHSessionManager:
             password=self._encrypt_cred(password),
             private_key=self._encrypt_cred(private_key),
             key_passphrase=self._encrypt_cred(key_passphrase),
+            owner_type=owner_type,
+            owner_name=owner_name,
+            owner_token_fingerprint=owner_token_fingerprint,
         )
 
         async with self._lock:

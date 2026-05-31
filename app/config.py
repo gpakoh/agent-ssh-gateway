@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     agent_token: str = Field(default="", alias="AGENT_TOKEN")
     agent_token_ttl: int = Field(default=3600, alias="AGENT_TOKEN_TTL")
     agent_token_expires_at: datetime | None = None
+    agent_token_scopes: list[str] = Field(default=[], alias="AGENT_TOKEN_SCOPES")
     allowed_client_cidrs: str = Field(
         default="127.0.0.1/32,::1/128,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12",
         alias="ALLOWED_CLIENT_CIDRS",

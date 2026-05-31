@@ -109,7 +109,7 @@ async def get_capabilities():
         rate_limit_requests=settings.rate_limit_requests,
         rate_limit_window=settings.rate_limit_window,
         server_count=len(servers),
-        agent_token_enabled=await is_agent_token_valid(settings, settings.agent_token, _state.agent_token_store),
+        agent_token_enabled=bool(await is_agent_token_valid(settings, settings.agent_token, _state.agent_token_store)),
         agent_token_ttl=settings.agent_token_ttl,
     )
 
