@@ -1,14 +1,63 @@
-"""Auth middleware: API key + IP allowlist for agent-ssh-gateway."""
+"""Auth middleware: API key + IP allowlist + scope enforcement for agent-ssh-gateway."""
 
+import hashlib
 import ipaddress
 import logging
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import Request, WebSocket, HTTPException
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Token Fingerprint
+# ---------------------------------------------------------------------------
+
+
+def token_fingerprint(token: str) -> str:
+    """Stable non-reversible token fingerprint for ownership checks."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Auth Identity — carried on request.state after auth
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AuthIdentity:
+    """Identifies the caller after successful authentication.
+
+    - ``master`` tokens (API_KEY) always have ``("*",)`` scopes — full access.
+    - ``agent`` tokens have a restricted scope tuple.
+    """
+
+    token_type: str
+    token: str
+    name: str | None = None
+    scopes: tuple[str, ...] = ()
+
+    @property
+    def fingerprint(self) -> str:
+        return token_fingerprint(self.token)
+
+
+# ---------------------------------------------------------------------------
+# Valid scopes for agent tokens
+# ---------------------------------------------------------------------------
+
+VALID_AGENT_SCOPES: set[str] = {
+    "ssh:connect",
+    "ssh:execute",
+    "ssh:disconnect",
+    "ssh:files",
+    "ssh:port-check",
+    "jobs:read",
+    "jobs:run",
+}
 
 # ---------------------------------------------------------------------------
 # CIDR Helpers
@@ -57,44 +106,59 @@ def is_ip_allowed(ip_str: str, allowed_networks: list) -> bool:
     return any(addr in net for net in allowed_networks)
 
 
-async def is_agent_token_valid(settings, provided: str, token_store=None) -> bool:
+async def is_agent_token_valid(settings, provided: str, token_store=None) -> AuthIdentity | None:
     if not provided:
-        return False
+        return None
     if token_store is not None and token_store.connected:
-        return await token_store.validate_token(provided)
+        valid, scopes = await token_store.validate_token(provided)
+        if not valid:
+            return None
+        return AuthIdentity(
+            token_type="agent",
+            token=provided,
+            name="agent",
+            scopes=tuple(scopes or ()),
+        )
     if not settings.agent_token:
-        return False
+        return None
     expires_at = getattr(settings, "agent_token_expires_at", None)
     if expires_at is not None:
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if datetime.now(timezone.utc) >= expires_at:
-            return False
-    return secrets.compare_digest(provided, settings.agent_token)
+            return None
+    if not secrets.compare_digest(provided, settings.agent_token):
+        return None
+    return AuthIdentity(
+        token_type="agent",
+        token=provided,
+        name="agent",
+        scopes=tuple(settings.agent_token_scopes),
+    )
 
 
 async def verify_api_key(
     request: Request, expected_key: str, extra_key: str = "", settings=None, token_store=None
-) -> bool:
+) -> AuthIdentity | None:
     provided = request.headers.get("X-API-Key", "")
     if not provided:
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             provided = auth_header[7:]
     if not provided:
-        return False
+        return None
     if secrets.compare_digest(provided, expected_key):
-        return True
+        return AuthIdentity(token_type="master", token=provided, name="master", scopes=("*",))
     if settings is not None:
         return await is_agent_token_valid(settings, provided, token_store)
     if extra_key and secrets.compare_digest(provided, extra_key):
-        return True
-    return False
+        return AuthIdentity(token_type="master", token=provided, name="master", scopes=("*",))
+    return None
 
 
 async def verify_master_api_key(
     request: Request, expected_key: str
-) -> bool:
+) -> AuthIdentity | None:
     """Verify only the master API key — rejects agent tokens.
 
     Use this for privileged operations like agent token management.
@@ -106,8 +170,10 @@ async def verify_master_api_key(
         if auth_header.startswith("Bearer "):
             provided = auth_header[7:]
     if not provided:
-        return False
-    return secrets.compare_digest(provided, expected_key)
+        return None
+    if secrets.compare_digest(provided, expected_key):
+        return AuthIdentity(token_type="master", token=provided, name="master", scopes=("*",))
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +271,8 @@ async def auth_check(request: Request, settings, token_store=None) -> Optional[H
         )
 
     # API Key Check (also Accept Agent_token)
-    if not await verify_api_key(request, settings.api_key, settings.agent_token, settings, token_store):
+    identity = await verify_api_key(request, settings.api_key, settings.agent_token, settings, token_store)
+    if identity is None:
         return HTTPException(
             status_code=401,
             detail={
@@ -217,6 +284,8 @@ async def auth_check(request: Request, settings, token_store=None) -> Optional[H
             },
         )
 
+    # Carry the authenticated identity for downstream scope checks
+    request.state.auth_identity = identity
     return None
 
 
@@ -282,6 +351,74 @@ async def ws_auth_check(websocket: WebSocket, settings, token_store=None) -> tup
         return (CLOSE_POLICY_VIOLATION, "Invalid or missing API key")
     if secrets.compare_digest(provided, settings.api_key):
         return None
-    if await is_agent_token_valid(settings, provided, token_store):
+    if await is_agent_token_valid(settings, provided, token_store) is not None:
         return None
     return (CLOSE_POLICY_VIOLATION, "Invalid or missing API key")
+
+
+# ---------------------------------------------------------------------------
+# Scope Check — used as FastAPI Depends on individual endpoints
+# ---------------------------------------------------------------------------
+
+
+def require_scope(required: str):
+    """FastAPI dependency: require a specific scope on the endpoint.
+
+    Master API key bypasses all scope checks.
+    Agent tokens must have the required scope in their scopes list.
+    """
+    async def _scope_check(request: Request) -> AuthIdentity:
+        identity: AuthIdentity | None = getattr(request.state, "auth_identity", None)
+        if identity is None:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "message": "Authentication required",
+                    "code": "UNAUTHORIZED",
+                    "retryable": False,
+                    "http_status": 401,
+                },
+            )
+        if identity.token_type == "master":
+            return identity
+        if "*" in identity.scopes or required in identity.scopes:
+            return identity
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": f"Missing required scope: {required}",
+                "code": "MISSING_SCOPE",
+                "retryable": False,
+                "hint": f"This endpoint requires the '{required}' scope",
+                "http_status": 403,
+            },
+        )
+    return _scope_check
+
+
+def ensure_session_owner(session, identity: AuthIdentity) -> None:
+    """Allow master to access any session, agent only its own sessions."""
+    if identity.token_type == "master":
+        return
+    if getattr(session, "owner_type", None) != "agent":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": "Agent token cannot access this session",
+                "code": "SESSION_OWNERSHIP",
+                "retryable": False,
+                "hint": "Use the agent token that created this session",
+                "http_status": 403,
+            },
+        )
+    if getattr(session, "owner_token_fingerprint", None) != identity.fingerprint:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": "Agent token cannot access this session",
+                "code": "SESSION_OWNERSHIP",
+                "retryable": False,
+                "hint": "Use the agent token that created this session",
+                "http_status": 403,
+            },
+        )
