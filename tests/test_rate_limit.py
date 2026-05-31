@@ -11,10 +11,9 @@ from app.config import settings
 
 
 @pytest.fixture(autouse=True)
-def _api_key():
-    settings.api_key = "test-key"
+def _api_key(monkeypatch):
+    monkeypatch.setattr(settings, "api_key", "test-key")
     yield
-    settings.api_key = ""
 
 
 def test_rate_limit_mutation_import():
