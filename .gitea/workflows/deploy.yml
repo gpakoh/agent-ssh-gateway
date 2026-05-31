@@ -49,9 +49,7 @@ jobs:
     container:
       image: node:20-bookworm
       volumes:
-        - /var/run/docker.sock:/var/run/docker.sock
         - /media/1TB/Docker/compose/ssh-gateway:/deploy:ro
-        - /media/1TB/Python/web_ssh/web-ssh-gateway:/project_source:ro
     steps:
       - name: Install Docker CLI
         run: |
@@ -66,8 +64,8 @@ jobs:
           test -n "${API_KEY:-}" || { echo "API_KEY secret is missing"; exit 1; }
           echo "::group::Build agent-ssh-gateway image"
           docker build -t agent-ssh-gateway:latest \
-            -f /project_source/docker/Dockerfile \
-            /project_source
+            -f docker/Dockerfile \
+            .
           echo "::endgroup::"
       - name: Deploy stack
         env:
