@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Optional
+from typing import Optional, cast
 
 import redis.asyncio as redis
 
@@ -169,9 +169,10 @@ class DistributedLock:
         ttl = await self._redis.ttl(lock_key)
 
         if token:
+            t = cast(str, token)
             return {
                 "resource": resource,
-                "token": token[:8] + "...",
+                "token": t[:8] + "...",
                 "ttl_remaining": ttl,
             }
         return None

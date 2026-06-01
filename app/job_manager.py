@@ -18,6 +18,15 @@ logger = logging.getLogger(__name__)
 MAX_STDOUT_SIZE = 10 * 1024 * 1024  # 10 MB per job
 
 
+def _make_job_error_logger(job_id: str):
+    """Build a done callback that logs job crashes."""
+    def _log(t: asyncio.Task) -> None:
+        exc = t.exception()
+        if exc:
+            logger.error("Job %s crashed: %s", job_id, exc)
+    return _log
+
+
 # ---------------------------------------------------------------------------
 # Job Record
 # ---------------------------------------------------------------------------
@@ -197,11 +206,7 @@ class JobManager:
 
         # Start The Job In Background
         task = asyncio.create_task(self._run_job(job_id))
-        task.add_done_callback(
-            lambda t: t.exception() and logger.error(
-                "Job %s crashed: %s", job_id, t.exception()
-            )
-        )
+        task.add_done_callback(_make_job_error_logger(job_id))
         self._job_tasks[job_id] = task
         task.add_done_callback(lambda _: self._job_tasks.pop(job_id, None))
         return job_id
@@ -365,4 +370,7 @@ class JobManager:
             if not active_events:
                 return
             logger.info("Waiting for %d active jobs to complete...", len(active_events))
-            await asyncio.wait(active_events, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait(
+                [asyncio.ensure_future(event.wait()) for event in active_events],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
