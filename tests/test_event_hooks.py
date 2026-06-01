@@ -53,7 +53,7 @@ async def test_list_hooks(store):
         url="https://b.com/hook", events=["session.connected"],
         session_id=None, headers_encrypted=None, secret_encrypted=None, include_output=False,
     )
-    hooks = await store.list()
+    hooks = await store.list_hooks()
     assert len(hooks) == 2
 
 
