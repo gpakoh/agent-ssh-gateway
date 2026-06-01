@@ -1,6 +1,6 @@
 # Web SSH Gateway — Nginx configuration example
-# Replace gateway.example.com and 10.0.0.10 with your actual domain and backend IP.
-# Real deploy configs: keep in private repo or Gitea, not in public GitHub.
+# Replace gateway.example.com and __BACKEND_IP__ with your actual domain and backend IP.
+# Keep real deploy configs in a private repository.
 
 # HTTP → HTTPS redirect
 server {
@@ -50,7 +50,7 @@ server {
 
     # Default location — mTLS bypass, otherwise SSO auth
     location / {
-        proxy_pass http://10.0.0.10:8085;
+        proxy_pass http://__BACKEND_IP__:8085;
 
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -65,7 +65,7 @@ server {
 
     # WebSocket execute stream
     location /api/ssh/execute/stream {
-        proxy_pass http://10.0.0.10:8085;
+        proxy_pass http://__BACKEND_IP__:8085;
         proxy_set_header X-API-Key "__API_KEY__";
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -76,7 +76,7 @@ server {
 
     # WebSocket PTY
     location /api/ssh/pty/ {
-        proxy_pass http://10.0.0.10:8085;
+        proxy_pass http://__BACKEND_IP__:8085;
         proxy_set_header X-API-Key "__API_KEY__";
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -90,7 +90,7 @@ server {
         internal;
         # auth_request /authelia;
         rewrite ^/_mtls-auth/(.*)$ /$1 break;
-        proxy_pass http://10.0.0.10:8085;
+        proxy_pass http://__BACKEND_IP__:8085;
         proxy_set_header X-API-Key "__API_KEY__";
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;

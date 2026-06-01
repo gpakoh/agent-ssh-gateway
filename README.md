@@ -425,7 +425,7 @@ Planned or recommended improvements:
 * session recording;
 * job queue improvements;
 * SDK examples;
-* Gitea/GitHub Actions examples;
+* GitHub Actions examples;
 * MCP/AI-agent integration examples;
 * production hardening guide.
 

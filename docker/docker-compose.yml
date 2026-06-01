@@ -1,11 +1,9 @@
-version: "3.8"
-
 services:
   redis:
     image: redis:7-alpine
     container_name: ssh-gateway-redis
     networks:
-      internal_net: {}
+      - internal_net
     volumes:
       - redis_data:/data
     restart: unless-stopped
@@ -16,39 +14,24 @@ services:
       timeout: 3s
       retries: 3
 
-  agent-ssh-gateway:
+  web-ssh-gateway:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    container_name: agent-ssh-gateway
-    hostname: agent-ssh-gateway
+    container_name: web-ssh-gateway
+    hostname: web-ssh-gateway
     networks:
-      proxy_net:
-        ipv4_address: ${GATEWAY_IP:-10.0.0.10}
-      internal_net: {}
+      - internal_net
     ports:
       - "8085:8085"
     environment:
       - UVICORN_HOST=0.0.0.0
       - UVICORN_PORT=8085
-      - SESSION_TIMEOUT=3600
-      - CLEANUP_INTERVAL=300
-      - CORS_ORIGINS=${CORS_ORIGINS:-["https://gateway.example.com"]}
-      - OPENCODE_ADAPTER_URL=${OPENCODE_ADAPTER_URL:-http://host.docker.internal:8008}
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
-      - API_AUTH_ENABLED=${API_AUTH_ENABLED:-true}
-      - API_KEY=${API_KEY:?set API_KEY for agent-ssh-gateway}
-      - ALLOWED_CLIENT_CIDRS=${ALLOWED_CLIENT_CIDRS:-127.0.0.1/32,192.168.0.0/16,10.0.0.0/8}
-      - TRUSTED_PROXY_CIDRS=${TRUSTED_PROXY_CIDRS:-127.0.0.1/32,10.0.0.0/8}
       - REDIS_URL=redis://redis:6379/0
-      - REDIS_JOB_QUEUE_ENABLED=true
+      - API_KEY=${API_KEY:?set API_KEY}
     volumes:
       - ssh_keys:/app/ssh_keys:ro
       - gateway_logs:/app/logs
-      - /tmp:/tmp
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -76,11 +59,8 @@ services:
         condition: service_healthy
 
 networks:
-  proxy_net:
-    driver: macvlan
-    external: true
   internal_net:
-    external: true
+    driver: bridge
 
 volumes:
   ssh_keys:
