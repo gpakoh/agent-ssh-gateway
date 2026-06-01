@@ -116,7 +116,7 @@ class SessionStore:
     def __init__(self, database_url: str):
         self._database_url = database_url
         self._engine = None
-        self._session_maker = None
+        self._session_maker: async_sessionmaker[AsyncSession] | None = None
     
     async def connect(self):
         """Initialize database connection."""
@@ -156,7 +156,9 @@ class SessionStore:
         ttl: int = 3600,
     ) -> None:
         """Save session to database."""
-        async with self._session_maker() as session:
+        sm = self._session_maker
+        assert sm is not None
+        async with sm() as session:
             secret_manager = _get_secret_manager()
             db_session = PersistentSession(
                 session_id=session_id,
@@ -177,13 +179,15 @@ class SessionStore:
     
     async def get_session(self, session_id: str) -> Optional[dict]:
         """Get session from database."""
-        async with self._session_maker() as session:
+        sm = self._session_maker
+        assert sm is not None
+        async with sm() as session:
             from sqlalchemy import select
             
             result = await session.execute(
                 select(PersistentSession).where(
                     PersistentSession.session_id == session_id,
-                    PersistentSession.is_active,
+                    PersistentSession.is_active == True,  # noqa: E712
                     PersistentSession.expires_at > datetime.now(timezone.utc)
                 )
             )
@@ -199,7 +203,9 @@ class SessionStore:
     
     async def update_session_activity(self, session_id: str) -> None:
         """Update session last activity."""
-        async with self._session_maker() as session:
+        sm = self._session_maker
+        assert sm is not None
+        async with sm() as session:
             from sqlalchemy import select
             
             result = await session.execute(
@@ -212,43 +218,49 @@ class SessionStore:
             if db_session:
                 db_session.last_activity = datetime.now(timezone.utc)
                 await session.commit()
-    
+
     async def deactivate_session(self, session_id: str) -> None:
         """Deactivate session."""
-        async with self._session_maker() as session:
+        sm = self._session_maker
+        assert sm is not None
+        async with sm() as session:
             from sqlalchemy import select
-            
+
             result = await session.execute(
                 select(PersistentSession).where(
                     PersistentSession.session_id == session_id
                 )
             )
             db_session = result.scalar_one_or_none()
-            
+
             if db_session:
                 db_session.is_active = False
                 await session.commit()
                 logger.info("Session %s deactivated", session_id)
-    
+
     async def list_active_sessions(self) -> list[dict]:
         """List all active sessions."""
-        async with self._session_maker() as session:
+        sm = self._session_maker
+        assert sm is not None
+        async with sm() as session:
             from sqlalchemy import select
-            
+
             result = await session.execute(
                 select(PersistentSession).where(
-                    PersistentSession.is_active,
+                    PersistentSession.is_active == True,  # noqa: E712
                     PersistentSession.expires_at > datetime.now(timezone.utc)
                 )
             )
             sessions = result.scalars().all()
             return [s.to_dict() for s in sessions]
-    
+
     async def cleanup_expired_sessions(self) -> int:
         """Remove expired sessions in batches. Returns count removed."""
         total = 0
         batch_size = 1000
-        async with self._session_maker() as session:
+        sm = self._session_maker
+        assert sm is not None
+        async with sm() as session:
             from sqlalchemy import select, delete
 
             while True:
@@ -261,9 +273,9 @@ class SessionStore:
                     )
                 )
                 await session.commit()
-                if result.rowcount == 0:
+                if result.rowcount == 0:  # type: ignore[attr-defined]
                     break
-                total += result.rowcount
+                total += result.rowcount  # type: ignore[attr-defined]
 
         if total > 0:
             logger.info("Cleaned up %d expired sessions", total)
@@ -271,13 +283,15 @@ class SessionStore:
     
     async def get_session_credentials(self, session_id: str) -> Optional[dict]:
         """Get decrypted credentials for session."""
-        async with self._session_maker() as session:
+        sm = self._session_maker
+        assert sm is not None
+        async with sm() as session:
             from sqlalchemy import select
             
             result = await session.execute(
                 select(PersistentSession).where(
                     PersistentSession.session_id == session_id,
-                    PersistentSession.is_active
+                    PersistentSession.is_active == True,  # noqa: E712
                 )
             )
             db_session = result.scalar_one_or_none()

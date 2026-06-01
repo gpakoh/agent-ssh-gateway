@@ -53,7 +53,7 @@ class EventHookStore:
             await session.refresh(hook)
             return hook
 
-    async def list(self) -> list[EventHook]:
+    async def list_hooks(self) -> list[EventHook]:
         async with self._session_factory() as session:
             result = await session.execute(
                 select(EventHook).order_by(EventHook.created_at)
@@ -127,7 +127,10 @@ class EventHookStore:
             hooks: list[EventHook] = list(result.scalars().all())
             matched = []
             for h in hooks:
-                if event_type not in h.events:
+                events = h.events
+                if events is None:
+                    continue
+                if event_type not in events:
                     continue
                 if h.session_id and h.session_id != session_id:
                     continue

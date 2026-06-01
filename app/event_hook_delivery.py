@@ -73,7 +73,6 @@ class DeliveryService:
                 total=connect_timeout + read_timeout,
                 connect=connect_timeout,
             ),
-            allow_redirects=False,
         )
         self._worker_task = asyncio.create_task(
             self._worker_loop(
@@ -130,7 +129,9 @@ class DeliveryService:
                         continue
                 # Skip Pending Deliveries That Are Too Young (avoid Races)
                 if d.status == "pending":
-                    age = (now - d.created_at).total_seconds()
+                    created_at = d.created_at
+                    assert created_at is not None
+                    age = (now - created_at).total_seconds()
                     if age < 2.0:
                         continue
                 # Skip Failed Deliveries Whose Retry Time Hasn't Come Yet
@@ -179,7 +180,8 @@ class DeliveryService:
             d = result.scalar_one_or_none()
             if not d:
                 return False
-            d.attempts += 1
+            attempts = d.attempts
+            d.attempts = (attempts if attempts is not None else 0) + 1
             d.last_error = last_error[:1024]
             d.leased_by = None
             d.leased_at = None
@@ -258,42 +260,49 @@ class DeliveryService:
     ):
         start = datetime.now(timezone.utc)
         metrics.record_event_hook_attempt()
+        assert delivery.delivery_id is not None
+        assert delivery.url is not None
+        assert delivery.event_type is not None
+        d_id: str = delivery.delivery_id
+        d_url: str = delivery.url
+        d_event: str = delivery.event_type
         try:
             async with self._http_session.post(
-                delivery.url,
+                d_url,
                 data=delivery.payload_json,
                 headers={"Content-Type": "application/json"},
+                allow_redirects=False,
             ) as resp:
                 if 200 <= resp.status < 300:
-                    await self.complete(delivery.delivery_id, resp.status)
-                    metrics.record_event_hook_delivery(status="success", event=delivery.event_type)
+                    await self.complete(d_id, resp.status)
+                    metrics.record_event_hook_delivery(status="success", event=d_event)
                 elif resp.status == 429 or resp.status >= 500:
                     await self.fail(
-                        delivery.delivery_id,
+                        d_id,
                         f"HTTP {resp.status}",
                         max_attempts,
                         retry_base_sec,
                         retry_max_sec,
                     )
-                    metrics.record_event_hook_delivery(status="retryable", event=delivery.event_type)
+                    metrics.record_event_hook_delivery(status="retryable", event=d_event)
                 else:
                     await self.fail(
-                        delivery.delivery_id,
+                        d_id,
                         f"HTTP {resp.status} (non-retryable)",
                         max_attempts,
                         retry_base_sec,
                         retry_max_sec,
                     )
-                    metrics.record_event_hook_delivery(status="failed", event=delivery.event_type)
+                    metrics.record_event_hook_delivery(status="failed", event=d_event)
         except Exception as exc:
             await self.fail(
-                delivery.delivery_id,
+                d_id,
                 str(exc)[:1024],
                 max_attempts,
                 retry_base_sec,
                 retry_max_sec,
             )
-            metrics.record_event_hook_delivery(status="error", event=delivery.event_type)
+            metrics.record_event_hook_delivery(status="error", event=d_event)
         finally:
             elapsed = (datetime.now(timezone.utc) - start).total_seconds()
             metrics.record_event_hook_latency(elapsed)

@@ -29,7 +29,7 @@ async def list_event_hooks(_identity: AuthIdentity = Depends(require_master_key)
     """List all registered event hooks."""
     if not _state.event_hook_store:
         raise HTTPException(status_code=503, detail=_err(503, "Event hook store not available"))
-    hooks = await _state.event_hook_store.list()
+    hooks = await _state.event_hook_store.list_hooks()
     return EventHookListResponse(
         hooks=[EventHookResponse(**h.to_dict()) for h in hooks],
         count=len(hooks),
@@ -48,7 +48,7 @@ async def create_event_hook(body: EventHookCreate, _identity: AuthIdentity = Dep
     if not result.valid:
         raise HTTPException(status_code=422, detail=_err(422, f"Invalid URL: {result.reason}"))
 
-    existing = await store.list()
+    existing = await store.list_hooks()
     if len(existing) >= settings.event_hooks_max:
         raise HTTPException(status_code=409, detail=_err(409, "Max event hooks reached"))
 
