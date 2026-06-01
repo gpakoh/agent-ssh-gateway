@@ -321,14 +321,19 @@ async def auth_check(request: Request, settings, token_store=None) -> Optional[H
 CLOSE_POLICY_VIOLATION = 1008
 
 
-async def ws_auth_check(websocket: WebSocket, settings, token_store=None) -> tuple[int, str] | None:
+async def ws_auth_check(
+    websocket: WebSocket,
+    settings,
+    token_store=None,
+    required_scope: str = "",
+) -> AuthIdentity | tuple[int, str]:
     """WebSocket auth guard — call before accept().
 
-    Returns None if allowed, or a (close_code, reason) tuple to reject.
-    Does NOT log or reveal the configured key value.
+    Returns AuthIdentity on success.
+    Returns (close_code, reason) tuple if the connection should be rejected.
     """
     if not settings.api_auth_enabled:
-        return None
+        return AuthIdentity(token_type="master", token="", name="auth-disabled", scopes=("*",))
 
     if not settings.api_key:
         logger.error("Api_auth_enabled=true But API_KEY Is Not Configured")
@@ -374,11 +379,21 @@ async def ws_auth_check(websocket: WebSocket, settings, token_store=None) -> tup
             provided = auth_header[7:]
     if not provided:
         return (CLOSE_POLICY_VIOLATION, "Invalid or missing API key")
+
+    identity: AuthIdentity | None = None
     if secrets.compare_digest(provided, settings.api_key):
-        return None
-    if await is_agent_token_valid(settings, provided, token_store) is not None:
-        return None
-    return (CLOSE_POLICY_VIOLATION, "Invalid or missing API key")
+        identity = AuthIdentity(token_type="master", token=provided, name="master", scopes=("*",))
+    else:
+        identity = await is_agent_token_valid(settings, provided, token_store)
+
+    if identity is None:
+        return (CLOSE_POLICY_VIOLATION, "Invalid or missing API key")
+
+    if required_scope and identity.token_type != "master" and "*" not in identity.scopes:
+        if required_scope not in identity.scopes:
+            return (CLOSE_POLICY_VIOLATION, f"Missing required scope: {required_scope}")
+
+    return identity
 
 
 # ---------------------------------------------------------------------------

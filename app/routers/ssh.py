@@ -400,20 +400,36 @@ async def session_health(session_id: str, request: Request, _identity: AuthIdent
 @router.websocket("/api/ssh/execute/stream")
 async def ssh_execute_stream(websocket: WebSocket):
     """Execute a command and stream output via WebSocket."""
-    ws_err = await ws_auth_check(websocket, settings, _state.agent_token_store)
-    if ws_err is not None:
-        await websocket.close(code=ws_err[0], reason=ws_err[1])
+    identity = await ws_auth_check(websocket, settings, _state.agent_token_store)
+    if isinstance(identity, tuple):
+        await websocket.close(code=identity[0], reason=identity[1])
         return
     await websocket.accept()
     _state.active_websockets.add(websocket)
     try:
-        # First Message Must Contain Session_id And Command
         data = await asyncio.wait_for(websocket.receive_json(), timeout=30)
         session_id = data.get("session_id", "")
         command = data.get("command", "")
 
         if not session_id or not command:
             await websocket.send_json({"type": "error", "data": "session_id and command are required"})
+            await websocket.close()
+            return
+
+        record = await _state.manager.get_session(session_id)
+        if not record:
+            await websocket.send_json({"type": "error", "data": "Session not found"})
+            await websocket.close()
+            return
+
+        try:
+            ensure_session_owner(record, identity)
+        except HTTPException:
+            await websocket.send_json({
+                "type": "error",
+                "code": "SESSION_OWNERSHIP",
+                "message": "Agent token cannot access this session",
+            })
             await websocket.close()
             return
 
@@ -446,10 +462,22 @@ async def ssh_execute_stream(websocket: WebSocket):
 @router.websocket("/api/ssh/pty/{session_id}/stream")
 async def pty_stream(websocket: WebSocket, session_id: str):
     """Interactive PTY via WebSocket."""
-    ws_err = await ws_auth_check(websocket, settings, _state.agent_token_store)
-    if ws_err is not None:
-        await websocket.close(code=ws_err[0], reason=ws_err[1])
+    identity = await ws_auth_check(websocket, settings, _state.agent_token_store)
+    if isinstance(identity, tuple):
+        await websocket.close(code=identity[0], reason=identity[1])
         return
+
+    record = await _state.manager.get_session(session_id)
+    if not record:
+        await websocket.close(code=4403, reason="Session not found")
+        return
+
+    try:
+        ensure_session_owner(record, identity)
+    except HTTPException:
+        await websocket.close(code=4403, reason="Agent token cannot access this session")
+        return
+
     await websocket.accept()
     _state.active_websockets.add(websocket)
 
