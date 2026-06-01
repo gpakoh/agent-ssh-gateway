@@ -174,11 +174,9 @@ class CodeIntelligence:
         """Find best place to insert class."""
         # Find End Of Last Class Or Module Level
         last_class_end = 0
-        indent_level = 0
         
         for i, line in enumerate(lines):
             if line.startswith('class '):
-                indent_level = 0
                 last_class_end = i
             elif line.strip() and not line.startswith('#'):
                 current_indent = len(line) - len(line.lstrip())

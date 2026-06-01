@@ -135,7 +135,7 @@ class TestCircuitBreakerRace:
             return ok
 
         tasks = [succeed() for _ in range(3)] + [fail() for _ in range(2)]
-        results = await asyncio.gather(*tasks)
+        await asyncio.gather(*tasks)
 
         stats = await cb.get_stats()
         assert stats["half_open_calls"] <= 5
@@ -196,10 +196,10 @@ class TestCircuitBreakerRegistry:
     @pytest.mark.asyncio
     async def test_eviction_when_max_size_exceeded(self):
         reg = CircuitBreakerRegistry(max_size=3)
-        cb_a = await reg.get_breaker("A")
-        cb_b = await reg.get_breaker("B")
-        cb_c = await reg.get_breaker("C")
-        cb_d = await reg.get_breaker("D")  # should evict A
+        await reg.get_breaker("A")
+        await reg.get_breaker("B")
+        await reg.get_breaker("C")
+        await reg.get_breaker("D")  # should evict A
 
         assert "A" not in reg._breakers
         assert "D" in reg._breakers
@@ -207,11 +207,11 @@ class TestCircuitBreakerRegistry:
     @pytest.mark.asyncio
     async def test_eviction_skips_recently_accessed(self):
         reg = CircuitBreakerRegistry(max_size=3)
-        cb_a = await reg.get_breaker("A")
-        cb_b = await reg.get_breaker("B")
-        cb_c = await reg.get_breaker("C")
+        await reg.get_breaker("A")
+        await reg.get_breaker("B")
+        await reg.get_breaker("C")
         await reg.get_breaker("A")  # re-access A, making it recent
-        cb_d = await reg.get_breaker("D")  # should evict B (oldest)
+        await reg.get_breaker("D")  # should evict B (oldest)
 
         assert "A" in reg._breakers
         assert "B" not in reg._breakers

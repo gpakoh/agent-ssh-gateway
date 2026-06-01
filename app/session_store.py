@@ -277,7 +277,7 @@ class SessionStore:
             result = await session.execute(
                 select(PersistentSession).where(
                     PersistentSession.session_id == session_id,
-                    PersistentSession.is_active == True
+                    PersistentSession.is_active
                 )
             )
             db_session = result.scalar_one_or_none()

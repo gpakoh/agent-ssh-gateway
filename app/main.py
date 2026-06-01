@@ -49,6 +49,7 @@ from app.server_manager import ServerManager
 from app.snapshot_manager import SnapshotManager
 from app.webhook_manager import WebhookManager
 from app.known_hosts import create_host_key_store, NullHostKeyStore
+import app.state as state
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,7 +61,6 @@ logger = logging.getLogger(__name__)
 # Lifespan — Initializes Globals In App.state
 # ---------------------------------------------------------------------------
 
-import app.state as state
 
 
 @asynccontextmanager
@@ -162,7 +162,7 @@ async def lifespan(app: FastAPI):
                 try:
                     creds = await state.session_store.get_session_credentials(sess["session_id"])
                     if creds and is_ip_allowed(creds.get("host", ""), allowed_nets):
-                        new_id = await state.manager.create_session(
+                        _ = await state.manager.create_session(
                             host=creds["host"],
                             port=creds.get("port", 22),
                             username=creds["username"],
@@ -787,15 +787,15 @@ async def validation_exception_handler(request, exc: RequestValidationError):
 # Router Registration — Route Handlers Live In App/routers/
 # ---------------------------------------------------------------------------
 
-from app.routers.ssh import router as ssh_router
-from app.routers.files import router as files_router
-from app.routers.jobs import router as jobs_router
-from app.routers.git import router as git_router
-from app.routers.context import router as context_router
-from app.routers.system import router as system_router
-from app.routers.logs import router as logs_router
-from app.routers.templates import router as templates_router
-from app.routers.event_hooks import router as event_hooks_router
+from app.routers.ssh import router as ssh_router  # noqa: E402
+from app.routers.files import router as files_router  # noqa: E402
+from app.routers.jobs import router as jobs_router  # noqa: E402
+from app.routers.git import router as git_router  # noqa: E402
+from app.routers.context import router as context_router  # noqa: E402
+from app.routers.system import router as system_router  # noqa: E402
+from app.routers.logs import router as logs_router  # noqa: E402
+from app.routers.templates import router as templates_router  # noqa: E402
+from app.routers.event_hooks import router as event_hooks_router  # noqa: E402
 
 app.include_router(ssh_router)
 app.include_router(files_router)

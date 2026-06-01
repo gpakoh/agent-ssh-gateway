@@ -87,8 +87,6 @@ class GlobalSearchReplace:
         
         # Parse Grep Output
         lines = result["stdout"].split("\n")
-        current_file = None
-        line_number = 0
         
         for line in lines:
             if line.startswith("--"):
