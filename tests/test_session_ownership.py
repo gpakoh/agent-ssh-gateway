@@ -296,6 +296,152 @@ class TestSessionOwnershipHTTP:
             )
         assert resp.status_code == 403
 
+    def test_heartbeat_ownership_agent_blocked(self, monkeypatch):
+        self._patch_base(monkeypatch)
+        with TestClient(app) as client:
+            self._override_manager(client, self._make_cross_tenant_session_mock())
+            resp = client.post(
+                "/api/ssh/heartbeat",
+                headers={"Authorization": "Bearer agent-token-a"},
+                json={"session_id": "s-2"},
+            )
+        assert resp.status_code == 403
+        assert "SESSION_OWNERSHIP" in resp.text or "cannot access" in resp.text
+
+    def test_heartbeat_ownership_master_bypasses(self, monkeypatch):
+        self._patch_base(monkeypatch)
+        with TestClient(app) as client:
+            self._override_manager(client, self._make_cross_tenant_session_mock())
+            resp = client.post(
+                "/api/ssh/heartbeat",
+                headers={"X-API-Key": "secret-42"},
+                json={"session_id": "s-2"},
+            )
+        assert resp.status_code == 200
+
+    def test_session_health_ownership_agent_blocked(self, monkeypatch):
+        self._patch_base(monkeypatch)
+        with TestClient(app) as client:
+            self._override_manager(client, self._make_cross_tenant_session_mock())
+            resp = client.get(
+                "/api/ssh/session/s-2/health",
+                headers={"Authorization": "Bearer agent-token-a"},
+            )
+        assert resp.status_code == 403
+        assert "SESSION_OWNERSHIP" in resp.text or "cannot access" in resp.text
+
+    def test_session_health_ownership_master_bypasses(self, monkeypatch):
+        self._patch_base(monkeypatch)
+        with TestClient(app) as client:
+            self._override_manager(client, self._make_cross_tenant_session_mock())
+            resp = client.get(
+                "/api/ssh/session/s-2/health",
+                headers={"X-API-Key": "secret-42"},
+            )
+        assert resp.status_code == 200
+
+    def test_session_env_ownership_agent_blocked(self, monkeypatch):
+        self._patch_base(monkeypatch)
+        with TestClient(app) as client:
+            mock_mgr = self._make_cross_tenant_session_mock()
+            self._override_manager(client, mock_mgr)
+            resp = client.get(
+                "/api/ssh/session/s-2/env",
+                headers={"Authorization": "Bearer agent-token-a"},
+            )
+        assert resp.status_code == 403
+        assert "SESSION_OWNERSHIP" in resp.text or "cannot access" in resp.text
+        mock_mgr.execute.assert_not_called()
+
+    def test_session_env_ownership_master_bypasses(self, monkeypatch):
+        self._patch_base(monkeypatch)
+        with TestClient(app) as client:
+            self._override_manager(client, self._make_cross_tenant_session_mock())
+            resp = client.get(
+                "/api/ssh/session/s-2/env",
+                headers={"X-API-Key": "secret-42"},
+            )
+        assert resp.status_code == 200
+
+    def test_sessions_list_agent_sees_only_own(self, monkeypatch):
+        self._patch_base(monkeypatch)
+        fp_a = token_fingerprint("agent-token-a")
+        fp_b = token_fingerprint("agent-token-b")
+
+        def _make_session_rec(sid, owner_fp):
+            rec = MagicMock()
+            rec.session_id = sid
+            rec.host = "10.0.0.1"
+            rec.port = 22
+            rec.username = "root"
+            rec.connected_at = 1000000.0
+            rec.last_activity = 1000000.0
+            rec.owner_type = "agent"
+            rec.owner_name = "bot"
+            rec.owner_token_fingerprint = owner_fp
+            return rec
+
+        mgr = self._base_mock()
+        mgr.get_session = AsyncMock(return_value=MagicMock(
+            owner_type="agent",
+            owner_name="bot-a",
+            owner_token_fingerprint=fp_a,
+        ))
+        mgr.list_sessions = AsyncMock(return_value=[
+            _make_session_rec("s-a", fp_a),
+            _make_session_rec("s-b", fp_b),
+        ])
+
+        with TestClient(app) as client:
+            self._override_manager(client, mgr)
+            resp = client.get(
+                "/api/ssh/sessions",
+                headers={"Authorization": "Bearer agent-token-a"},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 1
+        session_ids = [s["session_id"] for s in data["sessions"]]
+        assert "s-a" in session_ids
+        assert "s-b" not in session_ids
+
+    def test_sessions_list_master_sees_all(self, monkeypatch):
+        self._patch_base(monkeypatch)
+        fp_a = token_fingerprint("agent-token-a")
+        fp_b = token_fingerprint("agent-token-b")
+
+        def _make_session_rec(sid, owner_fp):
+            rec = MagicMock()
+            rec.session_id = sid
+            rec.host = "10.0.0.1"
+            rec.port = 22
+            rec.username = "root"
+            rec.connected_at = 1000000.0
+            rec.last_activity = 1000000.0
+            rec.owner_type = "agent"
+            rec.owner_name = "bot"
+            rec.owner_token_fingerprint = owner_fp
+            return rec
+
+        mgr = self._base_mock()
+        mgr.list_sessions = AsyncMock(return_value=[
+            _make_session_rec("s-a", fp_a),
+            _make_session_rec("s-b", fp_b),
+        ])
+
+        with TestClient(app) as client:
+            self._override_manager(client, mgr)
+            resp = client.get(
+                "/api/ssh/sessions",
+                headers={"X-API-Key": "secret-42"},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 2
+        session_ids = [s["session_id"] for s in data["sessions"]]
+        assert "s-a" in session_ids
+        assert "s-b" in session_ids
+
     def test_file_read_ownership_master_bypasses(self, monkeypatch):
         self._patch_base(monkeypatch)
         with TestClient(app) as client:
