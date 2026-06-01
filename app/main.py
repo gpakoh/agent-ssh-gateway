@@ -1,34 +1,23 @@
 """FastAPI entry point for agent-ssh-gateway."""
 
-import json
 import logging
 import asyncio
-import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Header, Response, UploadFile, File, Request
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, PlainTextResponse, HTMLResponse
+from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.auth_middleware import auth_check, ws_auth_check, is_agent_token_valid, is_ip_allowed, parse_cidrs
-import secrets
+from app.auth_middleware import auth_check, is_ip_allowed, parse_cidrs
 from app.security import (
     limiter,
-    rate_limit_mutation,
-    sanitize_command,
-    validate_path,
-    SecretManager,
     AuditLogger,
-    SessionSecurity,
     SECURITY_HEADERS,
 )
-from app.metrics import metrics
 from app.redis_queue import RedisJobQueue
 from app.agent_token_store import AgentTokenStore
 from app.circuit_breaker import CircuitBreakerRegistry
@@ -37,141 +26,6 @@ from app.session_store import SessionStore
 from app.bulk_operations_v2 import BulkOperationsManager
 from app.state import _err
 from app.models import (
-    ConnectRequest,
-    ConnectResponse,
-    ExecuteRequest,
-    ExecuteResponse,
-    DisconnectRequest,
-    DisconnectResponse,
-    SessionsResponse,
-    SessionInfo,
-    HealthResponse,
-    CapabilitiesResponse,
-    AgentTokenResponse,
-    AgentTokenRefreshResponse,
-    ErrorResponse,
-    SessionTimeoutRequest,
-    SessionTimeoutResponse,
-    SessionConfigResponse,
-    JobRunRequest,
-    JobRunResponse,
-    JobStatusResponse,
-    JobResultResponse,
-    JobListResponse,
-    FileEditRequest,
-    FileEditResponse,
-    FileReadRequest,
-    FileReadResponse,
-    PatchApplyRequest,
-    PatchApplyResponse,
-    ContextCreateRequest,
-    ContextResponse,
-    ContextListResponse,
-    GitInfoResponse,
-    GitInitRequest,
-    GitCommitRequest,
-    GitActionResponse,
-    GitStatusResponse,
-    GitDiffRequest,
-    GitDiffResponse,
-    ScaffoldRequest,
-    ScaffoldResponse,
-    FileEditWithContextRequest,
-    FileEditWithContextResponse,
-    ValidateRequest,
-    ValidationReportResponse,
-    ValidationStepResult,
-    SmartContextStateResponse,
-    TabStateResponse,
-    OpenFileRequest,
-    CloseFileRequest,
-    UpdateCursorRequest,
-    AddCommandRequest,
-    AddSearchRequest,
-    AddBookmarkRequest,
-    RemoveBookmarkRequest,
-    BatchExecuteRequest,
-    BatchExecuteResponse,
-    BatchReadRequest,
-    BatchReadResponse,
-    BatchOperationResultResponse,
-    CodeSearchRequest,
-    CodeSearchResponse,
-    CodeSearchResultItem,
-    CodeInsertRequest,
-    CodeInsertResponse,
-    CodeInsertSuggestion,
-    CodeGenerateRequest,
-    CodeGenerateResponse,
-    CodeCompleteRequest,
-    CodeCompleteResponse,
-    CreateBackupRequest,
-    RestoreBackupRequest,
-    RecoveryActionResponse,
-    BackupInfo,
-    ListBackupsResponse,
-    TemplateListResponse,
-    TemplateInfo,
-    TemplateGetRequest,
-    TemplateRenderRequest,
-    TemplateRenderResponse,
-    DiffResponse,
-    DiffLine,
-    ProjectAnalyticsRequest,
-    ProjectAnalyticsResponse,
-    FileStats,
-    CodeStats,
-    GitStats,
-    TestStats,
-    DependencyStats,
-    GlobalSearchRequest,
-    GlobalSearchResponse,
-    SearchMatchItem,
-    GlobalReplaceRequest,
-    GlobalReplaceResponse,
-    ReplaceResultItem,
-    FileTreeRequest,
-    FileTreeResponse,
-    FileTreeNode,
-    ServerInfo,
-    ServerListResponse,
-    AddServerRequest,
-    ConnectServerRequest,
-    ServerConnectResponse,
-    SnapshotInfo,
-    CreateSnapshotRequest,
-    RestoreSnapshotRequest,
-    SnapshotListResponse,
-    SnapshotActionResponse,
-    WebhookConfigResponse,
-    WebhookListResponse,
-    CreateWebhookRequest,
-    DeployRequest,
-    DeployResponse,
-    DeploymentInfo,
-    ProjectStructureRequest,
-    ProjectStructureResponse,
-    FileMetadata,
-    BatchEditRequest,
-    BatchEditResponse,
-    BatchEditResult,
-    BulkExecuteRequest,
-    BulkExecuteResult,
-    BulkExecuteResponse,
-    FileUploadRequest,
-    FileUploadResponse,
-    FileDownloadRequest,
-    FileWriteRequest,
-    FileWriteResponse,
-    FileTreeRequest,
-    FileTreeResponse,
-    ASTRefactorRenameRequest,
-    ASTRefactorRenameResponse,
-    ASTRefactorFileResult,
-    ASTRefactorExtractRequest,
-    ASTRefactorExtractResponse,
-    ASTAnalyzeRequest,
-    ASTAnalyzeResponse,
     ValidationErrorResponse,
 )
 from app.ssh_manager import (
@@ -185,20 +39,16 @@ from app.ssh_manager import (
 )
 from app.job_manager import JobManager
 from app.file_editor import FileEditor
-from app.ast_refactor import ASTRefactor
 from app.context_manager import ContextManager
-from app.git_manager import GitStatus
 from app.batch_operations import BatchOperationsManager
 from app.code_intelligence import CodeIntelligence
-from app.template_library import TemplateLibrary
-from app.diff_generator import DiffGenerator
 from app.project_analytics import ProjectAnalytics
 from app.search_replace import GlobalSearchReplace
 from app.file_tree import FileTreeExplorer
-from app.server_manager import ServerManager, ServerStatus
+from app.server_manager import ServerManager
 from app.snapshot_manager import SnapshotManager
-from app.webhook_manager import WebhookManager, WebhookType
-from app.known_hosts import create_host_key_store, NullHostKeyStore, HostKeyStore
+from app.webhook_manager import WebhookManager
+from app.known_hosts import create_host_key_store, NullHostKeyStore
 
 logging.basicConfig(
     level=logging.INFO,

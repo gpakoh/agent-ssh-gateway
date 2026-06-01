@@ -11,7 +11,6 @@ from typing import Optional
 from app.main import app
 from app.auth_middleware import token_fingerprint, ensure_session_owner, AuthIdentity
 from app.config import settings
-from app.agent_token_store import AgentTokenStore
 
 
 class FakeSession:

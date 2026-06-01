@@ -1,11 +1,10 @@
 """File editing utilities for remote SSH servers."""
 
 import logging
-import re
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-from app.ssh_manager import SSHSessionManager, SessionNotFoundError, ExecutionError
+from app.ssh_manager import SSHSessionManager, ExecutionError
 
 logger = logging.getLogger(__name__)
 

@@ -1,16 +1,15 @@
 """Persistent session storage using PostgreSQL."""
 
-import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import (
-    create_engine, Column, String, Integer, DateTime, 
-    Boolean, Text, ForeignKey, JSON
+    Column, String, Integer, DateTime, 
+    Boolean, Text, JSON
 )
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import declarative_base
 
 from app.config import settings as _settings
 from app.security import SecretManager
@@ -184,7 +183,7 @@ class SessionStore:
             result = await session.execute(
                 select(PersistentSession).where(
                     PersistentSession.session_id == session_id,
-                    PersistentSession.is_active == True,
+                    PersistentSession.is_active,
                     PersistentSession.expires_at > datetime.now(timezone.utc)
                 )
             )
@@ -238,7 +237,7 @@ class SessionStore:
             
             result = await session.execute(
                 select(PersistentSession).where(
-                    PersistentSession.is_active == True,
+                    PersistentSession.is_active,
                     PersistentSession.expires_at > datetime.now(timezone.utc)
                 )
             )

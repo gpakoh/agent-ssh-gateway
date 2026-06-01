@@ -1,8 +1,6 @@
 """File tree explorer for IDE-like directory navigation."""
 
-import json
 import logging
-from typing import Optional
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)

@@ -1,6 +1,5 @@
 """CI/CD Webhook integration for auto-deployment."""
 
-import json
 import logging
 from typing import Optional
 from dataclasses import dataclass

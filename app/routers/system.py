@@ -1,22 +1,18 @@
 """System, server, snapshot, webhook, search, code intelligence, analytics, tree, and batch routes."""
 
-import json
-import os
 import logging
-import base64
-import time
 import uuid
 
-from fastapi import APIRouter, Query, HTTPException, Request, Response, Header, UploadFile, File
+from fastapi import APIRouter, Depends, Query, HTTPException, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse, HTMLResponse
 
 from app import state as _state
 from app.state import _err
 from app.config import settings
-from app.auth_middleware import is_agent_token_valid
+from app.auth_middleware import is_agent_token_valid, require_master_key, AuthIdentity
 from app.security import validate_target_host
 from app.metrics import metrics
-from app.server_manager import ServerManager, ServerStatus
+from app.server_manager import ServerStatus
 from app.models import (
     HealthResponse,
     CapabilitiesResponse,
@@ -60,10 +56,6 @@ from app.models import (
     DependencyStats,
     FileTreeRequest,
     FileTreeResponse,
-    FileTreeNode,
-    ProjectStructureRequest,
-    ProjectStructureResponse,
-    FileMetadata,
     BatchExecuteRequest,
     BatchExecuteResponse,
     BatchOperationResultResponse,
@@ -115,7 +107,7 @@ async def get_capabilities():
 
 
 @router.get("/api/config", tags=["system"])
-async def get_config():
+async def get_config(_identity: AuthIdentity = Depends(require_master_key)):
     """Return runtime configuration (secrets masked)."""
     from app.config import settings
     return {
@@ -135,7 +127,7 @@ async def get_config():
 
 
 @router.get("/api/help", tags=["help"])
-async def api_help(request: Request):
+async def api_help(request: Request, _identity: AuthIdentity = Depends(require_master_key)):
     """List all API endpoints grouped by tag for agent consumption."""
     openapi = request.app.openapi()
     paths = openapi.get("paths", {})
@@ -195,13 +187,13 @@ def _clean_param(name: str, location: str, schema: dict, required: bool, descrip
 
 
 @router.get("/metrics", tags=["system"], response_class=PlainTextResponse)
-async def prometheus_metrics():
+async def prometheus_metrics(_identity: AuthIdentity = Depends(require_master_key)):
     """Prometheus metrics endpoint."""
     return Response(content=metrics.get_metrics(), media_type="text/plain")
 
 
 @router.get("/api/sdk/download", tags=["system"], response_class=PlainTextResponse)
-async def download_sdk():
+async def download_sdk(_identity: AuthIdentity = Depends(require_master_key)):
     """Download Python SDK.
 
     Note: auth is handled by the global middleware.
@@ -222,7 +214,7 @@ async def download_sdk():
 
 
 @router.get("/api/circuit-breaker/stats", tags=["system"])
-async def circuit_breaker_stats():
+async def circuit_breaker_stats(_identity: AuthIdentity = Depends(require_master_key)):
     """Get circuit breaker statistics."""
     return await _state.circuit_breakers.get_all_stats()
 
@@ -239,7 +231,7 @@ async def root():
 
 
 @router.get("/api/servers", tags=["servers"], response_model=ServerListResponse)
-async def list_servers():
+async def list_servers(_identity: AuthIdentity = Depends(require_master_key)):
     """List all configured servers."""
     servers = _state.server_manager.list_servers()
     return ServerListResponse(
@@ -249,7 +241,7 @@ async def list_servers():
 
 
 @router.post("/api/servers", tags=["servers"])
-async def add_server(req: AddServerRequest):
+async def add_server(req: AddServerRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Add a new server."""
     existing = _state.server_manager.get_server(req.id)
     if existing:
@@ -268,7 +260,7 @@ async def add_server(req: AddServerRequest):
 
 
 @router.delete("/api/servers/{server_id}", tags=["servers"])
-async def delete_server(server_id: str):
+async def delete_server(server_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """Remove a server."""
     if not _state.server_manager.get_server(server_id):
         raise HTTPException(status_code=404, detail=_err(404, f"Server {server_id} not found"))
@@ -277,7 +269,7 @@ async def delete_server(server_id: str):
 
 
 @router.post("/api/servers/{server_id}/connect", tags=["servers"], response_model=ServerConnectResponse)
-async def connect_server(server_id: str, req: ConnectServerRequest):
+async def connect_server(server_id: str, req: ConnectServerRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Connect to a server and return session."""
     server = _state.server_manager.get_server(server_id)
     if not server:
@@ -326,7 +318,7 @@ async def connect_server(server_id: str, req: ConnectServerRequest):
 
 
 @router.post("/api/snapshots", tags=["snapshots"], response_model=SnapshotActionResponse)
-async def create_snapshot(req: CreateSnapshotRequest):
+async def create_snapshot(req: CreateSnapshotRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Create a snapshot of current project state."""
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
@@ -350,7 +342,7 @@ async def create_snapshot(req: CreateSnapshotRequest):
 
 
 @router.get("/api/snapshots", tags=["snapshots"])
-async def list_snapshots(context_id: str):
+async def list_snapshots(context_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """List all snapshots for context."""
     ctx = await _state.context_manager.get_context(context_id)
     if not ctx:
@@ -377,7 +369,7 @@ async def list_snapshots(context_id: str):
 
 
 @router.post("/api/snapshots/restore", tags=["snapshots"], response_model=SnapshotActionResponse)
-async def restore_snapshot(req: RestoreSnapshotRequest):
+async def restore_snapshot(req: RestoreSnapshotRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Restore project from snapshot."""
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
@@ -401,7 +393,7 @@ async def restore_snapshot(req: RestoreSnapshotRequest):
 
 
 @router.delete("/api/snapshots/{snapshot_id}", tags=["snapshots"])
-async def delete_snapshot(snapshot_id: str, context_id: str):
+async def delete_snapshot(snapshot_id: str, context_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """Delete a snapshot."""
     ctx = await _state.context_manager.get_context(context_id)
     if not ctx:
@@ -422,7 +414,7 @@ async def delete_snapshot(snapshot_id: str, context_id: str):
 
 
 @router.post("/api/webhooks", tags=["webhooks"])
-async def create_webhook(req: CreateWebhookRequest):
+async def create_webhook(req: CreateWebhookRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Create a new webhook for auto-deployment."""
     config = _state.webhook_manager.add_webhook(
         name=req.name,
@@ -447,7 +439,7 @@ async def create_webhook(req: CreateWebhookRequest):
 
 
 @router.get("/api/webhooks", tags=["webhooks"], response_model=WebhookListResponse)
-async def list_webhooks():
+async def list_webhooks(_identity: AuthIdentity = Depends(require_master_key)):
     """List all webhooks."""
     configs = _state.webhook_manager.list_webhooks()
     return WebhookListResponse(
@@ -469,14 +461,14 @@ async def list_webhooks():
 
 
 @router.delete("/api/webhooks/{webhook_id}", tags=["webhooks"])
-async def delete_webhook(webhook_id: str):
+async def delete_webhook(webhook_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """Delete a webhook."""
     success = _state.webhook_manager.remove_webhook(webhook_id)
     return {"status": "deleted" if success else "not_found", "webhook_id": webhook_id}
 
 
 @router.post("/api/webhooks/{webhook_id}/deploy", tags=["webhooks"], response_model=DeployResponse)
-async def deploy_webhook(webhook_id: str, req: DeployRequest):
+async def deploy_webhook(webhook_id: str, req: DeployRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Manually trigger deployment."""
     result = await _state.webhook_manager.execute_deploy(
         session_id=req.session_id,
@@ -491,7 +483,7 @@ async def deploy_webhook(webhook_id: str, req: DeployRequest):
 
 
 @router.get("/api/webhooks/{webhook_id}/deployments", tags=["webhooks"])
-async def webhook_deployments(webhook_id: str):
+async def webhook_deployments(webhook_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """List deployment history."""
     deployments = _state.webhook_manager.get_deployments(webhook_id)
     return {
@@ -506,7 +498,7 @@ async def webhook_deployments(webhook_id: str):
 
 
 @router.post("/api/search/global", tags=["code"], response_model=GlobalSearchResponse)
-async def global_search(req: GlobalSearchRequest):
+async def global_search(req: GlobalSearchRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Search across all project files."""
     matches = await _state.search_replace.search(
         session_id=req.session_id,
@@ -537,7 +529,7 @@ async def global_search(req: GlobalSearchRequest):
 
 
 @router.post("/api/replace/global", tags=["code"], response_model=GlobalReplaceResponse)
-async def global_replace(req: GlobalReplaceRequest):
+async def global_replace(req: GlobalReplaceRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Replace across all project files."""
     results = await _state.search_replace.replace(
         session_id=req.session_id,
@@ -588,7 +580,7 @@ async def global_replace(req: GlobalReplaceRequest):
 
 
 @router.post("/api/code/search", tags=["code"], response_model=CodeSearchResponse)
-async def code_search(req: CodeSearchRequest):
+async def code_search(req: CodeSearchRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Search for code pattern in project."""
     results = await _state.code_intelligence.search_code(
         session_id=req.session_id,
@@ -614,7 +606,7 @@ async def code_search(req: CodeSearchRequest):
 
 
 @router.post("/api/code/insert", tags=["code"], response_model=CodeInsertResponse)
-async def code_insert(req: CodeInsertRequest):
+async def code_insert(req: CodeInsertRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Intelligently insert code based on natural language instruction."""
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
@@ -675,7 +667,7 @@ async def code_insert(req: CodeInsertRequest):
 
 
 @router.post("/api/code/generate", tags=["code"], response_model=CodeGenerateResponse)
-async def code_generate(req: CodeGenerateRequest):
+async def code_generate(req: CodeGenerateRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Generate code based on natural language instruction."""
     code = await _state.code_intelligence.generate_code(
         session_id="",
@@ -691,7 +683,7 @@ async def code_generate(req: CodeGenerateRequest):
 
 
 @router.post("/api/code/complete", tags=["code"], response_model=CodeCompleteResponse)
-async def code_complete(req: CodeCompleteRequest):
+async def code_complete(req: CodeCompleteRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Suggest code completion."""
     completion = await _state.code_intelligence.suggest_completion(
         session_id=req.session_id,
@@ -712,7 +704,7 @@ async def code_complete(req: CodeCompleteRequest):
 
 
 @router.post("/api/analytics", tags=["code"], response_model=ProjectAnalyticsResponse)
-async def run_analytics(req: ProjectAnalyticsRequest):
+async def run_analytics(req: ProjectAnalyticsRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Analyze project and return metrics."""
     metrics_data = await _state.analytics.analyze_project(
         session_id=req.session_id,
@@ -734,6 +726,7 @@ async def get_file_tree(
     session_id: str = Query(...),
     path: str = Query(default="."),
     max_depth: int = Query(default=3, ge=1, le=10),
+    _identity: AuthIdentity = Depends(require_master_key),
 ):
     """Simple project tree — list files and directories.
 
@@ -768,7 +761,7 @@ async def get_file_tree(
 
 
 @router.post("/api/tree", tags=["files"], response_model=FileTreeResponse)
-async def get_file_tree_v2(req: FileTreeRequest):
+async def get_file_tree_v2(req: FileTreeRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Get directory tree structure."""
     tree = await _state.file_tree.get_tree(
         session_id=req.session_id,
@@ -806,9 +799,8 @@ async def get_file_tree_v2(req: FileTreeRequest):
 
 
 @router.post("/api/batch/execute", tags=["files"], response_model=BatchExecuteResponse)
-async def batch_execute(req: BatchExecuteRequest, request: Request):
+async def batch_execute(req: BatchExecuteRequest, request: Request, _identity: AuthIdentity = Depends(require_master_key)):
     """Execute multiple file operations in a single transaction."""
-    import uuid
     
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
@@ -871,13 +863,13 @@ async def batch_execute(req: BatchExecuteRequest, request: Request):
 
 
 @router.get("/api/known-hosts", tags=["known-hosts"])
-async def list_known_hosts():
+async def list_known_hosts(_identity: AuthIdentity = Depends(require_master_key)):
     entries = await _state.host_key_store.list_keys()
     return {"hosts": entries}
 
 
 @router.delete("/api/known-hosts/{host}", tags=["known-hosts"])
-async def delete_known_host(host: str):
+async def delete_known_host(host: str, _identity: AuthIdentity = Depends(require_master_key)):
     count = await _state.host_key_store.delete_host(host)
     if count == 0:
         raise HTTPException(status_code=404, detail=f"No known hosts found for {host}")
@@ -885,6 +877,6 @@ async def delete_known_host(host: str):
 
 
 @router.delete("/api/known-hosts", tags=["known-hosts"])
-async def clear_known_hosts():
+async def clear_known_hosts(_identity: AuthIdentity = Depends(require_master_key)):
     count = await _state.host_key_store.delete_all()
     return {"deleted": count}

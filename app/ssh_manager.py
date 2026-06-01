@@ -11,7 +11,6 @@ from typing import Optional
 import paramiko
 from paramiko.ssh_exception import (
     AuthenticationException,
-    BadHostKeyException,
     SSHException,
     NoValidConnectionsError,
 )

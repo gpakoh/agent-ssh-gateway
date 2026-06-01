@@ -3,12 +3,12 @@
 import logging
 import shlex
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 
 from app import state as _state
 from app.state import _err
-from app.config import settings
 from app.security import sanitize_command
+from app.auth_middleware import require_master_key, AuthIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,7 @@ def _check_session(session_id: str) -> None:
 
 @router.get("/api/logs/journal")
 async def journal_logs(
+    _identity: AuthIdentity = Depends(require_master_key),
     session_id: str = Query(..., description="Active SSH session ID"),
     unit: str = Query(None, description="systemd unit name (e.g. nginx, sshd)"),
     lines: int = Query(50, ge=1, le=5000, description="Number of lines to fetch"),
@@ -51,6 +52,7 @@ async def journal_logs(
 
 @router.get("/api/logs/docker")
 async def docker_logs(
+    _identity: AuthIdentity = Depends(require_master_key),
     session_id: str = Query(..., description="Active SSH session ID"),
     container: str = Query(..., description="Container name or ID"),
     lines: int = Query(100, ge=1, le=5000, description="Number of lines to fetch"),

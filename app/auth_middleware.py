@@ -10,6 +10,8 @@ from typing import Optional
 
 from fastapi import Request, WebSocket, HTTPException
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -154,6 +156,29 @@ async def verify_api_key(
     if extra_key and secrets.compare_digest(provided, extra_key):
         return AuthIdentity(token_type="master", token=provided, name="master", scopes=("*",))
     return None
+
+
+async def require_master_key(
+    request: Request,
+) -> AuthIdentity:
+    """FastAPI Depends: accept only the master API key (rejects agent tokens).
+
+    Use on privileged endpoints that should never be accessible to agent tokens.
+    If ``api_auth_enabled`` is ``False``, allows all requests.
+    """
+    if not settings.api_auth_enabled:
+        return AuthIdentity(token_type="master", token="", name="auth-disabled", scopes=("*",))
+    identity = await verify_master_api_key(request, settings.api_key)
+    if identity is None:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "message": "Master API key required — agent token not accepted",
+                "code": "MASTER_KEY_REQUIRED",
+                "retryable": False,
+            },
+        )
+    return identity
 
 
 async def verify_master_api_key(
@@ -366,6 +391,9 @@ def require_scope(required: str):
 
     Master API key bypasses all scope checks.
     Agent tokens must have the required scope in their scopes list.
+
+    The returned function exposes ``.required_scope`` for introspection
+    by the route auth contract test.
     """
     async def _scope_check(request: Request) -> AuthIdentity:
         identity: AuthIdentity | None = getattr(request.state, "auth_identity", None)
@@ -393,6 +421,8 @@ def require_scope(required: str):
                 "http_status": 403,
             },
         )
+
+    _scope_check.required_scope = required  # type: ignore[attr-defined]
     return _scope_check
 
 

@@ -8,11 +8,12 @@ so they are tested indirectly via raw Redis ops or skipped.
 import asyncio
 
 import pytest
+import pytest_asyncio
 
 from app.distributed_lock import DistributedLock
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def lock():
     dl = DistributedLock(redis_url="redis://localhost:6379/0")
     import fakeredis.aioredis

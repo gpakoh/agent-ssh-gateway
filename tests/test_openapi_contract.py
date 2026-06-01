@@ -1,6 +1,5 @@
 """Contract tests: verify OpenAPI schema correctness for agent clients."""
 
-import json
 
 import jsonschema
 import pytest

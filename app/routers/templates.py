@@ -2,12 +2,13 @@
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 
 from app import state as _state
 from app.state import _err
 from app.models import CommandTemplate, TemplateRunRequest, TemplateRunResponse
 from app.security import sanitize_command
+from app.auth_middleware import require_master_key, AuthIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -81,13 +82,13 @@ TEMPLATES: list[CommandTemplate] = [
 
 
 @router.get("/api/command-templates", response_model=list[CommandTemplate])
-async def list_command_templates():
+async def list_command_templates(_identity: AuthIdentity = Depends(require_master_key)):
     """List all predefined command templates."""
     return TEMPLATES
 
 
 @router.post("/api/templates/run", response_model=TemplateRunResponse)
-async def run_template(req: TemplateRunRequest):
+async def run_template(req: TemplateRunRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Execute a command template with parameter substitution."""
     template = next((t for t in TEMPLATES if t.id == req.template), None)
     if not template:

@@ -445,6 +445,19 @@ MIT License.
 
 ---
 
+## Current hardening status
+
+- Route auth contract: enabled
+- Agent token scopes: enabled
+- Session ownership: enabled
+- Target allowlist/denylist: enabled
+- Command policy: audit by default
+- Secret redaction: enabled
+- Private key upload: disabled by default
+- Test suite: green without external services
+
+---
+
 ## Project status
 
 Early-stage but functional.

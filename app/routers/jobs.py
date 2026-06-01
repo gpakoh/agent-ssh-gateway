@@ -6,12 +6,12 @@ import time
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app import state as _state
+from app.auth_middleware import AuthIdentity, require_scope
 from app.state import _err
-from app.config import settings
 from app.security import rate_limit_mutation
 from app.models import (
     JobRunRequest,
@@ -29,7 +29,7 @@ router = APIRouter(tags=["jobs"])
 
 @router.post("/api/jobs/run", response_model=JobRunResponse)
 @rate_limit_mutation(20, "minute")
-async def jobs_run(req: JobRunRequest, request: Request):
+async def jobs_run(req: JobRunRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("jobs:run"))):
     """Start a background job on an SSH session."""
     session = await _state.manager.get_session(req.session_id)
     if not session:
@@ -42,21 +42,21 @@ async def jobs_run(req: JobRunRequest, request: Request):
 
 
 @router.get("/api/jobs/{job_id}/status", response_model=JobStatusResponse)
-async def jobs_status(job_id: str):
+async def jobs_status(job_id: str, _identity: AuthIdentity = Depends(require_scope("jobs:read"))):
     """Get job status."""
     status = await _state.job_manager.get_job_status(job_id)
     return JobStatusResponse(**status)
 
 
 @router.get("/api/jobs/{job_id}/result", response_model=JobResultResponse)
-async def jobs_result(job_id: str):
+async def jobs_result(job_id: str, _identity: AuthIdentity = Depends(require_scope("jobs:read"))):
     """Get full job result."""
     result = await _state.job_manager.get_job_result(job_id)
     return JobResultResponse(**result)
 
 
 @router.get("/api/jobs/queue/stats")
-async def jobs_queue_stats():
+async def jobs_queue_stats(_identity: AuthIdentity = Depends(require_scope("jobs:read"))):
     """Get Redis job queue statistics."""
     if not _state.redis_queue or not _state.redis_queue._redis:
         return {"error": "Redis not available"}
@@ -66,7 +66,7 @@ async def jobs_queue_stats():
 
 
 @router.get("/api/jobs/queue/dead")
-async def jobs_dead_letter(limit: int = 100):
+async def jobs_dead_letter(limit: int = 100, _identity: AuthIdentity = Depends(require_scope("jobs:read"))):
     """Get dead letter queue jobs."""
     if not _state.redis_queue or not _state.redis_queue._redis:
         return {"error": "Redis not available"}
@@ -77,7 +77,7 @@ async def jobs_dead_letter(limit: int = 100):
 
 @router.post("/api/bulk/execute", response_model=BulkExecuteResponse)
 @rate_limit_mutation(10, "minute")
-async def bulk_execute(req: BulkExecuteRequest, request: Request):
+async def bulk_execute(req: BulkExecuteRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("jobs:run"))):
     """Execute multiple commands concurrently."""
     start_time = time.time()
     results = await _state.bulk_ops.execute_batch_commands(
@@ -122,6 +122,7 @@ async def bulk_execute(req: BulkExecuteRequest, request: Request):
 async def jobs_list(
     session_id: Optional[str] = None,
     status: Optional[str] = None,
+    _identity: AuthIdentity = Depends(require_scope("jobs:read")),
 ):
     """List background jobs."""
     jobs = await _state.job_manager.list_jobs(session_id=session_id, status=status)
@@ -132,7 +133,7 @@ async def jobs_list(
 
 
 @router.post("/api/jobs/{job_id}/cancel")
-async def jobs_cancel(job_id: str):
+async def jobs_cancel(job_id: str, _identity: AuthIdentity = Depends(require_scope("jobs:run"))):
     """Cancel a running job."""
     await _state.job_manager.cancel_job(job_id)
     return {"status": "cancelled", "job_id": job_id}
@@ -145,7 +146,7 @@ async def jobs_cancel(job_id: str):
 
 @router.get("/api/jobs/{job_id}/stream", response_class=StreamingResponse)
 @rate_limit_mutation(20, "minute")
-async def jobs_stream(job_id: str, request: Request):
+async def jobs_stream(job_id: str, request: Request, _identity: AuthIdentity = Depends(require_scope("jobs:read"))):
     """Stream job output via Server-Sent Events."""
     job = await _state.job_manager.get_job(job_id)
     if not job:
@@ -198,6 +199,6 @@ async def jobs_stream(job_id: str, request: Request):
 
 @router.get("/api/jobs/{job_id}/events", response_class=StreamingResponse)
 @rate_limit_mutation(20, "minute")
-async def jobs_events(job_id: str, request: Request):
+async def jobs_events(job_id: str, request: Request, _identity: AuthIdentity = Depends(require_scope("jobs:read"))):
     """Alias for /api/jobs/{job_id}/stream — SSE job progress events."""
     return await jobs_stream(job_id, request)

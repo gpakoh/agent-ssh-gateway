@@ -112,7 +112,7 @@ async def test_find_matching_hooks(store):
         url="https://a.com/hook", events=["command.completed"],
         session_id=None, headers_encrypted=None, secret_encrypted=None, include_output=False,
     )
-    h2 = await store.create(
+    _ = await store.create(
         url="https://b.com/hook", events=["command.completed"],
         session_id="sess-1", headers_encrypted=None, secret_encrypted=None, include_output=False,
     )

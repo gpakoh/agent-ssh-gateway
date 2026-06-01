@@ -2,16 +2,14 @@
 
 import logging
 import os
-import json
-import time
 
 from typing import Any, Optional
 
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException
 
 from app import state as _state
 from app.state import _err
-from app.config import settings
+from app.auth_middleware import require_master_key, AuthIdentity
 from app.models import (
     ContextCreateRequest,
     ContextResponse,
@@ -26,7 +24,6 @@ from app.models import (
     AddCommandRequest,
     AddSearchRequest,
     AddBookmarkRequest,
-    RemoveBookmarkRequest,
     ScaffoldRequest,
     ScaffoldResponse,
     ValidateRequest,
@@ -46,7 +43,6 @@ from app.models import (
     TabStateResponse,
 )
 from app.template_library import TemplateLibrary
-from app.validation_pipeline import ValidationPipeline
 from app.git_manager import GitStatus
 from app.diff_generator import DiffGenerator
 
@@ -102,7 +98,7 @@ def _context_to_response(ctx) -> ContextResponse:
 
 
 @router.post("/api/context/create", response_model=ContextResponse)
-async def context_create(req: ContextCreateRequest):
+async def context_create(req: ContextCreateRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Create a new development context with git awareness."""
     ctx = await _state.context_manager.create_context(
         session_id=req.session_id,
@@ -126,7 +122,7 @@ async def context_create(req: ContextCreateRequest):
 
 
 @router.get("/api/context/list", response_model=ContextListResponse)
-async def context_list(session_id: Optional[str] = None):
+async def context_list(session_id: Optional[str] = None, _identity: AuthIdentity = Depends(require_master_key)):
     """List all active contexts."""
     contexts = []
     for ctx_id, ctx in _state.context_manager._contexts.items():
@@ -139,7 +135,7 @@ async def context_list(session_id: Optional[str] = None):
 
 
 @router.get("/api/context/{context_id}", response_model=ContextResponse)
-async def context_get(context_id: str):
+async def context_get(context_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """Get context details."""
     ctx = await _state.context_manager.get_context(context_id)
     if not ctx:
@@ -151,7 +147,7 @@ async def context_get(context_id: str):
 
 
 @router.delete("/api/context/{context_id}")
-async def context_delete(context_id: str):
+async def context_delete(context_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """Delete a context."""
     success = await _state.context_manager.delete_context(context_id)
     if not success:
@@ -165,7 +161,7 @@ async def context_delete(context_id: str):
 
 
 @router.get("/api/context/{context_id}/state")
-async def context_get_state(context_id: str):
+async def context_get_state(context_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """Get smart context state."""
     state = await _state.context_manager.get_smart_state(context_id)
     if not state:
@@ -179,7 +175,7 @@ async def context_get_state(context_id: str):
 
 
 @router.post("/api/context/file/read", response_model=FileReadResponse)
-async def context_file_read(req: FileReadRequest):
+async def context_file_read(req: FileReadRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Read a file using context (session_id extracted from context)."""
     ctx = await _state.context_manager.get_context(req.session_id)
     if not ctx:
@@ -191,7 +187,7 @@ async def context_file_read(req: FileReadRequest):
 
 
 @router.patch("/api/context/file/edit", response_model=FileEditWithContextResponse)
-async def context_file_edit(req: FileEditWithContextRequest):
+async def context_file_edit(req: FileEditWithContextRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Edit a file with context awareness (auto-commit, validation)."""
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
@@ -333,53 +329,49 @@ async def context_file_edit(req: FileEditWithContextRequest):
 
 
 @router.post("/api/context/file/open")
-async def context_file_open(req: OpenFileRequest):
+async def context_file_open(req: OpenFileRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Open file in smart context (creates tab)."""
     await _state.context_manager.add_file_to_context(req.context_id, req.path)
     return {"status": "opened", "path": req.path}
 
 
 @router.post("/api/context/file/close")
-async def context_file_close(req: CloseFileRequest):
+async def context_file_close(req: CloseFileRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Close file in smart context (closes tab)."""
     success = await _state.context_manager.close_file(req.context_id, req.path)
     return {"status": "closed" if success else "not_found", "path": req.path}
 
 
 @router.post("/api/context/cursor")
-async def context_update_cursor(req: UpdateCursorRequest):
+async def context_update_cursor(req: UpdateCursorRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Update cursor position in file."""
     await _state.context_manager.update_cursor(req.context_id, req.path, req.line, req.column)
     return {"status": "updated", "path": req.path, "line": req.line, "column": req.column}
 
 
 @router.post("/api/context/command")
-async def context_add_command(req: AddCommandRequest):
+async def context_add_command(req: AddCommandRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Add command to history."""
     result = await _state.context_manager.add_command(req.context_id, req.command, req.directory)
     return {"status": "added", "command": result}
 
 
 @router.post("/api/context/search")
-async def context_add_search(req: AddSearchRequest):
+async def context_add_search(req: AddSearchRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Add search query to history."""
     result = await _state.context_manager.add_search(req.context_id, req.query, req.path, req.replace_with)
     return {"status": "added", "search": result}
 
 
 @router.post("/api/context/bookmark")
-async def context_add_bookmark(req: AddBookmarkRequest):
+async def context_add_bookmark(req: AddBookmarkRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Add bookmark."""
     result = await _state.context_manager.add_bookmark(req.context_id, req.path, req.line, req.note)
     return {"status": "added", "bookmark": result}
 
 
 @router.delete("/api/context/bookmark")
-async def context_remove_bookmark(
-    context_id: str = Query(...),
-    path: str = Query(...),
-    line: int = Query(...),
-):
+async def context_remove_bookmark(context_id: str = Query(...), path: str = Query(...), line: int = Query(...), _identity: AuthIdentity = Depends(require_master_key)):
     """Remove bookmark."""
     success = await _state.context_manager.remove_bookmark(context_id, path, line)
     return {"status": "removed" if success else "not_found", "path": path, "line": line}
@@ -391,7 +383,7 @@ async def context_remove_bookmark(
 
 
 @router.post("/api/scaffold/python-class", response_model=ScaffoldResponse)
-async def scaffold_python_class(req: ScaffoldRequest):
+async def scaffold_python_class(req: ScaffoldRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Scaffold a Python class + test file from template."""
     files_created = []
     module_dir = req.module_path.rstrip("/")
@@ -445,7 +437,7 @@ async def scaffold_python_class(req: ScaffoldRequest):
 
 
 @router.post("/api/validate", response_model=ValidationReportResponse)
-async def validate_context(req: ValidateRequest):
+async def validate_context(req: ValidateRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Run validation pipeline (mypy + pytest) for context."""
     try:
         report = await _state.context_manager.validate_context(
@@ -484,7 +476,7 @@ async def validate_context(req: ValidateRequest):
 
 
 @router.get("/api/templates", response_model=TemplateListResponse)
-async def list_templates():
+async def list_templates(_identity: AuthIdentity = Depends(require_master_key)):
     """List all available code templates."""
     templates = TemplateLibrary.list_templates()
     return TemplateListResponse(
@@ -494,7 +486,7 @@ async def list_templates():
 
 
 @router.get("/api/templates/{template_id}")
-async def get_template(template_id: str):
+async def get_template(template_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """Get template details."""
     template = TemplateLibrary.get_template(template_id)
     if not template:
@@ -503,7 +495,7 @@ async def get_template(template_id: str):
 
 
 @router.post("/api/templates/render", response_model=TemplateRenderResponse)
-async def render_template(req: TemplateRenderRequest):
+async def render_template(req: TemplateRenderRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Render template and save to file."""
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
@@ -553,9 +545,8 @@ async def render_template(req: TemplateRenderRequest):
 
 
 @router.post("/api/project/structure", response_model=ProjectStructureResponse)
-async def project_structure(req: ProjectStructureRequest):
+async def project_structure(req: ProjectStructureRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Get project structure with metadata and git status."""
-    import json
 
     # Get File List With Metadata Using Find
     cmd = f"cd '{req.path}' && find . -maxdepth {req.max_depth} -printf '%y|%p|%s|%m|%TY-%Tm-%Td %TH:%TM:%TS\\n' 2>/dev/null || echo 'ERROR'"

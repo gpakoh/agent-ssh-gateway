@@ -3,7 +3,6 @@
 import pytest
 from app.security import (
     FORBIDDEN_PATHS,
-    DANGEROUS_COMMANDS,
     DANGEROUS_PATTERNS,
     SECURITY_HEADERS,
     sanitize_command,
@@ -232,7 +231,8 @@ def test_session_security_generate_token():
 
 
 def test_session_security_verify_token():
-    import hashlib, hmac
+    import hashlib
+    import hmac
     token = SessionSecurity.generate_secure_token()
     secret = "my-secret"
     expected_hash = hmac.new(secret.encode(), token.encode(), hashlib.sha256).hexdigest()
@@ -241,7 +241,8 @@ def test_session_security_verify_token():
 
 def test_session_security_verify_token_wrong_secret():
     token = SessionSecurity.generate_secure_token()
-    import hmac, hashlib
+    import hmac
+    import hashlib
     hash1 = hmac.new(b"secret1", token.encode(), hashlib.sha256).hexdigest()
     result = SessionSecurity.verify_token(token, hash1, "secret2")
     assert result is False

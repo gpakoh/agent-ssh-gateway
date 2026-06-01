@@ -1,7 +1,6 @@
 """Diff generation for file changes."""
 
 import difflib
-from typing import Optional
 
 
 class DiffGenerator:

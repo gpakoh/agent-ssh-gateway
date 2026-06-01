@@ -148,7 +148,6 @@ server {
 """
     src.write_text(content)
 
-    from pathlib import Path as P
     from time import strftime
     marker = MARKER
     text = src.read_text()
