@@ -3,7 +3,7 @@
 **OpenAPI-first SSH control plane for AI agents, CI/CD pipelines and self-hosted infrastructure automation.**
 
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
-![tests](https://img.shields.io/badge/tests-404%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-413%20passed-brightgreen)
 ![mypy](https://img.shields.io/badge/mypy-0%20errors-brightgreen)
 ![ruff](https://img.shields.io/badge/ruff-passing-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-blue)
@@ -351,10 +351,18 @@ depending on your deployment settings.
 
 ## Development
 
-Install dependencies:
-
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+On Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
 ```
 
 Run tests:

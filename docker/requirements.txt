@@ -1,3 +1,5 @@
+# Runtime dependencies for Docker image.
+# Keep in sync with [project.dependencies] in ../pyproject.toml.
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
 paramiko==3.5.0
