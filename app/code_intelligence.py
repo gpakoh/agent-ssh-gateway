@@ -47,7 +47,7 @@ class CodeIntelligence:
         context_lines: int = 3,
     ) -> list[CodeSearchResult]:
         """Search for code pattern in project."""
-        results = []
+        results: list[CodeSearchResult] = []
         
         # Use Grep To Find Matches
         cmd = f"cd {path} && grep -rn -C {context_lines} '{query}' --include='*.{language}' 2>/dev/null || true"
