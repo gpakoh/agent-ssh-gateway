@@ -1,7 +1,6 @@
 """Git operations wrapper for SSH sessions."""
 
 import logging
-from typing import Optional
 from dataclasses import dataclass
 from enum import Enum
 
@@ -20,10 +19,10 @@ class GitStatus(Enum):
 class GitInfo:
     """Git repository information."""
     status: GitStatus
-    branch: Optional[str] = None
+    branch: str | None = None
     has_changes: bool = False
-    last_commit: Optional[str] = None
-    remote_url: Optional[str] = None
+    last_commit: str | None = None
+    remote_url: str | None = None
     message: str = ""
     can_commit: bool = False
 
@@ -98,7 +97,7 @@ class GitManager:
             can_commit=True
         )
 
-    async def init_repo(self, session_id: str, path: str, remote_url: Optional[str] = None) -> dict:
+    async def init_repo(self, session_id: str, path: str, remote_url: str | None = None) -> dict:
         """Initialize git repository."""
         # Check if git is installed
         check_result = await self._ssh.execute(
@@ -136,7 +135,7 @@ class GitManager:
             "remote_url": remote_url
         }
 
-    async def commit(self, session_id: str, path: str, message: str, files: Optional[list] = None) -> dict:
+    async def commit(self, session_id: str, path: str, message: str, files: list | None = None) -> dict:
         """Create a git commit."""
         escaped_path = path.replace("'", "'\"'\"'")
         escaped_message = message.replace("'", "'\"'\"'")

@@ -1,6 +1,6 @@
 """Template library for common code patterns."""
 
-from typing import Any, Optional
+from typing import Any
 
 
 class TemplateLibrary:
@@ -216,7 +216,7 @@ jobs:
         ]
 
     @classmethod
-    def get_template(cls, template_id: str) -> Optional[dict]:
+    def get_template(cls, template_id: str) -> dict | None:
         """Get template by ID."""
         template = cls.TEMPLATES.get(template_id)
         if not template:
@@ -231,7 +231,7 @@ jobs:
         }
 
     @classmethod
-    def render_template(cls, template_id: str, params: dict) -> Optional[str]:
+    def render_template(cls, template_id: str, params: dict) -> str | None:
         """Render template with parameters."""
         template = cls.TEMPLATES.get(template_id)
         if not template:
@@ -243,4 +243,4 @@ jobs:
         try:
             return template["code"].format(**merged_params)
         except KeyError as exc:
-            raise ValueError(f"Missing parameter: {exc}")
+            raise ValueError(f"Missing parameter: {exc}") from exc

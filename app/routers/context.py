@@ -2,49 +2,48 @@
 
 import logging
 import os
+from typing import Any
 
-from typing import Any, Optional
-
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import state as _state
-from app.state import _err
-from app.auth_middleware import require_master_key, AuthIdentity
+from app.auth_middleware import AuthIdentity, require_master_key
+from app.diff_generator import DiffGenerator
+from app.git_manager import GitStatus
 from app.models import (
-    ContextCreateRequest,
-    ContextResponse,
-    ContextListResponse,
-    FileReadRequest,
-    FileReadResponse,
-    FileEditWithContextRequest,
-    FileEditWithContextResponse,
-    OpenFileRequest,
-    CloseFileRequest,
-    UpdateCursorRequest,
+    AddBookmarkRequest,
     AddCommandRequest,
     AddSearchRequest,
-    AddBookmarkRequest,
+    CloseFileRequest,
+    ContextCreateRequest,
+    ContextListResponse,
+    ContextResponse,
+    DiffLine,
+    DiffResponse,
+    FileEditWithContextRequest,
+    FileEditWithContextResponse,
+    FileMetadata,
+    FileReadRequest,
+    FileReadResponse,
+    GitInfoResponse,
+    OpenFileRequest,
+    ProjectStructureRequest,
+    ProjectStructureResponse,
     ScaffoldRequest,
     ScaffoldResponse,
+    SmartContextStateResponse,
+    TabStateResponse,
+    TemplateInfo,
+    TemplateListResponse,
+    TemplateRenderRequest,
+    TemplateRenderResponse,
+    UpdateCursorRequest,
     ValidateRequest,
     ValidationReportResponse,
     ValidationStepResult,
-    TemplateListResponse,
-    TemplateInfo,
-    TemplateRenderRequest,
-    TemplateRenderResponse,
-    DiffResponse,
-    DiffLine,
-    ProjectStructureRequest,
-    ProjectStructureResponse,
-    FileMetadata,
-    GitInfoResponse,
-    SmartContextStateResponse,
-    TabStateResponse,
 )
+from app.state import _err
 from app.template_library import TemplateLibrary
-from app.git_manager import GitStatus
-from app.diff_generator import DiffGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -122,10 +121,10 @@ async def context_create(req: ContextCreateRequest, _identity: AuthIdentity = De
 
 
 @router.get("/api/context/list", response_model=ContextListResponse)
-async def context_list(session_id: Optional[str] = None, _identity: AuthIdentity = Depends(require_master_key)):
+async def context_list(session_id: str | None = None, _identity: AuthIdentity = Depends(require_master_key)):
     """List all active contexts."""
     contexts = []
-    for ctx_id, ctx in _state.context_manager._contexts.items():
+    for _, ctx in _state.context_manager._contexts.items():
         if ctx and (not session_id or ctx.session_id == session_id):
             resp = _context_to_response(ctx)
             resp.message = f"Idle for {ctx.idle_time:.0f}s"
@@ -217,7 +216,7 @@ async def context_file_edit(req: FileEditWithContextRequest, _identity: AuthIden
         logger.info(f"Edit result: {result}")
     except Exception as exc:
         logger.error(f"Edit failed: {exc}")
-        raise HTTPException(status_code=500, detail=_err(500, f"Edit failed: {exc}"))
+        raise HTTPException(status_code=500, detail=_err(500, f"Edit failed: {exc}")) from exc
 
     await _state.context_manager.record_edit(req.context_id, req.path, "edit")
     await _state.context_manager.add_file_to_context(req.context_id, req.path)
@@ -464,10 +463,10 @@ async def validate_context(req: ValidateRequest, _identity: AuthIdentity = Depen
             ]
         )
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=_err(404, str(exc)))
+        raise HTTPException(status_code=404, detail=_err(404, str(exc))) from exc
     except Exception as exc:
         logger.error("Validation error: %s", exc)
-        raise HTTPException(status_code=500, detail=_err(500, f"Validation failed: {exc}"))
+        raise HTTPException(status_code=500, detail=_err(500, f"Validation failed: {exc}")) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +503,7 @@ async def render_template(req: TemplateRenderRequest, _identity: AuthIdentity = 
     try:
         code = TemplateLibrary.render_template(req.template_id, req.params)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
 
     if not code:
         raise HTTPException(status_code=404, detail=_err(404, f"Template {req.template_id} not found"))

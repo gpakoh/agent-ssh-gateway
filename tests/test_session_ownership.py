@@ -6,11 +6,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 from starlette.testclient import TestClient
-from typing import Optional
 
-from app.main import app
-from app.auth_middleware import token_fingerprint, ensure_session_owner, AuthIdentity
+from app.auth_middleware import AuthIdentity, ensure_session_owner, token_fingerprint
 from app.config import settings
+from app.main import app
 
 
 class FakeSession:
@@ -188,7 +187,7 @@ class TestSessionOwnershipHTTP:
         # Instead of patching settings fields (which pydantic-settings 2.6.0
         # doesn't honour via __setattr__ in Debian Bookworm), we patch
         # is_agent_token_valid at the module level to recognise fixed tokens.
-        async def _fake_is_agent_token_valid(settings, provided: str, token_store=None) -> Optional[AuthIdentity]:
+        async def _fake_is_agent_token_valid(settings, provided: str, token_store=None) -> AuthIdentity | None:
             if provided in ("agent-token-a", "agent-token-b"):
                 return AuthIdentity(
                     token_type="agent",

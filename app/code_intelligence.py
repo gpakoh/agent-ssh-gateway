@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import re
-from typing import Optional
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -87,7 +86,7 @@ class CodeIntelligence:
         path: str,
         instruction: str,
         language: str = "python",
-    ) -> Optional[CodeInsertion]:
+    ) -> CodeInsertion | None:
         """Find best insertion point based on instruction."""
         
         # Read File
@@ -345,7 +344,7 @@ Code:"""
                                 await asyncio.sleep(3)
                                 continue
                             
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("⏱️ Attempt %s: Timeout waiting for adapter", attempt + 1)
                 if attempt < 2:
                     await asyncio.sleep(5)

@@ -1,54 +1,55 @@
 """Global application state — initialized in lifespan()."""
 
-from typing import Optional
 
-from app.ssh_manager import SSHSessionManager
-from app.job_manager import JobManager
-from app.file_editor import FileEditor
-from app.context_manager import ContextManager
 from app.batch_operations import BatchOperationsManager
-from app.code_intelligence import CodeIntelligence
-from app.search_replace import GlobalSearchReplace
-from app.file_tree import FileTreeExplorer
-from app.server_manager import ServerManager
-from app.snapshot_manager import SnapshotManager
-from app.webhook_manager import WebhookManager
-from app.project_analytics import ProjectAnalytics
-from app.security import SecretManager, AuditLogger
-from app.redis_queue import RedisJobQueue
-from app.circuit_breaker import CircuitBreakerRegistry
-from app.distributed_lock import DistributedLock
-from app.session_store import SessionStore
 from app.bulk_operations_v2 import BulkOperationsManager
-from app.known_hosts import HostKeyStore
-from app.event_hook_store import EventHookStore
+from app.circuit_breaker import CircuitBreakerRegistry
+from app.code_intelligence import CodeIntelligence
+from app.context_manager import ContextManager
+from app.distributed_lock import DistributedLock
 from app.event_hook_delivery import DeliveryService
+from app.event_hook_store import EventHookStore
+from app.file_editor import FileEditor
+from app.file_tree import FileTreeExplorer
+from app.job_manager import JobManager
+from app.known_hosts import HostKeyStore
+from app.project_analytics import ProjectAnalytics
+from app.redis_queue import RedisJobQueue
+from app.search_replace import GlobalSearchReplace
+from app.security import AuditLogger, SecretManager
+from app.server_manager import ServerManager
+from app.session_store import SessionStore
+from app.snapshot_manager import SnapshotManager
+from app.ssh_manager import SSHSessionManager
+from app.webhook_manager import WebhookManager
 
-manager: Optional[SSHSessionManager] = None
-job_manager: Optional[JobManager] = None
-file_editor: Optional[FileEditor] = None
-context_manager: Optional[ContextManager] = None
-batch_manager: Optional[BatchOperationsManager] = None
-code_intelligence: Optional[CodeIntelligence] = None
-search_replace: Optional[GlobalSearchReplace] = None
-file_tree: Optional[FileTreeExplorer] = None
-server_manager: Optional[ServerManager] = None
-snapshot_manager: Optional[SnapshotManager] = None
-webhook_manager: Optional[WebhookManager] = None
-analytics: Optional[ProjectAnalytics] = None
-secret_manager: Optional[SecretManager] = None
-audit_logger: Optional[AuditLogger] = None
-redis_queue: Optional[RedisJobQueue] = None
-circuit_breakers: Optional[CircuitBreakerRegistry] = None
-dist_lock: Optional[DistributedLock] = None
-session_store: Optional[SessionStore] = None
-host_key_store: Optional[HostKeyStore] = None
-bulk_ops: Optional[BulkOperationsManager] = None
-event_hook_store: Optional[EventHookStore] = None
-delivery_service: Optional[DeliveryService] = None
-from app.agent_token_store import AgentTokenStore  # noqa: E402
+manager: SSHSessionManager | None = None
+job_manager: JobManager | None = None
+file_editor: FileEditor | None = None
+context_manager: ContextManager | None = None
+batch_manager: BatchOperationsManager | None = None
+code_intelligence: CodeIntelligence | None = None
+search_replace: GlobalSearchReplace | None = None
+file_tree: FileTreeExplorer | None = None
+server_manager: ServerManager | None = None
+snapshot_manager: SnapshotManager | None = None
+webhook_manager: WebhookManager | None = None
+analytics: ProjectAnalytics | None = None
+secret_manager: SecretManager | None = None
+audit_logger: AuditLogger | None = None
+redis_queue: RedisJobQueue | None = None
+circuit_breakers: CircuitBreakerRegistry | None = None
+dist_lock: DistributedLock | None = None
+session_store: SessionStore | None = None
+host_key_store: HostKeyStore | None = None
+bulk_ops: BulkOperationsManager | None = None
+event_hook_store: EventHookStore | None = None
+delivery_service: DeliveryService | None = None
 from fastapi import WebSocket  # noqa: E402
-agent_token_store: Optional[AgentTokenStore] = None
+
+from app.agent_token_store import AgentTokenStore  # noqa: E402
+
+agent_token_store: AgentTokenStore | None = None
 active_websockets: set[WebSocket] = set()
 
 

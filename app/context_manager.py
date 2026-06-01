@@ -5,12 +5,11 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
 from enum import Enum
 
-from app.git_manager import GitManager, GitInfo, GitStatus
-from app.validation_pipeline import ValidationPipeline, ValidationReport
+from app.git_manager import GitInfo, GitManager, GitStatus
 from app.smart_context import SmartContextState
+from app.validation_pipeline import ValidationPipeline, ValidationReport
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +28,8 @@ class Context:
     session_id: str
     name: str
     path: str
-    branch: Optional[str] = None
-    git_info: Optional[GitInfo] = None
+    branch: str | None = None
+    git_info: GitInfo | None = None
     files_opened: list[str] = field(default_factory=list)
     edit_history: list[dict] = field(default_factory=list)
     auto_commit: bool = False
@@ -38,7 +37,7 @@ class Context:
     created_at: float = field(default_factory=time.time)
     last_used: float = field(default_factory=time.time)
     status: ContextStatus = ContextStatus.ACTIVE
-    error_message: Optional[str] = None
+    error_message: str | None = None
     smart_state: SmartContextState = field(default_factory=SmartContextState)
 
     def touch(self) -> None:
@@ -62,7 +61,7 @@ class ContextManager:
         self._git = GitManager(ssh_manager)
         self._validation = ValidationPipeline(ssh_manager)
         self._context_timeout = context_timeout
-        self._cleanup_task: Optional[asyncio.Task] = None
+        self._cleanup_task: asyncio.Task | None = None
 
     async def start_cleanup_task(self) -> None:
         """Start cleanup coroutine."""
@@ -109,9 +108,9 @@ class ContextManager:
     async def create_context(
         self,
         session_id: str,
-        name: Optional[str] = None,
+        name: str | None = None,
         path: str = ".",
-        branch: Optional[str] = None,
+        branch: str | None = None,
         auto_commit: bool = False,
         auto_validate: bool = False,
     ) -> Context:
@@ -150,7 +149,7 @@ class ContextManager:
         logger.info("Context %s created: %s@%s", context_id, name, path)
         return context
 
-    async def get_context(self, context_id: str) -> Optional[Context]:
+    async def get_context(self, context_id: str) -> Context | None:
         """Get context by ID."""
         async with self._lock:
             ctx = self._contexts.get(context_id)
@@ -158,7 +157,7 @@ class ContextManager:
                 ctx.touch()
             return ctx
 
-    async def get_context_by_session(self, session_id: str) -> Optional[Context]:
+    async def get_context_by_session(self, session_id: str) -> Context | None:
         """Get context by session ID."""
         async with self._lock:
             ctx_id = self._session_contexts.get(session_id)
@@ -189,7 +188,7 @@ class ContextManager:
         ctx.git_info = git_info
         return git_info
 
-    async def init_git(self, context_id: str, remote_url: Optional[str] = None) -> dict:
+    async def init_git(self, context_id: str, remote_url: str | None = None) -> dict:
         """Initialize git for context."""
         ctx = await self.get_context(context_id)
         if not ctx:
@@ -204,7 +203,7 @@ class ContextManager:
         self,
         context_id: str,
         message: str,
-        files: Optional[list] = None
+        files: list | None = None
     ) -> dict:
         """Commit changes in context."""
         ctx = await self.get_context(context_id)

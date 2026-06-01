@@ -13,7 +13,6 @@ from fastapi.routing import APIRoute
 
 from app.main import app
 
-
 PUBLIC_ROUTES: set[tuple[str, str]] = {
     ("GET", "/health"),
     ("GET", "/"),

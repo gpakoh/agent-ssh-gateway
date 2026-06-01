@@ -4,22 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 import random
-from datetime import datetime, timedelta, timezone
+import uuid
+from datetime import UTC, datetime, timedelta
 
 import aiohttp
-from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.session_store import Base, WebhookDelivery
 from app.metrics import metrics
+from app.session_store import Base, WebhookDelivery
 
 logger = logging.getLogger(__name__)
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _compute_retry_at(attempts: int, base_sec: float, max_sec: float) -> datetime:
@@ -258,7 +258,7 @@ class DeliveryService:
         retry_base_sec: float,
         retry_max_sec: float,
     ):
-        start = datetime.now(timezone.utc)
+        start = datetime.now(UTC)
         metrics.record_event_hook_attempt()
         assert delivery.delivery_id is not None
         assert delivery.url is not None
@@ -304,7 +304,7 @@ class DeliveryService:
             )
             metrics.record_event_hook_delivery(status="error", event=d_event)
         finally:
-            elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+            elapsed = (datetime.now(UTC) - start).total_seconds()
             metrics.record_event_hook_latency(elapsed)
 
     async def _cleanup_loop(
