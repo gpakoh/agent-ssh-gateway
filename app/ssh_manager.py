@@ -5,8 +5,9 @@ import io
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import paramiko
 from paramiko.ssh_exception import (
@@ -20,13 +21,20 @@ from app.known_hosts import HostKeyStore, KnownHostsPolicy, NullHostKeyStore
 from app.security import SecretManager
 
 # Lazy Import To Avoid Circular Dependency
-_emit_event_fn = None
-def _emit(event: str, **kw):
+_emit_event_fn: Callable[..., Any] | None = None
+def _emit(event: str, **kw: Any) -> None:
     global _emit_event_fn
-    if _emit_event_fn is None:
+    fn = _emit_event_fn
+    if fn is None:
         from app.event_hook_emitter import emit_event as _emit_event_fn
-    task = asyncio.ensure_future(_emit_event_fn(event, **kw))
-    task.add_done_callback(lambda t: t.exception() and logger.error("_emit failed: %s", t.exception()))
+        fn = _emit_event_fn
+    assert fn is not None
+    task = asyncio.ensure_future(fn(event, **kw))
+    def _on_emit_done(t: asyncio.Task) -> None:
+        exc = t.exception()
+        if exc:
+            logger.error("_emit failed: %s", exc)
+    task.add_done_callback(_on_emit_done)
 logger = logging.getLogger(__name__)
 
 
