@@ -59,8 +59,8 @@ class ExtractFunctionTransformer(ast.NodeTransformer):
         if self.extracted:
             return node
 
-        new_body = []
-        extracted_body = []
+        new_body: list[ast.stmt] = []
+        extracted_body: list[ast.stmt] = []
         in_extract = False
 
         for stmt in node.body:
@@ -104,10 +104,11 @@ class ExtractFunctionTransformer(ast.NodeTransformer):
                 body=extracted_body,
                 decorator_list=[],
                 returns=None,
+                type_params=[],
             )
             ast.fix_missing_locations(new_func)
             # Insert new function before the current function
-            return [new_func, node]
+            return [new_func, node]  # type: ignore[return-value]
 
         self.generic_visit(node)
         return node
