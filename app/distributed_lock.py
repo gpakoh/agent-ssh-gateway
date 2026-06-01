@@ -124,7 +124,7 @@ class DistributedLock:
         end
         """
 
-        result = await self._redis.eval(lua_script, 1, lock_key, token)
+        result = await self._redis.eval(lua_script, 1, lock_key, token)  # type: ignore[arg-type, misc]
 
         if result:
             logger.debug("Lock released for %s", resource)
@@ -154,7 +154,7 @@ class DistributedLock:
         end
         """
 
-        result = await self._redis.eval(lua_script, 1, lock_key, token, str(ttl))
+        result = await self._redis.eval(lua_script, 1, lock_key, token, str(ttl))  # type: ignore[arg-type, misc]
         return bool(result)
 
     async def is_locked(self, resource: str) -> bool:
