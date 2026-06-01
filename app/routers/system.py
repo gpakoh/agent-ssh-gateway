@@ -722,45 +722,6 @@ async def run_analytics(req: ProjectAnalyticsRequest, _identity: AuthIdentity = 
     )
 
 
-@router.get("/api/project/tree", tags=["code"])
-async def get_file_tree(
-    session_id: str = Query(...),
-    path: str = Query(default="."),
-    max_depth: int = Query(default=3, ge=1, le=10),
-    _identity: AuthIdentity = Depends(require_master_key),
-):
-    """Simple project tree — list files and directories.
-
-    Returns flat list with type, path, size for quick introspection.
-    """
-    cmd = f"cd '{path}' && find . -maxdepth {max_depth} -not -path '*/\\.*' -not -path '*/node_modules/*' -not -path '*/__pycache__/*' -not -path '*/venv/*' -printf '%y|%p|%s\\n' 2>/dev/null || echo 'ERROR'"
-    result = await _state.manager.execute(session_id, cmd, timeout=30)
-
-    if result["exit_code"] != 0 or "ERROR" in result["stdout"]:
-        raise HTTPException(status_code=500, detail=_err(500, f"Cannot read directory: {result['stderr']}"))
-
-    items = []
-    for line in result["stdout"].strip().split("\n"):
-        if not line or line == "ERROR":
-            continue
-        parts = line.split("|", 3)
-        if len(parts) < 3:
-            continue
-
-        ftype, fpath, fsize = parts
-        fpath = fpath.lstrip("./")
-        if not fpath:
-            continue
-
-        items.append({
-            "type": "directory" if ftype == "d" else "file",
-            "path": fpath,
-            "size": int(fsize) if fsize and ftype == "f" else None,
-        })
-
-    return {"items": items, "count": len(items)}
-
-
 @router.post("/api/tree", tags=["files"], response_model=FileTreeResponse)
 async def get_file_tree_v2(req: FileTreeRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Get directory tree structure."""
