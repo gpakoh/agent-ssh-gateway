@@ -6,6 +6,7 @@ import tempfile
 
 import paramiko
 import pytest
+
 from app.known_hosts import (
     FileHostKeyStore,
     HostKeyStore,

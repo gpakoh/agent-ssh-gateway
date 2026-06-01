@@ -2,7 +2,7 @@
 
 import logging
 
-from prometheus_client import Counter, Histogram, Gauge, Info, generate_latest
+from prometheus_client import Counter, Gauge, Histogram, Info, generate_latest
 
 logger = logging.getLogger(__name__)
 

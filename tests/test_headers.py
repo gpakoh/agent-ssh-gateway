@@ -7,8 +7,8 @@ from httpx import ASGITransport, AsyncClient
 
 import app.main as main_module
 import app.state as state_module
-from app.security import SECURITY_HEADERS
 from app.config import settings
+from app.security import SECURITY_HEADERS
 
 
 @pytest.fixture(autouse=True)

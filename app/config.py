@@ -1,9 +1,9 @@
 """Application configuration."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from pydantic_settings import BaseSettings
 from pydantic import Field
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
@@ -99,7 +99,7 @@ class Settings(BaseSettings):
 
     def model_post_init(self, __context) -> None:
         if self.agent_token and self.agent_token_expires_at is None:
-            self.agent_token_expires_at = datetime.now(timezone.utc) + timedelta(
+            self.agent_token_expires_at = datetime.now(UTC) + timedelta(
                 seconds=self.agent_token_ttl
             )
 

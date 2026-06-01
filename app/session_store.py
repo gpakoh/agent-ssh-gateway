@@ -1,14 +1,10 @@
 """Persistent session storage using PostgreSQL."""
 
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import (
-    Column, String, Integer, DateTime, 
-    Boolean, Text, JSON
-)
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy import JSON, Boolean, Column, DateTime, Integer, String, Text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
 
 from app.config import settings as _settings
@@ -40,8 +36,8 @@ class PersistentSession(Base):
     password_encrypted = Column(Text, nullable=True)
     private_key_encrypted = Column(Text, nullable=True)
     key_passphrase_encrypted = Column(Text, nullable=True)
-    connected_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    last_activity = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    connected_at = Column(DateTime, default=lambda: datetime.now(UTC))
+    last_activity = Column(DateTime, default=lambda: datetime.now(UTC))
     expires_at = Column(DateTime, nullable=False)
     is_active = Column(Boolean, default=True)
     reconnect_count = Column(Integer, default=0)
@@ -73,8 +69,8 @@ class EventHook(Base):
     secret_encrypted = Column(Text, nullable=True)
     include_output = Column(Boolean, default=False)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
     def to_dict(self) -> dict:
         return {
@@ -106,8 +102,8 @@ class WebhookDelivery(Base):
     http_status = Column(Integer, nullable=True)
     leased_by = Column(String(64), nullable=True)
     leased_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
 
 class SessionStore:
@@ -150,9 +146,9 @@ class SessionStore:
         host: str,
         port: int,
         username: str,
-        password: Optional[str] = None,
-        private_key: Optional[str] = None,
-        key_passphrase: Optional[str] = None,
+        password: str | None = None,
+        private_key: str | None = None,
+        key_passphrase: str | None = None,
         ttl: int = 3600,
     ) -> None:
         """Save session to database."""
@@ -168,7 +164,7 @@ class SessionStore:
                 password_encrypted=secret_manager.encrypt(password) if password else None,
                 private_key_encrypted=secret_manager.encrypt(private_key) if private_key else None,
                 key_passphrase_encrypted=secret_manager.encrypt(key_passphrase) if key_passphrase else None,
-                expires_at=datetime.now(timezone.utc) + timedelta(seconds=ttl),
+                expires_at=datetime.now(UTC) + timedelta(seconds=ttl),
                 is_active=True,
             )
             
@@ -177,7 +173,7 @@ class SessionStore:
             
             logger.info("Session %s saved to database", session_id)
     
-    async def get_session(self, session_id: str) -> Optional[dict]:
+    async def get_session(self, session_id: str) -> dict | None:
         """Get session from database."""
         sm = self._session_maker
         assert sm is not None
@@ -188,14 +184,14 @@ class SessionStore:
                 select(PersistentSession).where(
                     PersistentSession.session_id == session_id,
                     PersistentSession.is_active == True,  # noqa: E712
-                    PersistentSession.expires_at > datetime.now(timezone.utc)
+                    PersistentSession.expires_at > datetime.now(UTC)
                 )
             )
             db_session = result.scalar_one_or_none()
             
             if db_session:
                 # Update Last Activity
-                db_session.last_activity = datetime.now(timezone.utc)
+                db_session.last_activity = datetime.now(UTC)
                 await session.commit()
                 return db_session.to_dict()
             
@@ -216,7 +212,7 @@ class SessionStore:
             db_session = result.scalar_one_or_none()
             
             if db_session:
-                db_session.last_activity = datetime.now(timezone.utc)
+                db_session.last_activity = datetime.now(UTC)
                 await session.commit()
 
     async def deactivate_session(self, session_id: str) -> None:
@@ -248,7 +244,7 @@ class SessionStore:
             result = await session.execute(
                 select(PersistentSession).where(
                     PersistentSession.is_active == True,  # noqa: E712
-                    PersistentSession.expires_at > datetime.now(timezone.utc)
+                    PersistentSession.expires_at > datetime.now(UTC)
                 )
             )
             sessions = result.scalars().all()
@@ -261,11 +257,11 @@ class SessionStore:
         sm = self._session_maker
         assert sm is not None
         async with sm() as session:
-            from sqlalchemy import select, delete
+            from sqlalchemy import delete, select
 
             while True:
                 subq = select(PersistentSession.session_id).where(
-                    PersistentSession.expires_at < datetime.now(timezone.utc)
+                    PersistentSession.expires_at < datetime.now(UTC)
                 ).limit(batch_size)
                 result = await session.execute(
                     delete(PersistentSession).where(
@@ -281,7 +277,7 @@ class SessionStore:
             logger.info("Cleaned up %d expired sessions", total)
         return total
     
-    async def get_session_credentials(self, session_id: str) -> Optional[dict]:
+    async def get_session_credentials(self, session_id: str) -> dict | None:
         """Get decrypted credentials for session."""
         sm = self._session_maker
         assert sm is not None

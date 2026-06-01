@@ -1,8 +1,7 @@
 """Pydantic models for API requests and responses."""
 
-from typing import Optional
-from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator, HttpUrl
 
+from pydantic import BaseModel, Field, HttpUrl, SecretStr, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Connection
@@ -262,7 +261,7 @@ class ErrorResponse(BaseModel):
     """Error response."""
 
     detail: str
-    error_type: Optional[str] = None
+    error_type: str | None = None
 
 
 class ValidationFieldItem(BaseModel):
@@ -334,7 +333,7 @@ class JobStatusResponse(BaseModel):
     job_id: str
     status: str
     progress: dict = Field(default_factory=dict)
-    duration: Optional[float] = None
+    duration: float | None = None
 
 
 class JobResultResponse(BaseModel):
@@ -346,12 +345,12 @@ class JobResultResponse(BaseModel):
     status: str
     stdout: str = ""
     stderr: str = ""
-    exit_code: Optional[int] = None
+    exit_code: int | None = None
     created_at: float
-    started_at: Optional[float] = None
-    completed_at: Optional[float] = None
-    duration: Optional[float] = None
-    error_message: Optional[str] = None
+    started_at: float | None = None
+    completed_at: float | None = None
+    duration: float | None = None
+    error_message: str | None = None
     progress: dict = Field(default_factory=dict)
 
 
@@ -370,11 +369,11 @@ class EditOperation(BaseModel):
     """Single file edit operation."""
 
     type: str = Field(..., pattern="^(replace|insert_after|insert_before|delete|append|create)$")
-    old: Optional[str] = Field(default=None)
-    new: Optional[str] = Field(default=None)
-    after: Optional[str] = Field(default=None)
-    before: Optional[str] = Field(default=None)
-    text: Optional[str] = Field(default=None)
+    old: str | None = Field(default=None)
+    new: str | None = Field(default=None)
+    after: str | None = Field(default=None)
+    before: str | None = Field(default=None)
+    text: str | None = Field(default=None)
     count: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
@@ -446,9 +445,9 @@ class ContextCreateRequest(BaseModel):
     """Request to create a development context."""
 
     session_id: str = Field(..., min_length=1)
-    name: Optional[str] = Field(default=None, min_length=1, description="Context name (e.g., 'gateway_refactor'). Auto-generated if not provided.")
+    name: str | None = Field(default=None, min_length=1, description="Context name (e.g., 'gateway_refactor'). Auto-generated if not provided.")
     path: str = Field(..., min_length=1, description="Working directory path")
-    branch: Optional[str] = Field(default=None, description="Git branch to checkout/create")
+    branch: str | None = Field(default=None, description="Git branch to checkout/create")
     auto_commit: bool = Field(default=False, description="Auto-commit on successful edits")
     auto_validate: bool = Field(default=False, description="Auto-run mypy+tests after edits")
 
@@ -457,10 +456,10 @@ class GitInfoResponse(BaseModel):
     """Git repository information."""
 
     status: str
-    branch: Optional[str] = None
+    branch: str | None = None
     has_changes: bool = False
-    last_commit: Optional[str] = None
-    remote_url: Optional[str] = None
+    last_commit: str | None = None
+    remote_url: str | None = None
     message: str = ""
     can_commit: bool = False
 
@@ -477,11 +476,11 @@ class TabStateResponse(BaseModel):
 class SmartContextStateResponse(BaseModel):
     """Smart context state."""
     tabs: list[TabStateResponse]
-    active_tab: Optional[str] = None
+    active_tab: str | None = None
     command_history: list[dict] = Field(default_factory=list)
     search_history: list[dict] = Field(default_factory=list)
     bookmarks: list[dict] = Field(default_factory=list)
-    last_edited_file: Optional[str] = None
+    last_edited_file: str | None = None
     clipboard_size: int = 0
 
 
@@ -492,7 +491,7 @@ class ContextResponse(BaseModel):
     name: str
     path: str
     session_id: str
-    branch: Optional[str] = None
+    branch: str | None = None
     git: GitInfoResponse
     auto_commit: bool = False
     auto_validate: bool = False
@@ -519,7 +518,7 @@ class GitInitRequest(BaseModel):
     """Request to initialize git repository."""
 
     context_id: str = Field(..., min_length=1)
-    remote_url: Optional[str] = Field(default=None, description="Remote repository URL")
+    remote_url: str | None = Field(default=None, description="Remote repository URL")
 
 
 class GitCommitRequest(BaseModel):
@@ -527,7 +526,7 @@ class GitCommitRequest(BaseModel):
 
     context_id: str = Field(..., min_length=1)
     message: str = Field(..., min_length=1)
-    files: Optional[list[str]] = Field(default=None, description="Specific files to commit")
+    files: list[str] | None = Field(default=None, description="Specific files to commit")
 
 
 class GitActionResponse(BaseModel):
@@ -535,8 +534,8 @@ class GitActionResponse(BaseModel):
 
     success: bool
     message: str
-    error: Optional[str] = None
-    hash: Optional[str] = None
+    error: str | None = None
+    hash: str | None = None
 
 
 class GitStatusResponse(BaseModel):
@@ -592,7 +591,7 @@ class FileEditWithContextRequest(BaseModel):
     path: str = Field(..., min_length=1)
     operations: list[EditOperation] = Field(..., min_length=1)
     run_validation: bool = Field(default=False, description="Run validation after edit")
-    commit_message: Optional[str] = Field(default=None, description="Auto-commit message")
+    commit_message: str | None = Field(default=None, description="Auto-commit message")
 
 
 class ValidationStepResult(BaseModel):
@@ -727,7 +726,7 @@ class BatchOperationResultResponse(BaseModel):
     path: str
     success: bool
     output: str = ""
-    error: Optional[str] = None
+    error: str | None = None
     duration: float = 0.0
     lines_changed: int = 0
 
@@ -740,8 +739,8 @@ class BatchExecuteResponse(BaseModel):
     summary: str
     total_duration: float
     operations: list[BatchOperationResultResponse]
-    git_commit: Optional[str] = None
-    validation_result: Optional[dict] = None
+    git_commit: str | None = None
+    validation_result: dict | None = None
 
 
 class BatchReadRequest(BaseModel):
@@ -815,7 +814,7 @@ class CodeInsertResponse(BaseModel):
     path: str
     suggestion: CodeInsertSuggestion
     applied: bool = False
-    git_commit: Optional[str] = None
+    git_commit: str | None = None
 
 
 class CodeGenerateRequest(BaseModel):
@@ -864,7 +863,7 @@ class RestoreBackupRequest(BaseModel):
     """Request to restore from backup."""
 
     context_id: str = Field(..., min_length=1)
-    backup_id: Optional[str] = Field(default=None, description="Specific backup ID or latest")
+    backup_id: str | None = Field(default=None, description="Specific backup ID or latest")
 
 
 class BackupInfo(BaseModel):
@@ -888,7 +887,7 @@ class RecoveryActionResponse(BaseModel):
 
     success: bool
     message: str
-    backup_id: Optional[str] = None
+    backup_id: str | None = None
     restored_files: list[str] = Field(default_factory=list)
 
 
@@ -938,7 +937,7 @@ class GlobalReplaceRequest(BaseModel):
     case_sensitive: bool = Field(default=True)
     dry_run: bool = Field(default=False, description="Preview changes without applying")
     auto_commit: bool = Field(default=False)
-    context_id: Optional[str] = Field(default=None)
+    context_id: str | None = Field(default=None)
 
 
 class ReplaceResultItem(BaseModel):
@@ -947,7 +946,7 @@ class ReplaceResultItem(BaseModel):
     path: str
     replacements_count: int
     success: bool
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class GlobalReplaceResponse(BaseModel):
@@ -959,7 +958,7 @@ class GlobalReplaceResponse(BaseModel):
     total_replacements: int
     files_modified: int
     dry_run: bool
-    git_commit: Optional[str] = None
+    git_commit: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1039,7 +1038,7 @@ class TemplateRenderResponse(BaseModel):
     template_id: str
     target_path: str
     code: str
-    git_commit: Optional[str] = None
+    git_commit: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1050,8 +1049,8 @@ class DiffLine(BaseModel):
     """Single diff line."""
 
     type: str  # equal, added, removed
-    old_line: Optional[int] = None
-    new_line: Optional[int] = None
+    old_line: int | None = None
+    new_line: int | None = None
     content: str
 
 
@@ -1072,10 +1071,10 @@ class FileEditWithContextResponse(BaseModel):
     operations_applied: int
     changed: bool
     success: bool = True
-    git_commit: Optional[str] = None
-    validation_result: Optional[ValidationReportResponse] = None
-    warning: Optional[str] = None
-    diff: Optional[DiffResponse] = None
+    git_commit: str | None = None
+    validation_result: ValidationReportResponse | None = None
+    warning: str | None = None
+    diff: DiffResponse | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1157,7 +1156,7 @@ class ServerInfo(BaseModel):
     description: str
     tags: list[str]
     status: str
-    last_check: Optional[float] = None
+    last_check: float | None = None
     has_session: bool = False
 
 
@@ -1246,7 +1245,7 @@ class SnapshotInfo(BaseModel):
     created_at: float
     files: list[str]
     description: str
-    git_commit_before: Optional[str] = None
+    git_commit_before: str | None = None
     size_bytes: int = 0
 
 
@@ -1277,7 +1276,7 @@ class SnapshotActionResponse(BaseModel):
 
     success: bool
     message: str
-    snapshot_id: Optional[str] = None
+    snapshot_id: str | None = None
     restored_files: list[str] = Field(default_factory=list)
 
 
@@ -1294,7 +1293,7 @@ class WebhookConfigResponse(BaseModel):
     target_path: str
     deploy_command: str
     context_id: str
-    notify_url: Optional[str] = None
+    notify_url: str | None = None
     enabled: bool
 
 
@@ -1314,7 +1313,7 @@ class CreateWebhookRequest(BaseModel):
     target_path: str = Field(..., min_length=1)
     deploy_command: str = Field(..., min_length=1)
     context_id: str = Field(..., min_length=1)
-    notify_url: Optional[str] = Field(default=None)
+    notify_url: str | None = Field(default=None)
 
 
 class DeployRequest(BaseModel):
@@ -1327,7 +1326,7 @@ class DeployResponse(BaseModel):
     """Response after deployment trigger."""
 
     status: str
-    job_id: Optional[str] = None
+    job_id: str | None = None
     message: str
 
 
@@ -1362,9 +1361,9 @@ class FileMetadata(BaseModel):
     type: str = Field(..., pattern="^(file|directory|symlink)$")
     size: int = 0
     permissions: str = ""
-    modified_at: Optional[str] = None
-    git_status: Optional[str] = None
-    extension: Optional[str] = None
+    modified_at: str | None = None
+    git_status: str | None = None
+    extension: str | None = None
 
 
 class ProjectStructureResponse(BaseModel):
@@ -1393,7 +1392,7 @@ class BatchEditRequest(BaseModel):
 
     session_id: str = Field(..., min_length=1)
     files: list[BatchEditOperation] = Field(..., min_length=1)
-    commit_message: Optional[str] = Field(default=None)
+    commit_message: str | None = Field(default=None)
 
 
 class BatchEditResult(BaseModel):
@@ -1403,7 +1402,7 @@ class BatchEditResult(BaseModel):
     success: bool
     operations_applied: int
     changed: bool
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class BatchEditResponse(BaseModel):
@@ -1413,7 +1412,7 @@ class BatchEditResponse(BaseModel):
     total_files: int
     files_changed: int
     total_operations: int
-    git_commit: Optional[str] = None
+    git_commit: str | None = None
 
 
 class BulkExecuteRequest(BaseModel):
@@ -1432,7 +1431,7 @@ class BulkExecuteResult(BaseModel):
     stderr: str = ""
     exit_code: int = -1
     duration: float = 0.0
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class BulkExecuteResponse(BaseModel):
@@ -1502,7 +1501,7 @@ class ASTRefactorRenameRequest(BaseModel):
     """
 
     session_id: str = Field(..., min_length=1)
-    path: Optional[str] = Field(default=None, min_length=1, description="Single file path")
+    path: str | None = Field(default=None, min_length=1, description="Single file path")
     files: list[str] = Field(default_factory=list, description="Multiple file paths (alternative to 'path')")
     old_name: str = Field(..., min_length=1)
     new_name: str = Field(..., min_length=1)
@@ -1520,7 +1519,7 @@ class ASTRefactorFileResult(BaseModel):
     path: str
     success: bool
     replacements: int
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class ASTRefactorRenameResponse(BaseModel):

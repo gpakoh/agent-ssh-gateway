@@ -3,7 +3,6 @@
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -28,7 +27,7 @@ class ValidationResult:
     errors: int = 0
     warnings: int = 0
     duration: float = 0.0
-    error_message: Optional[str] = None
+    error_message: str | None = None
 
 
 @dataclass
@@ -53,7 +52,7 @@ class ValidationPipeline:
         path: str,
         run_mypy: bool = True,
         run_tests: bool = True,
-        test_path: Optional[str] = None,
+        test_path: str | None = None,
         mypy_strict: bool = True,
     ) -> ValidationReport:
         """Run full validation pipeline."""

@@ -3,7 +3,6 @@
 import hashlib
 import json
 import logging
-from typing import Optional
 
 import redis.asyncio as redis
 
@@ -20,7 +19,7 @@ class AgentTokenStore:
 
     def __init__(self, redis_url: str):
         self._redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
 
     async def connect(self):
         if self._redis is None:

@@ -3,64 +3,64 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, Query, HTTPException, Request, Response
-from fastapi.responses import FileResponse, PlainTextResponse, HTMLResponse
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 
 from app import state as _state
-from app.state import _err
+from app.auth_middleware import AuthIdentity, is_agent_token_valid, require_master_key
 from app.config import settings
-from app.auth_middleware import is_agent_token_valid, require_master_key, AuthIdentity
-from app.security import validate_target_host
 from app.metrics import metrics
-from app.server_manager import ServerStatus
 from app.models import (
-    HealthResponse,
-    CapabilitiesResponse,
-    ServerListResponse,
-    ServerInfo,
     AddServerRequest,
-    ConnectServerRequest,
-    ServerConnectResponse,
-    CreateSnapshotRequest,
-    SnapshotActionResponse,
-    SnapshotListResponse,
-    SnapshotInfo,
-    RestoreSnapshotRequest,
-    CreateWebhookRequest,
-    WebhookConfigResponse,
-    WebhookListResponse,
-    DeployRequest,
-    DeployResponse,
-    GlobalSearchRequest,
-    GlobalSearchResponse,
-    SearchMatchItem,
-    GlobalReplaceRequest,
-    GlobalReplaceResponse,
-    ReplaceResultItem,
-    CodeSearchRequest,
-    CodeSearchResponse,
-    CodeSearchResultItem,
-    CodeInsertRequest,
-    CodeInsertResponse,
-    CodeInsertSuggestion,
-    CodeGenerateRequest,
-    CodeGenerateResponse,
-    CodeCompleteRequest,
-    CodeCompleteResponse,
-    ProjectAnalyticsRequest,
-    ProjectAnalyticsResponse,
-    FileStats,
-    CodeStats,
-    GitStats,
-    TestStats,
-    DependencyStats,
-    FileTreeRequest,
-    FileTreeNode,
-    FileTreeResponse,
     BatchExecuteRequest,
     BatchExecuteResponse,
     BatchOperationResultResponse,
+    CapabilitiesResponse,
+    CodeCompleteRequest,
+    CodeCompleteResponse,
+    CodeGenerateRequest,
+    CodeGenerateResponse,
+    CodeInsertRequest,
+    CodeInsertResponse,
+    CodeInsertSuggestion,
+    CodeSearchRequest,
+    CodeSearchResponse,
+    CodeSearchResultItem,
+    CodeStats,
+    ConnectServerRequest,
+    CreateSnapshotRequest,
+    CreateWebhookRequest,
+    DependencyStats,
+    DeployRequest,
+    DeployResponse,
+    FileStats,
+    FileTreeNode,
+    FileTreeRequest,
+    FileTreeResponse,
+    GitStats,
+    GlobalReplaceRequest,
+    GlobalReplaceResponse,
+    GlobalSearchRequest,
+    GlobalSearchResponse,
+    HealthResponse,
+    ProjectAnalyticsRequest,
+    ProjectAnalyticsResponse,
+    ReplaceResultItem,
+    RestoreSnapshotRequest,
+    SearchMatchItem,
+    ServerConnectResponse,
+    ServerInfo,
+    ServerListResponse,
+    SnapshotActionResponse,
+    SnapshotInfo,
+    SnapshotListResponse,
+    TestStats,
+    WebhookConfigResponse,
+    WebhookListResponse,
 )
+from app.security import validate_target_host
+from app.server_manager import ServerStatus
+from app.state import _err
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +160,7 @@ async def api_help(request: Request, _identity: AuthIdentity = Depends(require_m
             body = details.get("requestBody", {})
             if body:
                 content = body.get("content", {})
-                for media_type, media_body in content.items():
+                for _, media_body in content.items():
                     schema = _resolve(media_body.get("schema", {}))
                     props = schema.get("properties", {})
                     required_set = set(schema.get("required", []))
@@ -201,7 +201,7 @@ async def download_sdk(_identity: AuthIdentity = Depends(require_master_key)):
     """
     sdk_path = "/app/sdk/ssh_gateway.py"
     try:
-        with open(sdk_path, "r") as f:
+        with open(sdk_path) as f:
             content = f.read()
         return Response(
             content=content,
@@ -211,7 +211,7 @@ async def download_sdk(_identity: AuthIdentity = Depends(require_master_key)):
             }
         )
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=_err(404, "SDK not found"))
+        raise HTTPException(status_code=404, detail=_err(404, "SDK not found")) from None
 
 
 @router.get("/api/circuit-breaker/stats", tags=["system"])
@@ -283,7 +283,7 @@ async def connect_server(server_id: str, req: ConnectServerRequest, _identity: A
             settings.denied_target_cidrs,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=403, detail=_err(403, str(exc)))
+        raise HTTPException(status_code=403, detail=_err(403, str(exc))) from exc
 
     try:
         _password = req.password.get_secret_value() if req.password else None
@@ -310,7 +310,7 @@ async def connect_server(server_id: str, req: ConnectServerRequest, _identity: A
         )
     except Exception as exc:
         _state.server_manager.update_server_status(server_id, ServerStatus.ERROR)
-        raise HTTPException(status_code=502, detail=_err(502, f"Connection failed: {exc}"))
+        raise HTTPException(status_code=502, detail=_err(502, f"Connection failed: {exc}")) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +339,7 @@ async def create_snapshot(req: CreateSnapshotRequest, _identity: AuthIdentity = 
             snapshot_id=snapshot.id,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=_err(500, f"Snapshot creation failed: {exc}"))
+        raise HTTPException(status_code=500, detail=_err(500, f"Snapshot creation failed: {exc}")) from exc
 
 
 @router.get("/api/snapshots", tags=["snapshots"])
@@ -390,7 +390,7 @@ async def restore_snapshot(req: RestoreSnapshotRequest, _identity: AuthIdentity 
             restored_files=result["restored_files"],
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=_err(500, f"Restore failed: {exc}"))
+        raise HTTPException(status_code=500, detail=_err(500, f"Restore failed: {exc}")) from exc
 
 
 @router.delete("/api/snapshots/{snapshot_id}", tags=["snapshots"])

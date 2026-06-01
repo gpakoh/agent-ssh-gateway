@@ -1,7 +1,6 @@
 """CI/CD Webhook integration for auto-deployment."""
 
 import logging
-from typing import Optional
 from dataclasses import dataclass
 from enum import Enum
 
@@ -33,7 +32,7 @@ class WebhookConfig:
     target_path: str
     deploy_command: str
     context_id: str
-    notify_url: Optional[str] = None
+    notify_url: str | None = None
     enabled: bool = True
 
 
@@ -54,7 +53,7 @@ class WebhookManager:
         target_path: str,
         deploy_command: str,
         context_id: str,
-        notify_url: Optional[str] = None,
+        notify_url: str | None = None,
     ) -> WebhookConfig:
         """Add a new webhook."""
         import uuid
@@ -74,7 +73,7 @@ class WebhookManager:
         self._webhooks[webhook_id] = config
         return config
 
-    def get_webhook(self, webhook_id: str) -> Optional[WebhookConfig]:
+    def get_webhook(self, webhook_id: str) -> WebhookConfig | None:
         """Get webhook by ID."""
         return self._webhooks.get(webhook_id)
 
@@ -126,7 +125,7 @@ class WebhookManager:
             "message": f"Deployment queued for {config.name}",
         }
 
-    def get_deployments(self, webhook_id: Optional[str] = None) -> list[dict]:
+    def get_deployments(self, webhook_id: str | None = None) -> list[dict]:
         """Get deployment history."""
         if webhook_id:
             return [d for d in self._deployments if d["webhook_id"] == webhook_id]

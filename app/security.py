@@ -8,7 +8,7 @@ import re
 import secrets
 import socket
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from cryptography.fernet import Fernet
 from fastapi import Request
@@ -114,7 +114,7 @@ FORBIDDEN_PATHS = {
 }
 
 
-def validate_path(path: str, base_path: Optional[str] = None) -> str:
+def validate_path(path: str, base_path: str | None = None) -> str:
     """Validate file path to prevent directory traversal.
     
     Args:

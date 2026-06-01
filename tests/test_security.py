@@ -1,21 +1,21 @@
 """Tests for security functions: path validation, command sanitization, encryption, IP filter, ReDoS guard."""
 
 import pytest
+from cryptography.fernet import Fernet
+
+from app.search_replace import _is_safe_regex
 from app.security import (
-    FORBIDDEN_PATHS,
     DANGEROUS_PATTERNS,
+    FORBIDDEN_PATHS,
     SECURITY_HEADERS,
+    IPFilter,
+    SecretManager,
+    SessionSecurity,
+    redact_secrets,
     sanitize_command,
     validate_path,
-    SecretManager,
-    IPFilter,
-    SessionSecurity,
     validate_target_host,
-    redact_secrets,
 )
-from cryptography.fernet import Fernet
-from app.search_replace import _is_safe_regex
-
 
 # ---------------------------------------------------------------------------
 # Validate_path — FORBIDDEN_PATHS + Traversal
@@ -241,8 +241,8 @@ def test_session_security_verify_token():
 
 def test_session_security_verify_token_wrong_secret():
     token = SessionSecurity.generate_secure_token()
-    import hmac
     import hashlib
+    import hmac
     hash1 = hmac.new(b"secret1", token.encode(), hashlib.sha256).hexdigest()
     result = SessionSecurity.verify_token(token, hash1, "secret2")
     assert result is False

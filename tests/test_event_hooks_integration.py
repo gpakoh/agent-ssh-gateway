@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 import app.main as main_module
 import app.state as state_module
-from app.event_hook_store import EventHookStore
 from app.event_hook_delivery import DeliveryService
-
+from app.event_hook_store import EventHookStore
 
 TEST_API_KEY = "test-event-hook-key-789"
 
@@ -166,13 +167,15 @@ async def test_delivery_enqueue_and_claim(_setup_globals):
     claimed = await ds.claim_deliveries(limit=10, lease_ttl=30.0)
     assert len(claimed) == 0
 
+    from datetime import datetime, timedelta
+
     from sqlalchemy import select as sel
+
     from app.session_store import WebhookDelivery
-    from datetime import datetime, timedelta, timezone
     async with ds._session_factory() as session:
         result = await session.execute(sel(WebhookDelivery).limit(1))
         rec = result.scalar_one()
-        rec.created_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=10)
+        rec.created_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=10)
         await session.commit()
 
     claimed = await ds.claim_deliveries(limit=10, lease_ttl=30.0)
@@ -195,8 +198,8 @@ async def test_agent_token_cannot_manage_event_hooks(_setup_globals):
         # Create an agent token via the API
         from app.config import settings
         settings.agent_token = "agent-canary"
-        from datetime import datetime, timedelta, timezone as tz
-        settings.agent_token_expires_at = datetime.now(tz.utc) + timedelta(hours=1)
+        from datetime import datetime, timedelta
+        settings.agent_token_expires_at = datetime.now(UTC) + timedelta(hours=1)
         settings.agent_token_scopes = ["ssh:execute"]
 
         agent_headers = {"Authorization": "Bearer agent-canary"}

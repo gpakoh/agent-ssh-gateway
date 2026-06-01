@@ -7,13 +7,12 @@ import base64
 import hashlib
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+from datetime import UTC
 
 import paramiko
 
-
 try:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from sqlalchemy import (
         Column,
@@ -43,7 +42,7 @@ class HostKeyStore(ABC):
     """
 
     @abstractmethod
-    async def check(self, host: str, port: int, key: paramiko.PKey) -> Optional[bool]:
+    async def check(self, host: str, port: int, key: paramiko.PKey) -> bool | None:
         ...
 
     @abstractmethod
@@ -59,17 +58,22 @@ class HostKeyStore(ABC):
     async def delete_all(self) -> int:
         return 0
 
+    @abstractmethod
     async def disconnect(self):
+        """Disconnect and release resources."""
         pass
 
 
 class NullHostKeyStore(HostKeyStore):
     """No-op store — every host is unknown, store() does nothing."""
 
-    async def check(self, host: str, port: int, key: paramiko.PKey) -> Optional[bool]:
+    async def check(self, host: str, port: int, key: paramiko.PKey) -> bool | None:
         return None
 
     async def store(self, host: str, port: int, key: paramiko.PKey) -> None:
+        pass
+
+    async def disconnect(self):
         pass
 
 
@@ -98,7 +102,7 @@ class FileHostKeyStore(HostKeyStore):
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._hk.save, self._path)
 
-    async def check(self, host: str, port: int, key: paramiko.PKey) -> Optional[bool]:
+    async def check(self, host: str, port: int, key: paramiko.PKey) -> bool | None:
         async with self._lock:
             await self._load()
             host_key = self._hk.lookup(host)
@@ -153,6 +157,9 @@ class FileHostKeyStore(HostKeyStore):
                 await self._save()
             return count
 
+    async def disconnect(self):
+        pass
+
 
 class PostgresHostKeyStore(HostKeyStore):
     """PostgreSQL-backed host key store using SQLAlchemy async."""
@@ -187,7 +194,7 @@ class PostgresHostKeyStore(HostKeyStore):
     def _fingerprint(self, key: paramiko.PKey) -> str:
         return hashlib.sha256(key.asbytes()).hexdigest()
 
-    async def check(self, host: str, port: int, key: paramiko.PKey) -> Optional[bool]:
+    async def check(self, host: str, port: int, key: paramiko.PKey) -> bool | None:
         if key is None:
             return None
         async with self._lock:
@@ -294,8 +301,8 @@ if _sa_available:
         fingerprint = Column(String(128), nullable=False)
         updated_at = Column(
             DateTime,
-            default=lambda: datetime.now(timezone.utc),
-            onupdate=lambda: datetime.now(timezone.utc),
+            default=lambda: datetime.now(UTC),
+            onupdate=lambda: datetime.now(UTC),
         )
 
         __table_args__ = (

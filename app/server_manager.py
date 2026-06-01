@@ -4,7 +4,6 @@ import json
 import logging
 import threading
 import time
-from typing import Optional
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -32,8 +31,8 @@ class ServerConfig:
     description: str = ""
     tags: list[str] = field(default_factory=list)
     status: ServerStatus = ServerStatus.UNKNOWN
-    last_check: Optional[float] = None
-    session_id: Optional[str] = None
+    last_check: float | None = None
+    session_id: str | None = None
 
 
 class ServerManager:
@@ -72,7 +71,7 @@ class ServerManager:
         port: int = 22,
         username: str = "",
         description: str = "",
-        tags: Optional[list[str]] = None,
+        tags: list[str] | None = None,
     ) -> ServerConfig:
         """Add a new server."""
         server = ServerConfig(
@@ -88,7 +87,7 @@ class ServerManager:
             self._servers[server_id] = server
         return server
 
-    def get_server(self, server_id: str) -> Optional[ServerConfig]:
+    def get_server(self, server_id: str) -> ServerConfig | None:
         """Get server by ID."""
         with self._lock:
             return self._servers.get(server_id)
@@ -110,7 +109,7 @@ class ServerManager:
         self,
         server_id: str,
         status: ServerStatus,
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
     ):
         """Update server status."""
         with self._lock:

@@ -3,7 +3,6 @@
 import json
 import logging
 import time
-from typing import Optional
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -18,8 +17,8 @@ class Snapshot:
     created_at: float
     files: list[str] = field(default_factory=list)
     description: str = ""
-    git_commit_before: Optional[str] = None
-    git_commit_after: Optional[str] = None
+    git_commit_before: str | None = None
+    git_commit_after: str | None = None
     size_bytes: int = 0
 
 
@@ -148,7 +147,7 @@ class SnapshotManager:
         try:
             metadata = json.loads(meta_result["stdout"])
         except json.JSONDecodeError:
-            raise ValueError("Invalid snapshot metadata")
+            raise ValueError("Invalid snapshot metadata") from None
 
         # Restore files
         restored_files = []

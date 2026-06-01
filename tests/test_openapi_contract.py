@@ -1,10 +1,10 @@
 """Contract tests: verify OpenAPI schema correctness for agent clients."""
 
 
-import jsonschema
-import pytest
 from unittest.mock import patch
 
+import jsonschema
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import settings

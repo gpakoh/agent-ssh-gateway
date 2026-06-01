@@ -1,27 +1,27 @@
 """Git and recovery routes."""
 
-import time
 import shlex
+import time
 
-from fastapi import APIRouter, Query, HTTPException, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import state as _state
-from app.auth_middleware import require_master_key, AuthIdentity
-from app.state import _err
+from app.auth_middleware import AuthIdentity, require_master_key
 from app.models import (
-    GitInitRequest,
-    GitCommitRequest,
+    BackupInfo,
+    CreateBackupRequest,
     GitActionResponse,
-    GitInfoResponse,
-    GitStatusResponse,
+    GitCommitRequest,
     GitDiffRequest,
     GitDiffResponse,
-    CreateBackupRequest,
-    RestoreBackupRequest,
-    RecoveryActionResponse,
+    GitInfoResponse,
+    GitInitRequest,
+    GitStatusResponse,
     ListBackupsResponse,
-    BackupInfo,
+    RecoveryActionResponse,
+    RestoreBackupRequest,
 )
+from app.state import _err
 
 router = APIRouter(tags=["git"])
 

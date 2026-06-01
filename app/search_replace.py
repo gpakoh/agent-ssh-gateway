@@ -1,8 +1,7 @@
 """Global search and replace across project files."""
 
-import re
 import logging
-from typing import Optional
+import re
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -31,7 +30,7 @@ class ReplaceResult:
     path: str
     replacements_count: int
     success: bool
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class GlobalSearchReplace:

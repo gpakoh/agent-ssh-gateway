@@ -2,13 +2,13 @@
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app import state as _state
-from app.state import _err
+from app.auth_middleware import AuthIdentity, require_master_key
 from app.models import CommandTemplate, TemplateRunRequest, TemplateRunResponse
 from app.security import sanitize_command
-from app.auth_middleware import require_master_key, AuthIdentity
+from app.state import _err
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ async def run_template(req: TemplateRunRequest, _identity: AuthIdentity = Depend
     try:
         command = sanitize_command(command)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
 
     result = await _state.manager.execute(session_id=req.session_id, command=command, timeout=30)
     return TemplateRunResponse(**result)

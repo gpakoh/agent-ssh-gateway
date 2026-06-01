@@ -2,12 +2,13 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
-import app.main as main_module
-import app.state as state_module
 import pytest
 from httpx import ASGITransport, AsyncClient
-from app.security import rate_limit_mutation
+
+import app.main as main_module
+import app.state as state_module
 from app.config import settings
+from app.security import rate_limit_mutation
 
 
 @pytest.fixture(autouse=True)

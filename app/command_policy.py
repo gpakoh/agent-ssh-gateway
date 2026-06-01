@@ -15,16 +15,16 @@ from __future__ import annotations
 
 import shlex
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 
-class CommandPolicyMode(str, Enum):
+class CommandPolicyMode(StrEnum):
     OFF = "off"
     AUDIT = "audit"
     ENFORCE = "enforce"
 
 
-class CommandPolicyProfile(str, Enum):
+class CommandPolicyProfile(StrEnum):
     DEFAULT = "default"
     READONLY = "readonly"
     OPS = "ops"

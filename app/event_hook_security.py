@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import hmac
 import hashlib
+import hmac
 import ipaddress
 import logging
 from dataclasses import dataclass
@@ -78,7 +78,7 @@ def validate_destination_ip(host: str) -> UrlValidationResult:
 def sign_payload(secret: str | None, payload: bytes, timestamp: str) -> str | None:
     if not secret:
         return None
-    msg = f"{timestamp}.{payload.decode('utf-8', errors='replace')}".encode("utf-8")
+    msg = f"{timestamp}.{payload.decode('utf-8', errors='replace')}".encode()
     sig = hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
     return f"sha256={sig}"
 

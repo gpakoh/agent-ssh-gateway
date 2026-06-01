@@ -1,18 +1,19 @@
 """Tests for event hook system."""
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 import pytest_asyncio
-from datetime import datetime, timedelta, timezone
 
-from app.session_store import EventHook, WebhookDelivery
-from app.event_hook_store import EventHookStore
-from app.event_hook_security import (
-    validate_webhook_url,
-    validate_destination_ip,
-    sign_payload,
-    mask_sensitive_headers,
-)
 from app.event_hook_delivery import DeliveryService
+from app.event_hook_security import (
+    mask_sensitive_headers,
+    sign_payload,
+    validate_destination_ip,
+    validate_webhook_url,
+)
+from app.event_hook_store import EventHookStore
+from app.session_store import EventHook, WebhookDelivery
 
 
 def test_orm_models_defined():
@@ -261,7 +262,7 @@ async def test_delivery_claim_pending(delivery_service):
             sel(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
         )
         rec = result.scalar_one()
-        rec.created_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=10)
+        rec.created_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=10)
         await session.commit()
 
     claimed = await delivery_service.claim_deliveries(limit=10, lease_ttl=30.0)
@@ -340,7 +341,7 @@ async def test_delivery_cleanup(delivery_service):
             WebhookDelivery.delivery_id == d_id
         ))
         d = result.scalar_one()
-        d.updated_at = datetime.now(timezone.utc) - timedelta(days=10)
+        d.updated_at = datetime.now(UTC) - timedelta(days=10)
         await s.commit()
 
     # Now It Should Be Cleaned

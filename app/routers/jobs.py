@@ -1,28 +1,26 @@
 """Job, bulk, and batch execute routes."""
 
-import json
 import asyncio
+import json
 import time
-
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_scope
-from app.state import _err
-from app.security import rate_limit_mutation
 from app.models import (
+    BulkExecuteRequest,
+    BulkExecuteResponse,
+    BulkExecuteResult,
+    JobListResponse,
+    JobResultResponse,
     JobRunRequest,
     JobRunResponse,
     JobStatusResponse,
-    JobResultResponse,
-    JobListResponse,
-    BulkExecuteRequest,
-    BulkExecuteResult,
-    BulkExecuteResponse,
 )
+from app.security import rate_limit_mutation
+from app.state import _err
 
 router = APIRouter(tags=["jobs"])
 
@@ -120,8 +118,8 @@ async def bulk_execute(req: BulkExecuteRequest, request: Request, _identity: Aut
 
 @router.get("/api/jobs", response_model=JobListResponse)
 async def jobs_list(
-    session_id: Optional[str] = None,
-    status: Optional[str] = None,
+    session_id: str | None = None,
+    status: str | None = None,
     _identity: AuthIdentity = Depends(require_scope("jobs:read")),
 ):
     """List background jobs."""
@@ -177,7 +175,7 @@ async def jobs_stream(job_id: str, request: Request, _identity: AuthIdentity = D
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=1.0)
                     yield f"data: {json.dumps(event)}\n\n"
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     # Send Keepalive Comment
                     yield ":keepalive\n\n"
                     continue
