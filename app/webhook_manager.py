@@ -54,7 +54,7 @@ class WebhookManager:
         target_path: str,
         deploy_command: str,
         context_id: str,
-        notify_url: str = None,
+        notify_url: Optional[str] = None,
     ) -> WebhookConfig:
         """Add a new webhook."""
         import uuid
@@ -126,7 +126,7 @@ class WebhookManager:
             "message": f"Deployment queued for {config.name}",
         }
 
-    def get_deployments(self, webhook_id: str = None) -> list[dict]:
+    def get_deployments(self, webhook_id: Optional[str] = None) -> list[dict]:
         """Get deployment history."""
         if webhook_id:
             return [d for d in self._deployments if d["webhook_id"] == webhook_id]

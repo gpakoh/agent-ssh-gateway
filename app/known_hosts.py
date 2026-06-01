@@ -1,5 +1,7 @@
 """Host key storage backends and custom MissingHostKeyPolicy."""
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import hashlib
@@ -160,7 +162,7 @@ class PostgresHostKeyStore(HostKeyStore):
             raise RuntimeError("SQLAlchemy is not installed")
         self._database_url = database_url
         self._engine = None
-        self._session_maker = None
+        self._session_maker: async_sessionmaker[AsyncSession] | None = None
         self._lock = asyncio.Lock()
 
     async def _init_db(self):
@@ -190,7 +192,9 @@ class PostgresHostKeyStore(HostKeyStore):
             return None
         async with self._lock:
             await self._init_db()
-        async with self._session_maker() as session:
+        sm = self._session_maker
+        assert sm is not None
+        async with sm() as session:
             from sqlalchemy import select
             result = await session.execute(
                 select(HostKeyRecord).where(
@@ -207,7 +211,9 @@ class PostgresHostKeyStore(HostKeyStore):
     async def store(self, host: str, port: int, key: paramiko.PKey) -> None:
         async with self._lock:
             await self._init_db()
-        async with self._session_maker() as session:
+        sm = self._session_maker
+        assert sm is not None
+        async with sm() as session:
             from sqlalchemy import select
             result = await session.execute(
                 select(HostKeyRecord).where(
@@ -233,7 +239,9 @@ class PostgresHostKeyStore(HostKeyStore):
     async def list_keys(self) -> list[dict]:
         async with self._lock:
             await self._init_db()
-        async with self._session_maker() as session:
+        sm = self._session_maker
+        assert sm is not None
+        async with sm() as session:
             from sqlalchemy import select
             result = await session.execute(select(HostKeyRecord))
             records = result.scalars().all()
@@ -247,22 +255,26 @@ class PostgresHostKeyStore(HostKeyStore):
     async def delete_host(self, host: str) -> int:
         async with self._lock:
             await self._init_db()
-        async with self._session_maker() as session:
+        sm = self._session_maker
+        assert sm is not None
+        async with sm() as session:
             from sqlalchemy import delete as sa_delete
             result = await session.execute(
                 sa_delete(HostKeyRecord).where(HostKeyRecord.host == host)
             )
             await session.commit()
-            return result.rowcount
+            return result.rowcount  # type: ignore[attr-defined]
 
     async def delete_all(self) -> int:
         async with self._lock:
             await self._init_db()
-        async with self._session_maker() as session:
+        sm = self._session_maker
+        assert sm is not None
+        async with sm() as session:
             from sqlalchemy import delete as sa_delete
             result = await session.execute(sa_delete(HostKeyRecord))
             await session.commit()
-            return result.rowcount
+            return result.rowcount  # type: ignore[attr-defined]
 
     async def disconnect(self):
         if self._engine:
