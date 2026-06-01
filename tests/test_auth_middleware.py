@@ -287,10 +287,11 @@ class TestWsAuthCheckUnit:
         assert result is not None
         assert result[0] == CLOSE_POLICY_VIOLATION
 
-    def test_correct_key_returns_none(self, ws_settings):
+    def test_correct_key_returns_identity(self, ws_settings):
         ws = self._mock_ws(headers={"X-API-Key": "ws-secret-99"})
         result = asyncio.run(ws_auth_check(ws, settings))
-        assert result is None
+        assert isinstance(result, AuthIdentity)
+        assert result.token_type == "master"
 
     def test_ip_denied_returns_1008(self, ws_ip_deny_settings):
         ws = self._mock_ws(host="192.168.1.100", headers={"X-API-Key": "ws-secret-99"})
@@ -301,13 +302,15 @@ class TestWsAuthCheckUnit:
     def test_bearer_token_accepted(self, ws_settings):
         ws = self._mock_ws(headers={"Authorization": "Bearer ws-secret-99"})
         result = asyncio.run(ws_auth_check(ws, settings))
-        assert result is None
+        assert isinstance(result, AuthIdentity)
 
-    def test_auth_disabled_returns_none(self, monkeypatch):
+    def test_auth_disabled_returns_identity(self, monkeypatch):
         monkeypatch.setattr(settings, "api_auth_enabled", False)
         ws = self._mock_ws()
         result = asyncio.run(ws_auth_check(ws, settings))
-        assert result is None
+        assert isinstance(result, AuthIdentity)
+        assert result.token_type == "master"
+        assert result.name == "auth-disabled"
 
     def test_query_string_key_not_accepted(self, ws_settings):
         """Query string ?api_key=... must NOT work — only header auth."""
