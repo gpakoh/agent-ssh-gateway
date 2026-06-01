@@ -2,9 +2,9 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
 
-from app.ssh_manager import SSHSessionManager, ExecutionError
+from app.ssh_manager import ExecutionError, SSHSessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +18,11 @@ class EditOperation:
     """Single file edit operation."""
 
     type: Literal["replace", "insert_after", "insert_before", "delete", "append"]
-    old: Optional[str] = None
-    new: Optional[str] = None
-    after: Optional[str] = None
-    before: Optional[str] = None
-    text: Optional[str] = None
+    old: str | None = None
+    new: str | None = None
+    after: str | None = None
+    before: str | None = None
+    text: str | None = None
     count: int = 0  # 0 = all occurrences
 
 

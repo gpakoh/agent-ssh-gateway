@@ -1,7 +1,6 @@
 """Smart context - сохранение состояния работы между запросами."""
 
 import time
-from typing import Optional
 
 
 class CursorPosition:
@@ -25,8 +24,8 @@ class TabState:
         self.opened_at = time.time()
         self.last_accessed = time.time()
         self.view_mode = "text"  # text, hex, diff
-        self.selection_start: Optional[CursorPosition] = None
-        self.selection_end: Optional[CursorPosition] = None
+        self.selection_start: CursorPosition | None = None
+        self.selection_end: CursorPosition | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -46,7 +45,7 @@ class CommandHistory:
         self.command = command
         self.directory = directory
         self.timestamp = time.time()
-        self.exit_code: Optional[int] = None
+        self.exit_code: int | None = None
         self.output: str = ""
         self.duration: float = 0.0
 
@@ -104,8 +103,8 @@ class SmartContextState:
         self.command_history: list[CommandHistory] = []
         self.search_history: list[SearchQuery] = []
         self.bookmarks: list[Bookmark] = []
-        self.last_edited_file: Optional[str] = None
-        self.last_validation_result: Optional[dict] = None
+        self.last_edited_file: str | None = None
+        self.last_validation_result: dict | None = None
         self.clipboard: list[str] = []  # буфер обмена
         self.max_history = 50  # лимит истории
 
@@ -179,7 +178,7 @@ class SmartContextState:
         if len(self.clipboard) > 10:
             self.clipboard = self.clipboard[:10]
 
-    def get_active_tab(self) -> Optional[TabState]:
+    def get_active_tab(self) -> TabState | None:
         """Получить активную вкладку."""
         for tab in self.tabs.values():
             if tab.active:

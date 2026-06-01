@@ -2,10 +2,11 @@
 
 import asyncio
 import base64
-import pytest
-import paramiko
 
-from app.known_hosts import KnownHostsPolicy, HostKeyStore
+import paramiko
+import pytest
+
+from app.known_hosts import HostKeyStore, KnownHostsPolicy
 
 
 class InMemoryHostKeyStore(HostKeyStore):
@@ -26,6 +27,9 @@ class InMemoryHostKeyStore(HostKeyStore):
 
     async def store(self, host: str, port: int, key: paramiko.PKey):
         self._keys[(host, port)] = base64.b64encode(key.asbytes()).decode()
+
+    async def disconnect(self):
+        pass
 
 
 class TestKnownHostsPolicy:

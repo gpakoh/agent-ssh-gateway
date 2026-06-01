@@ -1,55 +1,55 @@
 """FastAPI entry point for agent-ssh-gateway."""
 
-import logging
 import asyncio
+import logging
 import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
-from app.config import settings
-from app.auth_middleware import auth_check, is_ip_allowed, parse_cidrs
-from app.security import (
-    limiter,
-    AuditLogger,
-    SECURITY_HEADERS,
-)
-from app.redis_queue import RedisJobQueue
+import app.state as state
 from app.agent_token_store import AgentTokenStore
-from app.circuit_breaker import CircuitBreakerRegistry
-from app.distributed_lock import DistributedLock
-from app.session_store import SessionStore
+from app.auth_middleware import auth_check, is_ip_allowed, parse_cidrs
+from app.batch_operations import BatchOperationsManager
 from app.bulk_operations_v2 import BulkOperationsManager
-from app.state import _err
+from app.circuit_breaker import CircuitBreakerRegistry
+from app.code_intelligence import CodeIntelligence
+from app.config import settings
+from app.context_manager import ContextManager
+from app.distributed_lock import DistributedLock
+from app.file_editor import FileEditor
+from app.file_tree import FileTreeExplorer
+from app.job_manager import JobManager
+from app.known_hosts import NullHostKeyStore, create_host_key_store
 from app.models import (
     ValidationErrorResponse,
 )
-from app.ssh_manager import (
-    SSHSessionManager,
-    SSHManagerError,
-    ConnectionError,
-    AuthenticationError,
-    SessionNotFoundError,
-    TimeoutError,
-    ExecutionError,
-)
-from app.job_manager import JobManager
-from app.file_editor import FileEditor
-from app.context_manager import ContextManager
-from app.batch_operations import BatchOperationsManager
-from app.code_intelligence import CodeIntelligence
 from app.project_analytics import ProjectAnalytics
+from app.redis_queue import RedisJobQueue
 from app.search_replace import GlobalSearchReplace
-from app.file_tree import FileTreeExplorer
+from app.security import (
+    SECURITY_HEADERS,
+    AuditLogger,
+    limiter,
+)
 from app.server_manager import ServerManager
+from app.session_store import SessionStore
 from app.snapshot_manager import SnapshotManager
+from app.ssh_manager import (
+    AuthenticationError,
+    ConnectionError,
+    ExecutionError,
+    SessionNotFoundError,
+    SSHManagerError,
+    SSHSessionManager,
+    TimeoutError,
+)
+from app.state import _err
 from app.webhook_manager import WebhookManager
-from app.known_hosts import create_host_key_store, NullHostKeyStore
-import app.state as state
 
 logging.basicConfig(
     level=logging.INFO,
@@ -187,8 +187,8 @@ async def lifespan(app: FastAPI):
             if not settings.database_url:
                 raise RuntimeError("EVENT_HOOKS_ENABLED=true requires DATABASE_URL")
 
-            from app.event_hook_store import EventHookStore
             from app.event_hook_delivery import DeliveryService
+            from app.event_hook_store import EventHookStore
 
             state.event_hook_store = EventHookStore(settings.database_url)
             await state.event_hook_store.create_tables()
@@ -245,7 +245,7 @@ async def lifespan(app: FastAPI):
             for s in sessions
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for sid, err in zip([s.session_id for s in sessions], results):
+        for sid, err in zip([s.session_id for s in sessions], results, strict=True):
             if err:
                 logger.warning("Force close session %s: %s", sid, err)
 
@@ -673,8 +673,8 @@ def custom_openapi():
                     param["description"] = name.replace("_", " ").title()
 
     # Security: /health And /api/capabilities Are Public; Everything Else Requires X-api-key
-    for path, methods in schema.get("paths", {}).items():
-        for method, op in methods.items():
+    for path, _methods in schema.get("paths", {}).items():
+        for _, op in _methods.items():
             if path in ("/health", "/api/capabilities"):
                 continue
             op["security"] = [{"ApiKeyHeader": []}]
@@ -787,15 +787,15 @@ async def validation_exception_handler(request, exc: RequestValidationError):
 # Router Registration — Route Handlers Live In App/routers/
 # ---------------------------------------------------------------------------
 
-from app.routers.ssh import router as ssh_router  # noqa: E402
-from app.routers.files import router as files_router  # noqa: E402
-from app.routers.jobs import router as jobs_router  # noqa: E402
-from app.routers.git import router as git_router  # noqa: E402
 from app.routers.context import router as context_router  # noqa: E402
-from app.routers.system import router as system_router  # noqa: E402
-from app.routers.logs import router as logs_router  # noqa: E402
-from app.routers.templates import router as templates_router  # noqa: E402
 from app.routers.event_hooks import router as event_hooks_router  # noqa: E402
+from app.routers.files import router as files_router  # noqa: E402
+from app.routers.git import router as git_router  # noqa: E402
+from app.routers.jobs import router as jobs_router  # noqa: E402
+from app.routers.logs import router as logs_router  # noqa: E402
+from app.routers.ssh import router as ssh_router  # noqa: E402
+from app.routers.system import router as system_router  # noqa: E402
+from app.routers.templates import router as templates_router  # noqa: E402
 
 app.include_router(ssh_router)
 app.include_router(files_router)

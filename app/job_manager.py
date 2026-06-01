@@ -5,12 +5,11 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
 
 from app.ssh_manager import (
-    SSHSessionManager,
-    SessionNotFoundError,
     ExecutionError,
+    SessionNotFoundError,
+    SSHSessionManager,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,11 +40,11 @@ class JobRecord:
     status: str = "pending"  # pending, running, completed, failed, cancelled
     stdout: str = ""
     stderr: str = ""
-    exit_code: Optional[int] = None
+    exit_code: int | None = None
     created_at: float = field(default_factory=time.time)
-    started_at: Optional[float] = None
-    completed_at: Optional[float] = None
-    error_message: Optional[str] = None
+    started_at: float | None = None
+    completed_at: float | None = None
+    error_message: str | None = None
     progress: dict = field(default_factory=dict)
     _listeners: list = field(default_factory=list, repr=False)
     _listener_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -57,7 +56,7 @@ class JobRecord:
         self.progress["last_update"] = time.time()
 
     @property
-    def duration(self) -> Optional[float]:
+    def duration(self) -> float | None:
         """Job duration in seconds."""
         if self.started_at is None:
             return None
@@ -122,7 +121,7 @@ class JobManager:
         self._lock = asyncio.Lock()
         self._max_jobs = max_jobs
         self._job_timeout = job_timeout
-        self._cleanup_task: Optional[asyncio.Task] = None
+        self._cleanup_task: asyncio.Task | None = None
         self._job_tasks: dict[str, asyncio.Task] = {}
 
     async def start_cleanup_task(self) -> None:
@@ -292,7 +291,7 @@ class JobManager:
     # Get Job
     # ------------------------------------------------------------------
 
-    async def get_job(self, job_id: str) -> Optional[JobRecord]:
+    async def get_job(self, job_id: str) -> JobRecord | None:
         """Get a job by ID."""
         async with self._lock:
             return self._jobs.get(job_id)
@@ -322,8 +321,8 @@ class JobManager:
 
     async def list_jobs(
         self,
-        session_id: Optional[str] = None,
-        status: Optional[str] = None,
+        session_id: str | None = None,
+        status: str | None = None,
     ) -> list[JobRecord]:
         """List jobs, optionally filtered."""
         async with self._lock:

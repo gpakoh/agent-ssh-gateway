@@ -3,7 +3,6 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Optional
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -27,7 +26,7 @@ class BatchOperationResult:
     path: str
     success: bool
     output: str = ""
-    error: Optional[str] = None
+    error: str | None = None
     duration: float = 0.0
     lines_changed: int = 0
 
@@ -40,8 +39,8 @@ class BatchTransactionResult:
     operations: list[BatchOperationResult]
     total_duration: float
     summary: str
-    git_commit: Optional[str] = None
-    validation_result: Optional[dict] = None
+    git_commit: str | None = None
+    validation_result: dict | None = None
 
 
 class BatchOperationsManager:
@@ -72,7 +71,7 @@ class BatchOperationsManager:
         ctx = await self._context.get_context(context_id)
         base_path = ctx.path if ctx else "."
 
-        for idx, op in enumerate(operations):
+        for _, op in enumerate(operations):
             op_type = op.get("type", "")
             path = op.get("path", "")
             full_path = f"{base_path}/{path}" if not path.startswith("/") else path

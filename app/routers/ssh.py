@@ -6,36 +6,52 @@ import os
 import re
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Query
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 
-
-from app.config import settings
-from app.state import _err
 from app import state as _state
-from app.auth_middleware import ws_auth_check, require_master_key, VALID_AGENT_SCOPES, require_scope, AuthIdentity, ensure_session_owner
-from app.security import sanitize_command, rate_limit_mutation, validate_target_host
+from app.auth_middleware import (
+    VALID_AGENT_SCOPES,
+    AuthIdentity,
+    ensure_session_owner,
+    require_master_key,
+    require_scope,
+    ws_auth_check,
+)
 from app.command_policy import evaluate_command_policy
-from app.ssh_manager import SessionNotFoundError
+from app.config import settings
 from app.models import (
+    AgentTokenRefreshRequest,
+    AgentTokenRefreshResponse,
+    AgentTokenRequest,
+    AgentTokenResponse,
     ConnectRequest,
     ConnectResponse,
-    ExecuteRequest,
-    ExecuteResponse,
     DisconnectRequest,
     DisconnectResponse,
-    SessionsResponse,
+    ExecuteRequest,
+    ExecuteResponse,
+    SessionConfigResponse,
     SessionInfo,
-    AgentTokenRequest,
-    AgentTokenRefreshRequest,
-    AgentTokenResponse,
-    AgentTokenRefreshResponse,
+    SessionsResponse,
     SessionTimeoutRequest,
     SessionTimeoutResponse,
-    SessionConfigResponse,
 )
+from app.security import rate_limit_mutation, sanitize_command, validate_target_host
+from app.ssh_manager import SessionNotFoundError
+from app.state import _err
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +64,7 @@ router = APIRouter(tags=["ssh"])
 
 def time_to_iso(timestamp: float) -> str:
     """Convert Unix timestamp to ISO format."""
-    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(timestamp, tz=UTC).isoformat()
 
 
 def get_connect_auth_method(req: ConnectRequest) -> str:
@@ -91,7 +107,7 @@ async def agent_token_generate(req: AgentTokenRequest, request: Request, _identi
 
     token = _secrets.token_urlsafe(32)
     ttl = req.ttl_seconds
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl)
+    expires_at = datetime.now(UTC) + timedelta(seconds=ttl)
     await _state.agent_token_store.set_token(token, ttl, scopes=req.scopes)
     logger.info("Agent token generated (ttl=%ds, scopes=%s)", ttl, req.scopes)
     return AgentTokenResponse(
@@ -130,7 +146,7 @@ async def agent_token_refresh(req: AgentTokenRefreshRequest, request: Request, _
 
     token = _secrets.token_urlsafe(32)
     ttl = req.ttl_seconds
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl)
+    expires_at = datetime.now(UTC) + timedelta(seconds=ttl)
     await _state.agent_token_store.set_token(token, ttl, scopes=old_scopes)
     logger.info("Agent token refreshed (ttl=%ds, scopes=%s)", ttl, old_scopes)
     return AgentTokenRefreshResponse(
@@ -197,7 +213,7 @@ async def ssh_connect(
             str(exc),
             request.client.host if request.client else "unknown",
         )
-        raise HTTPException(status_code=403, detail=_err(403, str(exc)))
+        raise HTTPException(status_code=403, detail=_err(403, str(exc))) from exc
 
     _password = req.password.get_secret_value() if req.password else None
     _private_key = req.private_key.get_secret_value() if req.private_key else None
@@ -248,7 +264,7 @@ async def ssh_execute(
         _state.audit_logger.log_security_event(
             "BLOCKED_COMMAND", str(exc), request.client.host
         )
-        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
 
     # Command Policy Evaluation
     decision = evaluate_command_policy(
@@ -551,7 +567,7 @@ async def check_port(
             settings.denied_target_cidrs,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=403, detail=_err(403, str(exc)))
+        raise HTTPException(status_code=403, detail=_err(403, str(exc))) from exc
 
     start = time.monotonic()
     try:
@@ -563,7 +579,7 @@ async def check_port(
         await _writer.wait_closed()
         elapsed = int((time.monotonic() - start) * 1000)
         return {"host": host, "port": port, "reachable": True, "duration_ms": elapsed}
-    except (OSError, asyncio.TimeoutError, ConnectionError):
+    except (TimeoutError, OSError, ConnectionError):
         elapsed = int((time.monotonic() - start) * 1000)
         return {"host": host, "port": port, "reachable": False, "duration_ms": elapsed}
 
@@ -623,7 +639,7 @@ async def upload_ssh_key(
     try:
         text = content.decode("utf-8").strip()
     except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail=_err(400, "Key must be valid UTF-8 text"))
+        raise HTTPException(status_code=400, detail=_err(400, "Key must be valid UTF-8 text")) from None
 
     if not text.startswith("-----BEGIN"):
         raise HTTPException(status_code=400, detail=_err(400, "Not a valid private key format"))

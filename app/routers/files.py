@@ -1,47 +1,57 @@
 """File operations, AST, and batch routes."""
 
-import logging
 import asyncio
-import time
+import logging
 import shlex
+import time
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Header, Response, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import PlainTextResponse
-from typing import Any, Optional
 
-from app.state import _err
 from app import state as _state
+from app.ast_refactor import ASTRefactor
+from app.auth_middleware import AuthIdentity, ensure_session_owner, require_scope, ws_auth_check
 from app.config import settings
-from app.security import validate_path, rate_limit_mutation
 from app.models import (
-    FileReadRequest,
-    FileReadResponse,
-    FileEditRequest,
-    FileEditResponse,
-    PatchApplyRequest,
-    PatchApplyResponse,
+    ASTAnalyzeRequest,
+    ASTAnalyzeResponse,
+    ASTRefactorExtractRequest,
+    ASTRefactorExtractResponse,
+    ASTRefactorFileResult,
+    ASTRefactorRenameRequest,
+    ASTRefactorRenameResponse,
+    BatchEditRequest,
+    BatchEditResponse,
+    BatchEditResult,
     BatchReadRequest,
     BatchReadResponse,
+    FileEditRequest,
+    FileEditResponse,
+    FileMetadata,
+    FileReadRequest,
+    FileReadResponse,
     FileUploadRequest,
     FileUploadResponse,
     FileWriteRequest,
     FileWriteResponse,
-    ASTRefactorRenameRequest,
-    ASTRefactorRenameResponse,
-    ASTRefactorFileResult,
-    ASTRefactorExtractRequest,
-    ASTRefactorExtractResponse,
-    ASTAnalyzeRequest,
-    ASTAnalyzeResponse,
-    BatchEditRequest,
-    BatchEditResponse,
-    BatchEditResult,
+    PatchApplyRequest,
+    PatchApplyResponse,
     ProjectStructureRequest,
     ProjectStructureResponse,
-    FileMetadata,
 )
-from app.ast_refactor import ASTRefactor
-from app.auth_middleware import ws_auth_check, AuthIdentity, ensure_session_owner, require_scope
+from app.security import rate_limit_mutation, validate_path
+from app.state import _err
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +81,7 @@ async def file_read(req: FileReadRequest, request: Request, _identity: AuthIdent
     try:
         validated = validate_path(req.path)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
 
     _state.audit_logger.log_file_access(req.session_id, validated, "READ", request.client.host)
     content = await _state.file_editor.read_file(req.session_id, validated)
@@ -87,7 +97,7 @@ async def file_edit(req: FileEditRequest, request: Request, _identity: AuthIdent
     try:
         validated = validate_path(req.path)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
     try:
         logger.info(f"File edit request: session={req.session_id}, path={validated}, ops={len(req.operations)}")
         result = await _state.file_editor.edit_file(
@@ -99,7 +109,7 @@ async def file_edit(req: FileEditRequest, request: Request, _identity: AuthIdent
         return FileEditResponse(**result)
     except Exception as exc:
         logger.error(f"File edit failed: {exc}")
-        raise HTTPException(status_code=500, detail=_err(500, f"File edit failed: {exc}"))
+        raise HTTPException(status_code=500, detail=_err(500, f"File edit failed: {exc}")) from exc
 
 
 @router.post("/api/file/patch", response_model=PatchApplyResponse)
@@ -126,7 +136,7 @@ async def file_raw(
     path: str = Query(...),
     offset: int = Query(0, ge=0),
     limit: int = Query(0, ge=0),
-    range_header: Optional[str] = Header(None, alias="range"),
+    range_header: str | None = Header(None, alias="range"),
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Read a remote file and return raw content as text/plain.
@@ -138,7 +148,7 @@ async def file_raw(
     try:
         path = validate_path(path)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
     content = await _state.file_editor.read_file(session_id, path)
 
     if range_header and range_header.startswith("bytes="):
@@ -219,7 +229,7 @@ async def file_upload(
     try:
         path = validate_path(path)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
     decoded = base64.b64decode(content).decode("utf-8", errors="replace")
     await _state.file_editor.write_file(session_id, path, decoded)
     return {"success": True, "path": path, "size": len(decoded), "deprecated": True}
@@ -238,7 +248,7 @@ async def file_upload_json(req: FileUploadRequest, request: Request, _identity: 
     try:
         validated = validate_path(req.path)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
     decoded = base64.b64decode(req.content).decode("utf-8", errors="replace")
     await _state.file_editor.write_file(req.session_id, validated, decoded)
     return FileUploadResponse(path=validated, size=len(decoded))
@@ -252,7 +262,7 @@ async def file_download(request: Request, session_id: str = Query(...), path: st
     try:
         path = validate_path(path)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
     content = await _state.file_editor.read_file(session_id, path)
     return Response(content=content, media_type="application/octet-stream")
 
@@ -269,7 +279,7 @@ async def file_write(req: FileWriteRequest, request: Request, _identity: AuthIde
     try:
         validated = validate_path(req.path)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
 
     if req.mode == "append":
         existing = await _state.file_editor.read_file(req.session_id, validated)
@@ -304,7 +314,7 @@ async def ast_rename(req: ASTRefactorRenameRequest, _identity: AuthIdentity = De
                 raise HTTPException(status_code=400, detail=_err(400, "Path is required"))
             validate_path(single_path)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
 
     if req.files:
         results: list[ASTRefactorFileResult] = []
@@ -376,7 +386,7 @@ async def ast_rename(req: ASTRefactorRenameRequest, _identity: AuthIdentity = De
                 files_changed=1 if count > 0 else 0,
             )
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=_err(500, f"AST rename failed: {exc}"))
+            raise HTTPException(status_code=500, detail=_err(500, f"AST rename failed: {exc}")) from exc
 
 
 @router.post("/api/refactor/rename", response_model=ASTRefactorRenameResponse)
@@ -391,7 +401,7 @@ async def ast_extract(req: ASTRefactorExtractRequest, _identity: AuthIdentity = 
     try:
         validated = validate_path(req.path)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
     try:
         code = await _state.file_editor.read_file(req.session_id, validated)
         refactored = ASTRefactor.extract_function(
@@ -410,7 +420,7 @@ async def ast_extract(req: ASTRefactorExtractRequest, _identity: AuthIdentity = 
             code=refactored,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=_err(500, f"AST extract failed: {exc}"))
+        raise HTTPException(status_code=500, detail=_err(500, f"AST extract failed: {exc}")) from exc
 
 
 @router.post("/api/ast/analyze", response_model=ASTAnalyzeResponse)
@@ -419,7 +429,7 @@ async def ast_analyze(req: ASTAnalyzeRequest, _identity: AuthIdentity = Depends(
     try:
         validated = validate_path(req.path)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=_err(400, str(exc)))
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
     try:
         code = await _state.file_editor.read_file(req.session_id, validated)
         analysis = ASTRefactor.analyze_code(code)
@@ -429,7 +439,7 @@ async def ast_analyze(req: ASTAnalyzeRequest, _identity: AuthIdentity = Depends(
             **analysis,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=_err(500, f"AST analysis failed: {exc}"))
+        raise HTTPException(status_code=500, detail=_err(500, f"AST analysis failed: {exc}")) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -771,7 +781,7 @@ async def file_watch_stream(websocket: WebSocket):
                     msg = await asyncio.wait_for(websocket.receive_json(), timeout=interval)
                     if msg.get("action") == "stop":
                         break
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
 
                 result = await _state.manager.execute(

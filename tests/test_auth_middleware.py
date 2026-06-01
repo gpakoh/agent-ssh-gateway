@@ -2,26 +2,26 @@
 
 import asyncio
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
 from starlette.testclient import TestClient
 
-from app.main import app
-from app.config import Settings, settings
 from app.auth_middleware import (
-    get_client_ip,
-    is_ip_allowed,
-    verify_api_key,
-    parse_cidrs,
-    ws_auth_check,
-    require_scope,
-    AuthIdentity,
     CLOSE_POLICY_VIOLATION,
     VALID_AGENT_SCOPES,
+    AuthIdentity,
+    get_client_ip,
+    is_ip_allowed,
+    parse_cidrs,
+    require_scope,
+    verify_api_key,
+    ws_auth_check,
 )
+from app.config import Settings, settings
+from app.main import app
 
 
 @contextmanager
@@ -455,7 +455,7 @@ class TestSdkAuth:
 def test_settings_env_agent_token_gets_startup_expiry():
     cfg = Settings(agent_token="boot-agent", agent_token_ttl=60)
     assert cfg.agent_token_expires_at is not None
-    assert cfg.agent_token_expires_at > datetime.now(timezone.utc)
+    assert cfg.agent_token_expires_at > datetime.now(UTC)
 
 
 @pytest.mark.asyncio
@@ -466,7 +466,7 @@ async def test_verify_api_key_accepts_non_expired_agent_token(monkeypatch):
     monkeypatch.setattr(
         settings,
         "agent_token_expires_at",
-        datetime.now(timezone.utc) + timedelta(seconds=60),
+        datetime.now(UTC) + timedelta(seconds=60),
     )
     identity = await verify_api_key(req, "main-key", settings=settings)
     assert identity is not None
@@ -481,7 +481,7 @@ async def test_verify_api_key_rejects_expired_agent_token(monkeypatch):
     monkeypatch.setattr(
         settings,
         "agent_token_expires_at",
-        datetime.now(timezone.utc) - timedelta(seconds=1),
+        datetime.now(UTC) - timedelta(seconds=1),
     )
     assert await verify_api_key(req, "main-key", settings=settings) is None
 
@@ -491,7 +491,7 @@ def test_ws_auth_rejects_expired_agent_token(ws_settings, monkeypatch):
     monkeypatch.setattr(
         settings,
         "agent_token_expires_at",
-        datetime.now(timezone.utc) - timedelta(seconds=1),
+        datetime.now(UTC) - timedelta(seconds=1),
     )
     ws = TestWsAuthCheckUnit()._mock_ws(headers={"X-API-Key": "ws-agent-expired"})
     result = asyncio.run(ws_auth_check(ws, settings))
@@ -520,7 +520,7 @@ class TestAgentTokenManagement:
         monkeypatch.setattr(settings, "agent_token", "agent-live-token")
         monkeypatch.setattr(
             settings, "agent_token_expires_at",
-            datetime.now(timezone.utc) + timedelta(hours=1),
+            datetime.now(UTC) + timedelta(hours=1),
         )
         with TestClient(app) as client:
             resp = client.post(
@@ -534,7 +534,7 @@ class TestAgentTokenManagement:
         monkeypatch.setattr(settings, "agent_token", "agent-live-token")
         monkeypatch.setattr(
             settings, "agent_token_expires_at",
-            datetime.now(timezone.utc) + timedelta(hours=1),
+            datetime.now(UTC) + timedelta(hours=1),
         )
         with TestClient(app) as client:
             resp = client.post(
