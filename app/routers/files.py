@@ -719,9 +719,9 @@ async def file_watch_stream(websocket: WebSocket):
     2. Send: {"session_id": "...", "path": "/var/log/app.log", "tail": true}
     3. Receive file updates as they happen
     """
-    ws_err = await ws_auth_check(websocket, settings, _state.agent_token_store)
-    if ws_err is not None:
-        await websocket.close(code=ws_err[0], reason=ws_err[1])
+    identity = await ws_auth_check(websocket, settings, _state.agent_token_store)
+    if isinstance(identity, tuple):
+        await websocket.close(code=identity[0], reason=identity[1])
         return
     await websocket.accept()
     _state.active_websockets.add(websocket)
@@ -743,6 +743,17 @@ async def file_watch_stream(websocket: WebSocket):
         record = await _state.manager.get_session(session_id)
         if not record:
             await websocket.send_json({"type": "error", "data": "Session not found"})
+            await websocket.close()
+            return
+
+        try:
+            ensure_session_owner(record, identity)
+        except HTTPException:
+            await websocket.send_json({
+                "type": "error",
+                "code": "SESSION_OWNERSHIP",
+                "message": "Agent token cannot access this session",
+            })
             await websocket.close()
             return
 
