@@ -5,13 +5,11 @@ import hmac
 import logging
 import re
 import secrets
-import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from cryptography.fernet import Fernet
-from fastapi import Request, HTTPException
+from fastapi import Request
 from slowapi import Limiter
 
 from app.auth_middleware import get_client_ip, parse_cidrs
@@ -94,7 +92,7 @@ def sanitize_command(command: str) -> str:
     for pattern in DANGEROUS_PATTERNS:
         if re.search(pattern, command_lower):
             logger.warning("Blocked command matching pattern %s: %s", pattern, command)
-            raise ValueError(f"Command matches dangerous pattern")
+            raise ValueError("Command matches dangerous pattern")
     
     return command
 

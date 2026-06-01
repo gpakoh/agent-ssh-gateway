@@ -4,10 +4,10 @@ Each test is explicit about which bug ID it guards against.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from app.models import EventHookCreate, EventHookUpdate, BatchOperation
-from app.security import validate_path, sanitize_command
+from app.security import validate_path
 from app.auth_middleware import is_ip_allowed
 
 
@@ -32,7 +32,6 @@ class TestC2_ShutdownTimeout:
     @pytest.mark.asyncio
     async def test_disconnect_called_on_shutdown(self):
         """C2: disconnect is called with a timeout during shutdown."""
-        import app.state as state_module
         from app.ssh_manager import SSHSessionManager
 
         manager = SSHSessionManager(cleanup_interval=3600)

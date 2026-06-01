@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 
 from app import state as _state
 from app.state import _err
@@ -17,6 +17,7 @@ from app.models import (
     EventHookListResponse,
 )
 from app.event_hook_security import validate_webhook_url
+from app.auth_middleware import require_master_key, AuthIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ router = APIRouter(tags=["webhooks"])
 
 
 @router.get("/api/event-hooks", response_model=EventHookListResponse)
-async def list_event_hooks():
+async def list_event_hooks(_identity: AuthIdentity = Depends(require_master_key)):
     """List all registered event hooks."""
     if not _state.event_hook_store:
         raise HTTPException(status_code=503, detail=_err(503, "Event hook store not available"))
@@ -36,7 +37,7 @@ async def list_event_hooks():
 
 
 @router.post("/api/event-hooks", response_model=EventHookResponse, status_code=201)
-async def create_event_hook(body: EventHookCreate):
+async def create_event_hook(body: EventHookCreate, _identity: AuthIdentity = Depends(require_master_key)):
     """Register a new event hook."""
     store = _state.event_hook_store
     if not store:
@@ -76,7 +77,7 @@ async def create_event_hook(body: EventHookCreate):
 
 
 @router.get("/api/event-hooks/{hook_id}", response_model=EventHookResponse)
-async def get_event_hook(hook_id: str):
+async def get_event_hook(hook_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """Get event hook by ID."""
     if not _state.event_hook_store:
         raise HTTPException(status_code=503, detail=_err(503, "Event hook store not available"))
@@ -87,7 +88,7 @@ async def get_event_hook(hook_id: str):
 
 
 @router.patch("/api/event-hooks/{hook_id}", response_model=EventHookResponse)
-async def update_event_hook(hook_id: str, body: EventHookUpdate):
+async def update_event_hook(hook_id: str, body: EventHookUpdate, _identity: AuthIdentity = Depends(require_master_key)):
     """Update an event hook (partial update)."""
     store = _state.event_hook_store
     if not store:
@@ -135,7 +136,7 @@ async def update_event_hook(hook_id: str, body: EventHookUpdate):
 
 
 @router.delete("/api/event-hooks/{hook_id}")
-async def delete_event_hook(hook_id: str):
+async def delete_event_hook(hook_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """Delete an event hook."""
     if not _state.event_hook_store:
         raise HTTPException(status_code=503, detail=_err(503, "Event hook store not available"))
