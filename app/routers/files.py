@@ -28,6 +28,7 @@ from app.models import (
     FileWriteResponse,
     ASTRefactorRenameRequest,
     ASTRefactorRenameResponse,
+    ASTRefactorFileResult,
     ASTRefactorExtractRequest,
     ASTRefactorExtractResponse,
     ASTAnalyzeRequest,
@@ -49,7 +50,7 @@ router = APIRouter(tags=["files"])
 
 async def _check_session_ownership(session_id: str, request: Request) -> None:
     """Check session ownership if caller identity is available."""
-    _identity: AuthIdentity = getattr(request.state, "auth_identity", None)
+    _identity: AuthIdentity | None = getattr(request.state, "auth_identity", None)
     if _identity is None:
         return
     session = await _state.manager.get_session(session_id)
@@ -120,20 +121,19 @@ async def file_patch(req: PatchApplyRequest, request: Request, _identity: AuthId
 
 @router.get("/api/file/raw", response_class=PlainTextResponse)
 async def file_raw(
+    request: Request,
     session_id: str = Query(...),
     path: str = Query(...),
     offset: int = Query(0, ge=0),
     limit: int = Query(0, ge=0),
     range_header: Optional[str] = Header(None, alias="range"),
-    request: Request = None,
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Read a remote file and return raw content as text/plain.
 
     Supports Range header (bytes=start-end) or offset/limit query params.
     """
-    if request is not None:
-        await _check_session_ownership(session_id, request)
+    await _check_session_ownership(session_id, request)
 
     try:
         path = validate_path(path)
@@ -205,15 +205,14 @@ async def batch_read(req: BatchReadRequest, request: Request, _identity: AuthIde
 @router.post("/api/file/upload")
 @rate_limit_mutation(20, "minute")
 async def file_upload(
+    request: Request,
     session_id: str = Query(...),
     path: str = Query(...),
     content: str = Query(...),
-    request: Request = None,
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Upload file to remote server (base64 encoded via query params)."""
-    if request is not None:
-        await _check_session_ownership(session_id, request)
+    await _check_session_ownership(session_id, request)
 
     import base64
 
@@ -246,10 +245,9 @@ async def file_upload_json(req: FileUploadRequest, request: Request, _identity: 
 
 
 @router.get("/api/file/download", response_class=Response)
-async def file_download(session_id: str = Query(...), path: str = Query(...), request: Request = None, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def file_download(request: Request, session_id: str = Query(...), path: str = Query(...), _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Download file from remote server."""
-    if request is not None:
-        await _check_session_ownership(session_id, request)
+    await _check_session_ownership(session_id, request)
 
     try:
         path = validate_path(path)
@@ -301,12 +299,15 @@ async def ast_rename(req: ASTRefactorRenameRequest, _identity: AuthIdentity = De
             for file_path in req.files:
                 validate_path(file_path)
         else:
-            validate_path(req.path)
+            single_path = req.path
+            if single_path is None:
+                raise HTTPException(status_code=400, detail=_err(400, "Path is required"))
+            validate_path(single_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=_err(400, str(exc)))
 
     if req.files:
-        results = []
+        results: list[ASTRefactorFileResult] = []
         total_replacements = 0
         files_changed = 0
 
@@ -323,24 +324,24 @@ async def ast_rename(req: ASTRefactorRenameRequest, _identity: AuthIdentity = De
                     )
                     total_replacements += count
                     files_changed += 1
-                    results.append({
-                        "path": file_path,
-                        "success": True,
-                        "replacements": count,
-                    })
+                    results.append(ASTRefactorFileResult(
+                        path=file_path,
+                        success=True,
+                        replacements=count,
+                    ))
                 else:
-                    results.append({
-                        "path": file_path,
-                        "success": True,
-                        "replacements": 0,
-                    })
+                    results.append(ASTRefactorFileResult(
+                        path=file_path,
+                        success=True,
+                        replacements=0,
+                    ))
             except Exception as exc:
-                results.append({
-                    "path": file_path,
-                    "success": False,
-                    "replacements": 0,
-                    "error": str(exc),
-                })
+                results.append(ASTRefactorFileResult(
+                    path=file_path,
+                    success=False,
+                    replacements=0,
+                    error=str(exc),
+                ))
 
         return ASTRefactorRenameResponse(
             old_name=req.old_name,
@@ -351,19 +352,22 @@ async def ast_rename(req: ASTRefactorRenameRequest, _identity: AuthIdentity = De
             files_changed=files_changed,
         )
     else:
+        single_path = req.path
+        if single_path is None:
+            raise HTTPException(status_code=400, detail=_err(400, "Path is required"))
         try:
-            code = await _state.file_editor.read_file(req.session_id, req.path)
+            code = await _state.file_editor.read_file(req.session_id, single_path)
             refactored, count = ASTRefactor.rename_symbol(
                 code, req.old_name, req.new_name
             )
 
             if count > 0:
                 await _state.file_editor.write_file(
-                    req.session_id, req.path, refactored
+                    req.session_id, single_path, refactored
                 )
 
             return ASTRefactorRenameResponse(
-                path=req.path,
+                path=single_path,
                 old_name=req.old_name,
                 new_name=req.new_name,
                 replacements=count,

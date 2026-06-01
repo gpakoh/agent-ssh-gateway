@@ -52,8 +52,8 @@ class GlobalSearchReplace:
         context_lines: int = 2,
     ) -> list[SearchMatch]:
         """Search for pattern across project files."""
-        results = []
-        
+        results: list[SearchMatch] = []
+
         # Build Grep Command
         grep_flags = "-rn"
         if not case_sensitive:
@@ -133,8 +133,8 @@ class GlobalSearchReplace:
         dry_run: bool = False,
     ) -> list[ReplaceResult]:
         """Replace occurrences across project files."""
-        results = []
-        
+        results: list[ReplaceResult] = []
+
         # First Search To Find Files
         matches = await self.search(
             session_id, path, search_query, file_pattern,
@@ -142,7 +142,7 @@ class GlobalSearchReplace:
         )
         
         # Group By File
-        files_to_modify = {}
+        files_to_modify: dict[str, list[SearchMatch]] = {}
         for match in matches:
             if match.path not in files_to_modify:
                 files_to_modify[match.path] = []

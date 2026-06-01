@@ -55,6 +55,7 @@ from app.models import (
     TestStats,
     DependencyStats,
     FileTreeRequest,
+    FileTreeNode,
     FileTreeResponse,
     BatchExecuteRequest,
     BatchExecuteResponse,
@@ -787,7 +788,7 @@ async def get_file_tree_v2(req: FileTreeRequest, _identity: AuthIdentity = Depen
     total_files, total_dirs = count_files(tree)
     
     return FileTreeResponse(
-        root=_state.file_tree.node_to_dict(tree),
+        root=FileTreeNode(**_state.file_tree.node_to_dict(tree)),
         total_files=total_files,
         total_directories=total_dirs,
     )

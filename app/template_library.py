@@ -1,12 +1,12 @@
 """Template library for common code patterns."""
 
-from typing import Optional
+from typing import Any, Optional
 
 
 class TemplateLibrary:
     """Library of code templates."""
 
-    TEMPLATES = {
+    TEMPLATES: dict[str, dict[str, Any]] = {
         "fastapi_endpoint": {
             "name": "FastAPI Endpoint",
             "description": "Create a new FastAPI endpoint",
