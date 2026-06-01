@@ -562,7 +562,6 @@ async def session_env(
 @router.post("/api/ssh/keys")
 async def upload_ssh_key(
     file: UploadFile = File(...),
-    request: Request = None,
     _identity: AuthIdentity = Depends(require_master_key),
 ):
     """Upload an SSH private key. Stored in /app/ssh_keys/."""
