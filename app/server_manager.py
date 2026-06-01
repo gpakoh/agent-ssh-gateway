@@ -72,7 +72,7 @@ class ServerManager:
         port: int = 22,
         username: str = "",
         description: str = "",
-        tags: list[str] = None,
+        tags: Optional[list[str]] = None,
     ) -> ServerConfig:
         """Add a new server."""
         server = ServerConfig(
@@ -110,7 +110,7 @@ class ServerManager:
         self,
         server_id: str,
         status: ServerStatus,
-        session_id: str = None,
+        session_id: Optional[str] = None,
     ):
         """Update server status."""
         with self._lock:
