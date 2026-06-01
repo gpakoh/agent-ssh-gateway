@@ -220,7 +220,7 @@ class ContextManager:
         # Pre-commit hooks: run validation if auto_validate is enabled
         if ctx.auto_validate:
             logger.info("Running pre-commit validation for context %s", context_id)
-            validation_report = await self._validation.run_validation(ctx.session_id, ctx.path)
+            validation_report = await self._validation.validate(ctx.session_id, ctx.path)
             
             if not validation_report.can_commit:
                 logger.warning("Pre-commit validation failed for context %s", context_id)

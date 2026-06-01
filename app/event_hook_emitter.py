@@ -131,11 +131,15 @@ async def emit_event(
         ds = _state.delivery_service
         if ds:
             try:
+                hook_id = hook.id
+                hook_url = hook.url
+                assert hook_id is not None
+                assert hook_url is not None
                 await ds.enqueue(
                     event_id=payload["event_id"],
-                    hook_id=hook.id,
+                    hook_id=hook_id,
                     event_type=event,
-                    url=hook.url,
+                    url=hook_url,
                     payload_json=payload_json,
                 )
             except Exception:

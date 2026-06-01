@@ -359,7 +359,7 @@ ruff check app tests
 Currently, mypy is enabled incrementally. Strict checked modules:
 
 ```bash
-mypy app/command_policy.py app/agent_token_store.py app/auth_middleware.py app/security.py app/event_hook_delivery.py app/session_store.py app/redis_queue.py app/known_hosts.py app/webhook_manager.py app/event_hook_store.py app/server_manager.py app/distributed_lock.py app/job_manager.py app/ssh_manager.py --show-error-codes --follow-imports=silent
+mypy app/command_policy.py app/agent_token_store.py app/auth_middleware.py app/security.py app/event_hook_delivery.py app/session_store.py app/redis_queue.py app/known_hosts.py app/webhook_manager.py app/event_hook_store.py app/server_manager.py app/distributed_lock.py app/job_manager.py app/ssh_manager.py app/file_tree.py app/event_hook_emitter.py app/context_manager.py app/code_intelligence.py app/bulk_operations_v2.py --show-error-codes --follow-imports=silent
 ```
 
 Full mypy report (includes pre-existing debt):

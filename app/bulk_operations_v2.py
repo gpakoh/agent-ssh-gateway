@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ class BulkOperationsManager:
     
     async def execute_bulk(
         self,
-        items: list[dict],
+        items: list[Any],
         executor_func,
         max_concurrency: Optional[int] = None,
     ) -> list[dict]:
