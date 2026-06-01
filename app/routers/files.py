@@ -475,7 +475,7 @@ async def project_tree(
     return {"items": items, "count": len(items)}
 
 
-@router.post("/api/project/structure", response_model=ProjectStructureResponse)
+@router.post("/api/project/files/structure", response_model=ProjectStructureResponse)
 async def project_structure_files(req: ProjectStructureRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Get project structure with metadata and git status."""
     await _check_session_ownership(req.session_id, request)
