@@ -9,7 +9,7 @@ import random
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
-from sqlalchemy import select, and_, func, text
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 from app.session_store import Base, WebhookDelivery

@@ -3,13 +3,11 @@
 import time
 import shlex
 
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Depends
 
 from app import state as _state
+from app.auth_middleware import require_master_key, AuthIdentity
 from app.state import _err
-from app.config import settings
-from app.git_manager import GitStatus
-from app.diff_generator import DiffGenerator
 from app.models import (
     GitInitRequest,
     GitCommitRequest,
@@ -40,14 +38,14 @@ async def _get_context_or_404(context_id: str):
 
 
 @router.post("/api/git/init", response_model=GitActionResponse)
-async def git_init(req: GitInitRequest):
+async def git_init(req: GitInitRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Initialize git repository for context."""
     result = await _state.context_manager.init_git(req.context_id, req.remote_url)
     return GitActionResponse(**result)
 
 
 @router.post("/api/git/commit", response_model=GitActionResponse)
-async def git_commit(req: GitCommitRequest):
+async def git_commit(req: GitCommitRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Create a git commit for context."""
     result = await _state.context_manager.commit_changes(
         req.context_id,
@@ -58,7 +56,7 @@ async def git_commit(req: GitCommitRequest):
 
 
 @router.post("/api/git/backup", response_model=GitActionResponse)
-async def git_backup(context_id: str, backup_name: str = "auto_backup"):
+async def git_backup(context_id: str, _identity: AuthIdentity = Depends(require_master_key), backup_name: str = "auto_backup"):
     """Create a git stash backup."""
     await _get_context_or_404(context_id)
     result = await _state.context_manager.create_backup(context_id, backup_name)
@@ -66,7 +64,7 @@ async def git_backup(context_id: str, backup_name: str = "auto_backup"):
 
 
 @router.post("/api/git/restore", response_model=GitActionResponse)
-async def git_restore(context_id: str):
+async def git_restore(context_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """Restore from stash."""
     await _get_context_or_404(context_id)
     result = await _state.context_manager.restore_backup(context_id)
@@ -74,7 +72,7 @@ async def git_restore(context_id: str):
 
 
 @router.get("/api/git/diff")
-async def git_diff_query(context_id: str):
+async def git_diff_query(context_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """Get git diff for context."""
     ctx = await _get_context_or_404(context_id)
 
@@ -85,7 +83,7 @@ async def git_diff_query(context_id: str):
 
 
 @router.post("/api/git/status")
-async def git_status(context_id: str):
+async def git_status(context_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """Refresh git status for context."""
     await _get_context_or_404(context_id)
     git_info = await _state.context_manager.update_git_status(context_id)
@@ -102,6 +100,7 @@ async def git_status(context_id: str):
 
 @router.get("/api/git/simple-status")
 async def git_simple_status(
+    _identity: AuthIdentity = Depends(require_master_key),
     session_id: str = Query(...),
     path: str = Query(default="."),
 ):
@@ -146,7 +145,7 @@ async def git_simple_status(
 
 
 @router.post("/api/git/diff", response_model=GitDiffResponse)
-async def git_diff(req: GitDiffRequest):
+async def git_diff(req: GitDiffRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Get git diff for working directory or staged changes."""
     flag = "--cached" if req.cached else ""
     result = await _state.manager.execute(
@@ -169,7 +168,7 @@ async def git_diff(req: GitDiffRequest):
 
 
 @router.post("/api/recovery/backup", response_model=RecoveryActionResponse)
-async def recovery_backup(req: CreateBackupRequest):
+async def recovery_backup(req: CreateBackupRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Create a backup before making changes."""
     await _get_context_or_404(req.context_id)
 
@@ -183,7 +182,7 @@ async def recovery_backup(req: CreateBackupRequest):
 
 
 @router.post("/api/recovery/restore", response_model=RecoveryActionResponse)
-async def recovery_restore(req: RestoreBackupRequest):
+async def recovery_restore(req: RestoreBackupRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Restore from backup."""
     await _get_context_or_404(req.context_id)
 
@@ -197,7 +196,7 @@ async def recovery_restore(req: RestoreBackupRequest):
 
 
 @router.get("/api/recovery/backups")
-async def recovery_list_backups(context_id: str):
+async def recovery_list_backups(context_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """List available backups."""
     ctx = await _get_context_or_404(context_id)
 

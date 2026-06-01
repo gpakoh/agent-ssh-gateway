@@ -1,33 +1,45 @@
 # Security Policy
 
-## Reporting a Vulnerability
+## Supported versions
 
-If you discover a security vulnerability, please do **not** open a public issue.
+Current active development version: `main`.
 
-Contact: **security@example.com**  
-PGP key: _available at https://example.com/.well-known/pgp-key.txt_
+## Security model
 
-We aim to acknowledge receipt within 48 hours and provide an initial assessment within 5 business days.
+agent-ssh-gateway is a sensitive infrastructure component. It can open SSH sessions and execute commands on remote hosts.
 
-## Security Measures
+Do not expose it directly to the Internet without authentication, network restrictions and reverse proxy protection.
 
-- **Encryption at rest**: session credentials encrypted with Fernet (symmetric key required at startup)
-- **Host key verification**: `RejectPolicy` by default (`SSH_STRICT_HOST_KEY_CHECKING=true`)
-- **mTLS**: nginx verifies client certificates before requests reach the gateway
-- **Rate limiting**: per-IP, configurable limits with CIDR allowlist
-- **Fail-closed host keys**: unknown host keys rejected in strict mode
-- **CIDR allowlist**: `ALLOWED_CLIENT_CIDRS` restricts which IPs can connect
-- **Read-only root filesystem** in production container
-- **No-new-privileges**, all capabilities dropped
-- **Command guardrails**: blocklist-based (not a security boundary — see README)
+## Recommended deployment
 
-## Supported Versions
+- Reverse proxy
+- SSO for browser access
+- API key or short-lived agent tokens for API access
+- Target host allowlist
+- Command policy
+- Audit logging
+- Secret redaction
+- Least-privilege SSH users
 
-| Version | Supported |
-|---------|-----------|
-| 0.x     | ✔️        |
+## Secrets
 
-## Threat Model
+Never commit:
 
-This gateway is designed for **trusted network environments** (internal VPC, CI/CD runners).  
-It is not intended for direct exposure to the public internet without additional controls (mTLS, CIDR restrictions, WAF).
+- `.env`
+- private SSH keys
+- API keys
+- agent tokens
+- webhook secrets
+- production IPs/domains if they reveal private infrastructure
+
+## Agent tokens
+
+Agent tokens are scoped and short-lived. They cannot create or refresh other agent tokens.
+
+## Session ownership
+
+Agent-created sessions are bound to the token fingerprint that created them.
+
+## Reporting vulnerabilities
+
+Open a private security advisory on GitHub or contact the maintainer.

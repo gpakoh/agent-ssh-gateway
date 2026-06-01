@@ -11,7 +11,6 @@ from app.known_hosts import (
     HostKeyStore,
     NullHostKeyStore,
     PostgresHostKeyStore,
-    create_host_key_store,
 )
 
 

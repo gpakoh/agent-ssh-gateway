@@ -1,5 +1,4 @@
 """Tests for command policy engine."""
-import pytest
 
 from app.command_policy import evaluate_command_policy
 
