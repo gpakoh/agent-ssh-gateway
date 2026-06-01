@@ -220,7 +220,6 @@ class BatchOperationsManager:
     ) -> BatchOperationResult:
         """Create new file."""
         # Use echo to create file
-        escaped_content = content.replace("'", "'\"'\"'")
         cmd = f"cat > '{path}' << 'EOF_BATCH'\n{content}\nEOF_BATCH"
         
         result = await self._ssh.execute(session_id, cmd, timeout=30)

@@ -46,8 +46,8 @@ host_key_store: Optional[HostKeyStore] = None
 bulk_ops: Optional[BulkOperationsManager] = None
 event_hook_store: Optional[EventHookStore] = None
 delivery_service: Optional[DeliveryService] = None
-from app.agent_token_store import AgentTokenStore
-from fastapi import WebSocket
+from app.agent_token_store import AgentTokenStore  # noqa: E402
+from fastapi import WebSocket  # noqa: E402
 agent_token_store: Optional[AgentTokenStore] = None
 active_websockets: set[WebSocket] = set()
 

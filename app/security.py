@@ -2,9 +2,11 @@
 
 import hashlib
 import hmac
+import ipaddress
 import logging
 import re
 import secrets
+import socket
 from pathlib import Path
 from typing import Any, Optional
 
@@ -363,10 +365,6 @@ class IPFilter:
 # ---------------------------------------------------------------------------
 # Target Host Validation (SSRF Protection)
 # ---------------------------------------------------------------------------
-
-import ipaddress
-import socket
-
 
 def parse_networks(raw: str) -> list[ipaddress._BaseNetwork]:
     """Parse comma-separated CIDR list into ipaddress networks."""

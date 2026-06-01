@@ -38,7 +38,10 @@ jobs:
           python3 -m venv .venv
           . .venv/bin/activate
           python -m pip install --default-timeout=120 --upgrade pip >/dev/null
-          python -m pip install --default-timeout=120 -q -r docker/requirements.txt pytest pytest-timeout httpx mypy
+          python -m pip install --default-timeout=120 -q -r docker/requirements.txt pytest pytest-timeout httpx mypy ruff
+          echo "::group::ruff linter"
+          python -m ruff check app tests || echo "ruff: issues found (non-blocking)"
+          echo "::endgroup::"
           echo "::group::mypy type check"
           python -m mypy app/ --no-error-summary || echo "mypy: pre-existing errors (non-blocking)"
           echo "::endgroup::"
