@@ -12,6 +12,14 @@ import redis.asyncio as redis
 logger = logging.getLogger(__name__)
 
 
+def _decode_id(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
 class RedisJobQueue:
     """Distributed job queue using Redis.
     
@@ -112,7 +120,7 @@ class RedisJobQueue:
         if not result:
             return None
 
-        job_id = result[0][0]
+        job_id = _decode_id(result[0][0])
         job_data = await self._get_job(job_id)
 
         if job_data:
@@ -263,14 +271,16 @@ class RedisJobQueue:
         
         # Remove Old Completed Jobs
         completed = await self._redis.zrangebyscore(self._completed_key, 0, cutoff)
-        for job_id in completed:
+        for raw_id in completed:
+            job_id = _decode_id(raw_id)
             await self._redis.delete(f"{self._job_prefix}{job_id}")
         await self._redis.zremrangebyscore(self._completed_key, 0, cutoff)
         
         # Remove Old Dead-letter Jobs (7-day Retention)
         dead_cutoff = time.time() - max_age * 7
         dead = await self._redis.zrangebyscore(self._dead_letter_key, 0, dead_cutoff)
-        for job_id in dead:
+        for raw_id in dead:
+            job_id = _decode_id(raw_id)
             await self._redis.delete(f"{self._job_prefix}{job_id}")
         await self._redis.zremrangebyscore(self._dead_letter_key, 0, dead_cutoff)
         
@@ -280,7 +290,8 @@ class RedisJobQueue:
         """Get jobs from dead letter queue."""
         job_ids = await self._redis.zrange(self._dead_letter_key, 0, limit - 1, desc=True)
         jobs = []
-        for job_id in job_ids:
+        for raw_id in job_ids:
+            job_id = _decode_id(raw_id)
             job = await self._get_job(job_id)
             if job:
                 jobs.append(job)
@@ -305,7 +316,8 @@ class RedisJobQueue:
             return 0
 
         recovered = 0
-        for job_id in stale:
+        for raw_id in stale:
+            job_id = _decode_id(raw_id)
             job_data = await self._get_job(job_id)
             if job_data is None:
                 await self._redis.zrem(self._processing_key, job_id)
