@@ -2,6 +2,7 @@
 
 import ast
 import re
+import sys
 
 
 class RenameTransformer(ast.NodeTransformer):
@@ -90,22 +91,40 @@ class ExtractFunctionTransformer(ast.NodeTransformer):
 
         if self.extracted:
             # Create new function with extracted body
-            new_func = ast.FunctionDef(
-                name=self.func_name,
-                args=ast.arguments(
-                    posonlyargs=[],
-                    args=[ast.arg(arg="self", annotation=None)]
-                    if node.args.args and node.args.args[0].arg == "self"
-                    else [],
-                    kwonlyargs=[],
-                    defaults=[],
-                    kw_defaults=[],
-                ),
-                body=extracted_body,
-                decorator_list=[],
-                returns=None,
-                type_params=[],
-            )
+            # Python 3.12+ requires type_params in FunctionDef
+            if sys.version_info >= (3, 12):
+                new_func = ast.FunctionDef(
+                    name=self.func_name,
+                    args=ast.arguments(
+                        posonlyargs=[],
+                        args=[ast.arg(arg="self", annotation=None)]
+                        if node.args.args and node.args.args[0].arg == "self"
+                        else [],
+                        kwonlyargs=[],
+                        defaults=[],
+                        kw_defaults=[],
+                    ),
+                    body=extracted_body,
+                    decorator_list=[],
+                    returns=None,
+                    type_params=[],
+                )
+            else:
+                new_func = ast.FunctionDef(
+                    name=self.func_name,
+                    args=ast.arguments(
+                        posonlyargs=[],
+                        args=[ast.arg(arg="self", annotation=None)]
+                        if node.args.args and node.args.args[0].arg == "self"
+                        else [],
+                        kwonlyargs=[],
+                        defaults=[],
+                        kw_defaults=[],
+                    ),
+                    body=extracted_body,
+                    decorator_list=[],
+                    returns=None,
+                )
             ast.fix_missing_locations(new_func)
             # Insert new function before the current function
             return [new_func, node]  # type: ignore[return-value]
