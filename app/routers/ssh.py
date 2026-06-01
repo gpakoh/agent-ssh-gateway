@@ -314,8 +314,20 @@ async def ssh_disconnect(req: DisconnectRequest, request: Request, _identity: Au
 
 @router.get("/api/ssh/sessions", response_model=SessionsResponse)
 async def ssh_sessions(request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:execute"))):
-    """List all active SSH sessions with details."""
+    """List active SSH sessions with details.
+
+    Master token sees all sessions.
+    Agent token sees only sessions it created.
+    """
     records = await _state.manager.list_sessions()
+
+    if _identity.token_type != "master":
+        records = [
+            r for r in records
+            if r.owner_type == "agent"
+            and r.owner_token_fingerprint == _identity.fingerprint
+        ]
+
     now = time.time()
     sessions = [
         SessionInfo(
@@ -344,6 +356,7 @@ async def ssh_heartbeat(req: DisconnectRequest, request: Request, _identity: Aut
     record = await _state.manager.get_session(req.session_id)
     if not record:
         raise SessionNotFoundError(f"Session {req.session_id} not found")
+    ensure_session_owner(record, _identity)
     record.touch()
     return {"status": "ok", "session_id": req.session_id, "idle_time": record.idle_time}
 
@@ -354,6 +367,7 @@ async def session_health(session_id: str, request: Request, _identity: AuthIdent
     record = await _state.manager.get_session(session_id)
     if not record:
         raise SessionNotFoundError(f"Session {session_id} not found")
+    ensure_session_owner(record, _identity)
 
     is_connected = record.is_connected()
 
@@ -539,6 +553,10 @@ async def session_env(
     prefix: str = Query(None, description="Filter env vars by prefix (e.g. PATH)"),
 ):
     """Read environment variables from an active SSH session."""
+    record = await _state.manager.get_session(session_id)
+    if not record:
+        raise SessionNotFoundError(f"Session {session_id} not found")
+    ensure_session_owner(record, _identity)
     result = await _state.manager.execute(session_id=session_id, command="printenv", timeout=10)
     if result["exit_code"] != 0:
         raise HTTPException(status_code=502, detail=_err(502, f"Failed to read env: {result['stderr']}"))
