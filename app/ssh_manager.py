@@ -7,7 +7,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, TypedDict
 
 import paramiko
 from paramiko.ssh_exception import (
@@ -21,6 +21,14 @@ from app.known_hosts import HostKeyStore, KnownHostsPolicy, NullHostKeyStore
 from app.security import SecretManager
 
 # Lazy Import To Avoid Circular Dependency
+
+class CommandResult(TypedDict):
+    stdout: str
+    stderr: str
+    exit_code: int
+    duration: float
+
+
 _emit_event_fn: Callable[..., Any] | None = None
 def _emit(event: str, **kw: Any) -> None:
     global _emit_event_fn
@@ -345,7 +353,7 @@ class SSHSessionManager:
 
     async def execute(
         self, session_id: str, command: str, timeout: int = 30
-    ) -> dict[str, object]:
+    ) -> CommandResult:
         """Execute a command and return stdout, stderr, exit_code, duration.
         
         Auto-reconnects if the SSH connection is broken.
