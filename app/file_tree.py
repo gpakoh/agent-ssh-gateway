@@ -128,7 +128,7 @@ class FileTreeExplorer:
         max_files: int = 100,
     ) -> list[FileNode]:
         """Get children of a directory."""
-        children = []
+        children: list[FileNode] = []
         file_count = 0
         
         ls_cmd = f"ls -la '{path}'"
