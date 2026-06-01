@@ -346,6 +346,28 @@ Run tests:
 pytest -q
 ```
 
+### Linting
+
+The project uses [ruff](https://docs.astral.sh/ruff/) for linting:
+
+```bash
+ruff check app tests
+```
+
+### Type checking
+
+Currently, mypy is enabled incrementally. Strict checked modules:
+
+```bash
+mypy app/command_policy.py app/agent_token_store.py app/auth_middleware.py app/security.py --show-error-codes
+```
+
+Full mypy report (includes pre-existing debt):
+
+```bash
+./scripts/mypy-full-report.sh
+```
+
 Run the application locally:
 
 ```bash

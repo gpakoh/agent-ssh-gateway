@@ -399,7 +399,7 @@ def resolve_host_ips(host: str) -> list[ipaddress._BaseAddress]:
         ip_raw = info[4][0]
         if ip_raw in seen:
             continue
-        seen.add(ip_raw)
+        seen.add(str(ip_raw))
         ips.append(ipaddress.ip_address(ip_raw))
 
     if not ips:

@@ -42,8 +42,11 @@ jobs:
           echo "::group::ruff linter"
           python -m ruff check app tests || echo "ruff: issues found (non-blocking)"
           echo "::endgroup::"
-          echo "::group::mypy type check"
-          python -m mypy app/ --no-error-summary || echo "mypy: pre-existing errors (non-blocking)"
+          echo "::group::mypy typed modules"
+          python -m mypy app/command_policy.py app/agent_token_store.py app/auth_middleware.py app/security.py --show-error-codes
+          echo "::endgroup::"
+          echo "::group::mypy full (informational)"
+          python -m mypy app/ --no-error-summary || echo "mypy full: pre-existing errors (non-blocking)"
           echo "::endgroup::"
           python -m pytest tests/ -q --timeout=30 \
             --ignore=tests/test_mtls_e2e.py \
