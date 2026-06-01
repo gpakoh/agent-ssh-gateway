@@ -2,7 +2,6 @@
 
 import ast
 import re
-from typing import Optional
 
 
 class RenameTransformer(ast.NodeTransformer):

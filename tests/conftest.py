@@ -1,7 +1,5 @@
 """Global test fixtures — autouse cleanup to prevent cross-file state pollution."""
 
-import gc
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 

@@ -1,7 +1,6 @@
 """Tests for CircuitBreaker — state machine, concurrency, race conditions."""
 
 import asyncio
-import time
 
 import pytest
 

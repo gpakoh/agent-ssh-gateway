@@ -9,7 +9,6 @@ from typing import Optional
 
 import paramiko
 
-from app.config import settings
 
 try:
     from datetime import datetime, timezone

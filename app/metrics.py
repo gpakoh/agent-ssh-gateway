@@ -1,8 +1,6 @@
 """Prometheus metrics for monitoring."""
 
 import logging
-import time
-from typing import Optional
 
 from prometheus_client import Counter, Histogram, Gauge, Info, generate_latest
 

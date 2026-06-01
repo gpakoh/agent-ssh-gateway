@@ -1,19 +1,18 @@
 """File operations, AST, and batch routes."""
 
-import json
 import logging
 import asyncio
 import time
 import shlex
 
-from fastapi import APIRouter, HTTPException, Query, Header, Response, UploadFile, File, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Header, Response, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
 from typing import Any, Optional
 
 from app.state import _err
 from app import state as _state
 from app.config import settings
-from app.security import sanitize_command, validate_path, rate_limit_mutation
+from app.security import validate_path, rate_limit_mutation
 from app.models import (
     FileReadRequest,
     FileReadResponse,
@@ -27,7 +26,6 @@ from app.models import (
     FileUploadResponse,
     FileWriteRequest,
     FileWriteResponse,
-    FileDownloadRequest,
     ASTRefactorRenameRequest,
     ASTRefactorRenameResponse,
     ASTRefactorExtractRequest,
@@ -42,7 +40,7 @@ from app.models import (
     FileMetadata,
 )
 from app.ast_refactor import ASTRefactor
-from app.auth_middleware import ws_auth_check, AuthIdentity, ensure_session_owner
+from app.auth_middleware import ws_auth_check, AuthIdentity, ensure_session_owner, require_scope
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +63,7 @@ async def _check_session_ownership(session_id: str, request: Request) -> None:
 # ---------------------------------------------------------------------------
 
 @router.post("/api/file/read", response_model=FileReadResponse)
-async def file_read(req: FileReadRequest, request: Request):
+async def file_read(req: FileReadRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Read a file from a remote server."""
     await _check_session_ownership(req.session_id, request)
 
@@ -81,7 +79,7 @@ async def file_read(req: FileReadRequest, request: Request):
 
 @router.patch("/api/file/edit", response_model=FileEditResponse)
 @rate_limit_mutation(30, "minute")
-async def file_edit(req: FileEditRequest, request: Request):
+async def file_edit(req: FileEditRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Edit a remote file using patch operations."""
     await _check_session_ownership(req.session_id, request)
 
@@ -104,7 +102,7 @@ async def file_edit(req: FileEditRequest, request: Request):
 
 
 @router.post("/api/file/patch", response_model=PatchApplyResponse)
-async def file_patch(req: PatchApplyRequest, request: Request):
+async def file_patch(req: PatchApplyRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Apply a unified diff patch."""
     await _check_session_ownership(req.session_id, request)
 
@@ -128,6 +126,7 @@ async def file_raw(
     limit: int = Query(0, ge=0),
     range_header: Optional[str] = Header(None, alias="range"),
     request: Request = None,
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Read a remote file and return raw content as text/plain.
 
@@ -179,7 +178,7 @@ async def file_raw(
 # ---------------------------------------------------------------------------
 
 @router.post("/api/batch/read", response_model=BatchReadResponse)
-async def batch_read(req: BatchReadRequest, request: Request):
+async def batch_read(req: BatchReadRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Read multiple files in a single request."""
     await _check_session_ownership(req.session_id, request)
 
@@ -210,6 +209,7 @@ async def file_upload(
     path: str = Query(...),
     content: str = Query(...),
     request: Request = None,
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Upload file to remote server (base64 encoded via query params)."""
     if request is not None:
@@ -227,7 +227,7 @@ async def file_upload(
 
 
 @router.post("/api/file/upload/json", response_model=FileUploadResponse)
-async def file_upload_json(req: FileUploadRequest, request: Request):
+async def file_upload_json(req: FileUploadRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Upload file via JSON body (base64 encoded).
 
     Preferred for large files (>2KB) where query params may fail.
@@ -246,7 +246,7 @@ async def file_upload_json(req: FileUploadRequest, request: Request):
 
 
 @router.get("/api/file/download", response_class=Response)
-async def file_download(session_id: str = Query(...), path: str = Query(...), request: Request = None):
+async def file_download(session_id: str = Query(...), path: str = Query(...), request: Request = None, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Download file from remote server."""
     if request is not None:
         await _check_session_ownership(session_id, request)
@@ -260,7 +260,7 @@ async def file_download(session_id: str = Query(...), path: str = Query(...), re
 
 
 @router.post("/api/file/write", response_model=FileWriteResponse)
-async def file_write(req: FileWriteRequest, request: Request):
+async def file_write(req: FileWriteRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Write file via JSON body (atomic, no heredoc escaping).
 
     Use for Python code with quotes, special chars, or large content.
@@ -290,7 +290,7 @@ async def file_write(req: FileWriteRequest, request: Request):
 # ---------------------------------------------------------------------------
 
 @router.post("/api/ast/rename", response_model=ASTRefactorRenameResponse)
-async def ast_rename(req: ASTRefactorRenameRequest):
+async def ast_rename(req: ASTRefactorRenameRequest, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Rename a symbol (function, class, variable) using AST.
 
     Supports single file ('path') or multiple files ('files' array).
@@ -376,13 +376,13 @@ async def ast_rename(req: ASTRefactorRenameRequest):
 
 
 @router.post("/api/refactor/rename", response_model=ASTRefactorRenameResponse)
-async def refactor_rename(req: ASTRefactorRenameRequest):
+async def refactor_rename(req: ASTRefactorRenameRequest, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Alias for /api/ast/rename — AST-aware symbol renaming."""
     return await ast_rename(req)
 
 
 @router.post("/api/ast/extract", response_model=ASTRefactorExtractResponse)
-async def ast_extract(req: ASTRefactorExtractRequest):
+async def ast_extract(req: ASTRefactorExtractRequest, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Extract a block of code into a new function."""
     try:
         validated = validate_path(req.path)
@@ -410,7 +410,7 @@ async def ast_extract(req: ASTRefactorExtractRequest):
 
 
 @router.post("/api/ast/analyze", response_model=ASTAnalyzeResponse)
-async def ast_analyze(req: ASTAnalyzeRequest):
+async def ast_analyze(req: ASTAnalyzeRequest, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Analyze Python code structure using AST."""
     try:
         validated = validate_path(req.path)
@@ -437,6 +437,7 @@ async def project_tree(
     session_id: str = Query(...),
     path: str = Query(default="."),
     max_depth: int = Query(default=3, ge=1, le=10),
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Simple project tree — list files and directories.
 
@@ -471,11 +472,10 @@ async def project_tree(
 
 
 @router.post("/api/project/structure", response_model=ProjectStructureResponse)
-async def project_structure_files(req: ProjectStructureRequest, request: Request):
+async def project_structure_files(req: ProjectStructureRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Get project structure with metadata and git status."""
     await _check_session_ownership(req.session_id, request)
 
-    import json
 
     cmd = f"cd {shlex.quote(req.path)} && find . -maxdepth {req.max_depth} -printf '%y|%p|%s|%m|%TY-%Tm-%Td %TH:%TM:%TS\\n' 2>/dev/null || echo 'ERROR'"
     result = await _state.manager.execute(req.session_id, cmd, timeout=30)
@@ -573,7 +573,7 @@ async def project_structure_files(req: ProjectStructureRequest, request: Request
 # ---------------------------------------------------------------------------
 
 @router.patch("/api/batch/edit", response_model=BatchEditResponse)
-async def batch_edit(req: BatchEditRequest, request: Request):
+async def batch_edit(req: BatchEditRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Edit multiple files in a single request."""
     await _check_session_ownership(req.session_id, request)
 
@@ -631,7 +631,7 @@ async def batch_edit(req: BatchEditRequest, request: Request):
 # ---------------------------------------------------------------------------
 
 @router.post("/api/bulk/read")
-async def bulk_read_files(req: BatchReadRequest):
+async def bulk_read_files(req: BatchReadRequest, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Read multiple files concurrently."""
     files = await _state.bulk_ops.read_files_bulk(
         req.session_id,
@@ -643,7 +643,7 @@ async def bulk_read_files(req: BatchReadRequest):
 
 
 @router.post("/api/bulk/edit", response_model=BatchEditResponse)
-async def bulk_edit_files(req: BatchEditRequest):
+async def bulk_edit_files(req: BatchEditRequest, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Edit multiple files concurrently.
 
     Example:

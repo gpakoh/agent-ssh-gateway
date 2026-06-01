@@ -15,10 +15,10 @@ from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisco
 from app.config import settings
 from app.state import _err
 from app import state as _state
-from app.auth_middleware import ws_auth_check, is_agent_token_valid, verify_master_api_key, VALID_AGENT_SCOPES, require_scope, AuthIdentity, ensure_session_owner
+from app.auth_middleware import ws_auth_check, require_master_key, VALID_AGENT_SCOPES, require_scope, AuthIdentity, ensure_session_owner
 from app.security import sanitize_command, rate_limit_mutation, validate_target_host
 from app.command_policy import evaluate_command_policy
-from app.ssh_manager import SSHManagerError, ConnectionError as SSHConnError, AuthenticationError, SessionNotFoundError, TimeoutError, ExecutionError
+from app.ssh_manager import SessionNotFoundError
 from app.models import (
     ConnectRequest,
     ConnectResponse,
@@ -66,19 +66,13 @@ def get_connect_auth_method(req: ConnectRequest) -> str:
 
 @router.post("/api/agent/token", response_model=AgentTokenResponse)
 @rate_limit_mutation(5, "minute")
-async def agent_token_generate(req: AgentTokenRequest, request: Request):
+async def agent_token_generate(req: AgentTokenRequest, request: Request, _identity: AuthIdentity = Depends(require_master_key)):
     """Generate a short-lived agent token (separate from API_KEY).
 
     Requires API_KEY auth. The generated token can be rotated
     without affecting the main API_KEY. Token stored in Redis with TTL.
     The token carries a scope list that limits which endpoints it can access.
     """
-    if not await verify_master_api_key(request, settings.api_key):
-        raise HTTPException(
-            status_code=401,
-            detail=_err(401, "Only master API key can create agent tokens"),
-        )
-
     invalid_scopes = sorted(set(req.scopes) - VALID_AGENT_SCOPES)
     if invalid_scopes:
         raise HTTPException(
@@ -110,19 +104,13 @@ async def agent_token_generate(req: AgentTokenRequest, request: Request):
 
 @router.post("/api/agent/token/refresh", response_model=AgentTokenRefreshResponse)
 @rate_limit_mutation(5, "minute")
-async def agent_token_refresh(req: AgentTokenRefreshRequest, request: Request):
+async def agent_token_refresh(req: AgentTokenRefreshRequest, request: Request, _identity: AuthIdentity = Depends(require_master_key)):
     """Refresh (rotate) the agent token.
 
     Invalidates the previous agent token and issues a new one atomically.
     Only master API key can refresh tokens.
     The new token preserves the scopes of the old token — refresh never expands rights.
     """
-    if not await verify_master_api_key(request, settings.api_key):
-        raise HTTPException(
-            status_code=401,
-            detail=_err(401, "Only master API key can create agent tokens"),
-        )
-
     import secrets as _secrets
     from datetime import timedelta
 
@@ -158,7 +146,7 @@ async def agent_token_refresh(req: AgentTokenRefreshRequest, request: Request):
 # ---------------------------------------------------------------------------
 
 @router.get("/api/config/session", response_model=SessionConfigResponse)
-async def get_session_config():
+async def get_session_config(_identity: AuthIdentity = Depends(require_master_key)):
     """Get current session configuration."""
     active = await _state.manager.list_sessions()
     return SessionConfigResponse(
@@ -170,7 +158,7 @@ async def get_session_config():
 
 
 @router.patch("/api/config/session/timeout", response_model=SessionTimeoutResponse)
-async def update_session_timeout(req: SessionTimeoutRequest):
+async def update_session_timeout(req: SessionTimeoutRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Update session timeout dynamically."""
     if not 60 <= req.timeout <= 86400:
         raise HTTPException(
@@ -307,14 +295,12 @@ async def ssh_execute(
 
 
 @router.post("/api/ssh/disconnect", response_model=DisconnectResponse)
-async def ssh_disconnect(req: DisconnectRequest, request: Request):
+async def ssh_disconnect(req: DisconnectRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:disconnect"))):
     """Close an SSH session."""
-    _identity: AuthIdentity = getattr(request.state, "auth_identity", None)
-    if _identity is not None:
-        session = await _state.manager.get_session(req.session_id)
-        if session is None:
-            raise HTTPException(status_code=404, detail=_err(404, "Session not found"))
-        ensure_session_owner(session, _identity)
+    session = await _state.manager.get_session(req.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=_err(404, "Session not found"))
+    ensure_session_owner(session, _identity)
     await _state.manager.disconnect(req.session_id)
 
     if _state.session_store:
@@ -327,7 +313,7 @@ async def ssh_disconnect(req: DisconnectRequest, request: Request):
 
 
 @router.get("/api/ssh/sessions", response_model=SessionsResponse)
-async def ssh_sessions():
+async def ssh_sessions(request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:execute"))):
     """List all active SSH sessions with details."""
     records = await _state.manager.list_sessions()
     now = time.time()
@@ -353,7 +339,7 @@ async def ssh_sessions():
 # ---------------------------------------------------------------------------
 
 @router.post("/api/ssh/heartbeat")
-async def ssh_heartbeat(req: DisconnectRequest):
+async def ssh_heartbeat(req: DisconnectRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:execute"))):
     """Refresh session timeout by touching it."""
     record = await _state.manager.get_session(req.session_id)
     if not record:
@@ -363,7 +349,7 @@ async def ssh_heartbeat(req: DisconnectRequest):
 
 
 @router.get("/api/ssh/session/{session_id}/health")
-async def session_health(session_id: str):
+async def session_health(session_id: str, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:execute"))):
     """Check session health and auto-reconnect if needed."""
     record = await _state.manager.get_session(session_id)
     if not record:
@@ -548,6 +534,8 @@ async def check_port(
 @router.get("/api/ssh/session/{session_id}/env")
 async def session_env(
     session_id: str,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:execute")),
     prefix: str = Query(None, description="Filter env vars by prefix (e.g. PATH)"),
 ):
     """Read environment variables from an active SSH session."""
@@ -574,6 +562,8 @@ async def session_env(
 @router.post("/api/ssh/keys")
 async def upload_ssh_key(
     file: UploadFile = File(...),
+    request: Request = None,
+    _identity: AuthIdentity = Depends(require_master_key),
 ):
     """Upload an SSH private key. Stored in /app/ssh_keys/."""
     if not settings.ssh_key_upload_enabled:

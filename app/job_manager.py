@@ -9,7 +9,6 @@ from typing import Optional
 
 from app.ssh_manager import (
     SSHSessionManager,
-    SSHManagerError,
     SessionNotFoundError,
     ExecutionError,
 )

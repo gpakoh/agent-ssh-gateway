@@ -58,8 +58,8 @@ class CodeIntelligence:
         
         # Parse Grep Output
         lines = result["stdout"].split("\n")
-        current_file = None
-        current_line = 0
+        _current_file = None
+        _current_line = 0
         
         for line in lines:
             if line.startswith("--"):
