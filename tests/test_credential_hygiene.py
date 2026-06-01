@@ -109,6 +109,7 @@ def test_connect_request_auth_method_detection_none():
 
 def test_ssh_session_model_has_no_credential_fields():
     from dataclasses import fields
+
     from app.ssh_manager import SessionRecord
 
     field_names = {field.name for field in fields(SessionRecord)}

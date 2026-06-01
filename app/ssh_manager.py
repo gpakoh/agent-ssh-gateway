@@ -1,19 +1,20 @@
 """SSH session management using Paramiko."""
 
 import asyncio
+import builtins
 import io
 import logging
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Optional, TypedDict
+from typing import Any, TypedDict
 
 import paramiko
 from paramiko.ssh_exception import (
     AuthenticationException,
-    SSHException,
     NoValidConnectionsError,
+    SSHException,
 )
 
 from app.config import settings
@@ -100,7 +101,7 @@ class SessionRecord:
     connected_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     reconnect_count: int = 0
-    last_reconnect_reason: Optional[str] = None
+    last_reconnect_reason: str | None = None
     owner_type: str = "master"
     owner_name: str | None = None
     owner_token_fingerprint: str | None = None
@@ -131,12 +132,12 @@ class SSHSessionManager:
     """Manages multiple SSH sessions with automatic cleanup."""
 
     def __init__(self, session_timeout: int = 300, cleanup_interval: int = 60,
-                 host_key_store: Optional[HostKeyStore] = None) -> None:
+                 host_key_store: HostKeyStore | None = None) -> None:
         self._sessions: dict[str, SessionRecord] = {}
         self._lock = asyncio.Lock()
         self._session_timeout = session_timeout
         self._cleanup_interval = cleanup_interval
-        self._cleanup_task: Optional[asyncio.Task] = None
+        self._cleanup_task: asyncio.Task | None = None
         self._strict_host_key = settings.ssh_strict_host_key_checking
         self._host_key_store = host_key_store or NullHostKeyStore()
         try:
@@ -212,12 +213,12 @@ class SSHSessionManager:
             return KnownHostsPolicy(self._host_key_store, port=port)
         return paramiko.RejectPolicy()
 
-    def _encrypt_cred(self, value: Optional[str]) -> Optional[str]:
+    def _encrypt_cred(self, value: str | None) -> str | None:
         if value is None or self._secret_manager is None:
             return value
         return self._secret_manager.encrypt(value)
 
-    def _decrypt_cred(self, value: Optional[str]) -> Optional[str]:
+    def _decrypt_cred(self, value: str | None) -> str | None:
         if value is None or self._secret_manager is None:
             return value
         return self._secret_manager.decrypt(value)
@@ -231,9 +232,9 @@ class SSHSessionManager:
         host: str,
         port: int,
         username: str,
-        password: Optional[str] = None,
-        private_key: Optional[str] = None,
-        key_passphrase: Optional[str] = None,
+        password: str | None = None,
+        private_key: str | None = None,
+        key_passphrase: str | None = None,
         owner_type: str = "master",
         owner_name: str | None = None,
         owner_token_fingerprint: str | None = None,
@@ -264,10 +265,10 @@ class SSHSessionManager:
             )
         except AuthenticationException as exc:
             client.close()
-            raise AuthenticationError(f"Authentication failed for {username}@{host}: {exc}")
+            raise AuthenticationError(f"Authentication failed for {username}@{host}: {exc}") from exc
         except (NoValidConnectionsError, SSHException, OSError) as exc:
             client.close()
-            raise ConnectionError(f"Could not connect to {host}:{port}: {exc}")
+            raise ConnectionError(f"Could not connect to {host}:{port}: {exc}") from exc
 
         # Увеличить размер окна ssh для потоковой передачи
         transport = client.get_transport()
@@ -326,7 +327,7 @@ class SSHSessionManager:
         return False
 
     async def _load_private_key(
-        self, key_data: str, passphrase: Optional[str] = None
+        self, key_data: str, passphrase: str | None = None
     ) -> paramiko.PKey:
         """Load a private key from string data (never touches disk)."""
         key_file = io.StringIO(key_data)
@@ -403,14 +404,14 @@ class SSHSessionManager:
                 timeout=timeout,
             )
             exit_code = stdout.channel.recv_exit_status()
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"Command timed out after {timeout}s: {command}")
+        except builtins.TimeoutError:
+            raise TimeoutError(f"Command timed out after {timeout}s: {command}") from None
         except SSHException as exc:
             # Try To Reconnect On SSH Errors
             logger.warning("SSH error during execution for session %s: %s", session_id, exc)
-            raise ExecutionError(f"SSH error during execution: {exc}")
+            raise ExecutionError(f"SSH error during execution: {exc}") from exc
         except Exception as exc:
-            raise ExecutionError(f"Execution error: {exc}")
+            raise ExecutionError(f"Execution error: {exc}") from exc
 
         duration = time.time() - start
         record.touch()
@@ -443,7 +444,7 @@ class SSHSessionManager:
     # ------------------------------------------------------------------
 
     async def execute_stream(self, session_id: str, command: str, timeout: int = 600,
-                             cancel_event: Optional[asyncio.Event] = None):
+                             cancel_event: asyncio.Event | None = None):
         """Execute a command and yield (type, data) tuples for WebSocket streaming.
 
         If cancel_event is provided and set, closes the channel and stops streaming.
@@ -595,7 +596,7 @@ class SSHSessionManager:
     # List Sessions
     # ------------------------------------------------------------------
 
-    async def get_session(self, session_id: str) -> Optional[SessionRecord]:
+    async def get_session(self, session_id: str) -> SessionRecord | None:
         """Get a session by ID."""
         async with self._lock:
             return self._sessions.get(session_id)

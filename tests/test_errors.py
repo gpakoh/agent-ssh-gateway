@@ -10,12 +10,18 @@ import app.main as main_module
 import app.state as state_module
 from app.config import settings
 from app.ssh_manager import (
-    SSHManagerError, ConnectionError as SSHConnectionError,
-    AuthenticationError, SessionNotFoundError, TimeoutError as SSHTimeoutError,
+    AuthenticationError,
     ExecutionError,
+    SessionNotFoundError,
+    SSHManagerError,
+)
+from app.ssh_manager import (
+    ConnectionError as SSHConnectionError,
+)
+from app.ssh_manager import (
+    TimeoutError as SSHTimeoutError,
 )
 from app.state import _err
-
 
 # ---------------------------------------------------------------------------
 # _err Helper

@@ -3,13 +3,14 @@
 Each test is explicit about which bug ID it guards against.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from app.models import EventHookCreate, EventHookUpdate, BatchOperation
-from app.security import validate_path
-from app.auth_middleware import is_ip_allowed
+import pytest
+from pydantic import ValidationError
 
+from app.auth_middleware import is_ip_allowed
+from app.models import BatchOperation, EventHookCreate, EventHookUpdate
+from app.security import validate_path
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # C1 – Exception Handler: Raise → Return
@@ -96,7 +97,7 @@ class TestC3_CidrCheck:
 class TestC4_AgentTokenStore:
     def test_get_agent_token_store_before_init_raises(self):
         """C4: get_agent_token_store() raises RuntimeError if not initialized."""
-        from app.state import get_agent_token_store, agent_token_store
+        from app.state import agent_token_store, get_agent_token_store
         saved = agent_token_store
         try:
             import app.state as state_module
@@ -122,8 +123,8 @@ class TestC4_AgentTokenStore:
         state_module.manager.deactivate_session = AsyncMock()
 
         creds = {"host": "127.0.0.1", "port": 22, "username": "test", "password": "test"}
+        from app.auth_middleware import is_ip_allowed, parse_cidrs
         from app.config import settings
-        from app.auth_middleware import parse_cidrs, is_ip_allowed
 
         allowed = parse_cidrs(settings.allowed_client_cidrs)
         if creds and is_ip_allowed(creds.get("host", ""), allowed):
@@ -146,6 +147,7 @@ class TestC5_OpenAPISpecValidation:
     def test_draft7_validation_of_app_schema(self):
         """C5: the generated OpenAPI schema is valid against Draft7."""
         import jsonschema
+
         import app.main as main_module
         schema = main_module.app.openapi()
         jsonschema.Draft7Validator.check_schema(schema)
@@ -177,8 +179,9 @@ class TestH1_CorsWhitelist:
 class TestH2_HealthFlags:
     def test_health_response_model(self):
         """H2: HealthResponse has redis, postgres, ready fields."""
-        from app.models import HealthResponse
         from pydantic import TypeAdapter
+
+        from app.models import HealthResponse
 
         ta = TypeAdapter(HealthResponse)
         inst = ta.validate_python({
@@ -209,7 +212,7 @@ class TestH3_HttpUrl:
         assert hook.url.scheme == "https"
 
     def test_invalid_url_raises(self):
-        with pytest.raises(Exception):
+        with pytest.raises((ValidationError, ValueError)):
             EventHookCreate(url="not-a-url", events=["*"], secret="s")
 
 
@@ -273,6 +276,7 @@ class TestL1_OpenAPITags:
     def test_system_route_uses_known_tags(self):
         """L1: system.py no longer imports TAGS_META from main."""
         import importlib
+
         import app.routers.system as system_module
         importlib.reload(system_module)
         assert not hasattr(system_module, "TAGS_META")
@@ -383,6 +387,7 @@ class TestMypyFoundBugs:
         that previously had the bug.
         """
         import inspect
+
         from app.routers import files as files_module
         src = inspect.getsource(files_module)
         # Line 602: the bulk read route uses _state.file_editor, not bare file_editor

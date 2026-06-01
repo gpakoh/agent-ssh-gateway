@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import uuid
 import logging
-from datetime import datetime, timezone
-from typing import List
+import uuid
+from datetime import UTC, datetime
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.session_store import Base, EventHook
 
@@ -71,7 +70,7 @@ class EventHookStore:
         self,
         hook_id: str,
         url: str | None = None,
-        events: List[str] | None = None,
+        events: list[str] | None = None,
         session_id: str | None = None,
         headers_encrypted: str | None = None,
         secret_encrypted: str | None = None,
@@ -99,7 +98,7 @@ class EventHookStore:
                 hook.include_output = include_output
             if is_active is not None:
                 hook.is_active = is_active
-            hook.updated_at = datetime.now(timezone.utc)
+            hook.updated_at = datetime.now(UTC)
             await session.commit()
             await session.refresh(hook)
             return hook

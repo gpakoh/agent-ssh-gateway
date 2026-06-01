@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import uuid
 import json
 import logging
-from datetime import datetime, timezone
+import uuid
+from datetime import UTC, datetime
 
 from app import state as _state
 from app.event_hook_security import sign_payload
@@ -25,7 +25,7 @@ def _build_payload(
         "event": event,
         "event_id": uuid.uuid4().hex,
         "event_version": EVENT_VERSION,
-        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "session_id": session_id,
     }
     payload.update({k: v for k, v in extra.items() if v is not None})
@@ -107,7 +107,7 @@ async def emit_event(
             except Exception:
                 logger.exception("Failed to decrypt hook secret %s", hook.id)
 
-        timestamp = str(int(datetime.now(timezone.utc).timestamp()))
+        timestamp = str(int(datetime.now(UTC).timestamp()))
         signature = sign_payload(secret, payload_json.encode("utf-8"), timestamp)
         delivery_headers = {"Content-Type": "application/json"}
         if signature:

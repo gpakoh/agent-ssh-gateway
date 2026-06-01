@@ -5,7 +5,6 @@ import json
 import logging
 import time
 import uuid
-from typing import Optional
 
 import redis.asyncio as redis
 
@@ -33,7 +32,7 @@ class RedisJobQueue:
     
     def __init__(self, redis_url: str = "redis://redis:6379/0"):
         self._redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         self._queue_key = "ssh_gateway:jobs:queue"
         self._processing_key = "ssh_gateway:jobs:processing"
         self._completed_key = "ssh_gateway:jobs:completed"
@@ -102,7 +101,7 @@ class RedisJobQueue:
         logger.info("Job %s enqueued (priority=%d, session=%s)", job_id, priority, session_id)
         return job_id
     
-    async def dequeue(self, lease_ttl: int = 120) -> Optional[dict]:
+    async def dequeue(self, lease_ttl: int = 120) -> dict | None:
         """Get next job from queue.
 
         Sets a processing lease TTL — if the worker fails to heartbeat
@@ -163,7 +162,7 @@ class RedisJobQueue:
         stdout: str = "",
         stderr: str = "",
         exit_code: int = 0,
-        error: Optional[str] = None,
+        error: str | None = None,
     ):
         """Mark job as completed."""
         job_data = await self._get_job(job_id)
@@ -238,11 +237,11 @@ class RedisJobQueue:
                    job_id, job_data["retry_count"], job_data["max_retries"], backoff)
         return True
     
-    async def get_job(self, job_id: str) -> Optional[dict]:
+    async def get_job(self, job_id: str) -> dict | None:
         """Get job by ID."""
         return await self._get_job(job_id)
     
-    async def _get_job(self, job_id: str) -> Optional[dict]:
+    async def _get_job(self, job_id: str) -> dict | None:
         """Internal: get job data from Redis."""
         if not self._redis:
             return None

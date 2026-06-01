@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Optional, cast
+from typing import cast
 
 import redis.asyncio as redis
 
@@ -20,7 +20,7 @@ class DistributedLock:
 
     def __init__(self, redis_url: str = "redis://redis:6379/0"):
         self._redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
+        self._redis: redis.Redis | None = None
         self._lock_prefix = "ssh_gateway:lock:"
         self._renewal_tasks: dict[str, asyncio.Task] = {}
 
@@ -32,7 +32,7 @@ class DistributedLock:
 
     async def disconnect(self):
         """Disconnect from Redis and cancel all renewal tasks."""
-        for resource, task in list(self._renewal_tasks.items()):
+        for _, task in list(self._renewal_tasks.items()):
             task.cancel()
         self._renewal_tasks.clear()
         if self._redis:
@@ -44,7 +44,7 @@ class DistributedLock:
         ttl: int = 30,
         blocking: bool = True,
         blocking_timeout: int = 10,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Acquire lock on resource.
 
         Args:
@@ -162,7 +162,7 @@ class DistributedLock:
         lock_key = f"{self._lock_prefix}{resource}"
         return await self._redis.exists(lock_key) > 0
 
-    async def get_lock_info(self, resource: str) -> Optional[dict]:
+    async def get_lock_info(self, resource: str) -> dict | None:
         """Get lock information."""
         lock_key = f"{self._lock_prefix}{resource}"
         token = await self._redis.get(lock_key)

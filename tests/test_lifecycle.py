@@ -8,7 +8,6 @@ import pytest
 import app.state as state_module
 from app.ssh_manager import SSHSessionManager
 
-
 # ---------------------------------------------------------------------------
 # Cleanup_stale_sessions — No Deadlock With Concurrent Access
 # ---------------------------------------------------------------------------
@@ -211,13 +210,13 @@ async def test_shutdown_all_sessions_handled():
         for sid in list(manager._sessions.keys()):
             try:
                 await asyncio.wait_for(manager.disconnect(sid), timeout=5.0)
-            except (asyncio.TimeoutError, Exception):
+            except (TimeoutError, Exception):
                 pass
 
     try:
         await asyncio.wait_for(shutdown_all(), timeout=10.0)
         assert len(manager._sessions) == 0
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pytest.fail("shutdown of 10 dead hosts exceeded 10s timeout")
     finally:
         await manager.close_all()

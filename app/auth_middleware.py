@@ -5,10 +5,9 @@ import ipaddress
 import logging
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
-from fastapi import Request, WebSocket, HTTPException
+from fastapi import HTTPException, Request, WebSocket
 
 from app.config import settings
 
@@ -126,8 +125,8 @@ async def is_agent_token_valid(settings, provided: str, token_store=None) -> Aut
     expires_at = getattr(settings, "agent_token_expires_at", None)
     if expires_at is not None:
         if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if datetime.now(timezone.utc) >= expires_at:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if datetime.now(UTC) >= expires_at:
             return None
     if not secrets.compare_digest(provided, settings.agent_token):
         return None
@@ -217,7 +216,7 @@ def _normalise_path(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def auth_check(request: Request, settings, token_store=None) -> Optional[HTTPException]:
+async def auth_check(request: Request, settings, token_store=None) -> HTTPException | None:
     if request.method == "OPTIONS":
         return None
 
