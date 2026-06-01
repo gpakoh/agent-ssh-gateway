@@ -2,10 +2,15 @@
 
 **OpenAPI-first SSH control plane for AI agents, CI/CD pipelines and self-hosted infrastructure automation.**
 
-`agent-ssh-gateway` gives automation tools, internal services and AI agents a structured, auditable and policy-controlled way to access remote machines over SSH.
+![python](https://img.shields.io/badge/python-3.11%2B-blue)
+![tests](https://img.shields.io/badge/tests-404%20passed-brightgreen)
+![mypy](https://img.shields.io/badge/mypy-0%20errors-brightgreen)
+![ruff](https://img.shields.io/badge/ruff-passing-brightgreen)
+![license](https://img.shields.io/badge/license-MIT-blue)
 
-It is not just a browser terminal.
-It is an API layer between your agents and your servers.
+A structured, auditable and policy-controlled SSH API for automation tools, AI agents and internal services.
+
+Not a browser terminal — an API layer between your agents and your servers.
 
 ```text
 AI Agent / CI Runner / Internal Tool
@@ -201,7 +206,19 @@ SSH gateways are sensitive infrastructure components.
 
 Do not expose this service directly to the Internet without proper protection.
 
-Recommended deployment:
+### Current hardening status
+
+- Target allowlist/denylist: enabled
+- Command policy: audit by default, enforce available
+- Route auth contract: enabled
+- Agent token scopes: enabled
+- Session ownership: enabled
+- Secret redaction: enabled
+- Private key upload: disabled by default
+- Full mypy: 0 errors
+- Test suite: 404 passed, 1 skipped
+
+### Recommended deployment
 
 ```text
 Internet
@@ -217,7 +234,7 @@ agent-ssh-gateway
 Allowed SSH Targets
 ```
 
-Recommended protections:
+### Recommended protections
 
 * run behind a reverse proxy;
 * require SSO for human access;
@@ -396,11 +413,6 @@ Before using this in production:
 
 Planned or recommended improvements:
 
-* target host allowlist and denylist;
-* role-based command policies;
-* stronger agent token lifecycle;
-* command output redaction;
-* secret-safe audit logs;
 * safer file transfer policies;
 * session recording;
 * job queue improvements;
@@ -461,19 +473,6 @@ MIT License.
 
 ---
 
-## Current hardening status
-
-- Route auth contract: enabled
-- Agent token scopes: enabled
-- Session ownership: enabled
-- Target allowlist/denylist: enabled
-- Command policy: audit by default
-- Secret redaction: enabled
-- Private key upload: disabled by default
-- Test suite: green without external services
-
----
-
 ## Project status
 
 Early-stage but functional.
@@ -481,9 +480,3 @@ Early-stage but functional.
 The project is suitable for experimentation, internal automation and controlled self-hosted environments.
 
 Production use requires careful security review, strict network policies and secret management.
-
----
-
-## Short description
-
-**agent-ssh-gateway** is a lightweight self-hosted SSH control plane that lets AI agents, CI/CD pipelines and internal tools execute SSH operations through a controlled, auditable OpenAPI-based gateway.
