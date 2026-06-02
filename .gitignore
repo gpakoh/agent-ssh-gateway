@@ -17,6 +17,25 @@ test-coverage-plan.md
 .gitea/
 mypy.ini
 
+# Archives
+*.zip
+*.tar.gz
+*.tgz
+
+# Build artifacts
+dist/
+build/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+
+# Environment variants
+.env.*
+!.env.example
+
 # Moved to docker/ directory
 /docker-compose.yml
 /Dockerfile
