@@ -8,21 +8,105 @@
 ![ruff](https://img.shields.io/badge/ruff-passing-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
-> **Security:** This project controls SSH access and command execution. Read [SECURITY.md](SECURITY.md) before deploying.
+> **Do not expose this service directly to the public Internet.** Read [SECURITY.md](SECURITY.md) before deploying.
 
-A structured, auditable and policy-controlled SSH API for automation tools, AI agents and internal services.
+---
 
-Not a browser terminal — an API layer between your agents and your servers.
+## Project status
+
+Early self-hosted MVP / alpha release. Intended for private/internal automation environments. The public API may change before v1.0.0.
+
+---
+
+## Quickstart
+
+```bash
+git clone https://github.com/gpakoh/web-ssh-gateway.git
+cd web-ssh-gateway
+cp .env.example .env
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+Start the server:
+
+```bash
+uvicorn app.main:app --reload
+```
+
+On Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+uvicorn app.main:app --reload
+```
+
+Verify it is running:
+
+```bash
+curl http://127.0.0.1:8000/health
+
+curl http://127.0.0.1:8000/api/capabilities
+```
+
+OpenAPI UI:
 
 ```text
-AI Agent / CI Runner / Internal Tool
-              ↓
-        HTTP API / SDK
-              ↓
- Policy • Audit • Sessions • Jobs
-              ↓
-          SSH Targets
+http://127.0.0.1:8000/docs
 ```
+
+---
+
+## Minimal SSH flow
+
+Set a master API key (required by the auth middleware):
+
+```bash
+export API_KEY=change-me-generate-long-random-api-key
+```
+
+1. Create an SSH session:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/ssh/connect \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "host": "your-server",
+    "username": "root",
+    "password": "your-password"
+  }'
+```
+
+Save the returned `session_id`.
+
+2. Execute a command:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/ssh/execute \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "<session_id>",
+    "command": "uname -a"
+  }'
+```
+
+3. Disconnect:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/ssh/disconnect \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "<session_id>"
+  }'
+```
+
+For AI agent use, request a scoped agent token instead of using the master key directly.
 
 ---
 
@@ -66,37 +150,19 @@ Instead of giving every automation component direct SSH access, you can place on
 
 Give AI agents a controlled way to execute infrastructure tasks without handing them raw SSH access.
 
-Examples:
-
-* inspect a remote service;
-* read logs;
-* restart a container;
-* check disk usage;
-* run deployment commands;
-* collect diagnostics.
+Examples: inspect a remote service, read logs, restart a container, check disk usage, run deployment commands, collect diagnostics.
 
 ### CI/CD pipelines
 
 Use the gateway as a central SSH execution layer for build and deployment jobs.
 
-Examples:
-
-* deploy to a remote host;
-* run migrations;
-* upload release artifacts;
-* restart services;
-* collect post-deploy status.
+Examples: deploy to a remote host, run migrations, upload release artifacts, restart services, collect post-deploy status.
 
 ### Internal infrastructure tools
 
 Build dashboards, admin panels and automation services on top of a single SSH API.
 
-Examples:
-
-* one-click maintenance actions;
-* controlled server operations;
-* internal support tools;
-* repeatable operational playbooks.
+Examples: one-click maintenance actions, controlled server operations, internal support tools, repeatable operational playbooks.
 
 ### Self-hosted environments
 
@@ -106,99 +172,114 @@ Useful for homelabs, small infrastructure clusters, internal DevOps setups and p
 
 ## Key features
 
-* **API-first design**
-  SSH operations are exposed through a documented HTTP API.
-
-* **OpenAPI contract**
-  Designed to be usable by agents, SDKs and generated clients.
-
-* **Persistent SSH sessions**
-  Create, reuse and close sessions through API calls.
-
-* **Command execution**
-  Run commands remotely and capture structured results.
-
-* **WebSocket terminal**
-  Optional interactive terminal access through the browser or custom clients.
-
-* **Background jobs**
-  Run longer tasks without blocking the initial API request.
-
-* **File operations**
-  Upload, download and manage files over SSH.
-
-* **Agent tokens**
-  Use short-lived tokens for automation instead of long-lived master credentials.
-
-* **Session ownership**
-  Each session is bound to the token that created it. Agent tokens cannot execute commands, transfer files, or disconnect sessions owned by other tokens. Master API keys bypass session ownership restrictions.
-
-* **Audit logging**
-  Track who connected, where, when and what was executed.
-
-* **Event hooks**
-  Send structured events to external systems.
-
-* **Security-focused deployment model**
-  Designed to run behind SSO, reverse proxy, mTLS, API keys and network policies.
+* **API-first design** — SSH operations are exposed through a documented HTTP API.
+* **OpenAPI contract** — usable by agents, SDKs and generated clients.
+* **Persistent SSH sessions** — create, reuse and close sessions through API calls.
+* **Command execution** — run commands remotely and capture structured results.
+* **WebSocket terminal** — optional interactive terminal access.
+* **Background jobs** — run longer tasks without blocking the initial API request.
+* **File operations** — upload, download and manage files over SSH.
+* **Agent tokens** — short-lived tokens for automation instead of long-lived master credentials.
+* **Session ownership** — each session is bound to the token that created it.
+* **Audit logging** — track who connected, where, when and what was executed.
+* **Event hooks** — send structured events to external systems.
+* **Security-focused deployment model** — designed to run behind SSO, reverse proxy, mTLS, API keys and network policies.
 
 ---
 
 ## What this project is not
 
-`agent-ssh-gateway` is not intended to replace mature enterprise access platforms such as Teleport or Apache Guacamole.
+Not a replacement for Teleport, Apache Guacamole, or enterprise access platforms. Not a browser SSH terminal.
 
-It is also not just another web SSH terminal.
-
-The goal is different:
-
-> provide a lightweight, self-hosted SSH control plane for agents, automation and internal infrastructure workflows.
+The goal: a lightweight, self-hosted SSH control plane for agents, automation and internal infrastructure workflows.
 
 If you only need a browser-based SSH client, this may be more than you need.
 
-If you need controlled SSH access for automation, agents and CI/CD, this project is designed for that.
-
 ---
 
-## Example workflow
+## Configuration
+
+Create an `.env` file from the example:
 
 ```bash
-# 1. Create SSH session
-curl -X POST https://gateway.example.com/api/ssh/connect \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "host": "10.0.0.25",
-    "port": 22,
-    "username": "deploy"
-  }'
+cp .env.example .env
+```
 
-# 2. Execute command
-curl -X POST https://gateway.example.com/api/ssh/sessions/<session_id>/exec \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "command": "docker ps"
-  }'
+All env vars are documented in `.env.example`. Key settings:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `API_KEY` | `change-me-...` | Master API key for authentication |
+| `AGENT_TOKEN` | `change-me-...` | Agent token for scoped access |
+| `ALLOWED_TARGET_CIDRS` | `10.0.0.0/8,...` | SSH targets the gateway may connect to |
+| `DENIED_TARGET_CIDRS` | `127.0.0.0/8,...` | SSH targets always denied |
+| `SSH_KEY_UPLOAD_ENABLED` | `false` | Private key upload via API |
+| `COMMAND_POLICY_MODE` | `audit` | Command policy mode |
+| `PERSISTENT_SESSIONS_ENABLED` | `false` | Persist sessions across restarts |
+| `ENCRYPTION_KEY` | `change-me-...` | Fernet key for credential encryption |
+
+Never commit real `.env` files.
+
+---
+
+## Running with Docker Compose
+
+```bash
+docker compose up -d
+```
+
+Health check:
+
+```bash
+curl http://localhost:8085/health
+```
+
+OpenAPI:
+
+```text
+http://localhost:8085/docs
 ```
 
 ---
 
-## Example agent use
+## Development
 
-An AI agent or automation service can use the gateway like this:
-
-```text
-1. Request short-lived agent token
-2. Create SSH session to an allowed target
-3. Run diagnostic command
-4. Parse structured output
-5. Trigger remediation job if needed
-6. Store audit trail
-7. Close session
+```bash
+source .venv/bin/activate
+pip install -e ".[dev]"
+pytest -q                       # 413+ tests
+ruff check app tests            # linting
+mypy app --show-error-codes     # type checking
+uvicorn app.main:app --reload   # run locally
 ```
 
-This gives agents a safer operational boundary than direct SSH access.
+---
+
+## Command policy
+
+```env
+COMMAND_POLICY_MODE=audit
+COMMAND_POLICY_PROFILE=default
+```
+
+Modes: `off` (disabled), `audit` (log, do not block), `enforce` (block).
+
+Profiles: `default` (blocks dangerous root commands), `readonly` (inspection only), `ops` (read-only + limited systemctl/service/docker).
+
+Recommended rollout: start with `audit`, review logs, then move to `enforce` on selected environments.
+
+---
+
+## Target allowlist
+
+Production deployments should restrict which hosts the gateway can reach:
+
+```env
+ALLOWED_TARGET_CIDRS=10.0.0.0/8,192.168.0.0/16,172.16.0.0/12
+DENIED_TARGET_CIDRS=127.0.0.0/8,::1/128,169.254.0.0/16,0.0.0.0/8,224.0.0.0/4
+```
+
+This prevents the gateway from becoming an internal port scanner or SSRF-style pivot.
 
 ---
 
@@ -218,14 +299,14 @@ Do not expose this service directly to the Internet without proper protection.
 - Secret redaction: enabled
 - Private key upload: disabled by default
 - Full mypy: 0 errors
-- Test suite: 404 passed, 1 skipped
+- Test suite: 413 passed, 1 skipped
 
-### Recommended deployment
+### Recommended deployment topology
 
 ```text
 Internet
    ↓
-Reverse Proxy
+Reverse Proxy (TLS termination)
    ↓
 SSO / Authelia / OAuth2 Proxy
    ↓
@@ -254,149 +335,6 @@ Allowed SSH Targets
 
 ---
 
-## Command policy
-
-`agent-ssh-gateway` includes a basic command policy engine.
-
-```env
-COMMAND_POLICY_MODE=audit
-COMMAND_POLICY_PROFILE=default
-```
-
-Modes:
-
-- `off` — command policy disabled;
-- `audit` — log decisions but do not block;
-- `enforce` — block commands that do not match the selected profile.
-
-Profiles:
-
-- `default` — blocks obviously dangerous root commands;
-- `readonly` — allows only inspection/read-only commands;
-- `ops` — allows read-only commands plus limited `systemctl`, `service` and `docker` actions.
-
-Recommended rollout:
-
-1. Start with `COMMAND_POLICY_MODE=audit`.
-2. Review audit logs.
-3. Move selected environments to `COMMAND_POLICY_MODE=enforce`.
-
----
-
-## Target allowlist
-
-A production deployment should restrict which hosts the gateway can access.
-
-Example:
-
-```env
-ALLOWED_TARGET_CIDRS=10.0.0.0/8,192.168.0.0/16,172.16.0.0/12
-DENIED_TARGET_CIDRS=127.0.0.0/8,::1/128,169.254.0.0/16,0.0.0.0/8,224.0.0.0/4
-```
-
-This prevents the gateway from becoming an internal port scanner or SSRF-style pivot.
-
----
-
-## Configuration
-
-Create an `.env` file from the example:
-
-```bash
-cp .env.example .env
-```
-
-Minimal configuration:
-
-```env
-API_KEY=change-me-to-a-long-random-secret
-ENCRYPTION_KEY=change-me
-DATABASE_URL=postgresql://gateway:gateway@postgres:5432/gateway
-REDIS_URL=redis://redis:6379/0
-
-ALLOWED_CLIENT_CIDRS=10.0.0.0/8,192.168.0.0/16
-ALLOWED_TARGET_CIDRS=10.0.0.0/8,192.168.0.0/16
-DENIED_TARGET_CIDRS=127.0.0.0/8,::1/128,169.254.0.0/16
-```
-
-Never commit real `.env` files.
-
----
-
-## Running with Docker Compose
-
-```bash
-docker compose up -d
-```
-
-Then check service health:
-
-```bash
-curl http://localhost:8085/health
-```
-
-OpenAPI schema should be available at:
-
-```text
-http://localhost:8085/openapi.json
-```
-
-Interactive API documentation may be available at:
-
-```text
-http://localhost:8085/docs
-```
-
-depending on your deployment settings.
-
----
-
-## Development
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-```
-
-On Windows PowerShell:
-
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
-```
-
-Run tests:
-
-```bash
-pytest -q
-```
-
-### Linting
-
-The project uses [ruff](https://docs.astral.sh/ruff/) for linting:
-
-```bash
-ruff check app tests
-```
-
-### Type checking
-
-The full application passes mypy strict checking:
-
-```bash
-mypy app --show-error-codes
-```
-
-Run the application locally:
-
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8085 --reload
-```
-
----
-
 ## Suggested production checklist
 
 Before using this in production:
@@ -419,9 +357,13 @@ Before using this in production:
 
 ---
 
-## Roadmap
+## Public repository hygiene
 
-See [docs/roadmap.md](docs/roadmap.md).
+This repository should contain only generic example configuration.
+
+Do not commit: real `.env` files, private SSH keys, API keys, agent tokens, webhook secrets, production IP addresses, internal domains, real reverse proxy configs, customer data, or deployment files containing private infrastructure details.
+
+Keep real deployment configuration in a private repository or secret manager.
 
 ---
 
@@ -448,43 +390,6 @@ docs/
 
 ---
 
-## Public repository hygiene
-
-This repository should contain only generic example configuration.
-
-Do not commit:
-
-* real `.env` files;
-* private SSH keys;
-* API keys;
-* agent tokens;
-* webhook secrets;
-* production IP addresses;
-* internal domains;
-* real reverse proxy configs;
-* customer data;
-* deployment files containing private infrastructure details.
-
-Keep real deployment configuration in a private repository or secret manager.
-
----
-
-## License
-
-MIT License.
-
----
-
-## Project status
-
-This project is an early self-hosted MVP / alpha release.
-
-It is intended for private/internal automation environments. Do not expose it directly to the public Internet without additional reverse proxy authentication, TLS, firewall rules, and operational hardening.
-
-The public API may change before v1.0.0.
-
----
-
 ## Project documents
 
 - [Security model](SECURITY.md)
@@ -495,4 +400,4 @@ The public API may change before v1.0.0.
 
 ## License
 
-MIT
+MIT License.
