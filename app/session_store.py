@@ -269,9 +269,9 @@ class SessionStore:
                     )
                 )
                 await session.commit()
-                if result.rowcount == 0:  # type: ignore[attr-defined]
+                if result.rowcount == 0:
                     break
-                total += result.rowcount  # type: ignore[attr-defined]
+                total += result.rowcount
 
         if total > 0:
             logger.info("Cleaned up %d expired sessions", total)
