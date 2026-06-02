@@ -649,7 +649,7 @@ async def upload_ssh_key(
     file: UploadFile = File(...),
     _identity: AuthIdentity = Depends(require_master_key),
 ):
-    """Upload an SSH private key. Stored in /app/ssh_keys/."""
+    """Upload an SSH private key. Stored in ./ssh_keys/."""
     if not settings.ssh_key_upload_enabled:
         raise HTTPException(
             status_code=403,
@@ -667,7 +667,7 @@ async def upload_ssh_key(
     if not text.startswith("-----BEGIN"):
         raise HTTPException(status_code=400, detail=_err(400, "Not a valid private key format"))
 
-    keys_dir = "/app/ssh_keys"
+    keys_dir = "ssh_keys"
     os.makedirs(keys_dir, exist_ok=True)
 
     raw_name = file.filename or f"key-{uuid.uuid4().hex[:8]}.pem"
