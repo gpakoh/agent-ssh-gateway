@@ -2,6 +2,7 @@
 
 import logging
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
@@ -61,6 +62,9 @@ from app.models import (
 from app.security import validate_target_host
 from app.server_manager import ServerStatus
 from app.state import _err
+from app.version import APP_VERSION
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +85,9 @@ async def health_check():
         status="ok" if redis_ok or not settings.redis_url else "degraded",
         redis=redis_ok,
         postgres=pg_ok,
-        ready=redis_ok or pg_ok or True,
+        # Redis/Postgres are optional integrations for this alpha release,
+        # so the service can be ready even when they are not configured.
+        ready=True,
     )
 
 
@@ -93,7 +99,7 @@ async def get_capabilities():
     """
     servers = _state.server_manager.list_servers() if _state.server_manager else []
     return CapabilitiesResponse(
-        version="4.5.1",
+        version=APP_VERSION,
         auth_mode="api_key" if settings.api_auth_enabled else "none",
         session_timeout=settings.session_timeout,
         cleanup_interval=settings.cleanup_interval,
@@ -199,19 +205,17 @@ async def download_sdk(_identity: AuthIdentity = Depends(require_master_key)):
 
     Note: auth is handled by the global middleware.
     """
-    sdk_path = "/app/sdk/ssh_gateway.py"
-    try:
-        with open(sdk_path) as f:
-            content = f.read()
-        return Response(
-            content=content,
-            media_type="text/x-python",
-            headers={
-                "Content-Disposition": "attachment; filename=ssh_gateway.py"
-            }
-        )
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=_err(404, "SDK not found")) from None
+    sdk_path = PROJECT_ROOT / "sdk" / "ssh_gateway.py"
+    if not sdk_path.exists():
+        raise HTTPException(status_code=404, detail=_err(404, "SDK not found"))
+    content = sdk_path.read_text()
+    return Response(
+        content=content,
+        media_type="text/x-python",
+        headers={
+            "Content-Disposition": "attachment; filename=ssh_gateway.py"
+        }
+    )
 
 
 @router.get("/api/circuit-breaker/stats", tags=["system"])

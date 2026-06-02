@@ -49,6 +49,7 @@ from app.ssh_manager import (
     TimeoutError,
 )
 from app.state import _err
+from app.version import APP_VERSION
 from app.webhook_manager import WebhookManager
 
 logging.basicConfig(
@@ -284,7 +285,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="agent-ssh-gateway",
     description="Execute SSH commands through a web browser",
-    version="1.0.0",
+    version=APP_VERSION,
     lifespan=lifespan,
     responses={
         422: {
@@ -576,7 +577,7 @@ def custom_openapi():
         ("/api/jobs/run", "post"): {"job_id": "job_abc123", "status": "queued"},
         ("/api/file/read", "post"): {"path": "/etc/hostname", "content": "my-server\n", "size": 10, "encoding": "utf-8"},
         ("/api/file/write", "post"): {"path": "/root/test.txt", "size": 5, "encoding": "utf-8"},
-        ("/", "get"): {"service": "agent-ssh-gateway", "version": "3.0.0", "status": "running"},
+        ("/", "get"): {"service": "agent-ssh-gateway", "version": APP_VERSION, "status": "running"},
     }
 
     # Helper To Generate Example From JSON Schema
