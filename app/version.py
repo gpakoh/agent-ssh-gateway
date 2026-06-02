@@ -6,7 +6,7 @@ Import this instead of hardcoding version strings.
 
 from importlib.metadata import PackageNotFoundError, version
 
-PACKAGE_NAME = "web-ssh-gateway"
+PACKAGE_NAME = "agent-ssh-gateway"
 FALLBACK_VERSION = "0.1.0a0"
 
 
