@@ -1,5 +1,5 @@
 [project]
-name = "web-ssh-gateway"
+name = "agent-ssh-gateway"
 version = "0.1.0a0"
 description = "A self-hosted SSH gateway API for agents, automation, and CI/CD workflows."
 readme = "README.md"

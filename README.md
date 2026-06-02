@@ -3,7 +3,7 @@
 **OpenAPI-first SSH control plane for AI agents, CI/CD pipelines and self-hosted infrastructure automation.**
 
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
-![CI](https://github.com/gpakoh/web-ssh-gateway/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/gpakoh/agent-ssh-gateway/actions/workflows/ci.yml/badge.svg)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 > **Do not expose this service directly to the public Internet.** Read [SECURITY.md](SECURITY.md) before deploying.
@@ -19,8 +19,8 @@ Early self-hosted MVP / alpha release. Intended for private/internal automation 
 ## Quickstart
 
 ```bash
-git clone https://github.com/gpakoh/web-ssh-gateway.git
-cd web-ssh-gateway
+git clone https://github.com/gpakoh/agent-ssh-gateway.git
+cd agent-ssh-gateway
 cp .env.example .env
 python -m venv .venv
 source .venv/bin/activate
