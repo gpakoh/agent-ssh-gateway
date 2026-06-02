@@ -436,7 +436,7 @@ def require_scope(required: str):
             },
         )
 
-    _scope_check.required_scope = required  # type: ignore[attr-defined]
+    _scope_check.required_scope = required
     return _scope_check
 
 

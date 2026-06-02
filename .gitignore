@@ -13,6 +13,9 @@ ENV/
 *.egg-info/
 report-*.md
 test-coverage-plan.md
+.ruff_cache/
+.gitea/
+mypy.ini
 
 # Moved to docker/ directory
 /docker-compose.yml
