@@ -8,6 +8,8 @@
 ![ruff](https://img.shields.io/badge/ruff-passing-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
+> **Security:** This project controls SSH access and command execution. Read [SECURITY.md](SECURITY.md) before deploying.
+
 A structured, auditable and policy-controlled SSH API for automation tools, AI agents and internal services.
 
 Not a browser terminal — an API layer between your agents and your servers.
