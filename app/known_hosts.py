@@ -270,7 +270,7 @@ class PostgresHostKeyStore(HostKeyStore):
                 sa_delete(HostKeyRecord).where(HostKeyRecord.host == host)
             )
             await session.commit()
-            return result.rowcount  # type: ignore[attr-defined]
+            return result.rowcount
 
     async def delete_all(self) -> int:
         async with self._lock:
@@ -281,7 +281,7 @@ class PostgresHostKeyStore(HostKeyStore):
             from sqlalchemy import delete as sa_delete
             result = await session.execute(sa_delete(HostKeyRecord))
             await session.commit()
-            return result.rowcount  # type: ignore[attr-defined]
+            return result.rowcount
 
     async def disconnect(self):
         if self._engine:
