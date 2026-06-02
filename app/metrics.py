@@ -4,6 +4,8 @@ import logging
 
 from prometheus_client import Counter, Gauge, Histogram, Info, generate_latest
 
+from app.version import APP_VERSION
+
 logger = logging.getLogger(__name__)
 
 
@@ -117,7 +119,7 @@ class MetricsCollector:
 
         # System info
         self.info = Info('ssh_gateway', 'SSH Gateway information')
-        self.info.info({'version': '4.5.1'})
+        self.info.info({'version': APP_VERSION})
     
     def record_request(self, method: str, endpoint: str, status: int, duration: float):
         """Record HTTP request metrics."""
