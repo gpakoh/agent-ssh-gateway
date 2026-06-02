@@ -28,7 +28,7 @@ class Settings(BaseSettings):
         default=True, alias="SSH_STRICT_HOST_KEY_CHECKING"
     )
     known_hosts_store: str = Field(default="", alias="KNOWN_HOSTS_STORE")
-    known_hosts_file: str = Field(default="/app/known_hosts", alias="KNOWN_HOSTS_FILE")
+    known_hosts_file: str = Field(default="known_hosts", alias="KNOWN_HOSTS_FILE")
 
     server_default_configs: str = Field(
         default="{}",

@@ -264,7 +264,7 @@ def redact_secrets(value: Any) -> Any:
 class AuditLogger:
     """Audit logger for security events."""
     
-    def __init__(self, log_file: str = "/app/logs/audit.log"):
+    def __init__(self, log_file: str = "logs/audit.log"):
         self.logger = logging.getLogger("audit")
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
