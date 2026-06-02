@@ -421,15 +421,7 @@ Before using this in production:
 
 ## Roadmap
 
-Planned or recommended improvements:
-
-* safer file transfer policies;
-* session recording;
-* job queue improvements;
-* SDK examples;
-* GitHub Actions examples;
-* MCP/AI-agent integration examples;
-* production hardening guide.
+See [docs/roadmap.md](docs/roadmap.md).
 
 ---
 
@@ -444,7 +436,7 @@ app/
   config.py         Application configuration
 
 docker/
-  docker-compose.example.yml
+  docker-compose.yml
   Dockerfile
 
 tests/
@@ -485,8 +477,22 @@ MIT License.
 
 ## Project status
 
-Early-stage but functional.
+This project is an early self-hosted MVP / alpha release.
 
-The project is suitable for experimentation, internal automation and controlled self-hosted environments.
+It is intended for private/internal automation environments. Do not expose it directly to the public Internet without additional reverse proxy authentication, TLS, firewall rules, and operational hardening.
 
-Production use requires careful security review, strict network policies and secret management.
+The public API may change before v1.0.0.
+
+---
+
+## Project documents
+
+- [Security model](SECURITY.md)
+- [Changelog](CHANGELOG.md)
+- [Roadmap](docs/roadmap.md)
+
+---
+
+## License
+
+MIT
