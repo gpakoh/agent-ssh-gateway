@@ -50,6 +50,7 @@ dev = [
   "types-PyYAML",
   "types-aiofiles",
   "jsonschema",
+  "fakeredis[lua]",
 ]
 
 [build-system]
