@@ -416,7 +416,7 @@ async def session_health(session_id: str, request: Request, _identity: AuthIdent
 @router.websocket("/api/ssh/execute/stream")
 async def ssh_execute_stream(websocket: WebSocket):
     """Execute a command and stream output via WebSocket."""
-    identity = await ws_auth_check(websocket, settings, _state.agent_token_store)
+    identity = await ws_auth_check(websocket, settings, _state.agent_token_store, required_scope="ssh:execute")
     if isinstance(identity, tuple):
         await websocket.close(code=identity[0], reason=identity[1])
         return
@@ -429,6 +429,39 @@ async def ssh_execute_stream(websocket: WebSocket):
 
         if not session_id or not command:
             await websocket.send_json({"type": "error", "data": "session_id and command are required"})
+            await websocket.close()
+            return
+
+        try:
+            command = sanitize_command(command)
+        except ValueError as exc:
+            _state.audit_logger.log_security_event(
+                "BLOCKED_COMMAND", str(exc), websocket.client.host
+            )
+            await websocket.send_json({"type": "error", "data": str(exc)})
+            await websocket.close()
+            return
+
+        decision = evaluate_command_policy(
+            command,
+            mode=settings.command_policy_mode,
+            profile=settings.command_policy_profile,
+        )
+
+        _state.audit_logger.log_security_event(
+            "COMMAND_POLICY_DECISION",
+            f"session_id={session_id}; command={command}; allowed={decision.allowed}; "
+            f"reason={decision.reason}; profile={decision.profile}; mode={decision.mode}; "
+            f"command_root={decision.command_root}",
+            websocket.client.host if websocket.client else "unknown",
+        )
+
+        if not decision.allowed:
+            await websocket.send_json({
+                "type": "error",
+                "code": "COMMAND_POLICY_DENIED",
+                "message": f"Command denied by policy: {decision.reason}",
+            })
             await websocket.close()
             return
 
@@ -446,16 +479,6 @@ async def ssh_execute_stream(websocket: WebSocket):
                 "code": "SESSION_OWNERSHIP",
                 "message": "Agent token cannot access this session",
             })
-            await websocket.close()
-            return
-
-        try:
-            command = sanitize_command(command)
-        except ValueError as exc:
-            _state.audit_logger.log_security_event(
-                "BLOCKED_COMMAND", str(exc), websocket.client.host
-            )
-            await websocket.send_json({"type": "error", "data": str(exc)})
             await websocket.close()
             return
 
@@ -478,7 +501,7 @@ async def ssh_execute_stream(websocket: WebSocket):
 @router.websocket("/api/ssh/pty/{session_id}/stream")
 async def pty_stream(websocket: WebSocket, session_id: str):
     """Interactive PTY via WebSocket."""
-    identity = await ws_auth_check(websocket, settings, _state.agent_token_store)
+    identity = await ws_auth_check(websocket, settings, _state.agent_token_store, required_scope="ssh:execute")
     if isinstance(identity, tuple):
         await websocket.close(code=identity[0], reason=identity[1])
         return

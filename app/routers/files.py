@@ -729,7 +729,7 @@ async def file_watch_stream(websocket: WebSocket):
     2. Send: {"session_id": "...", "path": "/var/log/app.log", "tail": true}
     3. Receive file updates as they happen
     """
-    identity = await ws_auth_check(websocket, settings, _state.agent_token_store)
+    identity = await ws_auth_check(websocket, settings, _state.agent_token_store, required_scope="ssh:files")
     if isinstance(identity, tuple):
         await websocket.close(code=identity[0], reason=identity[1])
         return
