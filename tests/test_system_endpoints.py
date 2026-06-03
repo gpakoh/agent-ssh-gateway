@@ -1,4 +1,4 @@
-"""Tests for /health, /openapi.json version, and /api/sdk/download consistency."""
+"""Tests for /health, /openapi.json version, /api/sdk/download, and known-hosts endpoints."""
 
 from starlette.testclient import TestClient
 
@@ -47,3 +47,37 @@ def test_sdk_download_returns_200_with_master_key(monkeypatch):
         )
     assert resp.status_code == 200
     assert "class SSHGatewayClient" in resp.text
+
+
+def test_known_hosts_check_unknown(monkeypatch):
+    monkeypatch.setattr(settings, "api_auth_enabled", False)
+    with TestClient(app) as client:
+        resp = client.get("/api/known-hosts/check?host=unknown.test&port=22")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "unknown"
+    assert data["host"] == "unknown.test"
+    assert data["port"] == 22
+
+
+def test_known_hosts_lookup_404(monkeypatch):
+    monkeypatch.setattr(settings, "api_auth_enabled", False)
+    with TestClient(app) as client:
+        resp = client.get("/api/known-hosts/unknown.test?port=22")
+    assert resp.status_code == 404
+
+
+def test_known_hosts_delete_with_port_404(monkeypatch):
+    monkeypatch.setattr(settings, "api_auth_enabled", False)
+    with TestClient(app) as client:
+        resp = client.delete("/api/known-hosts/unknown.test?port=22")
+    assert resp.status_code == 404
+
+
+def test_known_hosts_clear_all(monkeypatch):
+    monkeypatch.setattr(settings, "api_auth_enabled", False)
+    with TestClient(app) as client:
+        resp = client.delete("/api/known-hosts")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "deleted" in data
