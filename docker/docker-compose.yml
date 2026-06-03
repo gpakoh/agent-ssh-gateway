@@ -32,12 +32,11 @@ services:
       - AGENT_TOKEN=1cff760db55a0b6e058317d4259559c78c440e49f64aba78de942182a1fe2e3d
       - AGENT_TOKEN_SCOPES=["ssh:connect","ssh:execute","ssh:files","ssh:disconnect","ssh:port-check"]
       - KNOWN_HOSTS_STORE=file
-      - KNOWN_HOSTS_FILE=/tmp/known_hosts
-    tmpfs:
-      - /tmp
+      - KNOWN_HOSTS_FILE=/app/data/known_hosts
     volumes:
       - ssh_keys:/app/ssh_keys:ro
       - gateway_logs:/app/logs
+      - known_hosts:/app/data
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -74,4 +73,6 @@ volumes:
   gateway_logs:
     driver: local
   redis_data:
+    driver: local
+  known_hosts:
     driver: local
