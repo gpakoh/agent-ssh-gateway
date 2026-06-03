@@ -27,7 +27,7 @@ COPY --chown=appuser:appuser app/ ./app/
 COPY --chown=appuser:appuser sdk/ ./sdk/
 
 # Security: Create necessary directories
-RUN mkdir -p /app/ssh_keys /app/logs /tmp && \
+RUN mkdir -p /app/ssh_keys /app/logs /app/data /tmp && \
     chown -R appuser:appuser /app /tmp
 
 # Security: Set restrictive permissions
@@ -38,7 +38,7 @@ RUN chmod -R 755 /app && \
 USER appuser
 
 # Security: Read-only filesystem (except /tmp and /app/logs)
-VOLUME ["/tmp", "/app/logs"]
+VOLUME ["/tmp", "/app/logs", "/app/data"]
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
