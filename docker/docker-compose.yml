@@ -33,6 +33,7 @@ services:
       - AGENT_TOKEN_SCOPES=["ssh:connect","ssh:execute","ssh:files","ssh:disconnect","ssh:port-check"]
       - KNOWN_HOSTS_STORE=file
       - KNOWN_HOSTS_FILE=/app/data/known_hosts
+      - SSH_STRICT_HOST_KEY_CHECKING=false
     volumes:
       - ssh_keys:/app/ssh_keys:ro
       - gateway_logs:/app/logs

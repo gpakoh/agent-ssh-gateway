@@ -206,12 +206,17 @@ class SSHSessionManager:
                 logger.error("Error closing session %s: %s", sid, exc)
 
     def _get_host_key_policy(self, port: int = 22):
-        """Return host key policy based on configuration."""
-        if self._strict_host_key:
-            return paramiko.RejectPolicy()
+        """Return host key policy based on configuration.
+
+        When a host key store is configured, use KnownHostsPolicy
+        (checks store, rejects unknown/changed). When no store is
+        configured, use RejectPolicy if strict, AutoAddPolicy otherwise.
+        """
         if not isinstance(self._host_key_store, NullHostKeyStore):
             return KnownHostsPolicy(self._host_key_store, port=port)
-        return paramiko.RejectPolicy()
+        if self._strict_host_key:
+            return paramiko.RejectPolicy()
+        return paramiko.AutoAddPolicy()
 
     def _encrypt_cred(self, value: str | None) -> str | None:
         if value is None or self._secret_manager is None:
