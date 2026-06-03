@@ -29,6 +29,8 @@ services:
       - UVICORN_PORT=8085
       - REDIS_URL=redis://redis:6379/0
       - API_KEY=${API_KEY:?set API_KEY}
+      - AGENT_TOKEN=1cff760db55a0b6e058317d4259559c78c440e49f64aba78de942182a1fe2e3d
+      - AGENT_TOKEN_SCOPES=["ssh:connect","ssh:execute","ssh:files","ssh:disconnect","ssh:port-check"]
     volumes:
       - ssh_keys:/app/ssh_keys:ro
       - gateway_logs:/app/logs
