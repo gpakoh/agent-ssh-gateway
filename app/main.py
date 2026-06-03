@@ -284,7 +284,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="agent-ssh-gateway",
-    description="Execute SSH commands through a web browser",
+    description=(
+        "API-first SSH gateway for AI agents, CI/CD, and infrastructure teams.\n\n"
+        "## Authentication\n"
+        "All endpoints (except `/health` and `/api/capabilities`) require `X-API-Key` header.\n"
+        "- **Master API key** — full access to all endpoints.\n"
+        "- **Agent token** — scoped access for automation (create via `POST /api/agent/token`).\n\n"
+        "See `GET /api/help` for a quick-start guide with curl examples."
+    ),
     version=APP_VERSION,
     lifespan=lifespan,
     responses={
@@ -294,20 +301,20 @@ app = FastAPI(
         }
     },
     openapi_tags=[
-        {"name": "ssh", "description": "SSH session management (connect, execute, disconnect)"},
-        {"name": "files", "description": "File operations (read, edit, upload, download)"},
-        {"name": "jobs", "description": "Background job execution and monitoring"},
-        {"name": "git", "description": "Git repository operations"},
-        {"name": "context", "description": "Development contexts with git awareness"},
-        {"name": "templates", "description": "Code templates"},
-        {"name": "servers", "description": "Saved server management"},
-        {"name": "snapshots", "description": "Project snapshots for recovery"},
-        {"name": "webhooks", "description": "CI/CD webhooks"},
-        {"name": "known-hosts", "description": "Host key store management"},
-        {"name": "logs", "description": "Remote log reading (journald, docker)"},
-        {"name": "help", "description": "API help and endpoint discovery"},
-        {"name": "code", "description": "Code intelligence (search, insert, complete)"},
-        {"name": "system", "description": "System endpoints (health, metrics, config)"},
+        {"name": "ssh", "description": "SSH session management (connect, execute, disconnect). Requires scope: `ssh:connect` | `ssh:execute` | `ssh:disconnect` for agent tokens."},
+        {"name": "files", "description": "File operations (read, edit, upload, download). Requires scope: `ssh:files` for agent tokens."},
+        {"name": "jobs", "description": "Background job execution and monitoring. Requires scope: `jobs:run` | `jobs:read` for agent tokens."},
+        {"name": "git", "description": "Git repository operations. Master key only."},
+        {"name": "context", "description": "Development contexts with git awareness. Master key only."},
+        {"name": "templates", "description": "Code templates. Master key only."},
+        {"name": "servers", "description": "Saved server management. Master key only."},
+        {"name": "snapshots", "description": "Project snapshots for recovery. Master key only."},
+        {"name": "webhooks", "description": "CI/CD webhooks. Master key only."},
+        {"name": "known-hosts", "description": "Host key store management. Master key only."},
+        {"name": "logs", "description": "Remote log reading (journald, docker). Master key only."},
+        {"name": "help", "description": "API help and endpoint discovery. Accessible with any valid API key."},
+        {"name": "code", "description": "Code intelligence (search, insert, complete). Master key only."},
+        {"name": "system", "description": "System endpoints (health, metrics, config). Public: `/health`, `/api/capabilities`. Master key: rest."},
     ],
 )
 
@@ -526,7 +533,19 @@ def custom_openapi():
     }
 
     schema["components"]["securitySchemes"] = {
-        "ApiKeyHeader": {"type": "apiKey", "in": "header", "name": "X-API-Key"},
+        "ApiKeyHeader": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-API-Key",
+            "description": (
+                "Master API key (full access) **or** agent token (scoped access).\n\n"
+                "- **Master key**: set via `API_KEY` env var, has access to all endpoints.\n"
+                "- **Agent token**: created via `POST /api/agent/token` with a master key.\n"
+                "  Supports scopes: `ssh:connect`, `ssh:execute`, `ssh:disconnect`, "
+                "`ssh:files`, `ssh:port-check`, `jobs:read`, `jobs:run`.\n\n"
+                "Also accepted as `Authorization: Bearer <key>` header."
+            ),
+        },
         "MutualTLS": {
             "type": "http",
             "scheme": "mutual",

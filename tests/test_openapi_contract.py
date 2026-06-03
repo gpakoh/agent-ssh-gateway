@@ -64,11 +64,11 @@ class TestSecurity:
         schemes = schema["components"].get("securitySchemes", {})
         assert "ApiKeyHeader" in schemes
         assert "ApiKeyQuery" not in schemes, "ApiKeyQuery is not supported at runtime"
-        assert schemes["ApiKeyHeader"] == {
-            "type": "apiKey",
-            "in": "header",
-            "name": "X-API-Key",
-        }
+        api_key_scheme = schemes["ApiKeyHeader"]
+        assert api_key_scheme["type"] == "apiKey"
+        assert api_key_scheme["in"] == "header"
+        assert api_key_scheme["name"] == "X-API-Key"
+        assert "description" in api_key_scheme
 
     PUBLIC_GET = frozenset({"/health", "/api/capabilities"})
 
