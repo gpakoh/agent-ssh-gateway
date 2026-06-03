@@ -157,6 +157,34 @@ async def verify_api_key(
     return None
 
 
+async def require_any_auth(
+    request: Request,
+) -> AuthIdentity:
+    """FastAPI Depends: accept master API key or agent token (rejects unauthenticated).
+
+    Use on endpoints that need to know the caller identity but are available
+    to both master keys and agent tokens.  Falls back to the identity that the
+    global middleware already stored on ``request.state.auth_identity``.
+    """
+    identity: AuthIdentity | None = getattr(request.state, "auth_identity", None)
+    if identity is not None:
+        return identity
+    if not settings.api_auth_enabled:
+        return AuthIdentity(token_type="master", token="", name="auth-disabled", scopes=("*",))
+    identity = await verify_api_key(request, settings.api_key, settings.agent_token, settings, None)
+    if identity is None:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "message": "Authentication required. Provide a valid X-API-Key header",
+                "code": "AUTH_REQUIRED",
+                "retryable": False,
+                "hint": "Send the master API key or an agent token in the X-API-Key header",
+            },
+        )
+    return identity
+
+
 async def require_master_key(
     request: Request,
 ) -> AuthIdentity:
