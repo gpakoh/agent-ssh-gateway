@@ -1593,6 +1593,13 @@ class KnownHostCheckResponse(BaseModel):
     port: int
 
 
+class KnownHostAddRequest(BaseModel):
+    """Add a host key to known-hosts."""
+
+    host: str = Field(..., min_length=1)
+    port: int = Field(22, ge=1, le=65535)
+
+
 class KnownHostLookupResponse(BaseModel):
     """Single host entry lookup."""
 
