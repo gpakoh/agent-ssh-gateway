@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=4">
+    <link rel="stylesheet" href="/static/style.css?v=9">
     <link rel="icon" type="image/png" href="/static/favicon.png">
     <script>var require = { paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs' } };</script>
     <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs/loader.min.js"></script>
@@ -119,6 +119,22 @@
                                 </div>
                             </div>
                         </div>
+                        <!-- Trust Check Row -->
+                        <div class="trust-row">
+                            <div class="trust-indicator" id="trustIndicator">
+                                <i data-lucide="help-circle" class="icon-14"></i>
+                                <span id="trustText">Check trust before connecting</span>
+                            </div>
+                            <button type="button" class="btn btn-outline btn-compact trust-btn" id="checkTrustBtn">
+                                <i data-lucide="shield" class="icon-14"></i>
+                                <span>Check Trust</span>
+                            </button>
+                        </div>
+                        <!-- Changed Key Banner -->
+                        <div class="trust-changed-banner" id="trustChangedBanner">
+                            <i data-lucide="alert-triangle" class="icon-14"></i>
+                            <span>Host key CHANGED — possible MITM attack. Remove entry via <strong>Recovery > Known Hosts</strong>.</span>
+                        </div>
                         <!-- Action Buttons -->
                         <div class="form-actions">
                             <button type="submit" class="btn btn-primary" id="connectBtn">
@@ -140,6 +156,291 @@
                 </div>
             </section>
 
+            <!-- Saved Servers Panel (auto-height) -->
+            <section class="servers-section" id="serversSection">
+                <div class="panel-header servers-header">
+                    <div class="panel-header-left">
+                        <i data-lucide="hard-drive" class="icon-14"></i>
+                        <span class="panel-header-title">Saved Servers</span>
+                        <span class="count-badge" id="serversBadge">0</span>
+                    </div>
+                    <div class="panel-header-right">
+                        <button type="button" class="btn-icon btn-icon-sm" id="addServerBtn" aria-label="Add server" title="Add server">
+                            <i data-lucide="plus" class="icon-16"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="panel-body">
+                    <div class="servers-list" id="serversList">
+                        <div class="empty-state">
+                            <i data-lucide="hard-drive" class="icon-24"></i>
+                            <p>No saved servers</p>
+                            <p class="empty-sub">Click <strong>+</strong> to save a server for quick reconnect</p>
+                        </div>
+                    </div>
+                    <!-- Minimal Add Server Form (hidden by default) -->
+                    <div class="server-form" id="serverForm" style="display:none;">
+                        <div class="form-grid">
+                            <div class="form-field">
+                                <label for="serverId">ID</label>
+                                <input type="text" id="serverId" placeholder="e.g. prod-web-1">
+                            </div>
+                            <div class="form-field">
+                                <label for="serverName">Name</label>
+                                <input type="text" id="serverName" placeholder="e.g. Production Web 1">
+                            </div>
+                            <div class="form-field">
+                                <label for="serverHost">Host</label>
+                                <input type="text" id="serverHost" placeholder="e.g. 10.0.0.1">
+                            </div>
+                            <div class="form-row">
+                                <div class="form-field form-field-port">
+                                    <label for="serverPort">Port</label>
+                                    <input type="number" id="serverPort" value="22" min="1" max="65535">
+                                </div>
+                                <div class="form-field form-field-user">
+                                    <label for="serverUsername">Username</label>
+                                    <input type="text" id="serverUsername" placeholder="e.g. deploy">
+                                </div>
+                            </div>
+                            <div class="form-field">
+                                <label for="serverDesc">Description (optional)</label>
+                                <input type="text" id="serverDesc" placeholder="e.g. Primary web server">
+                            </div>
+                        </div>
+                        <div class="form-actions">
+                            <button type="button" class="btn btn-primary btn-compact" id="saveServerBtn">
+                                <i data-lucide="save" class="icon-14"></i>
+                                <span>Save Server</span>
+                            </button>
+                            <button type="button" class="btn btn-outline btn-compact" id="cancelServerBtn">
+                                <span>Cancel</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Bulk Operations Panel -->
+            <section class="servers-section" id="bulkSection">
+                <div class="panel-header bulk-header">
+                    <div class="panel-header-left">
+                        <i data-lucide="layers" class="icon-14"></i>
+                        <span class="panel-header-title">Bulk Operations</span>
+                    </div>
+                </div>
+                <div class="panel-body bulk-body">
+                    <div class="bulk-buttons">
+                        <button type="button" class="btn btn-outline btn-compact bulk-btn" data-mode="bulk_read" title="Read multiple files at once">
+                            <i data-lucide="file-text" class="icon-14"></i>
+                            <span>Bulk Read</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact bulk-btn" data-mode="bulk_edit" title="Edit multiple files at once">
+                            <i data-lucide="edit-3" class="icon-14"></i>
+                            <span>Bulk Edit</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact bulk-btn" data-mode="bulk_execute" title="Run multiple commands concurrently">
+                            <i data-lucide="terminal" class="icon-14"></i>
+                            <span>Run Batch</span>
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Git Safe Flow Panel -->
+            <section class="servers-section" id="gitSection">
+                <div class="panel-header git-header">
+                    <div class="panel-header-left">
+                        <i data-lucide="git-branch" class="icon-14"></i>
+                        <span class="panel-header-title">Git Safe Flow</span>
+                    </div>
+                </div>
+                <div class="panel-body git-body">
+                    <div class="git-flow">
+                        <button type="button" class="btn btn-outline btn-compact git-btn" data-mode="git_status" title="Check git status">
+                            <i data-lucide="info" class="icon-14"></i>
+                            <span>Status</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact git-btn" data-mode="git_diff" title="Review diff">
+                            <i data-lucide="file-diff" class="icon-14"></i>
+                            <span>Diff</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact git-btn" data-mode="git_backup" title="Create backup stash">
+                            <i data-lucide="save" class="icon-14"></i>
+                            <span>Backup</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact git-btn" data-mode="git_commit" title="Commit changes">
+                            <i data-lucide="check" class="icon-14"></i>
+                            <span>Commit</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact git-btn" data-mode="git_restore" title="Restore from backup">
+                            <i data-lucide="rotate-ccw" class="icon-14"></i>
+                            <span>Restore</span>
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Project Navigation Panel -->
+            <section class="servers-section" id="navSection">
+                <div class="panel-header nav-header">
+                    <div class="panel-header-left">
+                        <i data-lucide="compass" class="icon-14"></i>
+                        <span class="panel-header-title">Project Navigation</span>
+                    </div>
+                </div>
+                <div class="panel-body nav-body">
+                    <div class="nav-flow">
+                        <button type="button" class="btn btn-outline btn-compact nav-btn" data-mode="nav_tree" title="Show project file tree">
+                            <i data-lucide="folder-tree" class="icon-14"></i>
+                            <span>Tree</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact nav-btn" data-mode="nav_search" title="Search across all files">
+                            <i data-lucide="search" class="icon-14"></i>
+                            <span>Search</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact nav-btn" data-mode="nav_context" title="Create a development context">
+                            <i data-lucide="layers" class="icon-14"></i>
+                            <span>New Context</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact nav-btn" data-mode="nav_bookmark" title="Add a bookmark in context">
+                            <i data-lucide="bookmark" class="icon-14"></i>
+                            <span>Bookmark</span>
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Templates & Generate Panel -->
+            <section class="servers-section" id="tplSection">
+                <div class="panel-header tpl-header">
+                    <div class="panel-header-left">
+                        <i data-lucide="template" class="icon-14"></i>
+                        <span class="panel-header-title">Templates & Generate</span>
+                    </div>
+                </div>
+                <div class="panel-body tpl-body">
+                    <div class="tpl-flow">
+                        <button type="button" class="btn btn-outline btn-compact tpl-btn" data-mode="tpl_list" title="List all code templates">
+                            <i data-lucide="list" class="icon-14"></i>
+                            <span>List</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact tpl-btn" data-mode="tpl_render" title="Render a template to file">
+                            <i data-lucide="file-plus" class="icon-14"></i>
+                            <span>Render</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact tpl-btn" data-mode="tpl_run" title="Run a command template">
+                            <i data-lucide="terminal" class="icon-14"></i>
+                            <span>Run</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact tpl-btn" data-mode="tpl_scaffold" title="Scaffold Python class + test">
+                            <i data-lucide="layers" class="icon-14"></i>
+                            <span>Scaffold</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact tpl-btn" data-mode="tpl_generate" title="Generate code from description">
+                            <i data-lucide="sparkles" class="icon-14"></i>
+                            <span>Generate</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact tpl-btn" data-mode="tpl_complete" title="Complete partial code">
+                            <i data-lucide="code-2" class="icon-14"></i>
+                            <span>Complete</span>
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Observability Panel -->
+            <section class="servers-section" id="obsSection">
+                <div class="panel-header obs-header">
+                    <div class="panel-header-left">
+                        <i data-lucide="activity" class="icon-14"></i>
+                        <span class="panel-header-title">Observability</span>
+                    </div>
+                </div>
+                <div class="panel-body obs-body">
+                    <div class="obs-flow">
+                        <button type="button" class="btn btn-outline btn-compact obs-btn" data-mode="obs_analytics" title="Run project analytics">
+                            <i data-lucide="bar-chart-3" class="icon-14"></i>
+                            <span>Analytics</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact obs-btn" data-mode="obs_metrics" title="View Prometheus metrics">
+                            <i data-lucide="trending-up" class="icon-14"></i>
+                            <span>Metrics</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact obs-btn" data-mode="obs_journal" title="Read systemd journal logs">
+                            <i data-lucide="file-text" class="icon-14"></i>
+                            <span>Journal</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact obs-btn" data-mode="obs_docker" title="Read Docker container logs">
+                            <i data-lucide="hard-drive" class="icon-14"></i>
+                            <span>Docker</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact obs-btn" data-mode="obs_webhooks" title="List CI/CD webhooks">
+                            <i data-lucide="link" class="icon-14"></i>
+                            <span>Webhooks</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact obs-btn" data-mode="obs_hooks" title="List event hooks">
+                            <i data-lucide="bell" class="icon-14"></i>
+                            <span>Hooks</span>
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Recovery Panel -->
+            <section class="servers-section" id="recSection">
+                <div class="panel-header rec-header">
+                    <div class="panel-header-left">
+                        <i data-lucide="life-buoy" class="icon-14"></i>
+                        <span class="panel-header-title">Recovery</span>
+                    </div>
+                </div>
+                <div class="panel-body rec-body">
+                    <div class="rec-flow">
+                        <button type="button" class="btn btn-outline btn-compact rec-btn" data-mode="rec_backup" title="Create a named backup">
+                            <i data-lucide="save" class="icon-14"></i>
+                            <span>Backup</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact rec-btn" data-mode="rec_backups" title="List all backups">
+                            <i data-lucide="archive" class="icon-14"></i>
+                            <span>Backups</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact rec-btn" data-mode="rec_snapshots" title="List all snapshots">
+                            <i data-lucide="camera" class="icon-14"></i>
+                            <span>Snapshots</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact rec-btn" data-mode="rec_restore" title="Restore from snapshot">
+                            <i data-lucide="rotate-ccw" class="icon-14"></i>
+                            <span>Restore</span>
+                        </button>
+                        <button type="button" class="btn btn-outline btn-compact rec-btn" data-mode="rec_hosts" title="List known SSH hosts">
+                            <i data-lucide="shield" class="icon-14"></i>
+                            <span>Known Hosts</span>
+                        </button>
+                    </div>
+
+                    <!-- Known Hosts sub-block -->
+                    <div class="kh-section" id="khSection">
+                        <div class="kh-header">
+                            <span>Known Hosts <span id="khCount">(0)</span></span>
+                            <div class="kh-header-actions">
+                                <button type="button" class="btn btn-outline btn-compact" id="khRefreshBtn" title="Refresh known hosts">
+                                    <i data-lucide="refresh-cw" class="icon-12"></i>
+                                    <span>Refresh</span>
+                                </button>
+                                <button type="button" class="btn btn-outline btn-compact" id="khClearAllBtn" title="Clear all known hosts">
+                                    <i data-lucide="trash-2" class="icon-12"></i>
+                                    <span>Clear All</span>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="kh-list" id="khList">
+                            <div class="kh-empty">No known hosts yet.</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
             <!-- Sessions Panel (flex:1, fills remaining) -->
             <section class="sessions-section" id="sessionsSection">
                 <div class="panel-header sessions-header">
@@ -154,6 +455,7 @@
                         <div class="empty-state">
                             <i data-lucide="users" class="icon-24"></i>
                             <p>No active sessions</p>
+                            <p class="empty-sub">Fill in the form above and click <strong>Connect</strong> to start a session</p>
                         </div>
                     </div>
                 </div>
@@ -183,10 +485,11 @@
                 <!-- Terminal Output -->
                 <div class="terminal" id="terminal">
                     <div class="terminal-welcome">
-                        <p class="ansi-green">agent-ssh-gateway v1.0</p>
-                        <p>Configure connection on the left panel and click <strong>Connect</strong>.</p>
-                        <p>Supports password and SSH key authentication.</p>
-                        <p class="hint">Tip: Prefix commands with <code>bg:</code> to run in background</p>
+                        <p class="ansi-green">agent-ssh-gateway v2.0 — Quick Start</p>
+                        <p><strong>Option A — Connect directly:</strong> Fill in <strong>Host</strong>, <strong>Username</strong>, and <strong>Password</strong> (or Private Key) on the left, then click <strong>Connect</strong>.</p>
+                        <p><strong>Option B — Save a server:</strong> Use the <strong>Saved Servers</strong> section below to register a server for quick reconnect later.</p>
+                        <p class="hint">API auth: pass <code>X-API-Key</code> header (master key or agent token).</p>
+                        <p class="hint">Tip: Prefix with <code>bg:</code> to run in background. See <code>GET /api/help</code> for the REST API reference.</p>
                     </div>
                 </div>
 
@@ -216,6 +519,7 @@
                     <div class="panel-header-left">
                         <i data-lucide="file-code-2" class="icon-14"></i>
                         <span class="panel-header-title">File Editor</span>
+                        <span class="editor-status" id="editorStatus"></span>
                     </div>
                     <div class="panel-header-right">
                         <button type="button" class="btn-icon" id="fileEditBtn" aria-label="Open file" title="Open file">
@@ -226,8 +530,17 @@
                 <!-- Editor panel -->
                 <div class="editor-panel" id="editorPanel" style="display: none;">
                     <div class="editor-toolbar">
-                        <span class="editor-filename" id="editorFilename">No file</span>
+                        <div class="editor-path-bar">
+                            <i data-lucide="file" class="icon-14 editor-path-icon"></i>
+                            <input type="text" class="editor-path-input" id="editorPathInput" placeholder="Enter remote file path, e.g. /etc/hostname" spellcheck="false">
+                            <button type="button" class="btn btn-primary btn-compact" id="openFileBtn">
+                                <i data-lucide="download" class="icon-14"></i>
+                                <span>Open</span>
+                            </button>
+                        </div>
                         <div class="editor-toolbar-actions">
+                            <span class="editor-filename" id="editorFilename">No file</span>
+                            <span class="editor-save-status" id="editorSaveStatus"></span>
                             <button type="button" class="btn btn-primary btn-compact" id="saveFileBtn" disabled>
                                 <i data-lucide="save" class="icon-14"></i>
                                 <span>Save</span>
@@ -240,7 +553,7 @@
                     <div class="editor-container" id="editorContainer">
                         <div class="editor-placeholder">
                             <i data-lucide="file-code-2" class="placeholder-icon"></i>
-                            <p>Select a file from the file tree or use the File API to open files</p>
+                            <p>Enter a remote file path above and click <strong>Open</strong></p>
                         </div>
                     </div>
                 </div>
@@ -248,8 +561,9 @@
                 <div class="editor-welcome" id="editorWelcome">
                     <div class="editor-welcome-content">
                         <i data-lucide="file-code-2" class="placeholder-icon"></i>
-                        <p>Welcome to agent-ssh-gateway</p>
-                        <p class="editor-welcome-sub">Open a file to edit, or use the terminal to navigate.</p>
+                        <p>File Editor</p>
+                        <p class="editor-welcome-sub">Click <strong>Open file</strong> (<i data-lucide="folder-open" class="icon-14"></i>) to enter a remote path and edit files.</p>
+                        <p class="editor-welcome-sub">Requires an active SSH session.</p>
                     </div>
                 </div>
             </section>
@@ -303,7 +617,47 @@
     <!-- Toast Container -->
     <div class="toast-container" id="toastContainer" aria-live="polite"></div>
 
-    <script src="/static/app.js?v=4"></script>
+    <!-- Bulk Operations Modal -->
+    <div class="bulk-modal-overlay" id="bulkOverlay" style="display:none;">
+        <div class="bulk-modal" id="bulkModal">
+            <div class="bulk-modal-header">
+                <span class="bulk-modal-title" id="bulkModalTitle">Bulk Read</span>
+                <button type="button" class="btn-icon" id="bulkModalClose" aria-label="Close">
+                    <i data-lucide="x" class="icon-16"></i>
+                </button>
+            </div>
+            <div class="bulk-modal-body">
+                <div class="bulk-modal-mode">
+                    <label class="bulk-label">Operation</label>
+                    <select class="bulk-mode-select" id="bulkModeSelect" disabled>
+                        <option value="bulk_read">Bulk Read</option>
+                        <option value="bulk_edit">Bulk Edit</option>
+                        <option value="bulk_execute">Run Batch</option>
+                    </select>
+                </div>
+                <div class="bulk-hint" id="bulkSessionHint"></div>
+                <label class="bulk-label">Request Body (JSON)</label>
+                <textarea class="bulk-textarea" id="bulkRequestBody" spellcheck="false"></textarea>
+                <div class="bulk-validation" id="bulkValidationResult"></div>
+            </div>
+            <div class="bulk-modal-footer">
+                <button type="button" class="btn btn-outline btn-compact" id="bulkLoadExample">
+                    <i data-lucide="copy" class="icon-14"></i>
+                    <span>Load example</span>
+                </button>
+                <button type="button" class="btn btn-outline btn-compact" id="bulkValidate">
+                    <i data-lucide="check" class="icon-14"></i>
+                    <span>Validate</span>
+                </button>
+                <button type="button" class="btn btn-primary btn-compact" id="bulkExecute">
+                    <i data-lucide="play" class="icon-14"></i>
+                    <span>Execute</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=9"></script>
     <script>
         document.addEventListener('DOMContentLoaded', function() {
             if (typeof lucide !== 'undefined') {
