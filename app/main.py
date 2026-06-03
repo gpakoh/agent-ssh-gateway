@@ -143,6 +143,12 @@ async def lifespan(app: FastAPI):
     state.agent_token_store = AgentTokenStore(settings.redis_url)
     try:
         await state.agent_token_store.connect()
+        if settings.agent_token and state.agent_token_store.connected:
+            await state.agent_token_store.set_token(
+                token=settings.agent_token,
+                ttl=settings.agent_token_ttl,
+                scopes=settings.agent_token_scopes,
+            )
     except Exception as exc:
         logger.warning("AgentTokenStore not available (agent token rotation will fail): %s", exc)
     
