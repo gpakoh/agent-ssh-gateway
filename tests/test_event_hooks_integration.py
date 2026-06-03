@@ -202,6 +202,9 @@ async def test_agent_token_cannot_manage_event_hooks(_setup_globals):
         settings.agent_token_expires_at = datetime.now(UTC) + timedelta(hours=1)
         settings.agent_token_scopes = ["ssh:execute"]
 
+        # Ensure no connected token store — want fallback to settings.agent_token
+        state_module.agent_token_store = None
+
         agent_headers = {"Authorization": "Bearer agent-canary"}
 
         # GET /api/event-hooks — should reject agent token
