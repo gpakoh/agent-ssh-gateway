@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import logging
+import re
 from abc import ABC, abstractmethod
 from datetime import UTC
 
@@ -52,7 +53,15 @@ class HostKeyStore(ABC):
     async def list_keys(self) -> list[dict]:
         return []
 
-    async def delete_host(self, host: str) -> int:
+    async def get_host(self, host: str, port: int = 22) -> dict | None:
+        """Return {host, port, key_type, fingerprint} for (host,port) or None."""
+        entries = await self.list_keys()
+        for e in entries:
+            if e.get("host") == host and e.get("port", 22) == port:
+                return e
+        return None
+
+    async def delete_host(self, host: str, port: int = 22) -> int:
         return 0
 
     async def delete_all(self) -> int:
@@ -136,12 +145,18 @@ class FileHostKeyStore(HostKeyStore):
                     })
             return results
 
-    async def delete_host(self, host: str) -> int:
+    async def delete_host(self, host: str, port: int = 22) -> int:
         async with self._lock:
             await self._load()
             before = len(self._hk._entries)
+            def _match(e):
+                names = e.hostnames
+                bracketed = f"[{host}]:{port}"
+                if bracketed in names:
+                    return True
+                return host in names
             self._hk._entries = [
-                e for e in self._hk._entries if host not in e.hostnames
+                e for e in self._hk._entries if not _match(e)
             ]
             removed = before - len(self._hk._entries)
             if removed > 0:
@@ -259,7 +274,7 @@ class PostgresHostKeyStore(HostKeyStore):
                 for r in records
             ]
 
-    async def delete_host(self, host: str) -> int:
+    async def delete_host(self, host: str, port: int = 22) -> int:
         async with self._lock:
             await self._init_db()
         sm = self._session_maker
@@ -267,7 +282,10 @@ class PostgresHostKeyStore(HostKeyStore):
         async with sm() as session:
             from sqlalchemy import delete as sa_delete
             result = await session.execute(
-                sa_delete(HostKeyRecord).where(HostKeyRecord.host == host)
+                sa_delete(HostKeyRecord).where(
+                    HostKeyRecord.host == host,
+                    HostKeyRecord.port == port,
+                )
             )
             await session.commit()
             return result.rowcount
@@ -282,6 +300,30 @@ class PostgresHostKeyStore(HostKeyStore):
             result = await session.execute(sa_delete(HostKeyRecord))
             await session.commit()
             return result.rowcount
+
+    async def get_host(self, host: str, port: int = 22) -> dict | None:
+        async with self._lock:
+            await self._init_db()
+        sm = self._session_maker
+        assert sm is not None
+        async with sm() as session:
+            from sqlalchemy import select
+            result = await session.execute(
+                select(HostKeyRecord).where(
+                    HostKeyRecord.host == host,
+                    HostKeyRecord.port == port,
+                )
+            )
+            r = result.scalar_one_or_none()
+            if r is None:
+                return None
+            return {
+                "host": r.host,
+                "port": r.port,
+                "key_type": r.key_type,
+                "fingerprint": r.fingerprint,
+                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+            }
 
     async def disconnect(self):
         if self._engine:
@@ -355,3 +397,21 @@ def create_host_key_store(settings) -> HostKeyStore:
         from app.known_hosts import PostgresHostKeyStore
         return PostgresHostKeyStore(settings.database_url)
     return NullHostKeyStore()
+
+
+_TRUST_ERROR_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("unknown", re.compile(r"unknown host", re.IGNORECASE)),
+    ("changed", re.compile(r"(changed.*mitm|key.*changed|host key mismatch)", re.IGNORECASE)),
+]
+
+
+def classify_ssh_trust_error(message: str) -> str | None:
+    """Classify SSH error message into trust state.
+
+    Returns 'unknown', 'changed', or None if the message doesn't match
+    a known trust error pattern.
+    """
+    for state, pattern in _TRUST_ERROR_PATTERNS:
+        if pattern.search(message):
+            return state
+    return None
