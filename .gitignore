@@ -17,6 +17,9 @@ test-coverage-plan.md
 .gitea/
 mypy.ini
 
+# Generated SSH keys
+ssh_keys/
+
 # Archives
 *.zip
 *.tar.gz
