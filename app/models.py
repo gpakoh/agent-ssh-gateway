@@ -213,6 +213,7 @@ class CapabilitiesResponse(BaseModel):
     server_count: int
     agent_token_enabled: bool
     agent_token_ttl: int
+    hint: str = ""
 
 
 class AgentTokenRequest(BaseModel):
@@ -1578,6 +1579,23 @@ class ASTAnalyzeResponse(BaseModel):
 
 class KnownHostEntry(BaseModel):
     """Host key entry from the known-hosts store."""
+    host: str
+    port: int
+    key_type: str
+    fingerprint: str
+
+
+class KnownHostCheckResponse(BaseModel):
+    """Preflight trust check response."""
+
+    status: str
+    host: str
+    port: int
+
+
+class KnownHostLookupResponse(BaseModel):
+    """Single host entry lookup."""
+
     host: str
     port: int
     key_type: str
