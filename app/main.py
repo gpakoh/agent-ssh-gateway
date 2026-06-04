@@ -814,6 +814,7 @@ async def validation_exception_handler(request, exc: RequestValidationError):
 # ---------------------------------------------------------------------------
 
 from app.routers.batch import router as batch_router  # noqa: E402
+from app.routers.code import router as code_router  # noqa: E402
 from app.routers.context import router as context_router  # noqa: E402
 from app.routers.event_hooks import router as event_hooks_router  # noqa: E402
 from app.routers.files import router as files_router  # noqa: E402
@@ -830,6 +831,7 @@ from app.routers.templates import router as templates_router  # noqa: E402
 from app.routers.webhooks import router as webhooks_router  # noqa: E402
 
 app.include_router(batch_router)
+app.include_router(code_router)
 app.include_router(ssh_router)
 app.include_router(files_router)
 app.include_router(jobs_router)
