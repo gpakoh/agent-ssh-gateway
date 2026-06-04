@@ -12,6 +12,7 @@ import aiohttp
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.config import settings as _settings
 from app.metrics import metrics
 from app.session_store import Base, WebhookDelivery
 
@@ -260,9 +261,12 @@ class DeliveryService:
     ):
         start = datetime.now(UTC)
         metrics.record_event_hook_attempt()
-        assert delivery.delivery_id is not None
-        assert delivery.url is not None
-        assert delivery.event_type is not None
+        if delivery.delivery_id is None:
+            raise RuntimeError("Event hook delivery invariant violated: delivery_id is missing")
+        if delivery.url is None:
+            raise RuntimeError("Event hook delivery invariant violated: url is missing")
+        if delivery.event_type is None:
+            raise RuntimeError("Event hook delivery invariant violated: event_type is missing")
         d_id: str = delivery.delivery_id
         d_url: str = delivery.url
         d_event: str = delivery.event_type
@@ -330,5 +334,4 @@ class DeliveryService:
 
     @property
     def max_output_bytes(self) -> int:
-        from app.config import settings
-        return settings.event_hooks_max_output_bytes
+        return _settings.event_hooks_max_output_bytes
