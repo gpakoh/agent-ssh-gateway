@@ -64,6 +64,13 @@ def validate_webhook_url(url: str, allow_http: bool = False) -> UrlValidationRes
 
 
 def validate_destination_ip(host: str) -> UrlValidationResult:
+    """Validate a resolved destination IP address against blocked networks.
+
+    This is a public utility for callers that resolve hostnames to IPs
+    outside validate_destination_url(). It checks the IP against all
+    private, loopback, link-local, and multicast ranges defined in
+    BLOCKED_NETWORKS.
+    """
     try:
         addr = ipaddress.ip_address(host)
     except ValueError:
