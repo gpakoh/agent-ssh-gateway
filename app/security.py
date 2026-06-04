@@ -86,14 +86,14 @@ def sanitize_command(command: str) -> str:
     # Check Exact Matches
     for dangerous in DANGEROUS_COMMANDS:
         if dangerous.lower() in command_lower:
-            logger.warning("Blocked dangerous command: %s", command)
+            logger.warning("Blocked dangerous command matching pattern: %s", dangerous)
             raise ValueError(f"Command contains dangerous pattern: {dangerous}")
     
     # Check Regex Patterns
     import re
     for pattern in DANGEROUS_PATTERNS:
         if re.search(pattern, command_lower):
-            logger.warning("Blocked command matching pattern %s: %s", pattern, command)
+            logger.warning("Blocked command matching pattern: %s", pattern)
             raise ValueError("Command matches dangerous pattern")
     
     return command
