@@ -298,11 +298,13 @@ async def file_write(req: FileWriteRequest, request: Request, _identity: AuthIde
 # ---------------------------------------------------------------------------
 
 @router.post("/api/ast/rename", response_model=ASTRefactorRenameResponse)
-async def ast_rename(req: ASTRefactorRenameRequest, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def ast_rename(req: ASTRefactorRenameRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Rename a symbol (function, class, variable) using AST.
 
     Supports single file ('path') or multiple files ('files' array).
     """
+    await _check_session_ownership(req.session_id, request)
+
     # Validate All Paths First
     try:
         if req.files:
@@ -390,14 +392,16 @@ async def ast_rename(req: ASTRefactorRenameRequest, _identity: AuthIdentity = De
 
 
 @router.post("/api/refactor/rename", response_model=ASTRefactorRenameResponse)
-async def refactor_rename(req: ASTRefactorRenameRequest, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def refactor_rename(req: ASTRefactorRenameRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Alias for /api/ast/rename — AST-aware symbol renaming."""
-    return await ast_rename(req)
+    return await ast_rename(req, request)
 
 
 @router.post("/api/ast/extract", response_model=ASTRefactorExtractResponse)
-async def ast_extract(req: ASTRefactorExtractRequest, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def ast_extract(req: ASTRefactorExtractRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Extract a block of code into a new function."""
+    await _check_session_ownership(req.session_id, request)
+
     try:
         validated = validate_path(req.path)
     except ValueError as exc:
@@ -424,8 +428,10 @@ async def ast_extract(req: ASTRefactorExtractRequest, _identity: AuthIdentity = 
 
 
 @router.post("/api/ast/analyze", response_model=ASTAnalyzeResponse)
-async def ast_analyze(req: ASTAnalyzeRequest, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def ast_analyze(req: ASTAnalyzeRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Analyze Python code structure using AST."""
+    await _check_session_ownership(req.session_id, request)
+
     try:
         validated = validate_path(req.path)
     except ValueError as exc:
@@ -655,8 +661,10 @@ async def batch_edit(req: BatchEditRequest, request: Request, _identity: AuthIde
 # ---------------------------------------------------------------------------
 
 @router.post("/api/bulk/read")
-async def bulk_read_files(req: BatchReadRequest, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def bulk_read_files(req: BatchReadRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Read multiple files concurrently."""
+    await _check_session_ownership(req.session_id, request)
+
     files = await _state.bulk_ops.read_files_bulk(
         req.session_id,
         req.paths,
@@ -667,7 +675,7 @@ async def bulk_read_files(req: BatchReadRequest, _identity: AuthIdentity = Depen
 
 
 @router.post("/api/bulk/edit", response_model=BatchEditResponse)
-async def bulk_edit_files(req: BatchEditRequest, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def bulk_edit_files(req: BatchEditRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
     """Edit multiple files concurrently.
 
     Example:
@@ -689,6 +697,8 @@ async def bulk_edit_files(req: BatchEditRequest, _identity: AuthIdentity = Depen
             ]
         }
     """
+    await _check_session_ownership(req.session_id, request)
+
     results = []
     files_changed = 0
     total_operations = 0
