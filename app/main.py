@@ -825,6 +825,7 @@ from app.routers.snapshots import router as snapshots_router  # noqa: E402
 from app.routers.ssh import router as ssh_router  # noqa: E402
 from app.routers.system import router as system_router  # noqa: E402
 from app.routers.templates import router as templates_router  # noqa: E402
+from app.routers.webhooks import router as webhooks_router  # noqa: E402
 
 app.include_router(ssh_router)
 app.include_router(files_router)
@@ -833,6 +834,7 @@ app.include_router(git_router)
 app.include_router(context_router)
 app.include_router(servers_router)
 app.include_router(snapshots_router)
+app.include_router(webhooks_router)
 app.include_router(known_hosts_router)
 app.include_router(system_router)
 app.include_router(logs_router)
