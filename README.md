@@ -27,6 +27,17 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
+Generate API keys and add them to `.env`:
+
+```bash
+python -c "
+import secrets
+with open('.env', 'a') as f:
+    f.write(f'API_KEY={secrets.token_urlsafe(48)}\n')
+    f.write(f'AGENT_TOKEN={secrets.token_urlsafe(48)}\n')
+"
+```
+
 Start the server:
 
 ```bash
@@ -36,6 +47,7 @@ uvicorn app.main:app --reload
 On Windows PowerShell:
 
 ```powershell
+python -c "import secrets; open('.env', 'a').write('API_KEY=' + secrets.token_urlsafe(48) + '\n' + 'AGENT_TOKEN=' + secrets.token_urlsafe(48) + '\n')"
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
@@ -245,7 +257,7 @@ http://localhost:8085/docs
 ```bash
 source .venv/bin/activate
 pip install -e ".[dev]"
-pytest -q                       # 413+ tests
+pytest -q                       # 435+ tests
 ruff check app tests            # linting
 mypy app                     # type checking
 uvicorn app.main:app --reload   # run locally
@@ -297,7 +309,7 @@ Do not expose this service directly to the Internet without proper protection.
 - Secret redaction: enabled
 - Private key upload: disabled by default
 - Full mypy: 0 errors
-- Test suite: 413 passed, 1 skipped
+- Test suite: 435 passed, 1 skipped
 
 ### Recommended deployment topology
 
