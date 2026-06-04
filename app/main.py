@@ -821,6 +821,7 @@ from app.routers.jobs import router as jobs_router  # noqa: E402
 from app.routers.known_hosts import router as known_hosts_router  # noqa: E402
 from app.routers.logs import router as logs_router  # noqa: E402
 from app.routers.servers import router as servers_router  # noqa: E402
+from app.routers.snapshots import router as snapshots_router  # noqa: E402
 from app.routers.ssh import router as ssh_router  # noqa: E402
 from app.routers.system import router as system_router  # noqa: E402
 from app.routers.templates import router as templates_router  # noqa: E402
@@ -831,6 +832,7 @@ app.include_router(jobs_router)
 app.include_router(git_router)
 app.include_router(context_router)
 app.include_router(servers_router)
+app.include_router(snapshots_router)
 app.include_router(known_hosts_router)
 app.include_router(system_router)
 app.include_router(logs_router)
