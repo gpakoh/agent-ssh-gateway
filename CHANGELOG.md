@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.1-alpha] - 2026-06-04
+
+### Changed
+
+- Refactored the API routing layer into dedicated feature routers without changing public API paths or response contracts.
+- Extracted API help generation from the system router into `app/api_help.py`.
+- Extracted feature-specific routes from `app/routers/system.py`:
+  - known-hosts management
+  - server inventory and connection routes
+  - snapshot management
+  - webhook and deployment routes
+  - batch execution
+  - global search and replace
+  - code search/generation/completion
+  - project analytics and file tree inspection
+- Reduced `app/routers/system.py` to lightweight system/meta GET endpoints only.
+- Added router ownership documentation in `docs/ROUTERS.md`.
+
+### Tests
+
+- Verified route uniqueness, route authorization, and OpenAPI contract checks.
+- Full test suite remains green: 435 passed.
+
+### Compatibility
+
+- No public API path changes.
+- No authentication behavior changes.
+- No response model changes.
+
 ## [0.1.0-alpha] - 2026-06-02
 
 ### Added
