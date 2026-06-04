@@ -4,12 +4,15 @@ import hashlib
 import ipaddress
 import logging
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import HTTPException, Request, WebSocket
 
-from app.config import settings
+from app.agent_token_store import AgentTokenStore
+from app.config import Settings, settings
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +80,9 @@ def parse_cidrs(value: str) -> list[ipaddress.IPv4Network | ipaddress.IPv6Networ
     return networks
 
 
-def get_client_ip(request: Request, trusted_proxy_networks: list) -> str:
+def get_client_ip(
+    request: Request, trusted_proxy_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network]
+) -> str:
     client_host = request.client.host if request.client else "127.0.0.1"
 
     forwarded = request.headers.get("X-Forwarded-For", "")
@@ -91,7 +96,7 @@ def get_client_ip(request: Request, trusted_proxy_networks: list) -> str:
     return client_host
 
 
-def _is_trusted(ip_str: str, trusted_networks: list) -> bool:
+def _is_trusted(ip_str: str, trusted_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network]) -> bool:
     try:
         addr = ipaddress.ip_address(ip_str)
     except ValueError:
@@ -99,7 +104,7 @@ def _is_trusted(ip_str: str, trusted_networks: list) -> bool:
     return any(addr in net for net in trusted_networks)
 
 
-def is_ip_allowed(ip_str: str, allowed_networks: list) -> bool:
+def is_ip_allowed(ip_str: str, allowed_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network]) -> bool:
     try:
         addr = ipaddress.ip_address(ip_str)
     except ValueError:
@@ -107,7 +112,7 @@ def is_ip_allowed(ip_str: str, allowed_networks: list) -> bool:
     return any(addr in net for net in allowed_networks)
 
 
-async def is_agent_token_valid(settings, provided: str, token_store=None) -> AuthIdentity | None:
+async def is_agent_token_valid(settings: Settings, provided: str, token_store: AgentTokenStore | None = None) -> AuthIdentity | None:
     if not provided:
         return None
     if token_store is not None and token_store.connected:
@@ -139,7 +144,7 @@ async def is_agent_token_valid(settings, provided: str, token_store=None) -> Aut
 
 
 async def verify_api_key(
-    request: Request, expected_key: str, extra_key: str = "", settings=None, token_store=None
+    request: Request, expected_key: str, extra_key: str = "", settings: Settings | None = None, token_store: AgentTokenStore | None = None
 ) -> AuthIdentity | None:
     provided = request.headers.get("X-API-Key", "")
     if not provided:
@@ -244,7 +249,7 @@ def _normalise_path(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def auth_check(request: Request, settings, token_store=None) -> HTTPException | None:
+async def auth_check(request: Request, settings: Settings, token_store: AgentTokenStore | None = None) -> HTTPException | None:
     if request.method == "OPTIONS":
         return None
 
@@ -350,8 +355,8 @@ CLOSE_POLICY_VIOLATION = 1008
 
 async def ws_auth_check(
     websocket: WebSocket,
-    settings,
-    token_store=None,
+    settings: Settings,
+    token_store: AgentTokenStore | None = None,
     required_scope: str = "",
 ) -> AuthIdentity | tuple[int, str]:
     """WebSocket auth guard — call before accept().
@@ -428,7 +433,7 @@ async def ws_auth_check(
 # ---------------------------------------------------------------------------
 
 
-def require_scope(required: str):
+def require_scope(required: str) -> Callable[[Request], Awaitable[AuthIdentity]]:
     """FastAPI dependency: require a specific scope on the endpoint.
 
     Master API key bypasses all scope checks.
@@ -468,7 +473,7 @@ def require_scope(required: str):
     return _scope_check
 
 
-def ensure_session_owner(session, identity: AuthIdentity) -> None:
+def ensure_session_owner(session: Any, identity: AuthIdentity) -> None:
     """Allow master to access any session, agent only its own sessions."""
     if identity.token_type == "master":
         return
