@@ -822,6 +822,7 @@ from app.routers.git import router as git_router  # noqa: E402
 from app.routers.jobs import router as jobs_router  # noqa: E402
 from app.routers.known_hosts import router as known_hosts_router  # noqa: E402
 from app.routers.logs import router as logs_router  # noqa: E402
+from app.routers.project_inspection import router as project_inspection_router  # noqa: E402
 from app.routers.search_replace import router as search_replace_router  # noqa: E402
 from app.routers.servers import router as servers_router  # noqa: E402
 from app.routers.snapshots import router as snapshots_router  # noqa: E402
@@ -832,6 +833,7 @@ from app.routers.webhooks import router as webhooks_router  # noqa: E402
 
 app.include_router(batch_router)
 app.include_router(code_router)
+app.include_router(project_inspection_router)
 app.include_router(ssh_router)
 app.include_router(files_router)
 app.include_router(jobs_router)
