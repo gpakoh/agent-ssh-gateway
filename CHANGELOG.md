@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## Unreleased
+
+### Security
+
+- Added path validation (`validate_path`) for project tree, project file structure, and file watch endpoints to reject traversal attacks.
+- Added session ownership checks for AST rename, extract, analyze, bulk read, and bulk edit file endpoints — agent tokens can no longer operate on cross-tenant sessions through these routes.
+- Reduced secret exposure: `sanitize_command()` no longer logs raw passwords, tokens, or API keys to the warning log.
+- Added `SSH_STRICT_HOST_KEY_CHECKING` env var — when enabled, uses `RejectPolicy` instead of `AutoAddPolicy`.
+- `SecretManager` now requires an explicit `master_key` — removed automatic random key generation that made encrypted sessions unrecoverable after restart.
+- Event hook delivery safety: `assert` replaced with `RuntimeError` for invariant violations.
+- Added 22 regression tests covering path traversal rejection (12) and file endpoint ownership enforcement (10).
+
+### Changed
+
+- `auth_middleware.py`: `AuthIdentity` migrated from `dataclass` to `TypedDict`; `X-Forwarded-For` parsing added for CIDR checks behind proxies.
+- `pyproject.toml`: `paramiko` import guarded with `TYPE_CHECKING` to silence mypy import-untyped.
+- `session_store.py`: fixed `SecretManager` instantiation — now correctly passes `settings.encryption_key` instead of creating a random key on every call.
+- `ROUTER_ARCHITECTURE.md`: updated with router lifecycle and security model.
+
 ## [0.1.1-alpha] - 2026-06-04
 
 ### Changed
