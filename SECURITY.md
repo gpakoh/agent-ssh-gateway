@@ -50,7 +50,7 @@ Scopes restrict API surface but do not replace ownership checks. Ownership is en
 - Unauthorized session use via leaked `session_id` without a matching token — ownership verified on every session-bound request.
 - Basic command execution authorization through token scopes.
 - Target host restrictions via `ALLOWED_TARGET_CIDRS` and `DENIED_TARGET_CIDRS`.
-- Private key upload disabled by default (`PRIVATE_KEY_UPLOAD_ENABLED=false`).
+- Private key upload disabled by default (`SSH_KEY_UPLOAD_ENABLED=false`).
 - Audit logging of failed authentication and denied ownership attempts.
 
 ### Out of scope / not guaranteed
@@ -68,7 +68,7 @@ Scopes restrict API surface but do not replace ownership checks. Ownership is en
 - Use long random tokens for `API_KEY`, `AGENT_TOKEN`, and any webhook secrets.
 - Store tokens in environment variables or a secrets manager. Never commit `.env`.
 - Rotate tokens after suspected exposure.
-- Keep `PRIVATE_KEY_UPLOAD_ENABLED=false` unless you explicitly need the feature.
+- Keep `SSH_KEY_UPLOAD_ENABLED=false` unless you explicitly need the feature.
 - Restrict SSH targets with `ALLOWED_TARGET_CIDRS` and `DENIED_TARGET_CIDRS`.
 - Prefer non-root containers with read-only filesystems and dropped capabilities.
 - Use firewall rules or private networks to limit access to the gateway port.
