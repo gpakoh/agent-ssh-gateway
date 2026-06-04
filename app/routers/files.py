@@ -457,7 +457,12 @@ async def project_tree(
 
     Returns flat list with type, path, size for quick introspection.
     """
-    cmd = f"cd {shlex.quote(path)} && find . -maxdepth {max_depth} -not -path '*/\\.*' -not -path '*/node_modules/*' -not -path '*/__pycache__/*' -not -path '*/venv/*' -printf '%y|%p|%s\\n' 2>/dev/null || echo 'ERROR'"
+    try:
+        validated = validate_path(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
+
+    cmd = f"cd {shlex.quote(validated)} && find . -maxdepth {max_depth} -not -path '*/\\.*' -not -path '*/node_modules/*' -not -path '*/__pycache__/*' -not -path '*/venv/*' -printf '%y|%p|%s\\n' 2>/dev/null || echo 'ERROR'"
     result = await _state.manager.execute(session_id, cmd, timeout=30)
 
     if result["exit_code"] != 0 or "ERROR" in result["stdout"]:
@@ -491,7 +496,12 @@ async def project_structure_files(req: ProjectStructureRequest, request: Request
     await _check_session_ownership(req.session_id, request)
 
 
-    cmd = f"cd {shlex.quote(req.path)} && find . -maxdepth {req.max_depth} -printf '%y|%p|%s|%m|%TY-%Tm-%Td %TH:%TM:%TS\\n' 2>/dev/null || echo 'ERROR'"
+    try:
+        validated_path = validate_path(req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
+
+    cmd = f"cd {shlex.quote(validated_path)} && find . -maxdepth {req.max_depth} -printf '%y|%p|%s|%m|%TY-%Tm-%Td %TH:%TM:%TS\\n' 2>/dev/null || echo 'ERROR'"
     result = await _state.manager.execute(req.session_id, cmd, timeout=30)
 
     if result["exit_code"] != 0 or "ERROR" in result["stdout"]:
@@ -537,7 +547,7 @@ async def project_structure_files(req: ProjectStructureRequest, request: Request
         ))
 
     if req.include_git_status:
-        git_cmd = f"cd {shlex.quote(req.path)} && git status --short 2>/dev/null || echo ''"
+        git_cmd = f"cd {shlex.quote(validated_path)} && git status --short 2>/dev/null || echo ''"
         git_result = await _state.manager.execute(req.session_id, git_cmd, timeout=10)
 
         git_status_map = {}
@@ -763,6 +773,16 @@ async def file_watch_stream(websocket: WebSocket):
                 "type": "error",
                 "code": "SESSION_OWNERSHIP",
                 "message": "Agent token cannot access this session",
+            })
+            await websocket.close()
+            return
+
+        try:
+            path = validate_path(path)
+        except ValueError as exc:
+            await websocket.send_json({
+                "type": "error",
+                "data": f"Invalid path: {exc}",
             })
             await websocket.close()
             return
