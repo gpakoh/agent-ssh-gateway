@@ -8,7 +8,12 @@ This project follows semantic versioning where practical, but the public API is 
 
 ### Added
 
-- Added `async_mode` to `POST /api/ssh/execute` to start long-running commands through the existing job manager without changing the default synchronous behavior.
+- Added `async_mode` to `POST /api/ssh/execute` to start long-running commands through the existing job manager without changing the default synchronous behavior. Async commands can be tracked via `GET /api/jobs/{job_id}/status`.
+- Added async execute job lifecycle coverage — async mode now creates a job that can be inspected through the existing jobs API, supporting the full `exec → job_id → status` flow.
+
+### Tests
+
+- Added 6 tests covering async mode: sync backward compat, async job creation, command policy bypass prevention, cross-tenant isolation, and E2E execute → status flow.
 
 ## [0.1.2-alpha] - 2026-06-04
 
