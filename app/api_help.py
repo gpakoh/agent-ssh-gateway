@@ -77,6 +77,13 @@ def build_api_help(request: Request) -> dict[str, Any]:
             "response": '{"exit_code":0,"stdout":"total 42\\n-rw-r--r-- 1 root root ...","stderr":"","duration_ms":150}',
         },
         {
+            "title": "Execute a command (async / background job)",
+            "endpoint": "POST /api/ssh/execute",
+            "scope": "ssh:execute",
+            "curl": 'curl -s -X POST http://localhost:8085/api/ssh/execute \\\n  -H "X-API-Key: $API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"session_id":"ses_abc123","command":"docker compose build","async_mode":true}\'',
+            "response": '{"job_id":"job_abc123","status":"running","message":"Job started"}',
+        },
+        {
             "title": "Read a remote file",
             "endpoint": "POST /api/file/read",
             "scope": "ssh:files",
