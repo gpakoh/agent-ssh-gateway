@@ -43,6 +43,7 @@ from app.models import (
     DisconnectResponse,
     ExecuteRequest,
     ExecuteResponse,
+    JobRunResponse,
     SessionConfigResponse,
     SessionInfo,
     SessionsResponse,
@@ -249,7 +250,7 @@ async def ssh_connect(
     return ConnectResponse(session_id=session_id)
 
 
-@router.post("/api/ssh/execute", response_model=ExecuteResponse)
+@router.post("/api/ssh/execute", response_model=ExecuteResponse | JobRunResponse)
 @rate_limit_mutation(60, "minute")
 async def ssh_execute(
     req: ExecuteRequest,
@@ -301,6 +302,17 @@ async def ssh_execute(
     if session is None:
         raise HTTPException(status_code=404, detail=_err(404, "Session not found"))
     ensure_session_owner(session, _identity)
+
+    if req.async_mode:
+        job_id = await _state.job_manager.create_job(
+            session_id=req.session_id,
+            command=sanitized,
+        )
+        return JobRunResponse(
+            job_id=job_id,
+            status="running",
+            message="Job started",
+        )
 
     result = await _state.manager.execute(
         session_id=req.session_id,
