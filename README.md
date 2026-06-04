@@ -381,7 +381,7 @@ Keep real deployment configuration in a private repository or secret manager.
 
 ```text
 app/
-  routers/          API routers
+  routers/          API routers (see [docs/ROUTERS.md](docs/ROUTERS.md))
   services/         SSH, jobs, audit and integration services
   models/           Data models and schemas
   security.py       Authentication, validation and security helpers
