@@ -50,7 +50,7 @@ from app.models import (
     SessionTimeoutRequest,
     SessionTimeoutResponse,
 )
-from app.security import rate_limit_mutation, sanitize_command, validate_target_host
+from app.security import rate_limit_mutation, redact_secrets, sanitize_command, validate_target_host
 from app.ssh_manager import SessionNotFoundError
 from app.state import _err
 
@@ -66,6 +66,13 @@ router = APIRouter(tags=["ssh"])
 def time_to_iso(timestamp: float) -> str:
     """Convert Unix timestamp to ISO format."""
     return datetime.fromtimestamp(timestamp, tz=UTC).isoformat()
+
+
+def _should_redact_command_output(redact_output: bool | None) -> bool:
+    """Return effective redaction toggle — request override or settings default."""
+    if redact_output is not None:
+        return redact_output
+    return settings.command_output_redaction_enabled
 
 
 def get_connect_auth_method(req: ConnectRequest) -> str:
@@ -319,7 +326,17 @@ async def ssh_execute(
         command=sanitized,
         timeout=req.timeout,
     )
-    return ExecuteResponse(**result)
+    stdout = result["stdout"]
+    stderr = result["stderr"]
+    if _should_redact_command_output(req.redact_output):
+        stdout = redact_secrets(stdout)
+        stderr = redact_secrets(stderr)
+    return ExecuteResponse(
+        stdout=stdout,
+        stderr=stderr,
+        exit_code=result["exit_code"],
+        duration=result.get("duration", 0.0),
+    )
 
 
 @router.post("/api/ssh/disconnect", response_model=DisconnectResponse)
