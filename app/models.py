@@ -61,6 +61,10 @@ class ExecuteRequest(BaseModel):
         default=False,
         description="Start command as an async background job instead of waiting for completion.",
     )
+    redact_output: bool | None = Field(
+        default=None,
+        description="Override command output redaction for this request.",
+    )
 
 
 class ExecuteResponse(BaseModel):
