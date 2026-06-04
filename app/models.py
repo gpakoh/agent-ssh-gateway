@@ -57,6 +57,10 @@ class ExecuteRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
     command: str = Field(..., min_length=1)
     timeout: int = Field(default=30, ge=1, le=3600)
+    async_mode: bool = Field(
+        default=False,
+        description="Start command as an async background job instead of waiting for completion.",
+    )
 
 
 class ExecuteResponse(BaseModel):
