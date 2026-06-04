@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
-## Unreleased
+## [0.1.3-alpha] - 2026-06-05
 
 ### Added
 
