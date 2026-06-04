@@ -189,3 +189,56 @@ class TestExecuteAsyncMode:
                 json={"session_id": "s-2", "command": "ls", "async_mode": True},
             )
         assert resp.status_code == 403, f"Expected 403, got {resp.status_code}: {resp.text}"
+
+    # ------------------------------------------------------------------
+    # E2E: async execute → job_id → job status
+    # ------------------------------------------------------------------
+
+    def test_e2e_async_execute_then_job_status(self, monkeypatch):
+        monkeypatch.setattr(settings, "api_auth_enabled", True)
+        monkeypatch.setattr(settings, "api_key", "secret-42")
+        monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
+        monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
+
+        with TestClient(app) as client:
+            self._setup_state()
+            from app import state as _app_state
+
+            # Step 1: async execute → job_id
+            resp = client.post(
+                "/api/ssh/execute",
+                headers={"X-API-Key": "secret-42"},
+                json={"session_id": "s-1", "command": "docker compose build", "async_mode": True},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["job_id"] == "mock-job-id"
+            assert data["status"] == "running"
+
+            # Step 2: mock get_job_status for the next step
+            mock_status_data = {
+                "job_id": "mock-job-id",
+                "status": "running",
+                "progress": {},
+                "duration": None,
+            }
+            _app_state.job_manager.get_job_status = AsyncMock(return_value=mock_status_data)
+
+            # Step 3: GET job status
+            resp2 = client.get(
+                f"/api/jobs/{data['job_id']}/status",
+                headers={"X-API-Key": "secret-42"},
+            )
+            assert resp2.status_code == 200
+            status_data = resp2.json()
+            assert status_data["job_id"] == "mock-job-id"
+            assert status_data["status"] == "running"
+            assert "progress" in status_data
+
+            # Step 4: verify mocks
+            _app_state.job_manager.create_job.assert_awaited_once_with(
+                session_id="s-1", command="docker compose build"
+            )
+            _app_state.manager.execute.assert_not_called()
+            _app_state.job_manager.get_job_status.assert_awaited_once_with("mock-job-id")
