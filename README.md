@@ -93,7 +93,7 @@ curl -X POST http://127.0.0.1:8000/api/ssh/connect \
 
 Save the returned `session_id`.
 
-2. Execute a command:
+2. Execute a command (sync):
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/ssh/execute \
@@ -102,6 +102,19 @@ curl -X POST http://127.0.0.1:8000/api/ssh/execute \
   -d '{
     "session_id": "<session_id>",
     "command": "uname -a"
+  }'
+```
+
+   For long-running commands, use `async_mode=true` to run as a background job:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/ssh/execute \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "<session_id>",
+    "command": "docker compose build",
+    "async_mode": true
   }'
 ```
 
