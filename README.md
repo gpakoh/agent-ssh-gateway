@@ -238,6 +238,7 @@ All env vars are documented in `.env.example`. Key settings:
 | `DENIED_TARGET_CIDRS` | `127.0.0.0/8,...` | SSH targets always denied |
 | `SSH_KEY_UPLOAD_ENABLED` | `false` | Private key upload via API |
 | `COMMAND_POLICY_MODE` | `audit` | Command policy mode |
+| `COMMAND_OUTPUT_REDACTION_ENABLED` | `false` | Redact secrets (tokens, passwords, keys) from command responses |
 | `PERSISTENT_SESSIONS_ENABLED` | `false` | Persist sessions across restarts |
 | `ENCRYPTION_KEY` | `change-me-...` | Fernet key for credential encryption |
 
@@ -270,7 +271,7 @@ http://localhost:8085/docs
 ```bash
 source .venv/bin/activate
 pip install -e ".[dev]"
-pytest -q                       # 435+ tests
+pytest -q                       # 480+ tests
 ruff check app tests            # linting
 mypy app                     # type checking
 uvicorn app.main:app --reload   # run locally
@@ -290,6 +291,25 @@ Modes: `off` (disabled), `audit` (log, do not block), `enforce` (block).
 Profiles: `default` (blocks dangerous root commands), `readonly` (inspection only), `ops` (read-only + limited systemctl/service/docker).
 
 Recommended rollout: start with `audit`, review logs, then move to `enforce` on selected environments.
+
+---
+
+## Output redaction
+
+```env
+COMMAND_OUTPUT_REDACTION_ENABLED=true
+```
+
+Optional redaction of secrets (API keys, tokens, passwords, private key material) from command stdout/stderr responses. Disabled by default — set to `true` or pass `redact_output=true` per-request to enable.
+
+When enabled, secrets are replaced with `[REDACTED]` on the response/stream side. **Raw job output is never mutated** — redaction applies only to the response or SSE stream data.
+
+Covered endpoints:
+- `POST /api/ssh/execute` — field `redact_output` in request body
+- `GET /api/jobs/{job_id}/result` — query param `?redact_output=true`
+- `GET /api/jobs/{job_id}/stream` and `/events` — query param `?redact_output=true`
+
+Redaction is a best-effort regex-based pass, not a full DLP solution. It catches common patterns (`api_key=...`, `token=...`, `password=...`, `Authorization: Bearer ...`) but will not catch every possible secret format. Use as a safety net, not a security boundary.
 
 ---
 
@@ -322,7 +342,7 @@ Do not expose this service directly to the Internet without proper protection.
 - Secret redaction: enabled
 - Private key upload: disabled by default
 - Full mypy: 0 errors
-- Test suite: 435 passed, 1 skipped
+- Test suite: 480 passed, 1 skipped
 
 ### Recommended deployment topology
 
@@ -372,7 +392,7 @@ Before using this in production:
 * [ ] Use dedicated low-privilege SSH users.
 * [x] Private key upload disabled by default (`SSH_KEY_UPLOAD_ENABLED=false`).
 * [ ] Enable audit logging.
-* [ ] Enable output redaction for secrets.
+* [x] Enable output redaction for secrets (`COMMAND_OUTPUT_REDACTION_ENABLED=true`).
 * [x] Command policy engine with `readonly`/`ops`/`default` profiles (`COMMAND_POLICY_MODE=enforce`).
 * [ ] Rotate tokens regularly.
 * [ ] Review event hooks before enabling command output forwarding.
