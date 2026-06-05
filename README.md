@@ -8,6 +8,18 @@
 
 > **Do not expose this service directly to the public Internet.** Read [SECURITY.md](SECURITY.md) before deploying.
 
+### Why not just SSH?
+
+- Agents need structured APIs, not interactive terminals.
+- Long-running commands need jobs, status and output streams.
+- File operations should be separate from shell commands.
+- Access must be scoped, audited and redactable.
+
+### How is this different?
+
+Similar tools are often terminal-first or MCP-only.
+agent-ssh-gateway is OpenAPI-first and can be used by agents, CI/CD, dashboards and internal automation.
+
 ---
 
 ## Project status
