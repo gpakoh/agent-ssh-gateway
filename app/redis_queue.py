@@ -53,7 +53,7 @@ class RedisJobQueue:
     async def disconnect(self):
         """Disconnect from Redis."""
         if self._redis:
-            await self._redis.close()
+            await self._redis.aclose()
             logger.info("Disconnected From Redis")
     
     async def enqueue(

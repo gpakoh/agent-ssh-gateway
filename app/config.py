@@ -3,7 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 from pydantic import Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -96,9 +96,10 @@ class Settings(BaseSettings):
     event_hooks_retention_sent_days: int = Field(default=7, alias="EVENT_HOOKS_RETENTION_SENT_DAYS")
     event_hooks_retention_dead_days: int = Field(default=30, alias="EVENT_HOOKS_RETENTION_DEAD_DAYS")
 
-    class Config:
-        env_file = ".env"
-        populate_by_name = True
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        populate_by_name=True,
+    )
 
     def model_post_init(self, __context) -> None:
         if self.agent_token and self.agent_token_expires_at is None:
