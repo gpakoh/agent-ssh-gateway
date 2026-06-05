@@ -7,7 +7,7 @@ Import this instead of hardcoding version strings.
 from importlib.metadata import PackageNotFoundError, version
 
 PACKAGE_NAME = "agent-ssh-gateway"
-FALLBACK_VERSION = "0.1.4a0"
+FALLBACK_VERSION = "0.1.5a0"
 
 
 def get_app_version() -> str:
