@@ -159,7 +159,15 @@ async def jobs_cancel(job_id: str, _identity: AuthIdentity = Depends(require_sco
 
 @router.get("/api/jobs/{job_id}/stream", response_class=StreamingResponse)
 @rate_limit_mutation(20, "minute")
-async def jobs_stream(job_id: str, request: Request, _identity: AuthIdentity = Depends(require_scope("jobs:read"))):
+async def jobs_stream(
+    job_id: str,
+    request: Request,
+    redact_output: bool | None = Query(
+        default=None,
+        description="Override command output redaction for this stream.",
+    ),
+    _identity: AuthIdentity = Depends(require_scope("jobs:read")),
+):
     """Stream job output via Server-Sent Events."""
     job = await _state.job_manager.get_job(job_id)
     if not job:
@@ -178,9 +186,11 @@ async def jobs_stream(job_id: str, request: Request, _identity: AuthIdentity = D
 
             # Send Buffered Output If Job Already Completed
             if job.stdout:
-                yield f"data: {json.dumps({'type': 'stdout', 'data': job.stdout})}\n\n"
+                data = redact_secrets(job.stdout) if should_redact_command_output(redact_output) else job.stdout
+                yield f"data: {json.dumps({'type': 'stdout', 'data': data})}\n\n"
             if job.stderr:
-                yield f"data: {json.dumps({'type': 'stderr', 'data': job.stderr})}\n\n"
+                data = redact_secrets(job.stderr) if should_redact_command_output(redact_output) else job.stderr
+                yield f"data: {json.dumps({'type': 'stderr', 'data': data})}\n\n"
 
             # Stream New Events
             while job.status in ("pending", "running"):
@@ -189,6 +199,8 @@ async def jobs_stream(job_id: str, request: Request, _identity: AuthIdentity = D
                     break
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=1.0)
+                    if should_redact_command_output(redact_output) and event.get("type") in ("stdout", "stderr") and isinstance(event.get("data"), str):
+                        event["data"] = redact_secrets(event["data"])
                     yield f"data: {json.dumps(event)}\n\n"
                 except TimeoutError:
                     # Send Keepalive Comment
@@ -212,6 +224,14 @@ async def jobs_stream(job_id: str, request: Request, _identity: AuthIdentity = D
 
 @router.get("/api/jobs/{job_id}/events", response_class=StreamingResponse)
 @rate_limit_mutation(20, "minute")
-async def jobs_events(job_id: str, request: Request, _identity: AuthIdentity = Depends(require_scope("jobs:read"))):
+async def jobs_events(
+    job_id: str,
+    request: Request,
+    redact_output: bool | None = Query(
+        default=None,
+        description="Override command output redaction for this stream.",
+    ),
+    _identity: AuthIdentity = Depends(require_scope("jobs:read")),
+):
     """Alias for /api/jobs/{job_id}/stream — SSE job progress events."""
-    return await jobs_stream(job_id, request)
+    return await jobs_stream(job_id, request, redact_output)
