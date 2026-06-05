@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [Unreleased]
+
+### Added
+
+- Added optional command output redaction for secrets (tokens, passwords, API keys) in command responses. Opt-in via `COMMAND_OUTPUT_REDACTION_ENABLED` setting or per-request `redact_output` parameter.
+- Redaction applies to sync execute (`POST /api/ssh/execute`), job result (`GET /api/jobs/{job_id}/result`), and job SSE stream (`GET /api/jobs/{job_id}/stream` and `/events` alias).
+- Raw job output is not mutated — redaction is applied on the response/stream side only.
+
+### Tests
+
+- Added 13 tests covering output redaction: sync execute (4), job result (4), SSE stream (5).
+
 ## [0.1.3-alpha] - 2026-06-05
 
 ### Added
