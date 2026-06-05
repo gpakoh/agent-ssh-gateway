@@ -4,7 +4,13 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
-## [Unreleased]
+## [0.1.5-alpha] - 2026-06-05
+
+### Changed
+
+- Refined README positioning for the project as an OpenAPI-first SSH control plane for AI agents.
+- Migrated settings configuration to the Pydantic v2 `SettingsConfigDict` style.
+- Replaced deprecated Redis `close()` usage with `aclose()` in `redis_queue.py` and `distributed_lock.py`.
 
 ## [0.1.4-alpha] - 2026-06-05
 
