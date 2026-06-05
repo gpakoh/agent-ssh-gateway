@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app import state as _state
@@ -19,7 +19,8 @@ from app.models import (
     JobRunResponse,
     JobStatusResponse,
 )
-from app.security import rate_limit_mutation
+from app.output_redaction import should_redact_command_output
+from app.security import rate_limit_mutation, redact_secrets
 from app.state import _err
 
 router = APIRouter(tags=["jobs"])
@@ -47,10 +48,24 @@ async def jobs_status(job_id: str, _identity: AuthIdentity = Depends(require_sco
 
 
 @router.get("/api/jobs/{job_id}/result", response_model=JobResultResponse)
-async def jobs_result(job_id: str, _identity: AuthIdentity = Depends(require_scope("jobs:read"))):
+async def jobs_result(
+    job_id: str,
+    redact_output: bool | None = Query(
+        default=None,
+        description="Override command output redaction for this response.",
+    ),
+    _identity: AuthIdentity = Depends(require_scope("jobs:read")),
+):
     """Get full job result."""
     result = await _state.job_manager.get_job_result(job_id)
-    return JobResultResponse(**result)
+    stdout = result.get("stdout", "")
+    stderr = result.get("stderr", "")
+    if should_redact_command_output(redact_output):
+        stdout = redact_secrets(stdout)
+        stderr = redact_secrets(stderr)
+    return JobResultResponse(
+        **{**result, "stdout": stdout, "stderr": stderr},
+    )
 
 
 @router.get("/api/jobs/queue/stats")
