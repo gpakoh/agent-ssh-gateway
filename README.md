@@ -3,8 +3,9 @@
 **OpenAPI-first SSH control plane for AI agents, CI/CD pipelines and self-hosted infrastructure automation.**
 
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
-![CI](https://github.com/gpakoh/agent-ssh-gateway/actions/workflows/ci.yml/badge.svg)
-![license](https://img.shields.io/badge/license-MIT-blue)
+![license](https://img.shields.io/badge/license-MIT-green)
+![status](https://img.shields.io/badge/status-alpha-orange)
+![tests](https://img.shields.io/badge/tests-480%20passed-brightgreen)
 
 > **Do not expose this service directly to the public Internet.** Read [SECURITY.md](SECURITY.md) before deploying.
 
@@ -127,6 +128,19 @@ curl -X POST http://127.0.0.1:8000/api/ssh/execute \
     "session_id": "<session_id>",
     "command": "docker compose build",
     "async_mode": true
+  }'
+```
+
+   When command output may contain tokens or secrets, add `redact_output=true`:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/ssh/execute \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "<session_id>",
+    "command": "kubectl get secrets -o yaml",
+    "redact_output": true
   }'
 ```
 
