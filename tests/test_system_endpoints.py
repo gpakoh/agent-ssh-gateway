@@ -4,8 +4,7 @@ from starlette.testclient import TestClient
 
 from app.config import settings
 from app.main import app
-
-FALLBACK_VERSION = "0.1.0a0"
+from app.version import APP_VERSION
 
 
 def test_openapi_version(monkeypatch):
@@ -16,7 +15,7 @@ def test_openapi_version(monkeypatch):
         resp = client.get("/openapi.json")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["info"]["version"] == FALLBACK_VERSION
+    assert data["info"]["version"] == APP_VERSION
 
 
 def test_health_ready_is_true():
