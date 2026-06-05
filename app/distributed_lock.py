@@ -36,7 +36,7 @@ class DistributedLock:
             task.cancel()
         self._renewal_tasks.clear()
         if self._redis:
-            await self._redis.close()
+            await self._redis.aclose()
 
     async def acquire(
         self,
