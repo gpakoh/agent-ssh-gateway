@@ -6,6 +6,8 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.4-alpha] - 2026-06-05
+
 ### Added
 
 - Added optional command output redaction for secrets (tokens, passwords, API keys) in command responses. Opt-in via `COMMAND_OUTPUT_REDACTION_ENABLED` setting or per-request `redact_output` parameter.
