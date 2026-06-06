@@ -579,8 +579,9 @@ class TestSshKeyUpload:
         assert resp.status_code == 403
         assert "disabled" in resp.text.lower()
 
-    def test_upload_can_be_enabled(self, api_key_auth, monkeypatch):
+    def test_upload_can_be_enabled(self, api_key_auth, monkeypatch, tmp_path):
         monkeypatch.setattr(settings, "ssh_key_upload_enabled", True)
+        monkeypatch.setattr(settings, "ssh_key_upload_dir", str(tmp_path / "ssh_keys"))
         with TestClient(app) as client:
             resp = client.post(
                 "/api/ssh/keys",

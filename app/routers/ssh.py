@@ -690,7 +690,7 @@ async def upload_ssh_key(
     if not text.startswith("-----BEGIN"):
         raise HTTPException(status_code=400, detail=_err(400, "Not a valid private key format"))
 
-    keys_dir = "ssh_keys"
+    keys_dir = settings.ssh_key_upload_dir
     os.makedirs(keys_dir, exist_ok=True)
 
     raw_name = file.filename or f"key-{uuid.uuid4().hex[:8]}.pem"
