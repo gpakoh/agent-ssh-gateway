@@ -6,6 +6,8 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.6-alpha] - 2026-06-06
+
 ### Added
 
 - Added local Web UI authentication with first-admin registration, JWT login, logout, and auth-gated frontend initialization.
