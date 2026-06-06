@@ -10,9 +10,9 @@ import bcrypt
 import jwt
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import Column, DateTime, Integer, String, func, select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import DateTime, Integer, String, func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.config import settings
 
@@ -22,20 +22,28 @@ _register_lock = asyncio.Lock()
 
 router = APIRouter(tags=["auth"])
 
-Base = declarative_base()
+
+class Base(DeclarativeBase):
+    pass
 
 
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    username = Column(String(32), unique=True, nullable=False, index=True)
-    password_hash = Column(String(128), nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 
 _engine = None
-_SessionLocal = None
+_SessionLocal: async_sessionmaker[AsyncSession] | None = None
+
+
+def get_auth_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    if _SessionLocal is None:
+        raise RuntimeError("Auth database is not initialized")
+    return _SessionLocal
 
 
 async def init_auth_db():
@@ -46,12 +54,13 @@ async def init_auth_db():
     _engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    _SessionLocal = sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
+    _SessionLocal = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
     logger.info("Auth database initialized")
 
 
 async def get_db():
-    async with _SessionLocal() as session:
+    SessionLocal = get_auth_sessionmaker()
+    async with SessionLocal() as session:
         yield session
 
 
@@ -110,7 +119,8 @@ def verify_jwt(token: str) -> dict | None:
 
 @router.get("/api/auth/check")
 async def auth_check_users():
-    async with _SessionLocal() as session:
+    SessionLocal = get_auth_sessionmaker()
+    async with SessionLocal() as session:
         result = await session.execute(select(func.count(User.id)))
         count = result.scalar() or 0
     return {"users_count": count}
@@ -125,7 +135,8 @@ async def register(req: RegisterRequest):
         raise HTTPException(status_code=400, detail=err)
 
     async with _register_lock:
-        async with _SessionLocal() as session:
+        SessionLocal = get_auth_sessionmaker()
+        async with SessionLocal() as session:
             result = await session.execute(select(func.count(User.id)))
             count = result.scalar() or 0
             if count > 0:
@@ -141,22 +152,31 @@ async def register(req: RegisterRequest):
             await session.commit()
             await session.refresh(user)
 
-            token = create_jwt(user.username, user.id)
+            if user.id is None:
+                raise RuntimeError("User ID was not assigned")
+            if user.username is None:
+                raise RuntimeError("Username was not assigned")
+
+            token = create_jwt(username=user.username, user_id=user.id)
             return AuthResponse(token=token, username=user.username)
 
 
 @router.post("/api/auth/login")
 async def login(req: LoginRequest):
-    async with _SessionLocal() as session:
+    SessionLocal = get_auth_sessionmaker()
+    async with SessionLocal() as session:
         result = await session.execute(select(User).where(User.username == req.username))
         user = result.scalar_one_or_none()
-        if not user:
+        if user is None:
             raise HTTPException(status_code=401, detail="Invalid username or password")
 
         if not bcrypt.checkpw(req.password.encode("utf-8"), user.password_hash.encode("utf-8")):
             raise HTTPException(status_code=401, detail="Invalid username or password")
 
-        token = create_jwt(user.username, user.id)
+        if user.id is None or user.username is None:
+            raise RuntimeError("User record is incomplete")
+
+        token = create_jwt(username=user.username, user_id=user.id)
         return AuthResponse(token=token, username=user.username)
 
 
