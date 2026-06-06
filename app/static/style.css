@@ -2084,164 +2084,7 @@ textarea {
     animation: statusChangePulse 200ms var(--ease-spring);
 }
 
-/* ============================================
-   22. BULK OPERATIONS
-   ============================================ */
-.bulk-header {
-    border-bottom: 1px solid var(--border-subtle);
-}
 
-.bulk-body {
-    padding: var(--space-2) var(--space-3);
-}
-
-.bulk-buttons {
-    display: flex;
-    gap: var(--space-1);
-    flex-wrap: wrap;
-}
-
-.bulk-btn {
-    flex: 1;
-    min-width: 0;
-    justify-content: center;
-}
-
-/* Modal overlay */
-.bulk-modal-overlay {
-    position: fixed;
-    inset: 0;
-    z-index: 1000;
-    background: rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(4px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: var(--space-5);
-}
-
-.bulk-modal {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-default);
-    border-radius: 12px;
-    width: 100%;
-    max-width: 680px;
-    max-height: 85vh;
-    display: flex;
-    flex-direction: column;
-    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-}
-
-.bulk-modal-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--space-3) var(--space-4);
-    border-bottom: 1px solid var(--border-subtle);
-    flex-shrink: 0;
-}
-
-.bulk-modal-title {
-    font: var(--text-lg);
-    color: var(--text-primary);
-}
-
-.bulk-modal-body {
-    flex: 1;
-    overflow-y: auto;
-    padding: var(--space-4);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-}
-
-.bulk-modal-footer {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: var(--space-2);
-    padding: var(--space-3) var(--space-4);
-    border-top: 1px solid var(--border-subtle);
-    flex-shrink: 0;
-}
-
-.bulk-label {
-    font: var(--text-xs);
-    color: var(--text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-}
-
-.bulk-mode-select {
-    width: 100%;
-    height: 32px;
-    padding: 0 var(--space-2);
-    background: var(--bg-input);
-    border: 1px solid var(--border-default);
-    border-radius: 6px;
-    color: var(--text-primary);
-    font: var(--text-sm);
-    outline: none;
-}
-
-.bulk-textarea {
-    width: 100%;
-    min-height: 200px;
-    padding: var(--space-3);
-    background: var(--bg-input);
-    border: 1px solid var(--border-default);
-    border-radius: 6px;
-    color: var(--text-primary);
-    font: var(--font-mono);
-    font-size: 13px;
-    line-height: 1.5;
-    resize: vertical;
-    outline: none;
-    tab-size: 2;
-}
-
-.bulk-textarea:focus {
-    border-color: var(--accent-primary);
-}
-
-.bulk-hint {
-    font: var(--text-xs);
-    padding: 4px 8px;
-    border-radius: 4px;
-}
-
-.bulk-hint.active {
-    color: var(--accent-info);
-    background: var(--accent-info-muted);
-}
-
-.bulk-hint.warning {
-    color: var(--accent-warning);
-    background: var(--accent-warning-muted);
-}
-
-.bulk-validation {
-    font: var(--text-xs);
-    padding: 6px 8px;
-    border-radius: 4px;
-    min-height: 20px;
-}
-
-.bulk-validation.success {
-    color: var(--accent-success);
-    background: var(--accent-success-muted);
-}
-
-.bulk-validation.error {
-    color: var(--accent-danger);
-    background: var(--accent-danger-muted);
-}
-
-.bulk-validation.warning {
-    color: var(--accent-warning);
-    background: var(--accent-warning-muted);
-    white-space: pre-line;
-}
 
 /* ============================================
    23. GIT SAFE FLOW
@@ -2534,4 +2377,172 @@ textarea {
     color: var(--text-tertiary);
     padding: 4px 6px;
     font-style: italic;
+}
+
+/* ============================================
+   30. AUTH OVERLAY
+   ============================================ */
+.auth-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    background: var(--bg-base);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-5);
+}
+
+.auth-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: 12px;
+    width: 100%;
+    max-width: 400px;
+    padding: var(--space-6);
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+}
+
+.auth-card-header {
+    text-align: center;
+    margin-bottom: var(--space-5);
+}
+
+.auth-logo-icon {
+    width: 40px;
+    height: 40px;
+    color: var(--accent-primary);
+    margin-bottom: var(--space-2);
+}
+
+.auth-card-header h2 {
+    font: var(--text-2xl);
+    color: var(--text-primary);
+    margin: 0 0 2px;
+}
+
+.auth-subtitle {
+    font: var(--text-sm);
+    color: var(--text-tertiary);
+    margin: 0;
+}
+
+.auth-form {
+    display: none;
+}
+
+.auth-form-title {
+    font: var(--text-base);
+    color: var(--text-primary);
+    margin: 0 0 var(--space-1);
+}
+
+.auth-desc {
+    font: var(--text-sm);
+    color: var(--text-tertiary);
+    margin: 0 0 var(--space-3);
+}
+
+.auth-field {
+    margin-bottom: var(--space-3);
+}
+
+.auth-field label {
+    display: block;
+    font: var(--text-xs);
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+}
+
+.auth-input-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.auth-input-icon {
+    position: absolute;
+    left: 10px;
+    width: 16px;
+    height: 16px;
+    color: var(--text-tertiary);
+    pointer-events: none;
+}
+
+.auth-input-wrap input {
+    width: 100%;
+    height: 38px;
+    padding: 0 10px 0 34px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-default);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font: var(--text-sm);
+    outline: none;
+    transition: border-color 0.15s;
+}
+
+.auth-input-wrap input:focus {
+    border-color: var(--accent-primary);
+}
+
+.auth-input-wrap input::placeholder {
+    color: var(--text-tertiary);
+    opacity: 0.6;
+}
+
+.auth-hint {
+    font: var(--text-xs);
+    color: var(--text-tertiary);
+    margin-top: 4px;
+    padding-left: 2px;
+}
+
+.auth-error {
+    font: var(--text-xs);
+    color: var(--accent-danger);
+    background: var(--accent-danger-muted);
+    padding: 6px 10px;
+    border-radius: 6px;
+    margin-bottom: var(--space-2);
+    display: none;
+    line-height: 1.4;
+}
+
+.auth-submit {
+    width: 100%;
+    height: 40px;
+    justify-content: center;
+    font-size: 14px;
+}
+
+.auth-switch {
+    text-align: center;
+    font: var(--text-sm);
+    color: var(--text-tertiary);
+    margin: var(--space-3) 0 0;
+}
+
+.auth-switch a {
+    color: var(--accent-primary);
+    text-decoration: none;
+}
+
+.auth-switch a:hover {
+    text-decoration: underline;
+}
+
+.auth-user-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font: var(--text-sm);
+    color: var(--text-secondary);
+    padding: 2px 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    margin-right: var(--space-2);
 }

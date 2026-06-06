@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [Unreleased]
+
+### Added
+
+- Added local Web UI authentication with first-admin registration, JWT login, logout, and auth-gated frontend initialization.
+
+### Security
+
+- Added fail-closed `JWT_SECRET` validation — gateway refuses to start with an empty secret.
+- Public registration is automatically disabled after the first user is created.
+- Registration guarded by `asyncio.Lock` to prevent race conditions on first-user creation.
+- JWT payload enforces `type: "web-ui"` to prevent cross-context token reuse.
+- Parent directory for `AUTH_DB_PATH` is created automatically on startup.
+- Frontend fetch wrapper uses `Headers` API instead of raw object access for safe Bearer token injection.
+- Register link hidden from the UI when an admin already exists.
+- Added 15 auth tests covering: check (empty/after register), register (first/second/weak/mismatch/login-gate), login (valid/invalid/nonexistent), verify (valid/missing/invalid/expired), protected endpoint with JWT.
+
 ## [0.1.5-alpha] - 2026-06-05
 
 ### Changed

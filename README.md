@@ -5,7 +5,7 @@
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![status](https://img.shields.io/badge/status-alpha-orange)
-![tests](https://img.shields.io/badge/tests-480%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-489%20passed-brightgreen)
 
 > **Do not expose this service directly to the public Internet.** Read [SECURITY.md](SECURITY.md) before deploying.
 
@@ -336,6 +336,39 @@ Covered endpoints:
 - `GET /api/jobs/{job_id}/stream` and `/events` — query param `?redact_output=true`
 
 Redaction is a best-effort regex-based pass, not a full DLP solution. It catches common patterns (`api_key=...`, `token=...`, `password=...`, `Authorization: Bearer ...`) but will not catch every possible secret format. Use as a safety net, not a security boundary.
+
+---
+
+## Web UI authentication
+
+```env
+JWT_SECRET=...
+AUTH_DB_PATH=/app/data/auth.sqlite3
+JWT_EXPIRES_MINUTES=1440
+```
+
+The web UI uses a single-admin bootstrap flow powered by JWT:
+
+1. On first start, open `http://localhost:8085` and the UI shows a registration form.
+2. Create the first admin account — this is the only user the system will ever have.
+3. After registration, public registration is automatically disabled. Subsequent visits show a login form.
+4. The JWT token is stored in browser `localStorage` and sent as `Authorization: Bearer <token>` on every API request.
+
+Generate a `JWT_SECRET`:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+The auth database file lives at `AUTH_DB_PATH` (default `/app/data/auth.sqlite3`). In Docker, this path is inside the `known_hosts` volume mounted at `/app/data`.
+
+Behind the scenes:
+- Passwords are hashed with **bcrypt**.
+- Credential validation uses **bcrypt.checkpw** — no timing side channels.
+- Registration is guarded by an `asyncio.Lock` to prevent race conditions on first-user creation.
+- If `JWT_SECRET` is empty, the gateway refuses to start with a `RuntimeError`.
+- The `verify_jwt` function enforces `type: "web-ui"` in the token payload to prevent cross-context token reuse.
+- The global auth middleware falls back to JWT verification when no `X-API-Key` header is present.
 
 ---
 

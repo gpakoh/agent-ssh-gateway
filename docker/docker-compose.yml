@@ -34,6 +34,9 @@ services:
       - KNOWN_HOSTS_STORE=file
       - KNOWN_HOSTS_FILE=/app/data/known_hosts
       - SSH_STRICT_HOST_KEY_CHECKING=false
+      - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET}
+      - AUTH_DB_PATH=/app/data/auth.sqlite3
+      - JWT_EXPIRES_MINUTES=${JWT_EXPIRES_MINUTES:-1440}
     volumes:
       - ssh_keys:/app/ssh_keys:ro
       - gateway_logs:/app/logs

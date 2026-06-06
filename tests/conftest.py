@@ -1,14 +1,8 @@
-"""Global test fixtures — autouse cleanup to prevent cross-file state pollution."""
+"""Pytest configuration: set env vars before app modules are imported."""
 
+import os
 
-import pytest
-
-
-@pytest.fixture(autouse=True)
-def _reset_dependency_overrides():
-    """Restore FastAPI dependency_overrides after each test module."""
-    from app.main import app
-    old = dict(app.dependency_overrides)
-    yield
-    app.dependency_overrides.clear()
-    app.dependency_overrides.update(old)
+os.environ.setdefault("AUTH_DB_PATH", "/tmp/test_auth.sqlite3")
+os.environ.setdefault("JWT_SECRET", "test-jwt-secret-for-testing-only")
+os.environ.setdefault("API_KEY", "test-api-key-12345")
+os.environ.setdefault("AGENT_TOKEN", "test-agent-token-12345")
