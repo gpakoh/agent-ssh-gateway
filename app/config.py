@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     api_key: str = Field(default="", alias="API_KEY")
     api_auth_enabled: bool = Field(default=True, alias="API_AUTH_ENABLED")
     ssh_key_upload_enabled: bool = Field(default=False, alias="SSH_KEY_UPLOAD_ENABLED")
+    ssh_key_upload_dir: str = Field(default="./ssh_keys", alias="SSH_KEY_UPLOAD_DIR")
     command_policy_mode: str = Field(default="audit", alias="COMMAND_POLICY_MODE")
     command_policy_profile: str = Field(default="default", alias="COMMAND_POLICY_PROFILE")
     command_output_redaction_enabled: bool = Field(
