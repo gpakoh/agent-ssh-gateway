@@ -4,6 +4,103 @@
  */
 
 // ============================================
+// Auth State & Helpers
+// ============================================
+
+const AUTH_TOKEN_KEY = 'auth_token';
+
+function getAuthToken() {
+    return localStorage.getItem(AUTH_TOKEN_KEY);
+}
+
+function setAuthToken(token) {
+    if (token) {
+        localStorage.setItem(AUTH_TOKEN_KEY, token);
+    } else {
+        localStorage.removeItem(AUTH_TOKEN_KEY);
+    }
+}
+
+// Override fetch to add JWT Bearer token to API calls
+const _origFetch = window.fetch;
+window.fetch = function(url, opts) {
+    var token = getAuthToken();
+    if (token && typeof url === 'string' && url.indexOf('/api/') === 0) {
+        opts = opts || {};
+        var headers = new Headers(opts.headers || {});
+        if (!headers.has('Authorization')) {
+            headers.set('Authorization', 'Bearer ' + token);
+        }
+        opts.headers = headers;
+    }
+    return _origFetch.call(this, url, opts);
+};
+
+async function checkAuth() {
+    var token = getAuthToken();
+    if (token) {
+        try {
+            var res = await fetch('/api/auth/verify');
+            if (res.ok) {
+                var data = await res.json();
+                var badge = document.getElementById('authUserBadge');
+                var uname = document.getElementById('authUsername');
+                if (badge) badge.style.display = 'inline-flex';
+                if (uname) uname.textContent = data.username;
+                return true;
+            }
+        } catch (e) {}
+    }
+    setAuthToken(null);
+    return false;
+}
+
+async function showAuthForm() {
+    var overlay = document.getElementById('authOverlay');
+    var shell = document.getElementById('appShell');
+    if (overlay) overlay.style.display = 'flex';
+    if (shell) shell.style.display = 'none';
+
+    try {
+        var res = await fetch('/api/auth/check');
+        var data = await res.json();
+        if (data.users_count === 0) {
+            showRegisterForm();
+        } else {
+            showLoginForm();
+            var switchEl = document.getElementById('loginSwitch');
+            if (switchEl) switchEl.style.display = 'none';
+        }
+    } catch (e) {
+        showLoginForm();
+    }
+}
+
+function showApp() {
+    var overlay = document.getElementById('authOverlay');
+    var shell = document.getElementById('appShell');
+    if (overlay) overlay.style.display = 'none';
+    if (shell) shell.style.display = 'grid';
+
+    var logoutBtn = document.getElementById('logoutBtn');
+    if (logoutBtn) logoutBtn.style.display = 'inline-flex';
+}
+
+function showLoginForm() {
+    var login = document.getElementById('loginForm');
+    var register = document.getElementById('registerForm');
+    if (login) login.style.display = 'block';
+    if (register) register.style.display = 'none';
+}
+
+function showRegisterForm() {
+    var login = document.getElementById('loginForm');
+    var register = document.getElementById('registerForm');
+    if (login) login.style.display = 'none';
+    if (register) register.style.display = 'block';
+}
+
+// ============================================
 // State
 // ============================================
 
@@ -2183,7 +2280,7 @@ function summaryLine(mode, data) {
 
 // Bind bulk modal events (also handles git buttons)
 document.addEventListener('DOMContentLoaded', () => {
-    document.querySelectorAll('.bulk-btn, .git-btn, .nav-btn, .tpl-btn, .obs-btn, .rec-btn').forEach(btn => {
+    document.querySelectorAll('.git-btn, .nav-btn, .tpl-btn, .obs-btn, .rec-btn').forEach(btn => {
         btn.addEventListener('click', () => openBulkModal(btn.dataset.mode));
     });
 
@@ -2202,14 +2299,7 @@ document.addEventListener('DOMContentLoaded', () => {
         el2.validation.textContent = '';
         el2.validation.className = 'bulk-validation';
     });
-    // Keyboard shortcut: Enter in textarea when mod is held
-    document.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && document.getElementById('bulkOverlay').style.display === 'flex') {
-            e.preventDefault();
-            const parsed = validateBulkJson();
-            if (parsed) executeBulkRequest(parsed);
-        }
-    });
+
 
     // === SSH Trust Flow ===
     const trustIndicator = document.getElementById('trustIndicator');
@@ -2413,4 +2503,151 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     renderKnownHosts();
+});
+
+// ============================================
+// Auth Event Handlers & Initialization
+// ============================================
+
+document.addEventListener('DOMContentLoaded', async function authInit() {
+    var loginBtn = document.getElementById('loginBtn');
+    var registerBtn = document.getElementById('registerBtn');
+    var logoutBtn = document.getElementById('logoutBtn');
+    var showRegisterLink = document.getElementById('showRegisterLink');
+    var showLoginLink = document.getElementById('showLoginLink');
+    var loginError = document.getElementById('loginError');
+    var regError = document.getElementById('regError');
+
+    // Check if already authenticated
+    var authed = await checkAuth();
+    if (authed) {
+        showApp();
+        return;
+    }
+
+    // Not authenticated — show form
+    await showAuthForm();
+
+    // Login
+    if (loginBtn) {
+        loginBtn.addEventListener('click', async function() {
+            var username = document.getElementById('loginUsername');
+            var password = document.getElementById('loginPassword');
+            if (!username || !password) return;
+            var u = username.value.trim();
+            var p = password.value;
+            if (!u || !p) {
+                if (loginError) { loginError.textContent = 'Please fill in all fields'; loginError.style.display = 'block'; }
+                return;
+            }
+            if (loginError) loginError.style.display = 'none';
+            loginBtn.disabled = true;
+            loginBtn.innerHTML = '<i data-lucide="loader" class="icon-14"></i><span>Signing in...</span>';
+            try {
+                var res = await _origFetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: u, password: p }),
+                });
+                var data = await res.json();
+                if (res.ok) {
+                    setAuthToken(data.token);
+                    var badge = document.getElementById('authUserBadge');
+                    var uname = document.getElementById('authUsername');
+                    if (badge) badge.style.display = 'inline-flex';
+                    if (uname) uname.textContent = data.username;
+                    showApp();
+                } else {
+                    if (loginError) { loginError.textContent = data.detail || 'Login failed'; loginError.style.display = 'block'; }
+                }
+            } catch (e) {
+                if (loginError) { loginError.textContent = 'Network error'; loginError.style.display = 'block'; }
+            }
+            loginBtn.disabled = false;
+            loginBtn.innerHTML = '<i data-lucide="log-in" class="icon-14"></i><span>Sign In</span>';
+        });
+    }
+
+    // Register
+    if (registerBtn) {
+        registerBtn.addEventListener('click', async function() {
+            var username = document.getElementById('regUsername');
+            var password = document.getElementById('regPassword');
+            var confirm = document.getElementById('regPasswordConfirm');
+            if (!username || !password || !confirm) return;
+            var u = username.value.trim();
+            var p = password.value;
+            var c = confirm.value;
+            if (!u || !p || !c) {
+                if (regError) { regError.textContent = 'Please fill in all fields'; regError.style.display = 'block'; }
+                return;
+            }
+            if (p !== c) {
+                if (regError) { regError.textContent = 'Passwords do not match'; regError.style.display = 'block'; }
+                return;
+            }
+            if (regError) regError.style.display = 'none';
+            registerBtn.disabled = true;
+            registerBtn.innerHTML = '<i data-lucide="loader" class="icon-14"></i><span>Creating...</span>';
+            try {
+                var res = await _origFetch('/api/auth/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: u, password: p, password_confirm: c }),
+                });
+                var data = await res.json();
+                if (res.ok) {
+                    setAuthToken(data.token);
+                    var badge = document.getElementById('authUserBadge');
+                    var uname = document.getElementById('authUsername');
+                    if (badge) badge.style.display = 'inline-flex';
+                    if (uname) uname.textContent = data.username;
+                    showApp();
+                } else {
+                    if (regError) { regError.textContent = data.detail || 'Registration failed'; regError.style.display = 'block'; }
+                }
+            } catch (e) {
+                if (regError) { regError.textContent = 'Network error'; regError.style.display = 'block'; }
+            }
+            registerBtn.disabled = false;
+            registerBtn.innerHTML = '<i data-lucide="user-plus" class="icon-14"></i><span>Create Account</span>';
+        });
+    }
+
+    // Logout
+    if (logoutBtn) {
+        logoutBtn.addEventListener('click', function() {
+            setAuthToken(null);
+            location.reload();
+        });
+    }
+
+    // Switch between login and register forms
+    if (showRegisterLink) {
+        showRegisterLink.addEventListener('click', function(e) {
+            e.preventDefault();
+            showRegisterForm();
+        });
+    }
+    if (showLoginLink) {
+        showLoginLink.addEventListener('click', function(e) {
+            e.preventDefault();
+            showLoginForm();
+        });
+    }
+
+    // Enter key submits
+    function onEnter(id, btn) {
+        var el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter' && btn) btn.click();
+            });
+        }
+    }
+    onEnter('loginUsername', loginBtn);
+    onEnter('loginPassword', loginBtn);
+    onEnter('regUsername', registerBtn);
+    onEnter('regPassword', registerBtn);
+    onEnter('regPasswordConfirm', registerBtn);
 });

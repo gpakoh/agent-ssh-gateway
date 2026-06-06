@@ -46,6 +46,20 @@ class Settings(BaseSettings):
     command_output_redaction_enabled: bool = Field(
         default=False, alias="COMMAND_OUTPUT_REDACTION_ENABLED"
     )
+    # Web UI Auth
+    jwt_secret: str = Field(default="", alias="JWT_SECRET")
+    jwt_expires_minutes: int = Field(default=1440, alias="JWT_EXPIRES_MINUTES")
+    auth_db_path: str = Field(default="/app/data/auth.sqlite3", alias="AUTH_DB_PATH")
+
+    @property
+    def jwt_secret_required(self) -> str:
+        if not self.jwt_secret:
+            raise RuntimeError(
+                "JWT_SECRET must be configured when Web UI auth is enabled. "
+                "Generate one with: python3 -c \"import secrets; print(secrets.token_hex(32))\""
+            )
+        return self.jwt_secret
+
     agent_token: str = Field(default="", alias="AGENT_TOKEN")
     agent_token_ttl: int = Field(default=3600, alias="AGENT_TOKEN_TTL")
     agent_token_expires_at: datetime | None = None

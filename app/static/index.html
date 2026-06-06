@@ -7,14 +7,90 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=9">
+    <link rel="stylesheet" href="/static/style.css?v=10">
     <link rel="icon" type="image/png" href="/static/favicon.png">
     <script>var require = { paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs' } };</script>
     <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs/loader.min.js"></script>
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 </head>
 <body>
-    <div class="app-shell" id="appShell">
+    <!-- ============================================ -->
+    <!-- Auth Overlay — shown until login/register    -->
+    <!-- ============================================ -->
+    <div class="auth-overlay" id="authOverlay">
+        <div class="auth-card">
+            <div class="auth-card-header">
+                <i data-lucide="terminal" class="auth-logo-icon"></i>
+                <h2>agent-ssh-gateway</h2>
+                <p class="auth-subtitle">SSH Gateway</p>
+            </div>
+
+            <!-- Login Form -->
+            <div class="auth-form" id="loginForm">
+                <h3 class="auth-form-title">Sign In</h3>
+                <div class="auth-field">
+                    <label for="loginUsername">Username</label>
+                    <div class="auth-input-wrap">
+                        <i data-lucide="user" class="auth-input-icon"></i>
+                        <input type="text" id="loginUsername" placeholder="Enter username" autocomplete="username" spellcheck="false">
+                    </div>
+                </div>
+                <div class="auth-field">
+                    <label for="loginPassword">Password</label>
+                    <div class="auth-input-wrap">
+                        <i data-lucide="lock" class="auth-input-icon"></i>
+                        <input type="password" id="loginPassword" placeholder="Enter password" autocomplete="current-password">
+                    </div>
+                </div>
+                <div class="auth-error" id="loginError"></div>
+                <button type="button" class="btn btn-primary auth-submit" id="loginBtn">
+                    <i data-lucide="log-in" class="icon-14"></i>
+                    <span>Sign In</span>
+                </button>
+                <p class="auth-switch" id="loginSwitch">
+                    No account? <a href="#" id="showRegisterLink">Register</a>
+                </p>
+            </div>
+
+            <!-- Register Form -->
+            <div class="auth-form" id="registerForm">
+                <h3 class="auth-form-title">Create Admin Account</h3>
+                <p class="auth-desc">First-time setup — create your admin account</p>
+                <div class="auth-field">
+                    <label for="regUsername">Username</label>
+                    <div class="auth-input-wrap">
+                        <i data-lucide="user" class="auth-input-icon"></i>
+                        <input type="text" id="regUsername" placeholder="Choose a username (3-32 chars)" autocomplete="username" spellcheck="false">
+                    </div>
+                </div>
+                <div class="auth-field">
+                    <label for="regPassword">Password</label>
+                    <div class="auth-input-wrap">
+                        <i data-lucide="lock" class="auth-input-icon"></i>
+                        <input type="password" id="regPassword" placeholder="Min 8 chars, uppercase, digit, special" autocomplete="new-password">
+                    </div>
+                    <div class="auth-hint">Min 8 chars, uppercase, digit, special character</div>
+                </div>
+                <div class="auth-field">
+                    <label for="regPasswordConfirm">Confirm Password</label>
+                    <div class="auth-input-wrap">
+                        <i data-lucide="shield" class="auth-input-icon"></i>
+                        <input type="password" id="regPasswordConfirm" placeholder="Repeat password" autocomplete="new-password">
+                    </div>
+                </div>
+                <div class="auth-error" id="regError"></div>
+                <button type="button" class="btn btn-primary auth-submit" id="registerBtn">
+                    <i data-lucide="user-plus" class="icon-14"></i>
+                    <span>Create Account</span>
+                </button>
+                <p class="auth-switch" id="registerSwitch">
+                    Already have an account? <a href="#" id="showLoginLink">Sign In</a>
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <div class="app-shell" id="appShell" style="display:none">
         <!-- ============================================ -->
         <!-- HEADER BAR (full width, 48px)                -->
         <!-- ============================================ -->
@@ -25,6 +101,14 @@
                 <span class="version-badge">v2.0</span>
             </div>
             <div class="header-right">
+                <span class="auth-user-badge" id="authUserBadge" style="display:none">
+                    <i data-lucide="user" class="icon-14"></i>
+                    <span id="authUsername"></span>
+                </span>
+                <button type="button" class="btn btn-outline btn-compact" id="logoutBtn" style="display:none">
+                    <i data-lucide="log-out" class="icon-14"></i>
+                    <span>Logout</span>
+                </button>
                 <div class="status-group" id="statusGroup">
                     <span class="status-dot" id="statusDot"></span>
                     <span class="status-text" id="connectionStatus">Disconnected</span>
@@ -221,31 +305,6 @@
                 </div>
             </section>
 
-            <!-- Bulk Operations Panel -->
-            <section class="servers-section" id="bulkSection">
-                <div class="panel-header bulk-header">
-                    <div class="panel-header-left">
-                        <i data-lucide="layers" class="icon-14"></i>
-                        <span class="panel-header-title">Bulk Operations</span>
-                    </div>
-                </div>
-                <div class="panel-body bulk-body">
-                    <div class="bulk-buttons">
-                        <button type="button" class="btn btn-outline btn-compact bulk-btn" data-mode="bulk_read" title="Read multiple files at once">
-                            <i data-lucide="file-text" class="icon-14"></i>
-                            <span>Bulk Read</span>
-                        </button>
-                        <button type="button" class="btn btn-outline btn-compact bulk-btn" data-mode="bulk_edit" title="Edit multiple files at once">
-                            <i data-lucide="edit-3" class="icon-14"></i>
-                            <span>Bulk Edit</span>
-                        </button>
-                        <button type="button" class="btn btn-outline btn-compact bulk-btn" data-mode="bulk_execute" title="Run multiple commands concurrently">
-                            <i data-lucide="terminal" class="icon-14"></i>
-                            <span>Run Batch</span>
-                        </button>
-                    </div>
-                </div>
-            </section>
 
             <!-- Git Safe Flow Panel -->
             <section class="servers-section" id="gitSection">
@@ -617,45 +676,6 @@
     <!-- Toast Container -->
     <div class="toast-container" id="toastContainer" aria-live="polite"></div>
 
-    <!-- Bulk Operations Modal -->
-    <div class="bulk-modal-overlay" id="bulkOverlay" style="display:none;">
-        <div class="bulk-modal" id="bulkModal">
-            <div class="bulk-modal-header">
-                <span class="bulk-modal-title" id="bulkModalTitle">Bulk Read</span>
-                <button type="button" class="btn-icon" id="bulkModalClose" aria-label="Close">
-                    <i data-lucide="x" class="icon-16"></i>
-                </button>
-            </div>
-            <div class="bulk-modal-body">
-                <div class="bulk-modal-mode">
-                    <label class="bulk-label">Operation</label>
-                    <select class="bulk-mode-select" id="bulkModeSelect" disabled>
-                        <option value="bulk_read">Bulk Read</option>
-                        <option value="bulk_edit">Bulk Edit</option>
-                        <option value="bulk_execute">Run Batch</option>
-                    </select>
-                </div>
-                <div class="bulk-hint" id="bulkSessionHint"></div>
-                <label class="bulk-label">Request Body (JSON)</label>
-                <textarea class="bulk-textarea" id="bulkRequestBody" spellcheck="false"></textarea>
-                <div class="bulk-validation" id="bulkValidationResult"></div>
-            </div>
-            <div class="bulk-modal-footer">
-                <button type="button" class="btn btn-outline btn-compact" id="bulkLoadExample">
-                    <i data-lucide="copy" class="icon-14"></i>
-                    <span>Load example</span>
-                </button>
-                <button type="button" class="btn btn-outline btn-compact" id="bulkValidate">
-                    <i data-lucide="check" class="icon-14"></i>
-                    <span>Validate</span>
-                </button>
-                <button type="button" class="btn btn-primary btn-compact" id="bulkExecute">
-                    <i data-lucide="play" class="icon-14"></i>
-                    <span>Execute</span>
-                </button>
-            </div>
-        </div>
-    </div>
 
     <script src="/static/app.js?v=9"></script>
     <script>
