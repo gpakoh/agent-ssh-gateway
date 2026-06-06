@@ -29,6 +29,7 @@ PUBLIC_ROUTES: set[tuple[str, str]] = {
 
 PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/static",
+    "/api/auth/",
 )
 
 AUTH_DEPENDENCY_NAMES: set[str] = {
