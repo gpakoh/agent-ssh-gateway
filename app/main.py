@@ -49,6 +49,8 @@ from app.ssh_manager import (
     TimeoutError,
 )
 from app.state import _err
+from app.user_auth import init_auth_db
+from app.user_auth import router as auth_router
 from app.version import APP_VERSION
 from app.webhook_manager import WebhookManager
 
@@ -67,6 +69,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
+    await init_auth_db()
     state.host_key_store = create_host_key_store(settings)
     if not isinstance(state.host_key_store, NullHostKeyStore):
         logger.info("Host key store initialized: %s", type(state.host_key_store).__name__)
@@ -848,6 +851,7 @@ app.include_router(system_router)
 app.include_router(logs_router)
 app.include_router(templates_router)
 app.include_router(event_hooks_router)
+app.include_router(auth_router)
 
 # Static Files Mount (after All Router Includes So Static Routes Take Precedence)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
