@@ -237,7 +237,7 @@ async def verify_master_api_key(
 # Always‑public Paths (even When Auth Is Enabled)
 # ---------------------------------------------------------------------------
 
-ALWAYS_PUBLIC = frozenset({"/health", "/api/capabilities"})
+ALWAYS_PUBLIC = frozenset({"/", "/health", "/api/capabilities"})
 
 
 def _normalise_path(path: str) -> str:
@@ -261,6 +261,14 @@ async def auth_check(request: Request, settings: Settings, token_store: AgentTok
 
     # Always‑public Health Endpoint
     if request.method == "GET" and path in ALWAYS_PUBLIC:
+        return None
+
+    # Static files (Web UI) are always public
+    if request.method == "GET" and (path == "/static" or path.startswith("/static/")):
+        return None
+
+    # Auth endpoints are always public
+    if path.startswith("/api/auth/"):
         return None
 
     # Fail-closed: Auth Enabled But No Key Configured
@@ -329,21 +337,35 @@ async def auth_check(request: Request, settings: Settings, token_store: AgentTok
 
     # API Key Check (also Accept Agent_token)
     identity = await verify_api_key(request, settings.api_key, settings.agent_token, settings, token_store)
-    if identity is None:
-        return HTTPException(
-            status_code=401,
-            detail={
-                "message": "Invalid or missing API key. Provide via X-API-Key header",
-                "code": "INVALID_API_KEY",
-                "retryable": False,
-                "hint": "Provide a valid X-API-Key header in your requests",
-                "http_status": 401,
-            },
-        )
+    if identity is not None:
+        request.state.auth_identity = identity
+        return None
 
-    # Carry the authenticated identity for downstream scope checks
-    request.state.auth_identity = identity
-    return None
+    # JWT fallback for web UI (Bearer token from login/register)
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        from app.user_auth import verify_jwt
+
+        payload = verify_jwt(auth_header[7:])
+        if payload is not None:
+            request.state.auth_identity = AuthIdentity(
+                token_type="web-ui",
+                token=auth_header[7:],
+                name=payload["sub"],
+                scopes=("*",),
+            )
+            return None
+
+    return HTTPException(
+        status_code=401,
+        detail={
+            "message": "Invalid or missing API key. Provide via X-API-Key header",
+            "code": "INVALID_API_KEY",
+            "retryable": False,
+            "hint": "Provide a valid X-API-Key header in your requests",
+            "http_status": 401,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
