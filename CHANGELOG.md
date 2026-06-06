@@ -10,6 +10,19 @@ This project follows semantic versioning where practical, but the public API is 
 
 - Added local Web UI authentication with first-admin registration, JWT login, logout, and auth-gated frontend initialization.
 
+### Fixed
+
+- `/api/auth/*`, `/static/*`, and `/` are now public paths — middleware no longer blocks registration/login/verify with 403 when `API_AUTH_ENABLED=true`.
+- Auth middleware falls back to JWT Bearer token verification when no `X-API-Key` header is present, enabling the web UI login flow.
+
+### Changed
+
+- `SSH_KEY_UPLOAD_DIR` is now configurable via env var (default `./ssh_keys`).
+
+### Tests
+
+- SSH key upload test uses `tmp_path` instead of repo working directory — fixes `PermissionError` in CI runner.
+
 ### Security
 
 - Added fail-closed `JWT_SECRET` validation — gateway refuses to start with an empty secret.
