@@ -40,6 +40,8 @@ python auditor.py --enable-subagents "Investigate CI failure"
 - [ ] `GATEWAY_SESSION_ID` is set and the session is alive
 - [ ] `gateway_repo_status()` can execute git status/log via async jobs
 
+> **Note:** `git status/log` will fail if the SSH session's working directory is not inside a git repository. This is expected — `gateway_repo_status` runs raw git commands on the remote host. To test against a real repo, connect to a session where the working directory is a git checkout, or adjust the commands in `gateway_repo_status()`.
+
 **Expected output:**
 
 ```
