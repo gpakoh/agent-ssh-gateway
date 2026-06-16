@@ -63,6 +63,65 @@ def gateway_check_session(session_id: str) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Command allowlist — restricts what commands the RLM profile may run
+# ---------------------------------------------------------------------------
+
+ALLOWED_COMMAND_PREFIXES = (
+    "git status",
+    "git log",
+    "git diff",
+    "git show",
+    "git tag",
+    "pytest -q",
+    "pytest -x",
+    "ruff check",
+    "mypy",
+    "find ",
+    "grep ",
+    "sed -n",
+    "cat ",
+    "head ",
+    "tail ",
+    "wc ",
+    "ls ",
+    "python -m compileall",
+)
+
+DENIED_COMMAND_PARTS = (
+    " rm ",
+    "mv ",
+    "chmod ",
+    "chown ",
+    "> ",
+    "| ",
+    "git push",
+    "git reset",
+    "git commit",
+    "git branch -D",
+    "docker ",
+    "pip install",
+    "apt ",
+    "curl ",
+    "wget ",
+)
+
+
+def validate_readonly_command(command: str) -> str:
+    """Check command against allowlist/denylist. Returns stripped command."""
+    stripped = command.strip()
+    if any(part in stripped for part in DENIED_COMMAND_PARTS):
+        raise GatewayError(f"Command denied by RLM auditor profile: {command}")
+    if not stripped.startswith(ALLOWED_COMMAND_PREFIXES):
+        raise GatewayError(f"Command not allowed by RLM auditor profile: {command}")
+    return stripped
+
+
+# ---------------------------------------------------------------------------
+# Gateway API functions
+# ---------------------------------------------------------------------------
+
+
 def gateway_execute(session_id: str, command: str) -> dict[str, Any]:
     """Run a command through agent-ssh-gateway as an async, redacted job."""
     return _post(
@@ -74,6 +133,11 @@ def gateway_execute(session_id: str, command: str) -> dict[str, Any]:
             "redact_output": True,
         },
     )
+
+
+def gateway_execute_restricted(session_id: str, command: str) -> dict[str, Any]:
+    """Execute only if the command passes the allowlist."""
+    return gateway_execute(session_id, validate_readonly_command(command))
 
 
 def gateway_job_status(job_id: str) -> dict[str, Any]:
@@ -114,3 +178,14 @@ def gateway_repo_status(session_id: str) -> dict[str, Any]:
         job = gateway_execute(session_id, command)
         results[name] = gateway_wait_job(job["job_id"])
     return results
+
+
+# ---------------------------------------------------------------------------
+# Subagent tools — read‑only subset for controlled subcalls
+# ---------------------------------------------------------------------------
+
+READ_ONLY_SUB_TOOLS: dict[str, Any] = {
+    "gateway_job_status": gateway_job_status,
+    "gateway_job_result": gateway_job_result,
+    "gateway_read_file": gateway_read_file,
+}
