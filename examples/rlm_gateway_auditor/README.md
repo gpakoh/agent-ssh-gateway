@@ -51,7 +51,7 @@ Gateway connectivity & session check
   Subagents:           disabled
   Subagent tools:      (none)
   Max depth:           1
-  Command allowlist:   enabled (19 prefixes)
+  Command allowlist:   enabled (18 prefixes)
 
 --- repo_status smoke ---
     M README.md
