@@ -6,9 +6,11 @@ import os
 import sys
 
 from gateway_tools import (
+    ALLOWED_COMMAND_PREFIXES,
+    READ_ONLY_SUB_TOOLS,
     gateway_check_auth,
     gateway_check_session,
-    gateway_execute,
+    gateway_execute_restricted,
     gateway_health,
     gateway_job_result,
     gateway_job_status,
@@ -40,11 +42,28 @@ def _require_env(name: str) -> str:
     return value
 
 
+def _subagents_enabled() -> bool:
+    return (
+        "--enable-subagents" in sys.argv
+        or os.environ.get("RLM_ENABLE_SUBAGENTS", "0") == "1"
+    )
+
+
 def _dry_run() -> None:
     print("=" * 60)
     print("RLM Auditor — dry-run mode")
     print("Gateway connectivity & session check")
     print("=" * 60)
+
+    subagents = _subagents_enabled()
+    print(f"\n  Subagents:           {'enabled' if subagents else 'disabled'}")
+    if subagents:
+        print(f"  Subagent tools:      {', '.join(sorted(READ_ONLY_SUB_TOOLS))}")
+        print("  Max depth:           2")
+    else:
+        print("  Subagent tools:      (none)")
+        print("  Max depth:           1")
+    print(f"  Command allowlist:   enabled ({len(ALLOWED_COMMAND_PREFIXES)} prefixes)")
 
     checks: list[tuple[str, bool]] = []
 
@@ -104,29 +123,32 @@ def main() -> None:
             'Usage:'
             '\n  python auditor.py "Investigate why CI is failing"'
             '\n  python auditor.py --dry-run'
+            '\n  python auditor.py --enable-subagents "Investigate CI failure"'
         )
 
     session_id = _require_env("GATEWAY_SESSION_ID")
     task = sys.argv[1]
     logger = RLMLogger(log_dir=os.environ.get("RLM_LOG_DIR", "./logs"))
 
+    subagents = _subagents_enabled()
+
     rlm = RLM(
         backend="openai",
         backend_kwargs={"model_name": os.environ.get("RLM_MODEL", "gpt-5-nano")},
         environment=os.environ.get("RLM_ENVIRONMENT", "local"),
-        max_depth=int(os.environ.get("RLM_MAX_DEPTH", "1")),
+        max_depth=int(os.environ.get("RLM_MAX_DEPTH", "2" if subagents else "1")),
         max_iterations=int(os.environ.get("RLM_MAX_ITERATIONS", "8")),
         max_timeout=int(os.environ.get("RLM_MAX_TIMEOUT", "180")),
         max_concurrent_subcalls=int(os.environ.get("RLM_MAX_CONCURRENT_SUBCALLS", "2")),
         custom_tools={
-            "gateway_execute": gateway_execute,
+            "gateway_execute_restricted": gateway_execute_restricted,
             "gateway_job_status": gateway_job_status,
             "gateway_job_result": gateway_job_result,
             "gateway_wait_job": gateway_wait_job,
             "gateway_read_file": gateway_read_file,
             "gateway_repo_status": gateway_repo_status,
         },
-        custom_sub_tools={},
+        custom_sub_tools=READ_ONLY_SUB_TOOLS if subagents else {},
         logger=logger,
         verbose=True,
     )

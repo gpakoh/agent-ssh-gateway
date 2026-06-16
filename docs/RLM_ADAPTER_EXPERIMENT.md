@@ -26,6 +26,17 @@ RLM → custom gateway tools → agent-ssh-gateway HTTP API → jobs / results /
 - `async_mode=true` by default.
 - Low recursion depth.
 
+## Implementation milestones
+
+| # | Milestone | Status |
+|---|-----------|--------|
+| v0 | Design doc + skeleton | ✅ |
+| v1 | Safety review (warnings, disclaimers) | ✅ |
+| v2 | Runnable dry-run (connectivity, session health) | ✅ |
+| v3 | **Controlled subagent profile (read-only, allowlist)** | ✅ |
+| v4 | Optional `rlms` package extra | ⏳ |
+| v5 | Web UI / job integration | ⏳ |
+
 ## MVP workflow: CI failure investigator
 
 Input: "Investigate CI failure".
@@ -36,13 +47,32 @@ Output:
 3. minimal fix plan
 4. verification commands
 
-## Allowed tools
+## Allowed tools (root-agent)
 
-- `gateway_execute`
+- `gateway_execute_restricted` (with command allowlist)
 - `gateway_job_status`
 - `gateway_job_result`
 - `gateway_read_file`
 - `gateway_repo_status`
+
+## Subagent tools (when enabled)
+
+- `gateway_job_status`
+- `gateway_job_result`
+- `gateway_read_file`
+
+## Safety boundaries
+
+- No direct SSH.
+- No direct filesystem.
+- No root/master token.
+- Read-only token recommended.
+- `redact_output=true` by default.
+- `async_mode=true` by default.
+- Subagents disabled by default.
+- Root-agent command allowlist (no write/deploy/destructive/network).
+- Subagents: read-only tools only (no execute, no write endpoints).
+- `max_depth=2` with subagents, `max_depth=1` otherwise.
 
 ## Non-goals
 
@@ -54,6 +84,4 @@ Output:
 ## Future
 
 - DockerREPL / E2B sandbox
-- read-only scopes
-- command allowlist profile
 - trajectory visualizer
