@@ -36,6 +36,33 @@ def _get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     return response.json()
 
 
+def gateway_health() -> bool:
+    """Check gateway is alive via the public health endpoint."""
+    try:
+        response = httpx.get(f"{BASE_URL}/health", timeout=10)
+        return response.status_code < 400
+    except httpx.RequestError:
+        return False
+
+
+def gateway_check_auth() -> bool:
+    """Verify API key is accepted by calling a protected endpoint."""
+    try:
+        _get("/api/ssh/sessions")
+        return True
+    except GatewayError:
+        return False
+
+
+def gateway_check_session(session_id: str) -> bool:
+    """Verify session exists and is healthy."""
+    try:
+        resp = _get(f"/api/ssh/session/{session_id}/health")
+        return resp.get("healthy", False)
+    except GatewayError:
+        return False
+
+
 def gateway_execute(session_id: str, command: str) -> dict[str, Any]:
     """Run a command through agent-ssh-gateway as an async, redacted job."""
     return _post(
