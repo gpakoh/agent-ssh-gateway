@@ -18,8 +18,6 @@ from gateway_tools import (
     gateway_repo_status,
     gateway_wait_job,
 )
-from rlm import RLM
-from rlm.logger import RLMLogger
 
 SYSTEM_CONTEXT = """
 You are an experimental OSS maintainer auditor.
@@ -128,6 +126,9 @@ def main() -> None:
 
     session_id = _require_env("GATEWAY_SESSION_ID")
     task = sys.argv[1]
+
+    from rlm import RLM  # noqa: PLC0415
+    from rlm.logger import RLMLogger  # noqa: PLC0415
     logger = RLMLogger(log_dir=os.environ.get("RLM_LOG_DIR", "./logs"))
 
     subagents = _subagents_enabled()
