@@ -6,7 +6,10 @@ import os
 import sys
 
 from gateway_tools import (
+    gateway_check_auth,
+    gateway_check_session,
     gateway_execute,
+    gateway_health,
     gateway_job_result,
     gateway_job_status,
     gateway_read_file,
@@ -30,14 +33,80 @@ Always return:
 """
 
 
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise SystemExit(f"{name} is required")
+    return value
+
+
+def _dry_run() -> None:
+    print("=" * 60)
+    print("RLM Auditor — dry-run mode")
+    print("Gateway connectivity & session check")
+    print("=" * 60)
+
+    checks: list[tuple[str, bool]] = []
+
+    url = os.environ.get("GATEWAY_BASE_URL", "http://localhost:8085").rstrip("/")
+    healthy = gateway_health()
+    checks.append((f"GET {url}/health → {'200' if healthy else 'FAIL'}", healthy))
+
+    if healthy:
+        has_key = bool(os.environ.get("GATEWAY_API_KEY"))
+        checks.append(("GATEWAY_API_KEY set", has_key))
+        if has_key:
+            authed = gateway_check_auth()
+            checks.append(
+                ("GET /api/ssh/sessions → API key accepted", authed)
+            )
+
+        session_id = os.environ.get("GATEWAY_SESSION_ID")
+        checks.append(("GATEWAY_SESSION_ID set", bool(session_id)))
+        if session_id:
+            alive = gateway_check_session(session_id)
+            checks.append(
+                (f"GET /api/ssh/session/{session_id}/health → alive", alive)
+            )
+            if alive:
+                print("\n--- repo_status smoke ---")
+                try:
+                    repo = gateway_repo_status(session_id)
+                    for name, result in repo.items():
+                        ok = result.get("status") == "completed"
+                        checks.append((f"  git {name}: {result.get('status', 'FAIL')}", ok))
+                        if ok and result.get("stdout"):
+                            for line in result["stdout"].strip().splitlines()[:5]:
+                                print(f"    {line}")
+                except Exception as exc:
+                    checks.append((f"  repo_status failed: {exc}", False))
+
+    print("\n--- summary ---")
+    failures = 0
+    for label, ok in checks:
+        status = "PASS" if ok else "FAIL"
+        if not ok:
+            failures += 1
+        print(f"  [{status}] {label}")
+
+    print(f"\n{len(checks) - failures}/{len(checks)} passed")
+    if failures:
+        raise SystemExit(1)
+
+
 def main() -> None:
+    if "--dry-run" in sys.argv:
+        _dry_run()
+        return
+
     if len(sys.argv) < 2:
-        raise SystemExit('Usage: python auditor.py "Investigate why CI is failing"')
+        raise SystemExit(
+            'Usage:'
+            '\n  python auditor.py "Investigate why CI is failing"'
+            '\n  python auditor.py --dry-run'
+        )
 
-    session_id = os.environ.get("GATEWAY_SESSION_ID")
-    if not session_id:
-        raise SystemExit("GATEWAY_SESSION_ID is required")
-
+    session_id = _require_env("GATEWAY_SESSION_ID")
     task = sys.argv[1]
     logger = RLMLogger(log_dir=os.environ.get("RLM_LOG_DIR", "./logs"))
 
