@@ -58,7 +58,7 @@ def gateway_check_session(session_id: str) -> bool:
     """Verify session exists and is healthy."""
     try:
         resp = _get(f"/api/ssh/session/{session_id}/health")
-        return resp.get("healthy", False)
+        return resp.get("connected", False)
     except GatewayError:
         return False
 
