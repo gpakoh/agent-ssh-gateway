@@ -6,6 +6,26 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.7-alpha] - 2026-06-16
+
+### Added
+
+- Added an experimental RLM gateway auditor with controlled read-only subagents (disabled by default, `RLM_ENABLE_SUBAGENTS=1` or `--enable-subagents`).
+- Added command allowlist/denylist enforcement for all root-agent commands in the RLM auditor profile (19 allowed prefixes, 16 denied patterns).
+- Added gateway connectivity, auth, and session health checks via `--dry-run` mode — works without RLM/OpenAI.
+- Added `.env.example` and setup documentation for the RLM auditor example.
+
+### Changed
+
+- The RLM auditor root-agent now uses `gateway_execute_restricted()` with allowlist validation instead of raw `gateway_execute()`.
+- WebSocket stream timeout raised from 30s to 600s for long-running interactive sessions.
+- Docker Compose networks changed to `external: true`; gateway container now attaches to `proxmox_macvlan` with static IP `10.0.0.145` for direct LXC→container routing behind nginx.
+- `docs/RLM_ADAPTER_EXPERIMENT.md` updated with the v0–v3 implementation milestone table.
+
+### Docs
+
+- Added safety boundary warnings to `examples/rlm_gateway_auditor/README.md`: experimental, not a sandbox, use scoped token, no write/deploy commands allowed.
+
 ## [0.1.6-alpha] - 2026-06-06
 
 ### Added
