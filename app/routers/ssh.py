@@ -446,7 +446,7 @@ async def ssh_execute_stream(websocket: WebSocket):
     await websocket.accept()
     _state.active_websockets.add(websocket)
     try:
-        data = await asyncio.wait_for(websocket.receive_json(), timeout=30)
+        data = await asyncio.wait_for(websocket.receive_json(), timeout=600)
         session_id = data.get("session_id", "")
         command = data.get("command", "")
 
@@ -545,7 +545,7 @@ async def pty_stream(websocket: WebSocket, session_id: str):
 
     channel = None
     try:
-        init_data = await asyncio.wait_for(websocket.receive_json(), timeout=30)
+        init_data = await asyncio.wait_for(websocket.receive_json(), timeout=600)
         term = init_data.get("term", "xterm-256color")
         rows = init_data.get("rows", 24)
         cols = init_data.get("cols", 80)

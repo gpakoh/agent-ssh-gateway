@@ -3,7 +3,7 @@ services:
     image: redis:7-alpine
     container_name: ssh-gateway-redis
     networks:
-      - internal_net
+      internal_net: {}
     volumes:
       - redis_data:/data
     restart: unless-stopped
@@ -21,7 +21,9 @@ services:
     container_name: web-ssh-gateway
     hostname: web-ssh-gateway
     networks:
-      - internal_net
+      proxmox_macvlan:
+        ipv4_address: 10.10.10.145
+      internal_net: {}
     ports:
       - "8085:8085"
     environment:
@@ -68,8 +70,10 @@ services:
         condition: service_healthy
 
 networks:
+  proxmox_macvlan:
+    external: true
   internal_net:
-    driver: bridge
+    external: true
 
 volumes:
   ssh_keys:
