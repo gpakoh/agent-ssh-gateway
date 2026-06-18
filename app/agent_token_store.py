@@ -6,6 +6,8 @@ import logging
 
 import redis.asyncio as redis
 
+from .redis_compat import close_redis_client
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,7 +36,7 @@ class AgentTokenStore:
 
     async def disconnect(self):
         if self._redis is not None:
-            await self._redis.close()
+            await close_redis_client(self._redis)
             self._redis = None
             logger.info("Agenttokenstore Disconnected")
 

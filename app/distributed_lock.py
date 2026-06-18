@@ -8,6 +8,8 @@ from typing import cast
 
 import redis.asyncio as redis
 
+from .redis_compat import close_redis_client
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,7 +38,7 @@ class DistributedLock:
             task.cancel()
         self._renewal_tasks.clear()
         if self._redis:
-            await self._redis.aclose()
+            await close_redis_client(self._redis)
 
     async def acquire(
         self,
