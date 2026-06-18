@@ -8,6 +8,8 @@ import uuid
 
 import redis.asyncio as redis
 
+from .redis_compat import close_redis_client
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,7 +55,7 @@ class RedisJobQueue:
     async def disconnect(self):
         """Disconnect from Redis."""
         if self._redis:
-            await self._redis.aclose()
+            await close_redis_client(self._redis)
             logger.info("Disconnected From Redis")
     
     async def enqueue(
