@@ -1,0 +1,139 @@
+"""HTTP client for the experimental MCP server example."""
+
+from __future__ import annotations
+
+import os
+import time
+from typing import Any
+
+import httpx
+from command_policy import validate_readonly_command
+
+
+class GatewayClientError(RuntimeError):
+    """Raised when the gateway returns an error."""
+
+
+class GatewayClient:
+    """Small HTTP wrapper around agent-ssh-gateway."""
+
+    def __init__(
+        self,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        self.base_url = (
+            base_url or os.environ.get("GATEWAY_BASE_URL", "http://localhost:8085")
+        ).rstrip("/")
+        self.api_key = api_key or os.environ.get("GATEWAY_API_KEY", "")
+        self.session_id = session_id or os.environ.get("GATEWAY_SESSION_ID", "")
+        self.command_timeout = int(os.environ.get("MCP_GATEWAY_COMMAND_TIMEOUT", "120"))
+        self.job_timeout = int(os.environ.get("MCP_GATEWAY_JOB_TIMEOUT", "180"))
+
+    def _headers(self) -> dict[str, str]:
+        if not self.api_key:
+            raise GatewayClientError("GATEWAY_API_KEY is required")
+        return {"X-API-Key": self.api_key}
+
+    def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        response = httpx.get(
+            f"{self.base_url}{path}",
+            params=params,
+            headers=self._headers(),
+            timeout=30,
+        )
+        if response.status_code >= 400:
+            raise GatewayClientError(
+                f"GET {path} failed: {response.status_code} {response.text}"
+            )
+        return response.json()
+
+    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        response = httpx.post(
+            f"{self.base_url}{path}",
+            json=payload,
+            headers=self._headers(),
+            timeout=30,
+        )
+        if response.status_code >= 400:
+            raise GatewayClientError(
+                f"POST {path} failed: {response.status_code} {response.text}"
+            )
+        return response.json()
+
+    def _require_session_id(self) -> str:
+        if not self.session_id:
+            raise GatewayClientError("GATEWAY_SESSION_ID is required")
+        return self.session_id
+
+    def health(self) -> dict[str, Any]:
+        return self._get("/health")
+
+    def list_sessions(self) -> dict[str, Any]:
+        return self._get("/api/ssh/sessions")
+
+    def session_health(self, session_id: str | None = None) -> dict[str, Any]:
+        sid = session_id or self._require_session_id()
+        return self._get(f"/api/ssh/session/{sid}/health")
+
+    def execute_restricted(
+        self, command: str, session_id: str | None = None
+    ) -> dict[str, Any]:
+        sid = session_id or self._require_session_id()
+        safe_command = validate_readonly_command(command)
+        return self._post(
+            "/api/ssh/execute",
+            {
+                "session_id": sid,
+                "command": safe_command,
+                "async_mode": True,
+                "redact_output": True,
+                "timeout": self.command_timeout,
+            },
+        )
+
+    def job_status(self, job_id: str) -> dict[str, Any]:
+        return self._get(f"/api/jobs/{job_id}/status")
+
+    def job_result(
+        self, job_id: str, redact_output: bool = True
+    ) -> dict[str, Any]:
+        return self._get(
+            f"/api/jobs/{job_id}/result",
+            {"redact_output": str(redact_output).lower()},
+        )
+
+    def wait_job(
+        self, job_id: str, timeout_sec: int | None = None
+    ) -> dict[str, Any]:
+        deadline = time.time() + (timeout_sec or self.job_timeout)
+        while time.time() < deadline:
+            status = self.job_status(job_id)
+            if status.get("status") in {"completed", "failed", "cancelled"}:
+                return self.job_result(job_id)
+            time.sleep(1)
+        raise GatewayClientError(
+            f"Job {job_id} did not finish before timeout"
+        )
+
+    def read_file(
+        self, path: str, session_id: str | None = None
+    ) -> dict[str, Any]:
+        sid = session_id or self._require_session_id()
+        return self._post("/api/file/read", {"session_id": sid, "path": path})
+
+    def repo_status(
+        self, session_id: str | None = None
+    ) -> dict[str, Any]:
+        commands = {
+            "pwd": "pwd",
+            "status": "git status --short",
+            "recent_commits": "git log --oneline -10",
+            "tags": "git tag --list --sort=-creatordate | head -10",
+        }
+        output: dict[str, Any] = {}
+        for name, command in commands.items():
+            job = self.execute_restricted(command, session_id=session_id)
+            output[name] = self.wait_job(job["job_id"])
+        return output
