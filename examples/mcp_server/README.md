@@ -1,0 +1,68 @@
+# Agent SSH Gateway MCP Server
+
+Experimental MCP server for exposing safe, read/audit-first agent-ssh-gateway operations to MCP clients.
+
+**⚠️ Experimental. Do not use this with a master/root token. Use a scoped token and command policy.**
+
+## Tools
+
+- `gateway_health` — check gateway liveness
+- `gateway_list_sessions` — list SSH sessions visible to the API key
+- `gateway_session_health` — check a specific session health
+- `gateway_execute_restricted` — run an allowlisted read-only command as a redacted async job
+- `gateway_job_status` — get background job status
+- `gateway_job_result` — get background job result
+- `gateway_wait_job` — wait for a job and return its result
+- `gateway_read_file` — read a file through the gateway file API
+- `gateway_repo_status` — collect basic git repository status
+
+## Excluded by design
+
+- file write/edit/upload
+- token management
+- unrestricted command execution
+- deployment or destructive operations
+- WebSocket/PTTY streaming
+
+## Quick start
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r examples/mcp_server/requirements.txt
+
+export GATEWAY_BASE_URL=http://localhost:8085
+export GATEWAY_API_KEY=...
+export GATEWAY_SESSION_ID=...
+
+python examples/mcp_server/server.py
+```
+
+## Claude Desktop example
+
+```json
+{
+  "mcpServers": {
+    "agent-ssh-gateway": {
+      "command": "python",
+      "args": ["/path/to/agent-ssh-gateway/examples/mcp_server/server.py"],
+      "env": {
+        "GATEWAY_BASE_URL": "http://localhost:8085",
+        "GATEWAY_API_KEY": "...",
+        "GATEWAY_SESSION_ID": "..."
+      }
+    }
+  }
+}
+```
+
+## Security
+
+This server is not the security boundary. The gateway is.
+
+Keep using:
+- scoped API tokens
+- command policy
+- session ownership
+- output redaction
+- audit logging
