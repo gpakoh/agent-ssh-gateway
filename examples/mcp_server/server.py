@@ -11,6 +11,7 @@ from typing import Any
 from command_policy import CommandPolicyError
 from gateway_client import GatewayClient, GatewayClientError
 from mcp.server.fastmcp import FastMCP
+from self_test import run_self_test
 from tool_modes import should_register_tool
 from tool_results import error_result, text_result
 
@@ -175,6 +176,19 @@ def gateway_repo_status(
         title="Repository status",
         fn=_status,
         success_text="Collected repository status.",
+    )
+
+
+@register_tool("gateway_self_test")
+def gateway_self_test() -> dict[str, Any]:
+    """Run read-only diagnostics for the MCP gateway example."""
+    data = run_self_test(client)
+    status = data.get("status", "unknown")
+    return text_result(
+        tool="gateway_self_test",
+        title="Gateway self-test",
+        text=f"Gateway MCP self-test status: {status}",
+        data=data,
     )
 
 

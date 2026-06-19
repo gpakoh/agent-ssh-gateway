@@ -38,6 +38,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "gateway_wait_job",
         "gateway_read_file",
         "gateway_repo_status",
+        "gateway_self_test",
     },
 }
 
