@@ -20,7 +20,7 @@ Errors use `isError: true` with an `Error:` prefix in the text.
 - `standard` — default read/audit workflow. Includes file reading, repo status, session listing, and job waiting.
 - `full` — reserved for diagnostics and future handoff/context tools. Adds `gateway_self_test`.
 
-Tool mode controls visibility only. Future write/handoff permissions will be controlled separately by `MCP_GATEWAY_WRITE_MODE`.
+Tool mode controls visibility only. Write permissions are orthogonal — see [Handoff mode](#handoff-mode) below.
 
 ## Tools
 
@@ -34,10 +34,38 @@ Tool mode controls visibility only. Future write/handoff permissions will be con
 - `gateway_read_file` — read a file through the gateway file API
 - `gateway_repo_status` — collect basic git repository status
 - `gateway_self_test` — full-mode diagnostic: tool mode, gateway health, session health, command policy, optional repo status
+- `gateway_read_handoff` — read .ai-bridge handoff files
+- `gateway_show_handoff_status` — show compact handoff file availability
+- `gateway_write_handoff_plan` — write `.ai-bridge/current-plan.md` (requires `MCP_GATEWAY_WRITE_MODE=handoff`)
+
+## Handoff mode
+
+Handoff tools are full-mode tools. They remain write-disabled unless `MCP_GATEWAY_WRITE_MODE` is set to `handoff` or `full`.
+
+The first write surface exposed by this example is intentionally limited to:
+
+- `.ai-bridge/current-plan.md`
+
+It does not allow source file writes, edits, uploads, deletes, deploys, or token management.
+
+Enable handoff explicitly:
+
+```bash
+export MCP_GATEWAY_TOOL_MODE=full
+export MCP_GATEWAY_WRITE_MODE=handoff
+```
+
+Use this mode when you want an MCP client to prepare a plan for a local or remote implementation agent without giving it direct source-write access.
+
+Tools:
+
+- `gateway_read_handoff` — read `.ai-bridge/current-plan.md`, `agent-status.md`, and `implementation-diff.patch`
+- `gateway_show_handoff_status` — compact handoff file availability check
+- `gateway_write_handoff_plan` — write `.ai-bridge/current-plan.md` (requires `WRITE_MODE=handoff`)
 
 ## Excluded by design
 
-- file write/edit/upload
+- source file write/edit/upload
 - token management
 - unrestricted command execution
 - deployment or destructive operations

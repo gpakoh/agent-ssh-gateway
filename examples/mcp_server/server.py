@@ -10,10 +10,12 @@ from typing import Any
 
 from command_policy import CommandPolicyError
 from gateway_client import GatewayClient, GatewayClientError
+from handoff import read_handoff, show_handoff_status, write_handoff_plan
 from mcp.server.fastmcp import FastMCP
 from self_test import run_self_test
 from tool_modes import should_register_tool
 from tool_results import error_result, text_result
+from write_modes import WriteModeError, WritePermissionError
 
 mcp = FastMCP("agent-ssh-gateway")
 client = GatewayClient()
@@ -38,7 +40,7 @@ def run_tool(
     """Execute a tool call with structured error handling."""
     try:
         data = fn()
-    except (GatewayClientError, CommandPolicyError) as exc:
+    except (GatewayClientError, CommandPolicyError, WritePermissionError, WriteModeError) as exc:
         return error_result(tool=tool, title=title, error=str(exc))
     return text_result(tool=tool, title=title, text=success_text, data=data)
 
@@ -189,6 +191,50 @@ def gateway_self_test() -> dict[str, Any]:
         title="Gateway self-test",
         text=f"Gateway MCP self-test status: {status}",
         data=data,
+    )
+
+
+@register_tool("gateway_read_handoff")
+def gateway_read_handoff(session_id: str | None = None) -> dict[str, Any]:
+    """Read .ai-bridge handoff files."""
+    return run_tool(
+        tool="gateway_read_handoff",
+        title="Read handoff",
+        fn=lambda: read_handoff(client, session_id=session_id),
+        success_text="Read .ai-bridge handoff files.",
+    )
+
+
+@register_tool("gateway_show_handoff_status")
+def gateway_show_handoff_status(session_id: str | None = None) -> dict[str, Any]:
+    """Show compact handoff file availability."""
+    return run_tool(
+        tool="gateway_show_handoff_status",
+        title="Handoff status",
+        fn=lambda: show_handoff_status(client, session_id=session_id),
+        success_text="Collected .ai-bridge handoff status.",
+    )
+
+
+@register_tool("gateway_write_handoff_plan")
+def gateway_write_handoff_plan(
+    task: str,
+    agent: str = "opencode",
+    notes: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Write .ai-bridge/current-plan.md given a task description."""
+    return run_tool(
+        tool="gateway_write_handoff_plan",
+        title="Write handoff plan",
+        fn=lambda: write_handoff_plan(
+            client,
+            task=task,
+            agent=agent,
+            notes=notes,
+            session_id=session_id,
+        ),
+        success_text="Wrote .ai-bridge/current-plan.md.",
     )
 
 
