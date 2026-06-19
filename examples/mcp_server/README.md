@@ -4,6 +4,16 @@ Experimental MCP server for exposing safe, read/audit-first agent-ssh-gateway op
 
 **⚠️ Experimental. Do not use this with a master/root token. Use a scoped token and command policy.**
 
+## Tool modes
+
+`MCP_GATEWAY_TOOL_MODE` controls which tools are exposed to the MCP client.
+
+- `minimal` — health, session health, restricted execute, job status/result. Suitable for limited-scope automation.
+- `standard` — default read/audit workflow. Includes file reading, repo status, session listing, and job waiting.
+- `full` — reserved for diagnostics and future handoff/context tools. Currently identical to `standard`.
+
+Tool mode controls visibility only. Future write/handoff permissions will be controlled separately by `MCP_GATEWAY_WRITE_MODE`.
+
 ## Tools
 
 - `gateway_health` — check gateway liveness
