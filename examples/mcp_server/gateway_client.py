@@ -123,6 +123,24 @@ class GatewayClient:
         sid = session_id or self._require_session_id()
         return self._post("/api/file/read", {"session_id": sid, "path": path})
 
+    def write_file(
+        self,
+        path: str,
+        content: str,
+        session_id: str | None = None,
+        mode: str = "overwrite",
+    ) -> dict[str, Any]:
+        sid = session_id or self._require_session_id()
+        return self._post(
+            "/api/file/write",
+            {
+                "session_id": sid,
+                "path": path,
+                "content": content,
+                "mode": mode,
+            },
+        )
+
     def repo_status(
         self, session_id: str | None = None
     ) -> dict[str, Any]:
