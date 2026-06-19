@@ -18,7 +18,8 @@ Errors use `isError: true` with an `Error:` prefix in the text.
 
 - `minimal` — health, session health, restricted execute, job status/result. Suitable for limited-scope automation.
 - `standard` — default read/audit workflow. Includes file reading, repo status, session listing, and job waiting.
-- `full` — reserved for diagnostics and future handoff/context tools. Adds `gateway_self_test`.
+- `full` — reserved for diagnostics and handoff/context tools. Adds `gateway_self_test`.
+- `chatgpt` — designed for ChatGPT remote MCP. Replaces `gateway_execute_restricted` with high-level read-only tools (`gateway_git_status`, `gateway_run_tests`, etc.).
 
 Tool mode controls visibility only. Write permissions are orthogonal — see [Handoff mode](#handoff-mode) below.
 
@@ -33,10 +34,39 @@ Tool mode controls visibility only. Write permissions are orthogonal — see [Ha
 - `gateway_wait_job` — wait for a job and return its result
 - `gateway_read_file` — read a file through the gateway file API
 - `gateway_repo_status` — collect basic git repository status
+- `gateway_working_directory` — print working directory (chatgpt mode)
+- `gateway_git_status` — git status --short (chatgpt mode)
+- `gateway_recent_commits` — git log --oneline -10 (chatgpt mode)
+- `gateway_git_diff_stat` — git diff --stat (chatgpt mode)
+- `gateway_show_changes` — combined git status + diff stat (chatgpt mode)
+- `gateway_run_tests` — pytest -q (chatgpt mode)
+- `gateway_run_lint` — ruff check (chatgpt mode)
+- `gateway_run_compileall` — python -m compileall (chatgpt mode)
 - `gateway_self_test` — full-mode diagnostic: tool mode, gateway health, session health, command policy, optional repo status
 - `gateway_read_handoff` — read .ai-bridge handoff files
 - `gateway_show_handoff_status` — show compact handoff file availability
 - `gateway_write_handoff_plan` — write `.ai-bridge/current-plan.md` (requires `MCP_GATEWAY_WRITE_MODE=handoff`)
+
+## ChatGPT-safe mode
+
+For ChatGPT remote MCP, use:
+
+```bash
+export MCP_GATEWAY_TOOL_MODE=chatgpt
+```
+
+This mode hides the generic `gateway_execute_restricted` tool and exposes high-level read-only / verification tools instead:
+
+- `gateway_working_directory` — print working directory
+- `gateway_git_status` — git status --short
+- `gateway_recent_commits` — git log --oneline -10
+- `gateway_git_diff_stat` — git diff --stat
+- `gateway_show_changes` — combined git status + diff stat
+- `gateway_run_tests` — pytest -q
+- `gateway_run_lint` — ruff check
+- `gateway_run_compileall` — python -m compileall
+
+This is intended to reduce platform-level blocking and avoid exposing a generic SSH command surface.
 
 ## Handoff mode
 
