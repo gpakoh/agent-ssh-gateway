@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import threading
 from typing import Any
@@ -32,22 +34,29 @@ mcp = FastMCP("context7-remote")
 
 # Reusable stdio session to Context7 subprocess
 _session: ClientSession | None = None
-_lock = threading.Lock()
+_exit_stack: contextlib.AsyncExitStack | None = None
+_lock = asyncio.Lock()
 
 
 async def _get_session() -> ClientSession:
-    global _session
+    global _session, _exit_stack
     if _session is not None:
         return _session
-    params = StdioServerParameters(
-        command="npx",
-        args=["-y", "@upstash/context7-mcp"],
-        env=CONTEXT7_ENV,
-    )
-    read, write = await stdio_client(params).__aenter__()
-    _session = await ClientSession(read, write).__aenter__()
-    await _session.initialize()
-    return _session
+    async with _lock:
+        if _session is not None:
+            return _session
+        _exit_stack = contextlib.AsyncExitStack()
+        params = StdioServerParameters(
+            command="npx",
+            args=["-y", "@upstash/context7-mcp"],
+            env=CONTEXT7_ENV,
+        )
+        streams = await _exit_stack.enter_async_context(stdio_client(params))
+        _session = await _exit_stack.enter_async_context(
+            ClientSession(*streams)
+        )
+        await _session.initialize()
+        return _session
 
 
 @mcp.tool()
