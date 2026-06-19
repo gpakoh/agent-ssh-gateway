@@ -4,6 +4,14 @@ Experimental MCP server for exposing safe, read/audit-first agent-ssh-gateway op
 
 **⚠️ Experimental. Do not use this with a master/root token. Use a scoped token and command policy.**
 
+## Tool output format
+
+Tools return both human-readable text and machine-readable `structuredContent`.
+
+The `_meta.agent_ssh_gateway_tool` field identifies the tool that produced the response.
+
+Errors use `isError: true` with an `Error:` prefix in the text.
+
 ## Tool modes
 
 `MCP_GATEWAY_TOOL_MODE` controls which tools are exposed to the MCP client.
