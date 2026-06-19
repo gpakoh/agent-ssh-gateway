@@ -18,7 +18,7 @@ Errors use `isError: true` with an `Error:` prefix in the text.
 
 - `minimal` — health, session health, restricted execute, job status/result. Suitable for limited-scope automation.
 - `standard` — default read/audit workflow. Includes file reading, repo status, session listing, and job waiting.
-- `full` — reserved for diagnostics and future handoff/context tools. Currently identical to `standard`.
+- `full` — reserved for diagnostics and future handoff/context tools. Adds `gateway_self_test`.
 
 Tool mode controls visibility only. Future write/handoff permissions will be controlled separately by `MCP_GATEWAY_WRITE_MODE`.
 
@@ -33,6 +33,7 @@ Tool mode controls visibility only. Future write/handoff permissions will be con
 - `gateway_wait_job` — wait for a job and return its result
 - `gateway_read_file` — read a file through the gateway file API
 - `gateway_repo_status` — collect basic git repository status
+- `gateway_self_test` — full-mode diagnostic: tool mode, gateway health, session health, command policy, optional repo status
 
 ## Excluded by design
 
