@@ -32,10 +32,16 @@ CONTEXT7_ENV = {
 # ── FastMCP with tools ────────────────────────────────────────────────
 mcp = FastMCP("context7-remote")
 
-# Reusable stdio session to Context7 subprocess
 _session: ClientSession | None = None
 _exit_stack: contextlib.AsyncExitStack | None = None
 _lock = asyncio.Lock()
+
+
+def _reset_session() -> None:
+    """Drop stale session so next call reconnects."""
+    global _session, _exit_stack
+    _session = None
+    _exit_stack = None
 
 
 async def _get_session() -> ClientSession:
@@ -59,24 +65,34 @@ async def _get_session() -> ClientSession:
         return _session
 
 
+async def _call_upstream(name: str, args: dict) -> str:
+    """Call a Context7 tool with one reconnect retry on failure."""
+    for attempt in range(2):
+        session = await _get_session()
+        try:
+            result = await session.call_tool(name, args)
+            return result.content[0].text
+        except Exception:
+            if attempt == 0:
+                _reset_session()
+                continue
+            raise
+
+
 @mcp.tool()
 async def resolve_library_id(query: str, libraryName: str) -> Any:
     """Resolve a package/product name to a Context7-compatible library ID."""
-    session = await _get_session()
-    result = await session.call_tool(
+    return await _call_upstream(
         "resolve-library-id", {"query": query, "libraryName": libraryName}
     )
-    return result.content[0].text
 
 
 @mcp.tool()
 async def query_docs(libraryId: str, query: str) -> Any:
     """Query Context7 for documentation on a resolved library."""
-    session = await _get_session()
-    result = await session.call_tool(
+    return await _call_upstream(
         "query-docs", {"libraryId": libraryId, "query": query}
     )
-    return result.content[0].text
 
 
 # ── Auth proxy ────────────────────────────────────────────────────
