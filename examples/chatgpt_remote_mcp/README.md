@@ -50,8 +50,9 @@ All tools from `examples/mcp_server` — see [README.md](../mcp_server/README.md
 Tool visibility is controlled by `MCP_GATEWAY_TOOL_MODE`:
 
 - `minimal` — health, session health, restricted execute, job status/result
-- `standard` (default) — adds file reading, repo status, session listing, job waiting
+- `standard` — adds file reading, repo status, session listing, job waiting
 - `full` — adds `gateway_self_test` and handoff tools
+- `chatgpt` (recommended for ChatGPT) — replaces `gateway_execute_restricted` with high-level read-only tools to avoid platform-level blocking
 
 ## Reverse proxy (nginx)
 

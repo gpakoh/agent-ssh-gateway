@@ -8,6 +8,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from chatgpt_tools import (
+    git_diff_stat,
+    git_status,
+    recent_commits,
+    run_compileall,
+    run_lint,
+    run_tests,
+    show_changes,
+    working_directory,
+)
 from command_policy import CommandPolicyError
 from gateway_client import GatewayClient, GatewayClientError
 from handoff import read_handoff, show_handoff_status, write_handoff_plan
@@ -178,6 +188,94 @@ def gateway_repo_status(
         title="Repository status",
         fn=_status,
         success_text="Collected repository status.",
+    )
+
+
+@register_tool("gateway_working_directory")
+def gateway_working_directory(session_id: str | None = None) -> dict[str, Any]:
+    """Print working directory on the SSH target."""
+    return run_tool(
+        tool="gateway_working_directory",
+        title="Working directory",
+        fn=lambda: working_directory(client, session_id=session_id),
+        success_text="Collected current working directory.",
+    )
+
+
+@register_tool("gateway_git_status")
+def gateway_git_status(session_id: str | None = None) -> dict[str, Any]:
+    """Show git working tree status (short format)."""
+    return run_tool(
+        tool="gateway_git_status",
+        title="Git status",
+        fn=lambda: git_status(client, session_id=session_id),
+        success_text="Collected git status.",
+    )
+
+
+@register_tool("gateway_recent_commits")
+def gateway_recent_commits(session_id: str | None = None) -> dict[str, Any]:
+    """List recent commits (git log --oneline -10)."""
+    return run_tool(
+        tool="gateway_recent_commits",
+        title="Recent commits",
+        fn=lambda: recent_commits(client, session_id=session_id),
+        success_text="Collected recent commits.",
+    )
+
+
+@register_tool("gateway_git_diff_stat")
+def gateway_git_diff_stat(session_id: str | None = None) -> dict[str, Any]:
+    """Show uncommitted diff stat (git diff --stat)."""
+    return run_tool(
+        tool="gateway_git_diff_stat",
+        title="Git diff stat",
+        fn=lambda: git_diff_stat(client, session_id=session_id),
+        success_text="Collected git diff stat.",
+    )
+
+
+@register_tool("gateway_show_changes")
+def gateway_show_changes(session_id: str | None = None) -> dict[str, Any]:
+    """Show combined git status and diff stat."""
+    return run_tool(
+        tool="gateway_show_changes",
+        title="Show changes",
+        fn=lambda: show_changes(client, session_id=session_id),
+        success_text="Collected repository change summary.",
+    )
+
+
+@register_tool("gateway_run_tests")
+def gateway_run_tests(session_id: str | None = None) -> dict[str, Any]:
+    """Run test suite (pytest -q)."""
+    return run_tool(
+        tool="gateway_run_tests",
+        title="Run tests",
+        fn=lambda: run_tests(client, session_id=session_id),
+        success_text="Ran test suite.",
+    )
+
+
+@register_tool("gateway_run_lint")
+def gateway_run_lint(session_id: str | None = None) -> dict[str, Any]:
+    """Run ruff linter on the project."""
+    return run_tool(
+        tool="gateway_run_lint",
+        title="Run lint",
+        fn=lambda: run_lint(client, session_id=session_id),
+        success_text="Ran lint checks.",
+    )
+
+
+@register_tool("gateway_run_compileall")
+def gateway_run_compileall(session_id: str | None = None) -> dict[str, Any]:
+    """Run Python compileall on the project."""
+    return run_tool(
+        tool="gateway_run_compileall",
+        title="Run compileall",
+        fn=lambda: run_compileall(client, session_id=session_id),
+        success_text="Ran Python compileall.",
     )
 
 
