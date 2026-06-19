@@ -1,0 +1,20 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "agent-ssh-gateway": {
+      "type": "local",
+      "command": [
+        "python",
+        "/absolute/path/to/agent-ssh-gateway/examples/mcp_server/server.py"
+      ],
+      "environment": {
+        "GATEWAY_BASE_URL": "http://localhost:8085",
+        "GATEWAY_API_KEY": "paste-scoped-api-key-here",
+        "GATEWAY_SESSION_ID": "paste-existing-session-id-here",
+        "MCP_GATEWAY_COMMAND_TIMEOUT": "120",
+        "MCP_GATEWAY_JOB_TIMEOUT": "180"
+      },
+      "enabled": true
+    }
+  }
+}

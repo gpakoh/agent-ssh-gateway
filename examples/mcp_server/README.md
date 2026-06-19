@@ -56,6 +56,54 @@ python examples/mcp_server/server.py
 }
 ```
 
+## OpenCode setup
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "agent-ssh-gateway": {
+      "type": "local",
+      "command": [
+        "python",
+        "/ABSOLUTE/PATH/TO/agent-ssh-gateway/examples/mcp_server/server.py"
+      ],
+      "environment": {
+        "GATEWAY_BASE_URL": "http://localhost:8085",
+        "GATEWAY_API_KEY": "your-scoped-api-key",
+        "GATEWAY_SESSION_ID": "your-existing-session-id"
+      },
+      "enabled": true
+    }
+  }
+}
+```
+
+Add to your project or global `opencode.jsonc`. Restart OpenCode — tools
+appear automatically. An example file lives at
+[opencode.example.jsonc](opencode.example.jsonc) in this directory.
+
+## Required scopes
+
+| Scope | Required for |
+|-------|-------------|
+| `ssh:execute` | `gateway_execute_restricted` |
+| `ssh:files` | `gateway_read_file` |
+| `jobs:read` | `gateway_job_status`, `gateway_job_result`, `gateway_wait_job` |
+
+Use a **scoped agent token**, not a master key. The `scopes` parameter on
+`POST /api/tokens/create` allows setting custom scopes.
+
+## Example prompt
+
+Once configured, ask your agent:
+
+```
+Use the agent-ssh-gateway MCP server. Check gateway health, check the SSH
+session health, then collect repo status with read-only commands. Do not
+modify files. Do not run destructive commands. Return a short report.
+```
+
 ## Security
 
 This server is not the security boundary. The gateway is.
