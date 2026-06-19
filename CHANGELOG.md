@@ -6,6 +6,26 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.8-alpha] - 2026-06-19
+
+### Added
+
+- Added an experimental MCP server layer for AI coding agents.
+- Added MCP tool visibility modes: `minimal`, `standard`, and `full`.
+- Added structured MCP tool outputs with `content`, `structuredContent`, and `_meta`.
+- Added `gateway_self_test` diagnostics with pass/warn/fail checks.
+- Added guarded `.ai-bridge` handoff mode with `MCP_GATEWAY_WRITE_MODE`.
+
+### Changed
+
+- Added OpenCode MCP setup documentation.
+- Improved MCP example safety boundaries and tool registration.
+- Added Redis close/aclose compatibility across redis-py versions.
+
+### Tests
+
+- Test suite: 545 passed, 1 skipped.
+
 ## [0.1.7-alpha] - 2026-06-16
 
 ### Added
