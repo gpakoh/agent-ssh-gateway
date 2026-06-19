@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Literal, cast
 
-ToolMode = Literal["minimal", "standard", "full"]
+ToolMode = Literal["minimal", "standard", "full", "chatgpt"]
 
 DEFAULT_TOOL_MODE: ToolMode = "standard"
 
@@ -39,6 +39,26 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "gateway_read_file",
         "gateway_repo_status",
         "gateway_self_test",
+        "gateway_read_handoff",
+        "gateway_write_handoff_plan",
+        "gateway_show_handoff_status",
+    },
+    "chatgpt": {
+        "gateway_health",
+        "gateway_session_health",
+        "gateway_job_status",
+        "gateway_job_result",
+        "gateway_wait_job",
+        "gateway_read_file",
+        "gateway_repo_status",
+        "gateway_working_directory",
+        "gateway_git_status",
+        "gateway_recent_commits",
+        "gateway_git_diff_stat",
+        "gateway_show_changes",
+        "gateway_run_tests",
+        "gateway_run_lint",
+        "gateway_run_compileall",
         "gateway_read_handoff",
         "gateway_write_handoff_plan",
         "gateway_show_handoff_status",
