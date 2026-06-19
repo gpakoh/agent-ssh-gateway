@@ -10,6 +10,25 @@ import httpx
 from command_policy import validate_readonly_command
 
 
+def _project_root() -> str:
+    root = os.environ.get("MCP_GATEWAY_PROJECT_ROOT", "").strip().rstrip("/")
+    if not root:
+        raise GatewayClientError(
+            "MCP_GATEWAY_PROJECT_ROOT is required for project tools"
+        )
+    return root
+
+
+def _safe_project(project: str) -> str:
+    if not project:
+        raise GatewayClientError("project argument is required")
+    parts = project.strip("/").split("/")
+    for p in parts:
+        if p in ("..", ".", "~", ""):
+            raise GatewayClientError(f"Invalid project name: {project!r}")
+    return "/".join(parts)
+
+
 class GatewayClientError(RuntimeError):
     """Raised when the gateway returns an error."""
 
@@ -87,6 +106,24 @@ class GatewayClient:
             {
                 "session_id": sid,
                 "command": safe_command,
+                "async_mode": True,
+                "redact_output": True,
+                "timeout": self.command_timeout,
+            },
+        )
+
+    def execute_project_command(
+        self, project: str, command: str
+    ) -> dict[str, Any]:
+        sid = self._require_session_id()
+        root = _project_root()
+        proj = _safe_project(project)
+        full_command = f"cd {root}/{proj} && {command}"
+        return self._post(
+            "/api/ssh/execute",
+            {
+                "session_id": sid,
+                "command": full_command,
                 "async_mode": True,
                 "redact_output": True,
                 "timeout": self.command_timeout,

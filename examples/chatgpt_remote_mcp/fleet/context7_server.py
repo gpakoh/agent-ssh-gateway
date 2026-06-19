@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.routing import Route
 
 from .shared import get_fleet_env
 
@@ -99,7 +100,7 @@ def create_auth_proxy(
             headers=dict(resp.headers),
         )
 
-    return Starlette(routes=[{"path": "/mcp", "endpoint": proxy, "methods": ["POST"]}])
+    return Starlette(routes=[Route("/mcp", endpoint=proxy, methods=["POST"])])
 
 
 # ── Main ─────────────────────────────────────────────────────────────
@@ -107,13 +108,11 @@ if __name__ == "__main__":
     env = get_fleet_env()
 
     # Start internal FastMCP (streamable HTTP, no auth, localhost only)
+    mcp.settings.host = "127.0.0.1"
+    mcp.settings.port = INTERNAL_PORT
     threading.Thread(
         target=mcp.run,
-        kwargs={
-            "transport": "streamable-http",
-            "host": "127.0.0.1",
-            "port": INTERNAL_PORT,
-        },
+        kwargs={"transport": "streamable-http"},
         daemon=True,
     ).start()
 

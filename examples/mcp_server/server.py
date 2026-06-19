@@ -11,6 +11,14 @@ from typing import Any
 from chatgpt_tools import (
     git_diff_stat,
     git_status,
+    project_git_diff_stat,
+    project_git_status,
+    project_recent_commits,
+    project_run_compileall,
+    project_run_lint,
+    project_run_tests,
+    project_show_changes,
+    project_working_directory,
     recent_commits,
     run_compileall,
     run_lint,
@@ -276,6 +284,94 @@ def gateway_run_compileall(session_id: str | None = None) -> dict[str, Any]:
         title="Run compileall",
         fn=lambda: run_compileall(client, session_id=session_id),
         success_text="Ran Python compileall.",
+    )
+
+
+@register_tool("gateway_project_working_directory")
+def gateway_project_working_directory(project: str) -> dict[str, Any]:
+    """Print working directory within MCP_GATEWAY_PROJECT_ROOT/{project}."""
+    return run_tool(
+        tool="gateway_project_working_directory",
+        title="Project working directory",
+        fn=lambda: project_working_directory(client, project),
+        success_text="Collected project working directory.",
+    )
+
+
+@register_tool("gateway_project_git_status")
+def gateway_project_git_status(project: str) -> dict[str, Any]:
+    """Show git working tree status within a project directory."""
+    return run_tool(
+        tool="gateway_project_git_status",
+        title="Project git status",
+        fn=lambda: project_git_status(client, project),
+        success_text="Collected project git status.",
+    )
+
+
+@register_tool("gateway_project_recent_commits")
+def gateway_project_recent_commits(project: str) -> dict[str, Any]:
+    """List recent commits within a project (git log --oneline -10)."""
+    return run_tool(
+        tool="gateway_project_recent_commits",
+        title="Project recent commits",
+        fn=lambda: project_recent_commits(client, project),
+        success_text="Collected project recent commits.",
+    )
+
+
+@register_tool("gateway_project_git_diff_stat")
+def gateway_project_git_diff_stat(project: str) -> dict[str, Any]:
+    """Show uncommitted diff stat within a project."""
+    return run_tool(
+        tool="gateway_project_git_diff_stat",
+        title="Project git diff stat",
+        fn=lambda: project_git_diff_stat(client, project),
+        success_text="Collected project git diff stat.",
+    )
+
+
+@register_tool("gateway_project_show_changes")
+def gateway_project_show_changes(project: str) -> dict[str, Any]:
+    """Show combined git status and diff stat within a project."""
+    return run_tool(
+        tool="gateway_project_show_changes",
+        title="Project show changes",
+        fn=lambda: project_show_changes(client, project),
+        success_text="Collected project change summary.",
+    )
+
+
+@register_tool("gateway_project_run_tests")
+def gateway_project_run_tests(project: str) -> dict[str, Any]:
+    """Run test suite within a project (pytest -q)."""
+    return run_tool(
+        tool="gateway_project_run_tests",
+        title="Project run tests",
+        fn=lambda: project_run_tests(client, project),
+        success_text="Ran project test suite.",
+    )
+
+
+@register_tool("gateway_project_run_lint")
+def gateway_project_run_lint(project: str) -> dict[str, Any]:
+    """Run ruff linter within a project."""
+    return run_tool(
+        tool="gateway_project_run_lint",
+        title="Project run lint",
+        fn=lambda: project_run_lint(client, project),
+        success_text="Ran project lint checks.",
+    )
+
+
+@register_tool("gateway_project_run_compileall")
+def gateway_project_run_compileall(project: str) -> dict[str, Any]:
+    """Run Python compileall within a project."""
+    return run_tool(
+        tool="gateway_project_run_compileall",
+        title="Project run compileall",
+        fn=lambda: project_run_compileall(client, project),
+        success_text="Ran project Python compileall.",
     )
 
 

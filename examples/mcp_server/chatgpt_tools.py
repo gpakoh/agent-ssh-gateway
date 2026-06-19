@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from gateway_client import GatewayClient
+from gateway_client import GatewayClient, GatewayClientError
 
 
 def run_readonly_command(
@@ -77,4 +77,72 @@ def run_compileall(
     return run_readonly_command(
         client, "python -m compileall app tests examples",
         session_id=session_id,
+    )
+
+
+# ── Project-aware tools (cd into MCP_GATEWAY_PROJECT_ROOT/{project}) ──
+
+def run_project_command(
+    client: GatewayClient,
+    project: str,
+    command: str,
+) -> dict[str, Any]:
+    job = client.execute_project_command(project, command)
+    return client.wait_job(job["job_id"])
+
+
+def project_working_directory(
+    client: GatewayClient, project: str
+) -> dict[str, Any]:
+    return run_project_command(client, project, "pwd")
+
+
+def project_git_status(
+    client: GatewayClient, project: str
+) -> dict[str, Any]:
+    return run_project_command(client, project, "git status --short")
+
+
+def project_recent_commits(
+    client: GatewayClient, project: str
+) -> dict[str, Any]:
+    return run_project_command(
+        client, project, "git log --oneline -10"
+    )
+
+
+def project_git_diff_stat(
+    client: GatewayClient, project: str
+) -> dict[str, Any]:
+    return run_project_command(client, project, "git diff --stat")
+
+
+def project_show_changes(
+    client: GatewayClient, project: str
+) -> dict[str, Any]:
+    return {
+        "git_status": project_git_status(client, project),
+        "git_diff_stat": project_git_diff_stat(client, project),
+    }
+
+
+def project_run_tests(
+    client: GatewayClient, project: str
+) -> dict[str, Any]:
+    return run_project_command(client, project, "pytest -q")
+
+
+def project_run_lint(
+    client: GatewayClient, project: str
+) -> dict[str, Any]:
+    return run_project_command(
+        client, project, "ruff check app tests examples"
+    )
+
+
+def project_run_compileall(
+    client: GatewayClient, project: str
+) -> dict[str, Any]:
+    return run_project_command(
+        client, project, "python -m compileall app tests examples"
     )
