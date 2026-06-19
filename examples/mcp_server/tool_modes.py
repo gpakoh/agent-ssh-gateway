@@ -39,6 +39,9 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "gateway_read_file",
         "gateway_repo_status",
         "gateway_self_test",
+        "gateway_read_handoff",
+        "gateway_write_handoff_plan",
+        "gateway_show_handoff_status",
     },
 }
 
