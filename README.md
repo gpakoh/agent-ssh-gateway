@@ -32,6 +32,7 @@ The project now ships a **multi-adapter MCP Fleet** that exposes the gateway and
 | **GitHub** | 8 | Read-only: repo info, commits, branches, search, PRs, issues |
 | **Gitea** | 12 | Read-only + CI/CD: repos, branches, PRs, Actions runs, jobs |
 | **Context7** | 2 | Documentation lookup for AI coding agents |
+| **Docker** | 7 | Read-only: ps, images, inspect, logs, stats, compose_ps, services |
 
 All adapters are deployed behind an nginx reverse proxy and use **Streamable HTTP/SSE** transport with per-adapter API token auth.
 
@@ -42,6 +43,7 @@ Gateway MCP Fleet
     ├── Gateway (SSH + project tools)
     ├── GitHub (read-only)
     ├── Gitea (read-only + CI/CD)
+    ├── Docker (read-only fleet ops)
     └── Context7 (docs)
 ```
 
