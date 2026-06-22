@@ -1,11 +1,12 @@
 # agent-ssh-gateway
 
-**OpenAPI-first SSH control plane for AI agents, CI/CD pipelines and self-hosted infrastructure automation.**
+**AI engineering control plane — SSH gateway with MCP Fleet for agents, CI/CD and self-hosted automation.**
 
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![status](https://img.shields.io/badge/status-alpha-orange)
-![tests](https://img.shields.io/badge/tests-489%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-571%20passed-brightgreen)
+[![MCP](https://img.shields.io/badge/MCP-Fleet-7B2FF7?logo=modelcontextprotocol)](https://modelcontextprotocol.io)
 
 > **Do not expose this service directly to the public Internet.** Read [SECURITY.md](SECURITY.md) before deploying.
 
@@ -20,6 +21,29 @@
 
 Similar tools are often terminal-first or MCP-only.
 agent-ssh-gateway is OpenAPI-first and can be used by agents, CI/CD, dashboards and internal automation.
+
+### Gateway MCP Fleet
+
+The project now ships a **multi-adapter MCP Fleet** that exposes the gateway and its ecosystem through the Model Context Protocol:
+
+| Adapter | Tools | Access |
+|---------|-------|--------|
+| **Gateway** | 62 | SSH commands, project-safe code tools, job management, handoff |
+| **GitHub** | 8 | Read-only: repo info, commits, branches, search, PRs, issues |
+| **Gitea** | 12 | Read-only + CI/CD: repos, branches, PRs, Actions runs, jobs |
+| **Context7** | 2 | Documentation lookup for AI coding agents |
+
+All adapters are deployed behind an nginx reverse proxy and use **Streamable HTTP/SSE** transport with per-adapter API token auth.
+
+```text
+ChatGPT / AI agents
+    ↓
+Gateway MCP Fleet
+    ├── Gateway (SSH + project tools)
+    ├── GitHub (read-only)
+    ├── Gitea (read-only + CI/CD)
+    └── Context7 (docs)
+```
 
 ---
 
@@ -80,6 +104,40 @@ OpenAPI UI:
 ```text
 http://127.0.0.1:8000/docs
 ```
+
+---
+
+## MCP Fleet usage
+
+The Fleet exposes a **Streamable HTTP/SSE** endpoint per adapter. Each requires initialization via the MCP protocol:
+
+```text
+POST /mcp?mcp_token=<token>  →  initialize → Mcp-Session-Id → tools/list → tools/call
+```
+
+### Gateway (project-safe tools)
+
+Execute commands and use project-scoped tools through the gateway MCP adapter:
+
+```python
+# Initialize session
+POST /mcp?mcp_token=<token>
+{"jsonrpc":"2.0","id":"1","method":"initialize",...}
+
+# List 62 tools
+POST /mcp?mcp_token=<token>
+{"jsonrpc":"2.0","id":"2","method":"tools/list"}
+```
+
+The gateway adapter includes project-safe tools — read file, search text, find files, tree, git diff, pytest, ruff, mypy, remotes, branch info, and handoff read/write/status. These are scoped to the project root and block path traversal, shell injection, and unauthorized writes.
+
+### GitHub (read-only)
+
+8 read-only tools for repository inspection: repo info, commit log, branch list, file contents, code search, PR list, issues, user info.
+
+### Gitea (read-only + CI/CD)
+
+12 tools covering repository info, branches, file tree, file read, issues, PRs, CI/CD runs, job status, workflow details, and commit search.
 
 ---
 
@@ -178,8 +236,11 @@ Instead of giving every automation component direct SSH access, you can place on
 
 ## What it does
 
+The gateway MCP adapter also includes a **handoff protocol** (`.ai-bridge/current-plan.md`) that lets AI agents leave structured plan documents behind for other agents, with write access controlled by `MCP_GATEWAY_WRITE_MODE`.
+
 `agent-ssh-gateway` allows clients to:
 
+* work through an **MCP Fleet** with per-adapter tool sets and Streamable HTTP/SSE transport;
 * create SSH sessions through an HTTP API;
 * execute commands on remote machines;
 * stream terminal sessions through WebSocket;
@@ -221,6 +282,8 @@ Useful for homelabs, small infrastructure clusters, internal DevOps setups and p
 
 ## Key features
 
+* **MCP Fleet** — multi-adapter Model Context Protocol deployment: SSH gateway, GitHub read-only, Gitea + CI/CD, Context7 docs.
+* **Project-safe tools** — 16 scoped tools for file read, text search, diff, test run, lint, and handoff (path traversal and injection blocked).
 * **API-first design** — SSH operations are exposed through a documented HTTP API.
 * **OpenAPI contract** — usable by agents, SDKs and generated clients.
 * **Persistent SSH sessions** — create, reuse and close sessions through API calls.
@@ -238,9 +301,9 @@ Useful for homelabs, small infrastructure clusters, internal DevOps setups and p
 
 ## What this project is not
 
-Not a replacement for Teleport, Apache Guacamole, or enterprise access platforms. Not a browser SSH terminal.
+Not a replacement for Teleport, Apache Guacamole, or enterprise zero-trust platforms. Not a browser SSH terminal.
 
-The goal: a lightweight, self-hosted SSH control plane for agents, automation and internal infrastructure workflows.
+The goal: a lightweight, self-hosted control plane for AI agents, CI/CD and internal automation — built on an SSH gateway and extended through an MCP Fleet of project-safe, read-only and documentation adapters.
 
 If you only need a browser-based SSH client, this may be more than you need.
 
@@ -297,7 +360,7 @@ http://localhost:8085/docs
 ```bash
 source .venv/bin/activate
 pip install -e ".[dev]"
-pytest -q                       # 480+ tests
+pytest -q                       # 570+ tests
 ruff check app tests            # linting
 mypy app                     # type checking
 uvicorn app.main:app --reload   # run locally
@@ -401,7 +464,7 @@ Do not expose this service directly to the Internet without proper protection.
 - Secret redaction: enabled
 - Private key upload: disabled by default
 - Full mypy: 0 errors
-- Test suite: 480 passed, 1 skipped
+- Test suite: 571 passed, 1 skipped
 
 ### Recommended deployment topology
 
@@ -472,12 +535,17 @@ Keep real deployment configuration in a private repository or secret manager.
 ## Repository structure
 
 ```text
-app/
-  routers/          API routers (see [docs/ROUTERS.md](docs/ROUTERS.md))
-  services/         SSH, jobs, audit and integration services
-  models/           Data models and schemas
-  security.py       Authentication, validation and security helpers
-  config.py         Application configuration
+app/                  Core SSH gateway application
+  routers/            API routers (see [docs/ROUTERS.md](docs/ROUTERS.md))
+  services/           SSH, jobs, audit and integration services
+  models/             Data models and schemas
+  security.py         Authentication, validation and security helpers
+  config.py           Application configuration
+
+examples/             MCP Fleet adapters for AI agents
+  mcp_server/         Gateway MCP adapter (62 tools, project-safe, SSH)
+  chatgpt_remote_mcp/ ChatGPT remote MCP deployment
+    fleet/            GitHub, Gitea, Context7 remote adapters
 
 docker/
   docker-compose.yml
