@@ -6,10 +6,50 @@ by wrapping fixed allowlisted commands in semantic functions.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from gateway_client import GatewayClient, GatewayClientError
+from gateway_client import GatewayClient
 
+# ── Safety helpers ──────────────────────────────────────────────
+
+_OUTPUT_LINE_LIMIT = 2000
+_ALLOWED_PATH_RE = re.compile(r"^[a-zA-Z0-9_./-]+$")
+
+
+def _safe_relpath(path: str) -> str:
+    if not path:
+        raise ValueError("path is required")
+    if path.startswith("/"):
+        raise ValueError(f"absolute path not allowed: {path!r}")
+    if ".." in path.split("/"):
+        raise ValueError(f"path traversal not allowed: {path!r}")
+    if not _ALLOWED_PATH_RE.match(path):
+        raise ValueError(f"invalid characters in path: {path!r}")
+    return path
+
+
+def _safe_test_target(target: str) -> str:
+    if not target:
+        raise ValueError("target is required")
+    if target.startswith("/"):
+        raise ValueError(f"absolute target not allowed: {target!r}")
+    if ".." in target.split("/"):
+        raise ValueError(f"path traversal not allowed: {target!r}")
+    if ";" in target or "|" in target or "`" in target or "$" in target:
+        raise ValueError(f"shell metacharacters not allowed: {target!r}")
+    return target
+
+
+def _limit_output(output: str) -> str:
+    lines = output.splitlines()
+    if len(lines) > _OUTPUT_LINE_LIMIT:
+        lines = lines[:_OUTPUT_LINE_LIMIT]
+        lines.append(f"[... truncated to {_OUTPUT_LINE_LIMIT} lines]")
+    return "\n".join(lines)
+
+
+# ── Basic read-only helpers ─────────────────────────────────────
 
 def run_readonly_command(
     client: GatewayClient, command: str, session_id: str | None = None
@@ -78,6 +118,172 @@ def run_compileall(
         client, "python -m compileall app tests examples",
         session_id=session_id,
     )
+
+
+# ── Project file tools ──────────────────────────────────────────
+
+def project_read_file(
+    client: GatewayClient, project: str, path: str,
+) -> dict[str, Any]:
+    safe = _safe_relpath(path)
+    return run_project_command(client, project, f"cat {safe}")
+
+
+def project_search_text(
+    client: GatewayClient, project: str, query: str, glob: str | None = None,
+) -> dict[str, Any]:
+    cmd = "grep -RIn --exclude-dir=.git --exclude-dir=__pycache__"
+    cmd += " --exclude-dir=.venv --exclude-dir=node_modules"
+    cmd += " --exclude='*.pyc' --exclude='*.min.js'"
+    if glob:
+        if not _ALLOWED_PATH_RE.match(glob):
+            raise ValueError(f"invalid glob pattern: {glob!r}")
+        cmd += f" --include='{glob}'"
+    cmd += f" -e {_shell_escape(query)}"
+    cmd += " | head -200"
+    return run_project_command(client, project, cmd)
+
+
+def project_find_files(
+    client: GatewayClient, project: str, pattern: str,
+) -> dict[str, Any]:
+    if not _ALLOWED_PATH_RE.match(pattern):
+        raise ValueError(f"invalid pattern: {pattern!r}")
+    cmd = (
+        f"find . -not -path '*/.git/*' -not -path '*/__pycache__/*'"
+        f" -not -path '*/.venv/*' -not -path '*/node_modules/*'"
+        f" -type f -name '{pattern}' | sort | head -200"
+    )
+    return run_project_command(client, project, cmd)
+
+
+def project_tree(
+    client: GatewayClient, project: str, depth: int = 2, glob: str | None = None,
+) -> dict[str, Any]:
+    depth = min(max(depth, 1), 5)
+    cmd = (
+        f"find . -not -path '*/.git/*' -not -path '*/__pycache__/*'"
+        f" -not -path '*/.venv/*' -not -path '*/node_modules/*'"
+        f" -maxdepth {depth}"
+    )
+    if glob:
+        if not _ALLOWED_PATH_RE.match(glob):
+            raise ValueError(f"invalid glob: {glob!r}")
+        cmd += f" -name '{glob}'"
+    cmd += " | sort"
+    return run_project_command(client, project, cmd)
+
+
+# ── Project git diff tools ──────────────────────────────────────
+
+def project_git_diff(
+    client: GatewayClient, project: str, path: str | None = None,
+) -> dict[str, Any]:
+    cmd = "git diff --no-color"
+    if path:
+        cmd += f" -- {_safe_relpath(path)}"
+    cmd += " | head -500"
+    return run_project_command(client, project, cmd)
+
+
+def project_git_diff_cached(
+    client: GatewayClient, project: str, path: str | None = None,
+) -> dict[str, Any]:
+    cmd = "git diff --cached --no-color"
+    if path:
+        cmd += f" -- {_safe_relpath(path)}"
+    cmd += " | head -500"
+    return run_project_command(client, project, cmd)
+
+
+def project_show_file_diff(
+    client: GatewayClient, project: str, path: str,
+) -> dict[str, Any]:
+    safe = _safe_relpath(path)
+    cmd = f"git diff --no-color -- {safe} | head -500"
+    return run_project_command(client, project, cmd)
+
+
+# ── Project test target tools ───────────────────────────────────
+
+def project_run_pytest(
+    client: GatewayClient, project: str, target: str,
+) -> dict[str, Any]:
+    safe = _safe_test_target(target)
+    return run_project_command(client, project, f"pytest -q {safe}")
+
+
+def project_run_ruff(
+    client: GatewayClient, project: str, target: str,
+) -> dict[str, Any]:
+    safe = _safe_test_target(target)
+    return run_project_command(client, project, f"ruff check {safe}")
+
+
+def project_run_mypy(
+    client: GatewayClient, project: str, target: str,
+) -> dict[str, Any]:
+    safe = _safe_test_target(target)
+    return run_project_command(client, project, f"mypy {safe}")
+
+
+# ── Project git info tools ──────────────────────────────────────
+
+def project_remotes(
+    client: GatewayClient, project: str,
+) -> dict[str, Any]:
+    return run_project_command(client, project, "git remote -v")
+
+
+def project_current_branch(
+    client: GatewayClient, project: str,
+) -> dict[str, Any]:
+    return run_project_command(client, project, "git rev-parse --abbrev-ref HEAD")
+
+
+def project_commit_head(
+    client: GatewayClient, project: str,
+) -> dict[str, Any]:
+    return run_project_command(client, project, "git rev-parse HEAD")
+
+
+# ── Project-scoped handoff ──────────────────────────────────────
+
+def project_read_handoff(
+    client: GatewayClient, project: str,
+) -> dict[str, Any]:
+    return run_project_command(
+        client, project,
+        "cat .ai-bridge/current-plan.md 2>/dev/null || echo '(no handoff plan)'",
+    )
+
+
+def project_write_handoff_plan(
+    client: GatewayClient, project: str,
+    task: str, agent: str = "opencode", notes: str | None = None,
+) -> dict[str, Any]:
+    from handoff import assert_handoff_write_allowed, build_handoff_plan
+    assert_handoff_write_allowed()
+    plan = build_handoff_plan(task=task, agent=agent, notes=notes)
+    cmd = f"mkdir -p .ai-bridge && cat > .ai-bridge/current-plan.md << 'PLANEOF'\n{plan}\nPLANEOF"
+    return run_project_command(client, project, cmd)
+
+
+def project_show_handoff_status(
+    client: GatewayClient, project: str,
+) -> dict[str, Any]:
+    cmd = (
+        "echo '--- .ai-bridge files ---' && "
+        "ls -la .ai-bridge/ 2>/dev/null || echo '(no .ai-bridge directory)'"
+    )
+    return run_project_command(client, project, cmd)
+
+
+# ── Shell escape helper ─────────────────────────────────────────
+
+def _shell_escape(text: str) -> str:
+    escaped = text.replace("'", "'\\''")
+    return f"'{escaped}'"
 
 
 # ── Project-aware tools (cd into MCP_GATEWAY_PROJECT_ROOT/{project}) ──

@@ -5,20 +5,37 @@ This server is intentionally kept outside the gateway core.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from typing import Any
 
 from chatgpt_tools import (
     git_diff_stat,
     git_status,
+    project_commit_head,
+    project_current_branch,
+    project_find_files,
+    project_git_diff,
+    project_git_diff_cached,
     project_git_diff_stat,
     project_git_status,
+    project_read_file,
+    project_read_handoff,
     project_recent_commits,
+    project_remotes,
     project_run_compileall,
     project_run_lint,
+    project_run_mypy,
+    project_run_pytest,
+    project_run_ruff,
     project_run_tests,
+    project_search_text,
     project_show_changes,
+    project_show_file_diff,
+    project_show_handoff_status,
+    project_tree,
     project_working_directory,
+    project_write_handoff_plan,
     recent_commits,
     run_compileall,
     run_lint,
@@ -34,6 +51,9 @@ from self_test import run_self_test
 from tool_modes import should_register_tool
 from tool_results import error_result, text_result
 from write_modes import WriteModeError, WritePermissionError
+
+from examples.chatgpt_remote_mcp.fleet.gitea_client import GiteaClient
+from examples.chatgpt_remote_mcp.fleet.github_client import GitHubClient
 
 mcp = FastMCP("agent-ssh-gateway")
 client = GatewayClient()
@@ -375,6 +395,186 @@ def gateway_project_run_compileall(project: str) -> dict[str, Any]:
     )
 
 
+# ── Phase 2 project tools ─────────────────────────────────────────
+
+@register_tool("gateway_project_read_file")
+def gateway_project_read_file(project: str, path: str) -> dict[str, Any]:
+    """Read a file within MCP_GATEWAY_PROJECT_ROOT/{project}."""
+    return run_tool(
+        tool="gateway_project_read_file",
+        title="Project read file",
+        fn=lambda: project_read_file(client, project, path),
+        success_text="Read project file.",
+    )
+
+
+@register_tool("gateway_project_search_text")
+def gateway_project_search_text(project: str, query: str, glob: str | None = None) -> dict[str, Any]:
+    """Search for text across project files using grep."""
+    return run_tool(
+        tool="gateway_project_search_text",
+        title="Project search text",
+        fn=lambda: project_search_text(client, project, query, glob=glob),
+        success_text="Searched project text.",
+    )
+
+
+@register_tool("gateway_project_find_files")
+def gateway_project_find_files(project: str, pattern: str) -> dict[str, Any]:
+    """Find files matching a glob pattern in the project."""
+    return run_tool(
+        tool="gateway_project_find_files",
+        title="Project find files",
+        fn=lambda: project_find_files(client, project, pattern),
+        success_text="Found project files.",
+    )
+
+
+@register_tool("gateway_project_tree")
+def gateway_project_tree(project: str, depth: int = 2, glob: str | None = None) -> dict[str, Any]:
+    """List project directory tree up to a given depth."""
+    return run_tool(
+        tool="gateway_project_tree",
+        title="Project tree",
+        fn=lambda: project_tree(client, project, depth=depth, glob=glob),
+        success_text="Listed project tree.",
+    )
+
+
+@register_tool("gateway_project_git_diff")
+def gateway_project_git_diff(project: str, path: str | None = None) -> dict[str, Any]:
+    """Show git diff (uncommitted changes) in a project."""
+    return run_tool(
+        tool="gateway_project_git_diff",
+        title="Project git diff",
+        fn=lambda: project_git_diff(client, project, path=path),
+        success_text="Collected project git diff.",
+    )
+
+
+@register_tool("gateway_project_git_diff_cached")
+def gateway_project_git_diff_cached(project: str, path: str | None = None) -> dict[str, Any]:
+    """Show git --cached diff (staged changes) in a project."""
+    return run_tool(
+        tool="gateway_project_git_diff_cached",
+        title="Project git diff cached",
+        fn=lambda: project_git_diff_cached(client, project, path=path),
+        success_text="Collected project staged diff.",
+    )
+
+
+@register_tool("gateway_project_show_file_diff")
+def gateway_project_show_file_diff(project: str, path: str) -> dict[str, Any]:
+    """Show uncommitted diff for a specific file in the project."""
+    return run_tool(
+        tool="gateway_project_show_file_diff",
+        title="Project show file diff",
+        fn=lambda: project_show_file_diff(client, project, path),
+        success_text="Collected file diff.",
+    )
+
+
+@register_tool("gateway_project_run_pytest")
+def gateway_project_run_pytest(project: str, target: str) -> dict[str, Any]:
+    """Run pytest on a specific target within the project."""
+    return run_tool(
+        tool="gateway_project_run_pytest",
+        title="Project run pytest",
+        fn=lambda: project_run_pytest(client, project, target),
+        success_text="Ran project pytest.",
+    )
+
+
+@register_tool("gateway_project_run_ruff")
+def gateway_project_run_ruff(project: str, target: str) -> dict[str, Any]:
+    """Run ruff linter on a specific target within the project."""
+    return run_tool(
+        tool="gateway_project_run_ruff",
+        title="Project run ruff",
+        fn=lambda: project_run_ruff(client, project, target),
+        success_text="Ran project ruff check.",
+    )
+
+
+@register_tool("gateway_project_run_mypy")
+def gateway_project_run_mypy(project: str, target: str) -> dict[str, Any]:
+    """Run mypy type checker on a specific target within the project."""
+    return run_tool(
+        tool="gateway_project_run_mypy",
+        title="Project run mypy",
+        fn=lambda: project_run_mypy(client, project, target),
+        success_text="Ran project mypy.",
+    )
+
+
+@register_tool("gateway_project_remotes")
+def gateway_project_remotes(project: str) -> dict[str, Any]:
+    """List git remotes for the project."""
+    return run_tool(
+        tool="gateway_project_remotes",
+        title="Project remotes",
+        fn=lambda: project_remotes(client, project),
+        success_text="Collected project remotes.",
+    )
+
+
+@register_tool("gateway_project_current_branch")
+def gateway_project_current_branch(project: str) -> dict[str, Any]:
+    """Show current git branch for the project."""
+    return run_tool(
+        tool="gateway_project_current_branch",
+        title="Project current branch",
+        fn=lambda: project_current_branch(client, project),
+        success_text="Collected project current branch.",
+    )
+
+
+@register_tool("gateway_project_commit_head")
+def gateway_project_commit_head(project: str) -> dict[str, Any]:
+    """Show HEAD commit SHA for the project."""
+    return run_tool(
+        tool="gateway_project_commit_head",
+        title="Project commit HEAD",
+        fn=lambda: project_commit_head(client, project),
+        success_text="Collected project HEAD commit.",
+    )
+
+
+@register_tool("gateway_project_read_handoff")
+def gateway_project_read_handoff(project: str) -> dict[str, Any]:
+    """Read .ai-bridge handoff files for a project."""
+    return run_tool(
+        tool="gateway_project_read_handoff",
+        title="Project read handoff",
+        fn=lambda: project_read_handoff(client, project),
+        success_text="Read project handoff.",
+    )
+
+
+@register_tool("gateway_project_write_handoff_plan")
+def gateway_project_write_handoff_plan(
+    project: str, task: str, agent: str = "opencode", notes: str | None = None
+) -> dict[str, Any]:
+    """Write .ai-bridge/current-plan.md for a project (requires MCP_GATEWAY_WRITE_MODE=handoff)."""
+    return run_tool(
+        tool="gateway_project_write_handoff_plan",
+        title="Project write handoff",
+        fn=lambda: project_write_handoff_plan(client, project, task, agent=agent, notes=notes),
+        success_text="Wrote project handoff plan.",
+    )
+
+
+@register_tool("gateway_project_show_handoff_status")
+def gateway_project_show_handoff_status(project: str) -> dict[str, Any]:
+    """Show .ai-bridge file listing for a project."""
+    return run_tool(
+        tool="gateway_project_show_handoff_status",
+        title="Project handoff status",
+        fn=lambda: project_show_handoff_status(client, project),
+        success_text="Checked project handoff status.",
+    )
+
+
 @register_tool("gateway_self_test")
 def gateway_self_test() -> dict[str, Any]:
     """Run read-only diagnostics for the MCP gateway example."""
@@ -431,6 +631,232 @@ def gateway_write_handoff_plan(
         success_text="Wrote .ai-bridge/current-plan.md.",
     )
 
+
+# ── Gitea tools ──────────────────────────────────────────────────
+
+@register_tool("gitea_get_repo")
+async def gitea_get_repo(owner: str, repo: str) -> dict[str, Any]:
+    """Get Gitea repository metadata including description, visibility, language, default branch."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return error_result(tool="gitea_get_repo", title="Gitea get repo", error="GITEA_TOKEN not configured")
+    async with GiteaClient(token) as client:
+        data = await client.get_repo(owner, repo)
+    return text_result(tool="gitea_get_repo", title="Gitea repo", text=f"Repo: {data.get('full_name', 'unknown')}", data=data)
+
+
+@register_tool("gitea_list_branches")
+async def gitea_list_branches(owner: str, repo: str, limit: int = 30) -> dict[str, Any]:
+    """List branches in a Gitea repository."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return error_result(tool="gitea_list_branches", title="Gitea branches", error="GITEA_TOKEN not configured")
+    async with GiteaClient(token) as client:
+        data = await client.list_branches(owner, repo, limit=limit)
+    return text_result(tool="gitea_list_branches", title="Gitea branches", text=f"Branches: {len(data)}", data=data)
+
+
+@register_tool("gitea_list_commits")
+async def gitea_list_commits(owner: str, repo: str, sha: str | None = None, limit: int = 30) -> dict[str, Any]:
+    """List commits in a Gitea repository. Optionally filter by branch SHA."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return error_result(tool="gitea_list_commits", title="Gitea commits", error="GITEA_TOKEN not configured")
+    async with GiteaClient(token) as client:
+        data = await client.list_commits(owner, repo, sha=sha, limit=limit)
+    return text_result(tool="gitea_list_commits", title="Gitea commits", text=f"Commits: {len(data)}", data=data)
+
+
+@register_tool("gitea_get_file")
+async def gitea_get_file(owner: str, repo: str, path: str, branch: str | None = None) -> dict[str, Any]:
+    """Get a file or directory from a Gitea repository."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return error_result(tool="gitea_get_file", title="Gitea file", error="GITEA_TOKEN not configured")
+    async with GiteaClient(token) as client:
+        data = await client.get_file(owner, repo, path, branch=branch)
+    return text_result(tool="gitea_get_file", title="Gitea file", text=f"File: {path}", data=data)
+
+
+@register_tool("gitea_list_issues")
+async def gitea_list_issues(owner: str, repo: str, state: str = "open", limit: int = 30) -> dict[str, Any]:
+    """List issues in a Gitea repository. State: open, closed, all."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return error_result(tool="gitea_list_issues", title="Gitea issues", error="GITEA_TOKEN not configured")
+    async with GiteaClient(token) as client:
+        data = await client.list_issues(owner, repo, state=state, limit=limit)
+    return text_result(tool="gitea_list_issues", title="Gitea issues", text=f"Issues: {len(data)}", data=data)
+
+
+@register_tool("gitea_get_issue")
+async def gitea_get_issue(owner: str, repo: str, issue_number: int) -> dict[str, Any]:
+    """Get details of a specific Gitea issue by number."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return error_result(tool="gitea_get_issue", title="Gitea issue", error="GITEA_TOKEN not configured")
+    async with GiteaClient(token) as client:
+        data = await client.get_issue(owner, repo, issue_number)
+    return text_result(tool="gitea_get_issue", title="Gitea issue", text=f"Issue #{issue_number}", data=data)
+
+
+@register_tool("gitea_list_pull_requests")
+async def gitea_list_pull_requests(owner: str, repo: str, state: str = "open", limit: int = 30) -> dict[str, Any]:
+    """List pull requests in a Gitea repository. State: open, closed, all."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return error_result(tool="gitea_list_pull_requests", title="Gitea PRs", error="GITEA_TOKEN not configured")
+    async with GiteaClient(token) as client:
+        data = await client.list_pull_requests(owner, repo, state=state, limit=limit)
+    return text_result(tool="gitea_list_pull_requests", title="Gitea PRs", text=f"PRs: {len(data)}", data=data)
+
+
+@register_tool("gitea_get_pull_request")
+async def gitea_get_pull_request(owner: str, repo: str, pull_number: int) -> dict[str, Any]:
+    """Get details of a specific Gitea pull request by number."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return error_result(tool="gitea_get_pull_request", title="Gitea PR", error="GITEA_TOKEN not configured")
+    async with GiteaClient(token) as client:
+        data = await client.get_pull_request(owner, repo, pull_number)
+    return text_result(tool="gitea_get_pull_request", title="Gitea PR", text=f"PR #{pull_number}", data=data)
+
+
+@register_tool("gitea_list_action_runs")
+async def gitea_list_action_runs(owner: str, repo: str, status: str | None = None, limit: int = 10) -> dict[str, Any]:
+    """List Gitea Actions workflow runs. Optionally filter by status (completed, running, waiting)."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return error_result(tool="gitea_list_action_runs", title="Gitea runs", error="GITEA_TOKEN not configured")
+    async with GiteaClient(token) as client:
+        data = await client.list_action_runs(owner, repo, status=status, limit=limit)
+    return text_result(tool="gitea_list_action_runs", title="Gitea runs", text="Action runs retrieved", data=data)
+
+
+@register_tool("gitea_get_action_run")
+async def gitea_get_action_run(owner: str, repo: str, run_id: int) -> dict[str, Any]:
+    """Get details of a specific Gitea Actions workflow run by ID."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return error_result(tool="gitea_get_action_run", title="Gitea run", error="GITEA_TOKEN not configured")
+    async with GiteaClient(token) as client:
+        data = await client.get_action_run(owner, repo, run_id)
+    return text_result(tool="gitea_get_action_run", title="Gitea run", text=f"Run #{run_id}", data=data)
+
+
+@register_tool("gitea_list_action_run_jobs")
+async def gitea_list_action_run_jobs(owner: str, repo: str, run_id: int) -> dict[str, Any]:
+    """List jobs and steps for a Gitea Actions workflow run."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return error_result(tool="gitea_list_action_run_jobs", title="Gitea jobs", error="GITEA_TOKEN not configured")
+    async with GiteaClient(token) as client:
+        data = await client.list_action_run_jobs(owner, repo, run_id)
+    return text_result(tool="gitea_list_action_run_jobs", title="Gitea jobs", text=f"Jobs for run #{run_id}", data=data)
+
+
+@register_tool("gitea_list_workflows")
+async def gitea_list_workflows(owner: str, repo: str) -> dict[str, Any]:
+    """List Gitea Actions workflow files in a repository."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return error_result(tool="gitea_list_workflows", title="Gitea workflows", error="GITEA_TOKEN not configured")
+    async with GiteaClient(token) as client:
+        data = await client.list_workflows(owner, repo)
+    return text_result(tool="gitea_list_workflows", title="Gitea workflows", text="Workflows retrieved", data=data)
+
+
+# ── GitHub tools ─────────────────────────────────────────────────
+
+@register_tool("github_get_repo")
+async def github_get_repo(owner: str, repo: str) -> dict[str, Any]:
+    """Get GitHub repository metadata."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        return error_result(tool="github_get_repo", title="GitHub repo", error="GITHUB_TOKEN not configured")
+    async with GitHubClient(token) as client:
+        data = await client.get_repo(owner, repo)
+    return text_result(tool="github_get_repo", title="GitHub repo", text=f"Repo: {data.get('full_name', 'unknown')}", data=data)
+
+
+@register_tool("github_list_branches")
+async def github_list_branches(owner: str, repo: str, per_page: int = 30) -> dict[str, Any]:
+    """List branches in a GitHub repository."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        return error_result(tool="github_list_branches", title="GitHub branches", error="GITHUB_TOKEN not configured")
+    async with GitHubClient(token) as client:
+        data = await client.list_branches(owner, repo, per_page=per_page)
+    return text_result(tool="github_list_branches", title="GitHub branches", text=f"Branches: {len(data)}", data=data)
+
+
+@register_tool("github_list_commits")
+async def github_list_commits(owner: str, repo: str, sha: str | None = None, per_page: int = 30) -> dict[str, Any]:
+    """List commits in a GitHub repository."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        return error_result(tool="github_list_commits", title="GitHub commits", error="GITHUB_TOKEN not configured")
+    async with GitHubClient(token) as client:
+        data = await client.list_commits(owner, repo, sha=sha, per_page=per_page)
+    return text_result(tool="github_list_commits", title="GitHub commits", text=f"Commits: {len(data)}", data=data)
+
+
+@register_tool("github_get_file")
+async def github_get_file(owner: str, repo: str, path: str, branch: str | None = None) -> dict[str, Any]:
+    """Get a file or directory from a GitHub repository."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        return error_result(tool="github_get_file", title="GitHub file", error="GITHUB_TOKEN not configured")
+    async with GitHubClient(token) as client:
+        data = await client.get_file(owner, repo, path, branch=branch)
+    return text_result(tool="github_get_file", title="GitHub file", text=f"File: {path}", data=data)
+
+
+@register_tool("github_list_issues")
+async def github_list_issues(owner: str, repo: str, state: str = "open", per_page: int = 30) -> dict[str, Any]:
+    """List issues in a GitHub repository. State: open, closed, all."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        return error_result(tool="github_list_issues", title="GitHub issues", error="GITHUB_TOKEN not configured")
+    async with GitHubClient(token) as client:
+        data = await client.list_issues(owner, repo, state=state, per_page=per_page)
+    return text_result(tool="github_list_issues", title="GitHub issues", text=f"Issues: {len(data)}", data=data)
+
+
+@register_tool("github_get_issue")
+async def github_get_issue(owner: str, repo: str, issue_number: int) -> dict[str, Any]:
+    """Get details of a specific GitHub issue by number."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        return error_result(tool="github_get_issue", title="GitHub issue", error="GITHUB_TOKEN not configured")
+    async with GitHubClient(token) as client:
+        data = await client.get_issue(owner, repo, issue_number)
+    return text_result(tool="github_get_issue", title="GitHub issue", text=f"Issue #{issue_number}", data=data)
+
+
+@register_tool("github_list_pull_requests")
+async def github_list_pull_requests(owner: str, repo: str, state: str = "open", per_page: int = 30) -> dict[str, Any]:
+    """List pull requests in a GitHub repository. State: open, closed, all."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        return error_result(tool="github_list_pull_requests", title="GitHub PRs", error="GITHUB_TOKEN not configured")
+    async with GitHubClient(token) as client:
+        data = await client.list_pull_requests(owner, repo, state=state, per_page=per_page)
+    return text_result(tool="github_list_pull_requests", title="GitHub PRs", text=f"PRs: {len(data)}", data=data)
+
+
+@register_tool("github_get_pull_request")
+async def github_get_pull_request(owner: str, repo: str, pull_number: int) -> dict[str, Any]:
+    """Get details of a specific GitHub pull request by number."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        return error_result(tool="github_get_pull_request", title="GitHub PR", error="GITHUB_TOKEN not configured")
+    async with GitHubClient(token) as client:
+        data = await client.get_pull_request(owner, repo, pull_number)
+    return text_result(tool="github_get_pull_request", title="GitHub PR", text=f"PR #{pull_number}", data=data)
+
+
+# ── Main ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     mcp.run()
