@@ -6,6 +6,33 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.10-alpha] - 2026-06-22
+
+### Added
+
+- **62-tool Gateway MCP fleet**: main gateway (62 tools), GitHub (8), Gitea (12), Context7.
+- **Phase 2 — Project-scoped local code tools**: 16 new `gateway_project_*` endpoints for safe file read, text search, file find, directory tree, git diff/cached, pytest, ruff, mypy, remotes, branch, commit head, handoff read/write/status.
+- **GitHub read-only remote MCP adapter** (`fleet/github_server.py`): 8 read-only tools (repo info, commits, branches, file contents, search code, PR list, issues, user info) via fine-grained PAT.
+- **Gitea read-only + CI/CD remote MCP adapter** (`fleet/gitea_server.py`): 12 tools (repo info, branches, file tree/read, issues, PRs, CI/CD runs, jobs, workflows, commit search).
+- Introduced `.ai-bridge` handoff protocol: `current-plan.md` write with `MCP_GATEWAY_WRITE_MODE` guard.
+- Added `MCP_GATEWAY_TOOL_MODE` visibility filter (`minimal`, `standard`, `full`, `chatgpt`).
+- Added `MCP_PUBLIC_TOKEN` auth for Streamable HTTP/SSE public endpoint.
+- Added `AGENTS.md` agent reference documentation for Phase 2 workflow.
+- New CI runner: `runner-docker-e2e` dedicated to compose/E2E/smoke jobs.
+
+### Changed
+
+- `ssh_strict_host_key_checking` now controls Paramiko `AutoAddPolicy` vs `RejectPolicy`.
+- `SecretManager` now requires `master_key` (raises `ValueError` if empty).
+- `session_store.py` passes `settings.encryption_key` to `SecretManager` (fixes credential recovery on restart).
+- `KNOWN_HOSTS_STORE=file` removed from docker-compose.yml (restores `NullHostKeyStore` default).
+
+### Fixed
+
+- Context7 adapter: increased httpx timeout 5→120s, AsyncExitStack lifecycle, stale subprocess retry with session reset.
+- Ruff lint: `UP038` (union isinstance), `F841` (unused variable), `E402` (import ordering with load_dotenv).
+- 571 tests passing, 1 skipped, 0 failures.
+
 ## [0.1.8-alpha] - 2026-06-19
 
 ### Added
