@@ -227,10 +227,10 @@ class ASTRefactor:
                     "end_line": getattr(node, "end_lineno", node.lineno),
                     "methods": [
                         n.name for n in node.body
-                        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
                     ],
                 })
-            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            elif isinstance(node, ast.Import | ast.ImportFrom):
                 if isinstance(node, ast.Import):
                     imports.extend([alias.name for alias in node.names])
                 else:

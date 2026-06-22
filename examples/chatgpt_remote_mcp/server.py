@@ -25,6 +25,7 @@ EXAMPLES_DIR = Path(__file__).resolve().parents[1]
 MCP_SERVER_DIR = EXAMPLES_DIR / "mcp_server"
 
 sys.path.insert(0, str(MCP_SERVER_DIR))
+sys.path.insert(0, str(EXAMPLES_DIR.parent))
 
 _spec = importlib.util.spec_from_file_location(
     "mcp_server_module", MCP_SERVER_DIR / "server.py"

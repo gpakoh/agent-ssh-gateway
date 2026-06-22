@@ -19,9 +19,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-HTTP_TIMEOUT = httpx.Timeout(120.0, connect=15.0)
-
 from .shared import get_fleet_env
+
+HTTP_TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 
 # ── Config ────────────────────────────────────────────────────────────
 INTERNAL_PORT = 8780  # FastMCP streamable-http (no auth, localhost only)
