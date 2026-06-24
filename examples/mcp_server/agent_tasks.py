@@ -63,6 +63,7 @@ def build_task_json(
 
 def build_initial_status(agent: str, task_id: str) -> str:
     """Build initial agent-status.md with Status: created."""
+    validate_task_id(task_id)
     return (
         f"Status: created\n\n"
         f"## Task\n\n"
@@ -108,7 +109,7 @@ def build_current_plan(
         + notes
         + "\n## Agent instructions\n\n"
         + "Read this plan and execute it in small, reviewable steps.\n"
-        + "After each meaningful change, update `.ai-bridge/tasks/{task_id}/agent-status.md`.\n"
+        + f"After each meaningful change, update `.ai-bridge/tasks/{task_id}/agent-status.md`.\n"
         + f"Save final diff to `.ai-bridge/tasks/{task_id}/implementation-diff.patch`.\n"
         + "Do not commit or push unless explicitly instructed.\n"
     )
