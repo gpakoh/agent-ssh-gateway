@@ -7,9 +7,11 @@ import pytest
 import json
 
 from examples.mcp_server.agent_tasks import (
+    archive_agent_task,
     build_current_plan,
     build_initial_status,
     build_task_json,
+    list_agent_tasks,
     read_agent_task_file,
     validate_task_id,
 )
@@ -116,3 +118,36 @@ class TestReadAgentTaskFile:
         assert len(calls) == 1
         assert calls[0][0] == "my-proj"
         assert "a12345678901/agent-status.md" in calls[0][1]
+
+
+class TestListAgentTasks:
+    def test_passes_project(self):
+        calls = []
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            calls.append((project, command))
+            return {"stdout": "## Tasks\ntask-1\ntask-2", "stderr": "", "exit_code": 0}
+
+        result = list_agent_tasks(fake_run_cmd, project="my-proj")
+        assert calls[0][0] == "my-proj"
+        assert ".ai-bridge/tasks/" in calls[0][1]
+
+
+class TestArchiveAgentTask:
+    def test_passes_project_and_task_id(self):
+        calls = []
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            calls.append((project, command))
+            return {"stdout": "archived a12345678901", "stderr": "", "exit_code": 0}
+
+        result = archive_agent_task(
+            fake_run_cmd, project="my-proj", task_id="a12345678901"
+        )
+        assert result["stdout"] == "archived a12345678901"
+        assert ".ai-bridge/archive/" in calls[0][1]
+        assert "mv" in calls[0][1]
+
+    def test_invalid_task_id_raises(self):
+        with pytest.raises(ValueError):
+            archive_agent_task(lambda p, c: {}, project="p", task_id="bad")
