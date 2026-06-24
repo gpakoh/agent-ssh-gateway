@@ -6,6 +6,26 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.13-alpha] - 2026-06-24
+
+### Added
+
+- **Unified Gateway MCP Fleet endpoint** exposing 77 tools through a single `/mcp` ChatGPT App — no more separate adapter apps.
+- Aggregated Context7 documentation tools (2) into the main Gateway MCP schema.
+- Aggregated Docker read-only tools (7) into the main Gateway MCP schema.
+- Aggregated Postgres read-only tools (6) into the main Gateway MCP schema.
+- Added `asyncpg` to the remote MCP virtual environment for Postgres adapter support.
+
+### Changed
+
+- Extended `tool_modes.py` chatgpt mode to include the full unified fleet toolset.
+- Updated MCP fleet healthcheck expectations from 62 tools to 77 tools.
+- Simplified ChatGPT integration model: one app, one endpoint, one schema, no separate adapter apps required.
+
+### Fixed
+
+- Reduced ChatGPT action cache and namespace conflicts by consolidating adapter tools behind the main Gateway endpoint.
+
 ## [0.1.12-alpha] - 2026-06-24
 
 ### Added
