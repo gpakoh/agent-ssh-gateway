@@ -121,6 +121,12 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "postgres_vector_status",
         "resolve_library_id",
         "query_docs",
+        "gateway_project_write_agent_task",
+        "gateway_project_read_agent_status",
+        "gateway_project_read_agent_report",
+        "gateway_project_read_agent_diff",
+        "gateway_project_list_agent_tasks",
+        "gateway_project_archive_agent_task",
     },
 }
 
