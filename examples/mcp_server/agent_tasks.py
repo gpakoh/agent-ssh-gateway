@@ -115,6 +115,29 @@ def build_current_plan(
     )
 
 
+def list_agent_tasks(run_cmd, *, project: str) -> dict[str, Any]:
+    """List task directories under .ai-bridge/tasks/."""
+    cmd = (
+        f"echo '## Tasks' && "
+        f"ls -1 {TASKS_REL_DIR}/ 2>/dev/null | head -50 || echo '(no tasks)'"
+    )
+    return run_cmd(project, cmd)
+
+
+def archive_agent_task(run_cmd, *, project: str, task_id: str) -> dict[str, Any]:
+    """Move .ai-bridge/tasks/<task_id>/ -> .ai-bridge/archive/<task_id>/.
+
+    Move, not delete — physical deletion is never performed by this tool.
+    """
+    validate_task_id(task_id)
+    cmd = (
+        f"mkdir -p {ARCHIVE_REL_DIR} && "
+        f"mv {_task_dir(task_id)} {_archive_dir(task_id)} 2>/dev/null "
+        f"&& echo 'archived {task_id}' || echo 'task {task_id} not found'"
+    )
+    return run_cmd(project, cmd)
+
+
 def read_agent_task_file(run_cmd, *, project: str, task_id: str, filename: str) -> dict[str, Any]:
     """Read a file from .ai-bridge/tasks/<task_id>/ via shell.
 
