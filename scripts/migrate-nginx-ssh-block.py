@@ -9,10 +9,10 @@ Use environment variables to configure:
   NGINX_BLOCK_MARKER  Marker string to identify the block start
 """
 
-from pathlib import Path
-from time import strftime
 import os
 import sys
+from pathlib import Path
+from time import strftime
 
 path = Path(os.environ.get('NGINX_CONFIG_PATH', '/etc/nginx/sites-available/example.conf'))
 marker = os.environ.get('NGINX_BLOCK_MARKER', '# --- agent-ssh-gateway ---')
