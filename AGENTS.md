@@ -36,6 +36,19 @@ curl -s --noproxy '*' -H "Authorization: token $(grep GITEA_TOKEN /etc/agent-mcp
 curl --noproxy '*' -s http://192.168.1.11:5123/status
 ```
 
+## Fleet Healthcheck
+
+Перед любой диагностикой — запустить:
+
+```bash
+cd /media/1TB/Python/web_ssh/web-ssh-gateway
+python scripts/mcp_fleet_healthcheck.py
+```
+
+Проверяет: systemd, env file security, MCP tools/list, nginx route.
+Все 6 адаптеров должны быть `OK` с корректным количеством инструментов.
+После рестарта любого сервиса/nginx — прогнать healthcheck в первую очередь.
+
 ## Fleet MCP Endpoints (ChatGPT)
 
 | Adapter | Internal | Public | Token |
