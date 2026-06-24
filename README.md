@@ -49,6 +49,25 @@ Gateway MCP Fleet
     └── Context7 (docs)
 ```
 
+### Fleet healthcheck
+
+```bash
+python scripts/mcp_fleet_healthcheck.py
+```
+
+Output:
+
+```
+  OK    Gateway  [62/62 tools]
+  OK   Context7  [2/2 tools]
+  OK     GitHub  [8/8 tools]
+  OK      Gitea  [12/12 tools]
+  OK     Docker  [7/7 tools]
+  OK   Postgres  [6/6 tools]
+  ─────────────────────────────
+  All 6/6 adapters healthy
+```
+
 ---
 
 ## Project status
