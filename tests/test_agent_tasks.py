@@ -10,6 +10,7 @@ from examples.mcp_server.agent_tasks import (
     build_current_plan,
     build_initial_status,
     build_task_json,
+    read_agent_task_file,
     validate_task_id,
 )
 
@@ -94,3 +95,24 @@ class TestBuildCurrentPlan:
         assert "app/**" in result
         assert "polish: improve RAG search" in result
         assert "No model changes" in result
+
+
+class TestReadAgentTaskFile:
+    def test_returns_callable_result(self):
+        """Verify read_agent_task_file passes args to run_cmd correctly."""
+        calls = []
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            calls.append((project, command))
+            return {"stdout": "file content", "stderr": "", "exit_code": 0}
+
+        result = read_agent_task_file(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            filename="agent-status.md",
+        )
+        assert result["stdout"] == "file content"
+        assert len(calls) == 1
+        assert calls[0][0] == "my-proj"
+        assert "a12345678901/agent-status.md" in calls[0][1]

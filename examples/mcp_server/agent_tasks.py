@@ -115,6 +115,17 @@ def build_current_plan(
     )
 
 
+def read_agent_task_file(run_cmd, *, project: str, task_id: str, filename: str) -> dict[str, Any]:
+    """Read a file from .ai-bridge/tasks/<task_id>/ via shell.
+
+    run_cmd is a callable(project, command) that executes a shell command
+    and returns dict with at least {'stdout': str, 'stderr': str, 'exit_code': int}.
+    """
+    validate_task_id(task_id)
+    cmd = f"cat {_task_dir(task_id)}/{filename} 2>/dev/null || echo '(not found)'"
+    return run_cmd(project, cmd)
+
+
 def write_agent_task(
     run_cmd, *,
     project: str,
