@@ -45,6 +45,13 @@ from chatgpt_tools import (
 )
 from command_policy import CommandPolicyError
 from gateway_client import GatewayClient, GatewayClientError
+from agent_tasks import (
+    archive_agent_task as _archive_agent_task,
+    list_agent_tasks as _list_agent_tasks,
+    read_agent_task_file as _read_agent_task_file,
+    validate_task_id,
+    write_agent_task as _write_agent_task,
+)
 from handoff import read_handoff, show_handoff_status, write_handoff_plan
 from mcp.server.fastmcp import FastMCP
 from self_test import run_self_test
@@ -113,6 +120,13 @@ def run_tool(
     except (GatewayClientError, CommandPolicyError, WritePermissionError, WriteModeError) as exc:
         return error_result(tool=tool, title=title, error=str(exc))
     return text_result(tool=tool, title=title, text=success_text, data=data)
+
+
+def _split_lines(value: str | None) -> list[str] | None:
+    """Split newline-separated string into list, or return None."""
+    if value is None:
+        return None
+    return [line.strip() for line in value.split("\n") if line.strip()]
 
 
 @register_tool("gateway_health")
@@ -1033,6 +1047,119 @@ async def resolve_library_id(query: str, libraryName: str) -> str:
 async def query_docs(libraryId: str, query: str) -> str:
     """Query Context7 for documentation on a resolved library."""
     return await _call_context7_upstream("query-docs", {"libraryId": libraryId, "query": query})
+
+
+# ── Agent Handoff v2 tools ──────────────────────────────────────────
+
+
+@register_tool("gateway_project_write_agent_task")
+def gateway_project_write_agent_task(
+    project: str,
+    task_id: str,
+    agent: str,
+    task: str,
+    scope: str = "",
+    allowed_files: str | None = None,
+    forbidden_files: str | None = None,
+    required_checks: str | None = None,
+    acceptance_criteria: str | None = None,
+    commit_message: str | None = None,
+    constraints: str | None = None,
+    worktree_path: str | None = None,
+) -> dict[str, Any]:
+    """Write task.json + current-plan.md to .ai-bridge/tasks/<task_id>/."""
+    def _fn() -> dict[str, Any]:
+        return _write_agent_task(
+            lambda p, c: run_project_command(client, p, c),
+            project=project,
+            task_id=task_id,
+            agent=agent,
+            task=task,
+            scope=scope,
+            allowed_files=_split_lines(allowed_files),
+            forbidden_files=_split_lines(forbidden_files),
+            required_checks=_split_lines(required_checks),
+            acceptance_criteria=_split_lines(acceptance_criteria),
+            commit_message=commit_message,
+            constraints=constraints,
+            worktree_path=worktree_path,
+        )
+    return run_tool(
+        tool="gateway_project_write_agent_task",
+        title="Write agent task",
+        fn=_fn,
+        success_text="Wrote agent task.",
+    )
+
+
+@register_tool("gateway_project_read_agent_status")
+def gateway_project_read_agent_status(project: str, task_id: str) -> dict[str, Any]:
+    """Read .ai-bridge/tasks/<task_id>/agent-status.md."""
+    return run_tool(
+        tool="gateway_project_read_agent_status",
+        title="Read agent status",
+        fn=lambda: _read_agent_task_file(
+            lambda p, c: run_project_command(client, p, c),
+            project=project, task_id=task_id, filename="agent-status.md",
+        ),
+        success_text="Read agent status.",
+    )
+
+
+@register_tool("gateway_project_read_agent_report")
+def gateway_project_read_agent_report(project: str, task_id: str) -> dict[str, Any]:
+    """Read .ai-bridge/tasks/<task_id>/agent-report.md."""
+    return run_tool(
+        tool="gateway_project_read_agent_report",
+        title="Read agent report",
+        fn=lambda: _read_agent_task_file(
+            lambda p, c: run_project_command(client, p, c),
+            project=project, task_id=task_id, filename="agent-report.md",
+        ),
+        success_text="Read agent report.",
+    )
+
+
+@register_tool("gateway_project_read_agent_diff")
+def gateway_project_read_agent_diff(project: str, task_id: str) -> dict[str, Any]:
+    """Read .ai-bridge/tasks/<task_id>/implementation-diff.patch."""
+    return run_tool(
+        tool="gateway_project_read_agent_diff",
+        title="Read agent diff",
+        fn=lambda: _read_agent_task_file(
+            lambda p, c: run_project_command(client, p, c),
+            project=project, task_id=task_id, filename="implementation-diff.patch",
+        ),
+        success_text="Read agent diff.",
+    )
+
+
+@register_tool("gateway_project_list_agent_tasks")
+def gateway_project_list_agent_tasks(project: str) -> dict[str, Any]:
+    """List task directories under .ai-bridge/tasks/."""
+    return run_tool(
+        tool="gateway_project_list_agent_tasks",
+        title="List agent tasks",
+        fn=lambda: _list_agent_tasks(
+            lambda p, c: run_project_command(client, p, c),
+            project=project,
+        ),
+        success_text="Listed agent tasks.",
+    )
+
+
+@register_tool("gateway_project_archive_agent_task")
+def gateway_project_archive_agent_task(project: str, task_id: str) -> dict[str, Any]:
+    """Move .ai-bridge/tasks/<task_id>/ -> .ai-bridge/archive/<task_id>/."""
+    return run_tool(
+        tool="gateway_project_archive_agent_task",
+        title="Archive agent task",
+        fn=lambda: _archive_agent_task(
+            lambda p, c: run_project_command(client, p, c),
+            project=project, task_id=task_id,
+        ),
+        success_text="Archived agent task.",
+    )
 
 
 # ── Main ─────────────────────────────────────────────────────────
