@@ -155,10 +155,16 @@ def create_auth_proxy(
             headers=headers,
             params={k: v for k, v in request.query_params.items() if k != "mcp_token"},
         )
+        resp_headers = {
+            k: v
+            for k, v in resp.headers.items()
+            if k.lower() not in ("transfer-encoding", "content-length", "date", "server")
+        }
+        resp_headers.setdefault("content-type", "application/json")
         return Response(
             content=resp.content,
             status_code=resp.status_code,
-            headers=dict(resp.headers),
+            headers=resp_headers,
         )
 
     return Starlette(routes=[Route("/mcp", endpoint=proxy, methods=["POST"])])
