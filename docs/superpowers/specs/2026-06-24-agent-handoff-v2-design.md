@@ -1,7 +1,7 @@
 # Parallel Agent Handoff v2
 
 **Date:** 2026-06-24
-**Status:** Draft
+**Status:** Approved
 **Supersedes:** `.ai-bridge` handoff protocol from v0.1.0-alpha
 **Related:** Session 98 inventory, Session 99 spec
 
@@ -32,7 +32,12 @@ Allowed chars: `[a-z0-9][a-z0-9-]{10,120}`
 Rules:
 
 - Executor must not rename or reassign `task_id`.
-- Executor writes only inside `.ai-bridge/tasks/<task_id>/`.
+- All task directories are project-scoped:
+  `<MCP_GATEWAY_PROJECT_ROOT>/<project>/.ai-bridge/tasks/<task_id>/`.
+  The `.ai-bridge` root is always relative to the project root, never to
+  worktree, cwd, or home directory.
+- Executor writes only inside `.ai-bridge/tasks/<task_id>/` within the
+  project root.
 - Executor may create `runs/run-<n>.jsonl` inside the task directory for
   internal execution tracing, but the `task_id` itself is immutable.
 
@@ -42,13 +47,35 @@ Rules:
 .ai-bridge/
   tasks/
     <task_id>/
-      current-plan.md           # задача от ChatGPT (write by coordinator)
-      agent-status.md           # прогресс (write by executor)
+      task.json                 # machine-readable contract (write by coordinator)
+      current-plan.md           # human-readable task (write by coordinator)
+      agent-status.md           # прогресс + lifecycle state (write by executor)
       agent-report.md           # итоговый отчёт (write by executor)
       implementation-diff.patch # diff изменений (write by executor)
       execution-log.jsonl       # structured JSON events (write by executor)
+      worktree-path.txt         # absolute path to git worktree (write by coordinator)
       runs/                     # optional: внутренние логи исполнителя
         run-001.jsonl
+
+  archive/                      # completed/abandoned tasks moved here
+    <task_id>/
+```
+
+Example `task.json`:
+
+```json
+{
+  "task_id": "2026-06-24-stage-12-15a-rag-search-chunks-opencode",
+  "agent": "opencode",
+  "allowed_files": ["father-ui/src/**"],
+  "forbidden_files": ["app/**", "migrations/**", "tests/**"],
+  "required_checks": ["pytest -q", "ruff check"],
+  "worktree_path": "../agent-worktrees/2026-06-24-stage-12-15a-rag-search-chunks-opencode",
+  "commit_allowed": false,
+  "push_allowed": false,
+  "created": "2026-06-24T12:00:00+00:00"
+}
+```
 ```
 
 ## Task contract format
@@ -157,6 +184,40 @@ Benefits:
 - Coordinator can diff branches independently.
 - No risk of concurrent file write collisions.
 
+## Lifecycle states
+
+`agent-status.md` must begin with a `Status:` line using one of these
+standard states:
+
+- `created` — task written, not yet picked up by executor
+- `running` — executor actively working
+- `blocked` — executor hit a blocker, waiting for coordinator input
+- `needs-review` — executor finished, awaiting coordinator review
+- `failed` — executor could not complete the task
+- `completed` — task verified and accepted
+- `abandoned` — task cancelled or superseded
+
+Example:
+
+```markdown
+Status: running
+
+## Progress
+
+- Refactored SearchChunksPanel.tsx layout
+- Extracted helper into api/types.ts
+- Next: run build check
+```
+
+## Parallel task file conflict rule
+
+Parallel tasks MUST NOT share overlapping `allowed_files` unless the
+shared files are explicitly marked as `shared_read_only: true` in the
+corresponding `task.json`. This prevents two agents from editing the same
+file concurrently.
+
+Coordinator is responsible for checking this before assigning tasks.
+
 ## Safety rules
 
 - **No auto-commit, no auto-push.** Agent must not commit or push unless
@@ -177,12 +238,12 @@ Benefits:
 
 | Tool | Purpose |
 |------|---------|
-| `gateway_project_write_agent_task` | Write `current-plan.md` for a given task_id and agent |
+| `gateway_project_write_agent_task` | Write `task.json` + `current-plan.md` for a given task_id |
 | `gateway_project_read_agent_status` | Read `agent-status.md` |
 | `gateway_project_read_agent_report` | Read `agent-report.md` |
 | `gateway_project_read_agent_diff` | Read `implementation-diff.patch` |
 | `gateway_project_list_agent_tasks` | List task directories under `.ai-bridge/tasks/` |
-| `gateway_project_clear_agent_task` | Remove a completed/abandoned task directory |
+| `gateway_project_archive_agent_task` | Move task from `.ai-bridge/tasks/` to `.ai-bridge/archive/` — no physical delete |
 
 All tools require `project` and `task_id`. Some require `agent` parameter.
 
@@ -202,7 +263,7 @@ All tools require `project` and `task_id`. Some require `agent` parameter.
 
 ## Implementation order
 
-1. **Session 100** — Gateway tools: write/read/list/clear agent task
+1. **Session 100** — Gateway tools: write/read/list/archive agent task
 2. **Session 101** — OpenCode runner wrapper (reads current-plan.md,
    launches `opencode run`, writes results back)
 3. **Session 102** — Mimo runner wrapper (same pattern, with
