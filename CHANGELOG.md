@@ -6,6 +6,23 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.12-alpha] - 2026-06-24
+
+### Added
+
+- **Fleet healthcheck** (`scripts/mcp_fleet_healthcheck.py`): one-shot diagnostics for all 6 adapters — systemd, env file security, MCP tools/list, nginx route verification.
+- **Operations runbook** (`docs/operations/MCP_FLEET_RUNBOOK.md`): adapter reference, service management, troubleshooting.
+- **README/AGENTS.md operations pass**: healthcheck section with example output, agent instructions to run healthcheck first.
+
+## [0.1.11-alpha] - 2026-06-24
+
+### Added
+
+- **Docker read-only MCP adapter** (`fleet/docker_server.py`): 7 safe tools (ps, images, inspect, logs, stats, compose_ps, compose_services). Read-only subprocess wrapper, shell=False.
+- **Postgres read-only MCP adapter** (`fleet/postgres_server.py`): 6 tools (health, list_schemas, list_tables, describe_table, select, vector_status) for rag_vectordb. SQL guardrails: multi-statement ban, DDL/DML block, LIMIT 1000 wrapping, system schema block.
+- **mcp_readonly DB user**: nosuperuser, read-only, statement_timeout=30s.
+- **Public endpoints**: /mcp/docker, /mcp/postgres.
+
 ## [0.1.10-alpha] - 2026-06-22
 
 ### Added
