@@ -28,7 +28,7 @@ The project now ships a **multi-adapter MCP Fleet** that exposes the gateway and
 
 | Adapter | Tools | Access |
 |---------|-------|--------|
-| **Gateway** | 62 | SSH commands, project-safe code tools, job management, handoff |
+| **Gateway** | 77 | SSH commands, project-safe code tools, job management, handoff, GitHub, Gitea, Docker, Postgres, Context7 |
 | **GitHub** | 8 | Read-only: repo info, commits, branches, search, PRs, issues |
 | **Gitea** | 12 | Read-only + CI/CD: repos, branches, PRs, Actions runs, jobs |
 | **Context7** | 2 | Documentation lookup for AI coding agents |
@@ -58,7 +58,7 @@ python scripts/mcp_fleet_healthcheck.py
 Output:
 
 ```
-  OK    Gateway  [62/62 tools]
+  OK    Gateway  [77/77 tools]
   OK   Context7  [2/2 tools]
   OK     GitHub  [8/8 tools]
   OK      Gitea  [12/12 tools]
@@ -147,7 +147,7 @@ Execute commands and use project-scoped tools through the gateway MCP adapter:
 POST /mcp?mcp_token=<token>
 {"jsonrpc":"2.0","id":"1","method":"initialize",...}
 
-# List 62 tools
+# List 77 tools
 POST /mcp?mcp_token=<token>
 {"jsonrpc":"2.0","id":"2","method":"tools/list"}
 ```
@@ -566,7 +566,7 @@ app/                  Core SSH gateway application
   config.py           Application configuration
 
 examples/             MCP Fleet adapters for AI agents
-  mcp_server/         Gateway MCP adapter (62 tools, project-safe, SSH)
+  mcp_server/         Gateway MCP adapter (77 tools, unified fleet, SSH)
   chatgpt_remote_mcp/ ChatGPT remote MCP deployment
     fleet/            GitHub, Gitea, Context7 remote adapters
 
