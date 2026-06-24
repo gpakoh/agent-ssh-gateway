@@ -52,11 +52,43 @@ from tool_modes import should_register_tool
 from tool_results import error_result, text_result
 from write_modes import WriteModeError, WritePermissionError
 
+from examples.chatgpt_remote_mcp.fleet.context7_server import (
+    _call_upstream as _call_context7_upstream,
+)
+from examples.chatgpt_remote_mcp.fleet.docker_client import DockerClient
 from examples.chatgpt_remote_mcp.fleet.gitea_client import GiteaClient
 from examples.chatgpt_remote_mcp.fleet.github_client import GitHubClient
+from examples.chatgpt_remote_mcp.fleet.postgres_client import PostgresClient
 
 mcp = FastMCP("agent-ssh-gateway")
 client = GatewayClient()
+
+# ── Postgres DSN ────────────────────────────────────────────────────
+PG_DSN: str | None = None
+_pg_env = "/etc/agent-mcp-postgres.env"
+if os.path.exists(_pg_env):
+    _pg_vars: dict[str, str] = {}
+    with open(_pg_env) as f:
+        for line in f:
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                _pg_vars[k] = v
+    _h = _pg_vars.get("PGHOST", "")
+    _p = _pg_vars.get("PGPORT", "5432")
+    _d = _pg_vars.get("PGDATABASE", "")
+    _u = _pg_vars.get("PGUSER", "")
+    _pw = _pg_vars.get("PGPASSWORD", "")
+    if all([_h, _d, _u, _pw]):
+        PG_DSN = f"postgresql://{_u}:{_pw}@{_h}:{_p}/{_d}?sslmode=disable&application_name=mcp_gateway"
+
+_pg_client: PostgresClient | None = None
+
+def _get_pg_client() -> PostgresClient | None:
+    global _pg_client
+    if _pg_client is None and PG_DSN is not None:
+        _pg_client = PostgresClient(PG_DSN)
+    return _pg_client
 
 
 def register_tool(name: str):
@@ -854,6 +886,153 @@ async def github_get_pull_request(owner: str, repo: str, pull_number: int) -> di
     async with GitHubClient(token) as client:
         data = await client.get_pull_request(owner, repo, pull_number)
     return text_result(tool="github_get_pull_request", title="GitHub PR", text=f"PR #{pull_number}", data=data)
+
+
+# ── Docker tools ──────────────────────────────────────────────────
+
+@register_tool("docker_ps")
+async def docker_ps(all: bool = False, format: str | None = None) -> str:
+    """List running containers. Use all=True to include stopped containers."""
+    return await DockerClient().ps(all=all, format=format)
+
+
+@register_tool("docker_images")
+async def docker_images(format: str | None = None) -> str:
+    """List Docker images on the host."""
+    return await DockerClient().images(format=format)
+
+
+@register_tool("docker_inspect")
+async def docker_inspect(name: str) -> str:
+    """Inspect a container by name or ID. Returns JSON metadata (first 500 lines)."""
+    return await DockerClient().inspect(name, max_lines=500)
+
+
+@register_tool("docker_logs")
+async def docker_logs(container: str, tail: int = 200) -> str:
+    """Fetch logs from a running container. tail: number of recent lines (1-1000, default 200)."""
+    return await DockerClient().logs(container, tail=tail)
+
+
+@register_tool("docker_stats")
+async def docker_stats(format: str | None = None) -> str:
+    """Show live resource usage statistics for all running containers (CPU, memory, network, block I/O)."""
+    return await DockerClient().stats(format=format)
+
+
+@register_tool("docker_compose_ps")
+async def docker_compose_ps(project_dir: str | None = None, file_path: str | None = None) -> str:
+    """List containers in a Docker Compose project."""
+    return await DockerClient().compose_ps(project_dir=project_dir, file_path=file_path)
+
+
+@register_tool("docker_compose_services")
+async def docker_compose_services(project_dir: str | None = None, file_path: str | None = None) -> str:
+    """List service names defined in a Docker Compose project."""
+    return await DockerClient().compose_services(project_dir=project_dir, file_path=file_path)
+
+
+# ── Postgres tools ────────────────────────────────────────────────
+
+@register_tool("postgres_health")
+async def postgres_health() -> str:
+    """Check Postgres connectivity. Returns DB name, user, version."""
+    client = _get_pg_client()
+    if client is None:
+        return "error: Postgres not configured (PG DSN missing)"
+    try:
+        info = await client.health()
+        return f"ok | db={info['db']} user={info['user']} version={info['version']}"
+    except Exception as e:
+        return f"error: {e}"
+
+
+@register_tool("postgres_list_schemas")
+async def postgres_list_schemas() -> str:
+    """List non-system schemas in the database."""
+    client = _get_pg_client()
+    if client is None:
+        return "error: Postgres not configured"
+    schemas = await client.list_schemas()
+    if not schemas:
+        return "No user schemas found"
+    lines = "\n".join(f"  {s}" for s in schemas)
+    return f"Schemas ({len(schemas)}):\n{lines}"
+
+
+@register_tool("postgres_list_tables")
+async def postgres_list_tables(schema: str = "public") -> str:
+    """List tables in a schema with type and row estimate."""
+    client = _get_pg_client()
+    if client is None:
+        return "error: Postgres not configured"
+    tables = await client.list_tables(schema=schema)
+    if not tables:
+        return f"No tables found in schema '{schema}'"
+    lines = "\n".join(
+        f"  {t['table_name']:30s} {t['table_type']:15s} rows={t.get('row_estimate', '?')}"
+        for t in tables
+    )
+    return f"Tables in '{schema}' ({len(tables)}):\n{lines}"
+
+
+@register_tool("postgres_describe_table")
+async def postgres_describe_table(table_name: str, schema: str = "public") -> str:
+    """Describe columns of a table."""
+    client = _get_pg_client()
+    if client is None:
+        return "error: Postgres not configured"
+    columns = await client.describe_table(schema=schema, table_name=table_name)
+    if not columns:
+        return f"Table '{schema}.{table_name}' not found or has no columns"
+    lines = "\n".join(
+        f"  {c['column_name']:30s} {c['data_type']:20s} nullable={c['is_nullable']:5s} default={c.get('column_default', 'NULL')}"
+        for c in columns
+    )
+    return f"Columns of '{schema}.{table_name}' ({len(columns)}):\n{lines}"
+
+
+@register_tool("postgres_select")
+async def postgres_select(sql: str) -> str:
+    """Execute a read-only SELECT or WITH query with enforced LIMIT 1000.
+    Multi-statement not allowed, DDL/DML blocked."""
+    client = _get_pg_client()
+    if client is None:
+        return "error: Postgres not configured"
+    try:
+        rows = await client.execute(sql)
+    except ValueError as e:
+        return f"error: {e}"
+    except Exception as e:
+        return f"error: query failed: {e}"
+    import json
+    return json.dumps(rows, default=str, ensure_ascii=False)
+
+
+@register_tool("postgres_vector_status")
+async def postgres_vector_status() -> str:
+    """Check if pgvector extension is installed and its version."""
+    client = _get_pg_client()
+    if client is None:
+        return "error: Postgres not configured"
+    info = await client.vector_status()
+    if info["installed"]:
+        return f"pgvector is installed (version {info['version']})"
+    return "pgvector is NOT installed"
+
+
+# ── Context7 tools ────────────────────────────────────────────────
+
+@register_tool("resolve_library_id")
+async def resolve_library_id(query: str, libraryName: str) -> str:
+    """Resolve a package/product name to a Context7-compatible library ID."""
+    return await _call_context7_upstream("resolve-library-id", {"query": query, "libraryName": libraryName})
+
+
+@register_tool("query_docs")
+async def query_docs(libraryId: str, query: str) -> str:
+    """Query Context7 for documentation on a resolved library."""
+    return await _call_context7_upstream("query-docs", {"libraryId": libraryId, "query": query})
 
 
 # ── Main ─────────────────────────────────────────────────────────
