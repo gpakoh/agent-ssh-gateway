@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
-
 import json
+
+import pytest
 
 from examples.mcp_server.agent_tasks import (
     archive_agent_task,
@@ -128,7 +128,7 @@ class TestListAgentTasks:
             calls.append((project, command))
             return {"stdout": "## Tasks\ntask-1\ntask-2", "stderr": "", "exit_code": 0}
 
-        result = list_agent_tasks(fake_run_cmd, project="my-proj")
+        list_agent_tasks(fake_run_cmd, project="my-proj")
         assert calls[0][0] == "my-proj"
         assert ".ai-bridge/tasks/" in calls[0][1]
 
