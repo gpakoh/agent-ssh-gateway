@@ -45,6 +45,7 @@ curl --noproxy '*' -s http://192.168.1.11:5123/status
 | GitHub | `10.10.10.3:8791` | `/mcp/github` | в `/etc/agent-mcp-github.env` |
 | Gitea | `10.10.10.3:8792` | `/mcp/gitea` | `06KkheuSqP7A6dKeCCZdKtcDMe5UhzouvcwI5NyR_Xk` |
 | Docker | `10.10.10.3:8793` | `/mcp/docker` | в `/etc/agent-mcp-docker.env` |
+| Postgres (rag_vectordb) | `10.10.10.3:8794` | `/mcp/postgres` | в `/etc/agent-mcp-postgres.env` |
 
 Все nginx-прокси на VPS `192.168.1.100` → `/etc/nginx/sites-available/ssh.xloud.ru`.
 
@@ -81,6 +82,7 @@ SSH: `ssh root@192.168.1.100` (пароль `hjnjhbv2`).
 | `agent-mcp-gitea.service` | 8782/8792 | `/etc/agent-mcp-gitea.env` |
 | `agent-mcp-context7.service` | 8780/8790 | `/etc/agent-mcp-context7.env` |
 | `agent-mcp-docker.service` | 8783/8793 | `/etc/agent-mcp-docker.env` |
+| `agent-mcp-postgres.service` | 8784/8794 | `/etc/agent-mcp-postgres.env` |
 | `agent-ssh-gateway-mcp.service` | 8788 | `/etc/agent-ssh-gateway-mcp.env` |
 
 ```bash
