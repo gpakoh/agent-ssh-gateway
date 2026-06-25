@@ -47,3 +47,34 @@ class TestProjectRunOpencode:
             task_id="2026-06-25-fix-auth-opencode",
         )
         assert result["status"] == "failed"
+
+
+class TestToolRegistration:
+    def test_registered_in_chatgpt_mode(self, monkeypatch):
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+        import importlib
+        import sys
+        from pathlib import Path
+        example_dir = Path(__file__).resolve().parents[1] / "examples" / "mcp_server"
+        monkeypatch.syspath_prepend(str(example_dir))
+        sys.modules.pop("tool_modes", None)
+        tm = importlib.import_module("tool_modes")
+        assert tm.should_register_tool("gateway_project_run_opencode") is True
+
+
+class TestServerTool:
+    def test_tool_function_can_be_imported(self, monkeypatch):
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+        import importlib, sys
+        from pathlib import Path
+        example_dir = Path(__file__).resolve().parents[1] / "examples" / "mcp_server"
+        monkeypatch.syspath_prepend(str(example_dir))
+        monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
+        monkeypatch.setenv("GITEA_TOKEN", "test-token")
+        monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+        for name in list(sys.modules):
+            if "mcp_server" in name or "tool_modes" in name or "opencode_tools" in name:
+                sys.modules.pop(name, None)
+        server = importlib.import_module("server")
+        tool = getattr(server, "gateway_project_run_opencode", None)
+        assert tool is not None, "gateway_project_run_opencode not found in server module"
