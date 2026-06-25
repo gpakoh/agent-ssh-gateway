@@ -66,9 +66,9 @@ from mimo_tools import (
 
 # OAuth provider and settings
 from examples.mcp_server.oauth_provider import (
-    GatewayOAuthProvider,
-    SUPPORTED_SCOPES,
     DEFAULT_SCOPES,
+    SUPPORTED_SCOPES,
+    GatewayOAuthProvider,
 )
 
 MCP_AUTH_MODE = os.environ.get("MCP_AUTH_MODE", "token").strip().lower()
@@ -79,7 +79,7 @@ if MCP_AUTH_MODE not in VALID_AUTH_MODES:
 _auth_provider: GatewayOAuthProvider | None = None
 _auth_settings = None
 
-if MCP_AUTH_MODE in ("mixed", "oauth"):
+if MCP_AUTH_MODE == "oauth":
     _auth_provider = GatewayOAuthProvider()
     try:
         from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
@@ -100,6 +100,19 @@ if MCP_AUTH_MODE in ("mixed", "oauth"):
         )
     except ImportError:
         pass
+elif MCP_AUTH_MODE == "mixed":
+    from examples.mcp_server.oauth_provider import StoredToken as _StoredToken
+
+    _auth_provider = GatewayOAuthProvider()
+    mcp_token = os.environ.get("MCP_PUBLIC_TOKEN", "")
+    if mcp_token:
+        _auth_provider._tokens[mcp_token] = _StoredToken(
+            token=mcp_token,
+            client_id="mcp_token_client",
+            scopes=list(DEFAULT_SCOPES),
+            expires_at=float("inf"),
+            type="access",
+        )
 from opencode_tools import (
     project_run_opencode as _project_run_opencode,
 )
