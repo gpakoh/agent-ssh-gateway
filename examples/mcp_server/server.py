@@ -21,9 +21,6 @@ from agent_tasks import (
 from agent_tasks import (
     write_agent_task as _write_agent_task,
 )
-from opencode_tools import (
-    project_run_opencode as _project_run_opencode,
-)
 from chatgpt_tools import (
     git_diff_stat,
     git_status,
@@ -63,6 +60,9 @@ from command_policy import CommandPolicyError
 from gateway_client import GatewayClient, GatewayClientError
 from handoff import read_handoff, show_handoff_status, write_handoff_plan
 from mcp.server.fastmcp import FastMCP
+from opencode_tools import (
+    project_run_opencode as _project_run_opencode,
+)
 from self_test import run_self_test
 from tool_modes import should_register_tool
 from tool_results import error_result, text_result

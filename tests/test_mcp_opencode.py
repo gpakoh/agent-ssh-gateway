@@ -65,7 +65,8 @@ class TestToolRegistration:
 class TestServerTool:
     def test_tool_function_can_be_imported(self, monkeypatch):
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
-        import importlib, sys
+        import importlib
+        import sys
         from pathlib import Path
         example_dir = Path(__file__).resolve().parents[1] / "examples" / "mcp_server"
         monkeypatch.syspath_prepend(str(example_dir))

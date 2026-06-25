@@ -1,7 +1,7 @@
 .PHONY: test check lint ruff mypy compileall clean wrapper-self-test agent-handoff-smoke
 
 test:
-	pytest -q tests/test_agent_tasks.py tests/test_mcp_handoff.py tests/test_mcp_chatgpt_tools.py tests/test_mcp_tool_modes.py tests/test_opencode_runner_wrapper.py
+	pytest -q tests/test_agent_tasks.py tests/test_mcp_handoff.py tests/test_mcp_chatgpt_tools.py tests/test_mcp_tool_modes.py tests/test_mcp_opencode.py tests/test_opencode_runner_wrapper.py
 
 lint:
 	ruff check examples/ tests/ scripts/
