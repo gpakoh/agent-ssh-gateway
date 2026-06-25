@@ -1,6 +1,8 @@
 """Tests for OpenCode runner MCP tool — opencode_tools module."""
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 
 from examples.mcp_server.opencode_tools import project_run_opencode
@@ -63,6 +65,10 @@ class TestToolRegistration:
 
 
 class TestServerTool:
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("mcp"),
+        reason="mcp package not installed; only available with optional dependencies",
+    )
     def test_tool_function_can_be_imported(self, monkeypatch):
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
         import importlib
