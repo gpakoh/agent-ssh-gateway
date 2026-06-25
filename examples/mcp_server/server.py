@@ -60,6 +60,9 @@ from command_policy import CommandPolicyError
 from gateway_client import GatewayClient, GatewayClientError
 from handoff import read_handoff, show_handoff_status, write_handoff_plan
 from mcp.server.fastmcp import FastMCP
+from mimo_tools import (
+    project_run_mimo as _project_run_mimo,
+)
 from opencode_tools import (
     project_run_opencode as _project_run_opencode,
 )
@@ -1191,6 +1194,30 @@ def project_run_opencode(
             model=model,
         ),
         success_text="Submitted opencode task.",
+    )
+
+
+@register_tool("gateway_project_run_mimo")
+def gateway_project_run_mimo(
+    project: str,
+    task_id: str,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Execute an existing handoff task via Mimo CLI inside a disposable git worktree.
+    Requires write mode handoff or full. See spec for 11 pre-flight guards.
+    Mimo runs with --dangerously-skip-permissions — only valid in disposable worktrees."""
+    from write_modes import assert_handoff_write_allowed
+    assert_handoff_write_allowed()
+    return run_tool(
+        tool="gateway_project_run_mimo",
+        title="Run mimo task",
+        fn=lambda: _project_run_mimo(
+            lambda p, c: run_project_command(client, p, c),
+            project=project,
+            task_id=task_id,
+            model=model,
+        ),
+        success_text="Submitted mimo task.",
     )
 
 
