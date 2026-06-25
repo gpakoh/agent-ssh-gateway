@@ -59,7 +59,7 @@ class TestToolRegistration:
         monkeypatch.syspath_prepend(str(example_dir))
         sys.modules.pop("tool_modes", None)
         tm = importlib.import_module("tool_modes")
-        assert tm.should_register_tool("gateway_project_run_opencode") is True
+        assert tm.should_register_tool("project_run_opencode") is True
 
 
 class TestServerTool:
@@ -77,5 +77,5 @@ class TestServerTool:
             if "mcp_server" in name or "tool_modes" in name or "opencode_tools" in name:
                 sys.modules.pop(name, None)
         server = importlib.import_module("server")
-        tool = getattr(server, "gateway_project_run_opencode", None)
-        assert tool is not None, "gateway_project_run_opencode not found in server module"
+        tool = getattr(server, "project_run_opencode", None)
+        assert tool is not None, "project_run_opencode not found in server module"

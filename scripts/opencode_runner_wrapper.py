@@ -222,7 +222,6 @@ def run_wrapper(
 ) -> dict[str, Any]:
     validate_task_id(task_id)
 
-    opencode_bin_resolved = find_opencode_bin(opencode_bin)
     project_root = resolve_project_root(project)
     started_at = _now_iso()
 
@@ -267,6 +266,8 @@ def run_wrapper(
             "started_at": started_at,
             "finished_at": _now_iso(),
         }
+
+    opencode_bin_resolved = find_opencode_bin(opencode_bin)
 
     exec_workdir = workdir or project_root
 
