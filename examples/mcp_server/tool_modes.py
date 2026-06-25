@@ -128,6 +128,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "gateway_project_list_agent_tasks",
         "gateway_project_archive_agent_task",
         "project_run_opencode",
+        "gateway_project_run_mimo",
     },
 }
 
