@@ -98,7 +98,7 @@ def check_systemd(service: str) -> CheckResult:
         return fail(str(e).split("\n")[0][:120])
 
 
-def _mcp_request(full_url: str, body: dict, sid: str | None = None) -> tuple[dict, str]:
+def _mcp_request(full_url: str, body: dict, sid: str | None = None, token: str | None = None) -> tuple[dict, str]:
     """Send JSON-RPC to an SSE MCP endpoint, read first SSE frame.
 
     Returns (parsed_result_dict, session_id).
@@ -111,6 +111,8 @@ def _mcp_request(full_url: str, body: dict, sid: str | None = None) -> tuple[dic
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     if sid:
         headers["Mcp-Session-Id"] = sid
 
@@ -149,17 +151,15 @@ def check_mcp_endpoint(url: str, token: str, expected: int) -> CheckResult:
     if not token:
         return fail("no token found")
 
-    full_url = f"{url}?mcp_token={token}"
-
     try:
-        result, sid = _mcp_request(full_url, {
+        result, sid = _mcp_request(url, {
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {
                 "protocolVersion": "2025-03-26",
                 "capabilities": {},
                 "clientInfo": {"name": "healthcheck", "version": "1.0"},
             },
-        })
+        }, token=token)
 
         if not sid:
             return fail("no session ID in response")
@@ -167,9 +167,9 @@ def check_mcp_endpoint(url: str, token: str, expected: int) -> CheckResult:
         if "error" in result:
             return fail(result["error"].get("message", str(result["error"])))
 
-        result2, _ = _mcp_request(full_url, {
+        result2, _ = _mcp_request(url, {
             "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {},
-        }, sid=sid)
+        }, sid=sid, token=token)
 
         if "error" in result2:
             return fail(result2["error"].get("message", str(result2["error"])))
@@ -209,8 +209,11 @@ def check_nginx_route(url: str, token: str) -> CheckResult:
         return fail("no token — skipping nginx route check")
     try:
         req = Request(
-            f"{url}?mcp_token={token}",
-            headers={"Accept": "application/json, text/event-stream"},
+            url,
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Authorization": f"Bearer {token}",
+            },
             method="GET",
         )
         resp = urlopen(req, timeout=10)
