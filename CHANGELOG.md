@@ -6,6 +6,39 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.14-alpha] - 2026-06-25
+
+### Added
+
+- **Agent Handoff v2** — 6 new MCP tools for managing agent tasks: `write_agent_task`, `read_agent_status`, `read_agent_report`, `read_agent_diff`, `list_agent_tasks`, `archive_agent_task`. Task lifecycle: `created → running → needs-review | failed`. Structured `task.json` + `current-plan.md` contract with `agent`, `allowed_files`, `forbidden_files`, `commit_allowed`, `push_allowed` fields. (Sessions 99–102)
+- **OpenCode runner** — `project_run_opencode` MCP tool (`gateway_project_run_opencode`) executes handoff tasks via OpenCode CLI (`--dangerously-skip-permissions`). Exit code → `needs-review` / `failed` status. `agent-report.md` and `implementation-diff.patch` auto-generated. (Sessions 103)
+- **Mimo runner** — `project_run_mimo` MCP tool (`gateway_project_run_mimo`, chatgpt mode only) executes handoff tasks in disposable git worktrees via Mimo CLI. 11 pre-flight guards: task.json validation, agent check, worktree isolation, `MCP_GATEWAY_WORKTREE_ROOT` enforcement, linked worktree detection, binary discovery. Designed for `--dangerously-skip-permissions` safety. (Session 104)
+- **Parallel two-agent dry-run** — validated end-to-end orchestration: ChatGPT coordinates OpenCode (real artifact task) + Mimo (worktree task) independently with no cross-contamination, independent status/report/diff, full cleanup, `make check` green. (Session 106)
+
+### Tests
+
+- 210 tests for `test_mcp_mimo.py` — model validation, command construction, guard logic, result mapping, registration.
+- 87 tests for `test_mcp_opencode.py` — registration, mode visibility, shell execution, error handling.
+- 121 tests for `test_opencode_runner_wrapper.py` — dry-run, binary discovery, task validation, diff capture.
+- 153 tests for `test_agent_tasks.py` — write/read/list/archive, path guards, task_id validation.
+- `make check` target extended with 6 test files (90 tests, all passing).
+- CI: skipif guards for missing `mcp` package and missing `opencode` binary.
+
+### Changed
+
+- `opencode_runner_wrapper.py`: hardened heredoc, permissions, timeout handling (commit `c01b59a`).
+- `mimo_tools.py`: all 11 guards execute in shell script on SSH target — binary discovery (`$MIMO_BIN`, `command -v`, `/root/.mimocode/bin/mimo`) handled inside shell, not in Python.
+- `tool_modes.py`: `gateway_project_run_mimo` registered under chatgpt mode.
+- `server.py`: both `project_run_opencode` and `project_run_mimo` registered with `assert_handoff_write_allowed()`.
+
+### Docs
+
+- Design spec: `docs/superpowers/specs/2026-06-25-mimo-runner-design.md`.
+- Implementation plan: `docs/superpowers/plans/2026-06-25-mimo-runner-implementation.md`.
+- AGENTS.md: Agent Handoff v2 lifecycle, OpenCode runner, Mimo runner, parallel orchestration.
+- README: Agent Handoff v2 section with OpenCode + Mimo parallel orchestration diagram and examples.
+- Runbook: `docs/operations/AGENT_HANDOFF_RUNBOOK.md`.
+
 ## [0.1.13-alpha] - 2026-06-24
 
 ### Added
