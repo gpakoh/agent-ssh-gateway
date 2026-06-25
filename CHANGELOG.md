@@ -6,6 +6,24 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.15-alpha] - 2026-06-25
+
+### Added
+
+- **Mimo local execution bootstrap** — default model switched to local Ollama (`ollama-gen/gemma4:26b`), configurable via `MIMO_DEFAULT_MODEL` env var. (Session 109.5)
+- **NO_PROXY/no_proxy bypass** — `MIMO_EXTRA_NO_PROXY` env var adds local targets (`192.168.1.103`, `10.10.10.x`, etc.) to `NO_PROXY`/`no_proxy` before `mimo run`, preventing proxy-blocked connections. (Session 109.5)
+- **Mimo 403/proxy blocker resolved** — Xiaomi free-tier endpoint (`api.xiaomimimo.com`) reverted to `Illegal access` from all infra IPs; local Ollama path unblocked via NO_PROXY. No interactive login, no paid keys, no secrets in repo. (Session 109.5)
+- **Mimo real execution smoke** — 11/11 guards + full task lifecycle validated end-to-end via Mimo in linked worktree. `agent-status.md`, `agent-report.md`, `implementation-diff.patch` all produced correctly. Exit 0. (Session 110)
+
+### Tests
+
+- 33 tests for `test_mcp_mimo.py` (was 29): default model, env override, explicit model, NO_PROXY exports, local IP coverage.
+
+### Changed
+
+- `mimo_tools.py`: `project_run_mimo()` model fallback from hardcoded string to `MIMO_DEFAULT_MODEL` env → `ollama-gen/gemma4:26b`; `_build_mimo_script()` exports `NO_PROXY`/`no_proxy` before Mimo execution.
+- CI: Gitea CI Run #199 green (`b2f5c00`, healthcheck SSE fix) and #200 green (`652c86d`, Mimo defaults).
+
 ## [0.1.14-alpha] - 2026-06-25
 
 ### Added
