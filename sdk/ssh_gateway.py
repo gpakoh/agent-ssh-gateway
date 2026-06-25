@@ -26,12 +26,12 @@ Usage:
         print(log)
 """
 
-import json
 import time
+from collections.abc import Iterator
+from dataclasses import dataclass
+
 import requests
 import urllib3
-from typing import Optional, Iterator
-from dataclasses import dataclass
 
 urllib3.disable_warnings()
 
@@ -52,8 +52,8 @@ class SSHGatewayClient:
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
         self.session.verify = False
-        self._ssh_session: Optional[SSHSession] = None
-        self._context_id: Optional[str] = None
+        self._ssh_session: SSHSession | None = None
+        self._context_id: str | None = None
         
     def auth(self, username: str, password: str) -> bool:
         """Authenticate with Authelia."""

@@ -202,5 +202,5 @@ def write_agent_task(
         parts.append(
             f"cat > {td}/worktree-path.txt << 'WEOF'\n{worktree_path}\nWEOF"
         )
-    cmd = " && ".join(parts)
+    cmd = "\n".join(parts)
     return run_cmd(project, cmd)
