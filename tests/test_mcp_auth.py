@@ -20,6 +20,7 @@ def valid_token():
 def token_client(valid_token):
     with patch.dict(os.environ, {"MCP_PUBLIC_TOKEN": valid_token, "MCP_AUTH_MODE": "token"}):
         import importlib
+
         import examples.chatgpt_remote_mcp.server as srv
         importlib.reload(srv)
         app = srv.create_proxy_app()
@@ -30,6 +31,7 @@ def token_client(valid_token):
 def mixed_client(valid_token):
     with patch.dict(os.environ, {"MCP_PUBLIC_TOKEN": valid_token, "MCP_AUTH_MODE": "mixed"}):
         import importlib
+
         import examples.chatgpt_remote_mcp.server as srv
         importlib.reload(srv)
         app = srv.create_proxy_app()
@@ -99,3 +101,32 @@ def test_mixed_mode_bearer_preferred(mixed_client, valid_token):
         headers={"Authorization": "Bearer some-token"},
     )
     assert resp.status_code not in (401, 403)
+
+
+@pytest.fixture
+def oauth_client(valid_token):
+    with patch.dict(os.environ, {"MCP_PUBLIC_TOKEN": valid_token, "MCP_AUTH_MODE": "oauth"}):
+        import importlib
+
+        import examples.chatgpt_remote_mcp.server as srv
+        importlib.reload(srv)
+        app = srv.create_proxy_app()
+        yield TestClient(app)
+
+
+def test_oauth_mode_bearer_passthrough(oauth_client):
+    """Bearer token is passed through in oauth mode."""
+    resp = oauth_client.get("/", headers={"Authorization": "Bearer some-token"})
+    assert resp.status_code not in (401, 403)
+
+
+def test_oauth_mode_rejects_mcp_token(oauth_client, valid_token):
+    """mcp_token is rejected in oauth mode."""
+    resp = oauth_client.get(f"/?mcp_token={valid_token}")
+    assert resp.status_code == 401
+
+
+def test_oauth_mode_no_auth(oauth_client):
+    """Missing auth in oauth mode returns 401."""
+    resp = oauth_client.get("/")
+    assert resp.status_code == 401
