@@ -21,6 +21,9 @@ from agent_tasks import (
 from agent_tasks import (
     write_agent_task as _write_agent_task,
 )
+from opencode_tools import (
+    project_run_opencode as _project_run_opencode,
+)
 from chatgpt_tools import (
     git_diff_stat,
     git_status,
@@ -1165,6 +1168,29 @@ def gateway_project_archive_agent_task(project: str, task_id: str) -> dict[str, 
             project=project, task_id=task_id,
         ),
         success_text="Archived agent task.",
+    )
+
+
+@register_tool("gateway_project_run_opencode")
+def gateway_project_run_opencode(
+    project: str,
+    task_id: str,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Execute an existing handoff task via OpenCode CLI on the SSH target.
+    Requires MCP_GATEWAY_WRITE_MODE=handoff or full."""
+    from write_modes import assert_handoff_write_allowed
+    assert_handoff_write_allowed()
+    return run_tool(
+        tool="gateway_project_run_opencode",
+        title="Run OpenCode",
+        fn=lambda: _project_run_opencode(
+            lambda p, c: run_project_command(client, p, c),
+            project=project,
+            task_id=task_id,
+            model=model,
+        ),
+        success_text="Submitted OpenCode task.",
     )
 
 
