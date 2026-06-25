@@ -274,6 +274,25 @@ class GatewayOAuthProvider:
             return None
         return stored
 
+    async def load_access_token(self, token_str: str) -> dict | None:
+        """Async token loader for FastMCP ProviderTokenVerifier.
+
+        Returns an AccessToken-compatible dict (FastMCP's AccessToken model).
+        """
+        stored = self._tokens.get(token_str)
+        if not stored:
+            return None
+        if stored.type != "access":
+            return None
+        if time.time() > stored.expires_at:
+            return None
+        return {
+            "token": stored.token,
+            "client_id": stored.client_id,
+            "scopes": stored.scopes,
+            "expires_at": int(stored.expires_at),
+        }
+
     def revoke_token(self, client_id: str, token_str: str) -> None:
         """Revoke a token (any type)."""
         stored = self._tokens.get(token_str)

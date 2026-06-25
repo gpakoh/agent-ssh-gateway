@@ -64,7 +64,32 @@ def test_oauth_provider_initialized_in_oauth_mode():
 
 
 @patch.dict(os.environ, {"MCP_AUTH_MODE": "mixed"})
-def test_auth_settings_configured_in_mixed_mode():
+def test_mixed_mode_uses_proxy_auth():
+    """In mixed mode, FastMCP auth is disabled; proxy handles auth."""
+    import importlib
+
+    import examples.mcp_server.server as srv
+
+    importlib.reload(srv)
+    assert srv.mcp.settings.auth is None
+
+
+@patch.dict(os.environ, {"MCP_AUTH_MODE": "mixed", "MCP_PUBLIC_TOKEN": "test-token"})
+def test_mixed_mode_registers_mcp_token():
+    """In mixed mode, MCP_PUBLIC_TOKEN is pre-registered as a valid access token."""
+    import importlib
+
+    import examples.mcp_server.server as srv
+
+    importlib.reload(srv)
+    token = srv._auth_provider.verify_access_token("test-token")
+    assert token is not None
+    assert token.client_id == "mcp_token_client"
+
+
+@patch.dict(os.environ, {"MCP_AUTH_MODE": "oauth"})
+def test_oauth_mode_uses_fastmcp_auth():
+    """In oauth mode, FastMCP auth is configured with provider and settings."""
     import importlib
 
     import examples.mcp_server.server as srv
