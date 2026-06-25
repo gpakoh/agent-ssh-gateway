@@ -1171,26 +1171,26 @@ def gateway_project_archive_agent_task(project: str, task_id: str) -> dict[str, 
     )
 
 
-@register_tool("gateway_project_run_opencode")
-def gateway_project_run_opencode(
+@register_tool("project_run_opencode")
+def project_run_opencode(
     project: str,
     task_id: str,
     model: str | None = None,
 ) -> dict[str, Any]:
-    """Execute an existing handoff task via OpenCode CLI on the SSH target.
-    Requires MCP_GATEWAY_WRITE_MODE=handoff or full."""
+    """Execute an existing handoff task via agent CLI.
+    Requires write mode handoff or full."""
     from write_modes import assert_handoff_write_allowed
     assert_handoff_write_allowed()
     return run_tool(
-        tool="gateway_project_run_opencode",
-        title="Run OpenCode",
+        tool="project_run_opencode",
+        title="Run opencode task",
         fn=lambda: _project_run_opencode(
             lambda p, c: run_project_command(client, p, c),
             project=project,
             task_id=task_id,
             model=model,
         ),
-        success_text="Submitted OpenCode task.",
+        success_text="Submitted opencode task.",
     )
 
 

@@ -43,7 +43,7 @@ def project_run_opencode(
     td = f"{TASKS_REL_DIR}/{task_id}"
     started_at = _now_iso()
 
-    opencode_flags = "--never-ask"
+    opencode_flags = "--dangerously-skip-permissions"
     if model:
         opencode_flags += f" --model {_shell_escape(model)}"
 
@@ -71,7 +71,7 @@ def project_run_opencode(
     ])
     # Build agent-report.md via heredoc
     parts.append(
-        f'cat > "$td/agent-report.md" << \'REOF\'\n'
+        f'cat > "$td/agent-report.md" << REOF\n'
         f"# OpenCode Runner Result — {task_id}\n\n"
         f"- Status: $(head -1 \"$td/agent-status.md\" | cut -d' ' -f2)\n"
         f"- Exit code: $RC\n"
