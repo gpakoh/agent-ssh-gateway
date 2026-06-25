@@ -6,6 +6,22 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.17-alpha] - 2026-06-26
+
+### Changed
+
+- **OAuth-only MCP hardening.** Removed mixed auth mode. Made OAuth the default MCP auth mode (`MCP_AUTH_MODE=oauth`).
+- **Token mode preserved as emergency rollback.** `MCP_AUTH_MODE=token` now requires `MCP_PUBLIC_TOKEN` (raises `ValueError` if empty). Token pre-registered in `GatewayOAuthProvider` — not anonymous. Accepts Bearer header or `?mcp_token=` query param.
+- **Mixed mode removed.** (Session 115)
+- **`OAuthProxyMiddleware`** (renamed from `MixedAuthMiddleware`): token mode accepts both Bearer and `?mcp_token=`; oauth mode strictly Bearer-only, rejects `?mcp_token=`. (Session 115)
+- **Fleet adapters (5×)**: updated to accept Bearer header via shared `extract_auth_token()`; removed `TokenAuthMiddleware`. (Session 115)
+- **Healthcheck**: switched from `?mcp_token=` query param to `Authorization: Bearer`. (Session 115)
+- **All `.env.example` files**: `MCP_AUTH_MODE=oauth` default, token mode documented as rollback. (Session 115)
+
+### Tests
+
+- 144 MCP tests passing: 30 auth tests (oauth + token mode), 17 oauth provider tests, 97 tool/mode/handoff tests. 0 E402, 0 ruff errors. (Session 115)
+
 ## [0.1.16-alpha] - 2026-06-25
 
 ### Added

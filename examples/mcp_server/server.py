@@ -63,6 +63,21 @@ from mcp.server.fastmcp import FastMCP
 from mimo_tools import (
     project_run_mimo as _project_run_mimo,
 )
+from opencode_tools import (
+    project_run_opencode as _project_run_opencode,
+)
+from self_test import run_self_test
+from tool_modes import should_register_tool
+from tool_results import error_result, text_result
+from write_modes import WriteModeError, WritePermissionError
+
+from examples.chatgpt_remote_mcp.fleet.context7_server import (
+    _call_upstream as _call_context7_upstream,
+)
+from examples.chatgpt_remote_mcp.fleet.docker_client import DockerClient
+from examples.chatgpt_remote_mcp.fleet.gitea_client import GiteaClient
+from examples.chatgpt_remote_mcp.fleet.github_client import GitHubClient
+from examples.chatgpt_remote_mcp.fleet.postgres_client import PostgresClient
 
 # OAuth provider and settings
 from examples.mcp_server.oauth_provider import (
@@ -71,10 +86,9 @@ from examples.mcp_server.oauth_provider import (
     GatewayOAuthProvider,
 )
 
-MCP_AUTH_MODE = os.environ.get("MCP_AUTH_MODE", "token").strip().lower()
-VALID_AUTH_MODES = ("token", "mixed", "oauth")
-if MCP_AUTH_MODE not in VALID_AUTH_MODES:
-    raise ValueError(f"Invalid MCP_AUTH_MODE={MCP_AUTH_MODE!r}; expected one of {VALID_AUTH_MODES}")
+MCP_AUTH_MODE = os.environ.get("MCP_AUTH_MODE", "oauth").strip().lower()
+if MCP_AUTH_MODE not in ("token", "oauth"):
+    raise ValueError(f"Invalid MCP_AUTH_MODE={MCP_AUTH_MODE!r}; expected one of ('token', 'oauth')")
 
 _auth_provider: GatewayOAuthProvider | None = None
 _auth_settings = None
@@ -100,35 +114,20 @@ if MCP_AUTH_MODE == "oauth":
         )
     except ImportError:
         pass
-elif MCP_AUTH_MODE == "mixed":
-    from examples.mcp_server.oauth_provider import StoredToken as _StoredToken
-
+elif MCP_AUTH_MODE == "token":
     _auth_provider = GatewayOAuthProvider()
     mcp_token = os.environ.get("MCP_PUBLIC_TOKEN", "")
-    if mcp_token:
-        _auth_provider._tokens[mcp_token] = _StoredToken(
-            token=mcp_token,
-            client_id="mcp_token_client",
-            scopes=list(DEFAULT_SCOPES),
-            expires_at=float("inf"),
-            type="access",
-        )
-from opencode_tools import (
-    project_run_opencode as _project_run_opencode,
-)
-from self_test import run_self_test
-from tool_modes import should_register_tool
-from tool_results import error_result, text_result
-from write_modes import WriteModeError, WritePermissionError
+    if not mcp_token:
+        raise ValueError("MCP_PUBLIC_TOKEN is required in token mode")
+    from examples.mcp_server.oauth_provider import StoredToken as _StoredToken
 
-from examples.chatgpt_remote_mcp.fleet.context7_server import (
-    _call_upstream as _call_context7_upstream,
-)
-from examples.chatgpt_remote_mcp.fleet.docker_client import DockerClient
-from examples.chatgpt_remote_mcp.fleet.gitea_client import GiteaClient
-from examples.chatgpt_remote_mcp.fleet.github_client import GitHubClient
-from examples.chatgpt_remote_mcp.fleet.postgres_client import PostgresClient
-
+    _auth_provider._tokens[mcp_token] = _StoredToken(
+        token=mcp_token,
+        client_id="mcp_static_client",
+        scopes=list(DEFAULT_SCOPES),
+        expires_at=float("inf"),
+        type="access",
+    )
 mcp = FastMCP(
     "agent-ssh-gateway",
     auth=_auth_settings,

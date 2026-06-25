@@ -19,7 +19,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from .shared import get_fleet_env
+from .shared import extract_auth_token, get_fleet_env
 
 HTTP_TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 
@@ -102,18 +102,16 @@ def create_auth_proxy(
     *, upstream_port: int, valid_tokens: set[str]
 ) -> Starlette:
     """Return an ASGI app that proxies /mcp to the internal FastMCP
-    with mcp_token auth."""
+    with Bearer header or mcp_token auth."""
     client = httpx.AsyncClient(
         base_url=f"http://127.0.0.1:{upstream_port}",
         timeout=HTTP_TIMEOUT,
     )
 
     async def proxy(request: Request) -> Response:
-        token = request.query_params.get("mcp_token")
+        token = extract_auth_token(request, valid_tokens)
         if not token:
-            return JSONResponse({"error": "missing mcp_token"}, 401)
-        if token not in valid_tokens:
-            return JSONResponse({"error": "invalid mcp_token"}, 403)
+            return JSONResponse({"error": "missing or invalid auth"}, 401)
 
         body = await request.body()
         headers = dict(request.headers)

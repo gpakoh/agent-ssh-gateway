@@ -17,7 +17,7 @@ sys.path.insert(0, str(EXAMPLES_DIR.parent))
 @pytest.fixture(autouse=True)
 def reset_env():
     """Ensure clean MCP_AUTH_MODE for each test that doesn't override it."""
-    with patch.dict(os.environ, {"MCP_AUTH_MODE": "token"}, clear=False):
+    with patch.dict(os.environ, {"MCP_AUTH_MODE": "oauth"}, clear=False):
         import importlib
 
         import examples.mcp_server.server as srv
@@ -26,31 +26,37 @@ def reset_env():
         yield
 
 
-def test_auth_disabled_by_default():
-    """Default MCP_AUTH_MODE=token should not configure auth."""
+def test_auth_enabled_by_default():
+    """Default MCP_AUTH_MODE=oauth should configure auth."""
     from examples.mcp_server.server import mcp
 
-    assert mcp.settings.auth is None
+    assert mcp.settings.auth is not None
+    assert mcp.settings.auth.client_registration_options.enabled is True
 
 
-@patch.dict(os.environ, {"MCP_AUTH_MODE": "mixed"})
-def test_oauth_provider_initialized_in_mixed_mode():
+@patch.dict(os.environ, {"MCP_AUTH_MODE": "token", "MCP_PUBLIC_TOKEN": "test-token"})
+def test_token_mode_initializes_provider():
+    """Token mode initializes GatewayOAuthProvider with MCP_PUBLIC_TOKEN."""
     import importlib
 
     import examples.mcp_server.server as srv
 
     importlib.reload(srv)
     assert srv._auth_provider is not None
+    token = srv._auth_provider.verify_access_token("test-token")
+    assert token is not None
+    assert token.client_id == "mcp_static_client"
 
 
-@patch.dict(os.environ, {"MCP_AUTH_MODE": "token"})
-def test_oauth_provider_not_initialized_in_token_mode():
+@patch.dict(os.environ, {"MCP_AUTH_MODE": "token", "MCP_PUBLIC_TOKEN": ""})
+def test_token_mode_requires_token():
+    """Token mode raises ValueError if MCP_PUBLIC_TOKEN is empty."""
     import importlib
 
     import examples.mcp_server.server as srv
 
-    importlib.reload(srv)
-    assert srv._auth_provider is None
+    with pytest.raises(ValueError, match="MCP_PUBLIC_TOKEN is required"):
+        importlib.reload(srv)
 
 
 @patch.dict(os.environ, {"MCP_AUTH_MODE": "oauth"})
@@ -63,32 +69,8 @@ def test_oauth_provider_initialized_in_oauth_mode():
     assert srv._auth_provider is not None
 
 
-@patch.dict(os.environ, {"MCP_AUTH_MODE": "mixed"})
-def test_mixed_mode_uses_proxy_auth():
-    """In mixed mode, FastMCP auth is disabled; proxy handles auth."""
-    import importlib
-
-    import examples.mcp_server.server as srv
-
-    importlib.reload(srv)
-    assert srv.mcp.settings.auth is None
-
-
-@patch.dict(os.environ, {"MCP_AUTH_MODE": "mixed", "MCP_PUBLIC_TOKEN": "test-token"})
-def test_mixed_mode_registers_mcp_token():
-    """In mixed mode, MCP_PUBLIC_TOKEN is pre-registered as a valid access token."""
-    import importlib
-
-    import examples.mcp_server.server as srv
-
-    importlib.reload(srv)
-    token = srv._auth_provider.verify_access_token("test-token")
-    assert token is not None
-    assert token.client_id == "mcp_token_client"
-
-
 @patch.dict(os.environ, {"MCP_AUTH_MODE": "oauth"})
-def test_oauth_mode_uses_fastmcp_auth():
+def test_oauth_mode_configures_auth():
     """In oauth mode, FastMCP auth is configured with provider and settings."""
     import importlib
 
