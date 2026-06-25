@@ -45,6 +45,10 @@ MCP_INTERNAL_PORT = int(os.environ.get("MCP_INTERNAL_PORT", "8789"))
 MCP_INTERNAL_URL = f"http://{MCP_INTERNAL_HOST}:{MCP_INTERNAL_PORT}"
 
 MCP_AUTH_MODE = os.environ.get("MCP_AUTH_MODE", "token").strip().lower()
+VALID_AUTH_MODES = ("token", "mixed", "oauth")
+if MCP_AUTH_MODE not in VALID_AUTH_MODES:
+    raise ValueError(f"Invalid MCP_AUTH_MODE={MCP_AUTH_MODE!r}; expected one of {VALID_AUTH_MODES}")
+
 MCP_PUBLIC_TOKEN = os.environ.get("MCP_PUBLIC_TOKEN", "")
 
 OAUTH_PUBLIC_PREFIXES = ("/.well-known/", "/oauth/")
@@ -81,11 +85,12 @@ class MixedAuthMiddleware(BaseHTTPMiddleware):
                     {"error": "Invalid or missing mcp_token"},
                     status_code=401,
                 )
+            request.state.auth_token = mcp_token
             return await call_next(request)
 
         if MCP_AUTH_MODE == "oauth":
             if has_bearer:
-                # Let FastMCP validate the Bearer token internally
+                request.state.auth_token = auth_header.removeprefix("Bearer ")
                 return await call_next(request)
             if has_mcp_token:
                 return JSONResponse(
@@ -99,6 +104,7 @@ class MixedAuthMiddleware(BaseHTTPMiddleware):
 
         # mixed mode: Bearer preferred, mcp_token fallback
         if has_bearer:
+            request.state.auth_token = auth_header.removeprefix("Bearer ")
             return await call_next(request)
 
         if has_mcp_token:
@@ -107,6 +113,7 @@ class MixedAuthMiddleware(BaseHTTPMiddleware):
                     {"error": "invalid mcp_token"},
                     status_code=403,
                 )
+            request.state.auth_token = mcp_token
             return await call_next(request)
 
         return JSONResponse(
@@ -125,17 +132,27 @@ async def proxy_request(request: Request) -> StreamingResponse | JSONResponse:
     headers = dict(request.headers)
     headers.pop("host", None)
 
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        resp = await client.request(
-            method=request.method,
-            url=url,
-            content=body,
-            headers=headers,
-        )
-        return StreamingResponse(
-            content=resp.aiter_bytes(),
-            status_code=resp.status_code,
-            headers=dict(resp.headers),
+    auth_token = getattr(request.state, "auth_token", None)
+    if auth_token and "authorization" not in {k.lower() for k in headers}:
+        headers["Authorization"] = f"Bearer {auth_token}"
+
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            resp = await client.request(
+                method=request.method,
+                url=url,
+                content=body,
+                headers=headers,
+            )
+            return StreamingResponse(
+                content=resp.aiter_bytes(),
+                status_code=resp.status_code,
+                headers=dict(resp.headers),
+            )
+    except httpx.RequestError as exc:
+        return JSONResponse(
+            {"error": f"Upstream unreachable: {exc}"},
+            status_code=502,
         )
 
 
