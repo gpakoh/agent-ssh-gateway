@@ -4,11 +4,6 @@ import os
 from unittest.mock import patch
 
 import pytest
-from starlette.testclient import TestClient
-
-from examples.chatgpt_remote_mcp.server import (
-    _is_oauth_public_path,
-)
 
 
 @pytest.fixture
@@ -18,6 +13,8 @@ def valid_token():
 
 @pytest.fixture
 def token_client(valid_token):
+    from starlette.testclient import TestClient
+
     with patch.dict(os.environ, {"MCP_PUBLIC_TOKEN": valid_token, "MCP_AUTH_MODE": "token"}):
         import importlib
 
@@ -29,6 +26,8 @@ def token_client(valid_token):
 
 @pytest.fixture
 def mixed_client(valid_token):
+    from starlette.testclient import TestClient
+
     with patch.dict(os.environ, {"MCP_PUBLIC_TOKEN": valid_token, "MCP_AUTH_MODE": "mixed"}):
         import importlib
 
@@ -39,6 +38,8 @@ def mixed_client(valid_token):
 
 
 def test_oauth_public_paths():
+    from examples.chatgpt_remote_mcp.server import _is_oauth_public_path
+
     assert _is_oauth_public_path("/.well-known/oauth-authorization-server")
     assert _is_oauth_public_path("/oauth/authorize")
     assert _is_oauth_public_path("/oauth/token")
@@ -105,6 +106,8 @@ def test_mixed_mode_bearer_preferred(mixed_client, valid_token):
 
 @pytest.fixture
 def oauth_client(valid_token):
+    from starlette.testclient import TestClient
+
     with patch.dict(os.environ, {"MCP_PUBLIC_TOKEN": valid_token, "MCP_AUTH_MODE": "oauth"}):
         import importlib
 
