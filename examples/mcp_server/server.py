@@ -9,6 +9,18 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+from agent_tasks import (
+    archive_agent_task as _archive_agent_task,
+)
+from agent_tasks import (
+    list_agent_tasks as _list_agent_tasks,
+)
+from agent_tasks import (
+    read_agent_task_file as _read_agent_task_file,
+)
+from agent_tasks import (
+    write_agent_task as _write_agent_task,
+)
 from chatgpt_tools import (
     git_diff_stat,
     git_status,
@@ -39,19 +51,13 @@ from chatgpt_tools import (
     recent_commits,
     run_compileall,
     run_lint,
+    run_project_command,
     run_tests,
     show_changes,
     working_directory,
 )
 from command_policy import CommandPolicyError
 from gateway_client import GatewayClient, GatewayClientError
-from agent_tasks import (
-    archive_agent_task as _archive_agent_task,
-    list_agent_tasks as _list_agent_tasks,
-    read_agent_task_file as _read_agent_task_file,
-    validate_task_id,
-    write_agent_task as _write_agent_task,
-)
 from handoff import read_handoff, show_handoff_status, write_handoff_plan
 from mcp.server.fastmcp import FastMCP
 from self_test import run_self_test
