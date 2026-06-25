@@ -145,10 +145,29 @@ The public MCP endpoint uses **Streamable HTTP/SSE**. Smoke tests must parse `da
 - `gateway_project_run_mypy`
 - `gateway_project_write_handoff_plan`
 
+### Agent Handoff v2 lifecycle
+
+```
+write_agent_task → opencode_runner_wrapper → read task files → archive_agent_task
+```
+
+6 tools under prefix `gateway_project_*`:
+- `write_agent_task` — write task.json + current-plan.md + agent-status.md
+- `read_agent_status` — read .ai-bridge/tasks/<id>/agent-status.md
+- `read_agent_report` — read .ai-bridge/tasks/<id>/agent-report.md
+- `read_agent_diff` — read .ai-bridge/tasks/<id>/implementation-diff.patch
+- `list_agent_tasks` — list .ai-bridge/tasks/ directories
+- `archive_agent_task` — move task to .ai-bridge/archive/ (never delete)
+
+Local wrapper: `scripts/opencode_runner_wrapper.py` — executes task plan via OpenCode CLI.
+- `--dry-run` for safe validation
+- `--self-test` for CI smoke
+- Output: opencode-run.log + opencode-result.md in task dir
+
 ### Safety notes
 
 - Prefer project-scoped tools over generic SSH/session tools.
 - Do not use generic command execution for ChatGPT-facing workflows.
 - Do not read `.env`, private keys, tokens, or secret files.
-- Handoff write is limited to `.ai-bridge/current-plan.md`.
+- Handoff write is limited to `.ai-bridge/` directories.
 - Public endpoint responses are SSE-framed.
