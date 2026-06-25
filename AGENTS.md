@@ -148,8 +148,23 @@ The public MCP endpoint uses **Streamable HTTP/SSE**. Smoke tests must parse `da
 ### Agent Handoff v2 lifecycle
 
 ```
-write_agent_task → opencode_runner_wrapper → read task files → archive_agent_task
+ChatGPT / Gateway
+  ├─ write_agent_task → task.json + current-plan.md
+  ├─ project_run_opencode  → OpenCode CLI (main project, scope: opencode)
+  ├─ project_run_mimo      → Mimo CLI (disposable worktree, scope: mimo)
+  ├─ read_agent_status / report / diff
+  └─ archive_agent_task → .ai-bridge/archive/
 ```
+
+#### Task contract (task.json)
+
+Each task carries a structured contract:
+- `agent`: `"opencode"` or `"mimo"` — determines which runner executes
+- `worktree_path`: (mimo only) absolute path to linked git worktree
+- `allowed_files` / `forbidden_files`: path globs for scope enforcement
+- `commit_allowed` / `push_allowed`: safety flags (both default false)
+
+#### MCP tools
 
 6 tools under prefix `gateway_project_*`:
 - `write_agent_task` — write task.json + current-plan.md + agent-status.md
@@ -159,10 +174,18 @@ write_agent_task → opencode_runner_wrapper → read task files → archive_age
 - `list_agent_tasks` — list .ai-bridge/tasks/ directories
 - `archive_agent_task` — move task to .ai-bridge/archive/ (never delete)
 
-Local wrapper: `scripts/opencode_runner_wrapper.py` — executes task plan via OpenCode CLI.
-- `--dry-run` for safe validation
-- `--self-test` for CI smoke
-- Output: opencode-run.log + opencode-result.md in task dir
+#### Execution tools
+
+- `gateway_project_run_opencode` — runs an existing opencode task via `project_run_opencode()`. Uses OpenCode CLI (`--dangerously-skip-permissions`). Captures `agent-status.md`, `agent-report.md`, `implementation-diff.patch`. Requires `MCP_GATEWAY_WRITE_MODE=handoff` or `full`. Chatgpt mode only.
+- `gateway_project_run_mimo` — runs an existing mimo task via `project_run_mimo()`. 11 pre-flight guards execute as shell script on SSH target. Requires `MCP_GATEWAY_WORKTREE_ROOT` env var and valid linked git worktree. Chatgpt mode only.
+
+#### Local wrappers
+
+- `scripts/opencode_runner_wrapper.py` — executes task plan via OpenCode CLI locally.
+  - `--dry-run` for safe validation
+  - `--self-test` for CI smoke
+  - Output: opencode-run.log + opencode-result.md in task dir
+- `scripts/mimo_worktree_smoke.py` — (diagnostic) validates Mimo runner flow end-to-end.
 
 ### Safety notes
 

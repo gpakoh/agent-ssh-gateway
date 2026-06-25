@@ -259,7 +259,7 @@ Instead of giving every automation component direct SSH access, you can place on
 
 ## What it does
 
-The gateway MCP adapter also includes a **handoff protocol** (`.ai-bridge/current-plan.md`) that lets AI agents leave structured plan documents behind for other agents, with write access controlled by `MCP_GATEWAY_WRITE_MODE`.
+The gateway MCP adapter includes a **parallel agent orchestration system** built on the Agent Handoff v2 protocol. It lets ChatGPT coordinate multiple agents (OpenCode, Mimo) on independent tasks through a structured lifecycle — write task → execute → read results → archive. Write access is controlled by `MCP_GATEWAY_WRITE_MODE`.
 
 `agent-ssh-gateway` allows clients to:
 
@@ -276,6 +276,77 @@ The gateway MCP adapter also includes a **handoff protocol** (`.ai-bridge/curren
 * expose a structured OpenAPI contract for SDKs and agents.
 
 ---
+
+## Agent Handoff v2 — parallel agent orchestration
+
+Orchestrate multiple AI agents (OpenCode, Mimo) through a structured task lifecycle, all coordinated by ChatGPT.
+
+### Task lifecycle
+
+```
+ChatGPT / Gateway
+  ├─ write_agent_task → .ai-bridge/tasks/<id>/task.json + current-plan.md
+  ├─ project_run_opencode → executes via OpenCode CLI (main project scope)
+  ├─ project_run_mimo → executes via Mimo CLI (disposable git worktree)
+  ├─ read_agent_status → agent-status.md (running → needs-review / failed)
+  ├─ read_agent_report → agent-report.md (summary)
+  ├─ read_agent_diff → implementation-diff.patch (git diff from worktree)
+  └─ archive_agent_task → .ai-bridge/archive/ (never delete)
+```
+
+### Two execution modes
+
+| Agent | Scope | Isolation | Safety |
+|-------|-------|-----------|--------|
+| **OpenCode** | Main project directory | No worktree guard | `--never-ask`, binary discovery |
+| **Mimo** | Disposable git worktree | 11 pre-flight guards (linked worktree check, path isolation, `MCP_GATEWAY_WORKTREE_ROOT` enforcement) | `--dangerously-skip-permissions`, binary discovery via `$MIMO_BIN` |
+
+### Key features
+
+- **Independent tasks** — each task has its own `task_id`, `allowed_files`, `forbidden_files`, agent assignment.
+- **No cross-contamination** — OpenCode works in the main checkout; Mimo works in an isolated git worktree under `MCP_GATEWAY_WORKTREE_ROOT`.
+- **No auto-commit/push** — both agents enforce `commit_allowed` and `push_allowed` from `task.json`.
+- **Structured results** — each task produces `agent-status.md`, `agent-report.md`, `implementation-diff.patch`.
+- **Safety-first** — Mimo guards verify worktree is linked (not main checkout), canonical paths match, and worktree is under the designated root before any execution.
+
+### Mimo runner guards (11 checks)
+
+All guards execute as shell script on the SSH target — no Python runtime dependency:
+
+1. `task.json` exists
+2. `task.json` agent is `"mimo"`
+3. `worktree_path` set in `task.json`
+4. `MCP_GATEWAY_WORKTREE_ROOT` environment variable set
+5. `worktree_path` exists as a directory
+6. Canonical realpath for project, worktree, and WORKTREE_ROOT
+7. Worktree != project root
+8. Worktree under `MCP_GATEWAY_WORKTREE_ROOT`
+9. Valid git worktree (`rev-parse --is-inside-work-tree`)
+10. Worktree top-level matches (`rev-parse --show-toplevel`)
+11. Linked worktree, not main checkout (`git-dir != git-common-dir`)
+
+### Example: parallel two-agent task
+
+```bash
+# Set up
+export MCP_GATEWAY_WORKTREE_ROOT=/var/mimo-worktrees
+export MIMO_BIN=/usr/local/bin/mimo
+
+# Write two tasks
+TASK_A="2026-06-25-mytask-opencode"
+TASK_B="2026-06-25-mytask-mimo"
+
+# ChatGPT writes task.json + current-plan.md for both
+# creates git worktree for Mimo
+git worktree add "$MCP_GATEWAY_WORKTREE_ROOT/$TASK_B" -b "mimo/$TASK_B"
+
+# Execute (via MCP tools)
+# 1. gateway_project_run_opencode — runs OpenCode in main project
+# 2. gateway_project_run_mimo — runs Mimo in worktree (11 guards)
+# 3. Read results, clean up
+git worktree remove "$MCP_GATEWAY_WORKTREE_ROOT/$TASK_B" --force
+git branch -D "mimo/$TASK_B"
+```
 
 ## Main use cases
 
