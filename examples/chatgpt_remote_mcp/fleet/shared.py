@@ -3,31 +3,24 @@
 from __future__ import annotations
 
 import os
-from typing import Any
 
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
 
 
-class TokenAuthMiddleware(BaseHTTPMiddleware):
-    """Reject requests without a valid mcp_token query parameter."""
-
-    def __init__(self, app: Any, valid_tokens: set[str]) -> None:
-        super().__init__(app)
-        self._valid_tokens = valid_tokens
-
-    async def dispatch(self, request: Request, call_next: Any) -> Any:
-        token = request.query_params.get("mcp_token")
-        if not token:
-            return JSONResponse(
-                {"error": "missing mcp_token"}, status_code=401
-            )
-        if token not in self._valid_tokens:
-            return JSONResponse(
-                {"error": "invalid mcp_token"}, status_code=403
-            )
-        return await call_next(request)
+def extract_auth_token(request: Request, valid_tokens: set[str]) -> str | None:
+    """Extract and validate auth token from Bearer header or mcp_token query param.
+    Returns the token string if valid, None otherwise.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header.removeprefix("Bearer ")
+        if token in valid_tokens:
+            return token
+        return None
+    token = request.query_params.get("mcp_token", "")
+    if token and token in valid_tokens:
+        return token
+    return None
 
 
 def get_fleet_env() -> dict[str, str]:
