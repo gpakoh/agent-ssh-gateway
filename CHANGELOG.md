@@ -6,6 +6,27 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.16-alpha] - 2026-06-25
+
+### Added
+
+- **OAuth Phase 2 — FastMCP native Auth.** Three-layer auth architecture: `token` (legacy, default), `oauth` (FastMCP-native OAuth 2.1 DCR + PKCE), `mixed` (proxy auth for agents + FastMCP OAuth for clients). (Session 113)
+- **`GatewayOAuthProvider`** — async OAuth 2.1 provider implementing FastMCP `AuthorizationServerProtocol`: PKCE S256, DCR, auth code flow, refresh tokens, scope validation, token revocation. 17 tests. (Session 113)
+- **`mixed` auth mode** — MCP_PUBLIC_TOKEN pre-registered as opaque access token in `GatewayOAuthProvider`; FastMCP auth layer disabled (proxy handles `mcp_token` → Bearer injection). (Session 113)
+- **`oauth` auth mode** — full FastMCP-native OAuth with `AuthSettings` configured; `issuer_url`, `resource_server_url`, DCR with `mcp:read`/`mcp:write` scopes. (Session 113)
+- **`MCP_AUTH_MODE` env var** — tri-state: `token` (default, no change), `mixed` (proxy auth + FastMCP OAuth provider ready), `oauth` (FastMCP-native OAuth). (Session 113)
+
+### Tests
+
+- 24 tests for OAuth Phase 2: 7 `test_mcp_server.py` (auth mode config, provider init, token registration, FastMCP settings), 17 `test_oauth_provider.py` (PKCE, DCR, auth code, tokens, revocation, scopes).
+
+### Changed
+
+- `proxy.py`: `mcp_token` query → Bearer header injection now routes through `GatewayOAuthProvider.verify_access_token()` in mixed mode; no token → 401. (Session 113)
+- `server.py`: auth config block reorganized — `MCP_AUTH_MODE` switch selects between token (default, no auth), oauth (FastMCP-native), and mixed (proxy auth + provider pre-loaded). (Session 113)
+- `/etc/agent-ssh-gateway-mcp.env`: `MCP_AUTH_MODE=mixed` (was: token-only, no MCP_AUTH_MODE set). (Session 113)
+- Healthcheck: 6/6 adapters healthy, 85 Gateway tools available. (Session 113)
+
 ## [0.1.15-alpha] - 2026-06-25
 
 ### Added

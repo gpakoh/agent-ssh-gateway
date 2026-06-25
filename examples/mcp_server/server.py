@@ -63,6 +63,56 @@ from mcp.server.fastmcp import FastMCP
 from mimo_tools import (
     project_run_mimo as _project_run_mimo,
 )
+
+# OAuth provider and settings
+from examples.mcp_server.oauth_provider import (
+    DEFAULT_SCOPES,
+    SUPPORTED_SCOPES,
+    GatewayOAuthProvider,
+)
+
+MCP_AUTH_MODE = os.environ.get("MCP_AUTH_MODE", "token").strip().lower()
+VALID_AUTH_MODES = ("token", "mixed", "oauth")
+if MCP_AUTH_MODE not in VALID_AUTH_MODES:
+    raise ValueError(f"Invalid MCP_AUTH_MODE={MCP_AUTH_MODE!r}; expected one of {VALID_AUTH_MODES}")
+
+_auth_provider: GatewayOAuthProvider | None = None
+_auth_settings = None
+
+if MCP_AUTH_MODE == "oauth":
+    _auth_provider = GatewayOAuthProvider()
+    try:
+        from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
+        from pydantic import AnyHttpUrl
+
+        _auth_settings = AuthSettings(
+            issuer_url=AnyHttpUrl(os.environ.get("MCP_ISSUER_URL", "https://ssh.xloud.ru")),
+            resource_server_url=AnyHttpUrl(
+                os.environ.get("MCP_RESOURCE_URL", "https://ssh.xloud.ru/mcp")
+            ),
+            service_documentation_url=AnyHttpUrl("https://github.com/gpakoh/agent-ssh-gateway"),
+            client_registration_options=ClientRegistrationOptions(
+                enabled=True,
+                valid_scopes=SUPPORTED_SCOPES,
+                default_scopes=DEFAULT_SCOPES,
+            ),
+            required_scopes=None,
+        )
+    except ImportError:
+        pass
+elif MCP_AUTH_MODE == "mixed":
+    from examples.mcp_server.oauth_provider import StoredToken as _StoredToken
+
+    _auth_provider = GatewayOAuthProvider()
+    mcp_token = os.environ.get("MCP_PUBLIC_TOKEN", "")
+    if mcp_token:
+        _auth_provider._tokens[mcp_token] = _StoredToken(
+            token=mcp_token,
+            client_id="mcp_token_client",
+            scopes=list(DEFAULT_SCOPES),
+            expires_at=float("inf"),
+            type="access",
+        )
 from opencode_tools import (
     project_run_opencode as _project_run_opencode,
 )
@@ -79,7 +129,11 @@ from examples.chatgpt_remote_mcp.fleet.gitea_client import GiteaClient
 from examples.chatgpt_remote_mcp.fleet.github_client import GitHubClient
 from examples.chatgpt_remote_mcp.fleet.postgres_client import PostgresClient
 
-mcp = FastMCP("agent-ssh-gateway")
+mcp = FastMCP(
+    "agent-ssh-gateway",
+    auth=_auth_settings,
+    auth_server_provider=_auth_provider if _auth_settings else None,
+)
 client = GatewayClient()
 
 # ── Postgres DSN ────────────────────────────────────────────────────
@@ -99,9 +153,12 @@ if os.path.exists(_pg_env):
     _u = _pg_vars.get("PGUSER", "")
     _pw = _pg_vars.get("PGPASSWORD", "")
     if all([_h, _d, _u, _pw]):
-        PG_DSN = f"postgresql://{_u}:{_pw}@{_h}:{_p}/{_d}?sslmode=disable&application_name=mcp_gateway"
+        PG_DSN = (
+            f"postgresql://{_u}:{_pw}@{_h}:{_p}/{_d}?sslmode=disable&application_name=mcp_gateway"
+        )
 
 _pg_client: PostgresClient | None = None
+
 
 def _get_pg_client() -> PostgresClient | None:
     global _pg_client
@@ -112,10 +169,12 @@ def _get_pg_client() -> PostgresClient | None:
 
 def register_tool(name: str):
     """Decorator: register MCP tool only if visible in the active mode."""
+
     def decorator(func):
         if should_register_tool(name):
             return mcp.tool(name=name)(func)
         return func
+
     return decorator
 
 
@@ -155,6 +214,7 @@ def gateway_health() -> dict[str, Any]:
 @register_tool("gateway_list_sessions")
 def gateway_list_sessions() -> dict[str, Any]:
     """List current SSH sessions visible to the configured API key."""
+
     def _list() -> dict[str, Any]:
         data = client.list_sessions()
         return data
@@ -170,6 +230,7 @@ def gateway_list_sessions() -> dict[str, Any]:
 @register_tool("gateway_session_health")
 def gateway_session_health(session_id: str | None = None) -> dict[str, Any]:
     """Check an SSH session health."""
+
     def _health() -> dict[str, Any]:
         return client.session_health(session_id=session_id)
 
@@ -182,10 +243,9 @@ def gateway_session_health(session_id: str | None = None) -> dict[str, Any]:
 
 
 @register_tool("gateway_execute_restricted")
-def gateway_execute_restricted(
-    command: str, session_id: str | None = None
-) -> dict[str, Any]:
+def gateway_execute_restricted(command: str, session_id: str | None = None) -> dict[str, Any]:
     """Execute an allowlisted read-only command as a redacted async job."""
+
     def _exec() -> dict[str, Any]:
         return client.execute_restricted(command, session_id=session_id)
 
@@ -200,6 +260,7 @@ def gateway_execute_restricted(
 @register_tool("gateway_job_status")
 def gateway_job_status(job_id: str) -> dict[str, Any]:
     """Get background job status."""
+
     def _status() -> dict[str, Any]:
         data = client.job_status(job_id)
         return data
@@ -213,10 +274,9 @@ def gateway_job_status(job_id: str) -> dict[str, Any]:
 
 
 @register_tool("gateway_job_result")
-def gateway_job_result(
-    job_id: str, redact_output: bool = True
-) -> dict[str, Any]:
+def gateway_job_result(job_id: str, redact_output: bool = True) -> dict[str, Any]:
     """Get background job result."""
+
     def _result() -> dict[str, Any]:
         data = client.job_result(job_id, redact_output=redact_output)
         return data
@@ -230,10 +290,9 @@ def gateway_job_result(
 
 
 @register_tool("gateway_wait_job")
-def gateway_wait_job(
-    job_id: str, timeout_sec: int | None = None
-) -> dict[str, Any]:
+def gateway_wait_job(job_id: str, timeout_sec: int | None = None) -> dict[str, Any]:
     """Wait for a background job and return its result."""
+
     def _wait() -> dict[str, Any]:
         return client.wait_job(job_id, timeout_sec=timeout_sec)
 
@@ -246,10 +305,9 @@ def gateway_wait_job(
 
 
 @register_tool("gateway_read_file")
-def gateway_read_file(
-    path: str, session_id: str | None = None
-) -> dict[str, Any]:
+def gateway_read_file(path: str, session_id: str | None = None) -> dict[str, Any]:
     """Read a file through the gateway file API."""
+
     def _read() -> dict[str, Any]:
         return client.read_file(path, session_id=session_id)
 
@@ -262,10 +320,9 @@ def gateway_read_file(
 
 
 @register_tool("gateway_repo_status")
-def gateway_repo_status(
-    session_id: str | None = None
-) -> dict[str, Any]:
+def gateway_repo_status(session_id: str | None = None) -> dict[str, Any]:
     """Collect basic repository status using read-only commands."""
+
     def _status() -> dict[str, Any]:
         return client.repo_status(session_id=session_id)
 
@@ -455,6 +512,7 @@ def gateway_project_run_compileall(project: str) -> dict[str, Any]:
 
 # ── Phase 2 project tools ─────────────────────────────────────────
 
+
 @register_tool("gateway_project_read_file")
 def gateway_project_read_file(project: str, path: str) -> dict[str, Any]:
     """Read a file within MCP_GATEWAY_PROJECT_ROOT/{project}."""
@@ -467,7 +525,9 @@ def gateway_project_read_file(project: str, path: str) -> dict[str, Any]:
 
 
 @register_tool("gateway_project_search_text")
-def gateway_project_search_text(project: str, query: str, glob: str | None = None) -> dict[str, Any]:
+def gateway_project_search_text(
+    project: str, query: str, glob: str | None = None
+) -> dict[str, Any]:
     """Search for text across project files using grep."""
     return run_tool(
         tool="gateway_project_search_text",
@@ -692,15 +752,23 @@ def gateway_write_handoff_plan(
 
 # ── Gitea tools ──────────────────────────────────────────────────
 
+
 @register_tool("gitea_get_repo")
 async def gitea_get_repo(owner: str, repo: str) -> dict[str, Any]:
     """Get Gitea repository metadata including description, visibility, language, default branch."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
-        return error_result(tool="gitea_get_repo", title="Gitea get repo", error="GITEA_TOKEN not configured")
+        return error_result(
+            tool="gitea_get_repo", title="Gitea get repo", error="GITEA_TOKEN not configured"
+        )
     async with GiteaClient(token) as client:
         data = await client.get_repo(owner, repo)
-    return text_result(tool="gitea_get_repo", title="Gitea repo", text=f"Repo: {data.get('full_name', 'unknown')}", data=data)
+    return text_result(
+        tool="gitea_get_repo",
+        title="Gitea repo",
+        text=f"Repo: {data.get('full_name', 'unknown')}",
+        data=data,
+    )
 
 
 @register_tool("gitea_list_branches")
@@ -708,43 +776,63 @@ async def gitea_list_branches(owner: str, repo: str, limit: int = 30) -> dict[st
     """List branches in a Gitea repository."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
-        return error_result(tool="gitea_list_branches", title="Gitea branches", error="GITEA_TOKEN not configured")
+        return error_result(
+            tool="gitea_list_branches", title="Gitea branches", error="GITEA_TOKEN not configured"
+        )
     async with GiteaClient(token) as client:
         data = await client.list_branches(owner, repo, limit=limit)
-    return text_result(tool="gitea_list_branches", title="Gitea branches", text=f"Branches: {len(data)}", data=data)
+    return text_result(
+        tool="gitea_list_branches", title="Gitea branches", text=f"Branches: {len(data)}", data=data
+    )
 
 
 @register_tool("gitea_list_commits")
-async def gitea_list_commits(owner: str, repo: str, sha: str | None = None, limit: int = 30) -> dict[str, Any]:
+async def gitea_list_commits(
+    owner: str, repo: str, sha: str | None = None, limit: int = 30
+) -> dict[str, Any]:
     """List commits in a Gitea repository. Optionally filter by branch SHA."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
-        return error_result(tool="gitea_list_commits", title="Gitea commits", error="GITEA_TOKEN not configured")
+        return error_result(
+            tool="gitea_list_commits", title="Gitea commits", error="GITEA_TOKEN not configured"
+        )
     async with GiteaClient(token) as client:
         data = await client.list_commits(owner, repo, sha=sha, limit=limit)
-    return text_result(tool="gitea_list_commits", title="Gitea commits", text=f"Commits: {len(data)}", data=data)
+    return text_result(
+        tool="gitea_list_commits", title="Gitea commits", text=f"Commits: {len(data)}", data=data
+    )
 
 
 @register_tool("gitea_get_file")
-async def gitea_get_file(owner: str, repo: str, path: str, branch: str | None = None) -> dict[str, Any]:
+async def gitea_get_file(
+    owner: str, repo: str, path: str, branch: str | None = None
+) -> dict[str, Any]:
     """Get a file or directory from a Gitea repository."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
-        return error_result(tool="gitea_get_file", title="Gitea file", error="GITEA_TOKEN not configured")
+        return error_result(
+            tool="gitea_get_file", title="Gitea file", error="GITEA_TOKEN not configured"
+        )
     async with GiteaClient(token) as client:
         data = await client.get_file(owner, repo, path, branch=branch)
     return text_result(tool="gitea_get_file", title="Gitea file", text=f"File: {path}", data=data)
 
 
 @register_tool("gitea_list_issues")
-async def gitea_list_issues(owner: str, repo: str, state: str = "open", limit: int = 30) -> dict[str, Any]:
+async def gitea_list_issues(
+    owner: str, repo: str, state: str = "open", limit: int = 30
+) -> dict[str, Any]:
     """List issues in a Gitea repository. State: open, closed, all."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
-        return error_result(tool="gitea_list_issues", title="Gitea issues", error="GITEA_TOKEN not configured")
+        return error_result(
+            tool="gitea_list_issues", title="Gitea issues", error="GITEA_TOKEN not configured"
+        )
     async with GiteaClient(token) as client:
         data = await client.list_issues(owner, repo, state=state, limit=limit)
-    return text_result(tool="gitea_list_issues", title="Gitea issues", text=f"Issues: {len(data)}", data=data)
+    return text_result(
+        tool="gitea_list_issues", title="Gitea issues", text=f"Issues: {len(data)}", data=data
+    )
 
 
 @register_tool("gitea_get_issue")
@@ -752,21 +840,31 @@ async def gitea_get_issue(owner: str, repo: str, issue_number: int) -> dict[str,
     """Get details of a specific Gitea issue by number."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
-        return error_result(tool="gitea_get_issue", title="Gitea issue", error="GITEA_TOKEN not configured")
+        return error_result(
+            tool="gitea_get_issue", title="Gitea issue", error="GITEA_TOKEN not configured"
+        )
     async with GiteaClient(token) as client:
         data = await client.get_issue(owner, repo, issue_number)
-    return text_result(tool="gitea_get_issue", title="Gitea issue", text=f"Issue #{issue_number}", data=data)
+    return text_result(
+        tool="gitea_get_issue", title="Gitea issue", text=f"Issue #{issue_number}", data=data
+    )
 
 
 @register_tool("gitea_list_pull_requests")
-async def gitea_list_pull_requests(owner: str, repo: str, state: str = "open", limit: int = 30) -> dict[str, Any]:
+async def gitea_list_pull_requests(
+    owner: str, repo: str, state: str = "open", limit: int = 30
+) -> dict[str, Any]:
     """List pull requests in a Gitea repository. State: open, closed, all."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
-        return error_result(tool="gitea_list_pull_requests", title="Gitea PRs", error="GITEA_TOKEN not configured")
+        return error_result(
+            tool="gitea_list_pull_requests", title="Gitea PRs", error="GITEA_TOKEN not configured"
+        )
     async with GiteaClient(token) as client:
         data = await client.list_pull_requests(owner, repo, state=state, limit=limit)
-    return text_result(tool="gitea_list_pull_requests", title="Gitea PRs", text=f"PRs: {len(data)}", data=data)
+    return text_result(
+        tool="gitea_list_pull_requests", title="Gitea PRs", text=f"PRs: {len(data)}", data=data
+    )
 
 
 @register_tool("gitea_get_pull_request")
@@ -774,21 +872,31 @@ async def gitea_get_pull_request(owner: str, repo: str, pull_number: int) -> dic
     """Get details of a specific Gitea pull request by number."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
-        return error_result(tool="gitea_get_pull_request", title="Gitea PR", error="GITEA_TOKEN not configured")
+        return error_result(
+            tool="gitea_get_pull_request", title="Gitea PR", error="GITEA_TOKEN not configured"
+        )
     async with GiteaClient(token) as client:
         data = await client.get_pull_request(owner, repo, pull_number)
-    return text_result(tool="gitea_get_pull_request", title="Gitea PR", text=f"PR #{pull_number}", data=data)
+    return text_result(
+        tool="gitea_get_pull_request", title="Gitea PR", text=f"PR #{pull_number}", data=data
+    )
 
 
 @register_tool("gitea_list_action_runs")
-async def gitea_list_action_runs(owner: str, repo: str, status: str | None = None, limit: int = 10) -> dict[str, Any]:
+async def gitea_list_action_runs(
+    owner: str, repo: str, status: str | None = None, limit: int = 10
+) -> dict[str, Any]:
     """List Gitea Actions workflow runs. Optionally filter by status (completed, running, waiting)."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
-        return error_result(tool="gitea_list_action_runs", title="Gitea runs", error="GITEA_TOKEN not configured")
+        return error_result(
+            tool="gitea_list_action_runs", title="Gitea runs", error="GITEA_TOKEN not configured"
+        )
     async with GiteaClient(token) as client:
         data = await client.list_action_runs(owner, repo, status=status, limit=limit)
-    return text_result(tool="gitea_list_action_runs", title="Gitea runs", text="Action runs retrieved", data=data)
+    return text_result(
+        tool="gitea_list_action_runs", title="Gitea runs", text="Action runs retrieved", data=data
+    )
 
 
 @register_tool("gitea_get_action_run")
@@ -796,10 +904,14 @@ async def gitea_get_action_run(owner: str, repo: str, run_id: int) -> dict[str, 
     """Get details of a specific Gitea Actions workflow run by ID."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
-        return error_result(tool="gitea_get_action_run", title="Gitea run", error="GITEA_TOKEN not configured")
+        return error_result(
+            tool="gitea_get_action_run", title="Gitea run", error="GITEA_TOKEN not configured"
+        )
     async with GiteaClient(token) as client:
         data = await client.get_action_run(owner, repo, run_id)
-    return text_result(tool="gitea_get_action_run", title="Gitea run", text=f"Run #{run_id}", data=data)
+    return text_result(
+        tool="gitea_get_action_run", title="Gitea run", text=f"Run #{run_id}", data=data
+    )
 
 
 @register_tool("gitea_list_action_run_jobs")
@@ -807,10 +919,19 @@ async def gitea_list_action_run_jobs(owner: str, repo: str, run_id: int) -> dict
     """List jobs and steps for a Gitea Actions workflow run."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
-        return error_result(tool="gitea_list_action_run_jobs", title="Gitea jobs", error="GITEA_TOKEN not configured")
+        return error_result(
+            tool="gitea_list_action_run_jobs",
+            title="Gitea jobs",
+            error="GITEA_TOKEN not configured",
+        )
     async with GiteaClient(token) as client:
         data = await client.list_action_run_jobs(owner, repo, run_id)
-    return text_result(tool="gitea_list_action_run_jobs", title="Gitea jobs", text=f"Jobs for run #{run_id}", data=data)
+    return text_result(
+        tool="gitea_list_action_run_jobs",
+        title="Gitea jobs",
+        text=f"Jobs for run #{run_id}",
+        data=data,
+    )
 
 
 @register_tool("gitea_list_workflows")
@@ -818,23 +939,35 @@ async def gitea_list_workflows(owner: str, repo: str) -> dict[str, Any]:
     """List Gitea Actions workflow files in a repository."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
-        return error_result(tool="gitea_list_workflows", title="Gitea workflows", error="GITEA_TOKEN not configured")
+        return error_result(
+            tool="gitea_list_workflows", title="Gitea workflows", error="GITEA_TOKEN not configured"
+        )
     async with GiteaClient(token) as client:
         data = await client.list_workflows(owner, repo)
-    return text_result(tool="gitea_list_workflows", title="Gitea workflows", text="Workflows retrieved", data=data)
+    return text_result(
+        tool="gitea_list_workflows", title="Gitea workflows", text="Workflows retrieved", data=data
+    )
 
 
 # ── GitHub tools ─────────────────────────────────────────────────
+
 
 @register_tool("github_get_repo")
 async def github_get_repo(owner: str, repo: str) -> dict[str, Any]:
     """Get GitHub repository metadata."""
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
-        return error_result(tool="github_get_repo", title="GitHub repo", error="GITHUB_TOKEN not configured")
+        return error_result(
+            tool="github_get_repo", title="GitHub repo", error="GITHUB_TOKEN not configured"
+        )
     async with GitHubClient(token) as client:
         data = await client.get_repo(owner, repo)
-    return text_result(tool="github_get_repo", title="GitHub repo", text=f"Repo: {data.get('full_name', 'unknown')}", data=data)
+    return text_result(
+        tool="github_get_repo",
+        title="GitHub repo",
+        text=f"Repo: {data.get('full_name', 'unknown')}",
+        data=data,
+    )
 
 
 @register_tool("github_list_branches")
@@ -842,43 +975,68 @@ async def github_list_branches(owner: str, repo: str, per_page: int = 30) -> dic
     """List branches in a GitHub repository."""
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
-        return error_result(tool="github_list_branches", title="GitHub branches", error="GITHUB_TOKEN not configured")
+        return error_result(
+            tool="github_list_branches",
+            title="GitHub branches",
+            error="GITHUB_TOKEN not configured",
+        )
     async with GitHubClient(token) as client:
         data = await client.list_branches(owner, repo, per_page=per_page)
-    return text_result(tool="github_list_branches", title="GitHub branches", text=f"Branches: {len(data)}", data=data)
+    return text_result(
+        tool="github_list_branches",
+        title="GitHub branches",
+        text=f"Branches: {len(data)}",
+        data=data,
+    )
 
 
 @register_tool("github_list_commits")
-async def github_list_commits(owner: str, repo: str, sha: str | None = None, per_page: int = 30) -> dict[str, Any]:
+async def github_list_commits(
+    owner: str, repo: str, sha: str | None = None, per_page: int = 30
+) -> dict[str, Any]:
     """List commits in a GitHub repository."""
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
-        return error_result(tool="github_list_commits", title="GitHub commits", error="GITHUB_TOKEN not configured")
+        return error_result(
+            tool="github_list_commits", title="GitHub commits", error="GITHUB_TOKEN not configured"
+        )
     async with GitHubClient(token) as client:
         data = await client.list_commits(owner, repo, sha=sha, per_page=per_page)
-    return text_result(tool="github_list_commits", title="GitHub commits", text=f"Commits: {len(data)}", data=data)
+    return text_result(
+        tool="github_list_commits", title="GitHub commits", text=f"Commits: {len(data)}", data=data
+    )
 
 
 @register_tool("github_get_file")
-async def github_get_file(owner: str, repo: str, path: str, branch: str | None = None) -> dict[str, Any]:
+async def github_get_file(
+    owner: str, repo: str, path: str, branch: str | None = None
+) -> dict[str, Any]:
     """Get a file or directory from a GitHub repository."""
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
-        return error_result(tool="github_get_file", title="GitHub file", error="GITHUB_TOKEN not configured")
+        return error_result(
+            tool="github_get_file", title="GitHub file", error="GITHUB_TOKEN not configured"
+        )
     async with GitHubClient(token) as client:
         data = await client.get_file(owner, repo, path, branch=branch)
     return text_result(tool="github_get_file", title="GitHub file", text=f"File: {path}", data=data)
 
 
 @register_tool("github_list_issues")
-async def github_list_issues(owner: str, repo: str, state: str = "open", per_page: int = 30) -> dict[str, Any]:
+async def github_list_issues(
+    owner: str, repo: str, state: str = "open", per_page: int = 30
+) -> dict[str, Any]:
     """List issues in a GitHub repository. State: open, closed, all."""
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
-        return error_result(tool="github_list_issues", title="GitHub issues", error="GITHUB_TOKEN not configured")
+        return error_result(
+            tool="github_list_issues", title="GitHub issues", error="GITHUB_TOKEN not configured"
+        )
     async with GitHubClient(token) as client:
         data = await client.list_issues(owner, repo, state=state, per_page=per_page)
-    return text_result(tool="github_list_issues", title="GitHub issues", text=f"Issues: {len(data)}", data=data)
+    return text_result(
+        tool="github_list_issues", title="GitHub issues", text=f"Issues: {len(data)}", data=data
+    )
 
 
 @register_tool("github_get_issue")
@@ -886,21 +1044,33 @@ async def github_get_issue(owner: str, repo: str, issue_number: int) -> dict[str
     """Get details of a specific GitHub issue by number."""
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
-        return error_result(tool="github_get_issue", title="GitHub issue", error="GITHUB_TOKEN not configured")
+        return error_result(
+            tool="github_get_issue", title="GitHub issue", error="GITHUB_TOKEN not configured"
+        )
     async with GitHubClient(token) as client:
         data = await client.get_issue(owner, repo, issue_number)
-    return text_result(tool="github_get_issue", title="GitHub issue", text=f"Issue #{issue_number}", data=data)
+    return text_result(
+        tool="github_get_issue", title="GitHub issue", text=f"Issue #{issue_number}", data=data
+    )
 
 
 @register_tool("github_list_pull_requests")
-async def github_list_pull_requests(owner: str, repo: str, state: str = "open", per_page: int = 30) -> dict[str, Any]:
+async def github_list_pull_requests(
+    owner: str, repo: str, state: str = "open", per_page: int = 30
+) -> dict[str, Any]:
     """List pull requests in a GitHub repository. State: open, closed, all."""
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
-        return error_result(tool="github_list_pull_requests", title="GitHub PRs", error="GITHUB_TOKEN not configured")
+        return error_result(
+            tool="github_list_pull_requests",
+            title="GitHub PRs",
+            error="GITHUB_TOKEN not configured",
+        )
     async with GitHubClient(token) as client:
         data = await client.list_pull_requests(owner, repo, state=state, per_page=per_page)
-    return text_result(tool="github_list_pull_requests", title="GitHub PRs", text=f"PRs: {len(data)}", data=data)
+    return text_result(
+        tool="github_list_pull_requests", title="GitHub PRs", text=f"PRs: {len(data)}", data=data
+    )
 
 
 @register_tool("github_get_pull_request")
@@ -908,13 +1078,18 @@ async def github_get_pull_request(owner: str, repo: str, pull_number: int) -> di
     """Get details of a specific GitHub pull request by number."""
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
-        return error_result(tool="github_get_pull_request", title="GitHub PR", error="GITHUB_TOKEN not configured")
+        return error_result(
+            tool="github_get_pull_request", title="GitHub PR", error="GITHUB_TOKEN not configured"
+        )
     async with GitHubClient(token) as client:
         data = await client.get_pull_request(owner, repo, pull_number)
-    return text_result(tool="github_get_pull_request", title="GitHub PR", text=f"PR #{pull_number}", data=data)
+    return text_result(
+        tool="github_get_pull_request", title="GitHub PR", text=f"PR #{pull_number}", data=data
+    )
 
 
 # ── Docker tools ──────────────────────────────────────────────────
+
 
 @register_tool("docker_ps")
 async def docker_ps(all: bool = False, format: str | None = None) -> str:
@@ -953,12 +1128,15 @@ async def docker_compose_ps(project_dir: str | None = None, file_path: str | Non
 
 
 @register_tool("docker_compose_services")
-async def docker_compose_services(project_dir: str | None = None, file_path: str | None = None) -> str:
+async def docker_compose_services(
+    project_dir: str | None = None, file_path: str | None = None
+) -> str:
     """List service names defined in a Docker Compose project."""
     return await DockerClient().compose_services(project_dir=project_dir, file_path=file_path)
 
 
 # ── Postgres tools ────────────────────────────────────────────────
+
 
 @register_tool("postgres_health")
 async def postgres_health() -> str:
@@ -1032,6 +1210,7 @@ async def postgres_select(sql: str) -> str:
     except Exception as e:
         return f"error: query failed: {e}"
     import json
+
     return json.dumps(rows, default=str, ensure_ascii=False)
 
 
@@ -1049,10 +1228,13 @@ async def postgres_vector_status() -> str:
 
 # ── Context7 tools ────────────────────────────────────────────────
 
+
 @register_tool("resolve_library_id")
 async def resolve_library_id(query: str, libraryName: str) -> str:
     """Resolve a package/product name to a Context7-compatible library ID."""
-    return await _call_context7_upstream("resolve-library-id", {"query": query, "libraryName": libraryName})
+    return await _call_context7_upstream(
+        "resolve-library-id", {"query": query, "libraryName": libraryName}
+    )
 
 
 @register_tool("query_docs")
@@ -1080,6 +1262,7 @@ def gateway_project_write_agent_task(
     worktree_path: str | None = None,
 ) -> dict[str, Any]:
     """Write task.json + current-plan.md to .ai-bridge/tasks/<task_id>/."""
+
     def _fn() -> dict[str, Any]:
         return _write_agent_task(
             lambda p, c: run_project_command(client, p, c),
@@ -1096,6 +1279,7 @@ def gateway_project_write_agent_task(
             constraints=constraints,
             worktree_path=worktree_path,
         )
+
     return run_tool(
         tool="gateway_project_write_agent_task",
         title="Write agent task",
@@ -1112,7 +1296,9 @@ def gateway_project_read_agent_status(project: str, task_id: str) -> dict[str, A
         title="Read agent status",
         fn=lambda: _read_agent_task_file(
             lambda p, c: run_project_command(client, p, c),
-            project=project, task_id=task_id, filename="agent-status.md",
+            project=project,
+            task_id=task_id,
+            filename="agent-status.md",
         ),
         success_text="Read agent status.",
     )
@@ -1126,7 +1312,9 @@ def gateway_project_read_agent_report(project: str, task_id: str) -> dict[str, A
         title="Read agent report",
         fn=lambda: _read_agent_task_file(
             lambda p, c: run_project_command(client, p, c),
-            project=project, task_id=task_id, filename="agent-report.md",
+            project=project,
+            task_id=task_id,
+            filename="agent-report.md",
         ),
         success_text="Read agent report.",
     )
@@ -1140,7 +1328,9 @@ def gateway_project_read_agent_diff(project: str, task_id: str) -> dict[str, Any
         title="Read agent diff",
         fn=lambda: _read_agent_task_file(
             lambda p, c: run_project_command(client, p, c),
-            project=project, task_id=task_id, filename="implementation-diff.patch",
+            project=project,
+            task_id=task_id,
+            filename="implementation-diff.patch",
         ),
         success_text="Read agent diff.",
     )
@@ -1168,7 +1358,8 @@ def gateway_project_archive_agent_task(project: str, task_id: str) -> dict[str, 
         title="Archive agent task",
         fn=lambda: _archive_agent_task(
             lambda p, c: run_project_command(client, p, c),
-            project=project, task_id=task_id,
+            project=project,
+            task_id=task_id,
         ),
         success_text="Archived agent task.",
     )
@@ -1183,6 +1374,7 @@ def project_run_opencode(
     """Execute an existing handoff task via agent CLI.
     Requires write mode handoff or full."""
     from write_modes import assert_handoff_write_allowed
+
     assert_handoff_write_allowed()
     return run_tool(
         tool="project_run_opencode",
@@ -1207,6 +1399,7 @@ def gateway_project_run_mimo(
     Requires write mode handoff or full. See spec for 11 pre-flight guards.
     Mimo runs with --dangerously-skip-permissions — only valid in disposable worktrees."""
     from write_modes import assert_handoff_write_allowed
+
     assert_handoff_write_allowed()
     return run_tool(
         tool="gateway_project_run_mimo",
