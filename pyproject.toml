@@ -24,6 +24,7 @@ classifiers = [
 dependencies = [
   "fastapi",
   "uvicorn[standard]",
+  "mcp>=1.28.0",
   "paramiko",
   "pydantic",
   "pydantic-settings",
