@@ -1,9 +1,15 @@
 """Remote Streamable HTTP MCP server for ChatGPT Developer Mode.
 
 Architecture:
-  public :8788  →  TokenAuthMiddleware  →  reverse proxy  →  internal MCP :8789
+  public :8788  →  MixedAuthMiddleware  →  reverse proxy  →  internal MCP :8789
 
-This keeps the FastMCP lifecycle managed by run() and auth separate.
+Auth modes (MCP_AUTH_MODE env var):
+  token  — only ?mcp_token= query param (current behavior)
+  mixed  — Authorization: Bearer preferred, ?mcp_token= fallback
+  oauth  — only Bearer token (mcp_token rejected)
+
+OAuth paths (/.well-known/, /oauth/) are always public to enable
+the OAuth authorization flow.
 """
 
 from __future__ import annotations
@@ -38,26 +44,75 @@ MCP_INTERNAL_HOST = os.environ.get("MCP_INTERNAL_HOST", "127.0.0.1")
 MCP_INTERNAL_PORT = int(os.environ.get("MCP_INTERNAL_PORT", "8789"))
 MCP_INTERNAL_URL = f"http://{MCP_INTERNAL_HOST}:{MCP_INTERNAL_PORT}"
 
+MCP_AUTH_MODE = os.environ.get("MCP_AUTH_MODE", "token").strip().lower()
+MCP_PUBLIC_TOKEN = os.environ.get("MCP_PUBLIC_TOKEN", "")
 
-class TokenAuthMiddleware(BaseHTTPMiddleware):
-    """Protect remote MCP endpoint with a public connector token."""
+OAUTH_PUBLIC_PREFIXES = ("/.well-known/", "/oauth/")
+
+
+def _is_oauth_public_path(path: str) -> bool:
+    """OAuth endpoints don't require mcp_token or Bearer."""
+    return path.startswith(OAUTH_PUBLIC_PREFIXES)
+
+
+class MixedAuthMiddleware(BaseHTTPMiddleware):
+    """Accept Bearer token (header) or mcp_token (query param).
+
+    mode=token: only mcp_token
+    mode=mixed: Bearer preferred, mcp_token fallback
+    mode=oauth: only Bearer (mcp_token rejected)
+    """
 
     async def dispatch(self, request: Request, call_next: Callable):
-        expected = os.environ.get("MCP_PUBLIC_TOKEN", "")
-        if not expected:
-            return JSONResponse(
-                {"error": "MCP_PUBLIC_TOKEN is not configured"},
-                status_code=500,
-            )
+        path = request.url.path
 
-        provided = request.query_params.get("mcp_token", "")
-        if provided != expected:
+        # OAuth public paths — always pass through
+        if _is_oauth_public_path(path):
+            return await call_next(request)
+
+        auth_header = request.headers.get("Authorization", "")
+        mcp_token = request.query_params.get("mcp_token", "")
+        has_bearer = auth_header.startswith("Bearer ")
+        has_mcp_token = bool(mcp_token)
+
+        if MCP_AUTH_MODE == "token":
+            if not has_mcp_token or mcp_token != MCP_PUBLIC_TOKEN:
+                return JSONResponse(
+                    {"error": "Invalid or missing mcp_token"},
+                    status_code=401,
+                )
+            return await call_next(request)
+
+        if MCP_AUTH_MODE == "oauth":
+            if has_bearer:
+                # Let FastMCP validate the Bearer token internally
+                return await call_next(request)
+            if has_mcp_token:
+                return JSONResponse(
+                    {"error": "mcp_token is not accepted in oauth mode"},
+                    status_code=401,
+                )
             return JSONResponse(
-                {"error": "Invalid or missing mcp_token"},
+                {"error": "Missing Authorization: Bearer header"},
                 status_code=401,
             )
 
-        return await call_next(request)
+        # mixed mode: Bearer preferred, mcp_token fallback
+        if has_bearer:
+            return await call_next(request)
+
+        if has_mcp_token:
+            if mcp_token != MCP_PUBLIC_TOKEN:
+                return JSONResponse(
+                    {"error": "invalid mcp_token"},
+                    status_code=403,
+                )
+            return await call_next(request)
+
+        return JSONResponse(
+            {"error": "Missing Authorization header or mcp_token"},
+            status_code=401,
+        )
 
 
 async def proxy_request(request: Request) -> StreamingResponse | JSONResponse:
@@ -87,7 +142,8 @@ async def proxy_request(request: Request) -> StreamingResponse | JSONResponse:
 def create_proxy_app() -> Starlette:
     """Create auth-guarded proxy to internal MCP server."""
     proxy = Starlette()
-    proxy.add_middleware(TokenAuthMiddleware)
+    proxy.add_middleware(MixedAuthMiddleware)
+    proxy.add_route("/", proxy_request, methods=["GET", "POST", "DELETE"])
     proxy.add_route("/{path:path}", proxy_request, methods=["GET", "POST", "DELETE"])
     return proxy
 
@@ -116,7 +172,9 @@ def run():
 
     print(f"  MCP internal : {internal_host}:{internal_port}", file=sys.stderr)
     print(f"  MCP public   : {public_host}:{public_port}", file=sys.stderr)
-    print(f"  mcp_token    : {os.environ.get('MCP_PUBLIC_TOKEN', '(not set)')}", file=sys.stderr)
+    print(f"  auth mode    : {MCP_AUTH_MODE}", file=sys.stderr)
+    tok_display = MCP_PUBLIC_TOKEN[:8] + "..." if MCP_PUBLIC_TOKEN else "(not set)"
+    print(f"  mcp_token    : {tok_display}", file=sys.stderr)
 
     uvicorn.run(proxy_app, host=public_host, port=public_port)
 
