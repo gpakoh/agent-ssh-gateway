@@ -9,6 +9,7 @@ Follows the same run_cmd injection pattern as agent_tasks.py and opencode_tools.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -17,6 +18,11 @@ from typing import Any
 TASKS_REL_DIR = ".ai-bridge/tasks"
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9._:/@+-]{1,80}$")
+
+MIMO_EXTRA_NO_PROXY = os.getenv(
+    "MIMO_EXTRA_NO_PROXY",
+    "10.0.1.103,10.0.0.3,10.0.0.127,localhost,127.0.0.1,::1",
+)
 
 
 def validate_model(model: str | None) -> str | None:
@@ -135,6 +141,11 @@ def _build_mimo_script(
         '  echo "Error: Mimo binary not found" >&2; exit 127;',
         "fi",
         "",
+        "# NO_PROXY: ensure local targets bypass HTTP proxy",
+        f"MIMO_EXTRA_NO_PROXY={_shell_escape(MIMO_EXTRA_NO_PROXY)}",
+        'export NO_PROXY="${NO_PROXY:+$NO_PROXY,}$MIMO_EXTRA_NO_PROXY"',
+        'export no_proxy="${no_proxy:+$no_proxy,}$MIMO_EXTRA_NO_PROXY"',
+        "",
         "# Mark running",
         'echo "Status: running" > "$PROJECT_REAL/$td/agent-status.md"',
         "",
@@ -202,6 +213,8 @@ def project_run_mimo(
     from examples.mcp_server.agent_tasks import validate_task_id
 
     validate_task_id(task_id)
+    if model is None:
+        model = os.getenv("MIMO_DEFAULT_MODEL", "ollama-gen/gemma4:26b")
     model = validate_model(model)
 
     td = f"{TASKS_REL_DIR}/{task_id}"

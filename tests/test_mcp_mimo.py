@@ -106,10 +106,36 @@ class TestCommandConstruction:
         project_run_mimo(_capture_command, project="test", task_id=TASK_ID, model="big-pickle")
         assert "--model 'big-pickle'" in _capture_command.last_cmd
 
-    def test_no_model_flag_when_none(self):
+    def test_default_model_used_when_none(self):
         _capture_command.last_cmd = None
         project_run_mimo(_capture_command, project="test", task_id=TASK_ID, model=None)
-        assert "--model " not in _capture_command.last_cmd
+        assert "--model" in _capture_command.last_cmd
+        assert "ollama-gen/gemma4:26b" in _capture_command.last_cmd
+
+    def test_env_var_overrides_default_model(self, monkeypatch):
+        monkeypatch.setenv("MIMO_DEFAULT_MODEL", "ollama-check/gemma4:26b")
+        _capture_command.last_cmd = None
+        project_run_mimo(_capture_command, project="test", task_id=TASK_ID, model=None)
+        assert "ollama-check/gemma4:26b" in _capture_command.last_cmd
+        assert "ollama-gen/gemma4:26b" not in _capture_command.last_cmd
+
+    def test_explicit_model_still_works(self):
+        _capture_command.last_cmd = None
+        project_run_mimo(_capture_command, project="test", task_id=TASK_ID, model="big-pickle")
+        assert "--model 'big-pickle'" in _capture_command.last_cmd
+
+    def test_contains_no_proxy_exports(self):
+        _capture_command.last_cmd = None
+        project_run_mimo(_capture_command, project="test", task_id=TASK_ID)
+        assert "NO_PROXY" in _capture_command.last_cmd
+        assert "no_proxy" in _capture_command.last_cmd
+        assert "MIMO_EXTRA_NO_PROXY" in _capture_command.last_cmd
+
+    def test_no_proxy_contains_local_ips(self):
+        _capture_command.last_cmd = None
+        project_run_mimo(_capture_command, project="test", task_id=TASK_ID)
+        assert "10.0.1.103" in _capture_command.last_cmd
+        assert "10.0.0.3" in _capture_command.last_cmd
 
     def test_uses_absolute_paths(self):
         _capture_command.last_cmd = None
