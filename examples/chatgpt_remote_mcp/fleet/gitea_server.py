@@ -15,7 +15,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from .gitea_client import GiteaClient
-from .shared import get_fleet_env
+from .shared import extract_auth_token, get_fleet_env
 
 INTERNAL_PORT = 8782
 
@@ -161,11 +161,9 @@ def create_auth_proxy(
     )
 
     async def proxy(request: Request) -> Response:
-        token = request.query_params.get("mcp_token")
+        token = extract_auth_token(request, valid_tokens)
         if not token:
-            return JSONResponse({"error": "missing mcp_token"}, 401)
-        if token not in valid_tokens:
-            return JSONResponse({"error": "invalid mcp_token"}, 403)
+            return JSONResponse({"error": "missing or invalid auth"}, 401)
 
         body = await request.body()
         headers = dict(request.headers)
