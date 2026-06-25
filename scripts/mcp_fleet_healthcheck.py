@@ -11,8 +11,10 @@ Exit code:
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
+import ssl
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -38,7 +40,7 @@ class Adapter:
 
 ADAPTERS: list[Adapter] = [
     Adapter("Gateway", "agent-ssh-gateway-mcp", "/etc/agent-ssh-gateway-mcp.env",
-            "https://ssh.xloud.ru/mcp", 77, 8788, 0),
+            "https://ssh.xloud.ru/mcp", 85, 8788, 0),
     Adapter("Context7", "agent-mcp-context7", "/etc/agent-mcp-context7.env",
             "https://ssh.xloud.ru/mcp/context7", 2, 8780, 8790),
     Adapter("GitHub", "agent-mcp-github", "/etc/agent-mcp-github.env",
@@ -96,68 +98,84 @@ def check_systemd(service: str) -> CheckResult:
         return fail(str(e).split("\n")[0][:120])
 
 
+def _mcp_request(full_url: str, body: dict, sid: str | None = None) -> tuple[dict, str]:
+    """Send JSON-RPC to an SSE MCP endpoint, read first SSE frame.
+
+    Returns (parsed_result_dict, session_id).
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(full_url)
+    path_qs = f"{parsed.path}?{parsed.query}" if parsed.query else parsed.path
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if sid:
+        headers["Mcp-Session-Id"] = sid
+
+    host = parsed.hostname
+    port = parsed.port or 443
+    ctx = ssl.create_default_context()
+    conn = http.client.HTTPSConnection(host, port, context=ctx, timeout=15)
+    try:
+        conn.request("POST", path_qs, json.dumps(body), headers)
+        resp = conn.getresponse()
+
+        buf = b""
+        while True:
+            chunk = resp.read(4096)
+            if not chunk:
+                break
+            buf += chunk
+            if b"\n\n" in buf:
+                break
+
+        raw = buf.decode("utf-8", errors="replace")
+        result = None
+        for line in raw.split("\n"):
+            if line.startswith("data:"):
+                result = json.loads(line[5:])
+                break
+
+        ret_sid = resp.getheader("mcp-session-id", "")
+        resp.close()
+        return result or {}, ret_sid
+    finally:
+        conn.close()
+
+
 def check_mcp_endpoint(url: str, token: str, expected: int) -> CheckResult:
     if not token:
         return fail("no token found")
 
     full_url = f"{url}?mcp_token={token}"
 
-    payload = json.dumps({
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": {"name": "healthcheck", "version": "1.0"},
-        },
-    }).encode()
-
-    req = Request(
-        full_url,
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-        },
-        method="POST",
-    )
-
     try:
-        resp = urlopen(req, timeout=15)
-        resp.read()  # consume body before next request
-        headers = {k.lower(): v for k, v in resp.headers.items()}
+        result, sid = _mcp_request(full_url, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "healthcheck", "version": "1.0"},
+            },
+        })
 
-        sid = headers.get("mcp-session-id", "")
         if not sid:
             return fail("no session ID in response")
 
-        tools_payload = json.dumps({
+        if "error" in result:
+            return fail(result["error"].get("message", str(result["error"])))
+
+        result2, _ = _mcp_request(full_url, {
             "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {},
-        }).encode()
+        }, sid=sid)
 
-        req2 = Request(
-            full_url,
-            data=tools_payload,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-                "Mcp-Session-Id": sid,
-            },
-            method="POST",
-        )
-        resp2 = urlopen(req2, timeout=15)
-        body2 = resp2.read().decode()
+        if "error" in result2:
+            return fail(result2["error"].get("message", str(result2["error"])))
 
-        tool_names = []
-        for line in body2.split("\n"):
-            if line.startswith("data:"):
-                try:
-                    obj = json.loads(line[5:])
-                    for t in obj.get("result", {}).get("tools", []):
-                        tool_names.append(t["name"])
-                except json.JSONDecodeError:
-                    continue
-
-        count = len(tool_names)
+        tools = result2.get("result", {}).get("tools", [])
+        count = len(tools)
 
         if count == expected:
             return ok(f"{count} tools", count)
