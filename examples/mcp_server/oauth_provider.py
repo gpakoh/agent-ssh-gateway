@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -95,3 +94,188 @@ def _parse_scopes(scope_str: str | None) -> list[str]:
         if s not in SUPPORTED_SCOPES:
             raise ValueError(f"Unsupported scope: {s}")
     return scopes
+
+
+class GatewayOAuthProvider:
+    """In-memory OAuth 2.1 + PKCE provider for the MCP Gateway.
+
+    Uses FastMCP-compatible interface for integration with
+    BearerAuthBackend and AuthContextMiddleware.
+
+    Thread-safe via dict locks (GIL + single-process FastMCP in practice).
+    """
+
+    def __init__(self) -> None:
+        self._clients: dict[str, StoredClient] = {}
+        self._auth_codes: dict[str, StoredAuthCode] = {}
+        self._tokens: dict[str, StoredToken] = {}
+
+    # --- Client Registration ---
+
+    def register_client(
+        self,
+        redirect_uris: list[str],
+        client_name: str = "",
+        token_endpoint_auth_method: str = "none",
+        scopes: str | None = None,
+    ) -> dict[str, Any]:
+        """Register a new OAuth client (DCR, RFC 7591)."""
+        if not redirect_uris:
+            raise ValueError("At least one redirect_uri required")
+
+        parsed_scopes = _parse_scopes(scopes)
+        client_id = _generate_id("mcp_client_", 24)
+        client = StoredClient(
+            client_id=client_id,
+            redirect_uris=redirect_uris,
+            client_name=client_name,
+            token_endpoint_auth_method=token_endpoint_auth_method,
+            scopes=parsed_scopes,
+        )
+        self._clients[client_id] = client
+
+        return {
+            "client_id": client_id,
+            "client_id_issued_at": int(client.created_at),
+            "client_secret": None,
+            "redirect_uris": redirect_uris,
+            "token_endpoint_auth_method": token_endpoint_auth_method,
+            "grant_types": client.grant_types,
+            "response_types": client.response_types,
+        }
+
+    def get_client(self, client_id: str) -> StoredClient | None:
+        return self._clients.get(client_id)
+
+    def list_clients(self) -> list[StoredClient]:
+        return list(self._clients.values())
+
+    # --- Authorization Code ---
+
+    def create_authorization_code(
+        self,
+        client_id: str,
+        redirect_uri: str,
+        code_challenge: str,
+        state: str,
+        scopes: list[str] | None = None,
+    ) -> dict[str, str]:
+        """Create authorization code (PKCE-bound)."""
+        client = self.get_client(client_id)
+        if not client:
+            raise ValueError(f"Unknown client: {client_id}")
+
+        if not _is_redirect_uri_exact_match(client.redirect_uris, redirect_uri):
+            raise ValueError(f"redirect_uri not registered: {redirect_uri}")
+
+        code = _generate_id("auth_", 32)
+        code_obj = StoredAuthCode(
+            code=code,
+            client_id=client_id,
+            scopes=scopes or list(DEFAULT_SCOPES),
+            code_challenge=code_challenge,
+            redirect_uri=redirect_uri,
+            state=state,
+            expires_at=time.time() + 300,  # 5 minutes
+        )
+        self._auth_codes[code] = code_obj
+
+        return {"code": code, "state": state}
+
+    def exchange_code_for_token(
+        self,
+        client_id: str,
+        code: str,
+        code_verifier: str,
+        redirect_uri: str,
+    ) -> dict[str, Any]:
+        """Exchange authorization code for access + refresh tokens."""
+        stored = self._auth_codes.get(code)
+        if not stored:
+            raise ValueError("Authorization code not found")
+        if stored.used:
+            raise ValueError("Authorization code already used")
+        if stored.client_id != client_id:
+            raise ValueError("Client ID mismatch")
+        if time.time() > stored.expires_at:
+            raise ValueError("Authorization code expired")
+        if stored.redirect_uri != redirect_uri:
+            raise ValueError("redirect_uri mismatch")
+
+        try:
+            _verify_pkce(code_verifier, stored.code_challenge)
+        except (ValueError, AssertionError):
+            raise ValueError("PKCE verification failed") from None
+
+        # Mark code as used (single-use)
+        stored.used = True
+
+        access_token = _generate_id("mcp_at_", 32)
+        refresh_token = _generate_id("mcp_rt_", 32)
+
+        self._tokens[access_token] = StoredToken(
+            token=access_token,
+            client_id=client_id,
+            scopes=stored.scopes,
+            expires_at=time.time() + 7200,  # 2 hours
+            type="access",
+        )
+        self._tokens[refresh_token] = StoredToken(
+            token=refresh_token,
+            client_id=client_id,
+            scopes=stored.scopes,
+            expires_at=time.time() + 604800,  # 7 days
+            type="refresh",
+        )
+
+        return {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": 7200,
+            "refresh_token": refresh_token,
+            "scope": " ".join(stored.scopes),
+        }
+
+    def refresh_access_token(self, client_id: str, refresh_token: str) -> dict[str, Any]:
+        """Exchange refresh token for new access token."""
+        stored = self._tokens.get(refresh_token)
+        if not stored:
+            raise ValueError("Refresh token not found")
+        if stored.client_id != client_id:
+            raise ValueError("Client ID mismatch")
+        if stored.type != "refresh":
+            raise ValueError("Token is not a refresh token")
+        if time.time() > stored.expires_at:
+            raise ValueError("Refresh token expired")
+
+        new_access = _generate_id("mcp_at_", 32)
+        self._tokens[new_access] = StoredToken(
+            token=new_access,
+            client_id=client_id,
+            scopes=stored.scopes,
+            expires_at=time.time() + 7200,
+            type="access",
+        )
+        return {
+            "access_token": new_access,
+            "token_type": "Bearer",
+            "expires_in": 7200,
+            "scope": " ".join(stored.scopes),
+        }
+
+    def verify_access_token(self, token_str: str) -> StoredToken | None:
+        """Verify and return access token."""
+        stored = self._tokens.get(token_str)
+        if not stored:
+            return None
+        if stored.type != "access":
+            return None
+        if time.time() > stored.expires_at:
+            return None
+        return stored
+
+    def revoke_token(self, client_id: str, token_str: str) -> None:
+        """Revoke a token (any type)."""
+        stored = self._tokens.get(token_str)
+        if stored and stored.client_id == client_id:
+            del self._tokens[token_str]
