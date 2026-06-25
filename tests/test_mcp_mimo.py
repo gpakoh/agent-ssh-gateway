@@ -160,3 +160,51 @@ class TestProjectRunMimo:
 
         result = project_run_mimo(fail_run_cmd, project="test", task_id=TASK_ID)
         assert result["status"] == "failed"
+
+
+MIMO_BIN = os.getenv("MIMO_BIN") or shutil.which("mimo") or "/root/.mimocode/bin/mimo"
+
+
+class TestToolRegistration:
+    def test_registered_in_chatgpt_mode(self, monkeypatch):
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+        import importlib
+        import sys
+        example_dir = EXAMPLE_DIR
+        monkeypatch.syspath_prepend(str(example_dir))
+        sys.modules.pop("tool_modes", None)
+        tm = importlib.import_module("tool_modes")
+        assert tm.should_register_tool("gateway_project_run_mimo") is True
+
+    def test_visible_in_tools_for_chatgpt(self, monkeypatch):
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+        import importlib
+        import sys
+        example_dir = EXAMPLE_DIR
+        monkeypatch.syspath_prepend(str(example_dir))
+        sys.modules.pop("tool_modes", None)
+        tm = importlib.import_module("tool_modes")
+        tools = tm.tools_for_mode()
+        assert "gateway_project_run_mimo" in tools
+
+
+class TestServerTool:
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("mcp"),
+        reason="mcp package not installed; only available with optional dependencies",
+    )
+    def test_tool_function_can_be_imported(self, monkeypatch):
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+        import importlib
+        import sys
+        example_dir = EXAMPLE_DIR
+        monkeypatch.syspath_prepend(str(example_dir))
+        monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
+        monkeypatch.setenv("GITEA_TOKEN", "test-token")
+        monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+        for name in list(sys.modules):
+            if "mimo_tools" in name or "mcp_server" in name or "tool_modes" in name:
+                sys.modules.pop(name, None)
+        server = importlib.import_module("server")
+        tool = getattr(server, "gateway_project_run_mimo", None)
+        assert tool is not None, "gateway_project_run_mimo not found in server module"
