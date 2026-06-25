@@ -142,12 +142,12 @@ def _build_mimo_script(
         'cd "$WORKTREE_REAL"',
         "",
         f'"$MIMO_BIN" run --dangerously-skip-permissions{model_flag} \\',
-        f'  "Read $PROJECT_REAL/$td/current-plan.md in the parent repo at $PROJECT_REAL. '
-        f'Execute the plan fully inside worktree $WORKTREE_REAL. '
-        f'Do not commit, do not push, do not create branches. '
-        f'Save the implementation diff to $PROJECT_REAL/$td/implementation-diff.patch. '
-        f'Update $PROJECT_REAL/$td/agent-status.md as you go. '
-        f'Work only inside $WORKTREE_REAL."',
+        '  "Read $PROJECT_REAL/$td/current-plan.md in the parent repo at $PROJECT_REAL. '
+        'Execute the plan fully inside worktree $WORKTREE_REAL. '
+        'Do not commit, do not push, do not create branches. '
+        'Save the implementation diff to $PROJECT_REAL/$td/implementation-diff.patch. '
+        'Update $PROJECT_REAL/$td/agent-status.md as you go. '
+        'Work only inside $WORKTREE_REAL."',
         "RC=$?",
         "",
         "# Capture diff from worktree",
