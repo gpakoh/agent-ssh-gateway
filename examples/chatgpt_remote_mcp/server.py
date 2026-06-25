@@ -70,7 +70,7 @@ async def proxy_request(request: Request) -> StreamingResponse | JSONResponse:
     headers = dict(request.headers)
     headers.pop("host", None)
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=300.0) as client:
         resp = await client.request(
             method=request.method,
             url=url,
