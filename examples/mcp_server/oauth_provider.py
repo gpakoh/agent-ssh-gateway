@@ -15,6 +15,11 @@ from typing import Any
 
 from mcp.server.auth.provider import AccessToken
 
+def hash_token(token: str) -> str:
+    """Return sha256 hash with explicit 'sha256:' prefix."""
+    return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 SUPPORTED_SCOPES: list[str] = [
     "mcp:read",
     "mcp:project",
@@ -115,6 +120,53 @@ class GatewayOAuthProvider:
         self._auth_codes: dict[str, StoredAuthCode] = {}
         self._tokens: dict[str, StoredToken] = {}
 
+    def register_static_token(
+        self,
+        raw_token: str,
+        profile: str = "operator",
+        name: str = "static",
+        client_id: str = "mcp_static",
+    ) -> str:
+        """Register a raw static token. Returns the hash used as key.
+
+        Hashes the token internally, resolves scopes from profile,
+        stores with infinite expiry.
+        """
+        from examples.mcp_server.tool_scopes import get_profile_scopes
+
+        token_hash = hash_token(raw_token)
+        scopes = get_profile_scopes(profile)
+        self._tokens[token_hash] = StoredToken(
+            token=token_hash,
+            client_id=client_id,
+            scopes=list(scopes),
+            expires_at=float("inf"),
+            type="access",
+        )
+        return token_hash
+
+    def register_hashed_token(
+        self,
+        token_hash: str,
+        scopes: list[str],
+        profile: str = "operator",
+        name: str = "hashed",
+        client_id: str = "mcp_static",
+    ) -> None:
+        """Register a pre-hashed token (from persistent store).
+
+        Validates the 'sha256:' prefix and stores directly.
+        """
+        if not token_hash.startswith("sha256:"):
+            raise ValueError(f"token_hash must start with 'sha256:', got {token_hash[:20]}...")
+        self._tokens[token_hash] = StoredToken(
+            token=token_hash,
+            client_id=client_id,
+            scopes=list(scopes),
+            expires_at=float("inf"),
+            type="access",
+        )
+
     # --- Client Registration ---
 
     async def register_client(self, client_info: Any) -> None:
@@ -214,12 +266,14 @@ class GatewayOAuthProvider:
         stored.used = True
         access_token = _generate_id("mcp_at_", 32)
         refresh_token = _generate_id("mcp_rt_", 32)
-        self._tokens[access_token] = StoredToken(
-            token=access_token, client_id=client_id, scopes=stored.scopes,
+        at_hash = hash_token(access_token)
+        rt_hash = hash_token(refresh_token)
+        self._tokens[at_hash] = StoredToken(
+            token=at_hash, client_id=client_id, scopes=stored.scopes,
             expires_at=time.time() + 7200, type="access",
         )
-        self._tokens[refresh_token] = StoredToken(
-            token=refresh_token, client_id=client_id, scopes=stored.scopes,
+        self._tokens[rt_hash] = StoredToken(
+            token=rt_hash, client_id=client_id, scopes=stored.scopes,
             expires_at=time.time() + 604800, type="refresh",
         )
         return {
@@ -229,7 +283,8 @@ class GatewayOAuthProvider:
         }
 
     def refresh_access_token(self, client_id: str, refresh_token: str) -> dict[str, Any]:
-        stored = self._tokens.get(refresh_token)
+        rt_hash = hash_token(refresh_token)
+        stored = self._tokens.get(rt_hash)
         if not stored:
             raise ValueError("Refresh token not found")
         if stored.client_id != client_id:
@@ -239,16 +294,18 @@ class GatewayOAuthProvider:
         if time.time() > stored.expires_at:
             raise ValueError("Refresh token expired")
         new_access = _generate_id("mcp_at_", 32)
-        self._tokens[new_access] = StoredToken(
-            token=new_access, client_id=client_id, scopes=stored.scopes,
+        at_hash = hash_token(new_access)
+        self._tokens[at_hash] = StoredToken(
+            token=at_hash, client_id=client_id, scopes=stored.scopes,
             expires_at=time.time() + 7200, type="access",
         )
         return {"access_token": new_access, "token_type": "Bearer", "expires_in": 7200, "scope": " ".join(stored.scopes)}
 
     def revoke_client_token(self, client_id: str, token_str: str) -> None:
-        stored = self._tokens.get(token_str)
+        token_hash = hash_token(token_str)
+        stored = self._tokens.get(token_hash)
         if stored and stored.client_id == client_id:
-            del self._tokens[token_str]
+            del self._tokens[token_hash]
 
     # --- FastMCP protocol stubs (authorize/token endpoints) ---
 
@@ -276,15 +333,17 @@ class GatewayOAuthProvider:
         return None
 
     async def revoke_token(self, token_str: str) -> None:
-        stored = self._tokens.get(token_str)
+        token_hash = hash_token(token_str)
+        stored = self._tokens.get(token_hash)
         if stored:
-            del self._tokens[token_str]
+            del self._tokens[token_hash]
 
     # --- Internal helpers (used by token-mode code + tests) ---
 
     def verify_access_token(self, token_str: str) -> StoredToken | None:
-        """Verify and return access token."""
-        stored = self._tokens.get(token_str)
+        """Verify and return access token using hash lookup."""
+        token_hash = hash_token(token_str)
+        stored = self._tokens.get(token_hash)
         if not stored:
             return None
         if stored.type != "access":
@@ -294,8 +353,9 @@ class GatewayOAuthProvider:
         return stored
 
     async def load_access_token(self, token_str: str) -> AccessToken | None:
-        """Async token loader for FastMCP ProviderTokenVerifier."""
-        stored = self._tokens.get(token_str)
+        """Async token loader for FastMCP ProviderTokenVerifier (hash lookup)."""
+        token_hash = hash_token(token_str)
+        stored = self._tokens.get(token_hash)
         if not stored:
             return None
         if stored.type != "access":
@@ -304,7 +364,7 @@ class GatewayOAuthProvider:
             return None
         expires_at = int(stored.expires_at) if stored.expires_at != float("inf") else 2**63 - 1
         return AccessToken(
-            token=stored.token,
+            token=token_str,
             client_id=stored.client_id,
             scopes=stored.scopes,
             expires_at=expires_at,
