@@ -32,6 +32,13 @@ MCP_SERVER_DIR = EXAMPLES_DIR / "mcp_server"
 sys.path.insert(0, str(MCP_SERVER_DIR))
 sys.path.insert(0, str(EXAMPLES_DIR.parent))
 
+from tool_scopes import (  # noqa: E402
+    check_fleet_route,
+    extract_tool_from_body,
+    get_required_scopes,
+    has_required_scope,
+)
+
 _spec = importlib.util.spec_from_file_location(
     "mcp_server_module", MCP_SERVER_DIR / "server.py"
 )
@@ -48,6 +55,14 @@ if MCP_AUTH_MODE not in ("token", "oauth"):
     raise ValueError(f"Invalid MCP_AUTH_MODE={MCP_AUTH_MODE!r}; expected one of ('token', 'oauth')")
 
 MCP_PUBLIC_TOKEN = os.environ.get("MCP_PUBLIC_TOKEN", "")
+
+MCP_SCOPE_ENFORCEMENT = os.environ.get("MCP_SCOPE_ENFORCEMENT", "off").strip().lower()
+if MCP_SCOPE_ENFORCEMENT not in ("off", "audit", "enforce"):
+    raise ValueError(
+        f"Invalid MCP_SCOPE_ENFORCEMENT={MCP_SCOPE_ENFORCEMENT!r}; expected off|audit|enforce"
+    )
+
+MCP_DEFAULT_ACCESS_PROFILE = os.environ.get("MCP_DEFAULT_ACCESS_PROFILE", "operator")
 
 OAUTH_PUBLIC_PREFIXES = ("/.well-known/", "/oauth/")
 
@@ -114,6 +129,86 @@ class OAuthProxyMiddleware(BaseHTTPMiddleware):
         )
 
 
+async def _get_token_scopes(auth_token: str | None) -> list[str]:
+    """Resolve token scopes from auth provider or fallback profile."""
+    if not auth_token:
+        return []
+
+    try:
+        prov = getattr(_mcp_mod, "_auth_provider", None)
+        if prov and hasattr(prov, "load_access_token"):
+            token_info = await prov.load_access_token(auth_token)
+            if token_info:
+                return getattr(token_info, "scopes", [])
+    except Exception:
+        pass
+
+    return []
+
+
+async def _check_tool_scope(
+    request: Request, path: str, body: bytes
+) -> JSONResponse | None:
+    """Check scope enforcement for a request. Returns blocking response or None."""
+    if MCP_SCOPE_ENFORCEMENT == "off":
+        return None
+
+    auth_token = getattr(request.state, "auth_token", None)
+    token_scopes = await _get_token_scopes(auth_token)
+
+    # Fleet route check
+    allowed, scope = check_fleet_route(path, token_scopes)
+    if not allowed:
+        msg = (
+            f"SCOPE_DENIED fleet_route={path} required={scope} "
+            f"token_scopes={token_scopes}"
+        )
+        print(msg, file=sys.stderr)
+        if MCP_SCOPE_ENFORCEMENT == "enforce":
+            return JSONResponse(
+                {"error": "insufficient_scope", "required_scope": scope},
+                status_code=403,
+            )
+        return None
+
+    # Tool-level check (JSON-RPC tools/call)
+    tool_name = extract_tool_from_body(body)
+    if not tool_name:
+        return None
+
+    required = get_required_scopes(tool_name)
+    if has_required_scope(token_scopes, tool_name):
+        if MCP_SCOPE_ENFORCEMENT == "audit":
+            print(
+                f"SCOPE_ALLOWED tool={tool_name} required={required} "
+                f"token_scopes={token_scopes}",
+                file=sys.stderr,
+            )
+        return None
+
+    # Denied
+    msg = (
+        f"SCOPE_DENIED tool={tool_name} required={required} "
+        f"token_scopes={token_scopes}"
+    )
+    print(msg, file=sys.stderr)
+
+    if MCP_SCOPE_ENFORCEMENT == "enforce":
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {
+                    "code": -32000,
+                    "message": f"insufficient_scope: requires one of {required}",
+                },
+            },
+            status_code=403,
+        )
+
+    return None
+
+
 async def proxy_request(request: Request) -> StreamingResponse | JSONResponse:
     """Proxy an HTTP request to the internal MCP server."""
     url = f"{MCP_INTERNAL_URL}{request.url.path}"
@@ -125,6 +220,12 @@ async def proxy_request(request: Request) -> StreamingResponse | JSONResponse:
     headers.pop("host", None)
 
     auth_token = getattr(request.state, "auth_token", None)
+
+    # Scope check
+    scope_block = await _check_tool_scope(request, request.url.path, body)
+    if scope_block is not None:
+        return scope_block
+
     if auth_token and "authorization" not in {k.lower() for k in headers}:
         headers["Authorization"] = f"Bearer {auth_token}"
 
@@ -182,6 +283,8 @@ def run():
     print(f"  MCP internal : {internal_host}:{internal_port}", file=sys.stderr)
     print(f"  MCP public   : {public_host}:{public_port}", file=sys.stderr)
     print(f"  auth mode    : {MCP_AUTH_MODE}", file=sys.stderr)
+    print(f"  scope enforce: {MCP_SCOPE_ENFORCEMENT}", file=sys.stderr)
+    print(f"  default prof : {MCP_DEFAULT_ACCESS_PROFILE}", file=sys.stderr)
     tok_display = MCP_PUBLIC_TOKEN[:8] + "..." if MCP_PUBLIC_TOKEN else "(not set)"
     print(f"  mcp_token    : {tok_display}", file=sys.stderr)
 
