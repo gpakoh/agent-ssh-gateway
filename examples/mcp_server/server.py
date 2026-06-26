@@ -115,8 +115,8 @@ if MCP_AUTH_MODE == "oauth":
 
         try:
             _extra_tokens: dict = json.loads(_extra_tokens_json)
-            from examples.mcp_server.tool_scopes import ACCESS_PROFILES as _ACCESS_PROFILES
             from examples.mcp_server.oauth_provider import StoredToken as _StoredToken
+            from examples.mcp_server.tool_scopes import ACCESS_PROFILES as _ACCESS_PROFILES
 
             for _token_str, _profile in _extra_tokens.items():
                 _profile_scopes = _ACCESS_PROFILES.get(_profile, list(SUPPORTED_SCOPES))

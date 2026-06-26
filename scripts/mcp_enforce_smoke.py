@@ -20,7 +20,7 @@ import urllib.request
 from http.client import HTTPResponse
 
 ENV_FILE = "/etc/agent-ssh-gateway-mcp.env"
-GATEWAY_URL = "http://10.0.0.3:8788/mcp"
+GATEWAY_URL = "http://127.0.0.1:8788/mcp"
 
 def _read_env_val(key: str) -> str:
     """Read a value from the env file."""
@@ -84,7 +84,8 @@ def _restart() -> None:
         capture_output=True, text=True,
     )
     if r.stdout.strip() != "active":
-        print("  FATAL: service not active"); sys.exit(1)
+        print("  FATAL: service not active")
+        sys.exit(1)
 
 
 def _mcp_init(token: str) -> str | None:
@@ -150,7 +151,9 @@ def _check(profile: str, token: str) -> None:
     print(f"\n  == {profile} ==")
     sid = _mcp_init(token)
     if sid is None:
-        print(f"    INIT FAIL"); FAIL += 1; return
+        print("    INIT FAIL")
+        FAIL += 1
+        return
 
     ok_tools: list[str] = []
     denied_tools: list[str] = []
@@ -215,7 +218,7 @@ def main():
     extra_json = json.dumps(tokens)
 
     print("=== MCP Scope Enforcement Smoke ===")
-    print(f"  tokens: viewer, operator, agent-runner, infra + full (healthcheck)")
+    print("  tokens: viewer, operator, agent-runner, infra + full (healthcheck)")
 
     # 1. enable enforce
     print("\n--- Enforce mode ---")
