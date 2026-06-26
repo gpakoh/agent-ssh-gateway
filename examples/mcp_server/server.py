@@ -109,27 +109,49 @@ if MCP_AUTH_MODE == "oauth":
             type="access",
         )
 
+    _extra_tokens_all: dict[str, str] = {}
+
     _extra_tokens_json = os.environ.get("MCP_EXTRA_TOKENS_JSON", "")
     if _extra_tokens_json:
         import json
 
         try:
-            _extra_tokens: dict = json.loads(_extra_tokens_json)
-            from examples.mcp_server.oauth_provider import StoredToken as _StoredToken
-            from examples.mcp_server.tool_scopes import ACCESS_PROFILES as _ACCESS_PROFILES
-
-            for _token_str, _profile in _extra_tokens.items():
-                _profile_scopes = _ACCESS_PROFILES.get(_profile, list(SUPPORTED_SCOPES))
-                _auth_provider._tokens[_token_str] = _StoredToken(
-                    token=_token_str,
-                    client_id=f"mcp_extras_{_profile}",
-                    scopes=list(_profile_scopes),
-                    expires_at=float("inf"),
-                    type="access",
-                )
-            print(f"  extra tokens: {len(_extra_tokens)} registered", file=sys.stderr)
+            _extra_tokens_all.update(json.loads(_extra_tokens_json))
         except Exception as _exc:
             print(f"  MCP_EXTRA_TOKENS_JSON error: {_exc}", file=sys.stderr)
+
+    _extra_tokens_file = os.environ.get("MCP_EXTRA_TOKENS_FILE", "")
+    if _extra_tokens_file:
+        if os.path.isfile(_extra_tokens_file):
+            import json
+
+            try:
+                with open(_extra_tokens_file) as _f:
+                    _extra_tokens_all.update(json.load(_f))
+            except Exception as _exc:
+                print(f"  MCP_EXTRA_TOKENS_FILE error: {_exc}", file=sys.stderr)
+        else:
+            print(
+                f"  MCP_EXTRA_TOKENS_FILE not found: {_extra_tokens_file}",
+                file=sys.stderr,
+            )
+
+    if _extra_tokens_all:
+        from examples.mcp_server.oauth_provider import StoredToken as _StoredToken
+        from examples.mcp_server.tool_scopes import ACCESS_PROFILES as _ACCESS_PROFILES
+
+        for _token_str, _profile in _extra_tokens_all.items():
+            _profile_scopes = _ACCESS_PROFILES.get(_profile, list(SUPPORTED_SCOPES))
+            _auth_provider._tokens[_token_str] = _StoredToken(
+                token=_token_str,
+                client_id=f"mcp_extras_{_profile}",
+                scopes=list(_profile_scopes),
+                expires_at=float("inf"),
+                type="access",
+            )
+        print(f"  extra tokens: {len(_extra_tokens_all)} registered", file=sys.stderr)
+        if _extra_tokens_file:
+            print(f"  extra file  : {_extra_tokens_file}", file=sys.stderr)
 
     try:
         from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
