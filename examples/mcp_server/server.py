@@ -95,6 +95,19 @@ _auth_settings = None
 
 if MCP_AUTH_MODE == "oauth":
     _auth_provider = GatewayOAuthProvider()
+
+    _health_token = os.environ.get("MCP_HEALTHCHECK_BEARER_TOKEN", "")
+    if _health_token:
+        from examples.mcp_server.oauth_provider import StoredToken as _StoredToken
+
+        _auth_provider._tokens[_health_token] = _StoredToken(
+            token=_health_token,
+            client_id="mcp_healthcheck",
+            scopes=list(SUPPORTED_SCOPES),
+            expires_at=float("inf"),
+            type="access",
+        )
+
     try:
         from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
         from pydantic import AnyHttpUrl

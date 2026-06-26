@@ -54,42 +54,59 @@ def provider():
     return GatewayOAuthProvider()
 
 
-def test_dcr_register(provider):
-    result = provider.register_client(
+@pytest.mark.anyio
+async def test_dcr_register(provider):
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    client_info = OAuthClientInformationFull(
         redirect_uris=["https://chatgpt.com/callback"],
         client_name="Test Client",
+        token_endpoint_auth_method="none",
     )
-    assert "client_id" in result
-    assert result["client_secret"] is None
-    assert result["token_endpoint_auth_method"] == "none"
-    assert result["redirect_uris"] == ["https://chatgpt.com/callback"]
+    await provider.register_client(client_info)
+    assert client_info.client_id is not None
+    assert client_info.client_id.startswith("mcp_client_")
+    assert client_info.client_secret is None
 
 
-def test_dcr_requires_redirect_uri(provider):
-    with pytest.raises(ValueError, match="redirect_uri"):
-        provider.register_client(redirect_uris=[])
+@pytest.mark.anyio
+async def test_dcr_requires_redirect_uri(provider):
+    from mcp.shared.auth import OAuthClientInformationFull
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        OAuthClientInformationFull(
+            redirect_uris=[],
+            client_name="No Redirect",
+        )
 
 
-def test_get_client(provider):
-    reg = provider.register_client(
+@pytest.mark.anyio
+async def test_get_client(provider):
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    client_info = OAuthClientInformationFull(
         redirect_uris=["https://chatgpt.com/callback"],
         client_name="Test",
     )
-    client = provider.get_client(reg["client_id"])
-    assert client is not None
-    assert client.client_name == "Test"
+    await provider.register_client(client_info)
+    stored = await provider.get_client(client_info.client_id)
+    assert stored is not None
+    assert stored.client_name == "Test"
 
 
-def test_get_client_unknown(provider):
-    assert provider.get_client("nonexistent") is None
+@pytest.mark.anyio
+async def test_get_client_unknown(provider):
+    assert await provider.get_client("nonexistent") is None
 
 
 def test_authorization_code_flow(provider):
-    reg = provider.register_client(
-        redirect_uris=["https://chatgpt.com/callback"],
-        client_name="Test",
-    )
-    client_id = reg["client_id"]
+    reg_client = provider._clients
+    client_id = "mcp_client_test_1"
+    reg_client[client_id] = type("StoredClient", (), {
+        "client_id": client_id, "redirect_uris": ["https://chatgpt.com/callback"],
+        "client_name": "Test",
+    })()
     code_verifier = secrets.token_urlsafe(64)
     code_challenge = _generate_code_challenge(code_verifier)
 
@@ -116,68 +133,74 @@ def test_authorization_code_flow(provider):
 
 
 def test_code_reuse_rejected(provider):
-    reg = provider.register_client(redirect_uris=["https://example.com/cb"])
-    client_id = reg["client_id"]
+    provider._clients["cid"] = type("S", (), {
+        "client_id": "cid",
+        "redirect_uris": ["https://example.com/cb"],
+        "client_name": "T",
+    })()
     cv = secrets.token_urlsafe(64)
     cc = _generate_code_challenge(cv)
-    auth = provider.create_authorization_code(
-        client_id, "https://example.com/cb", cc, "s", ["mcp:read"]
-    )
-    provider.exchange_code_for_token(client_id, auth["code"], cv, "https://example.com/cb")
+    auth = provider.create_authorization_code("cid", "https://example.com/cb", cc, "s", ["mcp:read"])
+    provider.exchange_code_for_token("cid", auth["code"], cv, "https://example.com/cb")
     with pytest.raises(ValueError, match="already used"):
-        provider.exchange_code_for_token(client_id, auth["code"], cv, "https://example.com/cb")
+        provider.exchange_code_for_token("cid", auth["code"], cv, "https://example.com/cb")
 
 
 def test_pkce_verification_rejects_wrong_verifier(provider):
-    reg = provider.register_client(redirect_uris=["https://example.com/cb"])
-    client_id = reg["client_id"]
+    provider._clients["cid2"] = type("S", (), {
+        "client_id": "cid2",
+        "redirect_uris": ["https://example.com/cb"],
+        "client_name": "T",
+    })()
     cv = secrets.token_urlsafe(64)
     cc = _generate_code_challenge(cv)
-    auth = provider.create_authorization_code(
-        client_id, "https://example.com/cb", cc, "s", ["mcp:read"]
-    )
+    auth = provider.create_authorization_code("cid2", "https://example.com/cb", cc, "s", ["mcp:read"])
     with pytest.raises(ValueError, match="PKCE verification"):
-        provider.exchange_code_for_token(
-            client_id, auth["code"], "wrong_verifier", "https://example.com/cb"
-        )
+        provider.exchange_code_for_token("cid2", auth["code"], "wrong_verifier", "https://example.com/cb")
 
 
 def test_access_token_verification(provider):
-    reg = provider.register_client(redirect_uris=["https://example.com/cb"])
-    client_id = reg["client_id"]
+    provider._clients["cid3"] = type("S", (), {
+        "client_id": "cid3",
+        "redirect_uris": ["https://example.com/cb"],
+        "client_name": "T",
+    })()
     cv = secrets.token_urlsafe(64)
     cc = _generate_code_challenge(cv)
-    auth = provider.create_authorization_code(client_id, "https://example.com/cb", cc, "s")
-    tokens = provider.exchange_code_for_token(client_id, auth["code"], cv, "https://example.com/cb")
-
+    auth = provider.create_authorization_code("cid3", "https://example.com/cb", cc, "s")
+    tokens = provider.exchange_code_for_token("cid3", auth["code"], cv, "https://example.com/cb")
     stored = provider.verify_access_token(tokens["access_token"])
     assert stored is not None
-    assert stored.client_id == client_id
+    assert stored.client_id == "cid3"
     assert stored.type == "access"
 
 
 def test_refresh_token(provider):
-    reg = provider.register_client(redirect_uris=["https://example.com/cb"])
-    client_id = reg["client_id"]
+    provider._clients["cid4"] = type("S", (), {
+        "client_id": "cid4",
+        "redirect_uris": ["https://example.com/cb"],
+        "client_name": "T",
+    })()
     cv = secrets.token_urlsafe(64)
     cc = _generate_code_challenge(cv)
-    auth = provider.create_authorization_code(client_id, "https://example.com/cb", cc, "s")
-    tokens = provider.exchange_code_for_token(client_id, auth["code"], cv, "https://example.com/cb")
-
-    refreshed = provider.refresh_access_token(client_id, tokens["refresh_token"])
+    auth = provider.create_authorization_code("cid4", "https://example.com/cb", cc, "s")
+    tokens = provider.exchange_code_for_token("cid4", auth["code"], cv, "https://example.com/cb")
+    refreshed = provider.refresh_access_token("cid4", tokens["refresh_token"])
     assert "access_token" in refreshed
     assert refreshed["token_type"] == "Bearer"
 
 
 def test_revoke_token(provider):
-    reg = provider.register_client(redirect_uris=["https://example.com/cb"])
-    client_id = reg["client_id"]
+    provider._clients["cid5"] = type("S", (), {
+        "client_id": "cid5",
+        "redirect_uris": ["https://example.com/cb"],
+        "client_name": "T",
+    })()
     cv = secrets.token_urlsafe(64)
     cc = _generate_code_challenge(cv)
-    auth = provider.create_authorization_code(client_id, "https://example.com/cb", cc, "s")
-    tokens = provider.exchange_code_for_token(client_id, auth["code"], cv, "https://example.com/cb")
-
-    provider.revoke_token(client_id, tokens["access_token"])
+    auth = provider.create_authorization_code("cid5", "https://example.com/cb", cc, "s")
+    tokens = provider.exchange_code_for_token("cid5", auth["code"], cv, "https://example.com/cb")
+    provider.revoke_client_token("cid5", tokens["access_token"])
     assert provider.verify_access_token(tokens["access_token"]) is None
 
 
