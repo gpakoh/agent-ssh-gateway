@@ -205,9 +205,19 @@ def _check_tools_list(token: str) -> None:
         FAIL += 1
 
 
+def _cleanup_temp_file(path: str) -> None:
+    """Remove temp file if it exists."""
+    try:
+        if path and os.path.exists(path):
+            os.unlink(path)
+    except Exception:
+        pass
+
+
 def main():
     global PASS, FAIL
     ts = str(int(time.time()))
+    tmp_token_file = f"/tmp/mcp-enforce-smoke-{ts}.json"
 
     tokens = {
         f"smoke_viewer_{ts}":      "viewer",
@@ -215,21 +225,25 @@ def main():
         f"smoke_agent_runner_{ts}": "agent-runner",
         f"smoke_infra_{ts}":       "infra",
     }
-    extra_json = json.dumps(tokens)
 
     print("=== MCP Scope Enforcement Smoke ===")
     print("  tokens: viewer, operator, agent-runner, infra + full (healthcheck)")
 
-    # 1. enable enforce
+    # Write tokens to temp JSON file (avoids env escaping issues)
+    with open(tmp_token_file, "w") as f:
+        json.dump(tokens, f)
+
+    # 1. enable enforce + token file
     print("\n--- Enforce mode ---")
     _env_replace("MCP_SCOPE_ENFORCEMENT", "enforce")
-    _env_replace("MCP_EXTRA_TOKENS_JSON", extra_json)
+    _env_remove("MCP_EXTRA_TOKENS_JSON")  # ensure no stale JSON env var
+    _env_replace("MCP_EXTRA_TOKENS_FILE", tmp_token_file)
     _restart()
 
     # 2. smoke per profile
     print("\n--- Testing profiles ---")
-    for profile_name, token_str in tokens.items():
-        _check(profile_name, token_str)
+    for token_value, profile in tokens.items():
+        _check(profile, token_value)
 
     # 3. full profile via healthcheck token
     print("\n--- Full profile ---")
@@ -240,13 +254,14 @@ def main():
 
     # 4. tools/list not blocked
     print("\n--- tools/list ---")
-    for _, token_str in tokens.items():
-        _check_tools_list(token_str)
+    for token_value in tokens:
+        _check_tools_list(token_value)
 
     # 5. restore audit
     print("\n--- Restore audit ---")
     _env_replace("MCP_SCOPE_ENFORCEMENT", "audit")
-    _env_remove("MCP_EXTRA_TOKENS_JSON")
+    _env_remove("MCP_EXTRA_TOKENS_FILE")
+    _cleanup_temp_file(tmp_token_file)
     _restart()
 
     print(f"\n{'='*50}")
