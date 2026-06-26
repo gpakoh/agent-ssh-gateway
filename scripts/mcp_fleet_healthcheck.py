@@ -70,9 +70,12 @@ def fail(detail: str = "") -> CheckResult:
 
 
 def get_token_from_env(env_file: str) -> str:
-    token_key = "MCP_PUBLIC_TOKEN"
-    if "gateway" in env_file:
-        token_key = "MCP_PUBLIC_TOKEN"
+    """Read token for healthcheck.
+
+    For gateway (oauth mode), prefers MCP_HEALTHCHECK_BEARER_TOKEN.
+    Falls back to MCP_PUBLIC_TOKEN for fleet adapters.
+    """
+    token_key = "MCP_HEALTHCHECK_BEARER_TOKEN" if "gateway" in env_file else "MCP_PUBLIC_TOKEN"
     try:
         with open(env_file) as f:
             for line in f:

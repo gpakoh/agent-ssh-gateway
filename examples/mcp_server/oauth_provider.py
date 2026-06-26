@@ -13,6 +13,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from mcp.server.auth.provider import AccessToken
+
 SUPPORTED_SCOPES: list[str] = [
     "mcp:read",
     "mcp:project",
@@ -112,45 +114,60 @@ class GatewayOAuthProvider:
 
     # --- Client Registration ---
 
-    def register_client(
-        self,
-        redirect_uris: list[str],
-        client_name: str = "",
-        token_endpoint_auth_method: str = "none",
-        scopes: str | None = None,
-    ) -> dict[str, Any]:
+    async def register_client(self, client_info: Any) -> None:
         """Register a new OAuth client (DCR, RFC 7591)."""
-        if not redirect_uris:
-            raise ValueError("At least one redirect_uri required")
+        from mcp.server.auth.provider import RegistrationError
 
-        parsed_scopes = _parse_scopes(scopes)
+        redirect_uris = getattr(client_info, "redirect_uris", None) or getattr(client_info, "redirect_uris", [])
+        if not redirect_uris:
+            raise RegistrationError(
+                error="invalid_client_metadata",
+                error_description="At least one redirect_uri required",
+            )
+
+        client_name = getattr(client_info, "client_name", "") or ""
+        token_endpoint_auth_method = getattr(client_info, "token_endpoint_auth_method", "none") or "none"
+        scope_str = getattr(client_info, "scope", None)
+
+        parsed_scopes = _parse_scopes(scope_str)
         client_id = _generate_id("mcp_client_", 24)
         client = StoredClient(
             client_id=client_id,
-            redirect_uris=redirect_uris,
+            redirect_uris=list(str(u) for u in redirect_uris),
             client_name=client_name,
             token_endpoint_auth_method=token_endpoint_auth_method,
             scopes=parsed_scopes,
         )
         self._clients[client_id] = client
 
-        return {
-            "client_id": client_id,
-            "client_id_issued_at": int(client.created_at),
-            "client_secret": None,
-            "redirect_uris": redirect_uris,
-            "token_endpoint_auth_method": token_endpoint_auth_method,
-            "grant_types": client.grant_types,
-            "response_types": client.response_types,
-        }
+        client_info.client_id = client_id
+        client_info.client_id_issued_at = int(client.created_at)
+        client_info.client_secret = None
 
-    def get_client(self, client_id: str) -> StoredClient | None:
-        return self._clients.get(client_id)
+    async def get_client(self, client_id: str) -> Any | None:
+        stored = self._clients.get(client_id)
+        if not stored:
+            return None
+        from mcp.shared.auth import OAuthClientInformationFull
+
+        return OAuthClientInformationFull(
+            client_id=stored.client_id,
+            redirect_uris=stored.redirect_uris,
+            client_name=stored.client_name,
+            token_endpoint_auth_method=stored.token_endpoint_auth_method,
+            grant_types=stored.grant_types,
+            response_types=stored.response_types,
+            scope=" ".join(stored.scopes),
+            client_id_issued_at=int(stored.created_at),
+        )
 
     def list_clients(self) -> list[StoredClient]:
         return list(self._clients.values())
 
-    # --- Authorization Code ---
+    # --- Internal helpers (for tests + token-mode pre-registration) ---
+
+    async def _find_client(self, client_id: str) -> StoredClient | None:
+        return self._clients.get(client_id)
 
     def create_authorization_code(
         self,
@@ -160,36 +177,22 @@ class GatewayOAuthProvider:
         state: str,
         scopes: list[str] | None = None,
     ) -> dict[str, str]:
-        """Create authorization code (PKCE-bound)."""
-        client = self.get_client(client_id)
+        client = self._clients.get(client_id)
         if not client:
             raise ValueError(f"Unknown client: {client_id}")
-
         if not _is_redirect_uri_exact_match(client.redirect_uris, redirect_uri):
             raise ValueError(f"redirect_uri not registered: {redirect_uri}")
-
         code = _generate_id("auth_", 32)
-        code_obj = StoredAuthCode(
-            code=code,
-            client_id=client_id,
-            scopes=scopes or list(DEFAULT_SCOPES),
-            code_challenge=code_challenge,
-            redirect_uri=redirect_uri,
-            state=state,
-            expires_at=time.time() + 300,  # 5 minutes
+        self._auth_codes[code] = StoredAuthCode(
+            code=code, client_id=client_id, scopes=scopes or list(DEFAULT_SCOPES),
+            code_challenge=code_challenge, redirect_uri=redirect_uri, state=state,
+            expires_at=time.time() + 300,
         )
-        self._auth_codes[code] = code_obj
-
         return {"code": code, "state": state}
 
     def exchange_code_for_token(
-        self,
-        client_id: str,
-        code: str,
-        code_verifier: str,
-        redirect_uri: str,
+        self, client_id: str, code: str, code_verifier: str, redirect_uri: str,
     ) -> dict[str, Any]:
-        """Exchange authorization code for access + refresh tokens."""
         stored = self._auth_codes.get(code)
         if not stored:
             raise ValueError("Authorization code not found")
@@ -201,43 +204,28 @@ class GatewayOAuthProvider:
             raise ValueError("Authorization code expired")
         if stored.redirect_uri != redirect_uri:
             raise ValueError("redirect_uri mismatch")
-
         try:
             _verify_pkce(code_verifier, stored.code_challenge)
         except (ValueError, AssertionError):
             raise ValueError("PKCE verification failed") from None
-
-        # Mark code as used (single-use)
         stored.used = True
-
         access_token = _generate_id("mcp_at_", 32)
         refresh_token = _generate_id("mcp_rt_", 32)
-
         self._tokens[access_token] = StoredToken(
-            token=access_token,
-            client_id=client_id,
-            scopes=stored.scopes,
-            expires_at=time.time() + 7200,  # 2 hours
-            type="access",
+            token=access_token, client_id=client_id, scopes=stored.scopes,
+            expires_at=time.time() + 7200, type="access",
         )
         self._tokens[refresh_token] = StoredToken(
-            token=refresh_token,
-            client_id=client_id,
-            scopes=stored.scopes,
-            expires_at=time.time() + 604800,  # 7 days
-            type="refresh",
+            token=refresh_token, client_id=client_id, scopes=stored.scopes,
+            expires_at=time.time() + 604800, type="refresh",
         )
-
         return {
-            "access_token": access_token,
-            "token_type": "Bearer",
-            "expires_in": 7200,
-            "refresh_token": refresh_token,
+            "access_token": access_token, "token_type": "Bearer",
+            "expires_in": 7200, "refresh_token": refresh_token,
             "scope": " ".join(stored.scopes),
         }
 
     def refresh_access_token(self, client_id: str, refresh_token: str) -> dict[str, Any]:
-        """Exchange refresh token for new access token."""
         stored = self._tokens.get(refresh_token)
         if not stored:
             raise ValueError("Refresh token not found")
@@ -247,21 +235,49 @@ class GatewayOAuthProvider:
             raise ValueError("Token is not a refresh token")
         if time.time() > stored.expires_at:
             raise ValueError("Refresh token expired")
-
         new_access = _generate_id("mcp_at_", 32)
         self._tokens[new_access] = StoredToken(
-            token=new_access,
-            client_id=client_id,
-            scopes=stored.scopes,
-            expires_at=time.time() + 7200,
-            type="access",
+            token=new_access, client_id=client_id, scopes=stored.scopes,
+            expires_at=time.time() + 7200, type="access",
         )
-        return {
-            "access_token": new_access,
-            "token_type": "Bearer",
-            "expires_in": 7200,
-            "scope": " ".join(stored.scopes),
-        }
+        return {"access_token": new_access, "token_type": "Bearer", "expires_in": 7200, "scope": " ".join(stored.scopes)}
+
+    def revoke_client_token(self, client_id: str, token_str: str) -> None:
+        stored = self._tokens.get(token_str)
+        if stored and stored.client_id == client_id:
+            del self._tokens[token_str]
+
+    # --- FastMCP protocol stubs (authorize/token endpoints) ---
+
+    async def authorize(self, client_info: Any, params: Any) -> str:
+        raise NotImplementedError("authorize — not implemented; use pre-registered service token")
+
+    async def exchange_authorization_code(
+        self, client_info: Any, authorization_code: str
+    ) -> Any:
+        raise NotImplementedError(
+            "exchange_authorization_code — not implemented; use pre-registered service token"
+        )
+
+    async def exchange_refresh_token(
+        self, client_info: Any, refresh_token: str, scopes: list[str]
+    ) -> Any:
+        raise NotImplementedError(
+            "exchange_refresh_token — not implemented; use pre-registered service token"
+        )
+
+    async def load_authorization_code(self, client_info: Any, authorization_code: str) -> Any | None:
+        return None
+
+    async def load_refresh_token(self, client_info: Any, refresh_token: str) -> Any | None:
+        return None
+
+    async def revoke_token(self, token_str: str) -> None:
+        stored = self._tokens.get(token_str)
+        if stored:
+            del self._tokens[token_str]
+
+    # --- Internal helpers (used by token-mode code + tests) ---
 
     def verify_access_token(self, token_str: str) -> StoredToken | None:
         """Verify and return access token."""
@@ -274,11 +290,8 @@ class GatewayOAuthProvider:
             return None
         return stored
 
-    async def load_access_token(self, token_str: str) -> dict | None:
-        """Async token loader for FastMCP ProviderTokenVerifier.
-
-        Returns an AccessToken-compatible dict (FastMCP's AccessToken model).
-        """
+    async def load_access_token(self, token_str: str) -> AccessToken | None:
+        """Async token loader for FastMCP ProviderTokenVerifier."""
         stored = self._tokens.get(token_str)
         if not stored:
             return None
@@ -286,15 +299,10 @@ class GatewayOAuthProvider:
             return None
         if time.time() > stored.expires_at:
             return None
-        return {
-            "token": stored.token,
-            "client_id": stored.client_id,
-            "scopes": stored.scopes,
-            "expires_at": int(stored.expires_at),
-        }
-
-    def revoke_token(self, client_id: str, token_str: str) -> None:
-        """Revoke a token (any type)."""
-        stored = self._tokens.get(token_str)
-        if stored and stored.client_id == client_id:
-            del self._tokens[token_str]
+        expires_at = int(stored.expires_at) if stored.expires_at != float("inf") else 2**63 - 1
+        return AccessToken(
+            token=stored.token,
+            client_id=stored.client_id,
+            scopes=stored.scopes,
+            expires_at=expires_at,
+        )
