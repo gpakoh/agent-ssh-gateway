@@ -209,4 +209,4 @@ def test_scope_validation():
     assert _parse_scopes(None) == ["mcp:read", "mcp:project"]
     assert _parse_scopes("") == ["mcp:read", "mcp:project"]
     with pytest.raises(ValueError, match="Unsupported scope"):
-        _parse_scopes("mcp:admin")
+        _parse_scopes("mcp:invalid")
