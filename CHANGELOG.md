@@ -6,6 +6,36 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.18-alpha] - 2026-06-26
+
+### Added
+
+- **Tool-level scope enforcement for MCP tools.** 5 access profiles (`viewer`, `operator`, `agent-runner`, `infra`, `full`) with 10 capability scopes. Enforced at the OAuthProxyMiddleware level in the main gateway MCP adapter. (Session 120–121)
+- **`tool_scopes.py`**: `ACCESS_PROFILES` map (5 profiles × 10 scopes), `TOOL_SCOPES` map (88 tools), `FLEET_ROUTE_SCOPES`, `get_profile_scopes()`, `check_tool_scope()`, `get_tool_scope()`, `get_highest_profile()` helpers.
+- **`OAuthProxyMiddleware._get_token_scopes()`**: resolves token scopes from `GatewayOAuthProvider.verify_access_token()`. (Session 119)
+- **`OAuthProxyMiddleware._check_tool_scope()`**: per-request scope check for `tools/call` and fleet routes; supports `off`, `audit`, `enforce` modes via `MCP_SCOPE_ENFORCEMENT`. (Session 119)
+- **`MCP_SCOPE_ENFORCEMENT` env var**: tri-state (`off` / `audit` / `enforce`). Audit logs `SCOPE_ALLOWED`/`SCOPE_DENIED` to stderr without blocking. (Session 119)
+- **`MCP_DEFAULT_ACCESS_PROFILE` env var**: default profile for tokens without explicit scopes (default: `operator`). (Session 119)
+- **`MCP_EXTRA_TOKENS_JSON` env var**: JSON mapping `token → profile` for pre-registering scoped test/service tokens. (Session 120)
+- **Fail-closed model**: unknown tools default to `mcp:admin` scope, accessible only by `full` profile. (Session 119)
+- **`scripts/mcp_enforce_smoke.py`**: reusable profile-based enforce smoke test tool. (Session 120)
+
+### Changed
+
+- **`OAuthProxyMiddleware.proxy_request()`** now checks tool scopes for `tools/call` and fleet routes. (Session 119)
+- **Fleet route paths** use prefix match (`/mcp/gitea` → `mcp:repo`). (Session 119)
+- **Healthcheck token** pre-registered with all 10 scopes + infinite expiry. (Session 119)
+- **`mcp:execute`** scope added to separate `gateway_execute_restricted` from `mcp:read`. (Session 120)
+- **OAuth tokens** now carry access profile scopes in audit and enforce modes. (Session 120)
+- **Production deployed with `MCP_SCOPE_ENFORCEMENT=enforce`** and `MCP_DEFAULT_ACCESS_PROFILE=full` for full-capability private ChatGPT. (Session 121)
+- **`SUPPORTED_SCOPES`** in `oauth_provider.py` includes all 10 scopes: `mcp:read`, `mcp:project`, `mcp:handoff`, `mcp:agent-run`, `mcp:execute`, `mcp:repo`, `mcp:docker`, `mcp:postgres`, `mcp:docs`, `mcp:admin`.
+
+### Tests
+
+- 36 scope enforcement tests in `test_scope_enforcement.py`: profile integrity, scope logic, tool extraction, fleet routes, fail-closed. (Session 119)
+- 148 MCP tests + 36 scope tests = 184 total. `make check` clean. (Session 119)
+- Enforce mode smoke: all 5 profiles verified (viewer/operator → Docker 403, infra/full → Docker 200, healthcheck full profile OK, tools/list not blocked, denied → 403 JSON-RPC error). (Session 120)
+
 ## [0.1.17-alpha] - 2026-06-26
 
 ### Changed
