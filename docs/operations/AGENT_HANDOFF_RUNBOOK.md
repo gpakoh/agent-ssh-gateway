@@ -94,6 +94,18 @@ git branch -D mimo/<task_id>
 mv .ai-bridge/tasks/<task_id> .ai-bridge/archive/
 ```
 
+## Provider Cooldowns and Backend Fallback
+
+When a backend provider (OpenCode, Mimo) exhausts its quota or becomes unavailable, the runner records a cooldown and — if another backend is available — switches to it.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `OPENCODE_BIN` | No | `/root/.opencode/bin/opencode` | Path to OpenCode binary. Can point to a local wrapper (e.g. `/usr/local/bin/opencode-proxy`) at operator's discretion. |
+
+**Policy:** The project does not include automatic proxy rotation or public proxy scraping to bypass rate limits. See [`docs/architecture/ADR-2026-06-26-agent-backend-routing.md`](../architecture/ADR-2026-06-26-agent-backend-routing.md).
+
+**Future direction:** A quota-aware backend router will select the first available provider, record structured cooldowns, and fall back to local inference (Mimo/Ollama) before declaring a task blocked.
+
 ## Release Checklist
 
 Before tagging a release, verify:
