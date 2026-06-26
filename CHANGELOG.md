@@ -6,6 +6,24 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.19-alpha] - 2026-06-26
+
+### Added
+
+- **`MCP_EXTRA_TOKENS_FILE` env var**: file-based JSON token→profile mapping, overrides `MCP_EXTRA_TOKENS_JSON` on conflict. Avoids shell escaping issues. (Session 122)
+- **Enforce smoke `tools/list` flow**: now performs MCP initialize and passes `Mcp-Session-Id` before testing `tools/list`. (Session 122)
+
+### Fixed
+
+- **Enforce smoke token authentication**: generated Bearer tokens were not being sent (profile names were sent instead). Fixed dict key/value order in token→profile iteration. (Session 122)
+- **Scope validation test**: `mcp:admin` is now a valid scope (fail-closed), test was updated to check with `mcp:invalid` instead. (Session 122)
+
+### Verified
+
+- pytest: 709 passed
+- Enforce smoke: 14/14
+- Fleet healthcheck: 6/6
+
 ## [0.1.18-alpha] - 2026-06-26
 
 ### Added
