@@ -20,9 +20,12 @@ SUPPORTED_SCOPES: list[str] = [
     "mcp:project",
     "mcp:handoff",
     "mcp:agent-run",
+    "mcp:execute",
+    "mcp:repo",
     "mcp:docker",
     "mcp:postgres",
-    "mcp:repo",
+    "mcp:docs",
+    "mcp:admin",
 ]
 
 DEFAULT_SCOPES: list[str] = ["mcp:read", "mcp:project"]
