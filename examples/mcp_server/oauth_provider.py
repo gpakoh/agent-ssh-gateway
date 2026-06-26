@@ -15,6 +15,8 @@ from typing import Any
 
 from mcp.server.auth.provider import AccessToken
 
+from examples.mcp_server.token_store import TokenStore
+
 def hash_token(token: str) -> str:
     """Return sha256 hash with explicit 'sha256:' prefix."""
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -119,6 +121,33 @@ class GatewayOAuthProvider:
         self._clients: dict[str, StoredClient] = {}
         self._auth_codes: dict[str, StoredAuthCode] = {}
         self._tokens: dict[str, StoredToken] = {}
+        self._token_store: TokenStore | None = None
+
+    def set_token_store(self, store: TokenStore) -> None:
+        """Attach a TokenStore for synchronised revocations."""
+        self._token_store = store
+
+    def load_tokens(self) -> int:
+        """Load non-revoked tokens from the attached TokenStore.
+
+        Reads all non-revoked entries from the store and registers
+        each as a hashed token. Returns the count of tokens loaded.
+        """
+        if not self._token_store:
+            return 0
+        entries = self._token_store.load()
+        count = 0
+        for entry in entries:
+            if entry.revoked_at is not None:
+                continue
+            self.register_hashed_token(
+                token_hash=entry.token_hash,
+                profile=entry.profile,
+                client_id=None,
+                scopes=list(entry.scopes),
+            )
+            count += 1
+        return count
 
     def register_static_token(
         self,
@@ -306,6 +335,10 @@ class GatewayOAuthProvider:
         stored = self._tokens.get(token_hash)
         if stored and stored.client_id == client_id:
             del self._tokens[token_hash]
+            if self._token_store:
+                entry = self._token_store.find_by_hash(token_hash)
+                if entry and entry.revoked_at is None:
+                    self._token_store.revoke(entry.id)
 
     # --- FastMCP protocol stubs (authorize/token endpoints) ---
 
@@ -337,6 +370,10 @@ class GatewayOAuthProvider:
         stored = self._tokens.get(token_hash)
         if stored:
             del self._tokens[token_hash]
+            if self._token_store:
+                entry = self._token_store.find_by_hash(token_hash)
+                if entry and entry.revoked_at is None:
+                    self._token_store.revoke(entry.id)
 
     # --- Internal helpers (used by token-mode code + tests) ---
 

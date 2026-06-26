@@ -100,9 +100,11 @@ if MCP_AUTH_MODE == "oauth":
     _health_token = os.environ.get("MCP_HEALTHCHECK_BEARER_TOKEN", "")
     if _health_token:
         from examples.mcp_server.oauth_provider import StoredToken as _StoredToken
+        from examples.mcp_server.oauth_provider import hash_token as _hash_tok
 
-        _auth_provider._tokens[_health_token] = _StoredToken(
-            token=_health_token,
+        _at_hash = _hash_tok(_health_token)
+        _auth_provider._tokens[_at_hash] = _StoredToken(
+            token=_at_hash,
             client_id="mcp_healthcheck",
             scopes=list(SUPPORTED_SCOPES),
             expires_at=float("inf"),
@@ -138,12 +140,14 @@ if MCP_AUTH_MODE == "oauth":
 
     if _extra_tokens_all:
         from examples.mcp_server.oauth_provider import StoredToken as _StoredToken
+        from examples.mcp_server.oauth_provider import hash_token as _hash_tok
         from examples.mcp_server.tool_scopes import ACCESS_PROFILES as _ACCESS_PROFILES
 
         for _token_str, _profile in _extra_tokens_all.items():
+            _at_hash = _hash_tok(_token_str)
             _profile_scopes = _ACCESS_PROFILES.get(_profile, list(SUPPORTED_SCOPES))
-            _auth_provider._tokens[_token_str] = _StoredToken(
-                token=_token_str,
+            _auth_provider._tokens[_at_hash] = _StoredToken(
+                token=_at_hash,
                 client_id=f"mcp_extras_{_profile}",
                 scopes=list(_profile_scopes),
                 expires_at=float("inf"),
@@ -178,14 +182,30 @@ elif MCP_AUTH_MODE == "token":
     if not mcp_token:
         raise ValueError("MCP_PUBLIC_TOKEN is required in token mode")
     from examples.mcp_server.oauth_provider import StoredToken as _StoredToken
+    from examples.mcp_server.oauth_provider import hash_token as _hash_tok
 
-    _auth_provider._tokens[mcp_token] = _StoredToken(
-        token=mcp_token,
+    _at_hash = _hash_tok(mcp_token)
+    _auth_provider._tokens[_at_hash] = _StoredToken(
+        token=_at_hash,
         client_id="mcp_static_client",
         scopes=list(DEFAULT_SCOPES),
         expires_at=float("inf"),
         type="access",
     )
+
+# ── TokenStore: load persistent tokens from store ──────────────────
+if _auth_provider is not None:
+    try:
+        from examples.mcp_server.token_store import TokenStore
+
+        _token_store = TokenStore()
+        _auth_provider.set_token_store(_token_store)
+        _loaded = _auth_provider.load_tokens()
+        if _loaded:
+            print(f"  TokenStore: {_loaded} tokens loaded from {_token_store._path}", file=sys.stderr)
+    except Exception as _exc:
+        print(f"  TokenStore: error loading tokens: {_exc}", file=sys.stderr)
+
 mcp = FastMCP(
     "agent-ssh-gateway",
     auth=_auth_settings,
