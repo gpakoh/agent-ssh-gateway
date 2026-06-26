@@ -184,19 +184,25 @@ def _check(profile: str, token: str) -> None:
 
 def _check_tools_list(token: str) -> None:
     global PASS, FAIL
+    sid = _mcp_init(token)
+    if sid is None:
+        FAIL += 1
+        return
+
     body = json.dumps({
         "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {},
     }).encode()
-    req = urllib.request.Request(
-        GATEWAY_URL, data=body,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-        },
-    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "Mcp-Session-Id": sid,
+    }
     try:
-        resp: HTTPResponse = urllib.request.urlopen(req, timeout=10)
+        resp: HTTPResponse = urllib.request.urlopen(
+            urllib.request.Request(GATEWAY_URL, data=body, headers=headers),
+            timeout=10,
+        )
         _drain(resp)
         print(f"    ✅ tools/list → {resp.status}")
         PASS += 1
