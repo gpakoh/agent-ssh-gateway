@@ -12,6 +12,7 @@ This project follows semantic versioning where practical, but the public API is 
 
 - **`MCP_EXTRA_TOKENS_FILE` env var**: file-based JSON token→profile mapping, overrides `MCP_EXTRA_TOKENS_JSON` on conflict. Avoids shell escaping issues. (Session 122)
 - **Enforce smoke `tools/list` flow**: now performs MCP initialize and passes `Mcp-Session-Id` before testing `tools/list`. (Session 122)
+- **ADR: Agent backend routing and proxy policy**: documented decision against free public proxy rotation in core. `OPENCODE_BIN` override, preferred fallback is local inference (Mimo/Ollama). (Session 124)
 
 ### Fixed
 
