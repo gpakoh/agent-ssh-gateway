@@ -6,6 +6,24 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.22-alpha] - 2026-06-27
+
+### Added
+
+- **Agent Backend Router production enable**: `MCP_AGENT_BACKEND_ROUTER_ENABLED=true` deployed in production. Gateway exposes 86 tools including `gateway_project_run_agent`. Router selectively delegates to OpenCode (primary) or Mimo (fallback) based on cooldown and rate-limit state. Backend status updates via `record_result()`. (Sessions 133a–133b)
+
+### Changed
+
+- `gateway_project_run_agent` MCP tool registered and visible through public endpoint. Router wired to `agent_tools.py` — reads `task.json` with `agent: "auto"`, delegates via `AgentBackendRouter`. (Session 133a)
+- `scripts/mcp_fleet_healthcheck.py` expected tool count updated 85→86. (Session 133a.1)
+- Production env `/etc/agent-ssh-gateway-mcp.env`: `MCP_AGENT_BACKEND_ROUTER_ENABLED=true`. (Session 133b)
+
+### Verified
+
+- pytest: 805 passed
+- Fleet healthcheck: 6/6 (86 tools)
+- Router production smoke: OpenCode available, OpenCode cooldown → Mimo fallback, both exhausted → no-backend, rate-limit→7h cooldown, record_result restores availability
+
 ## [0.1.21-alpha] - 2026-06-27
 
 ### Added
