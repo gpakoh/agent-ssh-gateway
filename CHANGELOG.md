@@ -6,6 +6,31 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.20-alpha] - 2026-06-27
+
+### Added
+
+- **MCP token management CLI**: `mcp-token create/list/revoke/rotate` with text and JSON output. (Session 125)
+- **Hash-only token store**: `TokenStore` with atomic file persistence (`tempfile` + `os.replace` + `fcntl.flock`). (Session 125)
+- **`MCP_TOKEN_STORE_FILE` env var**: configurable path for token persistence (default `/var/lib/agent-ssh-gateway/mcp_tokens.json`). (Session 125)
+- **`MCP_PUBLIC_TOKEN_PROFILE` env var**: default profile for `mcp-token create` (default `full`). (Session 125)
+- **`register_static_token()` / `register_hashed_token()`**: unified provider API for token registration with hash-key storage. (Session 125)
+- **`GatewayOAuthProvider.set_token_store()` / `load_tokens()`**: TokenStore integration with startup token loading. (Session 125)
+- **Provider + TokenStore revocation sync**: `revoke_token` and `revoke_client_token` sync to TokenStore when attached. (Session 125)
+
+### Security
+
+- Raw tokens never stored on disk; provider uses `sha256:` hash keys.
+- Raw token shown only once at creation (`mcp-token create`).
+- Token store file intended for `chmod 600` root-only usage (enforced at load).
+
+### Verified
+
+- pytest: 743 passed
+- Enforce smoke: 14/14
+- Fleet healthcheck: 6/6
+- CI: pull_request #219 success, push #220 success
+
 ## [0.1.19-alpha] - 2026-06-26
 
 ### Added
