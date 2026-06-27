@@ -17,6 +17,7 @@ from mcp.server.auth.provider import AccessToken
 
 from examples.mcp_server.token_store import TokenStore
 
+
 def hash_token(token: str) -> str:
     """Return sha256 hash with explicit 'sha256:' prefix."""
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
