@@ -22,6 +22,9 @@ from agent_tasks import (
 from agent_tasks import (
     write_agent_task as _write_agent_task,
 )
+from agent_tools import (
+    project_run_agent as _project_run_agent,
+)
 from chatgpt_tools import (
     git_diff_stat,
     git_status,
@@ -1507,6 +1510,32 @@ def gateway_project_run_mimo(
             model=model,
         ),
         success_text="Submitted mimo task.",
+    )
+
+
+@register_tool("gateway_project_run_agent")
+def gateway_project_run_agent(
+    project: str,
+    task_id: str,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Execute a handoff task via the agent backend router — auto-selects OpenCode or Mimo.
+    Requires write mode handoff or full. Router enabled by MCP_AGENT_BACKEND_ROUTER_ENABLED.
+    Task must have task.json with agent='auto' and worktree_path if mimo may be selected."""
+    from write_modes import assert_handoff_write_allowed
+
+    assert_handoff_write_allowed()
+    return run_tool(
+        tool="gateway_project_run_agent",
+        title="Run agent task (router)",
+        fn=lambda: _project_run_agent(
+            lambda p, c: run_project_command(client, p, c),
+            project=project,
+            task_id=task_id,
+            model=model,
+            router=_agent_router,
+        ),
+        success_text="Submitted agent task via router.",
     )
 
 
