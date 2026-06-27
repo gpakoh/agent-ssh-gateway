@@ -5,7 +5,7 @@ import tempfile
 
 import pytest
 
-from examples.mcp_server.token_store import TokenStore, StoredTokenEntry
+from examples.mcp_server.token_store import TokenStore
 from scripts.mcp_token_cli import main
 
 
