@@ -105,6 +105,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     # agent-run — mcp:agent-run
     "project_run_opencode": ["mcp:agent-run"],
     "gateway_project_run_mimo": ["mcp:agent-run"],
+    "gateway_project_run_agent": ["mcp:agent-run"],
     # repo — mcp:repo
     "gitea_get_repo": ["mcp:repo"],
     "gitea_list_branches": ["mcp:repo"],
