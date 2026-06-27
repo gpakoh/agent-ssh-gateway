@@ -40,7 +40,7 @@ class Adapter:
 
 ADAPTERS: list[Adapter] = [
     Adapter("Gateway", "agent-ssh-gateway-mcp", "/etc/agent-ssh-gateway-mcp.env",
-            "https://gateway.example.com/mcp", 85, 8788, 0),
+            "https://gateway.example.com/mcp", 86, 8788, 0),
     Adapter("Context7", "agent-mcp-context7", "/etc/agent-mcp-context7.env",
             "https://gateway.example.com/mcp/context7", 2, 8780, 8790),
     Adapter("GitHub", "agent-mcp-github", "/etc/agent-mcp-github.env",
