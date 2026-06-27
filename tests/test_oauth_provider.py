@@ -11,7 +11,67 @@ from examples.mcp_server.oauth_provider import (
     _generate_code_challenge,
     _parse_scopes,
     _verify_pkce,
+    hash_token,
 )
+
+
+def test_hash_token_has_prefix():
+    h = hash_token("hello")
+    assert h.startswith("sha256:")
+    assert len(h) == 7 + 64
+
+
+def test_hash_token_deterministic():
+    assert hash_token("test-token") == hash_token("test-token")
+
+
+def test_hash_token_differs():
+    assert hash_token("token-a") != hash_token("token-b")
+
+
+def test_hash_token_format():
+    h = hash_token("hello")
+    hex_part = h[7:]
+    assert all(c in "0123456789abcdef" for c in hex_part)
+
+
+def test_register_static_token_hashes_key():
+    provider = GatewayOAuthProvider()
+    provider.register_static_token("my-raw-token", profile="full", name="test")
+    raw_hash = hash_token("my-raw-token")
+    stored = provider._tokens.get(raw_hash)
+    assert stored is not None
+    assert stored.client_id == "mcp_static"
+    assert "mcp:admin" in stored.scopes
+    assert stored.token == raw_hash
+
+
+def test_register_static_token_raw_not_in_keys():
+    provider = GatewayOAuthProvider()
+    provider.register_static_token("secret-42", profile="viewer", name="v")
+    assert "secret-42" not in provider._tokens
+
+
+def test_register_hashed_token():
+    provider = GatewayOAuthProvider()
+    token_hash = hash_token("some-token")
+    provider.register_hashed_token(token_hash, scopes=["mcp:read"], profile="viewer", name="h")
+    stored = provider._tokens.get(token_hash)
+    assert stored is not None
+    assert stored.scopes == ["mcp:read"]
+
+
+def test_register_hashed_token_rejects_bad_prefix():
+    provider = GatewayOAuthProvider()
+    with pytest.raises(ValueError, match="must start with 'sha256:'"):
+        provider.register_hashed_token("md5:abc", scopes=["mcp:read"], profile="v", name="bad")
+
+
+def test_register_static_token_with_custom_client_id():
+    provider = GatewayOAuthProvider()
+    provider.register_static_token("tk", profile="operator", name="op", client_id="mcp_healthcheck")
+    h = hash_token("tk")
+    assert provider._tokens[h].client_id == "mcp_healthcheck"
 
 
 def test_pkce_verification_valid():
