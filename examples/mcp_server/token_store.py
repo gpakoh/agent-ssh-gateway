@@ -44,7 +44,10 @@ def _ensure_parent(path_str: str) -> None:
     if not parent:
         return
     Path(parent).mkdir(parents=True, exist_ok=True)
-    os.chmod(parent, stat.S_IRWXU)
+    try:
+        os.chmod(parent, stat.S_IRWXU)
+    except PermissionError:
+        pass  # Existing system dir (e.g., /tmp) is fine
 
 
 def _check_not_world_writable(path_str: str) -> None:
