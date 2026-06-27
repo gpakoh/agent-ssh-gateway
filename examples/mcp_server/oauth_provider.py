@@ -144,7 +144,6 @@ class GatewayOAuthProvider:
             self.register_hashed_token(
                 token_hash=entry.token_hash,
                 profile=entry.profile,
-                client_id=None,
                 scopes=list(entry.scopes),
             )
             count += 1
