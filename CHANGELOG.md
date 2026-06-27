@@ -6,9 +6,11 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.21-alpha] - 2026-06-27
+
 ### Added
 
-- **Agent Backend Router**: `AgentBackendRouter` with `TryPrimaryFallback`/`RoundRobin` policies, cooldown tracking via regex patterns, and `MCP_AGENT_BACKEND_ROUTER_ENABLED` flag (default disabled). (Session 130)
+- **Agent Backend Router**: `AgentBackendRouter` with `TryPrimaryFallback`/`RoundRobin` policies, cooldown tracking via regex patterns, and `MCP_AGENT_BACKEND_ROUTER_ENABLED` flag (default disabled). Backend status model: available, cooldown, failed, disabled. Router smoke verified: OpenCode cooldown selects Mimo, exhausted backends return no selection, expired cooldown restores OpenCode. (Sessions 129–131)
 - **Spec: Agent Backend Router design**: `docs/superpowers/specs/2026-06-27-agent-backend-router-design.md`. (Session 129)
 
 ### Fixed
