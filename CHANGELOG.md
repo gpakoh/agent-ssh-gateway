@@ -6,6 +6,20 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+### Added
+
+- **Agent Backend Router**: `AgentBackendRouter` with `TryPrimaryFallback`/`RoundRobin` policies, cooldown tracking via regex patterns, and `MCP_AGENT_BACKEND_ROUTER_ENABLED` flag (default disabled). (Session 130)
+- **Spec: Agent Backend Router design**: `docs/superpowers/specs/2026-06-27-agent-backend-router-design.md`. (Session 129)
+
+### Fixed
+
+- **`load_tokens()` client_id=None bug**: `GatewayOAuthProvider.load_tokens()` passed `client_id=None` to `register_hashed_token()`, overriding the default `"mcp_static"`. Caused 500 on every Bearer request (AccessToken Pydantic rejection). Fixed by removing the explicit `None`. (Session 126)
+
+### Documentation
+
+- **MCP token ledger**: `docs/operations/MCP_TOKEN_LEDGER.md` — lifecycle, secret policy, known behavior, bug history. (Session 127)
+- **MCP operator runbook**: `docs/operations/MCP_OPERATOR_RUNBOOK.md` — daily ops, token tasks, ChatGPT setup, failures, rollback, security rules. (Session 128)
+
 ## [0.1.20-alpha] - 2026-06-27
 
 ### Added

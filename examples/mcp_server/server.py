@@ -206,6 +206,25 @@ if _auth_provider is not None:
     except Exception as _exc:
         print(f"  TokenStore: error loading tokens: {_exc}", file=sys.stderr)
 
+# ── Agent Backend Router ─────────────────────────────────────────────
+_agent_router: AgentBackendRouter | None = None
+if os.environ.get("MCP_AGENT_BACKEND_ROUTER_ENABLED", "false").strip().lower() == "true":
+    try:
+        from examples.mcp_server.agent_backend_router import AgentBackendRouter
+
+        _agent_router = AgentBackendRouter(
+            fallback_order=[
+                x.strip()
+                for x in os.environ.get(
+                    "MCP_BACKEND_FALLBACK_ORDER", "opencode,mimo"
+                ).split(",")
+                if x.strip()
+            ],
+        )
+        print(f"  backend router: enabled ({len(_agent_router._backends)} backends)", file=sys.stderr)
+    except Exception as _exc:
+        print(f"  backend router: init error: {_exc}", file=sys.stderr)
+
 mcp = FastMCP(
     "agent-ssh-gateway",
     auth=_auth_settings,
