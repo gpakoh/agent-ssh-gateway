@@ -148,8 +148,7 @@ def test_revoke_client_token_syncs_to_store(store_path):
     provider.load_tokens()
     assert provider.verify_access_token(raw) is not None
 
-    # Store-loaded tokens have client_id=None; use None to match
-    provider.revoke_client_token(None, raw)
+    provider.revoke_client_token("mcp_static", raw)
     assert provider.verify_access_token(raw) is None
 
     store2 = TokenStore(store_path)
