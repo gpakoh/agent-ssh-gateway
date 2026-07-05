@@ -32,6 +32,7 @@ function usage(exitCode = 0) {
     `  --token <token>        Cloudflare Tunnel token`,
     `  --token-file <path>    Cloudflare Tunnel token file`,
     `  --name <name>          Cloudflare named tunnel name`,
+    `  --hostname <host>      Public hostname (for stdout URL, e.g. mcp.nodsync.org)`,
     ``,
     `Ngrok-specific:`,
     `  --hostname <host>      Ngrok reserved domain (e.g. ssh.xloud.ru)`,
@@ -384,9 +385,10 @@ async function main() {
     const child = spawnLogged('cloudflared', cloudflaredPath, ['tunnel', '--url', args.local]);
     const publicUrl = (await waitForCloudflareUrl(child)).replace(/\/+$/, '');
     const healthUrl = args.health;
+    const qsPath = args.healthPath ? (args.healthPath.startsWith('/') ? args.healthPath : `/${args.healthPath}`) : '/mcp';
     console.error(`Waiting for health at ${healthUrl}...`);
     await waitForHealth(healthUrl, args.timeout);
-    console.log(`${publicUrl}/mcp`);
+    console.log(`${publicUrl}${qsPath}`);
     await waitForProcessExit(child);
     return;
   }
@@ -419,7 +421,13 @@ async function main() {
       const msg = error instanceof Error ? error.message : String(error);
       throw new Error(`${msg}${tail ? `\n\ncloudflared output:\n${tail}` : ''}`);
     }
-    console.log(healthUrl);
+    if (args.hostname) {
+      const base = publicBaseFromHostname(args.hostname);
+      const path = args.healthPath ? (args.healthPath.startsWith('/') ? args.healthPath : `/${args.healthPath}`) : '/mcp';
+      console.log(`${base}${path}`);
+    } else {
+      console.log(healthUrl);
+    }
     await waitForProcessExit(child);
     return;
   }
@@ -435,9 +443,10 @@ async function main() {
     console.error(`Starting ngrok tunnel for ${publicBase}...`);
     const child = spawnLogged('ngrok', ngrokPath, ngrokArgs);
     const healthUrl = args.health;
+    const ngrokQsPath = args.healthPath ? (args.healthPath.startsWith('/') ? args.healthPath : `/${args.healthPath}`) : '/mcp';
     console.error(`Waiting for health at ${healthUrl}...`);
     await waitForHealth(healthUrl, args.timeout);
-    console.log(`${publicBase}/mcp`);
+    console.log(`${publicBase}${ngrokQsPath}`);
     await waitForProcessExit(child);
     return;
   }
