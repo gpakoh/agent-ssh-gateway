@@ -1,12 +1,17 @@
-# TUNNEL_RUNBOOK
+# TUNNEL RUNBOOK
+
+> **2026-07-05: Production tunnel is now VPS nginx relay + autossh.**
+> See [`MCP_PUBLIC_ENDPOINT_RUNBOOK.md`](./MCP_PUBLIC_ENDPOINT_RUNBOOK.md) for the
+> canonical endpoint. This file only documents the legacy `scripts/tunnel.mjs`
+> subprocess manager.
 
 `scripts/tunnel.mjs` — standalone tunnel subprocess manager extracted from
 [codexpro](https://github.com/rebel0789/codexpro).
 
-## Why
+## Why (legacy)
 
 The MCP gateway (`agent-ssh-gateway-mcp.service`, port 8788) needs to be
-reachable from ChatGPT's cloud. Three tunnel backends are available:
+reachable from ChatGPT's cloud. Three tunnel backends were available:
 
 | Mode | URL | Stability | Priority |
 |------|-----|-----------|----------|
@@ -126,3 +131,20 @@ Set `TUNNEL_DEBUG=1` to see full stack traces on errors.
   output. Prefer `--token-file` for production
 - The health endpoint should be local-only (127.0.0.1) to avoid exposing it to
   the network
+
+## Status (2026-07-05)
+
+**`npm run tunnel cloudflare` is no longer the production path.**
+
+The VPS nginx relay replaced Cloudflare Tunnel because:
+- ISP-level QUIC filtering blocks `cloudflared tunnel` from home
+- `cloudflared tunnel route dns` requires `cert.pem` (unobtainable without OAuth)
+- VPS uses the same ISP as home — no clean egress
+
+Production setup:
+- `mcp.nodsync.org` A record → `171.25.251.242` (Cloudflare orange cloud)
+- VPS nginx terminates TLS, proxies to `127.0.0.1:18788`
+- autossh reverse tunnel carries traffic home to port 8788
+- `scripts/tunnel.mjs` kept as emergency fallback via localtunnel mode
+
+See [`MCP_PUBLIC_ENDPOINT_RUNBOOK.md`](./MCP_PUBLIC_ENDPOINT_RUNBOOK.md).
