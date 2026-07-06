@@ -45,7 +45,7 @@ def test_oauth_public_paths():
     assert _is_oauth_public_path("/oauth/token")
     assert _is_oauth_public_path("/oauth/register")
     assert not _is_oauth_public_path("/mcp")
-    assert not _is_oauth_public_path("/health")
+    assert _is_oauth_public_path("/health")
 
 
 def test_token_mode_no_auth(token_client):

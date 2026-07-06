@@ -61,7 +61,7 @@ from chatgpt_tools import (
     working_directory,
 )
 from command_policy import CommandPolicyError
-from gateway_client import GatewayClient, GatewayClientError
+from gateway_client import GatewayClient, GatewayClientError, resolve_file_path
 from handoff import read_handoff, show_handoff_status, write_handoff_plan
 from mcp.server.fastmcp import FastMCP
 from mimo_tools import (
@@ -173,7 +173,7 @@ if MCP_AUTH_MODE == "oauth":
             client_registration_options=ClientRegistrationOptions(
                 enabled=True,
                 valid_scopes=SUPPORTED_SCOPES,
-                default_scopes=DEFAULT_SCOPES,
+                default_scopes=list(SUPPORTED_SCOPES),
             ),
             required_scopes=None,
         )
@@ -405,16 +405,21 @@ def gateway_wait_job(job_id: str, timeout_sec: int | None = None) -> dict[str, A
 
 @register_tool("gateway_read_file")
 def gateway_read_file(path: str, session_id: str | None = None) -> dict[str, Any]:
-    """Read a file through the gateway file API."""
+    """Read a file through the gateway file API.
+
+    Relative paths are resolved under MCP_GATEWAY_PROJECT_ROOT.
+    Absolute paths must be under the project root.
+    """
+    resolved = resolve_file_path(path)
 
     def _read() -> dict[str, Any]:
-        return client.read_file(path, session_id=session_id)
+        return client.read_file(resolved, session_id=session_id)
 
     return run_tool(
         tool="gateway_read_file",
         title="Read file",
         fn=_read,
-        success_text=f"File {path} read successfully.",
+        success_text=f"File {resolved} read successfully.",
     )
 
 

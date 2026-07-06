@@ -24,7 +24,7 @@ import uvicorn
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
 EXAMPLES_DIR = Path(__file__).resolve().parents[1]
 MCP_SERVER_DIR = EXAMPLES_DIR / "mcp_server"
@@ -46,6 +46,11 @@ _mcp_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mcp_mod)
 mcp = _mcp_mod.mcp
 
+MCP_PUBLIC_URL = os.environ.get("MCP_PUBLIC_URL", "").rstrip("/")
+prov = getattr(_mcp_mod, "_auth_provider", None)
+if prov is not None and MCP_PUBLIC_URL:
+    prov.public_base_url = MCP_PUBLIC_URL
+
 MCP_INTERNAL_HOST = os.environ.get("MCP_INTERNAL_HOST", "127.0.0.1")
 MCP_INTERNAL_PORT = int(os.environ.get("MCP_INTERNAL_PORT", "8789"))
 MCP_INTERNAL_URL = f"http://{MCP_INTERNAL_HOST}:{MCP_INTERNAL_PORT}"
@@ -64,7 +69,16 @@ if MCP_SCOPE_ENFORCEMENT not in ("off", "audit", "enforce"):
 
 MCP_DEFAULT_ACCESS_PROFILE = os.environ.get("MCP_DEFAULT_ACCESS_PROFILE", "operator")
 
-OAUTH_PUBLIC_PREFIXES = ("/.well-known/", "/oauth/")
+MCP_AUTHORIZE_PASSWORD = os.environ.get("MCP_AUTHORIZE_PASSWORD", "")
+
+OAUTH_PUBLIC_PREFIXES = (
+    "/.well-known/",
+    "/oauth/",
+    "/authorize",
+    "/token",
+    "/register",
+    "/health",
+)
 
 
 def _is_oauth_public_path(path: str) -> bool:
@@ -249,10 +263,125 @@ async def proxy_request(request: Request) -> StreamingResponse | JSONResponse:
         )
 
 
+CONSENT_HTML = """<!DOCTYPE html>
+<html lang="ru">
+<head><meta charset="utf-8"><title>Authorization — MCP Gateway</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+         background: #0f1117; color: #e1e4e8; display: flex; align-items: center;
+         justify-content: center; min-height: 100vh; margin: 0; }}
+  .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+          padding: 40px; max-width: 440px; width: 100%; margin: 20px; }}
+  h1 {{ font-size: 22px; margin-bottom: 8px; }}
+  p {{ color: #8b949e; font-size: 14px; margin-bottom: 24px; line-height: 1.5; }}
+  label {{ display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; color: #c9d1d9; }}
+  input[type=password] {{ width: 100%; padding: 10px 12px; background: #0d1117;
+         border: 1px solid #30363d; border-radius: 8px; color: #e1e4e8; font-size: 15px;
+         outline: none; transition: border-color .2s; }}
+  input[type=password]:focus {{ border-color: #58a6ff; }}
+  .error {{ color: #f85149; font-size: 13px; margin-top: 12px; display: none; }}
+  .error.visible {{ display: block; }}
+  button {{ width: 100%; padding: 10px; margin-top: 20px; background: #238636;
+           border: none; border-radius: 8px; color: #fff; font-size: 15px; font-weight: 500;
+           cursor: pointer; transition: background .2s; }}
+  button:hover {{ background: #2ea043; }}
+  button:disabled {{ opacity: .6; cursor: not-allowed; }}
+</style></head>
+<body>
+<div class="card">
+  <h1>Authorize MCP Gateway</h1>
+  <p>Enter the authorization password to connect this MCP server to ChatGPT.</p>
+  <form method="post" id="auth-form">
+    <input type="hidden" name="client_id" value="{client_id}">
+    <input type="hidden" name="redirect_uri" value="{redirect_uri}">
+    <input type="hidden" name="scope" value="{scope}">
+    <input type="hidden" name="state" value="{state}">
+    <input type="hidden" name="code_challenge" value="{code_challenge}">
+    <input type="hidden" name="resource" value="{resource}">
+    <label for="password">Authorization Password</label>
+    <input type="password" id="password" name="password"
+           placeholder="Enter password" autofocus required>
+    <div class="error" id="error-msg">{error}</div>
+    <button type="submit" id="submit-btn">Authorize</button>
+  </form>
+</div>
+<script>
+  const err = document.getElementById('error-msg');
+  if (err.textContent.trim()) err.classList.add('visible');
+  document.getElementById('auth-form').addEventListener('submit', function() {{
+    document.getElementById('submit-btn').disabled = true;
+    document.getElementById('submit-btn').textContent = 'Authorizing…';
+  }});
+</script>
+</body>
+</html>"""
+
+
+async def consent_handler(request: Request):
+    from urllib.parse import urlencode, urlparse, urlunparse
+    if request.method == "GET":
+        client_id = request.query_params.get("client_id", "")
+        redirect_uri = request.query_params.get("redirect_uri", "")
+        scope = request.query_params.get("scope", "mcp:read mcp:project")
+        state = request.query_params.get("state", "")
+        code_challenge = request.query_params.get("code_challenge", "")
+        resource = request.query_params.get("resource", "")
+        error = request.query_params.get("error", "")
+        html = CONSENT_HTML.format(
+            client_id=client_id, redirect_uri=redirect_uri,
+            scope=scope, state=state, code_challenge=code_challenge,
+            resource=resource, error=error,
+        )
+        return HTMLResponse(html, status_code=200)
+
+    form = await request.form()
+    password = form.get("password", "")
+    client_id = form.get("client_id", "")
+    redirect_uri = form.get("redirect_uri", "")
+    scope_str = form.get("scope", "mcp:read mcp:project")
+    state = form.get("state", "")
+    code_challenge = form.get("code_challenge", "")
+    resource = form.get("resource", "")
+
+    if not password or password != MCP_AUTHORIZE_PASSWORD:
+        from urllib.parse import urlencode
+        params = {
+            "client_id": client_id, "redirect_uri": redirect_uri,
+            "scope": scope_str, "state": state,
+            "code_challenge": code_challenge, "resource": resource,
+            "error": "Invalid password. Try again.",
+        }
+        return RedirectResponse(url="/oauth/consent?" + urlencode(params), status_code=303)
+
+    from examples.mcp_server.oauth_provider import _parse_scopes
+    prov = getattr(_mcp_mod, "_auth_provider", None)
+    if not prov:
+        return JSONResponse({"error": "OAuth provider not available"}, status_code=500)
+
+    scopes = _parse_scopes(scope_str)
+    result = prov.create_authorization_code(
+        client_id=client_id, redirect_uri=redirect_uri,
+        code_challenge=code_challenge, state=state, scopes=scopes,
+    )
+    parsed = urlparse(redirect_uri)
+    qs = {}
+    if parsed.query:
+        for part in parsed.query.split("&"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                qs[k] = v
+    qs["code"] = result["code"]
+    qs["state"] = state
+    return RedirectResponse(url=urlunparse(parsed._replace(query=urlencode(qs))), status_code=303)
+
+
 def create_proxy_app() -> Starlette:
     """Create auth-guarded proxy to internal MCP server."""
     proxy = Starlette()
     proxy.add_middleware(OAuthProxyMiddleware)
+    proxy.add_route("/oauth/consent", consent_handler, methods=["GET", "POST"])
     proxy.add_route("/", proxy_request, methods=["GET", "POST", "DELETE"])
     proxy.add_route("/{path:path}", proxy_request, methods=["GET", "POST", "DELETE"])
     return proxy
