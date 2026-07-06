@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import functools
 import os
+import threading
 import time
 from typing import Any
 
@@ -70,6 +72,8 @@ class GatewayClientError(RuntimeError):
 class GatewayClient:
     """Small HTTP wrapper around agent-ssh-gateway."""
 
+    _SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
+
     def __init__(
         self,
         base_url: str | None = None,
@@ -84,10 +88,77 @@ class GatewayClient:
         self.command_timeout = int(os.environ.get("MCP_GATEWAY_COMMAND_TIMEOUT", "120"))
         self.job_timeout = int(os.environ.get("MCP_GATEWAY_JOB_TIMEOUT", "180"))
 
+        self._reconnect_lock = threading.Lock()
+        self._ssh_host = os.environ.get("GATEWAY_SSH_HOST", "")
+        self._ssh_port = int(os.environ.get("GATEWAY_SSH_PORT", "22"))
+        self._ssh_user = os.environ.get("GATEWAY_SSH_USER", "") or os.environ.get("GATEWAY_SSH_USERNAME", "")
+        self._ssh_password = os.environ.get("GATEWAY_SSH_PASSWORD", "")
+        self._ssh_private_key = os.environ.get("GATEWAY_SSH_PRIVATE_KEY", "")
+        if not self._ssh_private_key:
+            key_path = os.environ.get("GATEWAY_SSH_KEY_PATH", "")
+            if key_path:
+                try:
+                    with open(key_path) as f:
+                        self._ssh_private_key = f.read()
+                except OSError:
+                    pass
+
     def _headers(self) -> dict[str, str]:
         if not self.api_key:
             raise GatewayClientError("GATEWAY_API_KEY is required")
         return {"X-API-Key": self.api_key}
+
+    def _reconnect_session(self) -> None:
+        if not self._ssh_host or not self._ssh_user:
+            raise GatewayClientError(
+                "GATEWAY_SSH_HOST and GATEWAY_SSH_USER are required for auto-reconnect"
+            )
+        payload: dict[str, Any] = {
+            "host": self._ssh_host,
+            "port": self._ssh_port,
+            "username": self._ssh_user,
+        }
+        if self._ssh_password:
+            payload["password"] = self._ssh_password
+        if self._ssh_private_key:
+            payload["private_key"] = self._ssh_private_key
+
+        response = httpx.post(
+            f"{self.base_url}/api/ssh/connect",
+            json=payload,
+            headers=self._headers(),
+            timeout=30,
+        )
+        if response.status_code >= 400:
+            raise GatewayClientError(
+                f"auto-reconnect failed: {response.status_code}"
+            )
+        data = response.json()
+        self.session_id = data["session_id"]
+
+    @staticmethod
+    def _retry_on_session_not_found(
+        func: Any,
+    ) -> Any:
+        @functools.wraps(func)
+        def wrapper(self: "GatewayClient", *args: Any, **kwargs: Any) -> Any:
+            for attempt in range(2):
+                try:
+                    return func(self, *args, **kwargs)
+                except GatewayClientError as e:
+                    if (
+                        attempt == 0
+                        and GatewayClient._SESSION_NOT_FOUND in str(e)
+                    ):
+                        old_sid = self.session_id
+                        with self._reconnect_lock:
+                            if self.session_id == old_sid:
+                                self._reconnect_session()
+                        continue
+                    raise
+            return None  # unreachable
+
+        return wrapper
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         response = httpx.get(
@@ -126,10 +197,12 @@ class GatewayClient:
     def list_sessions(self) -> dict[str, Any]:
         return self._get("/api/ssh/sessions")
 
+    @_retry_on_session_not_found
     def session_health(self, session_id: str | None = None) -> dict[str, Any]:
         sid = session_id or self._require_session_id()
         return self._get(f"/api/ssh/session/{sid}/health")
 
+    @_retry_on_session_not_found
     def execute_restricted(
         self, command: str, session_id: str | None = None
     ) -> dict[str, Any]:
@@ -146,6 +219,7 @@ class GatewayClient:
             },
         )
 
+    @_retry_on_session_not_found
     def execute_project_command(
         self, project: str, command: str
     ) -> dict[str, Any]:
@@ -188,12 +262,14 @@ class GatewayClient:
             f"Job {job_id} did not finish before timeout"
         )
 
+    @_retry_on_session_not_found
     def read_file(
         self, path: str, session_id: str | None = None
     ) -> dict[str, Any]:
         sid = session_id or self._require_session_id()
         return self._post("/api/file/read", {"session_id": sid, "path": path})
 
+    @_retry_on_session_not_found
     def write_file(
         self,
         path: str,
