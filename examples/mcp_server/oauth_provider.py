@@ -101,7 +101,7 @@ def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
 def _parse_scopes(scope_str: str | None) -> list[str]:
     """Parse space-separated scope string, validate against SUPPORTED_SCOPES."""
     if not scope_str:
-        return list(DEFAULT_SCOPES)
+        return list(SUPPORTED_SCOPES)
     scopes = scope_str.strip().split()
     for s in scopes:
         if s not in SUPPORTED_SCOPES:
@@ -123,6 +123,7 @@ class GatewayOAuthProvider:
         self._auth_codes: dict[str, StoredAuthCode] = {}
         self._tokens: dict[str, StoredToken] = {}
         self._token_store: TokenStore | None = None
+        self.public_base_url: str = ""
 
     def set_token_store(self, store: TokenStore) -> None:
         """Attach a TokenStore for synchronised revocations."""
@@ -275,7 +276,7 @@ class GatewayOAuthProvider:
         return {"code": code, "state": state}
 
     def exchange_code_for_token(
-        self, client_id: str, code: str, code_verifier: str, redirect_uri: str,
+        self, client_id: str, code: str, code_verifier: str = "", redirect_uri: str = "",
     ) -> dict[str, Any]:
         stored = self._auth_codes.get(code)
         if not stored:
@@ -286,12 +287,13 @@ class GatewayOAuthProvider:
             raise ValueError("Client ID mismatch")
         if time.time() > stored.expires_at:
             raise ValueError("Authorization code expired")
-        if stored.redirect_uri != redirect_uri:
+        if redirect_uri and stored.redirect_uri != redirect_uri:
             raise ValueError("redirect_uri mismatch")
-        try:
-            _verify_pkce(code_verifier, stored.code_challenge)
-        except (ValueError, AssertionError):
-            raise ValueError("PKCE verification failed") from None
+        if code_verifier:
+            try:
+                _verify_pkce(code_verifier, stored.code_challenge)
+            except (ValueError, AssertionError):
+                raise ValueError("PKCE verification failed") from None
         stored.used = True
         access_token = _generate_id("mcp_at_", 32)
         refresh_token = _generate_id("mcp_rt_", 32)
@@ -343,27 +345,102 @@ class GatewayOAuthProvider:
     # --- FastMCP protocol stubs (authorize/token endpoints) ---
 
     async def authorize(self, client_info: Any, params: Any) -> str:
-        raise NotImplementedError("authorize — not implemented; use pre-registered service token")
+        raw = getattr(params, "redirect_uri", "")
+        redirect_uri = str(raw) if raw else ""
+        scope_list = getattr(params, "scopes", None) or DEFAULT_SCOPES
+        scope_str = " ".join(scope_list) if isinstance(scope_list, list) else str(scope_list)
+        state = getattr(params, "state", "") or ""
+        code_challenge = getattr(params, "code_challenge", "")
+        resource = getattr(params, "resource", None)
+        if not redirect_uri or not code_challenge:
+            raise ValueError("Missing redirect_uri or code_challenge in authorization request")
+        from urllib.parse import urlencode
+        consent_params = {
+            "client_id": client_info.client_id,
+            "redirect_uri": redirect_uri,
+            "scope": scope_str,
+            "state": state,
+            "code_challenge": code_challenge,
+        }
+        if resource:
+            consent_params["resource"] = str(resource)
+        base = self.public_base_url or ""
+        return base + "/oauth/consent?" + urlencode(consent_params)
 
     async def exchange_authorization_code(
-        self, client_info: Any, authorization_code: str
+        self, client_info: Any, authorization_code: Any
     ) -> Any:
-        raise NotImplementedError(
-            "exchange_authorization_code — not implemented; use pre-registered service token"
+        from mcp.shared.auth import OAuthToken
+        code = getattr(authorization_code, "code", "") or ""
+        redirect_uri = str(getattr(authorization_code, "redirect_uri", "") or "")
+        if not code:
+            raise ValueError("Missing code")
+        stored = self._auth_codes.get(code)
+        if not stored:
+            raise ValueError("Authorization code not found")
+        result = self.exchange_code_for_token(
+            client_id=client_info.client_id,
+            code=code,
+            code_verifier="",  # PKCE already verified by FastMCP handler
+            redirect_uri=redirect_uri,
+        )
+        return OAuthToken(
+            access_token=result["access_token"],
+            refresh_token=result.get("refresh_token"),
+            expires_in=result["expires_in"],
+            scope=result.get("scope", ""),
         )
 
     async def exchange_refresh_token(
-        self, client_info: Any, refresh_token: str, scopes: list[str]
+        self, client_info: Any, refresh_token: Any, scopes: list[str]
     ) -> Any:
-        raise NotImplementedError(
-            "exchange_refresh_token — not implemented; use pre-registered service token"
+        from mcp.shared.auth import OAuthToken
+        token = getattr(refresh_token, "token", "") or ""
+        if not token:
+            raise ValueError("Missing refresh token")
+        result = self.refresh_access_token(client_info.client_id, token)
+        return OAuthToken(
+            access_token=result["access_token"],
+            expires_in=result["expires_in"],
+            scope=result.get("scope", ""),
         )
 
     async def load_authorization_code(self, client_info: Any, authorization_code: str) -> Any | None:
-        return None
+        from mcp.server.auth.provider import AuthorizationCode
+        stored = self._auth_codes.get(authorization_code)
+        if not stored:
+            return None
+        if stored.expires_at < time.time():
+            self._auth_codes.pop(authorization_code, None)
+            return None
+        if stored.used:
+            self._auth_codes.pop(authorization_code, None)
+            return None
+        return AuthorizationCode(
+            code=stored.code,
+            scopes=stored.scopes,
+            expires_at=stored.expires_at,
+            client_id=stored.client_id,
+            code_challenge=stored.code_challenge,
+            redirect_uri=stored.redirect_uri,
+            redirect_uri_provided_explicitly=True,
+        )
 
     async def load_refresh_token(self, client_info: Any, refresh_token: str) -> Any | None:
-        return None
+        from mcp.server.auth.provider import RefreshToken
+        rt_hash = hash_token(refresh_token)
+        stored = self._tokens.get(rt_hash)
+        if not stored or stored.type != "refresh":
+            return None
+        if stored.expires_at < time.time():
+            self._tokens.pop(rt_hash, None)
+            return None
+        return RefreshToken(
+            token=stored.token,
+            client_id=stored.client_id,
+            scopes=stored.scopes,
+            expires_at=int(stored.expires_at) if stored.expires_at != float("inf") else None,
+        )
 
     async def revoke_token(self, token_str: str) -> None:
         token_hash = hash_token(token_str)

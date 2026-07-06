@@ -84,7 +84,14 @@ async def file_read(req: FileReadRequest, request: Request, _identity: AuthIdent
         raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
 
     _state.audit_logger.log_file_access(req.session_id, validated, "READ", request.client.host)
-    content = await _state.file_editor.read_file(req.session_id, validated)
+    try:
+        content = await _state.file_editor.read_file(req.session_id, validated)
+    except Exception as exc:
+        err_msg = str(exc)
+        logger.warning("File read failed: session=%s path=%s error=%s", req.session_id, validated, err_msg)
+        if "Cannot read" in err_msg:
+            raise HTTPException(status_code=404, detail=_err(404, err_msg))
+        raise HTTPException(status_code=500, detail=_err(500, f"File read failed: {err_msg}"))
     return FileReadResponse(path=validated, content=content)
 
 
@@ -149,7 +156,14 @@ async def file_raw(
         path = validate_path(path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
-    content = await _state.file_editor.read_file(session_id, path)
+    try:
+        content = await _state.file_editor.read_file(session_id, path)
+    except Exception as exc:
+        err_msg = str(exc)
+        logger.warning("File raw read failed: session=%s path=%s error=%s", session_id, path, err_msg)
+        if "Cannot read" in err_msg:
+            raise HTTPException(status_code=404, detail=_err(404, err_msg))
+        raise HTTPException(status_code=500, detail=_err(500, f"File read failed: {err_msg}"))
 
     if range_header and range_header.startswith("bytes="):
         try:
@@ -263,7 +277,14 @@ async def file_download(request: Request, session_id: str = Query(...), path: st
         path = validate_path(path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
-    content = await _state.file_editor.read_file(session_id, path)
+    try:
+        content = await _state.file_editor.read_file(session_id, path)
+    except Exception as exc:
+        err_msg = str(exc)
+        logger.warning("File download failed: session=%s path=%s error=%s", session_id, path, err_msg)
+        if "Cannot read" in err_msg:
+            raise HTTPException(status_code=404, detail=_err(404, err_msg))
+        raise HTTPException(status_code=500, detail=_err(500, f"File read failed: {err_msg}"))
     return Response(content=content, media_type="application/octet-stream")
 
 

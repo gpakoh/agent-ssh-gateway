@@ -266,7 +266,10 @@ def test_revoke_token(provider):
 
 def test_scope_validation():
     assert _parse_scopes("mcp:read mcp:project") == ["mcp:read", "mcp:project"]
-    assert _parse_scopes(None) == ["mcp:read", "mcp:project"]
-    assert _parse_scopes("") == ["mcp:read", "mcp:project"]
+    full = _parse_scopes(None)
+    assert "mcp:read" in full
+    assert "mcp:project" in full
+    assert "mcp:handoff" in full
+    assert _parse_scopes("") is _parse_scopes(None) or _parse_scopes("") == full
     with pytest.raises(ValueError, match="Unsupported scope"):
         _parse_scopes("mcp:invalid")
