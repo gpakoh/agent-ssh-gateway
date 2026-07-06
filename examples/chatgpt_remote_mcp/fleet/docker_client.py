@@ -7,6 +7,7 @@ All tools are read-only. Write/destructive commands have no implementation here.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import shlex
 
@@ -19,6 +20,23 @@ IMAGE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:/{-]{0,255}$")
 SERVICE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 COMPOSE_FILE_RE = re.compile(r"^[a-zA-Z0-9_/.-]{1,256}$")
 COMPOSE_PATH_TRAVERSAL_RE = re.compile(r"(?:^|/)\.\.(?:/|$)")
+
+REDACTED = "<redacted>"
+
+_SECRET_ENV_KEY_RE = re.compile(
+    r"(?i)^\s*("
+    r"\w*(?:PASSWORD|SECRET|TOKEN)"
+    r"|API[_-]?KEY|JWT|BEARER|AUTH|COOKIE|SESSION"
+    r"|PRIVATE[_-]?KEY|CREDENTIAL|ACCESS[_-]?KEY"
+    r"|REFRESH[_-]?TOKEN|CLIENT[_-]?SECRET|WEBHOOK[_-]?SECRET"
+    r")\s*="
+)
+
+_SECRET_DICT_KEY_RE = re.compile(
+    r"(?i)(TOKEN|SECRET|PASSWORD|PASS|API[_-]?KEY|JWT|BEARER|AUTH|COOKIE|SESSION|"
+    r"PRIVATE[_-]?KEY|CREDENTIAL|ACCESS[_-]?KEY|REFRESH[_-]?TOKEN|CLIENT[_-]?SECRET|"
+    r"WEBHOOK[_-]?SECRET|AUTHORIZATION)"
+)
 
 
 class DockerClient:
@@ -123,12 +141,49 @@ class DockerClient:
         self._validate_container_name(name)
         argv = [DOCKER_BIN, "inspect", name]
         result = await self._run(argv)
+        result = self._sanitize_inspect_output(result)
         if max_lines:
             lines = result.split("\n")
             if len(lines) > max_lines:
                 lines = lines[:max_lines]
                 result = "\n".join(lines) + f"\n[output truncated at {max_lines} lines]"
         return result
+
+    def _sanitize_inspect_output(self, raw: str) -> str:
+        """Redact secrets from docker inspect JSON output."""
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+        data = self._sanitize_value(data)
+        return json.dumps(data, indent=2, ensure_ascii=False)
+
+    def _sanitize_value(self, value: object) -> object:
+        """Recursively sanitize a JSON value, redacting secrets."""
+        if isinstance(value, str):
+            return self._sanitize_string(value)
+        if isinstance(value, dict):
+            return {
+                k: REDACTED if self._is_sensitive_key(k) else self._sanitize_value(v)
+                for k, v in value.items()
+            }
+        if isinstance(value, list):
+            return [self._sanitize_value(item) for item in value]
+        return value
+
+    def _sanitize_string(self, s: str) -> str:
+        """Redact secret-like values in a string.
+        Handles 'KEY=value' env format.
+        """
+        m = _SECRET_ENV_KEY_RE.match(s)
+        if m:
+            key_part = s[:m.end() - 1]
+            return f"{key_part}={REDACTED}"
+        return s
+
+    @staticmethod
+    def _is_sensitive_key(key: str) -> bool:
+        return bool(_SECRET_DICT_KEY_RE.search(key))
 
     async def logs(
         self, container: str, tail: int = 200,
