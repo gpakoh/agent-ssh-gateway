@@ -80,7 +80,10 @@ from examples.chatgpt_remote_mcp.fleet.context7_server import (
 )
 from examples.chatgpt_remote_mcp.fleet.docker_client import DockerClient
 from examples.chatgpt_remote_mcp.fleet.gitea_client import GiteaClient
-from examples.chatgpt_remote_mcp.fleet.github_client import GitHubClient
+from examples.chatgpt_remote_mcp.fleet.github_client import (
+    GitHubClient,
+    normalize_list_response,
+)
 from examples.chatgpt_remote_mcp.fleet.postgres_client import PostgresClient
 
 # OAuth provider and settings
@@ -1085,11 +1088,13 @@ async def github_list_branches(owner: str, repo: str, per_page: int = 30) -> dic
             error="GITHUB_TOKEN not configured",
         )
     async with GitHubClient(token) as client:
-        data = await client.list_branches(owner, repo, per_page=per_page)
+        data = normalize_list_response(
+            await client.list_branches(owner, repo, per_page=per_page),
+        )
     return text_result(
         tool="github_list_branches",
         title="GitHub branches",
-        text=f"Branches: {len(data)}",
+        text=f"Branches: {data['count']}",
         data=data,
     )
 
@@ -1105,9 +1110,11 @@ async def github_list_commits(
             tool="github_list_commits", title="GitHub commits", error="GITHUB_TOKEN not configured"
         )
     async with GitHubClient(token) as client:
-        data = await client.list_commits(owner, repo, sha=sha, per_page=per_page)
+        data = normalize_list_response(
+            await client.list_commits(owner, repo, sha=sha, per_page=per_page),
+        )
     return text_result(
-        tool="github_list_commits", title="GitHub commits", text=f"Commits: {len(data)}", data=data
+        tool="github_list_commits", title="GitHub commits", text=f"Commits: {data['count']}", data=data
     )
 
 
@@ -1137,9 +1144,11 @@ async def github_list_issues(
             tool="github_list_issues", title="GitHub issues", error="GITHUB_TOKEN not configured"
         )
     async with GitHubClient(token) as client:
-        data = await client.list_issues(owner, repo, state=state, per_page=per_page)
+        data = normalize_list_response(
+            await client.list_issues(owner, repo, state=state, per_page=per_page),
+        )
     return text_result(
-        tool="github_list_issues", title="GitHub issues", text=f"Issues: {len(data)}", data=data
+        tool="github_list_issues", title="GitHub issues", text=f"Issues: {data['count']}", data=data
     )
 
 
@@ -1171,9 +1180,11 @@ async def github_list_pull_requests(
             error="GITHUB_TOKEN not configured",
         )
     async with GitHubClient(token) as client:
-        data = await client.list_pull_requests(owner, repo, state=state, per_page=per_page)
+        data = normalize_list_response(
+            await client.list_pull_requests(owner, repo, state=state, per_page=per_page),
+        )
     return text_result(
-        tool="github_list_pull_requests", title="GitHub PRs", text=f"PRs: {len(data)}", data=data
+        tool="github_list_pull_requests", title="GitHub PRs", text=f"PRs: {data['count']}", data=data
     )
 
 

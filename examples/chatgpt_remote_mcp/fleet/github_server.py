@@ -14,7 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from .github_client import GitHubClient
+from .github_client import GitHubClient, normalize_list_response
 from .shared import extract_auth_token, get_fleet_env
 
 # ── Config ────────────────────────────────────────────────────────────
@@ -44,22 +44,24 @@ async def github_get_repo(owner: str, repo: str) -> dict[str, Any]:
 @mcp.tool()
 async def github_list_branches(
     owner: str, repo: str, per_page: int = 30,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """List branches in a repository. Returns branch names and commit SHAs."""
     async with _get_client() as client:
-        return await client.list_branches(owner, repo, per_page=per_page)
+        data = await client.list_branches(owner, repo, per_page=per_page)
+    return normalize_list_response(data)
 
 
 @mcp.tool()
 async def github_list_commits(
     owner: str, repo: str,
     sha: str | None = None, per_page: int = 30,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """List commits in a repository. Optionally filter by branch SHA."""
     async with _get_client() as client:
-        return await client.list_commits(
+        data = await client.list_commits(
             owner, repo, sha=sha, per_page=per_page,
         )
+    return normalize_list_response(data)
 
 
 @mcp.tool()
@@ -76,12 +78,13 @@ async def github_get_file(
 async def github_list_issues(
     owner: str, repo: str,
     state: str = "open", per_page: int = 30,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """List issues in a repository. State: open, closed, all."""
     async with _get_client() as client:
-        return await client.list_issues(
+        data = await client.list_issues(
             owner, repo, state=state, per_page=per_page,
         )
+    return normalize_list_response(data)
 
 
 @mcp.tool()
@@ -97,12 +100,13 @@ async def github_get_issue(
 async def github_list_pull_requests(
     owner: str, repo: str,
     state: str = "open", per_page: int = 30,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """List pull requests in a repository. State: open, closed, all."""
     async with _get_client() as client:
-        return await client.list_pull_requests(
+        data = await client.list_pull_requests(
             owner, repo, state=state, per_page=per_page,
         )
+    return normalize_list_response(data)
 
 
 @mcp.tool()
