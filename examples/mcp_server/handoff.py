@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from gateway_client import GatewayClient
+from gateway_client import GatewayClient, resolve_file_path
 from write_modes import assert_handoff_write_allowed
 
 AI_BRIDGE_DIR = ".ai-bridge"
@@ -54,8 +54,9 @@ def write_handoff_plan(
     """Write .ai-bridge/current-plan.md through the gateway file API."""
     assert_handoff_write_allowed()
     plan = build_handoff_plan(task=task, agent=agent, notes=notes)
+    resolved = resolve_file_path(CURRENT_PLAN)
     return client.write_file(
-        CURRENT_PLAN, plan, session_id=session_id, mode="overwrite"
+        resolved, plan, session_id=session_id, mode="overwrite"
     )
 
 
@@ -72,7 +73,8 @@ def read_handoff(
         "implementation_diff": IMPLEMENTATION_DIFF,
     }.items():
         try:
-            files[name] = client.read_file(path, session_id=session_id)
+            resolved = resolve_file_path(path)
+            files[name] = client.read_file(resolved, session_id=session_id)
         except Exception as exc:
             errors[name] = str(exc)
 
