@@ -7,7 +7,6 @@ Production deployment: **VPS nginx relay** with Cloudflare DNS proxy (orange clo
 ```text
 ChatGPT / Agent
   → https://mcp.nodsync.org/mcp
-  → Cloudflare DNS proxy (A record → 171.25.251.242)
   → VPS nginx (:443 TLS, :80 plain)
   → proxy_pass http://127.0.0.1:18788
   → autossh reverse tunnel (VPS:18788 ↔ home:8788)
@@ -64,37 +63,37 @@ python scripts/mcp_fleet_healthcheck.py --verbose
 ### VPS (nginx, port 80 + 443)
 
 - **Host**: `192.0.2.10` (Debian, same ISP as home)
-- **SSL**: Let's Encrypt, `/etc/letsencrypt/live/mcp.nodsync.org/`
-- **Nginx config**: `/etc/nginx/sites-enabled/mcp.nodsync.org`
+- **SSL**: Let's Encrypt (auto-renew), `/etc/letsencrypt/live/mcp.nodsync.org/`
+- **Nginx config**: `/etc/nginx/sites-available/mcp.nodsync.org` → symlink in `sites-enabled/`
 - **Upstream**: `http://127.0.0.1:18788` (SSH relay local listener)
+- **SSE settings**: `proxy_buffering off; proxy_cache off;` — required for Streamable HTTP transport
+- **http2**: Intentionally OFF — shares SSL listen socket with `AI-Docker.conf` (which has http2 disabled globally)
+- **Edit**: SSH → `cat /etc/nginx/sites-available/mcp.nodsync.org` → edit → `nginx -t && systemctl reload nginx`
 
 ### Cloudflare DNS
 
-- **Record**: `mcp.nodsync.org` A → `171.25.251.242` (orange cloud ON)
+- **Record**: `mcp.nodsync.org` A → `171.25.251.242`
+- **Proxy**: DNS only (grey cloud) — VPS serves Let's Encrypt TLS directly, no Cloudflare termination
 - **Zone**: `nodsync.org` (zone ID: `4821fc5084744fac025a2dbf42ef656d`)
-- **SSL mode**: Flexible (Cloudflare terminates TLS → plain HTTP to origin on :80)
 
-## TLS 525 Fix (critical)
+## Known Issues
 
-### Symptom
+### MCP server hang (home service)
 
-`https://mcp.nodsync.org/mcp` returns **error 525** (SSL handshake failure) through Cloudflare, but direct `openssl s_client` to origin `:443` succeeds (verify return:1).
+The `agent-ssh-gateway-mcp.service` can become unresponsive after several hours if stale SSE sessions accumulate. Symptoms: internal `127.0.0.1:8788` stops responding, all healthchecks fail or timeout.
 
-### Root cause
-
-nginx on VPS is compiled with **OpenSSL 3.x** which enables the post-quantum hybrid key exchange `X25519MLKEM768` (ML-KEM 768, a.k.a. Kyber-768). Cloudflare edge servers do not support this key exchange and fail the handshake.
-
-### Fix
-
-Add to nginx `server` block:
-
-```nginx
-ssl_ecdh_curve prime256v1:secp384r1;
+**Fix**:
+```bash
+systemctl restart agent-ssh-gateway-mcp.service
 ```
 
-This restricts the TLS key agreement to standard curves and removes the post-quantum hybrid from the handshake. Cloudflare edge negotiates `prime256v1` or `secp384r1` successfully.
+**Monitoring**: Scheduled restart in `/etc/cron.d/mcp-restart` or via systemd timer.
 
-**Never omit this directive** when proxying through Cloudflare — even if future OpenSSL versions fix the interop, the explicit curve list is defensive against regression.
+### Healtchcheck nginx route check
+
+The `mcp_fleet_healthcheck.py` used to do a `GET /mcp` for the nginx route check, which created an SSE session that never ended (causing a 10s timeout). Fixed in Session 148: now uses `POST` with a lightweight `initialize` JSON-RPC message instead.
+
+If a fleet MCP server returns HTTP 406 (Not Acceptable), ensure the healthcheck's `check_nginx_route` sends `Accept: application/json, text/event-stream` header.
 
 ## DNS History
 
