@@ -51,6 +51,7 @@ python scripts/mcp_fleet_healthcheck.py --verbose
 - **Service**: `agent-ssh-gateway-mcp.service` (port 8788)
 - **Env**: `/etc/agent-ssh-gateway-mcp.env` (chmod 600)
 - **Token**: `MCP_PUBLIC_TOKEN` in env file
+- **Auto-reconnect**: GatewayClient auto-creates a new SSH session on `SESSION_NOT_FOUND` (session expired after gateway/SSHD/Redis restart). Requires `GATEWAY_SSH_HOST`, `GATEWAY_SSH_USER` (or `USERNAME`), and `GATEWAY_SSH_PRIVATE_KEY` (inline) or `GATEWAY_SSH_KEY_PATH` (file path). See `.env.example`. Retries once; lock prevents concurrent reconnects.
 
 ### SSH Relay (VPS ↔ home)
 
