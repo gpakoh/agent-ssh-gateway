@@ -11,6 +11,39 @@ MAX_PER_PAGE = 50
 MAX_FILE_SIZE = 256 * 1024  # 256 KB
 REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
+
+def normalize_list_response(
+    value: Any,
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Wrap a bare list in a stable dict for MCP tool output.
+
+    MCP protocol expects tool results to be JSON objects (dicts), not bare arrays.
+    This helper normalises list data to ``{"items": [...], "count": N}``.
+
+    If *value* is already a dict with an ``items`` key, it is returned as-is
+    (with count ensured).  If it is a plain dict, it is returned unchanged.
+    Otherwise returns an empty result.
+    """
+    if isinstance(value, dict):
+        if "items" in value:
+            if "count" not in value:
+                value["count"] = len(value["items"])
+            if meta:
+                value.update(meta)
+            return value
+        if meta:
+            value.update(meta)
+        return value
+
+    if isinstance(value, list):
+        result: dict[str, Any] = {"items": value, "count": len(value)}
+        if meta:
+            result.update(meta)
+        return result
+
+    return {"items": [], "count": 0, "error": "unexpected response type"}
+
 ALLOWED_ENDPOINTS = frozenset({
     "/repos/{owner}/{repo}",
     "/repos/{owner}/{repo}/branches",
