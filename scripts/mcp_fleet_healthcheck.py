@@ -18,6 +18,7 @@ import ssl
 import subprocess
 import sys
 from dataclasses import dataclass
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 RED = "\033[91m"
@@ -208,25 +209,49 @@ def check_file_security(env_file: str) -> CheckResult:
 
 
 def check_nginx_route(url: str, token: str) -> CheckResult:
+    """Verify nginx proxy is alive using a lightweight POST (not SSE GET).
+
+    A GET to /mcp creates an SSE session that never ends (timeout).
+    We use a POST with a minimal JSON-RPC ping instead.
+    """
     if not token:
         return fail("no token — skipping nginx route check")
     try:
-        req = Request(
-            url,
-            headers={
-                "Accept": "application/json, text/event-stream",
-                "Authorization": f"Bearer {token}",
+        parsed = urlparse(url)
+        path_qs = f"{parsed.path}?{parsed.query}" if parsed.query else parsed.path
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "Authorization": f"Bearer {token}",
+        }
+
+        body = json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "healthcheck", "version": "1.0"},
             },
-            method="GET",
-        )
-        resp = urlopen(req, timeout=10)
-        code = resp.status
-        if code in (200, 405, 400, 401):
-            return ok("route OK")
-        elif code == 302:
-            return fail("nginx returned 302 redirect — location mismatch")
-        else:
-            return fail(f"unexpected HTTP {code}")
+        })
+
+        host = parsed.hostname
+        port = parsed.port or 443
+        ctx = ssl.create_default_context()
+        conn = http.client.HTTPSConnection(host, port, context=ctx, timeout=10)
+        try:
+            conn.request("POST", path_qs, body, headers)
+            resp = conn.getresponse()
+            code = resp.status
+            resp.close()
+
+            if code in (200, 202, 400, 401):
+                return ok("route OK")
+            elif code == 302:
+                return fail("nginx returned 302 redirect — location mismatch")
+            else:
+                return fail(f"unexpected HTTP {code}")
+        finally:
+            conn.close()
     except Exception as e:
         err = str(e)
         if "HTTP Error" in err:
