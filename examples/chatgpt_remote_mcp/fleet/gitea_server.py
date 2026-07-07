@@ -15,7 +15,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from .gitea_client import GiteaClient
-from .shared import extract_auth_token, get_fleet_env
+from .shared import extract_auth_token, get_fleet_env, normalize_list_response
 
 INTERNAL_PORT = 8782
 
@@ -44,10 +44,12 @@ async def gitea_list_branches(
     owner: str,
     repo: str,
     limit: int = 30,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """List branches in a repository. Returns branch names and commit SHAs."""
     async with _get_client() as client:
-        return await client.list_branches(owner, repo, limit=limit)
+        return normalize_list_response(
+            await client.list_branches(owner, repo, limit=limit),
+        )
 
 
 @mcp.tool()
@@ -56,10 +58,12 @@ async def gitea_list_commits(
     repo: str,
     sha: str | None = None,
     limit: int = 30,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """List commits in a repository. Optionally filter by branch SHA."""
     async with _get_client() as client:
-        return await client.list_commits(owner, repo, sha=sha, limit=limit)
+        return normalize_list_response(
+            await client.list_commits(owner, repo, sha=sha, limit=limit),
+        )
 
 
 @mcp.tool()
@@ -80,14 +84,11 @@ async def gitea_list_issues(
     repo: str,
     state: str = "open",
     limit: int = 30,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """List issues in a repository. State: open, closed, all."""
     async with _get_client() as client:
-        return await client.list_issues(
-            owner,
-            repo,
-            state=state,
-            limit=limit,
+        return normalize_list_response(
+            await client.list_issues(owner, repo, state=state, limit=limit),
         )
 
 
@@ -108,14 +109,11 @@ async def gitea_list_pull_requests(
     repo: str,
     state: str = "open",
     limit: int = 30,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """List pull requests in a repository. State: open, closed, all."""
     async with _get_client() as client:
-        return await client.list_pull_requests(
-            owner,
-            repo,
-            state=state,
-            limit=limit,
+        return normalize_list_response(
+            await client.list_pull_requests(owner, repo, state=state, limit=limit),
         )
 
 
