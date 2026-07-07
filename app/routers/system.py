@@ -37,11 +37,12 @@ router = APIRouter()
 async def health_check():
     """Health check endpoint."""
     redis_ok = _state.redis_queue is not None and _state.redis_queue._redis is not None
-    pg_ok = _state.session_store is not None
+    persistent_sessions_ok = _state.session_store is not None
     return HealthResponse(
         status="ok" if redis_ok or not settings.redis_url else "degraded",
         redis=redis_ok,
-        postgres=pg_ok,
+        persistent_sessions=persistent_sessions_ok,
+        postgres=persistent_sessions_ok,  # deprecated alias — use persistent_sessions
         # Redis/Postgres are optional integrations for this alpha release,
         # so the service can be ready even when they are not configured.
         ready=True,
