@@ -214,6 +214,7 @@ class CapabilitiesResponse(BaseModel):
     """API capabilities / environment information."""
 
     version: str
+    version_source: str
     auth_mode: str
     session_timeout: int
     cleanup_interval: int

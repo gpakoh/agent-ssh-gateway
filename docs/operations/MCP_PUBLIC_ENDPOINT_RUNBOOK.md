@@ -118,3 +118,28 @@ https://xloud-gpt-mcp-bridge-7f4c2a.loca.lt/mcp
 
 Change the endpoint URL in ChatGPT Developer Mode → MCP → edit URL.
 No changes to home services needed — the MCP gateway runs independently of the public relay.
+
+## Version Resolution
+
+Production APP_VERSION is determined by `app/version.py`:
+
+1. **Env `APP_VERSION`** — deployment override (optional)
+2. **`FALLBACK_VERSION`** — hardcoded in `app/version.py`, bumped in sync with `pyproject.toml` on each release
+3. `importlib.metadata` — fallback only (pip-installed package without source)
+
+The `CapabilitiesResponse` endpoint (`/api/capabilities`) returns both `version` and `version_source` fields for diagnostics.
+
+### Verify After Release
+
+```bash
+# Check version via local gateway
+curl -s https://ssh.xloud.ru/api/capabilities -H "X-API-Key: $API_KEY" | jq .version
+
+# Check version_source
+curl -s https://ssh.xloud.ru/api/capabilities -H "X-API-Key: $API_KEY" | jq .version_source
+
+# If version shows old pip-installed value, restart service
+sudo systemctl restart agent-ssh-gateway-mcp.service
+```
+
+There is no `pip install` step needed after a release — the service runs from the source worktree.
