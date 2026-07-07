@@ -69,6 +69,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "gateway_self_test": ["mcp:read"],
     # project — mcp:project
     "gateway_project_working_directory": ["mcp:project"],
+    "gateway_project_info": ["mcp:read", "mcp:project"],
     "gateway_project_git_status": ["mcp:project"],
     "gateway_project_recent_commits": ["mcp:project"],
     "gateway_project_git_diff_stat": ["mcp:project"],
@@ -79,7 +80,9 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "gateway_project_read_file": ["mcp:project"],
     "gateway_project_search_text": ["mcp:project"],
     "gateway_project_find_files": ["mcp:project"],
+    "gateway_project_list_files": ["mcp:read", "mcp:project"],
     "gateway_project_tree": ["mcp:project"],
+    "gateway_project_list_tree": ["mcp:read", "mcp:project"],
     "gateway_project_git_diff": ["mcp:project"],
     "gateway_project_git_diff_cached": ["mcp:project"],
     "gateway_project_show_file_diff": ["mcp:project"],

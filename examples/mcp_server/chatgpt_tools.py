@@ -6,10 +6,29 @@ by wrapping fixed allowlisted commands in semantic functions.
 
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
 from typing import Any
 
 from gateway_client import GatewayClient
+
+
+def _project_root() -> Path:
+    root = os.environ.get("MCP_GATEWAY_PROJECT_ROOT", "").strip().rstrip("/")
+    if not root:
+        raise ValueError("MCP_GATEWAY_PROJECT_ROOT is not set")
+    return Path(root)
+
+
+def _validate_project(project: str) -> str:
+    if not project:
+        raise ValueError("Project name must not be empty")
+    if not re.match(r"^[A-Za-z0-9._\-\/]+$", project):
+        raise ValueError(f"Invalid project name: {project!r}")
+    if ".." in project.split("/"):
+        raise ValueError(f"Path traversal blocked: {project!r}")
+    return project.strip("/")
 
 # ── Safety helpers ──────────────────────────────────────────────
 
@@ -143,24 +162,98 @@ def project_find_files(
     return run_project_command(client, project, cmd)
 
 
+def project_list_files(client: GatewayClient, project: str, pattern: str) -> dict[str, Any]:
+    """Find files by glob pattern using Python pathlib — no shell execution."""
+    _validate_project(project)
+    if not pattern or ".." in pattern:
+        raise ValueError(f"Invalid pattern: {pattern!r}")
+
+    project_dir = _project_root() / _validate_project(project)
+    exclude_dirs = {".git", "__pycache__", ".venv", "node_modules", ".mypy_cache", ".ruff_cache", ".pytest_cache"}
+
+    files: list[str] = []
+    for p in project_dir.rglob(pattern):
+        if any(part in exclude_dirs for part in p.relative_to(project_dir).parts):
+            continue
+        if p.is_file():
+            files.append(str(p.relative_to(project_dir)))
+
+    files.sort()
+    files = files[:200]
+
+    return {
+        "project": project,
+        "pattern": pattern,
+        "root": str(project_dir),
+        "files": files,
+        "count": len(files),
+    }
+
+
+_EXCLUDE_DIRS = frozenset({
+    ".git", "__pycache__", ".venv", "node_modules",
+    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".benchmarks",
+})
+
+
+def project_list_tree(client: GatewayClient, project: str, depth: int = 2) -> dict[str, Any]:
+    """List project directory tree using Python pathlib — no shell execution."""
+    project = _validate_project(project)
+    depth = min(max(depth, 1), 5)
+    project_dir = _project_root() / project
+
+    entries: list[str] = []
+    for p in sorted(project_dir.rglob("*")):
+        rel = p.relative_to(project_dir)
+        if any(part in _EXCLUDE_DIRS for part in rel.parts):
+            continue
+        if len(rel.parts) > depth:
+            continue
+        suffix = "/" if p.is_dir() else ""
+        entries.append(f"{rel}{suffix}")
+
+    return {
+        "project": project,
+        "root": str(project_dir),
+        "depth": depth,
+        "entries": entries,
+        "count": len(entries),
+    }
+
+
 def project_tree(
     client: GatewayClient,
     project: str,
     depth: int = 2,
     glob: str | None = None,
 ) -> dict[str, Any]:
+    """List project directory tree using Python pathlib — no shell execution."""
+    if glob and not _ALLOWED_PATH_RE.match(glob):
+        raise ValueError(f"invalid glob: {glob!r}")
+    project = _validate_project(project)
     depth = min(max(depth, 1), 5)
-    cmd = (
-        f"find . -not -path '*/.git/*' -not -path '*/__pycache__/*'"
-        f" -not -path '*/.venv/*' -not -path '*/node_modules/*'"
-        f" -maxdepth {depth}"
-    )
-    if glob:
-        if not _ALLOWED_PATH_RE.match(glob):
-            raise ValueError(f"invalid glob: {glob!r}")
-        cmd += f" -name '{glob}'"
-    cmd += " | sort"
-    return run_project_command(client, project, cmd)
+    project_dir = _project_root() / project
+
+    entries: list[str] = []
+    for p in sorted(project_dir.rglob("*")):
+        rel = p.relative_to(project_dir)
+        if any(part in _EXCLUDE_DIRS for part in rel.parts):
+            continue
+        if len(rel.parts) > depth:
+            continue
+        suffix = "/" if p.is_dir() else ""
+        name = str(rel)
+        if glob and not p.match(glob):
+            continue
+        entries.append(f"{name}{suffix}")
+
+    return {
+        "project": project,
+        "root": str(project_dir),
+        "depth": depth,
+        "entries": entries,
+        "count": len(entries),
+    }
 
 
 # ── Project git diff tools ──────────────────────────────────────
@@ -316,6 +409,20 @@ def run_project_command(
 
 def project_working_directory(client: GatewayClient, project: str) -> dict[str, Any]:
     return run_project_command(client, project, "pwd")
+
+
+def project_info(client: GatewayClient, project: str) -> dict[str, Any]:
+    """Resolve project path metadata — no shell execution."""
+    project = _validate_project(project)
+    resolved = _project_root() / project
+    return {
+        "project": project,
+        "root": str(_project_root()),
+        "resolved_path": str(resolved),
+        "exists": resolved.exists(),
+        "is_dir": resolved.is_dir(),
+        "is_git_repo": (resolved / ".git").exists(),
+    }
 
 
 def project_git_status(client: GatewayClient, project: str) -> dict[str, Any]:

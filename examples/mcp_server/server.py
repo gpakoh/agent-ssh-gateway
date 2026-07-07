@@ -49,6 +49,9 @@ from chatgpt_tools import (
     project_show_changes,
     project_show_file_diff,
     project_show_handoff_status,
+    project_info,
+    project_list_files,
+    project_list_tree,
     project_tree,
     project_working_directory,
     project_write_handoff_plan,
@@ -429,11 +432,17 @@ def gateway_read_file(path: str, session_id: str | None = None) -> dict[str, Any
 
 
 @register_tool("gateway_repo_status")
-def gateway_repo_status(session_id: str | None = None) -> dict[str, Any]:
-    """Collect basic repository status using read-only commands."""
+def gateway_repo_status(session_id: str | None = None, project: str | None = None) -> dict[str, Any]:
+    """Collect basic repository status using read-only commands.
+
+    Args:
+        session_id: Optional existing session ID. A new one is created if omitted.
+        project: Project subdirectory under MCP_GATEWAY_PROJECT_ROOT. Required when
+            the SSH session working directory is not a git repository.
+    """
 
     def _status() -> dict[str, Any]:
-        return client.repo_status(session_id=session_id)
+        return client.repo_status(session_id=session_id, project=project)
 
     return run_tool(
         tool="gateway_repo_status",
@@ -539,6 +548,19 @@ def gateway_project_working_directory(project: str) -> dict[str, Any]:
         title="Project working directory",
         fn=lambda: project_working_directory(client, project),
         success_text="Collected project working directory.",
+    )
+
+
+@register_tool("gateway_project_info")
+def gateway_project_info(project: str) -> dict[str, Any]:
+    """Return resolved project metadata for a configured project name.
+    Read-only. Does not execute user-provided shell commands.
+    """
+    return run_tool(
+        tool="gateway_project_info",
+        title="Project info",
+        fn=lambda: project_info(client, project),
+        success_text="Resolved project info.",
     )
 
 
@@ -657,6 +679,17 @@ def gateway_project_find_files(project: str, pattern: str) -> dict[str, Any]:
     )
 
 
+@register_tool("gateway_project_list_files")
+def gateway_project_list_files(project: str, pattern: str) -> dict[str, Any]:
+    """List files matching a glob pattern using Python pathlib — no shell execution."""
+    return run_tool(
+        tool="gateway_project_list_files",
+        title="Project list files",
+        fn=lambda: project_list_files(client, project, pattern),
+        success_text="Listed project files.",
+    )
+
+
 @register_tool("gateway_project_tree")
 def gateway_project_tree(project: str, depth: int = 2, glob: str | None = None) -> dict[str, Any]:
     """List project directory tree up to a given depth."""
@@ -664,6 +697,17 @@ def gateway_project_tree(project: str, depth: int = 2, glob: str | None = None) 
         tool="gateway_project_tree",
         title="Project tree",
         fn=lambda: project_tree(client, project, depth=depth, glob=glob),
+        success_text="Listed project tree.",
+    )
+
+
+@register_tool("gateway_project_list_tree")
+def gateway_project_list_tree(project: str, depth: int = 2) -> dict[str, Any]:
+    """List project directory tree using Python pathlib — no shell execution."""
+    return run_tool(
+        tool="gateway_project_list_tree",
+        title="Project list tree",
+        fn=lambda: project_list_tree(client, project, depth=depth),
         success_text="Listed project tree.",
     )
 
