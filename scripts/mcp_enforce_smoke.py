@@ -22,6 +22,7 @@ from http.client import HTTPResponse
 ENV_FILE = "/etc/agent-ssh-gateway-mcp.env"
 GATEWAY_URL = "http://127.0.0.1:8788/mcp"
 
+
 def _read_env_val(key: str) -> str:
     """Read a value from the env file."""
     if not os.path.exists(ENV_FILE):
@@ -36,11 +37,11 @@ HEALTH_TOKEN = _read_env_val("MCP_HEALTHCHECK_BEARER_TOKEN")
 
 # (profile_name, allowed_tools, denied_tools)
 PROFILE_CHECKS: list[tuple[str, list[str], list[str]]] = [
-    ("viewer",        ["gateway_health"],          ["docker_ps"]),
-    ("operator",      ["gateway_health"],          ["docker_ps"]),
-    ("agent-runner",  ["gateway_health"],          ["docker_ps"]),
-    ("infra",         ["gateway_health", "docker_ps"], []),
-    ("full",          ["gateway_health", "docker_ps"], []),
+    ("viewer", ["gateway_health"], ["docker_ps"]),
+    ("operator", ["gateway_health"], ["docker_ps"]),
+    ("agent-runner", ["gateway_health"], ["docker_ps"]),
+    ("infra", ["gateway_health", "docker_ps"], []),
+    ("full", ["gateway_health", "docker_ps"], []),
 ]
 
 PASS = 0
@@ -76,12 +77,14 @@ def _env_remove(key: str) -> None:
 def _restart() -> None:
     subprocess.run(
         ["systemctl", "restart", "agent-ssh-gateway-mcp.service"],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     time.sleep(3)
     r = subprocess.run(
         ["systemctl", "is-active", "agent-ssh-gateway-mcp.service"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if r.stdout.strip() != "active":
         print("  FATAL: service not active")
@@ -89,15 +92,21 @@ def _restart() -> None:
 
 
 def _mcp_init(token: str) -> str | None:
-    body = json.dumps({
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-03-26", "capabilities": {},
-            "clientInfo": {"name": "enforce-smoke", "version": "1.0"},
-        },
-    }).encode()
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "enforce-smoke", "version": "1.0"},
+            },
+        }
+    ).encode()
     req = urllib.request.Request(
-        GATEWAY_URL, data=body,
+        GATEWAY_URL,
+        data=body,
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -115,10 +124,14 @@ def _mcp_init(token: str) -> str | None:
 
 
 def _call_tool(token: str, sid: str | None, tool: str) -> int:
-    body = json.dumps({
-        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": {"name": tool, "arguments": {}},
-    }).encode()
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": {}},
+        }
+    ).encode()
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -189,9 +202,14 @@ def _check_tools_list(token: str) -> None:
         FAIL += 1
         return
 
-    body = json.dumps({
-        "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {},
-    }).encode()
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/list",
+            "params": {},
+        }
+    ).encode()
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -226,10 +244,10 @@ def main():
     tmp_token_file = f"/tmp/mcp-enforce-smoke-{ts}.json"
 
     tokens = {
-        f"smoke_viewer_{ts}":      "viewer",
-        f"smoke_operator_{ts}":    "operator",
+        f"smoke_viewer_{ts}": "viewer",
+        f"smoke_operator_{ts}": "operator",
         f"smoke_agent_runner_{ts}": "agent-runner",
-        f"smoke_infra_{ts}":       "infra",
+        f"smoke_infra_{ts}": "infra",
     }
 
     print("=== MCP Scope Enforcement Smoke ===")
@@ -270,9 +288,9 @@ def main():
     _cleanup_temp_file(tmp_token_file)
     _restart()
 
-    print(f"\n{'='*50}")
-    print(f"  {PASS} passed, {FAIL} failed (of {PASS+FAIL})")
-    print(f"{'='*50}")
+    print(f"\n{'=' * 50}")
+    print(f"  {PASS} passed, {FAIL} failed (of {PASS + FAIL})")
+    print(f"{'=' * 50}")
     if FAIL:
         sys.exit(1)
 

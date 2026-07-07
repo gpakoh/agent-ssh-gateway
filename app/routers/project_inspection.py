@@ -21,7 +21,9 @@ router = APIRouter()
 
 
 @router.post("/api/analytics", tags=["code"], response_model=ProjectAnalyticsResponse)
-async def run_analytics(req: ProjectAnalyticsRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def run_analytics(
+    req: ProjectAnalyticsRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Analyze project and return metrics."""
     metrics_data = await _state.analytics.analyze_project(
         session_id=req.session_id,
@@ -39,7 +41,9 @@ async def run_analytics(req: ProjectAnalyticsRequest, _identity: AuthIdentity = 
 
 
 @router.post("/api/tree", tags=["files"], response_model=FileTreeResponse)
-async def get_file_tree_v2(req: FileTreeRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def get_file_tree_v2(
+    req: FileTreeRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Get directory tree structure."""
     tree = await _state.file_tree.get_tree(
         session_id=req.session_id,

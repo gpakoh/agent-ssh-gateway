@@ -28,11 +28,17 @@ router = APIRouter(tags=["jobs"])
 
 @router.post("/api/jobs/run", response_model=JobRunResponse)
 @rate_limit_mutation(20, "minute")
-async def jobs_run(req: JobRunRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("jobs:run"))):
+async def jobs_run(
+    req: JobRunRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("jobs:run")),
+):
     """Start a background job on an SSH session."""
     session = await _state.manager.get_session(req.session_id)
     if not session:
-        raise HTTPException(status_code=404, detail=_err(404, f"Session {req.session_id} not found"))
+        raise HTTPException(
+            status_code=404, detail=_err(404, f"Session {req.session_id} not found")
+        )
     job_id = await _state.job_manager.create_job(
         session_id=req.session_id,
         command=req.command,
@@ -79,7 +85,9 @@ async def jobs_queue_stats(_identity: AuthIdentity = Depends(require_scope("jobs
 
 
 @router.get("/api/jobs/queue/dead")
-async def jobs_dead_letter(limit: int = 100, _identity: AuthIdentity = Depends(require_scope("jobs:read"))):
+async def jobs_dead_letter(
+    limit: int = 100, _identity: AuthIdentity = Depends(require_scope("jobs:read"))
+):
     """Get dead letter queue jobs."""
     if not _state.redis_queue or not _state.redis_queue._redis:
         return {"error": "Redis not available"}
@@ -90,7 +98,11 @@ async def jobs_dead_letter(limit: int = 100, _identity: AuthIdentity = Depends(r
 
 @router.post("/api/bulk/execute", response_model=BulkExecuteResponse)
 @rate_limit_mutation(10, "minute")
-async def bulk_execute(req: BulkExecuteRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("jobs:run"))):
+async def bulk_execute(
+    req: BulkExecuteRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("jobs:run")),
+):
     """Execute multiple commands concurrently."""
     start_time = time.time()
     results = await _state.bulk_ops.execute_batch_commands(
@@ -112,15 +124,19 @@ async def bulk_execute(req: BulkExecuteRequest, request: Request, _identity: Aut
         else:
             failed += 1
 
-        response_results.append(BulkExecuteResult(
-            command=result.get("item", ""),
-            success=is_success,
-            stdout=result.get("result", {}).get("stdout", "") if is_success else "",
-            stderr=result.get("result", {}).get("stderr", "") if is_success else result.get("error", ""),
-            exit_code=result.get("result", {}).get("exit_code", -1) if is_success else -1,
-            duration=result.get("result", {}).get("duration", 0.0) if is_success else 0.0,
-            error=result.get("error") if not is_success else None,
-        ))
+        response_results.append(
+            BulkExecuteResult(
+                command=result.get("item", ""),
+                success=is_success,
+                stdout=result.get("result", {}).get("stdout", "") if is_success else "",
+                stderr=result.get("result", {}).get("stderr", "")
+                if is_success
+                else result.get("error", ""),
+                exit_code=result.get("result", {}).get("exit_code", -1) if is_success else -1,
+                duration=result.get("result", {}).get("duration", 0.0) if is_success else 0.0,
+                error=result.get("error") if not is_success else None,
+            )
+        )
 
     return BulkExecuteResponse(
         results=response_results,
@@ -186,10 +202,18 @@ async def jobs_stream(
 
             # Send Buffered Output If Job Already Completed
             if job.stdout:
-                data = redact_secrets(job.stdout) if should_redact_command_output(redact_output) else job.stdout
+                data = (
+                    redact_secrets(job.stdout)
+                    if should_redact_command_output(redact_output)
+                    else job.stdout
+                )
                 yield f"data: {json.dumps({'type': 'stdout', 'data': data})}\n\n"
             if job.stderr:
-                data = redact_secrets(job.stderr) if should_redact_command_output(redact_output) else job.stderr
+                data = (
+                    redact_secrets(job.stderr)
+                    if should_redact_command_output(redact_output)
+                    else job.stderr
+                )
                 yield f"data: {json.dumps({'type': 'stderr', 'data': data})}\n\n"
 
             # Stream New Events
@@ -199,7 +223,11 @@ async def jobs_stream(
                     break
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=1.0)
-                    if should_redact_command_output(redact_output) and event.get("type") in ("stdout", "stderr") and isinstance(event.get("data"), str):
+                    if (
+                        should_redact_command_output(redact_output)
+                        and event.get("type") in ("stdout", "stderr")
+                        and isinstance(event.get("data"), str)
+                    ):
                         event["data"] = redact_secrets(event["data"])
                     yield f"data: {json.dumps(event)}\n\n"
                 except TimeoutError:

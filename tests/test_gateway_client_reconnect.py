@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from unittest.mock import ANY, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -14,7 +14,7 @@ MCP_SERVER_DIR = EXAMPLES_DIR / "mcp_server"
 sys.path.insert(0, str(MCP_SERVER_DIR))
 sys.path.insert(0, str(EXAMPLES_DIR.parent))
 
-from gateway_client import GatewayClient, GatewayClientError
+from gateway_client import GatewayClient, GatewayClientError  # noqa: E402
 
 _BASE_ENV = {
     "GATEWAY_BASE_URL": "http://gateway:8085",
@@ -125,9 +125,7 @@ class TestSessionHealthReconnect:
             mock_get.return_value = {"status": "ok"}
             result = client.session_health()
         assert result == {"status": "ok"}
-        mock_get.assert_called_once_with(
-            "/api/ssh/session/test-session-1/health"
-        )
+        mock_get.assert_called_once_with("/api/ssh/session/test-session-1/health")
 
     def test_reconnects_on_session_not_found(self):
         client = _client()
@@ -137,9 +135,7 @@ class TestSessionHealthReconnect:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise GatewayClientError(
-                    "SESSION_NOT_FOUND\nhint: Create a session first"
-                )
+                raise GatewayClientError("SESSION_NOT_FOUND\nhint: Create a session first")
             return {"status": "ok"}
 
         with patch.object(client, "_get") as mock_get:
@@ -158,16 +154,12 @@ class TestSessionHealthReconnect:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise GatewayClientError(
-                    "SESSION_NOT_FOUND\nhint: Create a session first"
-                )
+                raise GatewayClientError("SESSION_NOT_FOUND\nhint: Create a session first")
             return {"status": "ok"}
 
         with patch.object(client, "_get") as mock_get:
             mock_get.side_effect = _get_side_effect
-            client._reconnect_session = lambda: setattr(
-                client, "session_id", "reconnected-session"
-            )
+            client._reconnect_session = lambda: setattr(client, "session_id", "reconnected-session")
             client.session_health()
         mock_get.assert_any_call("/api/ssh/session/reconnected-session/health")
 
@@ -178,9 +170,7 @@ class TestSessionHealthReconnect:
                 "SESSION_NOT_FOUND\nhint: Create a session first"
             )
             with patch.object(client, "_reconnect_session") as mock_reconnect:
-                mock_reconnect.side_effect = GatewayClientError(
-                    "auto-reconnect failed: 403"
-                )
+                mock_reconnect.side_effect = GatewayClientError("auto-reconnect failed: 403")
                 with pytest.raises(GatewayClientError, match="auto-reconnect failed"):
                     client.session_health()
         mock_reconnect.assert_called_once()
@@ -218,9 +208,7 @@ class TestExecuteRestrictedReconnect:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise GatewayClientError(
-                    "SESSION_NOT_FOUND\nhint: Create a session first"
-                )
+                raise GatewayClientError("SESSION_NOT_FOUND\nhint: Create a session first")
             return {"job_id": "job-1"}
 
         with patch.object(client, "_post") as mock_post:
@@ -244,9 +232,7 @@ class TestExecuteProjectCommandReconnect:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise GatewayClientError(
-                    "SESSION_NOT_FOUND\nhint: Create a session first"
-                )
+                raise GatewayClientError("SESSION_NOT_FOUND\nhint: Create a session first")
             return {"job_id": "job-1"}
 
         with patch.object(client, "_post") as mock_post:
@@ -274,9 +260,7 @@ class TestFileReconnect:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise GatewayClientError(
-                    "SESSION_NOT_FOUND\nhint: Create a session first"
-                )
+                raise GatewayClientError("SESSION_NOT_FOUND\nhint: Create a session first")
             return {"content": "file content"}
 
         with patch.object(client, "_post") as mock_post:
@@ -294,9 +278,7 @@ class TestFileReconnect:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise GatewayClientError(
-                    "SESSION_NOT_FOUND\nhint: Create a session first"
-                )
+                raise GatewayClientError("SESSION_NOT_FOUND\nhint: Create a session first")
             return {"status": "written"}
 
         with patch.object(client, "_post") as mock_post:
@@ -353,9 +335,7 @@ class TestReconnectThreadSafety:
             reconnect_calls.append(1)
 
         client._reconnect_session = counting_reconnect
-        session_not_found = GatewayClientError(
-            "SESSION_NOT_FOUND\nhint: Create a session first"
-        )
+        session_not_found = GatewayClientError("SESSION_NOT_FOUND\nhint: Create a session first")
 
         with patch.object(client, "_post") as mock_post:
             mock_post.side_effect = session_not_found

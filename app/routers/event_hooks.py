@@ -37,7 +37,9 @@ async def list_event_hooks(_identity: AuthIdentity = Depends(require_master_key)
 
 
 @router.post("/api/event-hooks", response_model=EventHookResponse, status_code=201)
-async def create_event_hook(body: EventHookCreate, _identity: AuthIdentity = Depends(require_master_key)):
+async def create_event_hook(
+    body: EventHookCreate, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Register a new event hook."""
     store = _state.event_hook_store
     if not store:
@@ -58,12 +60,16 @@ async def create_event_hook(body: EventHookCreate, _identity: AuthIdentity = Dep
         try:
             headers_encrypted = _state.secret_manager.encrypt(json.dumps(body.headers))
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=_err(500, f"Failed to encrypt headers: {exc}")) from exc
+            raise HTTPException(
+                status_code=500, detail=_err(500, f"Failed to encrypt headers: {exc}")
+            ) from exc
     if body.secret and _state.secret_manager:
         try:
             secret_encrypted = _state.secret_manager.encrypt(body.secret)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=_err(500, f"Failed to encrypt secret: {exc}")) from exc
+            raise HTTPException(
+                status_code=500, detail=_err(500, f"Failed to encrypt secret: {exc}")
+            ) from exc
 
     hook = await store.create(
         url=url_str,
@@ -88,7 +94,9 @@ async def get_event_hook(hook_id: str, _identity: AuthIdentity = Depends(require
 
 
 @router.patch("/api/event-hooks/{hook_id}", response_model=EventHookResponse)
-async def update_event_hook(hook_id: str, body: EventHookUpdate, _identity: AuthIdentity = Depends(require_master_key)):
+async def update_event_hook(
+    hook_id: str, body: EventHookUpdate, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Update an event hook (partial update)."""
     store = _state.event_hook_store
     if not store:
@@ -112,7 +120,9 @@ async def update_event_hook(hook_id: str, body: EventHookUpdate, _identity: Auth
             try:
                 headers_encrypted = _state.secret_manager.encrypt(json.dumps(body.headers))
             except Exception as exc:
-                raise HTTPException(status_code=500, detail=_err(500, f"Failed to encrypt headers: {exc}")) from exc
+                raise HTTPException(
+                    status_code=500, detail=_err(500, f"Failed to encrypt headers: {exc}")
+                ) from exc
 
     secret_encrypted = None
     if body.secret is not None:
@@ -120,7 +130,9 @@ async def update_event_hook(hook_id: str, body: EventHookUpdate, _identity: Auth
             try:
                 secret_encrypted = _state.secret_manager.encrypt(body.secret)
             except Exception as exc:
-                raise HTTPException(status_code=500, detail=_err(500, f"Failed to encrypt secret: {exc}")) from exc
+                raise HTTPException(
+                    status_code=500, detail=_err(500, f"Failed to encrypt secret: {exc}")
+                ) from exc
 
     updated = await store.update(
         hook_id,

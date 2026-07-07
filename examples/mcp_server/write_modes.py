@@ -24,9 +24,7 @@ def get_write_mode() -> WriteMode:
     raw = os.environ.get("MCP_GATEWAY_WRITE_MODE", DEFAULT_WRITE_MODE).strip().lower()
     if raw not in ALLOWED_WRITE_MODES:
         allowed = ", ".join(sorted(ALLOWED_WRITE_MODES))
-        raise WriteModeError(
-            f"Invalid MCP_GATEWAY_WRITE_MODE={raw!r}; expected one of: {allowed}"
-        )
+        raise WriteModeError(f"Invalid MCP_GATEWAY_WRITE_MODE={raw!r}; expected one of: {allowed}")
     return cast(WriteMode, raw)
 
 

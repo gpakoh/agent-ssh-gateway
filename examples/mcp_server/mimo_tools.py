@@ -100,8 +100,8 @@ def _build_mimo_script(
         "",
         "# Guard 6: canonical realpath variables",
         "PROJECT_REAL=$(realpath .)",
-        "WORKTREE_REAL=$(realpath \"$WORKTREE\")",
-        "WORKTREE_ROOT_REAL=$(realpath \"$MCP_GATEWAY_WORKTREE_ROOT\")",
+        'WORKTREE_REAL=$(realpath "$WORKTREE")',
+        'WORKTREE_ROOT_REAL=$(realpath "$MCP_GATEWAY_WORKTREE_ROOT")',
         "",
         "# Guard 7: worktree != project root",
         'if [ "$WORKTREE_REAL" = "$PROJECT_REAL" ]; then',
@@ -154,10 +154,10 @@ def _build_mimo_script(
         "",
         f'"$MIMO_BIN" run --dangerously-skip-permissions{model_flag} \\',
         '  "Read $PROJECT_REAL/$td/current-plan.md in the parent repo at $PROJECT_REAL. '
-        'Execute the plan fully inside worktree $WORKTREE_REAL. '
-        'Do not commit, do not push, do not create branches. '
-        'Save the implementation diff to $PROJECT_REAL/$td/implementation-diff.patch. '
-        'Update $PROJECT_REAL/$td/agent-status.md as you go. '
+        "Execute the plan fully inside worktree $WORKTREE_REAL. "
+        "Do not commit, do not push, do not create branches. "
+        "Save the implementation diff to $PROJECT_REAL/$td/implementation-diff.patch. "
+        "Update $PROJECT_REAL/$td/agent-status.md as you go. "
         'Work only inside $WORKTREE_REAL."',
         "RC=$?",
         "",
@@ -179,7 +179,7 @@ def _build_mimo_script(
         '- Status: $(head -1 "$PROJECT_REAL/$td/agent-status.md" | cut -d" " -f2)',
         "- Exit code: $RC",
         "- Finished: $(date -u +%Y-%m-%dT%H:%M:%SZ)",
-        '- Worktree: $WORKTREE_REAL',
+        "- Worktree: $WORKTREE_REAL",
         "REOF",
         "exit $RC",
     ]

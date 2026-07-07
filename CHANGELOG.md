@@ -6,6 +6,34 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.23-alpha] - 2026-07-07
+
+### Added
+
+- **Standalone tunnel manager**: `scripts/tunnel.mjs` for managing SSH tunnels with tunnel runbook. (Session 140)
+- **MCP public endpoint runbook**: documents VPS nginx/autossh relay setup for `mcp.nodsync.org`. (Session 140)
+- **SSH session auto-reconnect on SESSION_NOT_FOUND**: `_reconnect_session()` + `_retry_on_session_not_found` decorator. 5 SSH-bound tools recover automatically after stale session loss. Thread-safe via `threading.Lock` with skip-if-changed check. (Session 150)
+
+### Changed
+
+- **MCP public healthcheck**: now uses POST `/mcp` (initialize) instead of GET `/mcp`, fixing SSE timeout issues. (Session 148)
+- **GitHub list tools** (`github_list_branches`, `github_list_issues`, `github_list_pull_requests`): now return dict responses with `items`/`count` keys for consistent MCP tool output. (Session 147)
+- **Gateway file tools**: resolve relative paths from `MCP_GATEWAY_PROJECT_ROOT` for predictable behavior. (Session 146)
+
+### Fixed
+
+- **Missing file reads**: gateway file tools now return 404 error instead of internal server error. (Session 146)
+- **Path traversal blocked**: directory traversal attempts in gateway file tools are now rejected. (Session 146)
+- **Docker inspect output**: secrets redacted recursively from inspect output to prevent credential leakage. (Session 146)
+- **SSE healthcheck timeout**: eternal GET `/mcp` sessions no longer hang the healthcheck. (Session 148)
+- **SSH-bound tools**: no longer require manual `GATEWAY_SESSION_ID` after gateway restart — auto-reconnect handles recovery. (Session 150)
+
+### Security
+
+- Rotated exposed `API_KEY`, `AGENT_TOKEN`, `JWT_SECRET` across all environments. (Session 146)
+- Purged leaked sensitive history entries via `git-filter-repo`. (Session 146, 150)
+- Added docker inspect secret redaction coverage via `_sanitize_inspect_output`. (Session 146)
+
 ## [0.1.22-alpha] - 2026-06-27
 
 ### Added

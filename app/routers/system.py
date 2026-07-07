@@ -69,7 +69,9 @@ async def get_capabilities():
         rate_limit_requests=settings.rate_limit_requests,
         rate_limit_window=settings.rate_limit_window,
         server_count=server_count,
-        agent_token_enabled=bool(await is_agent_token_valid(settings, settings.agent_token, _state.agent_token_store)),
+        agent_token_enabled=bool(
+            await is_agent_token_valid(settings, settings.agent_token, _state.agent_token_store)
+        ),
         agent_token_ttl=settings.agent_token_ttl,
         hint=hint,
     )
@@ -79,6 +81,7 @@ async def get_capabilities():
 async def get_config(_identity: AuthIdentity = Depends(require_master_key)):
     """Return runtime configuration (secrets masked)."""
     from app.config import settings
+
     return {
         "session_timeout": settings.session_timeout,
         "cleanup_interval": settings.cleanup_interval,
@@ -123,9 +126,7 @@ async def download_sdk(_identity: AuthIdentity = Depends(require_master_key)):
     return Response(
         content=content,
         media_type="text/x-python",
-        headers={
-            "Content-Disposition": "attachment; filename=ssh_gateway.py"
-        }
+        headers={"Content-Disposition": "attachment; filename=ssh_gateway.py"},
     )
 
 
@@ -145,6 +146,3 @@ async def root():
     See GET /api/help for the REST API reference.
     """
     return FileResponse("app/static/index.html")
-
-
-

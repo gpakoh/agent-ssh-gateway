@@ -6,7 +6,9 @@ from app.auth_middleware import VALID_AGENT_SCOPES
 from app.version import APP_VERSION
 
 
-def _clean_param(name: str, location: str, schema: dict, required: bool, description: str) -> dict[str, Any]:
+def _clean_param(
+    name: str, location: str, schema: dict, required: bool, description: str
+) -> dict[str, Any]:
     ptype = schema.get("type", "string")
     if not ptype and "$ref" in schema:
         ptype = schema["$ref"].split("/")[-1]
@@ -46,19 +48,29 @@ def build_api_help(request: Request) -> dict[str, Any]:
             tags = details.get("tags", ["other"])
             tag = next((t for t in tags if t in known_tags), tags[0] if tags else "other")
             if path in ("/health", "/api/capabilities"):
-                public_endpoints.append({"method": method.upper(), "path": path, "summary": details.get("summary", "")})
+                public_endpoints.append(
+                    {"method": method.upper(), "path": path, "summary": details.get("summary", "")}
+                )
                 continue
             scope = details.get("x-scope", "")
             if scope:
-                scope_routes.setdefault(scope, []).append({
-                    "method": method.upper(), "path": path, "tag": tag,
-                    "summary": details.get("summary", ""),
-                })
+                scope_routes.setdefault(scope, []).append(
+                    {
+                        "method": method.upper(),
+                        "path": path,
+                        "tag": tag,
+                        "summary": details.get("summary", ""),
+                    }
+                )
             else:
-                master_only.append({
-                    "method": method.upper(), "path": path, "tag": tag,
-                    "summary": details.get("summary", ""),
-                })
+                master_only.append(
+                    {
+                        "method": method.upper(),
+                        "path": path,
+                        "tag": tag,
+                        "summary": details.get("summary", ""),
+                    }
+                )
 
     # Quick-start examples
     examples = [
@@ -128,10 +140,22 @@ def build_api_help(request: Request) -> dict[str, Any]:
                 continue
             tags = details.get("tags", ["other"])
             tag = next((t for t in tags if t in known_tags), tags[0] if tags else "other")
-            entry: dict[str, Any] = {"method": method.upper(), "path": path, "summary": details.get("summary", "")}
+            entry: dict[str, Any] = {
+                "method": method.upper(),
+                "path": path,
+                "summary": details.get("summary", ""),
+            }
             params = []
             for p in details.get("parameters", []):
-                params.append(_clean_param(p.get("name", ""), p.get("in", "query"), p.get("schema", {}), p.get("required", False), p.get("description", "")))
+                params.append(
+                    _clean_param(
+                        p.get("name", ""),
+                        p.get("in", "query"),
+                        p.get("schema", {}),
+                        p.get("required", False),
+                        p.get("description", ""),
+                    )
+                )
             body = details.get("requestBody", {})
             if body:
                 content = body.get("content", {})
@@ -140,7 +164,15 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     props = schema.get("properties", {})
                     required_set = set(schema.get("required", []))
                     for pname, pdetails in props.items():
-                        params.append(_clean_param(pname, "body", pdetails, pname in required_set, pdetails.get("description", "")))
+                        params.append(
+                            _clean_param(
+                                pname,
+                                "body",
+                                pdetails,
+                                pname in required_set,
+                                pdetails.get("description", ""),
+                            )
+                        )
             if params:
                 entry["params"] = params
             groups.setdefault(tag, []).append(entry)
@@ -161,7 +193,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "description": "Scoped token for agent/automation use. Create via POST /api/agent/token (requires master key).",
                     "access": "endpoints listed under agent_scopes below",
                     "how_to_use": 'Same header: -H "X-API-Key: <agent-token>"',
-                    "create_command": "curl -X POST http://localhost:8085/api/agent/token -H 'X-API-Key: $MASTER_KEY' -H 'Content-Type: application/json' -d '{\"scopes\":[\"ssh:execute\",\"ssh:files\"],\"ttl\":3600}'",
+                    "create_command": 'curl -X POST http://localhost:8085/api/agent/token -H \'X-API-Key: $MASTER_KEY\' -H \'Content-Type: application/json\' -d \'{"scopes":["ssh:execute","ssh:files"],"ttl":3600}\'',
                 },
             },
             "available_scopes": sorted(VALID_AGENT_SCOPES),
@@ -240,10 +272,22 @@ def build_api_help(request: Request) -> dict[str, Any]:
                 "note": "Master key required. Saved servers can be connected with a single endpoint call.",
             },
             "lifecycle": [
-                {"step": "Create", "action": "POST /api/servers \u2014 register a server by id, host, username"},
-                {"step": "Connect", "action": "POST /api/servers/{id}/connect \u2014 start an SSH session to the saved server"},
-                {"step": "Execute", "action": "POST /api/ssh/execute \u2014 run commands via the session_id from the connect step"},
-                {"step": "Disconnect", "action": "POST /api/ssh/disconnect \u2014 clean up when done"},
+                {
+                    "step": "Create",
+                    "action": "POST /api/servers \u2014 register a server by id, host, username",
+                },
+                {
+                    "step": "Connect",
+                    "action": "POST /api/servers/{id}/connect \u2014 start an SSH session to the saved server",
+                },
+                {
+                    "step": "Execute",
+                    "action": "POST /api/ssh/execute \u2014 run commands via the session_id from the connect step",
+                },
+                {
+                    "step": "Disconnect",
+                    "action": "POST /api/ssh/disconnect \u2014 clean up when done",
+                },
             ],
         },
         "file_workflow": {
@@ -277,9 +321,18 @@ def build_api_help(request: Request) -> dict[str, Any]:
                 },
             ],
             "forbidden_paths": [
-                "/etc/passwd", "/etc/shadow", "/etc/hosts", "/etc/crontab",
-                "/root/.ssh", "/root/.bash_history", "/var/log/auth.log",
-                "/usr/bin", "/proc", "/sys", "/dev", "/boot",
+                "/etc/passwd",
+                "/etc/shadow",
+                "/etc/hosts",
+                "/etc/crontab",
+                "/root/.ssh",
+                "/root/.bash_history",
+                "/var/log/auth.log",
+                "/usr/bin",
+                "/proc",
+                "/sys",
+                "/dev",
+                "/boot",
             ],
             "limitations": {
                 "max_write_size": "500 KB (content encoded as base64 via heredoc)",
@@ -335,12 +388,30 @@ def build_api_help(request: Request) -> dict[str, Any]:
                 },
             ],
             "edit_operations": {
-                "replace": {"description": "Find exact text and replace it", "fields": {"old": "str (required)", "new": "str (required)"}},
-                "insert_after": {"description": "Insert text after a matching line", "fields": {"after": "str (required)", "text": "str (required)"}},
-                "insert_before": {"description": "Insert text before a matching line", "fields": {"before": "str (required)", "text": "str (required)"}},
-                "delete": {"description": "Delete matching line(s)", "fields": {"old": "str (required)", "count": "int (optional, 0 = all)"}},
-                "append": {"description": "Append text to the end of the file", "fields": {"text": "str (required)"}},
-                "create": {"description": "Create a new file with content", "fields": {"text": "str (required)"}},
+                "replace": {
+                    "description": "Find exact text and replace it",
+                    "fields": {"old": "str (required)", "new": "str (required)"},
+                },
+                "insert_after": {
+                    "description": "Insert text after a matching line",
+                    "fields": {"after": "str (required)", "text": "str (required)"},
+                },
+                "insert_before": {
+                    "description": "Insert text before a matching line",
+                    "fields": {"before": "str (required)", "text": "str (required)"},
+                },
+                "delete": {
+                    "description": "Delete matching line(s)",
+                    "fields": {"old": "str (required)", "count": "int (optional, 0 = all)"},
+                },
+                "append": {
+                    "description": "Append text to the end of the file",
+                    "fields": {"text": "str (required)"},
+                },
+                "create": {
+                    "description": "Create a new file with content",
+                    "fields": {"text": "str (required)"},
+                },
             },
             "tips": [
                 "Use cursor to bookmark where you are \u2014 especially useful when switching between files.",
@@ -384,7 +455,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "response": {
                         "files": {
                             "/etc/hostname": "web-server-01\n",
-                            "/etc/os-release": "PRETTY_NAME=\"Ubuntu 24.04 LTS\"\nNAME=\"Ubuntu\"\n...",
+                            "/etc/os-release": 'PRETTY_NAME="Ubuntu 24.04 LTS"\nNAME="Ubuntu"\n...',
                             "/proc/uptime": "482931.20 1234567.89\n",
                         },
                         "errors": {},
@@ -401,23 +472,50 @@ def build_api_help(request: Request) -> dict[str, Any]:
                             {
                                 "path": "/var/www/app/config.py",
                                 "operations": [
-                                    {"type": "replace", "old": "DEBUG = False", "new": "DEBUG = True"},
-                                    {"type": "insert_after", "after": "PORT = 8080", "text": "HOST = '0.0.0.0'\n"},
+                                    {
+                                        "type": "replace",
+                                        "old": "DEBUG = False",
+                                        "new": "DEBUG = True",
+                                    },
+                                    {
+                                        "type": "insert_after",
+                                        "after": "PORT = 8080",
+                                        "text": "HOST = '0.0.0.0'\n",
+                                    },
                                 ],
                             },
                             {
                                 "path": "/var/www/app/settings.py",
                                 "operations": [
-                                    {"type": "replace", "old": "TIMEOUT = 30", "new": "TIMEOUT = 60"},
-                                    {"type": "append", "text": "\n# Added by bulk edit\nMAX_RETRIES = 3\n"},
+                                    {
+                                        "type": "replace",
+                                        "old": "TIMEOUT = 30",
+                                        "new": "TIMEOUT = 60",
+                                    },
+                                    {
+                                        "type": "append",
+                                        "text": "\n# Added by bulk edit\nMAX_RETRIES = 3\n",
+                                    },
                                 ],
                             },
                         ],
                     },
                     "response": {
                         "results": [
-                            {"path": "/var/www/app/config.py", "success": True, "operations_applied": 2, "changed": True, "error": None},
-                            {"path": "/var/www/app/settings.py", "success": True, "operations_applied": 2, "changed": True, "error": None},
+                            {
+                                "path": "/var/www/app/config.py",
+                                "success": True,
+                                "operations_applied": 2,
+                                "changed": True,
+                                "error": None,
+                            },
+                            {
+                                "path": "/var/www/app/settings.py",
+                                "success": True,
+                                "operations_applied": 2,
+                                "changed": True,
+                                "error": None,
+                            },
                         ],
                         "total_files": 2,
                         "files_changed": 2,
@@ -439,9 +537,30 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     },
                     "response": {
                         "results": [
-                            {"command": "uptime", "success": True, "exit_code": 0, "stdout": " 12:34:56 up 10 days, ...", "stderr": "", "duration": 0.12},
-                            {"command": "df -h /", "success": True, "exit_code": 0, "stdout": "Filesystem ...\n/dev/sda1 ...", "stderr": "", "duration": 0.08},
-                            {"command": "free -m", "success": True, "exit_code": 0, "stdout": "               total  used  free  ...", "stderr": "", "duration": 0.09},
+                            {
+                                "command": "uptime",
+                                "success": True,
+                                "exit_code": 0,
+                                "stdout": " 12:34:56 up 10 days, ...",
+                                "stderr": "",
+                                "duration": 0.12,
+                            },
+                            {
+                                "command": "df -h /",
+                                "success": True,
+                                "exit_code": 0,
+                                "stdout": "Filesystem ...\n/dev/sda1 ...",
+                                "stderr": "",
+                                "duration": 0.08,
+                            },
+                            {
+                                "command": "free -m",
+                                "success": True,
+                                "exit_code": 0,
+                                "stdout": "               total  used  free  ...",
+                                "stderr": "",
+                                "duration": 0.09,
+                            },
                         ],
                         "total_commands": 3,
                         "successful": 3,
@@ -549,11 +668,31 @@ def build_api_help(request: Request) -> dict[str, Any]:
             "sse_events": {
                 "title": "SSE Event Types",
                 "events": [
-                    {"type": "status", "fields": {"status": "pending | running | completed | failed | cancelled"}, "description": "Job status change. Emitted on state transitions."},
-                    {"type": "stdout", "fields": {"data": "string \u2014 stdout chunk"}, "description": "A chunk of stdout output. Delivered as it arrives from the SSH process. Each chunk is up to 4 KB."},
-                    {"type": "stderr", "fields": {"data": "string \u2014 stderr chunk"}, "description": "A chunk of stderr output. Same delivery model as stdout."},
-                    {"type": "exit", "fields": {"exit_code": "int \u2014 process exit code"}, "description": "Process exit. Only emitted if the command completes normally."},
-                    {"type": "error", "fields": {"error": "string \u2014 error message"}, "description": "Fatal error (SSH disconnect, timeout, crash). Job transitions to failed status."},
+                    {
+                        "type": "status",
+                        "fields": {"status": "pending | running | completed | failed | cancelled"},
+                        "description": "Job status change. Emitted on state transitions.",
+                    },
+                    {
+                        "type": "stdout",
+                        "fields": {"data": "string \u2014 stdout chunk"},
+                        "description": "A chunk of stdout output. Delivered as it arrives from the SSH process. Each chunk is up to 4 KB.",
+                    },
+                    {
+                        "type": "stderr",
+                        "fields": {"data": "string \u2014 stderr chunk"},
+                        "description": "A chunk of stderr output. Same delivery model as stdout.",
+                    },
+                    {
+                        "type": "exit",
+                        "fields": {"exit_code": "int \u2014 process exit code"},
+                        "description": "Process exit. Only emitted if the command completes normally.",
+                    },
+                    {
+                        "type": "error",
+                        "fields": {"error": "string \u2014 error message"},
+                        "description": "Fatal error (SSH disconnect, timeout, crash). Job transitions to failed status.",
+                    },
                 ],
             },
             "stream_vs_poll": {
@@ -571,10 +710,30 @@ def build_api_help(request: Request) -> dict[str, Any]:
             "title": "Git safe flow \u2014 inspect, backup, commit, restore",
             "overview": "A safe git workflow: review changes before committing, create backups before risky operations, restore if something goes wrong. All git endpoints require the master API key.",
             "safe_flow": [
-                {"step": 1, "action": "Check status", "endpoint": "GET /api/git/simple-status", "purpose": "See which files are modified, staged, or untracked. Returns branch name and file lists. Lightweight \u2014 2 SSH calls."},
-                {"step": 2, "action": "Review diff", "endpoint": "POST /api/git/diff", "purpose": "See the actual changes line by line before deciding what to do. Returns the unified diff output."},
-                {"step": 3, "action": "Create backup", "endpoint": "POST /api/git/backup", "purpose": "Stash current changes with a named backup. Safe to run even if nothing changed \u2014 creates a git stash entry you can restore later."},
-                {"step": 4, "action": "Commit or restore", "endpoint": "POST /api/git/commit or POST /api/git/restore", "purpose": "Commit your reviewed changes, or restore the backup if something went wrong during the process."},
+                {
+                    "step": 1,
+                    "action": "Check status",
+                    "endpoint": "GET /api/git/simple-status",
+                    "purpose": "See which files are modified, staged, or untracked. Returns branch name and file lists. Lightweight \u2014 2 SSH calls.",
+                },
+                {
+                    "step": 2,
+                    "action": "Review diff",
+                    "endpoint": "POST /api/git/diff",
+                    "purpose": "See the actual changes line by line before deciding what to do. Returns the unified diff output.",
+                },
+                {
+                    "step": 3,
+                    "action": "Create backup",
+                    "endpoint": "POST /api/git/backup",
+                    "purpose": "Stash current changes with a named backup. Safe to run even if nothing changed \u2014 creates a git stash entry you can restore later.",
+                },
+                {
+                    "step": 4,
+                    "action": "Commit or restore",
+                    "endpoint": "POST /api/git/commit or POST /api/git/restore",
+                    "purpose": "Commit your reviewed changes, or restore the backup if something went wrong during the process.",
+                },
             ],
             "when_to_use": {
                 "git_simple_status": "Quick overview \u2014 what branch, what files changed, what's staged. No context needed, just session + path.",
@@ -654,9 +813,21 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "name": "project_tree",
                     "title": "Project tree & structure",
                     "endpoints": [
-                        {"endpoint": "GET /api/project/tree", "scope": "ssh:files", "description": "Quick flat listing of files and directories. Returns type, path, size. Good for getting a birds-eye view of a project directory. Query params: session_id, path (default \'.\'), max_depth (1\u201410, default 3)."},
-                        {"endpoint": "POST /api/project/structure", "scope": "master_key", "description": "Full project structure with metadata (permissions, modified_at, git_status) and a nested tree representation. Input: {session_id, path, include_git_status?, max_depth?}."},
-                        {"endpoint": "POST /api/tree", "scope": "master_key", "description": "Recursive file tree with nested children. Supports hidden files and configurable depth. Input: {session_id, path, depth?, show_hidden?, max_files?}."},
+                        {
+                            "endpoint": "GET /api/project/tree",
+                            "scope": "ssh:files",
+                            "description": "Quick flat listing of files and directories. Returns type, path, size. Good for getting a birds-eye view of a project directory. Query params: session_id, path (default '.'), max_depth (1\u201410, default 3).",
+                        },
+                        {
+                            "endpoint": "POST /api/project/structure",
+                            "scope": "master_key",
+                            "description": "Full project structure with metadata (permissions, modified_at, git_status) and a nested tree representation. Input: {session_id, path, include_git_status?, max_depth?}.",
+                        },
+                        {
+                            "endpoint": "POST /api/tree",
+                            "scope": "master_key",
+                            "description": "Recursive file tree with nested children. Supports hidden files and configurable depth. Input: {session_id, path, depth?, show_hidden?, max_files?}.",
+                        },
                     ],
                     "which_to_use": {
                         "quick_lookup": "GET /api/project/tree \u2014 low overhead, flat list, scope-based (agent tokens work)",
@@ -668,8 +839,16 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "name": "code_search",
                     "title": "Search across files & code",
                     "endpoints": [
-                        {"endpoint": "POST /api/search/global", "scope": "master_key", "description": "Text search across all project files. Supports regex and glob file patterns. Returns match count, affected files, and per-match line/column/content with optional context lines. Input: {session_id, path, query, file_pattern?, use_regex?, case_sensitive?, context_lines?}."},
-                        {"endpoint": "POST /api/code/search", "scope": "master_key", "description": "Language-aware code search. Filters by file extension. Supports 0\u201410 context lines. Input: {session_id, path, query, language?, context_lines?}. Language is a file extension (e.g. \'py\', \'js\', \'rs\')."},
+                        {
+                            "endpoint": "POST /api/search/global",
+                            "scope": "master_key",
+                            "description": "Text search across all project files. Supports regex and glob file patterns. Returns match count, affected files, and per-match line/column/content with optional context lines. Input: {session_id, path, query, file_pattern?, use_regex?, case_sensitive?, context_lines?}.",
+                        },
+                        {
+                            "endpoint": "POST /api/code/search",
+                            "scope": "master_key",
+                            "description": "Language-aware code search. Filters by file extension. Supports 0\u201410 context lines. Input: {session_id, path, query, language?, context_lines?}. Language is a file extension (e.g. 'py', 'js', 'rs').",
+                        },
                     ],
                     "which_to_use": {
                         "find_text": "POST /api/search/global \u2014 grep-style, text + regex, any file pattern",
@@ -680,12 +859,36 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "name": "context_system",
                     "title": "Contexts \u2014 bookmarks, cursor, session tracking",
                     "endpoints": [
-                        {"endpoint": "GET /api/context/list", "scope": "master_key", "description": "List all active contexts. Optional filter by session_id query param. Returns array of ContextResponse with name, path, branch, open files, and bookmark count."},
-                        {"endpoint": "POST /api/context/create", "scope": "master_key", "description": "Create a new development context. Binds a session to a working directory. Supports auto_commit (git commit on each edit) and auto_validate. Input: {session_id, path, name?, branch?, auto_commit?, auto_validate?}."},
-                        {"endpoint": "GET /api/context/{context_id}", "scope": "master_key", "description": "Get context details including open files, bookmarks, smart state (tabs, command history, search history)."},
-                        {"endpoint": "POST /api/context/bookmark", "scope": "master_key", "description": "Add a bookmark at a specific file and line. Bookmark notes help remember why this location is important. Input: {context_id, path, line, note?}."},
-                        {"endpoint": "POST /api/context/cursor", "scope": "master_key", "description": "Update cursor position in an open file. Line and column are 1-indexed. Helps agents remember where they left off. Input: {context_id, path, line, column?}."},
-                        {"endpoint": "POST /api/context/file/open", "scope": "master_key", "description": "Register a file as open in the context. Tracks cursor position, edit history, and tab state. Input: {context_id, path}."},
+                        {
+                            "endpoint": "GET /api/context/list",
+                            "scope": "master_key",
+                            "description": "List all active contexts. Optional filter by session_id query param. Returns array of ContextResponse with name, path, branch, open files, and bookmark count.",
+                        },
+                        {
+                            "endpoint": "POST /api/context/create",
+                            "scope": "master_key",
+                            "description": "Create a new development context. Binds a session to a working directory. Supports auto_commit (git commit on each edit) and auto_validate. Input: {session_id, path, name?, branch?, auto_commit?, auto_validate?}.",
+                        },
+                        {
+                            "endpoint": "GET /api/context/{context_id}",
+                            "scope": "master_key",
+                            "description": "Get context details including open files, bookmarks, smart state (tabs, command history, search history).",
+                        },
+                        {
+                            "endpoint": "POST /api/context/bookmark",
+                            "scope": "master_key",
+                            "description": "Add a bookmark at a specific file and line. Bookmark notes help remember why this location is important. Input: {context_id, path, line, note?}.",
+                        },
+                        {
+                            "endpoint": "POST /api/context/cursor",
+                            "scope": "master_key",
+                            "description": "Update cursor position in an open file. Line and column are 1-indexed. Helps agents remember where they left off. Input: {context_id, path, line, column?}.",
+                        },
+                        {
+                            "endpoint": "POST /api/context/file/open",
+                            "scope": "master_key",
+                            "description": "Register a file as open in the context. Tracks cursor position, edit history, and tab state. Input: {context_id, path}.",
+                        },
                     ],
                 },
             ],
@@ -797,9 +1000,21 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "title": "Code templates \u2014 list, inspect, render",
                     "overview": "Pre-written code templates for common patterns: FastAPI endpoints, Pydantic models, Python classes, functions, tests, Docker Compose services, Nginx configs, GitHub Actions workflows.",
                     "endpoints": [
-                        {"endpoint": "GET /api/templates", "scope": "master_key", "description": "List all available code templates. Returns id, name, description, and language for each template. 8 built-in templates cover Python, YAML, and Nginx."},
-                        {"endpoint": "GET /api/templates/{template_id}", "scope": "master_key", "description": "Get template details with full source code and default parameters. Use this to preview what will be generated before rendering."},
-                        {"endpoint": "POST /api/templates/render", "scope": "master_key", "description": "Render a template with custom parameters and save the output to a file on the remote host. Supports auto_commit. Input: {context_id, template_id, params, target_path, auto_commit?}."},
+                        {
+                            "endpoint": "GET /api/templates",
+                            "scope": "master_key",
+                            "description": "List all available code templates. Returns id, name, description, and language for each template. 8 built-in templates cover Python, YAML, and Nginx.",
+                        },
+                        {
+                            "endpoint": "GET /api/templates/{template_id}",
+                            "scope": "master_key",
+                            "description": "Get template details with full source code and default parameters. Use this to preview what will be generated before rendering.",
+                        },
+                        {
+                            "endpoint": "POST /api/templates/render",
+                            "scope": "master_key",
+                            "description": "Render a template with custom parameters and save the output to a file on the remote host. Supports auto_commit. Input: {context_id, template_id, params, target_path, auto_commit?}.",
+                        },
                     ],
                 },
                 {
@@ -807,8 +1022,16 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "title": "Command templates \u2014 predefined SSH commands",
                     "overview": "Parameterised SSH command templates for common tasks: deploy, healthcheck, disk usage, docker stats, nginx reload, journal logs. Params are substituted into {placeholders} before execution.",
                     "endpoints": [
-                        {"endpoint": "GET /api/command-templates", "scope": "master_key", "description": "List all predefined command templates. Each template has id, name, description, and a command string with {param} placeholders."},
-                        {"endpoint": "POST /api/templates/run", "scope": "master_key", "description": "Execute a command template with parameter substitution. Params dict is used to replace {key} placeholders in the template command. Input: {session_id, template, params?}."},
+                        {
+                            "endpoint": "GET /api/command-templates",
+                            "scope": "master_key",
+                            "description": "List all predefined command templates. Each template has id, name, description, and a command string with {param} placeholders.",
+                        },
+                        {
+                            "endpoint": "POST /api/templates/run",
+                            "scope": "master_key",
+                            "description": "Execute a command template with parameter substitution. Params dict is used to replace {key} placeholders in the template command. Input: {session_id, template, params?}.",
+                        },
                     ],
                 },
                 {
@@ -816,7 +1039,11 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "title": "Scaffold \u2014 generate project structures",
                     "overview": "Generate multi-file project structures from a single request. Currently supports Python class scaffolding (class file + test file).",
                     "endpoints": [
-                        {"endpoint": "POST /api/scaffold/python-class", "scope": "master_key", "description": "Create a Python class with an optional test file. Specify class name, methods, and target module directory. Creates both class file (lowercase name) and test file (test_ prefix) in one call. Input: {session_id, module_path, class_name, methods?, include_test?}."},
+                        {
+                            "endpoint": "POST /api/scaffold/python-class",
+                            "scope": "master_key",
+                            "description": "Create a Python class with an optional test file. Specify class name, methods, and target module directory. Creates both class file (lowercase name) and test file (test_ prefix) in one call. Input: {session_id, module_path, class_name, methods?, include_test?}.",
+                        },
                     ],
                     "conflict_handling": {
                         "note": "Scaffold uses write_file which overwrites existing files. There is no built-in conflict detection \u2014 check file existence first via POST /api/file/read or include in a context to track state.",
@@ -832,8 +1059,16 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "title": "Code generation & completion",
                     "overview": "Generate or complete code from natural language instructions without writing boilerplate by hand.",
                     "endpoints": [
-                        {"endpoint": "POST /api/code/generate", "scope": "master_key", "description": "Generate code from a natural language instruction. No session required \u2014 works standalone. Returns generated code with language label and explanation. Input: {instruction, language?}."},
-                        {"endpoint": "POST /api/code/complete", "scope": "master_key", "description": "Suggest code completion for a partially written file. Uses CodeIntelligence to match the existing code context. Input: {session_id, path, partial_code, language?}. Returns completion text with surrounding context for verification."},
+                        {
+                            "endpoint": "POST /api/code/generate",
+                            "scope": "master_key",
+                            "description": "Generate code from a natural language instruction. No session required \u2014 works standalone. Returns generated code with language label and explanation. Input: {instruction, language?}.",
+                        },
+                        {
+                            "endpoint": "POST /api/code/complete",
+                            "scope": "master_key",
+                            "description": "Suggest code completion for a partially written file. Uses CodeIntelligence to match the existing code context. Input: {session_id, path, partial_code, language?}. Returns completion text with surrounding context for verification.",
+                        },
                     ],
                 },
             ],
@@ -851,7 +1086,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "title": "Render a template to a file",
                     "description": "Render a FastAPI endpoint template with custom parameters and save it to a target file on the remote host. Optionally auto-commit.",
                     "body": '{"context_id":"ctx_abc123","template_id":"fastapi_endpoint","params":{"method":"get","path":"/users/{user_id}","handler_name":"get_user","params":"user_id: int","description":"Get user by ID","response":"{\\"user_id\\": user_id}"},"target_path":"/var/www/app/routes/users.py","auto_commit":false}',
-                    "response": '{"success":true,"template_id":"fastapi_endpoint","target_path":"/var/www/app/routes/users.py","code":"@router.get(\"/users/{user_id}\")\\nasync def get_user(user_id: int):\\n    \"\"\"Get user by ID\"\"\"\\n    return {\"user_id\": user_id}\\n","git_commit":null}',
+                    "response": '{"success":true,"template_id":"fastapi_endpoint","target_path":"/var/www/app/routes/users.py","code":"@router.get("/users/{user_id}")\\nasync def get_user(user_id: int):\\n    """Get user by ID"""\\n    return {"user_id": user_id}\\n","git_commit":null}',
                     "notes": "The rendered code is returned in the response so you can verify it. Set auto_commit=true for automatic git commit. The file is written via SSH heredoc.",
                 },
                 {
@@ -875,7 +1110,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "title": "Generate code from description",
                     "description": "Turn a natural language description into code. No SSH session needed \u2014 works standalone. Returns code with language and explanation.",
                     "body": '{"instruction":"FastAPI route that returns a list of users from a database","language":"python"}',
-                    "response": '{"code":"from fastapi import APIRouter, Depends\\nfrom sqlalchemy.ext.asyncio import AsyncSession\\n\\nrouter = APIRouter()\\n\\n@router.get(\"/users\")\\nasync def list_users(db: AsyncSession = Depends(get_db)):\\n    \"\"\"Return all users.\"\"\"\\n    result = await db.execute(select(User))\\n    return result.scalars().all()\\n","language":"python","explanation":"Generated code for: FastAPI route that returns a list of users from a database"}',
+                    "response": '{"code":"from fastapi import APIRouter, Depends\\nfrom sqlalchemy.ext.asyncio import AsyncSession\\n\\nrouter = APIRouter()\\n\\n@router.get("/users")\\nasync def list_users(db: AsyncSession = Depends(get_db)):\\n    """Return all users."""\\n    result = await db.execute(select(User))\\n    return result.scalars().all()\\n","language":"python","explanation":"Generated code for: FastAPI route that returns a list of users from a database"}',
                     "notes": "Code is generated server-side (no external LLM call). The implementation uses CodeIntelligence.generate_code(). For project-specific context, use code/insert instead.",
                 },
             ],
@@ -911,7 +1146,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                         "endpoint": "POST /api/file/read",
                         "body": '{"session_id":"ses_abc123","path":"/var/www/app/routes/items.py"}',
                         "expected": "File content matches what was rendered. The new route is ready to be used.",
-                        "notes": "You can also run a syntax check: POST /api/ssh/execute with \'python -m py_compile /var/www/app/routes/items.py\'.",
+                        "notes": "You can also run a syntax check: POST /api/ssh/execute with 'python -m py_compile /var/www/app/routes/items.py'.",
                     },
                 ],
                 "summary": "4 API calls: browse \u2192 preview \u2192 render \u2192 verify. No file system navigation, no manual typing \u2014 the agent goes from nothing to a working file in seconds.",
@@ -935,7 +1170,11 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "title": "Project analytics",
                     "overview": "Comprehensive project metrics: file counts by extension, code statistics (LOC, classes, functions), git history (commits, branches, contributors), test coverage, and dependency status. All data is collected via SSH commands on the remote host.",
                     "endpoints": [
-                        {"endpoint": "POST /api/analytics", "scope": "master_key", "description": "Analyze a project on the remote host. Input: {session_id, path}. Returns files (total, extensions), code (LOC, classes, functions), git (is_git_repo, commits, branches, contributors), tests (test_files, total_tests, has_tests), dependencies (requirements_count, has_pyproject, outdated_packages)."},
+                        {
+                            "endpoint": "POST /api/analytics",
+                            "scope": "master_key",
+                            "description": "Analyze a project on the remote host. Input: {session_id, path}. Returns files (total, extensions), code (LOC, classes, functions), git (is_git_repo, commits, branches, contributors), tests (test_files, total_tests, has_tests), dependencies (requirements_count, has_pyproject, outdated_packages).",
+                        },
                     ],
                 },
                 {
@@ -943,8 +1182,16 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "title": "Prometheus metrics & circuit breaker",
                     "overview": "Prometheus-format metrics endpoint measuring all gateways operations: request count/latency, SSH connections, job queue depth, circuit breaker states, file operations, event hook deliveries. Circuit breaker stats give per-host state (closed/open/half-open) with failure/success counts.",
                     "endpoints": [
-                        {"endpoint": "GET /metrics", "scope": "master_key", "description": "Prometheus exposition format (text/plain). Includes counters for requests, SSH connections, commands, jobs, file ops, hook deliveries; histograms for latency; gauges for queue depth, circuit breaker state, active locks."},
-                        {"endpoint": "GET /api/circuit-breaker/stats", "scope": "master_key", "description": "Per-host circuit breaker state. Returns dict keyed by host with state (closed/open/half_open), failure_count, success_count, last_failure_time, half_open_calls."},
+                        {
+                            "endpoint": "GET /metrics",
+                            "scope": "master_key",
+                            "description": "Prometheus exposition format (text/plain). Includes counters for requests, SSH connections, commands, jobs, file ops, hook deliveries; histograms for latency; gauges for queue depth, circuit breaker state, active locks.",
+                        },
+                        {
+                            "endpoint": "GET /api/circuit-breaker/stats",
+                            "scope": "master_key",
+                            "description": "Per-host circuit breaker state. Returns dict keyed by host with state (closed/open/half_open), failure_count, success_count, last_failure_time, half_open_calls.",
+                        },
                     ],
                 },
                 {
@@ -952,8 +1199,16 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "title": "Logs \u2014 journald & Docker",
                     "overview": "Read systemd journal logs or Docker container logs from the remote host. Both support filtering by recency, count, and severity/container. Returns raw stdout from the SSH command.",
                     "endpoints": [
-                        {"endpoint": "GET /api/logs/journal", "scope": "master_key", "description": "Read systemd journal logs. Query params: session_id (required), unit (systemd unit name, e.g. nginx/sshd), lines (1\u20135000, default 50), priority (emerg/alert/crit/err/warning/notice/info/debug), since (time range: \'1h\', \'30m\', ISO date)."},
-                        {"endpoint": "GET /api/logs/docker", "scope": "master_key", "description": "Read Docker container logs. Query params: session_id (required), container (name or ID, required), lines (1\u20135000, default 100), since (time range: \'5m\', \'1h\'), timestamps (boolean, default false)."},
+                        {
+                            "endpoint": "GET /api/logs/journal",
+                            "scope": "master_key",
+                            "description": "Read systemd journal logs. Query params: session_id (required), unit (systemd unit name, e.g. nginx/sshd), lines (1\u20135000, default 50), priority (emerg/alert/crit/err/warning/notice/info/debug), since (time range: '1h', '30m', ISO date).",
+                        },
+                        {
+                            "endpoint": "GET /api/logs/docker",
+                            "scope": "master_key",
+                            "description": "Read Docker container logs. Query params: session_id (required), container (name or ID, required), lines (1\u20135000, default 100), since (time range: '5m', '1h'), timestamps (boolean, default false).",
+                        },
                     ],
                     "when_to_use": {
                         "journal": "system-level logs: service failures, SSH auth attempts, system errors. Use unit filter to narrow to a specific service.",
@@ -965,17 +1220,39 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "title": "Event hooks \u2014 event-driven notifications",
                     "overview": "Event hooks are PostgreSQL-backed webhook endpoints that receive session and command lifecycle events (session.connected, session.disconnected, command.started, command.completed, command.failed). Deliveries use an outbox pattern with automatic retry, HMAC signing, and dead-letter queue for failed deliveries.",
                     "endpoints": [
-                        {"endpoint": "GET /api/event-hooks", "scope": "master_key", "description": "List all registered event hooks. Returns id, url, events (list of subscribed event types), session_id filter, include_output, is_active, created_at, updated_at."},
-                        {"endpoint": "POST /api/event-hooks", "scope": "master_key", "description": "Register a new event hook. Input: {url (HTTPS), events (array, e.g. [\'command.completed\', \'session.connected\']), session_id?, headers?, secret?, include_output?}. The URL receives POST requests with JSON payloads on matching events."},
-                        {"endpoint": "PATCH /api/event-hooks/{hook_id}", "scope": "master_key", "description": "Update an event hook. All fields optional: url, events, session_id, headers, secret, include_output, is_active."},
-                        {"endpoint": "DELETE /api/event-hooks/{hook_id}", "scope": "master_key", "description": "Delete an event hook. Returns {deleted: true}."},
+                        {
+                            "endpoint": "GET /api/event-hooks",
+                            "scope": "master_key",
+                            "description": "List all registered event hooks. Returns id, url, events (list of subscribed event types), session_id filter, include_output, is_active, created_at, updated_at.",
+                        },
+                        {
+                            "endpoint": "POST /api/event-hooks",
+                            "scope": "master_key",
+                            "description": "Register a new event hook. Input: {url (HTTPS), events (array, e.g. ['command.completed', 'session.connected']), session_id?, headers?, secret?, include_output?}. The URL receives POST requests with JSON payloads on matching events.",
+                        },
+                        {
+                            "endpoint": "PATCH /api/event-hooks/{hook_id}",
+                            "scope": "master_key",
+                            "description": "Update an event hook. All fields optional: url, events, session_id, headers, secret, include_output, is_active.",
+                        },
+                        {
+                            "endpoint": "DELETE /api/event-hooks/{hook_id}",
+                            "scope": "master_key",
+                            "description": "Delete an event hook. Returns {deleted: true}.",
+                        },
                     ],
                     "event_types": [
                         {"type": "session.connected", "description": "SSH session established"},
                         {"type": "session.disconnected", "description": "SSH session ended"},
                         {"type": "command.started", "description": "Command execution began"},
-                        {"type": "command.completed", "description": "Command exited successfully (exit_code=0)"},
-                        {"type": "command.failed", "description": "Command exited with non-zero code"},
+                        {
+                            "type": "command.completed",
+                            "description": "Command exited successfully (exit_code=0)",
+                        },
+                        {
+                            "type": "command.failed",
+                            "description": "Command exited with non-zero code",
+                        },
                     ],
                 },
                 {
@@ -983,11 +1260,31 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "title": "CI/CD webhooks \u2014 auto-deployment",
                     "overview": "Webhooks managed by the WebhookManager. These are CI/CD deployment triggers (not event-driven hooks). A webhook stores a deploy command and target path; triggering it runs the deploy as a background job. Storage is in-memory (not persisted across restarts).",
                     "endpoints": [
-                        {"endpoint": "GET /api/webhooks", "scope": "master_key", "description": "List all CI/CD webhooks. Returns id, name, webhook_type (github/gitea/generic), target_path, deploy_command, context_id, notify_url, enabled."},
-                        {"endpoint": "POST /api/webhooks", "scope": "master_key", "description": "Create a new webhook. Input: {name, target_path, deploy_command, context_id, webhook_type?, secret?, notify_url?}. Returns the created webhook config."},
-                        {"endpoint": "POST /api/webhooks/{webhook_id}/deploy", "scope": "master_key", "description": "Manually trigger deployment. Input: {session_id}. Runs \'cd target_path && deploy_command\' as a background job. Returns job_id for tracking."},
-                        {"endpoint": "GET /api/webhooks/{webhook_id}/deployments", "scope": "master_key", "description": "List deployment history for a webhook. Returns array with id, webhook_id, webhook_name, status (pending/running/success/failed), timestamp, payload."},
-                        {"endpoint": "DELETE /api/webhooks/{webhook_id}", "scope": "master_key", "description": "Delete a webhook and its deployment history."},
+                        {
+                            "endpoint": "GET /api/webhooks",
+                            "scope": "master_key",
+                            "description": "List all CI/CD webhooks. Returns id, name, webhook_type (github/gitea/generic), target_path, deploy_command, context_id, notify_url, enabled.",
+                        },
+                        {
+                            "endpoint": "POST /api/webhooks",
+                            "scope": "master_key",
+                            "description": "Create a new webhook. Input: {name, target_path, deploy_command, context_id, webhook_type?, secret?, notify_url?}. Returns the created webhook config.",
+                        },
+                        {
+                            "endpoint": "POST /api/webhooks/{webhook_id}/deploy",
+                            "scope": "master_key",
+                            "description": "Manually trigger deployment. Input: {session_id}. Runs 'cd target_path && deploy_command' as a background job. Returns job_id for tracking.",
+                        },
+                        {
+                            "endpoint": "GET /api/webhooks/{webhook_id}/deployments",
+                            "scope": "master_key",
+                            "description": "List deployment history for a webhook. Returns array with id, webhook_id, webhook_name, status (pending/running/success/failed), timestamp, payload.",
+                        },
+                        {
+                            "endpoint": "DELETE /api/webhooks/{webhook_id}",
+                            "scope": "master_key",
+                            "description": "Delete a webhook and its deployment history.",
+                        },
                     ],
                 },
             ],
@@ -1005,7 +1302,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "title": "View Prometheus metrics",
                     "description": "Returns all gateway metrics in Prometheus text format. Key metrics: HTTP requests total, request latency histogram, active SSH connections, job queue depth, circuit breaker states.",
                     "request": "GET /metrics",
-                    "response_preview": "ssh_gateway_requests_total{method=\"POST\",endpoint=\"/api/ssh/connect\",status=\"200\"} 42\nssh_gateway_ssh_connections_active 3.0\nssh_gateway_queue_depth{queue=\"pending\"} 0\nssh_gateway_circuit_breaker_state{host=\"10.0.0.1\"} 0",
+                    "response_preview": 'ssh_gateway_requests_total{method="POST",endpoint="/api/ssh/connect",status="200"} 42\nssh_gateway_ssh_connections_active 3.0\nssh_gateway_queue_depth{queue="pending"} 0\nssh_gateway_circuit_breaker_state{host="10.0.0.1"} 0',
                     "notes": "Formatter: Prometheus exposition. Parse with promtool or any Prometheus client library. The /api/circuit-breaker/stats endpoint gives a friendlier JSON view of circuit breaker states.",
                 },
                 {
@@ -1014,12 +1311,12 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "description": "Fetch the last 20 lines of nginx service logs from the remote host. Use unit filter for specific services, priority for error-level filtering.",
                     "request": "GET /api/logs/journal?session_id=ses_abc123&unit=nginx&lines=20&priority=err",
                     "response": '{"stdout":"Jun 01 12:34:56 web-server nginx[1234]: 2025/06/01 12:34:56 [error] ... connect() failed (111: Connection refused)...","stderr":"","exit_code":0,"duration":0.45}',
-                    "notes": "Uses journalctl --no-pager on the remote host. Supported priorities: emerg, alert, crit, err, warning, notice, info, debug. Since accepts relative (\'1h\', \'30m\') or absolute dates.",
+                    "notes": "Uses journalctl --no-pager on the remote host. Supported priorities: emerg, alert, crit, err, warning, notice, info, debug. Since accepts relative ('1h', '30m') or absolute dates.",
                 },
                 {
                     "endpoint": "GET /api/logs/docker",
                     "title": "Read Docker container logs",
-                    "description": "Fetch the last 30 lines of a container named \'web-app\' with timestamps. Use container name or ID.",
+                    "description": "Fetch the last 30 lines of a container named 'web-app' with timestamps. Use container name or ID.",
                     "request": "GET /api/logs/docker?session_id=ses_abc123&container=web-app&lines=30&timestamps=true&since=5m",
                     "response": '{"stdout":"2025-06-01T12:34:56Z [INFO] Server started on port 8080\\n2025-06-01T12:35:10Z [WARN] Memory usage high: 85%","stderr":"","exit_code":0,"duration":0.32}',
                     "notes": "Uses docker logs on the remote host. Container must be running. Since supports duration suffixes (5m, 1h) or ISO timestamps.",
@@ -1056,7 +1353,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                         "step": 2,
                         "action": "Check circuit breaker stats for blocked hosts",
                         "endpoint": "GET /api/circuit-breaker/stats",
-                        "expected": "Per-host breaker states. Any host in \'open\' state means connections are blocked due to repeated failures.",
+                        "expected": "Per-host breaker states. Any host in 'open' state means connections are blocked due to repeated failures.",
                         "notes": "Open breakers auto-recover after 60s. Half-open means recovery is being tested.",
                     },
                     {
@@ -1114,9 +1411,21 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "overview": "Backups use git stash under the hood. They save working tree changes to a named stash entry. Restoring pops the most recent stash. Backups are per-context (bound to a working directory). Each backup has a name and a stash index. List available backups to see what's saved.",
                     "when_to_use": "Before any risky operation: bulk edit, template render, scaffold, global replace. Create a backup first, do the operation, verify, and if something went wrong restore.",
                     "endpoints": [
-                        {"endpoint": "POST /api/recovery/backup", "scope": "master_key", "description": "Create a named backup. Input: {context_id, name? (default auto_backup)}. Stashes current working tree changes as a git stash entry. Safe to call multiple times \u2014 each call creates a new entry."},
-                        {"endpoint": "GET /api/recovery/backups", "scope": "master_key", "description": "List all stash backups for a context. Query: context_id. Returns array with id (stash index like stash@{0}), name (stash message), created_at (server timestamp)."},
-                        {"endpoint": "POST /api/recovery/restore", "scope": "master_key", "description": "Restore the most recent stash backup. Input: {context_id, backup_id?}. Overwrites current working tree with stashed files. This is destructive \u2014 current uncommitted changes are lost."},
+                        {
+                            "endpoint": "POST /api/recovery/backup",
+                            "scope": "master_key",
+                            "description": "Create a named backup. Input: {context_id, name? (default auto_backup)}. Stashes current working tree changes as a git stash entry. Safe to call multiple times \u2014 each call creates a new entry.",
+                        },
+                        {
+                            "endpoint": "GET /api/recovery/backups",
+                            "scope": "master_key",
+                            "description": "List all stash backups for a context. Query: context_id. Returns array with id (stash index like stash@{0}), name (stash message), created_at (server timestamp).",
+                        },
+                        {
+                            "endpoint": "POST /api/recovery/restore",
+                            "scope": "master_key",
+                            "description": "Restore the most recent stash backup. Input: {context_id, backup_id?}. Overwrites current working tree with stashed files. This is destructive \u2014 current uncommitted changes are lost.",
+                        },
                     ],
                     "recovery_vs_git": {
                         "note": "POST /api/recovery/backup and /api/recovery/restore are aliases for POST /api/git/backup and /api/git/restore with request-body inputs instead of query params. The recovery variants are preferred for agent workflows because they use cleaner JSON bodies.",
@@ -1128,10 +1437,26 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "overview": "Snapshots capture the state of specific files in a project directory. Unlike backups (which use git stash), snapshots are managed by the SnapshotManager and store file contents independently of git. They can include a description, file list, and reference the git commit before the snapshot was taken. Snapshots persist across context deletion.",
                     "when_to_use": "When you need a named restore point with a description and file inventory. Snapshots are better than backups when you want to know exactly which files were saved and why.",
                     "endpoints": [
-                        {"endpoint": "POST /api/snapshots", "scope": "master_key", "description": "Create a snapshot. Input: {context_id, name, description?}. Returns snapshot_id and message with file count. Creates a point-in-time copy of all files in the context's working directory."},
-                        {"endpoint": "GET /api/snapshots", "scope": "master_key", "description": "List snapshots for a context. Query: context_id. Returns array with id, name, description, created_at, files (filenames), git_commit_before, size_bytes."},
-                        {"endpoint": "POST /api/snapshots/restore", "scope": "master_key", "description": "Restore project state from a snapshot. Input: {context_id, snapshot_id}. Restores all files in the snapshot to their state at capture time. Returns success and restored files count."},
-                        {"endpoint": "DELETE /api/snapshots/{snapshot_id}", "scope": "master_key", "description": "Delete a snapshot. Query: context_id. Removes the snapshot from storage. Cannot be undone."},
+                        {
+                            "endpoint": "POST /api/snapshots",
+                            "scope": "master_key",
+                            "description": "Create a snapshot. Input: {context_id, name, description?}. Returns snapshot_id and message with file count. Creates a point-in-time copy of all files in the context's working directory.",
+                        },
+                        {
+                            "endpoint": "GET /api/snapshots",
+                            "scope": "master_key",
+                            "description": "List snapshots for a context. Query: context_id. Returns array with id, name, description, created_at, files (filenames), git_commit_before, size_bytes.",
+                        },
+                        {
+                            "endpoint": "POST /api/snapshots/restore",
+                            "scope": "master_key",
+                            "description": "Restore project state from a snapshot. Input: {context_id, snapshot_id}. Restores all files in the snapshot to their state at capture time. Returns success and restored files count.",
+                        },
+                        {
+                            "endpoint": "DELETE /api/snapshots/{snapshot_id}",
+                            "scope": "master_key",
+                            "description": "Delete a snapshot. Query: context_id. Removes the snapshot from storage. Cannot be undone.",
+                        },
                     ],
                 },
                 {
@@ -1139,9 +1464,21 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "title": "Known hosts \u2014 SSH host key management",
                     "overview": "The gateway tracks SSH host keys for connected servers. Known hosts are stored either in a file (OpenSSH format) or PostgreSQL depending on configuration. The system auto-accepts or rejects unknown hosts based on the SSH_STRICT_HOST_KEY_CHECKING setting.",
                     "endpoints": [
-                        {"endpoint": "GET /api/known-hosts", "scope": "master_key", "description": "List all known hosts. Returns host, port, key_type, fingerprint for each entry. Useful for auditing which servers the gateway has connected to."},
-                        {"endpoint": "DELETE /api/known-hosts/{host}", "scope": "master_key", "description": "Remove a specific host from known hosts. Path: host. Useful after a host key rotation to force re-acceptance on next connection."},
-                        {"endpoint": "DELETE /api/known-hosts", "scope": "master_key", "description": "Clear all known hosts. Resets the known hosts store to empty. Next connections to any host will be treated as unknown."},
+                        {
+                            "endpoint": "GET /api/known-hosts",
+                            "scope": "master_key",
+                            "description": "List all known hosts. Returns host, port, key_type, fingerprint for each entry. Useful for auditing which servers the gateway has connected to.",
+                        },
+                        {
+                            "endpoint": "DELETE /api/known-hosts/{host}",
+                            "scope": "master_key",
+                            "description": "Remove a specific host from known hosts. Path: host. Useful after a host key rotation to force re-acceptance on next connection.",
+                        },
+                        {
+                            "endpoint": "DELETE /api/known-hosts",
+                            "scope": "master_key",
+                            "description": "Clear all known hosts. Resets the known hosts store to empty. Next connections to any host will be treated as unknown.",
+                        },
                     ],
                 },
             ],
@@ -1220,7 +1557,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                         "step": 3,
                         "action": "Verify the changes work",
                         "endpoint": "POST /api/ssh/execute",
-                        "body": '{"session_id":"ses_abc123","command":"python -c \"import config; print(config.DEBUG)\""}',
+                        "body": '{"session_id":"ses_abc123","command":"python -c "import config; print(config.DEBUG)""}',
                         "expected": "Output shows DEBUG = True. The edit is working.",
                         "notes": "Verify before snapshotting. If the edit broke something, restore from the backup instead.",
                     },
@@ -1244,7 +1581,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
             },
             "tips": [
                 "Always create a backup (POST /api/recovery/backup) before bulk edits, template renders, or scaffolding.",
-                "Use descriptive backup names like \'before_refactor_auth\' so you can identify them in the list.",
+                "Use descriptive backup names like 'before_refactor_auth' so you can identify them in the list.",
                 "Snapshots are better for permanent checkpoints \u2014 they survive context deletion and include file lists and descriptions.",
                 "After restoring a snapshot, create a fresh backup if you plan to make more changes (the restore overwrites the working tree).",
                 "Known hosts accumulate over time. Periodically audit GET /api/known-hosts and remove stale entries.",
@@ -1255,41 +1592,65 @@ def build_api_help(request: Request) -> dict[str, Any]:
         "ssh_trust_workflow": {
             "title": "SSH Trust Flow \u2014 safe host key verification",
             "overview": "Before establishing an SSH connection, the gateway checks whether the remote host's key is known. This section documents the three trust states, how the UI behaves in each, and how to manage known hosts manually.",
-            "important": "The preflight endpoint GET /api/known-hosts/check returns only \'known\' or \'unknown\'. It does NOT attempt to detect \'changed\' \u2014 that requires a real SSH handshake. \'changed\' is only reported after a failed Connect attempt.",
+            "important": "The preflight endpoint GET /api/known-hosts/check returns only 'known' or 'unknown'. It does NOT attempt to detect 'changed' \u2014 that requires a real SSH handshake. 'changed' is only reported after a failed Connect attempt.",
             "sections": [
                 {
                     "name": "trust_states",
                     "title": "Three trust states",
                     "overview": "The gateway maintains a store of SSH host keys (file or PostgreSQL). Each (host,port) pair has exactly one state at any time.",
                     "states": [
-                        {"state": "known", "meaning": "The host:port has been seen before and its key matches what's stored. No action needed.", "ui": "Green: \'Trusted\'. Connect works normally.", "icon": "\U0001f7e2"},
-                        {"state": "unknown", "meaning": "The host:port has never been seen before. This is normal for first connections.", "ui": "Yellow: \'Host not in known-hosts yet\'. Connect still works \u2014 the key will be stored on success.", "icon": "\U0001f7e1"},
-                        {"state": "changed", "meaning": "The host presented a key that differs from what's stored. This is a potential MITM attack and requires manual intervention.", "ui": "Red: \'Host key CHANGED\'. Connect is blocked until the entry is deleted via Recovery > Known Hosts.", "icon": "\U0001f534"},
+                        {
+                            "state": "known",
+                            "meaning": "The host:port has been seen before and its key matches what's stored. No action needed.",
+                            "ui": "Green: 'Trusted'. Connect works normally.",
+                            "icon": "\U0001f7e2",
+                        },
+                        {
+                            "state": "unknown",
+                            "meaning": "The host:port has never been seen before. This is normal for first connections.",
+                            "ui": "Yellow: 'Host not in known-hosts yet'. Connect still works \u2014 the key will be stored on success.",
+                            "icon": "\U0001f7e1",
+                        },
+                        {
+                            "state": "changed",
+                            "meaning": "The host presented a key that differs from what's stored. This is a potential MITM attack and requires manual intervention.",
+                            "ui": "Red: 'Host key CHANGED'. Connect is blocked until the entry is deleted via Recovery > Known Hosts.",
+                            "icon": "\U0001f534",
+                        },
                     ],
-                    "note": "\'changed\' is never returned by the preflight endpoint. It only appears after a real SSH connection attempt fails with a key mismatch. Once triggered, the UI remembers the state until the entry is deleted.",
+                    "note": "'changed' is never returned by the preflight endpoint. It only appears after a real SSH connection attempt fails with a key mismatch. Once triggered, the UI remembers the state until the entry is deleted.",
                 },
                 {
                     "name": "host_key_store",
                     "title": "How known-hosts work",
-                    "overview": "The store is configured via KNOWN_HOSTS_STORE env var (\'file\', \'postgres\', or empty/null for no-op). On first connection to a host, the key is automatically added. On subsequent connections, the key is verified against the stored copy.",
+                    "overview": "The store is configured via KNOWN_HOSTS_STORE env var ('file', 'postgres', or empty/null for no-op). On first connection to a host, the key is automatically added. On subsequent connections, the key is verified against the stored copy.",
                     "settings": [
-                        {"setting": "KNOWN_HOSTS_STORE=\'file\'", "description": "Uses an OpenSSH-format file (default: known_hosts in working dir). Paramiko\'s HostKeys handles read/write."},
-                        {"setting": "KNOWN_HOSTS_STORE=\'postgres\'", "description": "Uses the ssh_host_keys table in PostgreSQL. Supports concurrent access across gateway instances."},
-                        {"setting": "SSH_STRICT_HOST_KEY_CHECKING=true", "description": "Unknown hosts are rejected instead of auto-accepted. Combine with manual key management via known-hosts API."},
+                        {
+                            "setting": "KNOWN_HOSTS_STORE='file'",
+                            "description": "Uses an OpenSSH-format file (default: known_hosts in working dir). Paramiko's HostKeys handles read/write.",
+                        },
+                        {
+                            "setting": "KNOWN_HOSTS_STORE='postgres'",
+                            "description": "Uses the ssh_host_keys table in PostgreSQL. Supports concurrent access across gateway instances.",
+                        },
+                        {
+                            "setting": "SSH_STRICT_HOST_KEY_CHECKING=true",
+                            "description": "Unknown hosts are rejected instead of auto-accepted. Combine with manual key management via known-hosts API.",
+                        },
                     ],
                 },
                 {
                     "name": "preflight_check",
                     "title": "Check Trust \u2014 what it does and doesn't do",
-                    "overview": "The Check Trust button in the UI calls GET /api/known-hosts/check?host=X&port=Y. It looks up the (host,port) pair in the store and returns \'known\' if found, \'unknown\' if not.",
+                    "overview": "The Check Trust button in the UI calls GET /api/known-hosts/check?host=X&port=Y. It looks up the (host,port) pair in the store and returns 'known' if found, 'unknown' if not.",
                     "what_it_does": [
-                        "Returns \'known\' \u2014 host:port exists in the store. The key was previously trusted.",
-                        "Returns \'unknown\' \u2014 host:port not found. First connection or entry was deleted.",
+                        "Returns 'known' \u2014 host:port exists in the store. The key was previously trusted.",
+                        "Returns 'unknown' \u2014 host:port not found. First connection or entry was deleted.",
                     ],
                     "what_it_does_not_do": [
                         "It does NOT attempt to connect to the host.",
                         "It does NOT compare keys (no key is available before connection).",
-                        "It does NOT return \'changed\'. That state is impossible to determine without an active SSH handshake.",
+                        "It does NOT return 'changed'. That state is impossible to determine without an active SSH handshake.",
                     ],
                     "recommendation": "Always use Check Trust before connecting to a sensitive host. If unknown, verify the host fingerprint out-of-band before proceeding.",
                 },
@@ -1298,11 +1659,31 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "title": "Known-hosts management (Recovery panel)",
                     "overview": "The Recovery panel has a Known Hosts sub-block with three actions: View (show fingerprint), Delete (remove one host:port entry), Clear All (remove all entries). All actions require master API key.",
                     "endpoints": [
-                        {"endpoint": "GET /api/known-hosts", "scope": "master_key", "description": "List all known hosts. Returns host, port, key_type, fingerprint for each entry."},
-                        {"endpoint": "GET /api/known-hosts/{host}?port=Y", "scope": "master_key", "description": "Lookup single host:port entry. Returns full record or 404. Lookup is by (host,port) pair."},
-                        {"endpoint": "GET /api/known-hosts/check?host=X&port=Y", "scope": "master_key", "description": "Preflight trust check. Returns \'known\' or \'unknown\'. Never \'changed\'."},
-                        {"endpoint": "DELETE /api/known-hosts/{host}?port=Y", "scope": "master_key", "description": "Delete specific host:port entry. Port defaults to 22. Use after host key rotation."},
-                        {"endpoint": "DELETE /api/known-hosts", "scope": "master_key", "description": "Clear all known hosts. Resets the store. All hosts become unknown on next connect."},
+                        {
+                            "endpoint": "GET /api/known-hosts",
+                            "scope": "master_key",
+                            "description": "List all known hosts. Returns host, port, key_type, fingerprint for each entry.",
+                        },
+                        {
+                            "endpoint": "GET /api/known-hosts/{host}?port=Y",
+                            "scope": "master_key",
+                            "description": "Lookup single host:port entry. Returns full record or 404. Lookup is by (host,port) pair.",
+                        },
+                        {
+                            "endpoint": "GET /api/known-hosts/check?host=X&port=Y",
+                            "scope": "master_key",
+                            "description": "Preflight trust check. Returns 'known' or 'unknown'. Never 'changed'.",
+                        },
+                        {
+                            "endpoint": "DELETE /api/known-hosts/{host}?port=Y",
+                            "scope": "master_key",
+                            "description": "Delete specific host:port entry. Port defaults to 22. Use after host key rotation.",
+                        },
+                        {
+                            "endpoint": "DELETE /api/known-hosts",
+                            "scope": "master_key",
+                            "description": "Clear all known hosts. Resets the store. All hosts become unknown on next connect.",
+                        },
                     ],
                 },
             ],
@@ -1310,10 +1691,10 @@ def build_api_help(request: Request) -> dict[str, Any]:
                 {
                     "endpoint": "GET /api/known-hosts/check",
                     "title": "Preflight: check if a host is trusted",
-                    "description": "Before connecting, check if the host:port has a stored key. This is the \'Check Trust\' action.",
+                    "description": "Before connecting, check if the host:port has a stored key. This is the 'Check Trust' action.",
                     "request": "GET /api/known-hosts/check?host=192.0.2.10&port=22",
                     "response": '{"status":"known","host":"192.0.2.10","port":22}',
-                    "notes": "Returns \'known\' if the (host,port) pair exists in the store, \'unknown\' if not. Never returns \'changed\'.",
+                    "notes": "Returns 'known' if the (host,port) pair exists in the store, 'unknown' if not. Never returns 'changed'.",
                 },
                 {
                     "endpoint": "DELETE /api/known-hosts/{host}",
@@ -1329,7 +1710,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "description": "Remove all entries from the store. All hosts become unknown on next connection.",
                     "request": "DELETE /api/known-hosts",
                     "response": '{"deleted":5}',
-                    "notes": "This is destructive and irreversible. After this, every host will be treated as \'unknown\' on first connect.",
+                    "notes": "This is destructive and irreversible. After this, every host will be treated as 'unknown' on first connect.",
                 },
             ],
             "full_scenario": {
@@ -1349,7 +1730,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                         "endpoint": "POST /api/ssh/connect",
                         "body": '{"host":"10.0.0.5","port":2222,"username":"deploy","password":"***"}',
                         "expected": "Connection successful. Host key is automatically stored in the store.",
-                        "notes": "On success, the gateway stores the host key via store(). Next check will return \'known\'.",
+                        "notes": "On success, the gateway stores the host key via store(). Next check will return 'known'.",
                     },
                     {
                         "step": 3,
@@ -1363,15 +1744,15 @@ def build_api_help(request: Request) -> dict[str, Any]:
                         "action": "Connect fails \u2014 key changed",
                         "endpoint": "POST /api/ssh/connect",
                         "body": '{"host":"10.0.0.5","port":2222,"username":"deploy","password":"***"}',
-                        "expected": "Connection fails with \'Host key changed \u2014 possible MITM attack\'.",
-                        "notes": "The gateway\'s KnownHostsPolicy detected a key mismatch. The connection is rejected with SSHException.",
+                        "expected": "Connection fails with 'Host key changed \u2014 possible MITM attack'.",
+                        "notes": "The gateway's KnownHostsPolicy detected a key mismatch. The connection is rejected with SSHException.",
                     },
                     {
                         "step": 5,
                         "action": "UI blocks Connect \u2014 shows red warning",
                         "endpoint": "(UI only)",
-                        "expected": "Connect button is disabled. Red banner: \'Host key CHANGED \u2014 possible MITM attack. Remove entry via Recovery > Known Hosts\'.",
-                        "notes": "The UI detected \'changed\' from the error message. User must resolve before retrying.",
+                        "expected": "Connect button is disabled. Red banner: 'Host key CHANGED \u2014 possible MITM attack. Remove entry via Recovery > Known Hosts'.",
+                        "notes": "The UI detected 'changed' from the error message. User must resolve before retrying.",
                     },
                     {
                         "step": 6,
@@ -1385,7 +1766,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                         "action": "Admin confirms the key change is legitimate \u2014 deletes stale entry",
                         "endpoint": "DELETE /api/known-hosts/10.0.0.5?port=2222",
                         "expected": '{"deleted":1}',
-                        "notes": "Entry removed. Next connection attempt will treat the host as \'unknown\' and store the new key.",
+                        "notes": "Entry removed. Next connection attempt will treat the host as 'unknown' and store the new key.",
                     },
                     {
                         "step": 8,
@@ -1399,14 +1780,14 @@ def build_api_help(request: Request) -> dict[str, Any]:
                 "summary": "8 steps: preflight unknown \u2192 connect (store) \u2192 confirm known \u2192 changed detected \u2192 blocked \u2192 inspect \u2192 delete \u2192 reconnect. Full trust lifecycle with safe recovery.",
             },
             "tips": [
-                "Always run Check Trust before connecting to a production server. \'unknown\' is safe but worth verifying.",
+                "Always run Check Trust before connecting to a production server. 'unknown' is safe but worth verifying.",
                 "If a host key changed unexpectedly, do NOT delete the entry blindly. Verify the new fingerprint out-of-band first.",
-                "The preflight endpoint never returns \'changed\'. Changed is only detected during an actual SSH handshake.",
+                "The preflight endpoint never returns 'changed'. Changed is only detected during an actual SSH handshake.",
                 "Delete by (host,port) pair, not by host alone. A server on port 2222 and the same server on port 22 have separate entries.",
-                "Use Clear All sparingly \u2014 it removes every stored key and every host becomes \'unknown\'.",
+                "Use Clear All sparingly \u2014 it removes every stored key and every host becomes 'unknown'.",
                 "Known hosts are stored per gateway instance. If you run multiple gateways, they share the store only if using KNOWN_HOSTS_STORE=postgres.",
                 "Check Trust requires the host and port. If connecting through a jump host, check the jump host, not the target.",
-                "The Recovery panel\'s Known Hosts sub-block shows the action log in the terminal. Use View to confirm a fingerprint before deleting.",
+                "The Recovery panel's Known Hosts sub-block shows the action log in the terminal. Use View to confirm a fingerprint before deleting.",
             ],
         },
         "public_endpoints": public_endpoints,

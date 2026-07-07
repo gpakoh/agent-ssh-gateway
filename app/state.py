@@ -1,6 +1,5 @@
 """Global application state — initialized in lifespan()."""
 
-
 from app.batch_operations import BatchOperationsManager
 from app.bulk_operations_v2 import BulkOperationsManager
 from app.circuit_breaker import CircuitBreakerRegistry
@@ -58,11 +57,18 @@ def get_agent_token_store() -> AgentTokenStore:
         raise RuntimeError("AgentTokenStore not initialized")
     return agent_token_store
 
+
 # ---------------------------------------------------------------------------
 # Error Helpers (shared Across Routers)
 # ---------------------------------------------------------------------------
 
-RETRYABLE_CODES = {"BAD_GATEWAY", "GATEWAY_TIMEOUT", "INTERNAL_ERROR", "UPSTREAM_CONNECTION_FAILED", "RATE_LIMIT_EXCEEDED"}
+RETRYABLE_CODES = {
+    "BAD_GATEWAY",
+    "GATEWAY_TIMEOUT",
+    "INTERNAL_ERROR",
+    "UPSTREAM_CONNECTION_FAILED",
+    "RATE_LIMIT_EXCEEDED",
+}
 
 ERROR_CODE_MAP: dict[tuple[int, str], str] = {
     (404, "session"): "SESSION_NOT_FOUND",
@@ -116,7 +122,14 @@ def _hint(code: str) -> str:
     return HINTS.get(code, "")
 
 
-def _err(status_code: int, message: str, *, code: str | None = None, retryable: bool | None = None, hint: str | None = None) -> dict:
+def _err(
+    status_code: int,
+    message: str,
+    *,
+    code: str | None = None,
+    retryable: bool | None = None,
+    hint: str | None = None,
+) -> dict:
     if code is None:
         code = _auto_code(status_code, message)
     if retryable is None:

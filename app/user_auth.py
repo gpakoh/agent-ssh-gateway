@@ -140,7 +140,9 @@ async def register(req: RegisterRequest):
             result = await session.execute(select(func.count(User.id)))
             count = result.scalar() or 0
             if count > 0:
-                raise HTTPException(status_code=403, detail="Registration disabled. An admin already exists.")
+                raise HTTPException(
+                    status_code=403, detail="Registration disabled. An admin already exists."
+                )
 
             existing = await session.execute(select(User).where(User.username == req.username))
             if existing.scalar_one_or_none():

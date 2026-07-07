@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 class CircuitState(Enum):
     """Circuit breaker states."""
+
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"
@@ -46,8 +47,10 @@ class CircuitBreaker:
     async def can_execute(self) -> bool:
         async with self._lock:
             if self._state == CircuitState.OPEN:
-                if self._last_failure_time is not None and \
-                   time.time() - self._last_failure_time >= self._recovery_timeout:
+                if (
+                    self._last_failure_time is not None
+                    and time.time() - self._last_failure_time >= self._recovery_timeout
+                ):
                     self._state = CircuitState.HALF_OPEN
                     self._half_open_calls = 0
                     logger.info("Circuit Breaker Entering HALF_OPEN State")

@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 class ServerStatus(Enum):
     """Server connection status."""
+
     ONLINE = "online"
     OFFLINE = "offline"
     ERROR = "error"
@@ -23,6 +24,7 @@ class ServerStatus(Enum):
 @dataclass
 class ServerConfig:
     """Server configuration."""
+
     id: str
     name: str
     host: str

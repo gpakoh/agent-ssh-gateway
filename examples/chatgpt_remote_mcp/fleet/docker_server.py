@@ -109,9 +109,7 @@ async def docker_compose_services(
     return await client.compose_services(project_dir=project_dir, file_path=file_path)
 
 
-def create_auth_proxy(
-    *, upstream_port: int, valid_tokens: set[str]
-) -> Starlette:
+def create_auth_proxy(*, upstream_port: int, valid_tokens: set[str]) -> Starlette:
     client = httpx.AsyncClient(
         base_url=f"http://127.0.0.1:{upstream_port}",
         timeout=HTTP_TIMEOUT,
@@ -151,7 +149,5 @@ if __name__ == "__main__":
         daemon=True,
     ).start()
 
-    app = create_auth_proxy(
-        upstream_port=INTERNAL_PORT, valid_tokens={env["token"]}
-    )
+    app = create_auth_proxy(upstream_port=INTERNAL_PORT, valid_tokens={env["token"]})
     uvicorn.run(app, host=env["host"], port=env["port"])

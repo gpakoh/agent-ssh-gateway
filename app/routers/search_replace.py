@@ -17,7 +17,9 @@ router = APIRouter()
 
 
 @router.post("/api/search/global", tags=["code"], response_model=GlobalSearchResponse)
-async def global_search(req: GlobalSearchRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def global_search(
+    req: GlobalSearchRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Search across all project files."""
     matches = await _state.search_replace.search(
         session_id=req.session_id,
@@ -48,7 +50,9 @@ async def global_search(req: GlobalSearchRequest, _identity: AuthIdentity = Depe
 
 
 @router.post("/api/replace/global", tags=["code"], response_model=GlobalReplaceResponse)
-async def global_replace(req: GlobalReplaceRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def global_replace(
+    req: GlobalReplaceRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Replace across all project files."""
     results = await _state.search_replace.replace(
         session_id=req.session_id,
@@ -69,7 +73,7 @@ async def global_replace(req: GlobalReplaceRequest, _identity: AuthIdentity = De
         commit_result = await _state.context_manager.commit_changes(
             req.context_id,
             f"Global replace: '{req.search}' -> '{req.replace}'",
-            [r.path for r in results if r.replacements_count > 0]
+            [r.path for r in results if r.replacements_count > 0],
         )
         if commit_result.get("success"):
             git_commit = commit_result.get("hash")

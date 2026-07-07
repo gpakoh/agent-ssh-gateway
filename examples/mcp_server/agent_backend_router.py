@@ -81,8 +81,7 @@ class SelectionPolicy(ABC):
         backends: dict[str, BackendEntry],
         cooldowns: list[CooldownEntry],
         preferred: str | None = None,
-    ) -> str | None:
-        ...
+    ) -> str | None: ...
 
 
 class TryPrimaryFallback(SelectionPolicy):
@@ -111,9 +110,7 @@ class TryPrimaryFallback(SelectionPolicy):
         if preferred and _is_available(preferred):
             return preferred
 
-        sorted_backends = sorted(
-            backends.values(), key=lambda b: b.priority
-        )
+        sorted_backends = sorted(backends.values(), key=lambda b: b.priority)
         for entry in sorted_backends:
             if _is_available(entry.name):
                 return entry.name
@@ -134,11 +131,7 @@ class RoundRobin(SelectionPolicy):
         preferred: str | None = None,
     ) -> str | None:
         available = sorted(
-            [
-                name
-                for name, entry in backends.items()
-                if entry.status == BackendStatus.AVAILABLE
-            ]
+            [name for name, entry in backends.items() if entry.status == BackendStatus.AVAILABLE]
         )
         if not available:
             return None
@@ -152,14 +145,12 @@ class RoundRobin(SelectionPolicy):
 # ── Router ────────────────────────────────────────────────────────────────────
 
 _ENABLED = os.environ.get("MCP_AGENT_BACKEND_ROUTER_ENABLED", "false").strip().lower() == "true"
-_FALLBACK_ORDER = os.environ.get(
-    "MCP_BACKEND_FALLBACK_ORDER", "opencode,mimo"
-).strip().split(",")
+_FALLBACK_ORDER = os.environ.get("MCP_BACKEND_FALLBACK_ORDER", "opencode,mimo").strip().split(",")
 _COOLDOWN_DEFAULT = int(os.environ.get("MCP_BACKEND_COOLDOWN_DEFAULT", "25200"))
 _COOLDOWN_ERROR = int(os.environ.get("MCP_BACKEND_COOLDOWN_ERROR", "300"))
-_POLICY_NAME = os.environ.get(
-    "MCP_BACKEND_SELECTION_POLICY", "try-primary-fallback"
-).strip().lower()
+_POLICY_NAME = (
+    os.environ.get("MCP_BACKEND_SELECTION_POLICY", "try-primary-fallback").strip().lower()
+)
 
 
 class AgentBackendRouter:
@@ -181,10 +172,7 @@ class AgentBackendRouter:
     ) -> None:
         if backends is None:
             order = fallback_order or _FALLBACK_ORDER
-            backends = {
-                name: BackendEntry(name=name, priority=i)
-                for i, name in enumerate(order)
-            }
+            backends = {name: BackendEntry(name=name, priority=i) for i, name in enumerate(order)}
         self._backends = backends
         self._policy = policy or self._default_policy()
         self._cooldown_default = cooldown_default

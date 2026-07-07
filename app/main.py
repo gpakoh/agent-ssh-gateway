@@ -65,7 +65,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
@@ -85,56 +84,56 @@ async def lifespan(app: FastAPI):
     await state.job_manager.start_cleanup_task()
 
     state.file_editor = FileEditor(ssh_manager=state.manager)
-    
+
     state.context_manager = ContextManager(ssh_manager=state.manager)
     await state.context_manager.start_cleanup_task()
-    
+
     state.batch_manager = BatchOperationsManager(
         ssh_manager=state.manager,
         file_editor=state.file_editor,
         context_manager=state.context_manager,
     )
-    
+
     state.code_intelligence = CodeIntelligence(
         ssh_manager=state.manager,
         file_editor=state.file_editor,
     )
-    
+
     state.search_replace = GlobalSearchReplace(
         ssh_manager=state.manager,
         file_editor=state.file_editor,
     )
-    
+
     state.file_tree = FileTreeExplorer(ssh_manager=state.manager)
-    
+
     state.server_manager = ServerManager()
-    
+
     state.snapshot_manager = SnapshotManager(
         ssh_manager=state.manager,
         context_manager=state.context_manager,
     )
-    
+
     state.webhook_manager = WebhookManager(
         ssh_manager=state.manager,
         job_manager=state.job_manager,
     )
-    
+
     state.analytics = ProjectAnalytics(ssh_manager=state.manager)
-    
+
     # Initialize Security Components
     if settings.persistent_sessions_enabled and not settings.encryption_key:
         raise RuntimeError(
             "PERSISTENT_SESSIONS_ENABLED=true requires ENCRYPTION_KEY to be set. "
-            "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            'Generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
         )
     state.audit_logger = AuditLogger()
-    
+
     # Initialize Swarm Components
     state.redis_queue = RedisJobQueue(settings.redis_url)
     state.circuit_breakers = CircuitBreakerRegistry()
     state.dist_lock = DistributedLock(settings.redis_url)
     state.bulk_ops = BulkOperationsManager(max_concurrency=50)
-    
+
     try:
         await state.redis_queue.connect()
         await state.dist_lock.connect()
@@ -154,7 +153,7 @@ async def lifespan(app: FastAPI):
             )
     except Exception as exc:
         logger.warning("AgentTokenStore not available (agent token rotation will fail): %s", exc)
-    
+
     # Initialize Persistent Sessions If Configured
     state.session_store = None
     if settings.persistent_sessions_enabled and settings.database_url:
@@ -187,10 +186,12 @@ async def lifespan(app: FastAPI):
                     logger.warning("Failed to restore session %s: %s", sess["session_id"], exc)
                     failed += 1
             if restored:
-                logger.info("Restored %d sessions from persistent storage (%d failed)", restored, failed)
+                logger.info(
+                    "Restored %d sessions from persistent storage (%d failed)", restored, failed
+                )
         except Exception as exc:
             logger.warning("PostgreSQL not available: %s", exc)
-    
+
     # Initialize Event Hook Components
     if settings.event_hooks_enabled:
         try:
@@ -203,7 +204,9 @@ async def lifespan(app: FastAPI):
             state.event_hook_store = EventHookStore(settings.database_url)
             await state.event_hook_store.create_tables()
 
-            state.delivery_service = DeliveryService(settings.database_url, instance_id=uuid.uuid4().hex)
+            state.delivery_service = DeliveryService(
+                settings.database_url, instance_id=uuid.uuid4().hex
+            )
             await state.delivery_service.create_tables()
 
             s = settings
@@ -228,20 +231,16 @@ async def lifespan(app: FastAPI):
 
     logger.info("agent-ssh-gateway started on %s:%d", settings.uvicorn_host, settings.uvicorn_port)
     yield
-    
+
     # Graceful Shutdown: Drain Active Jobs
     logger.info("Starting Graceful Shutdown...")
-    
+
     # Wait For Active Jobs To Complete (max 30s)
     if state.job_manager:
         active_jobs = [j for j in state.job_manager._jobs.values() if j.status == "running"]
         if active_jobs:
             logger.info("Waiting for %d active jobs to complete...", len(active_jobs))
-            await asyncio.wait_for(
-                state.job_manager.wait_for_all_jobs(),
-                timeout=30.0
-            )
-    
+            await asyncio.wait_for(state.job_manager.wait_for_all_jobs(), timeout=30.0)
 
     # Cleanup
     await state.context_manager.stop_cleanup_task()
@@ -251,8 +250,7 @@ async def lifespan(app: FastAPI):
     sessions = await state.manager.list_sessions()
     if sessions:
         tasks = [
-            asyncio.wait_for(state.manager.disconnect(s.session_id), timeout=5.0)
-            for s in sessions
+            asyncio.wait_for(state.manager.disconnect(s.session_id), timeout=5.0) for s in sessions
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for sid, err in zip([s.session_id for s in sessions], results, strict=True):
@@ -275,7 +273,7 @@ async def lifespan(app: FastAPI):
         await state.dist_lock.disconnect()
     if state.agent_token_store:
         await state.agent_token_store.disconnect()
-    ds = getattr(state, 'delivery_service', None)
+    ds = getattr(state, "delivery_service", None)
     if ds:
         await ds.close()
         logger.info("Event Hook Delivery Service Shut Down")
@@ -283,7 +281,7 @@ async def lifespan(app: FastAPI):
         await state.session_store.disconnect()
     if state.host_key_store:
         await state.host_key_store.disconnect()
-    
+
     logger.info("agent-ssh-gateway Shutdown Complete")
 
 
@@ -310,23 +308,43 @@ app = FastAPI(
         }
     },
     openapi_tags=[
-        {"name": "ssh", "description": "SSH session management (connect, execute, disconnect). Requires scope: `ssh:connect` | `ssh:execute` | `ssh:disconnect` for agent tokens."},
-        {"name": "files", "description": "File operations (read, edit, upload, download). Requires scope: `ssh:files` for agent tokens."},
-        {"name": "jobs", "description": "Background job execution and monitoring. Requires scope: `jobs:run` | `jobs:read` for agent tokens."},
+        {
+            "name": "ssh",
+            "description": "SSH session management (connect, execute, disconnect). Requires scope: `ssh:connect` | `ssh:execute` | `ssh:disconnect` for agent tokens.",
+        },
+        {
+            "name": "files",
+            "description": "File operations (read, edit, upload, download). Requires scope: `ssh:files` for agent tokens.",
+        },
+        {
+            "name": "jobs",
+            "description": "Background job execution and monitoring. Requires scope: `jobs:run` | `jobs:read` for agent tokens.",
+        },
         {"name": "git", "description": "Git repository operations. Master key only."},
-        {"name": "context", "description": "Development contexts with git awareness. Master key only."},
+        {
+            "name": "context",
+            "description": "Development contexts with git awareness. Master key only.",
+        },
         {"name": "templates", "description": "Code templates. Master key only."},
         {"name": "servers", "description": "Saved server management. Master key only."},
         {"name": "snapshots", "description": "Project snapshots for recovery. Master key only."},
         {"name": "webhooks", "description": "CI/CD webhooks. Master key only."},
         {"name": "known-hosts", "description": "Host key store management. Master key only."},
         {"name": "logs", "description": "Remote log reading (journald, docker). Master key only."},
-        {"name": "help", "description": "API help and endpoint discovery. Accessible with any valid API key."},
-        {"name": "code", "description": "Code intelligence (search, insert, complete). Master key only."},
-        {"name": "system", "description": "System endpoints (health, metrics, config). Public: `/health`, `/api/capabilities`. Master key: rest."},
+        {
+            "name": "help",
+            "description": "API help and endpoint discovery. Accessible with any valid API key.",
+        },
+        {
+            "name": "code",
+            "description": "Code intelligence (search, insert, complete). Master key only.",
+        },
+        {
+            "name": "system",
+            "description": "System endpoints (health, metrics, config). Public: `/health`, `/api/capabilities`. Master key: rest.",
+        },
     ],
 )
-
 
 
 ERROR_SCHEMA_REF = "#/components/schemas/ErrorResponse"
@@ -356,6 +374,7 @@ ERROR_DESC = {
     504: "Gateway timeout",
 }
 
+
 def _set_errors(op: dict):
     tag = (op.get("tags") or ["system"])[0]
     codes = TAG_ERROR_CODES.get(tag, [])
@@ -366,8 +385,10 @@ def _set_errors(op: dict):
                 "content": {"application/json": {"schema": {"$ref": ERROR_SCHEMA_REF}}},
             }
 
+
 def custom_openapi():
     from fastapi.openapi.utils import get_openapi
+
     if app.openapi_schema:
         return app.openapi_schema
     schema = get_openapi(
@@ -391,17 +412,32 @@ def custom_openapi():
                     {
                         "type": "object",
                         "properties": {
-                            "message": {"type": "string", "description": "Human-readable error message"},
-                            "code": {"type": "string", "description": "Machine-readable error code (e.g. SESSION_NOT_FOUND)"},
-                            "retryable": {"type": "boolean", "description": "Whether the operation can be retried"},
-                            "hint": {"type": "string", "description": "Guidance for resolving the error"},
+                            "message": {
+                                "type": "string",
+                                "description": "Human-readable error message",
+                            },
+                            "code": {
+                                "type": "string",
+                                "description": "Machine-readable error code (e.g. SESSION_NOT_FOUND)",
+                            },
+                            "retryable": {
+                                "type": "boolean",
+                                "description": "Whether the operation can be retried",
+                            },
+                            "hint": {
+                                "type": "string",
+                                "description": "Guidance for resolving the error",
+                            },
                             "http_status": {"type": "integer", "description": "HTTP status code"},
                             "errors": {
                                 "type": "array",
                                 "items": {"$ref": "#/components/schemas/ValidationFieldItem"},
                                 "description": "Field-level validation errors (422 only)",
                             },
-                            "total_errors": {"type": "integer", "description": "Total number of validation errors"},
+                            "total_errors": {
+                                "type": "integer",
+                                "description": "Total number of validation errors",
+                            },
                         },
                     },
                 ],
@@ -424,7 +460,10 @@ def custom_openapi():
                 "properties": {
                     "message": {"type": "string", "description": "Error summary"},
                     "code": {"type": "string", "description": "Always VALIDATION_ERROR"},
-                    "retryable": {"type": "boolean", "description": "Always false for validation errors"},
+                    "retryable": {
+                        "type": "boolean",
+                        "description": "Always false for validation errors",
+                    },
                     "hint": {"type": "string", "description": "Guidance to fix validation errors"},
                     "http_status": {"type": "integer", "description": "Always 422"},
                     "errors": {
@@ -432,7 +471,10 @@ def custom_openapi():
                         "items": {"$ref": "#/components/schemas/ValidationFieldItem"},
                         "description": "Per-field validation errors",
                     },
-                    "total_errors": {"type": "integer", "description": "Count of validation errors"},
+                    "total_errors": {
+                        "type": "integer",
+                        "description": "Count of validation errors",
+                    },
                 },
             },
         },
@@ -480,7 +522,10 @@ def custom_openapi():
             "data": {
                 "type": "object",
                 "properties": {
-                    "status": {"type": "string", "enum": ["started", "running", "completed", "cancelled"]},
+                    "status": {
+                        "type": "string",
+                        "enum": ["started", "running", "completed", "cancelled"],
+                    },
                     "job_id": {"type": "string"},
                     "ts": {"type": "number", "description": "Unix timestamp"},
                 },
@@ -534,7 +579,10 @@ def custom_openapi():
                 "type": "object",
                 "properties": {
                     "message": {"type": "string", "description": "Error message"},
-                    "code": {"type": "string", "description": "Error code (e.g. TIMEOUT, CONNECTION_LOST)"},
+                    "code": {
+                        "type": "string",
+                        "description": "Error code (e.g. TIMEOUT, CONNECTION_LOST)",
+                    },
                     "ts": {"type": "number", "description": "Unix timestamp"},
                 },
             },
@@ -564,10 +612,22 @@ def custom_openapi():
 
     # --- Default Response Headers ---
     COMMON_RESPONSE_HEADERS = {
-        "X-Request-ID": {"schema": {"type": "string"}, "description": "Unique request identifier for tracing"},
-        "X-RateLimit-Limit": {"schema": {"type": "integer"}, "description": "Rate limit ceiling (requests per window)"},
-        "X-RateLimit-Remaining": {"schema": {"type": "integer"}, "description": "Requests remaining in current window"},
-        "X-RateLimit-Reset": {"schema": {"type": "integer"}, "description": "Unix timestamp when rate limit resets"},
+        "X-Request-ID": {
+            "schema": {"type": "string"},
+            "description": "Unique request identifier for tracing",
+        },
+        "X-RateLimit-Limit": {
+            "schema": {"type": "integer"},
+            "description": "Rate limit ceiling (requests per window)",
+        },
+        "X-RateLimit-Remaining": {
+            "schema": {"type": "integer"},
+            "description": "Requests remaining in current window",
+        },
+        "X-RateLimit-Reset": {
+            "schema": {"type": "integer"},
+            "description": "Unix timestamp when rate limit resets",
+        },
     }
 
     content_type_map = {
@@ -599,11 +659,32 @@ def custom_openapi():
     }
 
     response_examples: dict[tuple[str, str], dict] = {
-        ("/api/ssh/connect", "post"): {"session_id": "abc123", "host": "10.0.0.1", "port": 22, "username": "deploy"},
-        ("/api/ssh/execute", "post"): {"session_id": "abc123", "exit_code": 0, "stdout": "total 42\n-rw-r--r-- 1 root root ...", "stderr": "", "duration_ms": 150},
-        ("/api/context/create", "post"): {"context_id": "ctx_abc123", "name": "my_project", "path": "/root/project", "status": "ready"},
+        ("/api/ssh/connect", "post"): {
+            "session_id": "abc123",
+            "host": "10.0.0.1",
+            "port": 22,
+            "username": "deploy",
+        },
+        ("/api/ssh/execute", "post"): {
+            "session_id": "abc123",
+            "exit_code": 0,
+            "stdout": "total 42\n-rw-r--r-- 1 root root ...",
+            "stderr": "",
+            "duration_ms": 150,
+        },
+        ("/api/context/create", "post"): {
+            "context_id": "ctx_abc123",
+            "name": "my_project",
+            "path": "/root/project",
+            "status": "ready",
+        },
         ("/api/jobs/run", "post"): {"job_id": "job_abc123", "status": "queued"},
-        ("/api/file/read", "post"): {"path": "/etc/hostname", "content": "my-server\n", "size": 10, "encoding": "utf-8"},
+        ("/api/file/read", "post"): {
+            "path": "/etc/hostname",
+            "content": "my-server\n",
+            "size": 10,
+            "encoding": "utf-8",
+        },
         ("/api/file/write", "post"): {"path": "/root/test.txt", "size": 5, "encoding": "utf-8"},
         ("/", "get"): {"service": "agent-ssh-gateway", "version": APP_VERSION, "status": "running"},
     }
@@ -618,7 +699,11 @@ def custom_openapi():
             if "enum" in schema_def:
                 return schema_def["enum"][0]
             if "format" in schema_def:
-                return {"date-time": "2026-01-01T00:00:00Z", "uri": "https://example.com", "email": "user@example.com"}.get(schema_def["format"], "string")
+                return {
+                    "date-time": "2026-01-01T00:00:00Z",
+                    "uri": "https://example.com",
+                    "email": "user@example.com",
+                }.get(schema_def["format"], "string")
             return "string"
         if schema_def.get("type") == "integer":
             return 0
@@ -691,7 +776,9 @@ def custom_openapi():
                     if ct_content and "example" not in ct_content:
                         ct_content["example"] = response_examples[key]
                     elif ct_content is None:
-                        resp200.setdefault("content", {}).setdefault("application/json", {})["example"] = response_examples[key]
+                        resp200.setdefault("content", {}).setdefault("application/json", {})[
+                            "example"
+                        ] = response_examples[key]
 
             # --- Parameter Descriptions ---
             for param in op.get("parameters", []):
@@ -710,6 +797,7 @@ def custom_openapi():
 
     app.openapi_schema = schema
     return app.openapi_schema
+
 
 app.openapi = custom_openapi
 
@@ -750,6 +838,7 @@ async def auth_middleware(request: Request, call_next):
 # Exception Handler
 # ---------------------------------------------------------------------------
 
+
 @app.exception_handler(SSHManagerError)
 async def ssh_exception_handler(request, exc: SSHManagerError):
     """Convert SSH manager exceptions to structured HTTP responses."""
@@ -772,13 +861,13 @@ async def validation_exception_handler(request, exc: RequestValidationError):
     """Convert Pydantic validation errors to clear field-specific messages."""
     errors = exc.errors()
     field_errors = []
-    
+
     for error in errors:
         loc = error.get("loc", [])
         field = ".".join(str(x) for x in loc if x != "body")
         msg = error.get("msg", "")
         error_type = error.get("type", "")
-        
+
         # Create Human-readable Message
         if "missing" in error_type or "required" in error_type:
             message = f"Field '{field}' is required but was not provided"
@@ -791,13 +880,15 @@ async def validation_exception_handler(request, exc: RequestValidationError):
             message = f"Field '{field}' length validation failed: {msg}"
         else:
             message = f"Field '{field}': {msg}"
-        
-        field_errors.append({
-            "field": field,
-            "error": message,
-            "type": error_type,
-        })
-    
+
+        field_errors.append(
+            {
+                "field": field,
+                "error": message,
+                "type": error_type,
+            }
+        )
+
     return JSONResponse(
         status_code=422,
         content={
@@ -808,7 +899,7 @@ async def validation_exception_handler(request, exc: RequestValidationError):
             "http_status": 422,
             "errors": field_errors,
             "total_errors": len(field_errors),
-        }
+        },
     )
 
 

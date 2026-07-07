@@ -64,7 +64,11 @@ class ProjectAnalytics:
             metrics["dependencies"] = dep_stats
         except Exception as e:
             logger.warning("Dependency stats error: %s", e)
-            metrics["dependencies"] = {"requirements_count": 0, "has_pyproject": False, "outdated_packages": 0}
+            metrics["dependencies"] = {
+                "requirements_count": 0,
+                "has_pyproject": False,
+                "outdated_packages": 0,
+            }
 
         return metrics
 
@@ -73,7 +77,7 @@ class ProjectAnalytics:
         # Count files by extension
         cmd = f"cd '{path}' && find . -type f -not -path './venv/*' -not -path './.git/*' -not -path './__pycache__/*' 2>/dev/null | sed 's/.*\\.//' | sort | uniq -c | sort -rn | head -20"
         result = await self._ssh.execute(session_id, cmd, timeout=15)
-        
+
         extensions = {}
         if result["stdout"]:
             for line in result["stdout"].strip().split("\n"):
@@ -113,7 +117,7 @@ class ProjectAnalytics:
         # Lines of code by language
         loc_cmd = f"cd '{path}' && find . -name '*.py' -not -path './venv/*' -not -path './__pycache__/*' 2>/dev/null | xargs wc -l 2>/dev/null | tail -1"
         loc_result = await self._ssh.execute(session_id, loc_cmd, timeout=15)
-        
+
         python_loc = 0
         try:
             python_loc = int(loc_result["stdout"].strip().split()[0])
@@ -191,7 +195,9 @@ class ProjectAnalytics:
     async def _get_test_stats(self, session_id: str, path: str) -> dict:
         """Get test statistics."""
         # Check for test files
-        test_cmd = f"cd '{path}' && find . -name 'test_*.py' -o -name '*_test.py' 2>/dev/null | wc -l"
+        test_cmd = (
+            f"cd '{path}' && find . -name 'test_*.py' -o -name '*_test.py' 2>/dev/null | wc -l"
+        )
         test_result = await self._ssh.execute(session_id, test_cmd, timeout=10)
         try:
             test_files = int(test_result["stdout"].strip() or 0)
@@ -199,9 +205,11 @@ class ProjectAnalytics:
             test_files = 0
 
         # Run pytest to get test count
-        pytest_cmd = f"cd '{path}' && python -m pytest --collect-only -q 2>/dev/null | tail -1 || echo '0'"
+        pytest_cmd = (
+            f"cd '{path}' && python -m pytest --collect-only -q 2>/dev/null | tail -1 || echo '0'"
+        )
         pytest_result = await self._ssh.execute(session_id, pytest_cmd, timeout=30)
-        
+
         test_count = 0
         try:
             # Parse "X tests collected"
@@ -233,7 +241,9 @@ class ProjectAnalytics:
         has_pyproject = pyproject_result["stdout"].strip() == "yes"
 
         # Check for outdated packages (if pip available)
-        outdated_cmd = f"cd '{path}' && pip list --outdated --format=json 2>/dev/null | wc -l || echo '0'"
+        outdated_cmd = (
+            f"cd '{path}' && pip list --outdated --format=json 2>/dev/null | wc -l || echo '0'"
+        )
         outdated_result = await self._ssh.execute(session_id, outdated_cmd, timeout=30)
         try:
             outdated = int(outdated_result["stdout"].strip() or 0)

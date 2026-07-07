@@ -84,9 +84,7 @@ class TestWriteHandoffPlan:
                 return {"path": path, "mode": mode}
 
         client = FakeClient()
-        result = handoff.write_handoff_plan(
-            client, task="Do work", session_id="s1"
-        )
+        result = handoff.write_handoff_plan(client, task="Do work", session_id="s1")
         assert result["path"] == ".ai-bridge/current-plan.md"
         assert client.calls[0][0] == ".ai-bridge/current-plan.md"
         assert client.calls[0][2] == "s1"

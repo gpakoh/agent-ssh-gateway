@@ -31,7 +31,9 @@ def _setup_globals():
     state_module.bulk_ops = MagicMock()
     state_module.bulk_ops.execute_batch_commands = AsyncMock(return_value=[])
     state_module.context_manager = AsyncMock()
-    state_module.context_manager.get_context = AsyncMock(return_value=MagicMock(session_id="mock-session"))
+    state_module.context_manager.get_context = AsyncMock(
+        return_value=MagicMock(session_id="mock-session")
+    )
     state_module.batch_manager = AsyncMock()
     state_module.server_manager = MagicMock()
     mock_result = MagicMock()
@@ -47,8 +49,14 @@ def _setup_globals():
     yield
 
     for n in [
-        "manager", "audit_logger", "file_editor", "job_manager",
-        "bulk_ops", "context_manager", "batch_manager", "server_manager",
+        "manager",
+        "audit_logger",
+        "file_editor",
+        "job_manager",
+        "bulk_ops",
+        "context_manager",
+        "batch_manager",
+        "server_manager",
     ]:
         try:
             delattr(state_module, n)
@@ -70,7 +78,9 @@ ENDPOINTS = [
 @pytest.mark.asyncio
 async def test_security_headers_present(path):
     transport = ASGITransport(app=main_module.app)
-    async with AsyncClient(transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}) as client:
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}
+    ) as client:
         r = await client.get(path)
         for header, value in SECURITY_HEADERS.items():
             assert r.headers.get(header) == value, f"Missing {header} on {path}"
@@ -79,7 +89,9 @@ async def test_security_headers_present(path):
 @pytest.mark.asyncio
 async def test_security_headers_on_error():
     transport = ASGITransport(app=main_module.app)
-    async with AsyncClient(transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}) as client:
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}
+    ) as client:
         r = await client.get("/api/servers")
         for header, value in SECURITY_HEADERS.items():
             assert r.headers.get(header) == value, f"Missing {header} on 401 response"
@@ -93,22 +105,32 @@ async def test_security_headers_on_error():
 @pytest.mark.asyncio
 async def test_cors_origin_on_health():
     transport = ASGITransport(app=main_module.app)
-    async with AsyncClient(transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}) as client:
-        r = await client.options("/health", headers={
-            "Origin": "https://gateway.example.com",
-            "Access-Control-Request-Method": "GET",
-        })
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}
+    ) as client:
+        r = await client.options(
+            "/health",
+            headers={
+                "Origin": "https://gateway.example.com",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
         assert r.headers.get("access-control-allow-origin") == "https://gateway.example.com"
 
 
 @pytest.mark.asyncio
 async def test_cors_allow_headers():
     transport = ASGITransport(app=main_module.app)
-    async with AsyncClient(transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}) as client:
-        r = await client.options("/health", headers={
-            "Origin": "https://gateway.example.com",
-            "Access-Control-Request-Method": "GET",
-        })
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}
+    ) as client:
+        r = await client.options(
+            "/health",
+            headers={
+                "Origin": "https://gateway.example.com",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
         ac_headers = r.headers.get("access-control-allow-headers", "")
         assert "Content-Type" in ac_headers
         assert "Authorization" in ac_headers
@@ -118,11 +140,16 @@ async def test_cors_allow_headers():
 @pytest.mark.asyncio
 async def test_cors_allow_methods():
     transport = ASGITransport(app=main_module.app)
-    async with AsyncClient(transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}) as client:
-        r = await client.options("/health", headers={
-            "Origin": "https://gateway.example.com",
-            "Access-Control-Request-Method": "GET",
-        })
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}
+    ) as client:
+        r = await client.options(
+            "/health",
+            headers={
+                "Origin": "https://gateway.example.com",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
         ac_methods = r.headers.get("access-control-allow-methods", "")
         assert "POST" in ac_methods
         assert "GET" in ac_methods
@@ -137,14 +164,28 @@ async def test_cors_allow_methods():
 @pytest.mark.asyncio
 async def test_throttle_returns_429():
     transport = ASGITransport(app=main_module.app)
-    async with AsyncClient(transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}) as client:
-        await client.post("/api/ssh/connect", json={
-            "host": "127.0.0.1", "port": 22, "username": "test", "password": "test",
-        })
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}
+    ) as client:
+        await client.post(
+            "/api/ssh/connect",
+            json={
+                "host": "127.0.0.1",
+                "port": 22,
+                "username": "test",
+                "password": "test",
+            },
+        )
         for _ in range(12):
-            r = await client.post("/api/ssh/connect", json={
-                "host": "127.0.0.1", "port": 22, "username": "test", "password": "test",
-            })
+            r = await client.post(
+                "/api/ssh/connect",
+                json={
+                    "host": "127.0.0.1",
+                    "port": 22,
+                    "username": "test",
+                    "password": "test",
+                },
+            )
             if r.status_code == 429:
                 return
         pytest.fail("Never got 429")
@@ -158,6 +199,8 @@ async def test_throttle_returns_429():
 @pytest.mark.asyncio
 async def test_json_content_type():
     transport = ASGITransport(app=main_module.app)
-    async with AsyncClient(transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}) as client:
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}
+    ) as client:
         r = await client.get("/health")
         assert r.headers.get("content-type", "").startswith("application/json")

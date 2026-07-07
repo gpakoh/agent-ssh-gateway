@@ -5,6 +5,7 @@ import time
 
 class CursorPosition:
     """Позиция курсора в файле."""
+
     def __init__(self, line: int = 1, column: int = 1):
         self.line = line
         self.column = column
@@ -16,6 +17,7 @@ class CursorPosition:
 
 class TabState:
     """Состояние вкладки (открытого файла)."""
+
     def __init__(self, path: str, active: bool = True):
         self.path = path
         self.active = active  # текущая активная вкладка
@@ -41,6 +43,7 @@ class TabState:
 
 class CommandHistory:
     """История команд терминала."""
+
     def __init__(self, command: str, directory: str = ""):
         self.command = command
         self.directory = directory
@@ -61,6 +64,7 @@ class CommandHistory:
 
 class SearchQuery:
     """Поисковый запрос."""
+
     def __init__(self, query: str, path: str = "", replace_with: str = ""):
         self.query = query
         self.path = path
@@ -80,6 +84,7 @@ class SearchQuery:
 
 class Bookmark:
     """Закладка в файле."""
+
     def __init__(self, path: str, line: int, note: str = ""):
         self.path = path
         self.line = line
@@ -97,7 +102,7 @@ class Bookmark:
 
 class SmartContextState:
     """Полное состояние smart context."""
-    
+
     def __init__(self):
         self.tabs: dict[str, TabState] = {}  # path -> TabState
         self.command_history: list[CommandHistory] = []
@@ -113,13 +118,13 @@ class SmartContextState:
         # Деактивируем текущую активную вкладку
         for tab in self.tabs.values():
             tab.active = False
-        
+
         if path not in self.tabs:
             self.tabs[path] = TabState(path, active=True)
         else:
             self.tabs[path].active = True
             self.tabs[path].last_accessed = time.time()
-        
+
         self.last_edited_file = path
         return self.tabs[path]
 
@@ -147,7 +152,7 @@ class SmartContextState:
         self.command_history.append(cmd)
         # Ограничиваем историю
         if len(self.command_history) > self.max_history:
-            self.command_history = self.command_history[-self.max_history:]
+            self.command_history = self.command_history[-self.max_history :]
         return cmd
 
     def add_search(self, query: str, path: str = "", replace_with: str = "") -> SearchQuery:
@@ -155,7 +160,7 @@ class SmartContextState:
         search = SearchQuery(query, path, replace_with)
         self.search_history.append(search)
         if len(self.search_history) > self.max_history:
-            self.search_history = self.search_history[-self.max_history:]
+            self.search_history = self.search_history[-self.max_history :]
         return search
 
     def add_bookmark(self, path: str, line: int, note: str = "") -> Bookmark:

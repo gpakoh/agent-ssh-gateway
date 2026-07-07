@@ -1,4 +1,5 @@
 """Integration tests: GatewayOAuthProvider + TokenStore."""
+
 import os
 import tempfile
 
@@ -42,11 +43,16 @@ def test_load_tokens_from_store(store_path):
     store = TokenStore(store_path)
     raw_token = "mcp_test_integration_token_12345"
     token_hash = hash_token(raw_token)
-    store.add(StoredTokenEntry(
-        id="tok_int_1", token_hash=token_hash, name="integration-test",
-        profile="full", scopes=["mcp:read", "mcp:admin"],
-        created_at="2026-06-26T12:00:00Z",
-    ))
+    store.add(
+        StoredTokenEntry(
+            id="tok_int_1",
+            token_hash=token_hash,
+            name="integration-test",
+            profile="full",
+            scopes=["mcp:read", "mcp:admin"],
+            created_at="2026-06-26T12:00:00Z",
+        )
+    )
 
     provider = GatewayOAuthProvider()
     provider.set_token_store(TokenStore(store_path))
@@ -63,16 +69,26 @@ def test_load_tokens_skips_revoked(store_path):
     store = TokenStore(store_path)
     h1 = hash_token("mcp_active")
     h2 = hash_token("mcp_revoked")
-    store.add(StoredTokenEntry(
-        id="tok_active", token_hash=h1, name="active",
-        profile="full", scopes=["mcp:read"],
-        created_at="2026-06-26T12:00:00Z",
-    ))
-    store.add(StoredTokenEntry(
-        id="tok_revoked", token_hash=h2, name="revoked",
-        profile="full", scopes=["mcp:read"],
-        created_at="2026-06-26T12:00:00Z",
-    ))
+    store.add(
+        StoredTokenEntry(
+            id="tok_active",
+            token_hash=h1,
+            name="active",
+            profile="full",
+            scopes=["mcp:read"],
+            created_at="2026-06-26T12:00:00Z",
+        )
+    )
+    store.add(
+        StoredTokenEntry(
+            id="tok_revoked",
+            token_hash=h2,
+            name="revoked",
+            profile="full",
+            scopes=["mcp:read"],
+            created_at="2026-06-26T12:00:00Z",
+        )
+    )
     store.revoke("tok_revoked")
 
     provider = GatewayOAuthProvider()
@@ -90,11 +106,16 @@ def test_load_tokens_multiple(store_path):
     for i in range(3):
         raw = f"mcp_multi_{i}"
         h = hash_token(raw)
-        store.add(StoredTokenEntry(
-            id=f"tok_multi_{i}", token_hash=h, name=f"multi-{i}",
-            profile="full", scopes=["mcp:read"],
-            created_at="2026-06-26T12:00:00Z",
-        ))
+        store.add(
+            StoredTokenEntry(
+                id=f"tok_multi_{i}",
+                token_hash=h,
+                name=f"multi-{i}",
+                profile="full",
+                scopes=["mcp:read"],
+                created_at="2026-06-26T12:00:00Z",
+            )
+        )
         tokens.append(raw)
 
     provider = GatewayOAuthProvider()
@@ -108,11 +129,16 @@ def test_revoke_token_syncs_to_store(store_path):
     store = TokenStore(store_path)
     raw = "mcp_revoke_sync"
     h = hash_token(raw)
-    store.add(StoredTokenEntry(
-        id="tok_sync", token_hash=h, name="sync-test",
-        profile="full", scopes=["mcp:read"],
-        created_at="2026-06-26T12:00:00Z",
-    ))
+    store.add(
+        StoredTokenEntry(
+            id="tok_sync",
+            token_hash=h,
+            name="sync-test",
+            profile="full",
+            scopes=["mcp:read"],
+            created_at="2026-06-26T12:00:00Z",
+        )
+    )
 
     provider = GatewayOAuthProvider()
     provider.set_token_store(TokenStore(store_path))
@@ -121,6 +147,7 @@ def test_revoke_token_syncs_to_store(store_path):
 
     # Revoke via provider
     import asyncio
+
     asyncio.run(provider.revoke_token(raw))
 
     # Must be gone from provider
@@ -137,11 +164,16 @@ def test_revoke_client_token_syncs_to_store(store_path):
     store = TokenStore(store_path)
     raw = "mcp_client_revoke"
     h = hash_token(raw)
-    store.add(StoredTokenEntry(
-        id="tok_client_sync", token_hash=h, name="client-sync",
-        profile="full", scopes=["mcp:read"],
-        created_at="2026-06-26T12:00:00Z",
-    ))
+    store.add(
+        StoredTokenEntry(
+            id="tok_client_sync",
+            token_hash=h,
+            name="client-sync",
+            profile="full",
+            scopes=["mcp:read"],
+            created_at="2026-06-26T12:00:00Z",
+        )
+    )
 
     provider = GatewayOAuthProvider()
     provider.set_token_store(TokenStore(store_path))

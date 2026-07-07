@@ -190,10 +190,14 @@ class TestPostgresClient:
     @pytest.mark.asyncio
     async def test_describe_table(self):
         rows = [
-            MockRecord({
-                "column_name": "id", "data_type": "integer",
-                "is_nullable": "NO", "column_default": "nextval(...)"
-            }),
+            MockRecord(
+                {
+                    "column_name": "id",
+                    "data_type": "integer",
+                    "is_nullable": "NO",
+                    "column_default": "nextval(...)",
+                }
+            ),
         ]
         conn = _make_conn_mock(rows=rows)
         pool = _make_pool_mock(conn)
@@ -227,6 +231,3 @@ class TestPostgresClient:
         client._pool = pool
         result = await client.vector_status()
         assert result["installed"] is False
-
-
-

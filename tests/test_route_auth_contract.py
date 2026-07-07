@@ -79,8 +79,7 @@ def test_all_api_routes_are_explicitly_public_or_authenticated():
 
         if not (
             path.startswith("/api")
-            or path in {"/health", "/", "/openapi.json", "/docs",
-                        "/docs/oauth2-redirect", "/redoc"}
+            or path in {"/health", "/", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
         ):
             continue
 
@@ -91,7 +90,6 @@ def test_all_api_routes_are_explicitly_public_or_authenticated():
                 continue
             failures.append(f"{method} {path}")
 
-    assert not failures, (
-        "Unprotected API routes (missing auth dependency):\n"
-        + "\n".join(f"  {f}" for f in failures)
+    assert not failures, "Unprotected API routes (missing auth dependency):\n" + "\n".join(
+        f"  {f}" for f in failures
     )

@@ -44,10 +44,7 @@ async def postgres_health() -> str:
     client = _get_client()
     try:
         info = await client.health()
-        return (
-            f"ok | db={info['db']} user={info['user']} "
-            f"version={info['version']}"
-        )
+        return f"ok | db={info['db']} user={info['user']} version={info['version']}"
     except Exception as e:
         return f"error: {e}"
 
@@ -118,6 +115,7 @@ async def postgres_select(sql: str) -> str:
     except Exception as e:
         return f"error: query failed: {e}"
     import json
+
     return json.dumps(rows, default=str, ensure_ascii=False)
 
 
@@ -131,9 +129,7 @@ async def postgres_vector_status() -> str:
     return "pgvector is NOT installed"
 
 
-def create_auth_proxy(
-    *, upstream_port: int, valid_tokens: set[str]
-) -> Starlette:
+def create_auth_proxy(*, upstream_port: int, valid_tokens: set[str]) -> Starlette:
     client = httpx.AsyncClient(
         base_url=f"http://127.0.0.1:{upstream_port}",
         timeout=HTTP_TIMEOUT,
@@ -179,7 +175,5 @@ if __name__ == "__main__":
         daemon=True,
     ).start()
 
-    app = create_auth_proxy(
-        upstream_port=INTERNAL_PORT, valid_tokens={env["token"]}
-    )
+    app = create_auth_proxy(upstream_port=INTERNAL_PORT, valid_tokens={env["token"]})
     uvicorn.run(app, host=env["host"], port=env["port"])

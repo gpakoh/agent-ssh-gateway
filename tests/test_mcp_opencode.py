@@ -1,4 +1,5 @@
 """Tests for OpenCode runner MCP tool — opencode_tools module."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -36,13 +37,22 @@ class TestProjectRunOpencode:
             project="test",
             task_id="2026-06-25-fix-auth-opencode",
         )
-        for key in ("task_id", "status", "exit_code", "stdout", "stderr", "started_at", "finished_at"):
+        for key in (
+            "task_id",
+            "status",
+            "exit_code",
+            "stdout",
+            "stderr",
+            "started_at",
+            "finished_at",
+        ):
             assert key in result, f"missing key: {key}"
         assert result["status"] == "needs-review"
 
     def test_failed_run_returns_failed_status(self):
         def _failing_run_cmd(project: str, command: str) -> dict:
             return {"stdout": "", "stderr": "error", "exit_code": 1}
+
         result = project_run_opencode(
             _failing_run_cmd,
             project="test",
@@ -57,6 +67,7 @@ class TestToolRegistration:
         import importlib
         import sys
         from pathlib import Path
+
         example_dir = Path(__file__).resolve().parents[1] / "examples" / "mcp_server"
         monkeypatch.syspath_prepend(str(example_dir))
         sys.modules.pop("tool_modes", None)
@@ -74,6 +85,7 @@ class TestServerTool:
         import importlib
         import sys
         from pathlib import Path
+
         example_dir = Path(__file__).resolve().parents[1] / "examples" / "mcp_server"
         monkeypatch.syspath_prepend(str(example_dir))
         monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
