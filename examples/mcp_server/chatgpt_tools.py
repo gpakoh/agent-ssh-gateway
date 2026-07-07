@@ -51,6 +51,7 @@ def _limit_output(output: str) -> str:
 
 # ── Basic read-only helpers ─────────────────────────────────────
 
+
 def run_readonly_command(
     client: GatewayClient, command: str, session_id: str | None = None
 ) -> dict[str, Any]:
@@ -58,79 +59,62 @@ def run_readonly_command(
     return client.wait_job(job["job_id"])
 
 
-def working_directory(
-    client: GatewayClient, session_id: str | None = None
-) -> dict[str, Any]:
+def working_directory(client: GatewayClient, session_id: str | None = None) -> dict[str, Any]:
     return run_readonly_command(client, "pwd", session_id=session_id)
 
 
-def git_status(
-    client: GatewayClient, session_id: str | None = None
-) -> dict[str, Any]:
-    return run_readonly_command(
-        client, "git status --short", session_id=session_id
-    )
+def git_status(client: GatewayClient, session_id: str | None = None) -> dict[str, Any]:
+    return run_readonly_command(client, "git status --short", session_id=session_id)
 
 
-def recent_commits(
-    client: GatewayClient, session_id: str | None = None
-) -> dict[str, Any]:
-    return run_readonly_command(
-        client, "git log --oneline -10", session_id=session_id
-    )
+def recent_commits(client: GatewayClient, session_id: str | None = None) -> dict[str, Any]:
+    return run_readonly_command(client, "git log --oneline -10", session_id=session_id)
 
 
-def git_diff_stat(
-    client: GatewayClient, session_id: str | None = None
-) -> dict[str, Any]:
-    return run_readonly_command(
-        client, "git diff --stat", session_id=session_id
-    )
+def git_diff_stat(client: GatewayClient, session_id: str | None = None) -> dict[str, Any]:
+    return run_readonly_command(client, "git diff --stat", session_id=session_id)
 
 
-def show_changes(
-    client: GatewayClient, session_id: str | None = None
-) -> dict[str, Any]:
+def show_changes(client: GatewayClient, session_id: str | None = None) -> dict[str, Any]:
     return {
         "git_status": git_status(client, session_id=session_id),
         "git_diff_stat": git_diff_stat(client, session_id=session_id),
     }
 
 
-def run_tests(
-    client: GatewayClient, session_id: str | None = None
-) -> dict[str, Any]:
+def run_tests(client: GatewayClient, session_id: str | None = None) -> dict[str, Any]:
     return run_readonly_command(client, "pytest -q", session_id=session_id)
 
 
-def run_lint(
-    client: GatewayClient, session_id: str | None = None
-) -> dict[str, Any]:
-    return run_readonly_command(
-        client, "ruff check app tests examples", session_id=session_id
-    )
+def run_lint(client: GatewayClient, session_id: str | None = None) -> dict[str, Any]:
+    return run_readonly_command(client, "ruff check app tests examples", session_id=session_id)
 
 
-def run_compileall(
-    client: GatewayClient, session_id: str | None = None
-) -> dict[str, Any]:
+def run_compileall(client: GatewayClient, session_id: str | None = None) -> dict[str, Any]:
     return run_readonly_command(
-        client, "python -m compileall app tests examples",
+        client,
+        "python -m compileall app tests examples",
         session_id=session_id,
     )
 
 
 # ── Project file tools ──────────────────────────────────────────
 
+
 def project_read_file(
-    client: GatewayClient, project: str, path: str,
+    client: GatewayClient,
+    project: str,
+    path: str,
 ) -> dict[str, Any]:
     safe = _safe_relpath(path)
     return run_project_command(client, project, f"cat {safe}")
 
 
 def project_search_text(
-    client: GatewayClient, project: str, query: str, glob: str | None = None,
+    client: GatewayClient,
+    project: str,
+    query: str,
+    glob: str | None = None,
 ) -> dict[str, Any]:
     cmd = "grep -RIn --exclude-dir=.git --exclude-dir=__pycache__"
     cmd += " --exclude-dir=.venv --exclude-dir=node_modules"
@@ -145,7 +129,9 @@ def project_search_text(
 
 
 def project_find_files(
-    client: GatewayClient, project: str, pattern: str,
+    client: GatewayClient,
+    project: str,
+    pattern: str,
 ) -> dict[str, Any]:
     if not _ALLOWED_PATH_RE.match(pattern):
         raise ValueError(f"invalid pattern: {pattern!r}")
@@ -158,7 +144,10 @@ def project_find_files(
 
 
 def project_tree(
-    client: GatewayClient, project: str, depth: int = 2, glob: str | None = None,
+    client: GatewayClient,
+    project: str,
+    depth: int = 2,
+    glob: str | None = None,
 ) -> dict[str, Any]:
     depth = min(max(depth, 1), 5)
     cmd = (
@@ -176,8 +165,11 @@ def project_tree(
 
 # ── Project git diff tools ──────────────────────────────────────
 
+
 def project_git_diff(
-    client: GatewayClient, project: str, path: str | None = None,
+    client: GatewayClient,
+    project: str,
+    path: str | None = None,
 ) -> dict[str, Any]:
     cmd = "git diff --no-color"
     if path:
@@ -187,7 +179,9 @@ def project_git_diff(
 
 
 def project_git_diff_cached(
-    client: GatewayClient, project: str, path: str | None = None,
+    client: GatewayClient,
+    project: str,
+    path: str | None = None,
 ) -> dict[str, Any]:
     cmd = "git diff --cached --no-color"
     if path:
@@ -197,7 +191,9 @@ def project_git_diff_cached(
 
 
 def project_show_file_diff(
-    client: GatewayClient, project: str, path: str,
+    client: GatewayClient,
+    project: str,
+    path: str,
 ) -> dict[str, Any]:
     safe = _safe_relpath(path)
     cmd = f"git diff --no-color -- {safe} | head -500"
@@ -206,22 +202,29 @@ def project_show_file_diff(
 
 # ── Project test target tools ───────────────────────────────────
 
+
 def project_run_pytest(
-    client: GatewayClient, project: str, target: str,
+    client: GatewayClient,
+    project: str,
+    target: str,
 ) -> dict[str, Any]:
     safe = _safe_test_target(target)
     return run_project_command(client, project, f"pytest -q {safe}")
 
 
 def project_run_ruff(
-    client: GatewayClient, project: str, target: str,
+    client: GatewayClient,
+    project: str,
+    target: str,
 ) -> dict[str, Any]:
     safe = _safe_test_target(target)
     return run_project_command(client, project, f"ruff check {safe}")
 
 
 def project_run_mypy(
-    client: GatewayClient, project: str, target: str,
+    client: GatewayClient,
+    project: str,
+    target: str,
 ) -> dict[str, Any]:
     safe = _safe_test_target(target)
     return run_project_command(client, project, f"mypy {safe}")
@@ -229,40 +232,51 @@ def project_run_mypy(
 
 # ── Project git info tools ──────────────────────────────────────
 
+
 def project_remotes(
-    client: GatewayClient, project: str,
+    client: GatewayClient,
+    project: str,
 ) -> dict[str, Any]:
     return run_project_command(client, project, "git remote -v")
 
 
 def project_current_branch(
-    client: GatewayClient, project: str,
+    client: GatewayClient,
+    project: str,
 ) -> dict[str, Any]:
     return run_project_command(client, project, "git rev-parse --abbrev-ref HEAD")
 
 
 def project_commit_head(
-    client: GatewayClient, project: str,
+    client: GatewayClient,
+    project: str,
 ) -> dict[str, Any]:
     return run_project_command(client, project, "git rev-parse HEAD")
 
 
 # ── Project-scoped handoff ──────────────────────────────────────
 
+
 def project_read_handoff(
-    client: GatewayClient, project: str,
+    client: GatewayClient,
+    project: str,
 ) -> dict[str, Any]:
     return run_project_command(
-        client, project,
+        client,
+        project,
         "cat .ai-bridge/current-plan.md 2>/dev/null || echo '(no handoff plan)'",
     )
 
 
 def project_write_handoff_plan(
-    client: GatewayClient, project: str,
-    task: str, agent: str = "opencode", notes: str | None = None,
+    client: GatewayClient,
+    project: str,
+    task: str,
+    agent: str = "opencode",
+    notes: str | None = None,
 ) -> dict[str, Any]:
     from handoff import assert_handoff_write_allowed, build_handoff_plan
+
     assert_handoff_write_allowed()
     plan = build_handoff_plan(task=task, agent=agent, notes=notes)
     cmd = f"mkdir -p .ai-bridge && cat > .ai-bridge/current-plan.md << 'PLANEOF'\n{plan}\nPLANEOF"
@@ -270,7 +284,8 @@ def project_write_handoff_plan(
 
 
 def project_show_handoff_status(
-    client: GatewayClient, project: str,
+    client: GatewayClient,
+    project: str,
 ) -> dict[str, Any]:
     cmd = (
         "echo '--- .ai-bridge files ---' && "
@@ -281,12 +296,14 @@ def project_show_handoff_status(
 
 # ── Shell escape helper ─────────────────────────────────────────
 
+
 def _shell_escape(text: str) -> str:
     escaped = text.replace("'", "'\\''")
     return f"'{escaped}'"
 
 
 # ── Project-aware tools (cd into MCP_GATEWAY_PROJECT_ROOT/{project}) ──
+
 
 def run_project_command(
     client: GatewayClient,
@@ -297,58 +314,36 @@ def run_project_command(
     return client.wait_job(job["job_id"])
 
 
-def project_working_directory(
-    client: GatewayClient, project: str
-) -> dict[str, Any]:
+def project_working_directory(client: GatewayClient, project: str) -> dict[str, Any]:
     return run_project_command(client, project, "pwd")
 
 
-def project_git_status(
-    client: GatewayClient, project: str
-) -> dict[str, Any]:
+def project_git_status(client: GatewayClient, project: str) -> dict[str, Any]:
     return run_project_command(client, project, "git status --short")
 
 
-def project_recent_commits(
-    client: GatewayClient, project: str
-) -> dict[str, Any]:
-    return run_project_command(
-        client, project, "git log --oneline -10"
-    )
+def project_recent_commits(client: GatewayClient, project: str) -> dict[str, Any]:
+    return run_project_command(client, project, "git log --oneline -10")
 
 
-def project_git_diff_stat(
-    client: GatewayClient, project: str
-) -> dict[str, Any]:
+def project_git_diff_stat(client: GatewayClient, project: str) -> dict[str, Any]:
     return run_project_command(client, project, "git diff --stat")
 
 
-def project_show_changes(
-    client: GatewayClient, project: str
-) -> dict[str, Any]:
+def project_show_changes(client: GatewayClient, project: str) -> dict[str, Any]:
     return {
         "git_status": project_git_status(client, project),
         "git_diff_stat": project_git_diff_stat(client, project),
     }
 
 
-def project_run_tests(
-    client: GatewayClient, project: str
-) -> dict[str, Any]:
+def project_run_tests(client: GatewayClient, project: str) -> dict[str, Any]:
     return run_project_command(client, project, "pytest -q")
 
 
-def project_run_lint(
-    client: GatewayClient, project: str
-) -> dict[str, Any]:
-    return run_project_command(
-        client, project, "ruff check app tests examples"
-    )
+def project_run_lint(client: GatewayClient, project: str) -> dict[str, Any]:
+    return run_project_command(client, project, "ruff check app tests examples")
 
 
-def project_run_compileall(
-    client: GatewayClient, project: str
-) -> dict[str, Any]:
-    return run_project_command(
-        client, project, "python -m compileall app tests examples"
-    )
+def project_run_compileall(client: GatewayClient, project: str) -> dict[str, Any]:
+    return run_project_command(client, project, "python -m compileall app tests examples")

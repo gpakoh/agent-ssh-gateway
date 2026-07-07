@@ -44,16 +44,19 @@ def normalize_list_response(
 
     return {"items": [], "count": 0, "error": "unexpected response type"}
 
-ALLOWED_ENDPOINTS = frozenset({
-    "/repos/{owner}/{repo}",
-    "/repos/{owner}/{repo}/branches",
-    "/repos/{owner}/{repo}/commits",
-    "/repos/{owner}/{repo}/contents/{path}",
-    "/repos/{owner}/{repo}/issues",
-    "/repos/{owner}/{repo}/issues/{number}",
-    "/repos/{owner}/{repo}/pulls",
-    "/repos/{owner}/{repo}/pulls/{number}",
-})
+
+ALLOWED_ENDPOINTS = frozenset(
+    {
+        "/repos/{owner}/{repo}",
+        "/repos/{owner}/{repo}/branches",
+        "/repos/{owner}/{repo}/commits",
+        "/repos/{owner}/{repo}/contents/{path}",
+        "/repos/{owner}/{repo}/issues",
+        "/repos/{owner}/{repo}/issues/{number}",
+        "/repos/{owner}/{repo}/pulls",
+        "/repos/{owner}/{repo}/pulls/{number}",
+    }
+)
 
 API_BASE = "https://api.github.com"
 
@@ -75,7 +78,8 @@ class GitHubClient:
         )
 
     async def _get(
-        self, endpoint: str,
+        self,
+        endpoint: str,
         params: dict[str, Any] | None = None,
         **path_params: Any,
     ) -> Any:
@@ -103,12 +107,16 @@ class GitHubClient:
         return await self._get(
             "/repos/{owner}/{repo}/branches",
             params={"per_page": per_page},
-            owner=owner, repo=repo,
+            owner=owner,
+            repo=repo,
         )
 
     async def list_commits(
-        self, owner: str, repo: str,
-        sha: str | None = None, per_page: int = 30,
+        self,
+        owner: str,
+        repo: str,
+        sha: str | None = None,
+        per_page: int = 30,
     ) -> list[dict[str, Any]]:
         per_page = min(per_page, MAX_PER_PAGE)
         params: dict[str, Any] = {"per_page": per_page}
@@ -117,12 +125,16 @@ class GitHubClient:
         return await self._get(
             "/repos/{owner}/{repo}/commits",
             params=params,
-            owner=owner, repo=repo,
+            owner=owner,
+            repo=repo,
         )
 
     async def get_file(
-        self, owner: str, repo: str,
-        path: str, branch: str | None = None,
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        branch: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, str] = {}
         if branch:
@@ -130,54 +142,73 @@ class GitHubClient:
         result = await self._get(
             "/repos/{owner}/{repo}/contents/{path}",
             params=params,
-            owner=owner, repo=repo, path=path,
+            owner=owner,
+            repo=repo,
+            path=path,
         )
         if isinstance(result, dict) and "content" in result:
             import base64
+
             raw = base64.b64decode(result["content"])
             if len(raw) > MAX_FILE_SIZE:
-                result["content"] = (
-                    f"[truncated {len(raw)} bytes > {MAX_FILE_SIZE} limit]"
-                )
+                result["content"] = f"[truncated {len(raw)} bytes > {MAX_FILE_SIZE} limit]"
                 result["truncated"] = True
         return result
 
     async def list_issues(
-        self, owner: str, repo: str,
-        state: str = "open", per_page: int = 30,
+        self,
+        owner: str,
+        repo: str,
+        state: str = "open",
+        per_page: int = 30,
     ) -> list[dict[str, Any]]:
         per_page = min(per_page, MAX_PER_PAGE)
         return await self._get(
             "/repos/{owner}/{repo}/issues",
             params={"state": state, "per_page": per_page},
-            owner=owner, repo=repo,
+            owner=owner,
+            repo=repo,
         )
 
     async def get_issue(
-        self, owner: str, repo: str, issue_number: int,
+        self,
+        owner: str,
+        repo: str,
+        issue_number: int,
     ) -> dict[str, Any]:
         return await self._get(
             "/repos/{owner}/{repo}/issues/{number}",
-            owner=owner, repo=repo, number=issue_number,
+            owner=owner,
+            repo=repo,
+            number=issue_number,
         )
 
     async def list_pull_requests(
-        self, owner: str, repo: str,
-        state: str = "open", per_page: int = 30,
+        self,
+        owner: str,
+        repo: str,
+        state: str = "open",
+        per_page: int = 30,
     ) -> list[dict[str, Any]]:
         per_page = min(per_page, MAX_PER_PAGE)
         return await self._get(
             "/repos/{owner}/{repo}/pulls",
             params={"state": state, "per_page": per_page},
-            owner=owner, repo=repo,
+            owner=owner,
+            repo=repo,
         )
 
     async def get_pull_request(
-        self, owner: str, repo: str, pull_number: int,
+        self,
+        owner: str,
+        repo: str,
+        pull_number: int,
     ) -> dict[str, Any]:
         return await self._get(
             "/repos/{owner}/{repo}/pulls/{number}",
-            owner=owner, repo=repo, number=pull_number,
+            owner=owner,
+            repo=repo,
+            number=pull_number,
         )
 
     async def aclose(self) -> None:

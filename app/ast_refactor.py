@@ -139,7 +139,7 @@ class ASTRefactor:
     @staticmethod
     def rename_symbol(code: str, old_name: str, new_name: str) -> tuple[str, int]:
         """Rename a symbol in Python code.
-        
+
         Returns:
             tuple of (refactored_code, replacements_count)
         """
@@ -154,11 +154,7 @@ class ASTRefactor:
         # Also replace in comments and strings using regex
         refactored = ast.unparse(tree)
         # Simple regex replacement for docstrings and comments
-        refactored = re.sub(
-            rf'\b{re.escape(old_name)}\b',
-            new_name,
-            refactored
-        )
+        refactored = re.sub(rf"\b{re.escape(old_name)}\b", new_name, refactored)
 
         # Count replacements
         count = refactored.count(new_name) - code.count(new_name)
@@ -170,13 +166,13 @@ class ASTRefactor:
     @staticmethod
     def extract_function(code: str, start_line: int, end_line: int, func_name: str) -> str:
         """Extract a block of code into a new function.
-        
+
         Args:
             code: Python source code
             start_line: Starting line number (1-based)
             end_line: Ending line number (1-based)
             func_name: Name for the new function
-            
+
         Returns:
             Refactored code with extracted function
         """
@@ -189,16 +185,14 @@ class ASTRefactor:
         result = transformer.visit(tree)
 
         if not transformer.extracted:
-            raise ValueError(
-                f"Could not find block at lines {start_line}-{end_line}"
-            )
+            raise ValueError(f"Could not find block at lines {start_line}-{end_line}")
 
         return ast.unparse(result)
 
     @staticmethod
     def analyze_code(code: str) -> dict:
         """Analyze Python code and return structure info.
-        
+
         Returns:
             dict with functions, classes, imports, and variables
         """
@@ -214,38 +208,47 @@ class ASTRefactor:
 
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef):
-                functions.append({
-                    "name": node.name,
-                    "line": node.lineno,
-                    "end_line": getattr(node, "end_lineno", node.lineno),
-                    "args": [arg.arg for arg in node.args.args],
-                })
+                functions.append(
+                    {
+                        "name": node.name,
+                        "line": node.lineno,
+                        "end_line": getattr(node, "end_lineno", node.lineno),
+                        "args": [arg.arg for arg in node.args.args],
+                    }
+                )
             elif isinstance(node, ast.ClassDef):
-                classes.append({
-                    "name": node.name,
-                    "line": node.lineno,
-                    "end_line": getattr(node, "end_lineno", node.lineno),
-                    "methods": [
-                        n.name for n in node.body
-                        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
-                    ],
-                })
+                classes.append(
+                    {
+                        "name": node.name,
+                        "line": node.lineno,
+                        "end_line": getattr(node, "end_lineno", node.lineno),
+                        "methods": [
+                            n.name
+                            for n in node.body
+                            if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
+                        ],
+                    }
+                )
             elif isinstance(node, ast.Import | ast.ImportFrom):
                 if isinstance(node, ast.Import):
                     imports.extend([alias.name for alias in node.names])
                 else:
                     module = node.module or ""
-                    imports.extend([
-                        f"{module}.{alias.name}" if alias.name != alias.asname else module
-                        for alias in node.names
-                    ])
+                    imports.extend(
+                        [
+                            f"{module}.{alias.name}" if alias.name != alias.asname else module
+                            for alias in node.names
+                        ]
+                    )
             elif isinstance(node, ast.Assign):
                 for target in node.targets:
                     if isinstance(target, ast.Name):
-                        variables.append({
-                            "name": target.id,
-                            "line": node.lineno,
-                        })
+                        variables.append(
+                            {
+                                "name": target.id,
+                                "line": node.lineno,
+                            }
+                        )
 
         return {
             "functions": functions,

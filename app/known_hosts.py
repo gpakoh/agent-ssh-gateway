@@ -43,12 +43,10 @@ class HostKeyStore(ABC):
     """
 
     @abstractmethod
-    async def check(self, host: str, port: int, key: paramiko.PKey) -> bool | None:
-        ...
+    async def check(self, host: str, port: int, key: paramiko.PKey) -> bool | None: ...
 
     @abstractmethod
-    async def store(self, host: str, port: int, key: paramiko.PKey) -> None:
-        ...
+    async def store(self, host: str, port: int, key: paramiko.PKey) -> None: ...
 
     async def list_keys(self) -> list[dict]:
         return []
@@ -137,27 +135,29 @@ class FileHostKeyStore(HostKeyStore):
             results = []
             for host, entries in self._hk.items():
                 for key_type, known_key in entries.items():
-                    results.append({
-                        "host": host,
-                        "port": 22,
-                        "key_type": key_type,
-                        "fingerprint": hashlib.sha256(known_key.asbytes()).hexdigest(),
-                    })
+                    results.append(
+                        {
+                            "host": host,
+                            "port": 22,
+                            "key_type": key_type,
+                            "fingerprint": hashlib.sha256(known_key.asbytes()).hexdigest(),
+                        }
+                    )
             return results
 
     async def delete_host(self, host: str, port: int = 22) -> int:
         async with self._lock:
             await self._load()
             before = len(self._hk._entries)
+
             def _match(e):
                 names = e.hostnames
                 bracketed = f"[{host}]:{port}"
                 if bracketed in names:
                     return True
                 return host in names
-            self._hk._entries = [
-                e for e in self._hk._entries if not _match(e)
-            ]
+
+            self._hk._entries = [e for e in self._hk._entries if not _match(e)]
             removed = before - len(self._hk._entries)
             if removed > 0:
                 await self._save()
@@ -192,10 +192,14 @@ class PostgresHostKeyStore(HostKeyStore):
             return
         engine = create_async_engine(self._database_url, echo=False)
         session_maker = async_sessionmaker(
-            engine, class_=AsyncSession, expire_on_commit=False,
+            engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
         )
         async with engine.begin() as conn:
-            logger.warning("Auto-creating Host Key Tables Via Base.metadata.create_all — Use Alembic For Production Migrations")
+            logger.warning(
+                "Auto-creating Host Key Tables Via Base.metadata.create_all — Use Alembic For Production Migrations"
+            )
             await conn.run_sync(Base.metadata.create_all)
         self._engine = engine
         self._session_maker = session_maker
@@ -218,6 +222,7 @@ class PostgresHostKeyStore(HostKeyStore):
         assert sm is not None
         async with sm() as session:
             from sqlalchemy import select
+
             result = await session.execute(
                 select(HostKeyRecord).where(
                     HostKeyRecord.host == host,
@@ -237,6 +242,7 @@ class PostgresHostKeyStore(HostKeyStore):
         assert sm is not None
         async with sm() as session:
             from sqlalchemy import select
+
             result = await session.execute(
                 select(HostKeyRecord).where(
                     HostKeyRecord.host == host,
@@ -247,7 +253,8 @@ class PostgresHostKeyStore(HostKeyStore):
             record = result.scalar_one_or_none()
             if record is None:
                 record = HostKeyRecord(
-                    host=host, port=port,
+                    host=host,
+                    port=port,
                     key_type=self._key_type(key),
                     key_data=self._key_data(key),
                     fingerprint=self._fingerprint(key),
@@ -265,12 +272,17 @@ class PostgresHostKeyStore(HostKeyStore):
         assert sm is not None
         async with sm() as session:
             from sqlalchemy import select
+
             result = await session.execute(select(HostKeyRecord))
             records = result.scalars().all()
             return [
-                {"host": r.host, "port": r.port, "key_type": r.key_type,
-                 "fingerprint": r.fingerprint,
-                 "updated_at": r.updated_at.isoformat() if r.updated_at else None}
+                {
+                    "host": r.host,
+                    "port": r.port,
+                    "key_type": r.key_type,
+                    "fingerprint": r.fingerprint,
+                    "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+                }
                 for r in records
             ]
 
@@ -281,6 +293,7 @@ class PostgresHostKeyStore(HostKeyStore):
         assert sm is not None
         async with sm() as session:
             from sqlalchemy import delete as sa_delete
+
             result = await session.execute(
                 sa_delete(HostKeyRecord).where(
                     HostKeyRecord.host == host,
@@ -297,6 +310,7 @@ class PostgresHostKeyStore(HostKeyStore):
         assert sm is not None
         async with sm() as session:
             from sqlalchemy import delete as sa_delete
+
             result = await session.execute(sa_delete(HostKeyRecord))
             await session.commit()
             return result.rowcount
@@ -308,6 +322,7 @@ class PostgresHostKeyStore(HostKeyStore):
         assert sm is not None
         async with sm() as session:
             from sqlalchemy import select
+
             result = await session.execute(
                 select(HostKeyRecord).where(
                     HostKeyRecord.host == host,
@@ -347,9 +362,7 @@ if _sa_available:
             onupdate=lambda: datetime.now(UTC),
         )
 
-        __table_args__ = (
-            UniqueConstraint("host", "port", "key_type", name="uq_host_key_type"),
-        )
+        __table_args__ = (UniqueConstraint("host", "port", "key_type", name="uq_host_key_type"),)
 
 
 class KnownHostsPolicy(paramiko.MissingHostKeyPolicy):
@@ -369,9 +382,7 @@ class KnownHostsPolicy(paramiko.MissingHostKeyPolicy):
         except RuntimeError:
             asyncio.run(self._check_or_store(hostname, key))
             return
-        future = asyncio.run_coroutine_threadsafe(
-            self._check_or_store(hostname, key), loop
-        )
+        future = asyncio.run_coroutine_threadsafe(self._check_or_store(hostname, key), loop)
         future.result(timeout=5)
 
     async def _check_or_store(self, hostname, key):
@@ -392,9 +403,11 @@ def create_host_key_store(settings) -> HostKeyStore:
     kind = settings.known_hosts_store
     if kind == "file":
         from app.known_hosts import FileHostKeyStore
+
         return FileHostKeyStore(settings.known_hosts_file)
     if kind == "postgres":
         from app.known_hosts import PostgresHostKeyStore
+
         return PostgresHostKeyStore(settings.database_url)
     return NullHostKeyStore()
 

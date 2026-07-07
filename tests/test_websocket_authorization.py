@@ -1,6 +1,5 @@
 """Tests for WebSocket scope enforcement and command policy."""
 
-
 import pytest
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -116,13 +115,13 @@ class TestWebSocketCommandPolicy:
     def test_readonly_policy_denies_systemctl(self, agent_with_execute):
         """readonly profile in enforce mode must deny systemctl restart."""
         with TestClient(app) as client:
-            with client.websocket_connect(
-                WS_EXECUTE, headers={"X-API-Key": "agent-exec"}
-            ) as ws:
-                ws.send_json({
-                    "session_id": "test-session",
-                    "command": "systemctl restart nginx",
-                })
+            with client.websocket_connect(WS_EXECUTE, headers={"X-API-Key": "agent-exec"}) as ws:
+                ws.send_json(
+                    {
+                        "session_id": "test-session",
+                        "command": "systemctl restart nginx",
+                    }
+                )
                 resp = ws.receive_json()
                 assert resp.get("type") == "error"
                 assert resp.get("code") == "COMMAND_POLICY_DENIED"

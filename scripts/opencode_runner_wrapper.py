@@ -55,9 +55,7 @@ TASK_ID_RE = re.compile(TASK_ID_RE_PATTERN)
 
 def validate_task_id(task_id: str) -> None:
     if not TASK_ID_RE.match(task_id):
-        raise ValueError(
-            f"Invalid task_id: {task_id!r}. Must match {TASK_ID_RE_PATTERN}"
-        )
+        raise ValueError(f"Invalid task_id: {task_id!r}. Must match {TASK_ID_RE_PATTERN}")
 
 
 def _task_dir(task_id: str) -> str:
@@ -247,9 +245,9 @@ def run_wrapper(
         if plan:
             resolved_cmd = (
                 f"opencode run --never-ask "
-                f"\"Read .ai-bridge/tasks/{task_id}/current-plan.md and execute the plan. "
+                f'"Read .ai-bridge/tasks/{task_id}/current-plan.md and execute the plan. '
                 f"Save diff to .ai-bridge/tasks/{task_id}/implementation-diff.patch. "
-                f"Update agent-status.md as you go.\""
+                f'Update agent-status.md as you go."'
             )
         else:
             resolved_cmd = f"echo 'No plan found for {task_id}'"
@@ -286,7 +284,9 @@ def run_wrapper(
     )
 
     log_path = write_task_file(
-        project_root, task_id, "opencode-run.log",
+        project_root,
+        task_id,
+        "opencode-run.log",
         f"COMMAND: {resolved_cmd}\n"
         f"STARTED: {run_result['started_at']}\n"
         f"FINISHED: {run_result['finished_at']}\n"
@@ -296,11 +296,13 @@ def run_wrapper(
         f"{'=' * 60}\n"
         f"STDOUT:\n{run_result['stdout']}\n"
         f"{'=' * 60}\n"
-        f"STDERR:\n{run_result['stderr']}\n"
+        f"STDERR:\n{run_result['stderr']}\n",
     )
 
     result_path = write_task_file(
-        project_root, task_id, "opencode-result.md",
+        project_root,
+        task_id,
+        "opencode-result.md",
         result_summary,
     )
 
@@ -318,14 +320,14 @@ def run_wrapper(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="OpenCode runner wrapper for agent handoff tasks"
-    )
+    parser = argparse.ArgumentParser(description="OpenCode runner wrapper for agent handoff tasks")
     parser.add_argument("--task-id", help="Agent handoff task ID")
     parser.add_argument("--project", help="Project name")
     parser.add_argument("--command", help="Override command (default: read current-plan.md)")
     parser.add_argument("--opencode-bin", help="Path to opencode binary")
-    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SEC, help="Timeout in seconds")
+    parser.add_argument(
+        "--timeout", type=int, default=DEFAULT_TIMEOUT_SEC, help="Timeout in seconds"
+    )
     parser.add_argument("--workdir", help="Working directory override")
     parser.add_argument("--dry-run", action="store_true", help="Log intent without executing")
     parser.add_argument("--self-test", action="store_true", help="Run self-test and exit")
@@ -366,7 +368,9 @@ def self_test() -> dict[str, Any]:
     for bad_id in ["", "too-short", "UPPERCASE"]:
         try:
             validate_task_id(bad_id)
-            tests.append({"name": f"reject_{bad_id}", "passed": False, "error": "should have raised"})
+            tests.append(
+                {"name": f"reject_{bad_id}", "passed": False, "error": "should have raised"}
+            )
             all_passed = False
         except ValueError:
             tests.append({"name": f"reject_{bad_id}", "passed": True})

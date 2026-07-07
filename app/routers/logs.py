@@ -26,7 +26,9 @@ async def journal_logs(
     session_id: str = Query(..., description="Active SSH session ID"),
     unit: str = Query(None, description="systemd unit name (e.g. nginx, sshd)"),
     lines: int = Query(50, ge=1, le=5000, description="Number of lines to fetch"),
-    priority: str = Query(None, description="Priority filter: emerg, alert, crit, err, warning, notice, info, debug"),
+    priority: str = Query(
+        None, description="Priority filter: emerg, alert, crit, err, warning, notice, info, debug"
+    ),
     since: str = Query(None, description="Time range: '1h', '30m', '2025-01-01'"),
 ):
     """Read systemd journal logs from a remote server."""

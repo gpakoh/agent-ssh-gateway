@@ -26,7 +26,9 @@ router = APIRouter()
 
 
 @router.post("/api/code/search", tags=["code"], response_model=CodeSearchResponse)
-async def code_search(req: CodeSearchRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def code_search(
+    req: CodeSearchRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Search for code pattern in project."""
     results = await _state.code_intelligence.search_code(
         session_id=req.session_id,
@@ -52,7 +54,9 @@ async def code_search(req: CodeSearchRequest, _identity: AuthIdentity = Depends(
 
 
 @router.post("/api/code/insert", tags=["code"], response_model=CodeInsertResponse)
-async def code_insert(req: CodeInsertRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def code_insert(
+    req: CodeInsertRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Intelligently insert code based on natural language instruction."""
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
@@ -78,9 +82,7 @@ async def code_insert(req: CodeInsertRequest, _identity: AuthIdentity = Depends(
         git_commit = None
         if req.auto_commit and result.get("success"):
             commit_result = await _state.context_manager.commit_changes(
-                req.context_id,
-                f"AI: {req.instruction}",
-                [req.path]
+                req.context_id, f"AI: {req.instruction}", [req.path]
             )
             if commit_result.get("success"):
                 git_commit = commit_result.get("hash")
@@ -113,7 +115,9 @@ async def code_insert(req: CodeInsertRequest, _identity: AuthIdentity = Depends(
 
 
 @router.post("/api/code/generate", tags=["code"], response_model=CodeGenerateResponse)
-async def code_generate(req: CodeGenerateRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def code_generate(
+    req: CodeGenerateRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Generate code based on natural language instruction."""
     code = await _state.code_intelligence.generate_code(
         session_id="",
@@ -129,7 +133,9 @@ async def code_generate(req: CodeGenerateRequest, _identity: AuthIdentity = Depe
 
 
 @router.post("/api/code/complete", tags=["code"], response_model=CodeCompleteResponse)
-async def code_complete(req: CodeCompleteRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def code_complete(
+    req: CodeCompleteRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Suggest code completion."""
     completion = await _state.code_intelligence.suggest_completion(
         session_id=req.session_id,

@@ -58,7 +58,7 @@ def _build_opencode_script(td: str, task_id: str, model: str | None) -> str:
         f"td='{td}'",
         'mkdir -p "$td"',
         'echo "Status: running" > "$td/agent-status.md"',
-        'OPCODE_BIN=$(command -v opencode 2>/dev/null || echo \'/root/.opencode/bin/opencode\')',
+        "OPCODE_BIN=$(command -v opencode 2>/dev/null || echo '/root/.opencode/bin/opencode')",
         'if [ -f "$td/current-plan.md" ]; then',
         f'  $OPCODE_BIN run {opencode_flags} "Read the plan at $td/current-plan.md and execute it fully. Save the implementation diff to $td/implementation-diff.patch. Update $td/agent-status.md as you complete each step. Do not commit, do not push, do not create branches."',
         "  RC=$?",
@@ -68,13 +68,15 @@ def _build_opencode_script(td: str, task_id: str, model: str | None) -> str:
         "fi",
         'git diff --no-color > "$td/implementation-diff.patch" 2>/dev/null',
     ]
-    parts.extend([
-        "if [ $RC -eq 0 ]; then",
-        '  echo "Status: needs-review" > "$td/agent-status.md"',
-        "else",
-        '  echo "Status: failed" > "$td/agent-status.md"',
-        "fi",
-    ])
+    parts.extend(
+        [
+            "if [ $RC -eq 0 ]; then",
+            '  echo "Status: needs-review" > "$td/agent-status.md"',
+            "else",
+            '  echo "Status: failed" > "$td/agent-status.md"',
+            "fi",
+        ]
+    )
     parts.append(
         f'cat > "$td/agent-report.md" << REOF\n'
         f"# Agent Runner Result — {task_id}\n\n"
@@ -118,8 +120,8 @@ def _build_mimo_script(td: str, task_id: str, model: str | None) -> str:
         "",
         "# Guard 5: canonical realpath variables",
         "PROJECT_REAL=$(realpath .)",
-        "WORKTREE_REAL=$(realpath \"$WORKTREE\")",
-        "WORKTREE_ROOT_REAL=$(realpath \"$MCP_GATEWAY_WORKTREE_ROOT\")",
+        'WORKTREE_REAL=$(realpath "$WORKTREE")',
+        'WORKTREE_ROOT_REAL=$(realpath "$MCP_GATEWAY_WORKTREE_ROOT")',
         "",
         "# Guard 6: worktree != project root",
         'if [ "$WORKTREE_REAL" = "$PROJECT_REAL" ]; then',
@@ -168,10 +170,10 @@ def _build_mimo_script(td: str, task_id: str, model: str | None) -> str:
         f'"$MIMO_BIN" run --dangerously-skip-permissions{model_flag} \\',
         '  "Read $PROJECT_REAL/$td/current-plan.md in the parent repo at $PROJECT_REAL. '
         "Execute the plan fully inside worktree $WORKTREE_REAL. "
-        'Do not commit, do not push, do not create branches. '
+        "Do not commit, do not push, do not create branches. "
         "Save the implementation diff to $PROJECT_REAL/$td/implementation-diff.patch. "
         "Update $PROJECT_REAL/$td/agent-status.md as you go. "
-        "Work only inside $WORKTREE_REAL.\"",
+        'Work only inside $WORKTREE_REAL."',
         "RC=$?",
         "",
         "# Capture diff from worktree",
@@ -269,14 +271,13 @@ def project_run_agent(
 
     if not selected:
         cooldowns = router.get_cooldowns() if router else []
-        cooldown_info = "; ".join(
-            f"{c.backend}: blocked until {c.until}"
-            for c in cooldowns
-        )
+        cooldown_info = "; ".join(f"{c.backend}: blocked until {c.until}" for c in cooldowns)
         return {
             "task_id": task_id,
             "status": "blocked",
-            "error": f"all backends unavailable ({cooldown_info})" if cooldown_info else "no backend available",
+            "error": f"all backends unavailable ({cooldown_info})"
+            if cooldown_info
+            else "no backend available",
             "exit_code": None,
             "stdout": "",
             "stderr": "",
@@ -341,14 +342,19 @@ def project_run_agent(
 
     if router is not None and selected:
         router.record_result(
-            selected, exit_code=exit_code if exit_code is not None else -1,
+            selected,
+            exit_code=exit_code if exit_code is not None else -1,
             stdout=result.get("stdout", ""),
             stderr=result.get("stderr", ""),
         )
 
     return {
         "task_id": task_id,
-        "status": "needs-review" if exit_code == 0 else "failed" if exit_code is not None else "error",
+        "status": "needs-review"
+        if exit_code == 0
+        else "failed"
+        if exit_code is not None
+        else "error",
         "exit_code": exit_code,
         "stdout": result.get("stdout", ""),
         "stderr": result.get("stderr", ""),

@@ -97,7 +97,9 @@ def _context_to_response(ctx) -> ContextResponse:
 
 
 @router.post("/api/context/create", response_model=ContextResponse)
-async def context_create(req: ContextCreateRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def context_create(
+    req: ContextCreateRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Create a new development context with git awareness."""
     ctx = await _state.context_manager.create_context(
         session_id=req.session_id,
@@ -121,7 +123,9 @@ async def context_create(req: ContextCreateRequest, _identity: AuthIdentity = De
 
 
 @router.get("/api/context/list", response_model=ContextListResponse)
-async def context_list(session_id: str | None = None, _identity: AuthIdentity = Depends(require_master_key)):
+async def context_list(
+    session_id: str | None = None, _identity: AuthIdentity = Depends(require_master_key)
+):
     """List all active contexts."""
     contexts = []
     for _, ctx in _state.context_manager._contexts.items():
@@ -174,7 +178,9 @@ async def context_get_state(context_id: str, _identity: AuthIdentity = Depends(r
 
 
 @router.post("/api/context/file/read", response_model=FileReadResponse)
-async def context_file_read(req: FileReadRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def context_file_read(
+    req: FileReadRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Read a file using context (session_id extracted from context)."""
     ctx = await _state.context_manager.get_context(req.session_id)
     if not ctx:
@@ -186,7 +192,9 @@ async def context_file_read(req: FileReadRequest, _identity: AuthIdentity = Depe
 
 
 @router.patch("/api/context/file/edit", response_model=FileEditWithContextResponse)
-async def context_file_edit(req: FileEditWithContextRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def context_file_edit(
+    req: FileEditWithContextRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Edit a file with context awareness (auto-commit, validation)."""
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
@@ -198,14 +206,13 @@ async def context_file_edit(req: FileEditWithContextRequest, _identity: AuthIden
     if ctx.git_info and ctx.git_info.status.value != "not_initialized":
         try:
             await _state.context_manager.create_backup(
-                req.context_id,
-                f"before_edit_{req.path.replace('/', '_')}"
+                req.context_id, f"before_edit_{req.path.replace('/', '_')}"
             )
         except Exception as exc:
             logger.warning("Auto-backup failed: %s", exc)
 
     # Perform Edit (resolve Relative Path Against Context Path)
-    file_path = req.path if req.path.startswith('/') else os.path.join(ctx.path, req.path)
+    file_path = req.path if req.path.startswith("/") else os.path.join(ctx.path, req.path)
 
     try:
         result = await _state.file_editor.edit_file(
@@ -230,13 +237,17 @@ async def context_file_edit(req: FileEditWithContextRequest, _identity: AuthIden
     logger.info(f"Response object: success={response.success}, changed={response.changed}")
 
     # Generate Diff If File Was Changed And Git Is Initialized
-    if result.get("changed", False) and ctx.git_info and ctx.git_info.status.value != "not_initialized":
+    if (
+        result.get("changed", False)
+        and ctx.git_info
+        and ctx.git_info.status.value != "not_initialized"
+    ):
         try:
             # Quick Check If File Is Tracked In Git
             check_result = await _state.manager.execute(
                 ctx.session_id,
                 f"cd {ctx.path} && git ls-files --error-unmatch '{req.path}' 2>/dev/null || echo 'NOT_TRACKED'",
-                timeout=2
+                timeout=2,
             )
 
             if check_result["stdout"].strip() != "NOT_TRACKED":
@@ -244,7 +255,7 @@ async def context_file_edit(req: FileEditWithContextRequest, _identity: AuthIden
                 git_result = await _state.manager.execute(
                     ctx.session_id,
                     f"cd {ctx.path} && git show HEAD:'{req.path}' 2>/dev/null || echo ''",
-                    timeout=2
+                    timeout=2,
                 )
                 old_content = git_result["stdout"]
 
@@ -272,9 +283,7 @@ async def context_file_edit(req: FileEditWithContextRequest, _identity: AuthIden
     if ctx.auto_commit and result.get("changed", False):
         commit_msg = req.commit_message or f"Update {req.path}"
         commit_result = await _state.context_manager.commit_changes(
-            req.context_id,
-            commit_msg,
-            [req.path]
+            req.context_id, commit_msg, [req.path]
         )
         if commit_result["success"]:
             response.git_commit = commit_result.get("hash")
@@ -298,7 +307,7 @@ async def context_file_edit(req: FileEditWithContextRequest, _identity: AuthIden
                         duration=step.duration,
                     )
                     for step in report.steps
-                ]
+                ],
             )
 
             # If Validation Failed And Auto_commit Is On, Rollback Commit
@@ -312,7 +321,7 @@ async def context_file_edit(req: FileEditWithContextRequest, _identity: AuthIden
                 summary=f"\u041e\u0448\u0438\u0431\u043a\u0430 \u0432\u0430\u043b\u0438\u0434\u0430\u0446\u0438\u0438: {exc}",
                 total_duration=0,
                 can_commit=False,
-                steps=[]
+                steps=[],
             )
 
     # Warning If Git Not Initialized
@@ -328,49 +337,68 @@ async def context_file_edit(req: FileEditWithContextRequest, _identity: AuthIden
 
 
 @router.post("/api/context/file/open")
-async def context_file_open(req: OpenFileRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def context_file_open(
+    req: OpenFileRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Open file in smart context (creates tab)."""
     await _state.context_manager.add_file_to_context(req.context_id, req.path)
     return {"status": "opened", "path": req.path}
 
 
 @router.post("/api/context/file/close")
-async def context_file_close(req: CloseFileRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def context_file_close(
+    req: CloseFileRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Close file in smart context (closes tab)."""
     success = await _state.context_manager.close_file(req.context_id, req.path)
     return {"status": "closed" if success else "not_found", "path": req.path}
 
 
 @router.post("/api/context/cursor")
-async def context_update_cursor(req: UpdateCursorRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def context_update_cursor(
+    req: UpdateCursorRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Update cursor position in file."""
     await _state.context_manager.update_cursor(req.context_id, req.path, req.line, req.column)
     return {"status": "updated", "path": req.path, "line": req.line, "column": req.column}
 
 
 @router.post("/api/context/command")
-async def context_add_command(req: AddCommandRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def context_add_command(
+    req: AddCommandRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Add command to history."""
     result = await _state.context_manager.add_command(req.context_id, req.command, req.directory)
     return {"status": "added", "command": result}
 
 
 @router.post("/api/context/search")
-async def context_add_search(req: AddSearchRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def context_add_search(
+    req: AddSearchRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Add search query to history."""
-    result = await _state.context_manager.add_search(req.context_id, req.query, req.path, req.replace_with)
+    result = await _state.context_manager.add_search(
+        req.context_id, req.query, req.path, req.replace_with
+    )
     return {"status": "added", "search": result}
 
 
 @router.post("/api/context/bookmark")
-async def context_add_bookmark(req: AddBookmarkRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def context_add_bookmark(
+    req: AddBookmarkRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Add bookmark."""
     result = await _state.context_manager.add_bookmark(req.context_id, req.path, req.line, req.note)
     return {"status": "added", "bookmark": result}
 
 
 @router.delete("/api/context/bookmark")
-async def context_remove_bookmark(context_id: str = Query(...), path: str = Query(...), line: int = Query(...), _identity: AuthIdentity = Depends(require_master_key)):
+async def context_remove_bookmark(
+    context_id: str = Query(...),
+    path: str = Query(...),
+    line: int = Query(...),
+    _identity: AuthIdentity = Depends(require_master_key),
+):
     """Remove bookmark."""
     success = await _state.context_manager.remove_bookmark(context_id, path, line)
     return {"status": "removed" if success else "not_found", "path": path, "line": line}
@@ -382,15 +410,15 @@ async def context_remove_bookmark(context_id: str = Query(...), path: str = Quer
 
 
 @router.post("/api/scaffold/python-class", response_model=ScaffoldResponse)
-async def scaffold_python_class(req: ScaffoldRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def scaffold_python_class(
+    req: ScaffoldRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Scaffold a Python class + test file from template."""
     files_created = []
     module_dir = req.module_path.rstrip("/")
 
     # Ensure Directory Exists
-    await _state.manager.execute(
-        req.session_id, f"mkdir -p '{module_dir}'", timeout=10
-    )
+    await _state.manager.execute(req.session_id, f"mkdir -p '{module_dir}'", timeout=10)
 
     # Generate Class File
     methods_str = ""
@@ -401,7 +429,7 @@ async def scaffold_python_class(req: ScaffoldRequest, _identity: AuthIdentity = 
         raise NotImplementedError("{method} not implemented")
 """
 
-    class_content = f"\"\"\"{req.class_name} module.\"\"\"\n\n\nclass {req.class_name}:\n    \"\"\"{req.class_name} service.\"\"\"\n\n    def __init__(self) -> None:\n        pass\n{methods_str}\n"
+    class_content = f'"""{req.class_name} module."""\n\n\nclass {req.class_name}:\n    """{req.class_name} service."""\n\n    def __init__(self) -> None:\n        pass\n{methods_str}\n'
 
     class_path = f"{module_dir}/{req.class_name.lower()}.py"
     await _state.file_editor.write_file(req.session_id, class_path, class_content)
@@ -418,7 +446,7 @@ async def scaffold_python_class(req: ScaffoldRequest, _identity: AuthIdentity = 
         pass
 """
 
-        test_content = f"\"\"\"Tests for {req.class_name}.\"\"\"\n\nimport pytest\nfrom {module_dir.replace('/', '.')}.{req.class_name.lower()} import {req.class_name}\n\n\nclass Test{req.class_name}:\n    \"\"\"Test suite for {req.class_name}.\"\"\"\n{test_methods}\n"
+        test_content = f'"""Tests for {req.class_name}."""\n\nimport pytest\nfrom {module_dir.replace("/", ".")}.{req.class_name.lower()} import {req.class_name}\n\n\nclass Test{req.class_name}:\n    """Test suite for {req.class_name}."""\n{test_methods}\n'
 
         test_path = f"{module_dir}/test_{req.class_name.lower()}.py"
         await _state.file_editor.write_file(req.session_id, test_path, test_content)
@@ -436,7 +464,9 @@ async def scaffold_python_class(req: ScaffoldRequest, _identity: AuthIdentity = 
 
 
 @router.post("/api/validate", response_model=ValidationReportResponse)
-async def validate_context(req: ValidateRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def validate_context(
+    req: ValidateRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Run validation pipeline (mypy + pytest) for context."""
     try:
         report = await _state.context_manager.validate_context(
@@ -460,7 +490,7 @@ async def validate_context(req: ValidateRequest, _identity: AuthIdentity = Depen
                     duration=step.duration,
                 )
                 for step in report.steps
-            ]
+            ],
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=_err(404, str(exc))) from exc
@@ -479,8 +509,7 @@ async def list_templates(_identity: AuthIdentity = Depends(require_master_key)):
     """List all available code templates."""
     templates = TemplateLibrary.list_templates()
     return TemplateListResponse(
-        templates=[TemplateInfo(**t) for t in templates],
-        count=len(templates)
+        templates=[TemplateInfo(**t) for t in templates], count=len(templates)
     )
 
 
@@ -494,7 +523,9 @@ async def get_template(template_id: str, _identity: AuthIdentity = Depends(requi
 
 
 @router.post("/api/templates/render", response_model=TemplateRenderResponse)
-async def render_template(req: TemplateRenderRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def render_template(
+    req: TemplateRenderRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Render template and save to file."""
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
@@ -506,25 +537,27 @@ async def render_template(req: TemplateRenderRequest, _identity: AuthIdentity = 
         raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
 
     if not code:
-        raise HTTPException(status_code=404, detail=_err(404, f"Template {req.template_id} not found"))
+        raise HTTPException(
+            status_code=404, detail=_err(404, f"Template {req.template_id} not found")
+        )
 
     # Create File With Rendered Code
     result = await _state.manager.execute(
         ctx.session_id,
         f"cat > '{req.target_path}' << 'TEMPLATE_EOF'\n{code}\nTEMPLATE_EOF",
-        timeout=10
+        timeout=10,
     )
 
     if result["exit_code"] != 0:
-        raise HTTPException(status_code=500, detail=_err(500, f"Failed to create file: {result['stderr']}"))
+        raise HTTPException(
+            status_code=500, detail=_err(500, f"Failed to create file: {result['stderr']}")
+        )
 
     # Auto-commit If Enabled
     git_commit = None
     if req.auto_commit:
         commit_result = await _state.context_manager.commit_changes(
-            req.context_id,
-            f"Add {req.template_id} template",
-            [req.target_path]
+            req.context_id, f"Add {req.template_id} template", [req.target_path]
         )
         if commit_result.get("success"):
             git_commit = commit_result.get("hash")
@@ -544,7 +577,9 @@ async def render_template(req: TemplateRenderRequest, _identity: AuthIdentity = 
 
 
 @router.post("/api/project/structure", response_model=ProjectStructureResponse)
-async def project_structure(req: ProjectStructureRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def project_structure(
+    req: ProjectStructureRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Get project structure with metadata and git status."""
 
     # Get File List With Metadata Using Find
@@ -552,7 +587,9 @@ async def project_structure(req: ProjectStructureRequest, _identity: AuthIdentit
     result = await _state.manager.execute(req.session_id, cmd, timeout=30)
 
     if result["exit_code"] != 0 or "ERROR" in result["stdout"]:
-        raise HTTPException(status_code=500, detail=_err(500, f"Cannot read directory: {result['stderr']}"))
+        raise HTTPException(
+            status_code=500, detail=_err(500, f"Cannot read directory: {result['stderr']}")
+        )
 
     files = []
     total_files = 0
@@ -584,15 +621,17 @@ async def project_structure(req: ProjectStructureRequest, _identity: AuthIdentit
         if "." in path and file_type == "file":
             extension = path.split(".")[-1]
 
-        files.append(FileMetadata(
-            name=path.split("/")[-1] if "/" in path else path,
-            path=path,
-            type=file_type,
-            size=int(size) if size else 0,
-            permissions=permissions,
-            modified_at=mtime if mtime else None,
-            extension=extension,
-        ))
+        files.append(
+            FileMetadata(
+                name=path.split("/")[-1] if "/" in path else path,
+                path=path,
+                type=file_type,
+                size=int(size) if size else 0,
+                permissions=permissions,
+                modified_at=mtime if mtime else None,
+                extension=extension,
+            )
+        )
 
     # Get Git Status If Requested
     if req.include_git_status:

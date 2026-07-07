@@ -141,9 +141,7 @@ def api_key_auth(monkeypatch):
     monkeypatch.setattr(settings, "api_key", "secret-42")
     monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
     monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
-    monkeypatch.setattr(
-        "app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1"
-    )
+    monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
 
 
 class TestApiKey:
@@ -196,17 +194,13 @@ def ip_allowlist_auth(monkeypatch):
 
 class TestIpAllowlist:
     def test_forbidden_ip_returns_403(self, ip_allowlist_auth, monkeypatch):
-        monkeypatch.setattr(
-            "app.auth_middleware.get_client_ip", lambda req, trusted: "192.0.2.10"
-        )
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "192.0.2.10")
         with TestClient(app) as client:
             resp = client.get("/api/servers", headers={"X-API-Key": "secret-42"})
         assert resp.status_code == 403
 
     def test_allowed_ip_with_correct_key_succeeds(self, ip_allowlist_auth, monkeypatch):
-        monkeypatch.setattr(
-            "app.auth_middleware.get_client_ip", lambda req, trusted: "10.0.0.5"
-        )
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "10.0.0.5")
         with TestClient(app) as client:
             resp = client.get("/api/servers", headers={"X-API-Key": "secret-42"})
         assert resp.status_code not in (401, 403)
@@ -419,9 +413,7 @@ def sdk_auth(monkeypatch):
     monkeypatch.setattr(settings, "api_key", "sdk-key-77")
     monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
     monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
-    monkeypatch.setattr(
-        "app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1"
-    )
+    monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
 
 
 class TestSdkAuth:
@@ -519,7 +511,8 @@ class TestAgentTokenManagement:
     def test_agent_token_cannot_create_another_token(self, api_key_auth, monkeypatch):
         monkeypatch.setattr(settings, "agent_token", "agent-live-token")
         monkeypatch.setattr(
-            settings, "agent_token_expires_at",
+            settings,
+            "agent_token_expires_at",
             datetime.now(UTC) + timedelta(hours=1),
         )
         with TestClient(app) as client:
@@ -533,7 +526,8 @@ class TestAgentTokenManagement:
     def test_agent_token_cannot_refresh_another_token(self, api_key_auth, monkeypatch):
         monkeypatch.setattr(settings, "agent_token", "agent-live-token")
         monkeypatch.setattr(
-            settings, "agent_token_expires_at",
+            settings,
+            "agent_token_expires_at",
             datetime.now(UTC) + timedelta(hours=1),
         )
         with TestClient(app) as client:

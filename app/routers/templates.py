@@ -20,21 +20,32 @@ TEMPLATES: list[CommandTemplate] = [
         name="Deploy service",
         description="Restart and check service status",
         command="systemctl restart {service} && systemctl status {service}",
-        params=[{"name": "service", "type": "string", "required": True, "desc": "Systemd unit name"}],
+        params=[
+            {"name": "service", "type": "string", "required": True, "desc": "Systemd unit name"}
+        ],
     ),
     CommandTemplate(
         id="healthcheck",
         name="Service health",
         description="Check if service is active",
         command="systemctl is-active --quiet {service} && echo 'active' || echo 'inactive'",
-        params=[{"name": "service", "type": "string", "required": True, "desc": "Systemd unit name"}],
+        params=[
+            {"name": "service", "type": "string", "required": True, "desc": "Systemd unit name"}
+        ],
     ),
     CommandTemplate(
         id="disk-usage",
         name="Disk usage",
         description="Show disk usage for a path",
         command="df -h {path}",
-        params=[{"name": "path", "type": "string", "required": False, "desc": "Mount point (default: /)"}],
+        params=[
+            {
+                "name": "path",
+                "type": "string",
+                "required": False,
+                "desc": "Mount point (default: /)",
+            }
+        ],
     ),
     CommandTemplate(
         id="memory",
@@ -88,11 +99,15 @@ async def list_command_templates(_identity: AuthIdentity = Depends(require_maste
 
 
 @router.post("/api/templates/run", response_model=TemplateRunResponse)
-async def run_template(req: TemplateRunRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def run_template(
+    req: TemplateRunRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Execute a command template with parameter substitution."""
     template = next((t for t in TEMPLATES if t.id == req.template), None)
     if not template:
-        raise HTTPException(status_code=404, detail=_err(404, f"Template not found: {req.template}"))
+        raise HTTPException(
+            status_code=404, detail=_err(404, f"Template not found: {req.template}")
+        )
 
     command = template.command
     for key, val in req.params.items():

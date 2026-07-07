@@ -1,6 +1,5 @@
 """Contract tests: verify OpenAPI schema correctness for agent clients."""
 
-
 from unittest.mock import patch
 
 import jsonschema
@@ -21,12 +20,7 @@ def _op(schema, path, method="get"):
 
 
 def _content(schema, path, method, status=200):
-    return (
-        _op(schema, path, method)
-        .get("responses", {})
-        .get(str(status), {})
-        .get("content", {})
-    )
+    return _op(schema, path, method).get("responses", {}).get(str(status), {}).get("content", {})
 
 
 class TestMediaTypes:
@@ -43,9 +37,7 @@ class TestMediaTypes:
     def test_critical_endpoints_have_correct_content_type(self, schema):
         for path, method, expected in self.CRITICAL:
             c = _content(schema, path, method)
-            assert expected in c, (
-                f"{method.upper()} {path}: expected {expected}, got {list(c)}"
-            )
+            assert expected in c, f"{method.upper()} {path}: expected {expected}, got {list(c)}"
 
     def test_422_refers_to_validation_error_response(self, schema):
         for path, methods in schema["paths"].items():
@@ -147,9 +139,7 @@ class TestTags:
             for method, op in methods.items():
                 tags = op.get("tags", [])
                 assert tags, f"{method.upper()} {path}: no tag"
-                assert len(tags) == 1, (
-                    f"{method.upper()} {path}: expected 1 tag, got {tags}"
-                )
+                assert len(tags) == 1, f"{method.upper()} {path}: expected 1 tag, got {tags}"
 
     def test_top_level_tags_defined(self, schema):
         tags = {t["name"] for t in schema.get("tags", [])}
@@ -190,11 +180,7 @@ class TestExamples:
         missing = []
         for path, methods in schema["paths"].items():
             for method, op in methods.items():
-                req_body = (
-                    op.get("requestBody", {})
-                    .get("content", {})
-                    .get("application/json", {})
-                )
+                req_body = op.get("requestBody", {}).get("content", {}).get("application/json", {})
                 if req_body.get("schema") and "example" not in req_body:
                     missing.append(f"{method.upper()} {path}")
         assert not missing, f"Endpoints without request example: {missing}"
@@ -210,9 +196,7 @@ class TestSSE:
             "SSEExitEvent",
             "SSEErrorEvent",
         ):
-            assert name in schema["components"]["schemas"], (
-                f"Missing SSE schema: {name}"
-            )
+            assert name in schema["components"]["schemas"], f"Missing SSE schema: {name}"
 
     def test_sse_event_has_discriminator(self, schema):
         ev = schema["components"]["schemas"]["SSEEvent"]
@@ -272,7 +256,9 @@ class TestSchemaStructure:
                 oid = op.get("operationId", "")
                 if oid:
                     prev = op_ids.get(oid)
-                    assert prev is None, f"Duplicate operationId '{oid}' at {method.upper()} {path} (also at {prev})"
+                    assert prev is None, (
+                        f"Duplicate operationId '{oid}' at {method.upper()} {path} (also at {prev})"
+                    )
                     op_ids[oid] = f"{method.upper()} {path}"
 
     def test_all_refs_resolve(self, schema):
@@ -283,7 +269,9 @@ class TestSchemaStructure:
             if isinstance(obj, dict):
                 ref = obj.get("$ref", "")
                 if ref:
-                    assert ref.startswith("#/components/schemas/"), f"External $ref not supported: {ref} at {path_str}"
+                    assert ref.startswith("#/components/schemas/"), (
+                        f"External $ref not supported: {ref} at {path_str}"
+                    )
                     name = ref.replace("#/components/schemas/", "")
                     assert name in components, f"Unresolved $ref '{ref}' at {path_str}"
                 for k, v in obj.items():
@@ -318,9 +306,7 @@ class TestRuntimeBehavior:
     def test_delete_unknown_server_returns_404(self):
         with TestClient(app) as client:
             resp = client.delete("/api/servers/nonexistent-12345", headers=self._auth_headers())
-        assert resp.status_code == 404, (
-            f"Expected 404, got {resp.status_code}: {resp.text}"
-        )
+        assert resp.status_code == 404, f"Expected 404, got {resp.status_code}: {resp.text}"
 
     def test_jobs_run_bad_session_returns_404(self):
         with TestClient(app) as client:
@@ -329,9 +315,7 @@ class TestRuntimeBehavior:
                 json={"session_id": "fake-session-999", "command": "ls"},
                 headers=self._auth_headers(),
             )
-        assert resp.status_code == 404, (
-            f"Expected 404, got {resp.status_code}: {resp.text}"
-        )
+        assert resp.status_code == 404, f"Expected 404, got {resp.status_code}: {resp.text}"
 
     def test_delete_unknown_returns_structured_error(self):
         with TestClient(app) as client:

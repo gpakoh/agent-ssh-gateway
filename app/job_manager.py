@@ -19,16 +19,19 @@ MAX_STDOUT_SIZE = 10 * 1024 * 1024  # 10 MB per job
 
 def _make_job_error_logger(job_id: str):
     """Build a done callback that logs job crashes."""
+
     def _log(t: asyncio.Task) -> None:
         exc = t.exception()
         if exc:
             logger.error("Job %s crashed: %s", job_id, exc)
+
     return _log
 
 
 # ---------------------------------------------------------------------------
 # Job Record
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class JobRecord:
@@ -106,6 +109,7 @@ class JobRecord:
 # ---------------------------------------------------------------------------
 # Job Manager
 # ---------------------------------------------------------------------------
+
 
 class JobManager:
     """Manages background jobs for SSH sessions."""
@@ -219,11 +223,13 @@ class JobManager:
 
         job.status = "running"
         job.started_at = time.time()
-        await job.notify_listeners({
-            "type": "status",
-            "status": "running",
-            "message": f"Started: {job.command}",
-        })
+        await job.notify_listeners(
+            {
+                "type": "status",
+                "status": "running",
+                "message": f"Started: {job.command}",
+            }
+        )
 
         try:
             # Use Streaming Execution For Real-time Output
@@ -238,26 +244,32 @@ class JobManager:
                         job.stdout += msg_data[:remaining]
                         if remaining < len(msg_data) and "[truncated]" not in job.stdout:
                             job.stdout += "\n... [output truncated, exceeded 10MB]"
-                    await job.notify_listeners({
-                        "type": "stdout",
-                        "data": msg_data,
-                    })
+                    await job.notify_listeners(
+                        {
+                            "type": "stdout",
+                            "data": msg_data,
+                        }
+                    )
                 elif msg_type == "stderr":
                     remaining = MAX_STDOUT_SIZE - len(job.stderr)
                     if remaining > 0:
                         job.stderr += msg_data[:remaining]
                         if remaining < len(msg_data) and "[truncated]" not in job.stderr:
                             job.stderr += "\n... [output truncated, exceeded 10MB]"
-                    await job.notify_listeners({
-                        "type": "stderr",
-                        "data": msg_data,
-                    })
+                    await job.notify_listeners(
+                        {
+                            "type": "stderr",
+                            "data": msg_data,
+                        }
+                    )
                 elif msg_type == "exit":
                     job.exit_code = int(msg_data)
-                    await job.notify_listeners({
-                        "type": "exit",
-                        "exit_code": job.exit_code,
-                    })
+                    await job.notify_listeners(
+                        {
+                            "type": "exit",
+                            "exit_code": job.exit_code,
+                        }
+                    )
 
             job.status = "completed" if (job.exit_code == 0) else "failed"
             if job.exit_code != 0:
@@ -266,26 +278,32 @@ class JobManager:
         except SessionNotFoundError as exc:
             job.status = "failed"
             job.error_message = str(exc)
-            await job.notify_listeners({
-                "type": "error",
-                "error": str(exc),
-            })
+            await job.notify_listeners(
+                {
+                    "type": "error",
+                    "error": str(exc),
+                }
+            )
         except Exception as exc:
             job.status = "failed"
             job.error_message = str(exc)
-            await job.notify_listeners({
-                "type": "error",
-                "error": str(exc),
-            })
+            await job.notify_listeners(
+                {
+                    "type": "error",
+                    "error": str(exc),
+                }
+            )
         finally:
             job.completed_at = time.time()
             job.completed_event.set()
-            await job.notify_listeners({
-                "type": "status",
-                "status": job.status,
-                "duration": job.duration,
-                "exit_code": job.exit_code,
-            })
+            await job.notify_listeners(
+                {
+                    "type": "status",
+                    "status": job.status,
+                    "duration": job.duration,
+                    "exit_code": job.exit_code,
+                }
+            )
 
     # ------------------------------------------------------------------
     # Get Job
@@ -352,10 +370,12 @@ class JobManager:
         job.cancel_event.set()
         job.completed_at = time.time()
         job.completed_event.set()
-        await job.notify_listeners({
-            "type": "status",
-            "status": "cancelled",
-        })
+        await job.notify_listeners(
+            {
+                "type": "status",
+                "status": "cancelled",
+            }
+        )
 
     async def wait_for_all_jobs(self) -> None:
         """Wait for all active (pending/running) jobs to complete."""

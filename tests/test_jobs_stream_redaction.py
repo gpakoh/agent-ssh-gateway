@@ -9,11 +9,7 @@ from app.config import settings
 from app.job_manager import JobRecord
 from app.main import app
 
-SECRET_STDOUT = (
-    "TOKEN=abc123\n"
-    "password=secret123\n"
-    "Authorization: Bearer test-token\n"
-)
+SECRET_STDOUT = "TOKEN=abc123\npassword=secret123\nAuthorization: Bearer test-token\n"
 SECRET_STDERR = "error: password=admin123"
 
 
@@ -54,9 +50,7 @@ class TestJobsStreamRedaction:
         monkeypatch.setattr(settings, "api_key", "secret-42")
         monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
         monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
-        monkeypatch.setattr(
-            "app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1"
-        )
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
 
     def _read_sse_events(self, resp):
         events = []
@@ -75,8 +69,9 @@ class TestJobsStreamRedaction:
 
         with TestClient(app) as client:
             self._setup_mocks(monkeypatch)
-            with client.stream("GET", "/api/jobs/job-stream-1/stream",
-                               headers={"X-API-Key": "secret-42"}) as resp:
+            with client.stream(
+                "GET", "/api/jobs/job-stream-1/stream", headers={"X-API-Key": "secret-42"}
+            ) as resp:
                 assert resp.status_code == 200
                 events = self._read_sse_events(resp)
 
@@ -96,8 +91,11 @@ class TestJobsStreamRedaction:
 
         with TestClient(app) as client:
             self._setup_mocks(monkeypatch)
-            with client.stream("GET", "/api/jobs/job-stream-1/stream?redact_output=true",
-                               headers={"X-API-Key": "secret-42"}) as resp:
+            with client.stream(
+                "GET",
+                "/api/jobs/job-stream-1/stream?redact_output=true",
+                headers={"X-API-Key": "secret-42"},
+            ) as resp:
                 assert resp.status_code == 200
                 events = self._read_sse_events(resp)
 
@@ -121,8 +119,9 @@ class TestJobsStreamRedaction:
 
         with TestClient(app) as client:
             self._setup_mocks(monkeypatch)
-            with client.stream("GET", "/api/jobs/job-stream-1/stream",
-                               headers={"X-API-Key": "secret-42"}) as resp:
+            with client.stream(
+                "GET", "/api/jobs/job-stream-1/stream", headers={"X-API-Key": "secret-42"}
+            ) as resp:
                 assert resp.status_code == 200
                 events = self._read_sse_events(resp)
 
@@ -146,8 +145,11 @@ class TestJobsStreamRedaction:
 
         with TestClient(app) as client:
             self._setup_mocks(monkeypatch)
-            with client.stream("GET", "/api/jobs/job-stream-1/stream?redact_output=false",
-                               headers={"X-API-Key": "secret-42"}) as resp:
+            with client.stream(
+                "GET",
+                "/api/jobs/job-stream-1/stream?redact_output=false",
+                headers={"X-API-Key": "secret-42"},
+            ) as resp:
                 assert resp.status_code == 200
                 events = self._read_sse_events(resp)
 
@@ -167,8 +169,11 @@ class TestJobsStreamRedaction:
 
         with TestClient(app) as client:
             self._setup_mocks(monkeypatch)
-            with client.stream("GET", "/api/jobs/job-stream-1/events?redact_output=true",
-                               headers={"X-API-Key": "secret-42"}) as resp:
+            with client.stream(
+                "GET",
+                "/api/jobs/job-stream-1/events?redact_output=true",
+                headers={"X-API-Key": "secret-42"},
+            ) as resp:
                 assert resp.status_code == 200
                 events = self._read_sse_events(resp)
 

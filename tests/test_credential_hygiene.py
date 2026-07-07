@@ -81,6 +81,7 @@ def test_connect_request_auth_method_detection_password():
         password="secret",
     )
     from app.routers.ssh import get_connect_auth_method
+
     assert get_connect_auth_method(req) == "password"
 
 
@@ -92,6 +93,7 @@ def test_connect_request_auth_method_detection_private_key():
         private_key="-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n-----END OPENSSH PRIVATE KEY-----",
     )
     from app.routers.ssh import get_connect_auth_method
+
     assert get_connect_auth_method(req) == "private_key"
 
 
@@ -104,6 +106,7 @@ def test_connect_request_auth_method_detection_none():
         private_key="key",
     )
     from app.routers.ssh import get_connect_auth_method
+
     assert get_connect_auth_method(req) == "private_key"
 
 

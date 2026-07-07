@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 class ContextStatus(Enum):
     """Context status."""
+
     ACTIVE = "active"
     EXPIRED = "expired"
     ERROR = "error"
@@ -24,6 +25,7 @@ class ContextStatus(Enum):
 @dataclass
 class Context:
     """Development context."""
+
     context_id: str
     session_id: str
     name: str
@@ -116,10 +118,11 @@ class ContextManager:
     ) -> Context:
         """Create a new development context."""
         context_id = str(uuid.uuid4())
-        
+
         # Auto-generate name if not provided
         if not name:
             import os
+
             base_name = os.path.basename(os.path.normpath(path)) or "context"
             name = f"{base_name}_{context_id[:8]}"
 
@@ -200,10 +203,7 @@ class ContextManager:
         return result
 
     async def commit_changes(
-        self,
-        context_id: str,
-        message: str,
-        files: list | None = None
+        self, context_id: str, message: str, files: list | None = None
     ) -> dict:
         """Commit changes in context."""
         ctx = await self.get_context(context_id)
@@ -211,16 +211,13 @@ class ContextManager:
             return {"success": False, "error": "Context not found"}
 
         if not ctx.git_info or ctx.git_info.status == GitStatus.NOT_INITIALIZED:
-            return {
-                "success": False,
-                "error": "Git not initialized. Use /api/git/init first."
-            }
+            return {"success": False, "error": "Git not initialized. Use /api/git/init first."}
 
         # Pre-commit hooks: run validation if auto_validate is enabled
         if ctx.auto_validate:
             logger.info("Running pre-commit validation for context %s", context_id)
             validation_report = await self._validation.validate(ctx.session_id, ctx.path)
-            
+
             if not validation_report.can_commit:
                 logger.warning("Pre-commit validation failed for context %s", context_id)
                 return {
@@ -230,22 +227,20 @@ class ContextManager:
                         "overall_status": validation_report.overall_status.value,
                         "summary": validation_report.summary,
                         "can_commit": validation_report.can_commit,
-                    }
+                    },
                 }
-            
+
             logger.info("Pre-commit validation passed for context %s", context_id)
 
         # Prepend context name to commit message
         full_message = f"[{ctx.name}] {message}"
         result = await self._git.commit(ctx.session_id, ctx.path, full_message, files)
-        
+
         if result["success"]:
             ctx.git_info = await self._git.check_git_status(ctx.session_id, ctx.path)
-            ctx.edit_history.append({
-                "type": "commit",
-                "message": full_message,
-                "timestamp": time.time()
-            })
+            ctx.edit_history.append(
+                {"type": "commit", "message": full_message, "timestamp": time.time()}
+            )
 
         return result
 
@@ -278,12 +273,14 @@ class ContextManager:
         """Record an edit in context history."""
         ctx = await self.get_context(context_id)
         if ctx:
-            ctx.edit_history.append({
-                "type": "edit",
-                "file": file_path,
-                "operation": operation,
-                "timestamp": time.time()
-            })
+            ctx.edit_history.append(
+                {
+                    "type": "edit",
+                    "file": file_path,
+                    "operation": operation,
+                    "timestamp": time.time(),
+                }
+            )
             ctx.smart_state.last_edited_file = file_path
 
     async def close_file(self, context_id: str, file_path: str) -> bool:
@@ -293,7 +290,9 @@ class ContextManager:
             return ctx.smart_state.close_file(file_path)
         return False
 
-    async def update_cursor(self, context_id: str, file_path: str, line: int, column: int = 1) -> None:
+    async def update_cursor(
+        self, context_id: str, file_path: str, line: int, column: int = 1
+    ) -> None:
         """Update cursor position."""
         ctx = await self.get_context(context_id)
         if ctx:
@@ -307,7 +306,9 @@ class ContextManager:
             return cmd.to_dict()
         return {}
 
-    async def add_search(self, context_id: str, query: str, path: str = "", replace_with: str = "") -> dict:
+    async def add_search(
+        self, context_id: str, query: str, path: str = "", replace_with: str = ""
+    ) -> dict:
         """Add search query to history."""
         ctx = await self.get_context(context_id)
         if ctx:
@@ -315,7 +316,9 @@ class ContextManager:
             return search.to_dict()
         return {}
 
-    async def add_bookmark(self, context_id: str, file_path: str, line: int, note: str = "") -> dict:
+    async def add_bookmark(
+        self, context_id: str, file_path: str, line: int, note: str = ""
+    ) -> dict:
         """Add bookmark."""
         ctx = await self.get_context(context_id)
         if ctx:
@@ -356,12 +359,14 @@ class ContextManager:
         )
 
         # Record validation in history
-        ctx.edit_history.append({
-            "type": "validation",
-            "status": report.overall_status.value,
-            "duration": report.total_duration,
-            "timestamp": time.time()
-        })
+        ctx.edit_history.append(
+            {
+                "type": "validation",
+                "status": report.overall_status.value,
+                "duration": report.total_duration,
+                "timestamp": time.time(),
+            }
+        )
 
         return report
 
@@ -369,22 +374,14 @@ class ContextManager:
         """Checkout or create branch."""
         # Check if branch exists
         result = await self._ssh.execute(
-            session_id,
-            f"cd {path} && git branch --list {branch}",
-            timeout=10
+            session_id, f"cd {path} && git branch --list {branch}", timeout=10
         )
-        
+
         if result["stdout"].strip():
             # Branch exists, checkout
-            await self._ssh.execute(
-                session_id,
-                f"cd {path} && git checkout {branch}",
-                timeout=10
-            )
+            await self._ssh.execute(session_id, f"cd {path} && git checkout {branch}", timeout=10)
         else:
             # Create new branch
             await self._ssh.execute(
-                session_id,
-                f"cd {path} && git checkout -b {branch}",
-                timeout=10
+                session_id, f"cd {path} && git checkout -b {branch}", timeout=10
             )

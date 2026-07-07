@@ -64,6 +64,7 @@ router = APIRouter(tags=["ssh"])
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def time_to_iso(timestamp: float) -> str:
     """Convert Unix timestamp to ISO format."""
     return datetime.fromtimestamp(timestamp, tz=UTC).isoformat()
@@ -82,9 +83,12 @@ def get_connect_auth_method(req: ConnectRequest) -> str:
 # Agent Token
 # ---------------------------------------------------------------------------
 
+
 @router.post("/api/agent/token", response_model=AgentTokenResponse)
 @rate_limit_mutation(5, "minute")
-async def agent_token_generate(req: AgentTokenRequest, request: Request, _identity: AuthIdentity = Depends(require_master_key)):
+async def agent_token_generate(
+    req: AgentTokenRequest, request: Request, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Generate a short-lived agent token (separate from API_KEY).
 
     Requires API_KEY auth. The generated token can be rotated
@@ -122,7 +126,11 @@ async def agent_token_generate(req: AgentTokenRequest, request: Request, _identi
 
 @router.post("/api/agent/token/refresh", response_model=AgentTokenRefreshResponse)
 @rate_limit_mutation(5, "minute")
-async def agent_token_refresh(req: AgentTokenRefreshRequest, request: Request, _identity: AuthIdentity = Depends(require_master_key)):
+async def agent_token_refresh(
+    req: AgentTokenRefreshRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_master_key),
+):
     """Refresh (rotate) the agent token.
 
     Invalidates the previous agent token and issues a new one atomically.
@@ -163,6 +171,7 @@ async def agent_token_refresh(req: AgentTokenRefreshRequest, request: Request, _
 # Session Config
 # ---------------------------------------------------------------------------
 
+
 @router.get("/api/config/session", response_model=SessionConfigResponse)
 async def get_session_config(_identity: AuthIdentity = Depends(require_master_key)):
     """Get current session configuration."""
@@ -176,7 +185,9 @@ async def get_session_config(_identity: AuthIdentity = Depends(require_master_ke
 
 
 @router.patch("/api/config/session/timeout", response_model=SessionTimeoutResponse)
-async def update_session_timeout(req: SessionTimeoutRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def update_session_timeout(
+    req: SessionTimeoutRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Update session timeout dynamically."""
     if not 60 <= req.timeout <= 86400:
         raise HTTPException(
@@ -194,6 +205,7 @@ async def update_session_timeout(req: SessionTimeoutRequest, _identity: AuthIden
 # ---------------------------------------------------------------------------
 # SSH Connection
 # ---------------------------------------------------------------------------
+
 
 @router.post("/api/ssh/connect", response_model=ConnectResponse)
 @rate_limit_mutation(10, "minute")
@@ -263,9 +275,7 @@ async def ssh_execute(
     try:
         sanitized = sanitize_command(req.command)
     except ValueError as exc:
-        _state.audit_logger.log_security_event(
-            "BLOCKED_COMMAND", str(exc), request.client.host
-        )
+        _state.audit_logger.log_security_event("BLOCKED_COMMAND", str(exc), request.client.host)
         raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
 
     # Command Policy Evaluation
@@ -334,7 +344,11 @@ async def ssh_execute(
 
 
 @router.post("/api/ssh/disconnect", response_model=DisconnectResponse)
-async def ssh_disconnect(req: DisconnectRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:disconnect"))):
+async def ssh_disconnect(
+    req: DisconnectRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:disconnect")),
+):
     """Close an SSH session."""
     session = await _state.manager.get_session(req.session_id)
     if session is None:
@@ -352,7 +366,9 @@ async def ssh_disconnect(req: DisconnectRequest, request: Request, _identity: Au
 
 
 @router.get("/api/ssh/sessions", response_model=SessionsResponse)
-async def ssh_sessions(request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:execute"))):
+async def ssh_sessions(
+    request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:execute"))
+):
     """List active SSH sessions with details.
 
     Master token sees all sessions.
@@ -362,9 +378,9 @@ async def ssh_sessions(request: Request, _identity: AuthIdentity = Depends(requi
 
     if _identity.token_type != "master":
         records = [
-            r for r in records
-            if r.owner_type == "agent"
-            and r.owner_token_fingerprint == _identity.fingerprint
+            r
+            for r in records
+            if r.owner_type == "agent" and r.owner_token_fingerprint == _identity.fingerprint
         ]
 
     now = time.time()
@@ -389,8 +405,13 @@ async def ssh_sessions(request: Request, _identity: AuthIdentity = Depends(requi
 # Heartbeat / Keepalive
 # ---------------------------------------------------------------------------
 
+
 @router.post("/api/ssh/heartbeat")
-async def ssh_heartbeat(req: DisconnectRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:execute"))):
+async def ssh_heartbeat(
+    req: DisconnectRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:execute")),
+):
     """Refresh session timeout by touching it."""
     record = await _state.manager.get_session(req.session_id)
     if not record:
@@ -401,7 +422,11 @@ async def ssh_heartbeat(req: DisconnectRequest, request: Request, _identity: Aut
 
 
 @router.get("/api/ssh/session/{session_id}/health")
-async def session_health(session_id: str, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:execute"))):
+async def session_health(
+    session_id: str,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:execute")),
+):
     """Check session health and auto-reconnect if needed."""
     record = await _state.manager.get_session(session_id)
     if not record:
@@ -436,10 +461,13 @@ async def session_health(session_id: str, request: Request, _identity: AuthIdent
 # Websocket Streaming
 # ---------------------------------------------------------------------------
 
+
 @router.websocket("/api/ssh/execute/stream")
 async def ssh_execute_stream(websocket: WebSocket):
     """Execute a command and stream output via WebSocket."""
-    identity = await ws_auth_check(websocket, settings, _state.agent_token_store, required_scope="ssh:execute")
+    identity = await ws_auth_check(
+        websocket, settings, _state.agent_token_store, required_scope="ssh:execute"
+    )
     if isinstance(identity, tuple):
         await websocket.close(code=identity[0], reason=identity[1])
         return
@@ -451,7 +479,9 @@ async def ssh_execute_stream(websocket: WebSocket):
         command = data.get("command", "")
 
         if not session_id or not command:
-            await websocket.send_json({"type": "error", "data": "session_id and command are required"})
+            await websocket.send_json(
+                {"type": "error", "data": "session_id and command are required"}
+            )
             await websocket.close()
             return
 
@@ -480,11 +510,13 @@ async def ssh_execute_stream(websocket: WebSocket):
         )
 
         if not decision.allowed:
-            await websocket.send_json({
-                "type": "error",
-                "code": "COMMAND_POLICY_DENIED",
-                "message": f"Command denied by policy: {decision.reason}",
-            })
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "code": "COMMAND_POLICY_DENIED",
+                    "message": f"Command denied by policy: {decision.reason}",
+                }
+            )
             await websocket.close()
             return
 
@@ -497,11 +529,13 @@ async def ssh_execute_stream(websocket: WebSocket):
         try:
             ensure_session_owner(record, identity)
         except HTTPException:
-            await websocket.send_json({
-                "type": "error",
-                "code": "SESSION_OWNERSHIP",
-                "message": "Agent token cannot access this session",
-            })
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "code": "SESSION_OWNERSHIP",
+                    "message": "Agent token cannot access this session",
+                }
+            )
             await websocket.close()
             return
 
@@ -524,7 +558,9 @@ async def ssh_execute_stream(websocket: WebSocket):
 @router.websocket("/api/ssh/pty/{session_id}/stream")
 async def pty_stream(websocket: WebSocket, session_id: str):
     """Interactive PTY via WebSocket."""
-    identity = await ws_auth_check(websocket, settings, _state.agent_token_store, required_scope="ssh:execute")
+    identity = await ws_auth_check(
+        websocket, settings, _state.agent_token_store, required_scope="ssh:execute"
+    )
     if isinstance(identity, tuple):
         await websocket.close(code=identity[0], reason=identity[1])
         return
@@ -649,7 +685,9 @@ async def session_env(
     ensure_session_owner(record, _identity)
     result = await _state.manager.execute(session_id=session_id, command="printenv", timeout=10)
     if result["exit_code"] != 0:
-        raise HTTPException(status_code=502, detail=_err(502, f"Failed to read env: {result['stderr']}"))
+        raise HTTPException(
+            status_code=502, detail=_err(502, f"Failed to read env: {result['stderr']}")
+        )
 
     env = {}
     for line in result["stdout"].splitlines():
@@ -685,7 +723,9 @@ async def upload_ssh_key(
     try:
         text = content.decode("utf-8").strip()
     except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail=_err(400, "Key must be valid UTF-8 text")) from None
+        raise HTTPException(
+            status_code=400, detail=_err(400, "Key must be valid UTF-8 text")
+        ) from None
 
     if not text.startswith("-----BEGIN"):
         raise HTTPException(status_code=400, detail=_err(400, "Not a valid private key format"))

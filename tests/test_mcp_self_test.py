@@ -62,11 +62,7 @@ class TestSelfTest:
     def test_summary_counts_match(self, monkeypatch: pytest.MonkeyPatch):
         self_test = _import(monkeypatch, "self_test")
         result = self_test.run_self_test(FakeClient())
-        total = (
-            result["summary"]["pass"]
-            + result["summary"]["warn"]
-            + result["summary"]["fail"]
-        )
+        total = result["summary"]["pass"] + result["summary"]["warn"] + result["summary"]["fail"]
         assert total == len(result["checks"])
 
     def test_full_mode_includes_self_test(self, monkeypatch: pytest.MonkeyPatch):

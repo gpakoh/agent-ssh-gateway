@@ -16,7 +16,9 @@ router = APIRouter()
 
 
 @router.post("/api/webhooks", tags=["webhooks"])
-async def create_webhook(req: CreateWebhookRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def create_webhook(
+    req: CreateWebhookRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Create a new webhook for auto-deployment."""
     config = _state.webhook_manager.add_webhook(
         name=req.name,
@@ -70,7 +72,9 @@ async def delete_webhook(webhook_id: str, _identity: AuthIdentity = Depends(requ
 
 
 @router.post("/api/webhooks/{webhook_id}/deploy", tags=["webhooks"], response_model=DeployResponse)
-async def deploy_webhook(webhook_id: str, req: DeployRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def deploy_webhook(
+    webhook_id: str, req: DeployRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Manually trigger deployment."""
     result = await _state.webhook_manager.execute_deploy(
         session_id=req.session_id,
@@ -85,7 +89,9 @@ async def deploy_webhook(webhook_id: str, req: DeployRequest, _identity: AuthIde
 
 
 @router.get("/api/webhooks/{webhook_id}/deployments", tags=["webhooks"])
-async def webhook_deployments(webhook_id: str, _identity: AuthIdentity = Depends(require_master_key)):
+async def webhook_deployments(
+    webhook_id: str, _identity: AuthIdentity = Depends(require_master_key)
+):
     """List deployment history."""
     deployments = _state.webhook_manager.get_deployments(webhook_id)
     return {

@@ -49,8 +49,7 @@ class TestCircuitBreakerStateMachine:
 
     @pytest.mark.asyncio
     async def test_half_open_to_closed_on_successes(self):
-        cb = CircuitBreaker(failure_threshold=3, recovery_timeout=0.05,
-                            half_open_max_calls=3)
+        cb = CircuitBreaker(failure_threshold=3, recovery_timeout=0.05, half_open_max_calls=3)
         for _ in range(3):
             await cb.record_failure()
         await asyncio.sleep(0.06)
@@ -84,6 +83,7 @@ class TestCircuitBreakerStateMachine:
 # Race Conditions — Concurrent Can_execute In HALF_OPEN
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestCircuitBreakerRace:
     """The lock guard prevents _half_open_calls from exceeding max.
 
@@ -93,8 +93,7 @@ class TestCircuitBreakerRace:
 
     @pytest.mark.asyncio
     async def test_concurrent_half_open_respects_limit(self):
-        cb = CircuitBreaker(failure_threshold=3, recovery_timeout=0.05,
-                            half_open_max_calls=5)
+        cb = CircuitBreaker(failure_threshold=3, recovery_timeout=0.05, half_open_max_calls=5)
         # Force Into HALF_OPEN
         for _ in range(3):
             await cb.record_failure()
@@ -114,8 +113,7 @@ class TestCircuitBreakerRace:
     @pytest.mark.asyncio
     async def test_concurrent_half_open_with_failures(self):
         """Mixed success/failure in concurrent calls."""
-        cb = CircuitBreaker(failure_threshold=3, recovery_timeout=0.05,
-                            half_open_max_calls=5)
+        cb = CircuitBreaker(failure_threshold=3, recovery_timeout=0.05, half_open_max_calls=5)
         for _ in range(3):
             await cb.record_failure()
         await asyncio.sleep(0.06)
@@ -143,8 +141,7 @@ class TestCircuitBreakerRace:
     @pytest.mark.asyncio
     async def test_successes_close_from_any_caller(self):
         """Any caller's record_success can transition to CLOSED."""
-        cb = CircuitBreaker(failure_threshold=3, recovery_timeout=0.05,
-                            half_open_max_calls=3)
+        cb = CircuitBreaker(failure_threshold=3, recovery_timeout=0.05, half_open_max_calls=3)
         for _ in range(3):
             await cb.record_failure()
         await asyncio.sleep(0.06)
@@ -158,8 +155,7 @@ class TestCircuitBreakerRace:
     @pytest.mark.asyncio
     async def test_failure_while_others_succeeding(self):
         """A single failure in HALF_OPEN re-opens the breaker."""
-        cb = CircuitBreaker(failure_threshold=3, recovery_timeout=0.05,
-                            half_open_max_calls=5)
+        cb = CircuitBreaker(failure_threshold=3, recovery_timeout=0.05, half_open_max_calls=5)
         for _ in range(3):
             await cb.record_failure()
         await asyncio.sleep(0.06)
@@ -177,6 +173,7 @@ class TestCircuitBreakerRace:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Circuitbreakerregistry — Eviction, Threading, Isolation
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestCircuitBreakerRegistry:
     @pytest.mark.asyncio

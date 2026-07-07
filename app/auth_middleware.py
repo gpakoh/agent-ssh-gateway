@@ -96,7 +96,9 @@ def get_client_ip(
     return client_host
 
 
-def _is_trusted(ip_str: str, trusted_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network]) -> bool:
+def _is_trusted(
+    ip_str: str, trusted_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network]
+) -> bool:
     try:
         addr = ipaddress.ip_address(ip_str)
     except ValueError:
@@ -104,7 +106,9 @@ def _is_trusted(ip_str: str, trusted_networks: list[ipaddress.IPv4Network | ipad
     return any(addr in net for net in trusted_networks)
 
 
-def is_ip_allowed(ip_str: str, allowed_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network]) -> bool:
+def is_ip_allowed(
+    ip_str: str, allowed_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network]
+) -> bool:
     try:
         addr = ipaddress.ip_address(ip_str)
     except ValueError:
@@ -112,7 +116,9 @@ def is_ip_allowed(ip_str: str, allowed_networks: list[ipaddress.IPv4Network | ip
     return any(addr in net for net in allowed_networks)
 
 
-async def is_agent_token_valid(settings: Settings, provided: str, token_store: AgentTokenStore | None = None) -> AuthIdentity | None:
+async def is_agent_token_valid(
+    settings: Settings, provided: str, token_store: AgentTokenStore | None = None
+) -> AuthIdentity | None:
     if not provided:
         return None
     if token_store is not None and token_store.connected:
@@ -144,7 +150,11 @@ async def is_agent_token_valid(settings: Settings, provided: str, token_store: A
 
 
 async def verify_api_key(
-    request: Request, expected_key: str, extra_key: str = "", settings: Settings | None = None, token_store: AgentTokenStore | None = None
+    request: Request,
+    expected_key: str,
+    extra_key: str = "",
+    settings: Settings | None = None,
+    token_store: AgentTokenStore | None = None,
 ) -> AuthIdentity | None:
     provided = request.headers.get("X-API-Key", "")
     if not provided:
@@ -213,9 +223,7 @@ async def require_master_key(
     return identity
 
 
-async def verify_master_api_key(
-    request: Request, expected_key: str
-) -> AuthIdentity | None:
+async def verify_master_api_key(request: Request, expected_key: str) -> AuthIdentity | None:
     """Verify only the master API key — rejects agent tokens.
 
     Use this for privileged operations like agent token management.
@@ -249,7 +257,9 @@ def _normalise_path(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def auth_check(request: Request, settings: Settings, token_store: AgentTokenStore | None = None) -> HTTPException | None:
+async def auth_check(
+    request: Request, settings: Settings, token_store: AgentTokenStore | None = None
+) -> HTTPException | None:
     if request.method == "OPTIONS":
         return None
 
@@ -336,7 +346,9 @@ async def auth_check(request: Request, settings: Settings, token_store: AgentTok
         )
 
     # API Key Check (also Accept Agent_token)
-    identity = await verify_api_key(request, settings.api_key, settings.agent_token, settings, token_store)
+    identity = await verify_api_key(
+        request, settings.api_key, settings.agent_token, settings, token_store
+    )
     if identity is not None:
         request.state.auth_identity = identity
         return None
@@ -464,6 +476,7 @@ def require_scope(required: str) -> Callable[[Request], Awaitable[AuthIdentity]]
     The returned function exposes ``.required_scope`` for introspection
     by the route auth contract test.
     """
+
     async def _scope_check(request: Request) -> AuthIdentity:
         identity: AuthIdentity | None = getattr(request.state, "auth_identity", None)
         if identity is None:

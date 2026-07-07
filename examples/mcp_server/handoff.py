@@ -14,9 +14,7 @@ AGENT_STATUS = f"{AI_BRIDGE_DIR}/agent-status.md"
 IMPLEMENTATION_DIFF = f"{AI_BRIDGE_DIR}/implementation-diff.patch"
 
 
-def build_handoff_plan(
-    task: str, agent: str = "opencode", notes: str | None = None
-) -> str:
+def build_handoff_plan(task: str, agent: str = "opencode", notes: str | None = None) -> str:
     """Build a standard handoff plan body."""
     timestamp = datetime.now(UTC).isoformat()
     notes_section = f"\n## Additional notes\n\n{notes.strip()}\n" if notes else ""
@@ -55,14 +53,10 @@ def write_handoff_plan(
     assert_handoff_write_allowed()
     plan = build_handoff_plan(task=task, agent=agent, notes=notes)
     resolved = resolve_file_path(CURRENT_PLAN)
-    return client.write_file(
-        resolved, plan, session_id=session_id, mode="overwrite"
-    )
+    return client.write_file(resolved, plan, session_id=session_id, mode="overwrite")
 
 
-def read_handoff(
-    client: GatewayClient, *, session_id: str | None = None
-) -> dict[str, Any]:
+def read_handoff(client: GatewayClient, *, session_id: str | None = None) -> dict[str, Any]:
     """Read standard .ai-bridge handoff files."""
     files: dict[str, Any] = {}
     errors: dict[str, str] = {}
@@ -89,9 +83,7 @@ def read_handoff(
     }
 
 
-def show_handoff_status(
-    client: GatewayClient, *, session_id: str | None = None
-) -> dict[str, Any]:
+def show_handoff_status(client: GatewayClient, *, session_id: str | None = None) -> dict[str, Any]:
     """Return compact handoff status."""
     handoff = read_handoff(client, session_id=session_id)
     files = handoff["files"]

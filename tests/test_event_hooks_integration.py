@@ -18,6 +18,7 @@ TEST_API_KEY = "test-event-hook-key-789"
 @pytest.fixture(autouse=True)
 def _configure_auth():
     from app.config import settings
+
     settings.api_key = TEST_API_KEY
     yield
 
@@ -29,6 +30,7 @@ def _setup_globals():
     state_module.event_hook_store = store
     state_module.delivery_service = ds
     from app.config import settings
+
     settings.event_hooks_max = 10
     yield store, ds
     state_module.event_hook_store = None
@@ -126,6 +128,7 @@ async def test_crud_rejects_max_hooks(_setup_globals):
     await ds.create_tables()
 
     from app.config import settings
+
     settings.event_hooks_max = 1
 
     transport = ASGITransport(app=main_module.app)
@@ -148,14 +151,19 @@ async def test_delivery_enqueue_and_claim(_setup_globals):
 
     transport = ASGITransport(app=main_module.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.post("/api/event-hooks", json={
-            "url": "https://example.com/hook",
-            "events": ["session.connected"],
-            "secret": "test-secret",
-        }, headers=_auth_headers())
+        r = await client.post(
+            "/api/event-hooks",
+            json={
+                "url": "https://example.com/hook",
+                "events": ["session.connected"],
+                "secret": "test-secret",
+            },
+            headers=_auth_headers(),
+        )
         assert r.status_code == 201
 
     from app.event_hook_emitter import emit_event
+
     await emit_event(
         event="session.connected",
         session_id="test-session",
@@ -172,6 +180,7 @@ async def test_delivery_enqueue_and_claim(_setup_globals):
     from sqlalchemy import select as sel
 
     from app.session_store import WebhookDelivery
+
     async with ds._session_factory() as session:
         result = await session.execute(sel(WebhookDelivery).limit(1))
         rec = result.scalar_one()
@@ -197,8 +206,10 @@ async def test_agent_token_cannot_manage_event_hooks(_setup_globals):
 
         # Create an agent token via the API
         from app.config import settings
+
         settings.agent_token = "agent-canary"
         from datetime import datetime, timedelta
+
         settings.agent_token_expires_at = datetime.now(UTC) + timedelta(hours=1)
         settings.agent_token_scopes = ["ssh:execute"]
 
@@ -209,14 +220,22 @@ async def test_agent_token_cannot_manage_event_hooks(_setup_globals):
 
         # GET /api/event-hooks — should reject agent token
         r = await client.get("/api/event-hooks", headers=agent_headers)
-        assert r.status_code in (401, 403), f"Expected 401/403 for agent token, got {r.status_code}: {r.text}"
+        assert r.status_code in (401, 403), (
+            f"Expected 401/403 for agent token, got {r.status_code}: {r.text}"
+        )
 
         # POST /api/event-hooks — should reject agent token
-        r = await client.post("/api/event-hooks", json={
-            "url": "https://example.com/hook",
-            "events": ["session.connected"],
-        }, headers=agent_headers)
-        assert r.status_code in (401, 403), f"Expected 401/403 for agent token, got {r.status_code}: {r.text}"
+        r = await client.post(
+            "/api/event-hooks",
+            json={
+                "url": "https://example.com/hook",
+                "events": ["session.connected"],
+            },
+            headers=agent_headers,
+        )
+        assert r.status_code in (401, 403), (
+            f"Expected 401/403 for agent token, got {r.status_code}: {r.text}"
+        )
 
         # Verify master can still manage (sanity check)
         r = await client.get("/api/event-hooks", headers=master_headers)

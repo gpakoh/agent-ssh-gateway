@@ -17,6 +17,7 @@ from app.distributed_lock import DistributedLock
 async def lock():
     dl = DistributedLock(redis_url="redis://localhost:6379/0")
     import fakeredis.aioredis
+
     dl._redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     await dl._redis.ping()
     yield dl
@@ -25,6 +26,7 @@ async def lock():
 
 def test_imports():
     from app.distributed_lock import DistributedLock
+
     assert DistributedLock
 
 
@@ -86,6 +88,7 @@ class TestDistributedLockBasics:
 # Split-brain Scenarios
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestSplitBrain:
     @pytest.mark.asyncio
     async def test_ttl_expiry_allows_other_acquire(self, lock):
@@ -136,6 +139,7 @@ class TestSplitBrain:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Disconnect — Watchdog Cleanup
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestDisconnect:
     @pytest.mark.asyncio

@@ -23,6 +23,7 @@ from app.security import SecretManager
 
 # Lazy Import To Avoid Circular Dependency
 
+
 class CommandResult(TypedDict):
     stdout: str
     stderr: str
@@ -31,19 +32,26 @@ class CommandResult(TypedDict):
 
 
 _emit_event_fn: Callable[..., Any] | None = None
+
+
 def _emit(event: str, **kw: Any) -> None:
     global _emit_event_fn
     fn = _emit_event_fn
     if fn is None:
         from app.event_hook_emitter import emit_event as _emit_event_fn
+
         fn = _emit_event_fn
     assert fn is not None
     task = asyncio.ensure_future(fn(event, **kw))
+
     def _on_emit_done(t: asyncio.Task) -> None:
         exc = t.exception()
         if exc:
             logger.error("_emit failed: %s", exc)
+
     task.add_done_callback(_on_emit_done)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,39 +59,47 @@ logger = logging.getLogger(__name__)
 # Custom Exceptions
 # ---------------------------------------------------------------------------
 
+
 class SSHManagerError(Exception):
     """Base exception for SSH manager errors."""
+
     pass
 
 
 class ConnectionError(SSHManagerError):
     """Failed to establish SSH connection."""
+
     pass
 
 
 class AuthenticationError(SSHManagerError):
     """SSH authentication failed."""
+
     pass
 
 
 class SessionNotFoundError(SSHManagerError):
     """Session ID not found."""
+
     pass
 
 
 class TimeoutError(SSHManagerError):
     """Command execution timed out."""
+
     pass
 
 
 class ExecutionError(SSHManagerError):
     """Error during command execution."""
+
     pass
 
 
 # ---------------------------------------------------------------------------
 # Session Record
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class SessionRecord:
@@ -128,11 +144,16 @@ class SessionRecord:
 # SSH Session Manager
 # ---------------------------------------------------------------------------
 
+
 class SSHSessionManager:
     """Manages multiple SSH sessions with automatic cleanup."""
 
-    def __init__(self, session_timeout: int = 300, cleanup_interval: int = 60,
-                 host_key_store: HostKeyStore | None = None) -> None:
+    def __init__(
+        self,
+        session_timeout: int = 300,
+        cleanup_interval: int = 60,
+        host_key_store: HostKeyStore | None = None,
+    ) -> None:
         self._sessions: dict[str, SessionRecord] = {}
         self._lock = asyncio.Lock()
         self._session_timeout = session_timeout
@@ -141,11 +162,15 @@ class SSHSessionManager:
         self._strict_host_key = settings.ssh_strict_host_key_checking
         self._host_key_store = host_key_store or NullHostKeyStore()
         try:
-            self._secret_manager = SecretManager(settings.encryption_key) if settings.encryption_key else None
+            self._secret_manager = (
+                SecretManager(settings.encryption_key) if settings.encryption_key else None
+            )
         except Exception:
             self._secret_manager = None
         if self._secret_manager is None:
-            logger.warning("No Encryption Key Configured — SSH Credentials Stored In Plaintext In Memory")
+            logger.warning(
+                "No Encryption Key Configured — SSH Credentials Stored In Plaintext In Memory"
+            )
             self._secret_manager = None
 
     async def start_cleanup_task(self) -> None:
@@ -187,7 +212,9 @@ class SSHSessionManager:
                     stale.append(record)
 
         for record in stale:
-            logger.info("Closing stale session %s (idle %.0fs)", record.session_id, record.idle_time)
+            logger.info(
+                "Closing stale session %s (idle %.0fs)", record.session_id, record.idle_time
+            )
             try:
                 record.client.close()
             except Exception as exc:
@@ -270,7 +297,9 @@ class SSHSessionManager:
             )
         except AuthenticationException as exc:
             client.close()
-            raise AuthenticationError(f"Authentication failed for {username}@{host}: {exc}") from exc
+            raise AuthenticationError(
+                f"Authentication failed for {username}@{host}: {exc}"
+            ) from exc
         except (NoValidConnectionsError, SSHException, OSError) as exc:
             client.close()
             raise ConnectionError(f"Could not connect to {host}:{port}: {exc}") from exc
@@ -327,7 +356,10 @@ class SSHSessionManager:
         logger.warning(
             "Session %s (%s@%s:%d) is disconnected. Credentials are not "
             "stored — call create_session() again with fresh credentials.",
-            session_id, record.username, record.host, record.port,
+            session_id,
+            record.username,
+            record.host,
+            record.port,
         )
         return False
 
@@ -357,11 +389,9 @@ class SSHSessionManager:
     # Execute
     # ------------------------------------------------------------------
 
-    async def execute(
-        self, session_id: str, command: str, timeout: int = 30
-    ) -> CommandResult:
+    async def execute(self, session_id: str, command: str, timeout: int = 30) -> CommandResult:
         """Execute a command and return stdout, stderr, exit_code, duration.
-        
+
         Auto-reconnects if the SSH connection is broken.
         """
         async with self._lock:
@@ -374,7 +404,9 @@ class SSHSessionManager:
             logger.warning("Session %s disconnected, attempting auto-reconnect", session_id)
             reconnected = await self.reconnect(session_id)
             if not reconnected:
-                raise ConnectionError(f"Session {session_id} is disconnected and reconnection failed")
+                raise ConnectionError(
+                    f"Session {session_id} is disconnected and reconnection failed"
+                )
 
         record.touch()
         host, port, username = record.host, record.port, record.username
@@ -448,8 +480,13 @@ class SSHSessionManager:
     # Streaming Execute (websocket)
     # ------------------------------------------------------------------
 
-    async def execute_stream(self, session_id: str, command: str, timeout: int = 600,
-                             cancel_event: asyncio.Event | None = None):
+    async def execute_stream(
+        self,
+        session_id: str,
+        command: str,
+        timeout: int = 600,
+        cancel_event: asyncio.Event | None = None,
+    ):
         """Execute a command and yield (type, data) tuples for WebSocket streaming.
 
         If cancel_event is provided and set, closes the channel and stops streaming.

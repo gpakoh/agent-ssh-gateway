@@ -26,12 +26,14 @@ class TestFileReadWriteEdit:
     @classmethod
     def _make_session_mock(cls):
         mgr = cls._base_manager_mock()
-        mgr.get_session = AsyncMock(return_value=MagicMock(
-            owner_type="master",
-            owner_name="admin",
-            owner_token_fingerprint=token_fingerprint("secret-42"),
-            is_connected=MagicMock(return_value=True),
-        ))
+        mgr.get_session = AsyncMock(
+            return_value=MagicMock(
+                owner_type="master",
+                owner_name="admin",
+                owner_token_fingerprint=token_fingerprint("secret-42"),
+                is_connected=MagicMock(return_value=True),
+            )
+        )
         return mgr
 
     @classmethod
@@ -39,12 +41,14 @@ class TestFileReadWriteEdit:
         fe = MagicMock()
         fe.read_file = AsyncMock(return_value="file content here")
         fe.write_file = AsyncMock(return_value=None)
-        fe.edit_file = AsyncMock(return_value={
-            "success": True,
-            "operations_applied": 1,
-            "changed": True,
-            "path": "/tmp/test.py",
-        })
+        fe.edit_file = AsyncMock(
+            return_value={
+                "success": True,
+                "operations_applied": 1,
+                "changed": True,
+                "path": "/tmp/test.py",
+            }
+        )
         return fe
 
     @classmethod
@@ -55,6 +59,7 @@ class TestFileReadWriteEdit:
 
     def _setup_state(self):
         from app import state as _app_state
+
         _app_state.manager = self._make_session_mock()
         _app_state.file_editor = self._make_file_editor_mock()
         _app_state.audit_logger = self._make_audit_logger_mock()
@@ -83,6 +88,7 @@ class TestFileReadWriteEdit:
         assert data["content"] == "file content here"
         # Verify the mock was called with the expected path
         from app import state as _app_state
+
         _app_state.file_editor.read_file.assert_awaited_once_with("s-1", "/etc/hostname")
         _app_state.audit_logger.log_file_access.assert_called_once()
 
@@ -114,6 +120,7 @@ class TestFileReadWriteEdit:
         assert data["size"] == len("print('hello')")
         assert data["mode"] == "write"
         from app import state as _app_state
+
         _app_state.file_editor.write_file.assert_awaited_once_with(
             "s-1", "/tmp/test.py", "print('hello')"
         )
@@ -130,6 +137,7 @@ class TestFileReadWriteEdit:
             fe = self._make_file_editor_mock()
             fe.read_file = AsyncMock(return_value="existing content\n")
             from app import state as _app_state
+
             _app_state.file_editor = fe
             resp = client.post(
                 "/api/file/write",
@@ -144,9 +152,7 @@ class TestFileReadWriteEdit:
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
         data = resp.json()
         assert data["mode"] == "append"
-        fe.write_file.assert_awaited_once_with(
-            "s-1", "/tmp/test.py", "existing content\nnew line"
-        )
+        fe.write_file.assert_awaited_once_with("s-1", "/tmp/test.py", "existing content\nnew line")
 
     # ------------------------------------------------------------------
     # Happy path: file edit
@@ -175,6 +181,7 @@ class TestFileReadWriteEdit:
         assert data["success"] is True
         assert data["operations_applied"] == 1
         from app import state as _app_state
+
         _app_state.file_editor.edit_file.assert_awaited_once()
         call_args = _app_state.file_editor.edit_file.await_args
         assert call_args is not None

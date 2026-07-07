@@ -12,6 +12,7 @@ from app.ssh_manager import SSHSessionManager
 # Cleanup_stale_sessions — No Deadlock With Concurrent Access
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_cleanup_stale_sessions_no_deadlock():
     manager = SSHSessionManager(cleanup_interval=3600)
@@ -30,6 +31,7 @@ async def test_cleanup_stale_sessions_with_sessions():
     mock_client = MagicMock()
     mock_client.close = MagicMock()
     import time
+
     now = time.time()
     manager._sessions["stale-1"] = MagicMock(
         spec=["client", "last_activity", "idle_time", "session_id", "is_connected"],
@@ -58,8 +60,10 @@ async def test_cleanup_stale_sessions_with_sessions():
 # Disconnect With Timeout — Mock A Slow SSH Transport
 # ---------------------------------------------------------------------------
 
+
 class BrokenClient:
     """Mock SSH client whose close() raises."""
+
     def close(self):
         raise RuntimeError("Transport closed unexpectedly")
 
@@ -73,8 +77,19 @@ async def test_disconnect_handles_broken_client():
     manager = SSHSessionManager(cleanup_interval=3600)
     session_id = "broken-session"
     manager._sessions[session_id] = MagicMock(
-        spec=["client", "last_activity", "idle_time", "session_id", "is_connected",
-              "password", "private_key", "key_passphrase", "host", "port", "username"],
+        spec=[
+            "client",
+            "last_activity",
+            "idle_time",
+            "session_id",
+            "is_connected",
+            "password",
+            "private_key",
+            "key_passphrase",
+            "host",
+            "port",
+            "username",
+        ],
         client=BrokenClient(),
         last_activity=0,
         idle_time=0,
@@ -96,6 +111,7 @@ async def test_disconnect_handles_broken_client():
 # Disconnect — Session Removed After Disconnect
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_disconnect_removes_session():
     manager = SSHSessionManager(cleanup_interval=3600)
@@ -103,8 +119,19 @@ async def test_disconnect_removes_session():
     mock_client.close = MagicMock()
     session_id = "test-session"
     manager._sessions[session_id] = MagicMock(
-        spec=["client", "last_activity", "idle_time", "session_id", "is_connected",
-              "password", "private_key", "key_passphrase", "host", "port", "username"],
+        spec=[
+            "client",
+            "last_activity",
+            "idle_time",
+            "session_id",
+            "is_connected",
+            "password",
+            "private_key",
+            "key_passphrase",
+            "host",
+            "port",
+            "username",
+        ],
         client=mock_client,
         last_activity=0,
         idle_time=0,
@@ -122,6 +149,7 @@ async def test_disconnect_removes_session():
 # Websocket Drain In Shutdown
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_shutdown_ws_drain():
     """H5: shutdown iterates active_websockets and closes each with code 1001."""
@@ -131,10 +159,13 @@ async def test_shutdown_ws_drain():
     state_module.active_websockets.add(ws)
 
     import asyncio
+
     # Simulate the actual shutdown logic from main.py
     for ws_entry in list(state_module.active_websockets):
         try:
-            await asyncio.wait_for(ws_entry.close(code=1001, reason="Server shutting down"), timeout=5.0)
+            await asyncio.wait_for(
+                ws_entry.close(code=1001, reason="Server shutting down"), timeout=5.0
+            )
         except Exception:
             pass
     state_module.active_websockets.clear()
@@ -152,13 +183,15 @@ async def test_shutdown_ws_drain_timeout():
 
     tasks = []
     for ws_entry in list(state_module.active_websockets):
-        tasks.append(asyncio.wait_for(ws_entry.close(code=1001, reason="Server shutting down"), timeout=0.001))
+        tasks.append(
+            asyncio.wait_for(
+                ws_entry.close(code=1001, reason="Server shutting down"), timeout=0.001
+            )
+        )
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     assert any(isinstance(r, asyncio.TimeoutError) for r in results)
     state_module.active_websockets.clear()
-
-
 
 
 @pytest.mark.asyncio
@@ -179,8 +212,10 @@ async def test_websocket_register_discard():
 # Multiple Dead Sessions — Shutdown Completes Within Timeout
 # ---------------------------------------------------------------------------
 
+
 class RaisingClient:
     """SSH client whose close() raises a handled exception."""
+
     def close(self):
         raise RuntimeError("dead host")
 
@@ -194,8 +229,19 @@ async def test_shutdown_all_sessions_handled():
     for i in range(10):
         sid = f"dead-{i}"
         manager._sessions[sid] = MagicMock(
-            spec=["client", "last_activity", "idle_time", "session_id", "is_connected",
-                  "password", "private_key", "key_passphrase", "host", "port", "username"],
+            spec=[
+                "client",
+                "last_activity",
+                "idle_time",
+                "session_id",
+                "is_connected",
+                "password",
+                "private_key",
+                "key_passphrase",
+                "host",
+                "port",
+                "username",
+            ],
             client=RaisingClient(),
             last_activity=0,
             idle_time=0,

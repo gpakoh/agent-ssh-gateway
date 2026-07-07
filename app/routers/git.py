@@ -33,7 +33,9 @@ async def _get_context_or_404(context_id: str):
         raise HTTPException(status_code=404, detail=_err(404, f"Context {context_id} not found"))
     session = await _state.manager.get_session(ctx.session_id)
     if not session:
-        raise HTTPException(status_code=403, detail=_err(403, "Context session is no longer active"))
+        raise HTTPException(
+            status_code=403, detail=_err(403, "Context session is no longer active")
+        )
     return ctx
 
 
@@ -47,16 +49,16 @@ async def git_init(req: GitInitRequest, _identity: AuthIdentity = Depends(requir
 @router.post("/api/git/commit", response_model=GitActionResponse)
 async def git_commit(req: GitCommitRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Create a git commit for context."""
-    result = await _state.context_manager.commit_changes(
-        req.context_id,
-        req.message,
-        req.files
-    )
+    result = await _state.context_manager.commit_changes(req.context_id, req.message, req.files)
     return GitActionResponse(**result)
 
 
 @router.post("/api/git/backup", response_model=GitActionResponse)
-async def git_backup(context_id: str, _identity: AuthIdentity = Depends(require_master_key), backup_name: str = "auto_backup"):
+async def git_backup(
+    context_id: str,
+    _identity: AuthIdentity = Depends(require_master_key),
+    backup_name: str = "auto_backup",
+):
     """Create a git stash backup."""
     await _get_context_or_404(context_id)
     result = await _state.context_manager.create_backup(context_id, backup_name)
@@ -77,6 +79,7 @@ async def git_diff_query(context_id: str, _identity: AuthIdentity = Depends(requ
     ctx = await _get_context_or_404(context_id)
 
     from app.git_manager import GitManager
+
     git = GitManager(_state.manager)
     diff = await git.diff(ctx.session_id, ctx.path)
     return {"context_id": context_id, "diff": diff}
@@ -106,7 +109,9 @@ async def git_simple_status(
 ):
     """Simple git status — branch, modified, staged, untracked files."""
     branch_res = await _state.manager.execute(
-        session_id, f"cd {shlex.quote(path)} && git branch --show-current 2>/dev/null || echo 'main'", timeout=10
+        session_id,
+        f"cd {shlex.quote(path)} && git branch --show-current 2>/dev/null || echo 'main'",
+        timeout=10,
     )
     branch = branch_res["stdout"].strip() or "main"
 
@@ -168,7 +173,9 @@ async def git_diff(req: GitDiffRequest, _identity: AuthIdentity = Depends(requir
 
 
 @router.post("/api/recovery/backup", response_model=RecoveryActionResponse)
-async def recovery_backup(req: CreateBackupRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def recovery_backup(
+    req: CreateBackupRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Create a backup before making changes."""
     await _get_context_or_404(req.context_id)
 
@@ -182,7 +189,9 @@ async def recovery_backup(req: CreateBackupRequest, _identity: AuthIdentity = De
 
 
 @router.post("/api/recovery/restore", response_model=RecoveryActionResponse)
-async def recovery_restore(req: RestoreBackupRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def recovery_restore(
+    req: RestoreBackupRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Restore from backup."""
     await _get_context_or_404(req.context_id)
 
@@ -196,14 +205,14 @@ async def recovery_restore(req: RestoreBackupRequest, _identity: AuthIdentity = 
 
 
 @router.get("/api/recovery/backups")
-async def recovery_list_backups(context_id: str, _identity: AuthIdentity = Depends(require_master_key)):
+async def recovery_list_backups(
+    context_id: str, _identity: AuthIdentity = Depends(require_master_key)
+):
     """List available backups."""
     ctx = await _get_context_or_404(context_id)
 
     result = await _state.manager.execute(
-        ctx.session_id,
-        f"cd {shlex.quote(ctx.path)} && git stash list",
-        timeout=10
+        ctx.session_id, f"cd {shlex.quote(ctx.path)} && git stash list", timeout=10
     )
 
     backups = []
@@ -213,10 +222,12 @@ async def recovery_list_backups(context_id: str, _identity: AuthIdentity = Depen
             if len(parts) >= 2:
                 stash_id = parts[0].strip()
                 message = parts[1].strip()
-                backups.append(BackupInfo(
-                    id=stash_id,
-                    name=message,
-                    created_at=time.time(),
-                ))
+                backups.append(
+                    BackupInfo(
+                        id=stash_id,
+                        name=message,
+                        created_at=time.time(),
+                    )
+                )
 
     return ListBackupsResponse(backups=backups, count=len(backups))

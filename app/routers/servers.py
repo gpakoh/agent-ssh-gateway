@@ -34,7 +34,9 @@ async def add_server(req: AddServerRequest, _identity: AuthIdentity = Depends(re
     """Add a new server."""
     existing = _state.server_manager.get_server(req.id)
     if existing:
-        raise HTTPException(status_code=409, detail=_err(409, f"Server with ID '{req.id}' already exists"))
+        raise HTTPException(
+            status_code=409, detail=_err(409, f"Server with ID '{req.id}' already exists")
+        )
 
     server = _state.server_manager.add_server(
         server_id=req.id,
@@ -57,7 +59,9 @@ async def delete_server(server_id: str, _identity: AuthIdentity = Depends(requir
     return {"status": "removed", "server_id": server_id}
 
 
-@router.post("/api/servers/{server_id}/connect", tags=["servers"], response_model=ServerConnectResponse)
+@router.post(
+    "/api/servers/{server_id}/connect", tags=["servers"], response_model=ServerConnectResponse
+)
 async def connect_server(
     server_id: str,
     req: ConnectServerRequest,

@@ -73,8 +73,13 @@ async def _check_session_ownership(session_id: str, request: Request) -> None:
 # File Edit
 # ---------------------------------------------------------------------------
 
+
 @router.post("/api/file/read", response_model=FileReadResponse)
-async def file_read(req: FileReadRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def file_read(
+    req: FileReadRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
+):
     """Read a file from a remote server."""
     await _check_session_ownership(req.session_id, request)
 
@@ -88,16 +93,24 @@ async def file_read(req: FileReadRequest, request: Request, _identity: AuthIdent
         content = await _state.file_editor.read_file(req.session_id, validated)
     except Exception as exc:
         err_msg = str(exc)
-        logger.warning("File read failed: session=%s path=%s error=%s", req.session_id, validated, err_msg)
+        logger.warning(
+            "File read failed: session=%s path=%s error=%s", req.session_id, validated, err_msg
+        )
         if "Cannot read" in err_msg:
-            raise HTTPException(status_code=404, detail=_err(404, err_msg))
-        raise HTTPException(status_code=500, detail=_err(500, f"File read failed: {err_msg}"))
+            raise HTTPException(status_code=404, detail=_err(404, err_msg)) from exc
+        raise HTTPException(
+            status_code=500, detail=_err(500, f"File read failed: {err_msg}")
+        ) from exc
     return FileReadResponse(path=validated, content=content)
 
 
 @router.patch("/api/file/edit", response_model=FileEditResponse)
 @rate_limit_mutation(30, "minute")
-async def file_edit(req: FileEditRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def file_edit(
+    req: FileEditRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
+):
     """Edit a remote file using patch operations."""
     await _check_session_ownership(req.session_id, request)
 
@@ -106,7 +119,9 @@ async def file_edit(req: FileEditRequest, request: Request, _identity: AuthIdent
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
     try:
-        logger.info(f"File edit request: session={req.session_id}, path={validated}, ops={len(req.operations)}")
+        logger.info(
+            f"File edit request: session={req.session_id}, path={validated}, ops={len(req.operations)}"
+        )
         result = await _state.file_editor.edit_file(
             req.session_id,
             validated,
@@ -120,7 +135,11 @@ async def file_edit(req: FileEditRequest, request: Request, _identity: AuthIdent
 
 
 @router.post("/api/file/patch", response_model=PatchApplyResponse)
-async def file_patch(req: PatchApplyRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def file_patch(
+    req: PatchApplyRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
+):
     """Apply a unified diff patch."""
     await _check_session_ownership(req.session_id, request)
 
@@ -135,6 +154,7 @@ async def file_patch(req: PatchApplyRequest, request: Request, _identity: AuthId
 # ---------------------------------------------------------------------------
 # Raw File
 # ---------------------------------------------------------------------------
+
 
 @router.get("/api/file/raw", response_class=PlainTextResponse)
 async def file_raw(
@@ -160,10 +180,14 @@ async def file_raw(
         content = await _state.file_editor.read_file(session_id, path)
     except Exception as exc:
         err_msg = str(exc)
-        logger.warning("File raw read failed: session=%s path=%s error=%s", session_id, path, err_msg)
+        logger.warning(
+            "File raw read failed: session=%s path=%s error=%s", session_id, path, err_msg
+        )
         if "Cannot read" in err_msg:
-            raise HTTPException(status_code=404, detail=_err(404, err_msg))
-        raise HTTPException(status_code=500, detail=_err(500, f"File read failed: {err_msg}"))
+            raise HTTPException(status_code=404, detail=_err(404, err_msg)) from exc
+        raise HTTPException(
+            status_code=500, detail=_err(500, f"File read failed: {err_msg}")
+        ) from exc
 
     if range_header and range_header.startswith("bytes="):
         try:
@@ -178,7 +202,7 @@ async def file_raw(
                 media_type="text/plain",
                 status_code=206,
                 headers={
-                    "Content-Range": f"bytes {rstart}-{rend-1}/{original_len}",
+                    "Content-Range": f"bytes {rstart}-{rend - 1}/{original_len}",
                     "Accept-Ranges": "bytes",
                 },
             )
@@ -201,8 +225,13 @@ async def file_raw(
 # Batch Read
 # ---------------------------------------------------------------------------
 
+
 @router.post("/api/batch/read", response_model=BatchReadResponse)
-async def batch_read(req: BatchReadRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def batch_read(
+    req: BatchReadRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
+):
     """Read multiple files in a single request."""
     await _check_session_ownership(req.session_id, request)
 
@@ -225,6 +254,7 @@ async def batch_read(req: BatchReadRequest, request: Request, _identity: AuthIde
 # ---------------------------------------------------------------------------
 # File Upload/download
 # ---------------------------------------------------------------------------
+
 
 @router.post("/api/file/upload")
 @rate_limit_mutation(20, "minute")
@@ -250,7 +280,11 @@ async def file_upload(
 
 
 @router.post("/api/file/upload/json", response_model=FileUploadResponse)
-async def file_upload_json(req: FileUploadRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def file_upload_json(
+    req: FileUploadRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
+):
     """Upload file via JSON body (base64 encoded).
 
     Preferred for large files (>2KB) where query params may fail.
@@ -269,7 +303,12 @@ async def file_upload_json(req: FileUploadRequest, request: Request, _identity: 
 
 
 @router.get("/api/file/download", response_class=Response)
-async def file_download(request: Request, session_id: str = Query(...), path: str = Query(...), _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def file_download(
+    request: Request,
+    session_id: str = Query(...),
+    path: str = Query(...),
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
+):
     """Download file from remote server."""
     await _check_session_ownership(session_id, request)
 
@@ -281,15 +320,23 @@ async def file_download(request: Request, session_id: str = Query(...), path: st
         content = await _state.file_editor.read_file(session_id, path)
     except Exception as exc:
         err_msg = str(exc)
-        logger.warning("File download failed: session=%s path=%s error=%s", session_id, path, err_msg)
+        logger.warning(
+            "File download failed: session=%s path=%s error=%s", session_id, path, err_msg
+        )
         if "Cannot read" in err_msg:
-            raise HTTPException(status_code=404, detail=_err(404, err_msg))
-        raise HTTPException(status_code=500, detail=_err(500, f"File read failed: {err_msg}"))
+            raise HTTPException(status_code=404, detail=_err(404, err_msg)) from exc
+        raise HTTPException(
+            status_code=500, detail=_err(500, f"File read failed: {err_msg}")
+        ) from exc
     return Response(content=content, media_type="application/octet-stream")
 
 
 @router.post("/api/file/write", response_model=FileWriteResponse)
-async def file_write(req: FileWriteRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def file_write(
+    req: FileWriteRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
+):
     """Write file via JSON body (atomic, no heredoc escaping).
 
     Use for Python code with quotes, special chars, or large content.
@@ -309,17 +356,20 @@ async def file_write(req: FileWriteRequest, request: Request, _identity: AuthIde
         content = req.content
 
     await _state.file_editor.write_file(req.session_id, validated, content)
-    return FileWriteResponse(
-        path=validated, size=len(content), mode=req.mode
-    )
+    return FileWriteResponse(path=validated, size=len(content), mode=req.mode)
 
 
 # ---------------------------------------------------------------------------
 # AST Refactor
 # ---------------------------------------------------------------------------
 
+
 @router.post("/api/ast/rename", response_model=ASTRefactorRenameResponse)
-async def ast_rename(req: ASTRefactorRenameRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def ast_rename(
+    req: ASTRefactorRenameRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
+):
     """Rename a symbol (function, class, variable) using AST.
 
     Supports single file ('path') or multiple files ('files' array).
@@ -347,34 +397,36 @@ async def ast_rename(req: ASTRefactorRenameRequest, request: Request, _identity:
         for file_path in req.files:
             try:
                 code = await _state.file_editor.read_file(req.session_id, file_path)
-                refactored, count = ASTRefactor.rename_symbol(
-                    code, req.old_name, req.new_name
-                )
+                refactored, count = ASTRefactor.rename_symbol(code, req.old_name, req.new_name)
 
                 if count > 0:
-                    await _state.file_editor.write_file(
-                        req.session_id, file_path, refactored
-                    )
+                    await _state.file_editor.write_file(req.session_id, file_path, refactored)
                     total_replacements += count
                     files_changed += 1
-                    results.append(ASTRefactorFileResult(
-                        path=file_path,
-                        success=True,
-                        replacements=count,
-                    ))
+                    results.append(
+                        ASTRefactorFileResult(
+                            path=file_path,
+                            success=True,
+                            replacements=count,
+                        )
+                    )
                 else:
-                    results.append(ASTRefactorFileResult(
-                        path=file_path,
-                        success=True,
-                        replacements=0,
-                    ))
+                    results.append(
+                        ASTRefactorFileResult(
+                            path=file_path,
+                            success=True,
+                            replacements=0,
+                        )
+                    )
             except Exception as exc:
-                results.append(ASTRefactorFileResult(
-                    path=file_path,
-                    success=False,
-                    replacements=0,
-                    error=str(exc),
-                ))
+                results.append(
+                    ASTRefactorFileResult(
+                        path=file_path,
+                        success=False,
+                        replacements=0,
+                        error=str(exc),
+                    )
+                )
 
         return ASTRefactorRenameResponse(
             old_name=req.old_name,
@@ -390,14 +442,10 @@ async def ast_rename(req: ASTRefactorRenameRequest, request: Request, _identity:
             raise HTTPException(status_code=400, detail=_err(400, "Path is required"))
         try:
             code = await _state.file_editor.read_file(req.session_id, single_path)
-            refactored, count = ASTRefactor.rename_symbol(
-                code, req.old_name, req.new_name
-            )
+            refactored, count = ASTRefactor.rename_symbol(code, req.old_name, req.new_name)
 
             if count > 0:
-                await _state.file_editor.write_file(
-                    req.session_id, single_path, refactored
-                )
+                await _state.file_editor.write_file(req.session_id, single_path, refactored)
 
             return ASTRefactorRenameResponse(
                 path=single_path,
@@ -409,17 +457,27 @@ async def ast_rename(req: ASTRefactorRenameRequest, request: Request, _identity:
                 files_changed=1 if count > 0 else 0,
             )
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=_err(500, f"AST rename failed: {exc}")) from exc
+            raise HTTPException(
+                status_code=500, detail=_err(500, f"AST rename failed: {exc}")
+            ) from exc
 
 
 @router.post("/api/refactor/rename", response_model=ASTRefactorRenameResponse)
-async def refactor_rename(req: ASTRefactorRenameRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def refactor_rename(
+    req: ASTRefactorRenameRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
+):
     """Alias for /api/ast/rename — AST-aware symbol renaming."""
     return await ast_rename(req, request)
 
 
 @router.post("/api/ast/extract", response_model=ASTRefactorExtractResponse)
-async def ast_extract(req: ASTRefactorExtractRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def ast_extract(
+    req: ASTRefactorExtractRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
+):
     """Extract a block of code into a new function."""
     await _check_session_ownership(req.session_id, request)
 
@@ -429,9 +487,7 @@ async def ast_extract(req: ASTRefactorExtractRequest, request: Request, _identit
         raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
     try:
         code = await _state.file_editor.read_file(req.session_id, validated)
-        refactored = ASTRefactor.extract_function(
-            code, req.start_line, req.end_line, req.func_name
-        )
+        refactored = ASTRefactor.extract_function(code, req.start_line, req.end_line, req.func_name)
 
         await _state.file_editor.write_file(
             req.session_id,
@@ -445,11 +501,17 @@ async def ast_extract(req: ASTRefactorExtractRequest, request: Request, _identit
             code=refactored,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=_err(500, f"AST extract failed: {exc}")) from exc
+        raise HTTPException(
+            status_code=500, detail=_err(500, f"AST extract failed: {exc}")
+        ) from exc
 
 
 @router.post("/api/ast/analyze", response_model=ASTAnalyzeResponse)
-async def ast_analyze(req: ASTAnalyzeRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def ast_analyze(
+    req: ASTAnalyzeRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
+):
     """Analyze Python code structure using AST."""
     await _check_session_ownership(req.session_id, request)
 
@@ -466,12 +528,15 @@ async def ast_analyze(req: ASTAnalyzeRequest, request: Request, _identity: AuthI
             **analysis,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=_err(500, f"AST analysis failed: {exc}")) from exc
+        raise HTTPException(
+            status_code=500, detail=_err(500, f"AST analysis failed: {exc}")
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
 # Project Introspection
 # ---------------------------------------------------------------------------
+
 
 @router.get("/api/project/tree")
 async def project_tree(
@@ -493,7 +558,9 @@ async def project_tree(
     result = await _state.manager.execute(session_id, cmd, timeout=30)
 
     if result["exit_code"] != 0 or "ERROR" in result["stdout"]:
-        raise HTTPException(status_code=500, detail=_err(500, f"Cannot read directory: {result['stderr']}"))
+        raise HTTPException(
+            status_code=500, detail=_err(500, f"Cannot read directory: {result['stderr']}")
+        )
 
     items = []
     for line in result["stdout"].strip().split("\n"):
@@ -508,20 +575,25 @@ async def project_tree(
         if not fpath:
             continue
 
-        items.append({
-            "type": "directory" if ftype == "d" else "file",
-            "path": fpath,
-            "size": int(fsize) if fsize and ftype == "f" else None,
-        })
+        items.append(
+            {
+                "type": "directory" if ftype == "d" else "file",
+                "path": fpath,
+                "size": int(fsize) if fsize and ftype == "f" else None,
+            }
+        )
 
     return {"items": items, "count": len(items)}
 
 
 @router.post("/api/project/files/structure", response_model=ProjectStructureResponse)
-async def project_structure_files(req: ProjectStructureRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def project_structure_files(
+    req: ProjectStructureRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
+):
     """Get project structure with metadata and git status."""
     await _check_session_ownership(req.session_id, request)
-
 
     try:
         validated_path = validate_path(req.path)
@@ -532,7 +604,9 @@ async def project_structure_files(req: ProjectStructureRequest, request: Request
     result = await _state.manager.execute(req.session_id, cmd, timeout=30)
 
     if result["exit_code"] != 0 or "ERROR" in result["stdout"]:
-        raise HTTPException(status_code=500, detail=_err(500, f"Cannot read directory: {result['stderr']}"))
+        raise HTTPException(
+            status_code=500, detail=_err(500, f"Cannot read directory: {result['stderr']}")
+        )
 
     files = []
     total_files = 0
@@ -563,15 +637,17 @@ async def project_structure_files(req: ProjectStructureRequest, request: Request
         if "." in path and file_type == "file":
             extension = path.split(".")[-1]
 
-        files.append(FileMetadata(
-            name=path.split("/")[-1] if "/" in path else path,
-            path=path,
-            type=file_type,
-            size=int(size) if size else 0,
-            permissions=permissions,
-            modified_at=mtime if mtime else None,
-            extension=extension,
-        ))
+        files.append(
+            FileMetadata(
+                name=path.split("/")[-1] if "/" in path else path,
+                path=path,
+                type=file_type,
+                size=int(size) if size else 0,
+                permissions=permissions,
+                modified_at=mtime if mtime else None,
+                extension=extension,
+            )
+        )
 
     if req.include_git_status:
         git_cmd = f"cd {shlex.quote(validated_path)} && git status --short 2>/dev/null || echo ''"
@@ -623,8 +699,13 @@ async def project_structure_files(req: ProjectStructureRequest, request: Request
 # Batch Edit
 # ---------------------------------------------------------------------------
 
+
 @router.patch("/api/batch/edit", response_model=BatchEditResponse)
-async def batch_edit(req: BatchEditRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def batch_edit(
+    req: BatchEditRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
+):
     """Edit multiple files in a single request."""
     await _check_session_ownership(req.session_id, request)
 
@@ -636,13 +717,15 @@ async def batch_edit(req: BatchEditRequest, request: Request, _identity: AuthIde
         try:
             validate_path(file_op.path)
         except ValueError as exc:
-            results.append(BatchEditResult(
-                path=file_op.path,
-                success=False,
-                operations_applied=0,
-                changed=False,
-                error=str(exc),
-            ))
+            results.append(
+                BatchEditResult(
+                    path=file_op.path,
+                    success=False,
+                    operations_applied=0,
+                    changed=False,
+                    error=str(exc),
+                )
+            )
             continue
 
         try:
@@ -651,23 +734,27 @@ async def batch_edit(req: BatchEditRequest, request: Request, _identity: AuthIde
                 file_op.path,
                 [op.model_dump() for op in file_op.operations],
             )
-            results.append(BatchEditResult(
-                path=file_op.path,
-                success=True,
-                operations_applied=result.get("operations_applied", 0),
-                changed=result.get("changed", False),
-            ))
+            results.append(
+                BatchEditResult(
+                    path=file_op.path,
+                    success=True,
+                    operations_applied=result.get("operations_applied", 0),
+                    changed=result.get("changed", False),
+                )
+            )
             total_operations += result.get("operations_applied", 0)
             if result.get("changed", False):
                 files_changed += 1
         except Exception as exc:
-            results.append(BatchEditResult(
-                path=file_op.path,
-                success=False,
-                operations_applied=0,
-                changed=False,
-                error=str(exc),
-            ))
+            results.append(
+                BatchEditResult(
+                    path=file_op.path,
+                    success=False,
+                    operations_applied=0,
+                    changed=False,
+                    error=str(exc),
+                )
+            )
 
     return BatchEditResponse(
         results=results,
@@ -681,8 +768,13 @@ async def batch_edit(req: BatchEditRequest, request: Request, _identity: AuthIde
 # Bulk Read/edit
 # ---------------------------------------------------------------------------
 
+
 @router.post("/api/bulk/read")
-async def bulk_read_files(req: BatchReadRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def bulk_read_files(
+    req: BatchReadRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
+):
     """Read multiple files concurrently."""
     await _check_session_ownership(req.session_id, request)
 
@@ -696,7 +788,11 @@ async def bulk_read_files(req: BatchReadRequest, request: Request, _identity: Au
 
 
 @router.post("/api/bulk/edit", response_model=BatchEditResponse)
-async def bulk_edit_files(req: BatchEditRequest, request: Request, _identity: AuthIdentity = Depends(require_scope("ssh:files"))):
+async def bulk_edit_files(
+    req: BatchEditRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:files")),
+):
     """Edit multiple files concurrently.
 
     Example:
@@ -731,23 +827,27 @@ async def bulk_edit_files(req: BatchEditRequest, request: Request, _identity: Au
                 file_op.path,
                 [op.model_dump() for op in file_op.operations],
             )
-            results.append(BatchEditResult(
-                path=file_op.path,
-                success=True,
-                operations_applied=result.get("operations_applied", 0),
-                changed=result.get("changed", False),
-            ))
+            results.append(
+                BatchEditResult(
+                    path=file_op.path,
+                    success=True,
+                    operations_applied=result.get("operations_applied", 0),
+                    changed=result.get("changed", False),
+                )
+            )
             total_operations += result.get("operations_applied", 0)
             if result.get("changed", False):
                 files_changed += 1
         except Exception as exc:
-            results.append(BatchEditResult(
-                path=file_op.path,
-                success=False,
-                operations_applied=0,
-                changed=False,
-                error=str(exc),
-            ))
+            results.append(
+                BatchEditResult(
+                    path=file_op.path,
+                    success=False,
+                    operations_applied=0,
+                    changed=False,
+                    error=str(exc),
+                )
+            )
 
     return BatchEditResponse(
         results=results,
@@ -761,6 +861,7 @@ async def bulk_edit_files(req: BatchEditRequest, request: Request, _identity: Au
 # File Watch Websocket
 # ---------------------------------------------------------------------------
 
+
 @router.websocket("/api/file/watch")
 async def file_watch_stream(websocket: WebSocket):
     """Watch file changes in real-time via WebSocket.
@@ -770,7 +871,9 @@ async def file_watch_stream(websocket: WebSocket):
     2. Send: {"session_id": "...", "path": "/var/log/app.log", "tail": true}
     3. Receive file updates as they happen
     """
-    identity = await ws_auth_check(websocket, settings, _state.agent_token_store, required_scope="ssh:files")
+    identity = await ws_auth_check(
+        websocket, settings, _state.agent_token_store, required_scope="ssh:files"
+    )
     if isinstance(identity, tuple):
         await websocket.close(code=identity[0], reason=identity[1])
         return
@@ -800,31 +903,32 @@ async def file_watch_stream(websocket: WebSocket):
         try:
             ensure_session_owner(record, identity)
         except HTTPException:
-            await websocket.send_json({
-                "type": "error",
-                "code": "SESSION_OWNERSHIP",
-                "message": "Agent token cannot access this session",
-            })
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "code": "SESSION_OWNERSHIP",
+                    "message": "Agent token cannot access this session",
+                }
+            )
             await websocket.close()
             return
 
         try:
             path = validate_path(path)
         except ValueError as exc:
-            await websocket.send_json({
-                "type": "error",
-                "data": f"Invalid path: {exc}",
-            })
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "data": f"Invalid path: {exc}",
+                }
+            )
             await websocket.close()
             return
 
         last_content = ""
         last_size = 0
 
-        await websocket.send_json({
-            "type": "status",
-            "data": f"Watching {path} (tail={tail})"
-        })
+        await websocket.send_json({"type": "status", "data": f"Watching {path} (tail={tail})"})
 
         while True:
             try:
@@ -838,14 +942,11 @@ async def file_watch_stream(websocket: WebSocket):
                 result = await _state.manager.execute(
                     session_id,
                     f"cat {shlex.quote(path)} 2>/dev/null || echo '__FILE_NOT_FOUND__'",
-                    timeout=10
+                    timeout=10,
                 )
 
                 if "__FILE_NOT_FOUND__" in result["stdout"]:
-                    await websocket.send_json({
-                        "type": "error",
-                        "data": f"File not found: {path}"
-                    })
+                    await websocket.send_json({"type": "error", "data": f"File not found: {path}"})
                     await asyncio.sleep(interval)
                     continue
 
@@ -857,19 +958,15 @@ async def file_watch_stream(websocket: WebSocket):
                         lines = new_content.strip().split("\n")
                         for line in lines:
                             if line:
-                                await websocket.send_json({
-                                    "type": "line",
-                                    "data": line,
-                                    "timestamp": time.time()
-                                })
+                                await websocket.send_json(
+                                    {"type": "line", "data": line, "timestamp": time.time()}
+                                )
                         last_size = len(content)
                 else:
                     if content != last_content:
-                        await websocket.send_json({
-                            "type": "content",
-                            "data": content,
-                            "timestamp": time.time()
-                        })
+                        await websocket.send_json(
+                            {"type": "content", "data": content, "timestamp": time.time()}
+                        )
                         last_content = content
 
             except Exception as exc:
