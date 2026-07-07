@@ -48,3 +48,6 @@ htmlcov/
 /Dockerfile
 /requirements.txt
 /docker-compose.override.yml
+# Agent context (contains operational details, not for public repo)
+AGENTS.md
+
