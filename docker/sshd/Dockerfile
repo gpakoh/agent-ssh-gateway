@@ -1,6 +1,6 @@
 FROM alpine:3.19
 
-RUN apk add --no-cache openssh-server && \
+RUN apk add --no-cache openssh-server git && \
     adduser -D mcpuser && \
     mkdir -p /home/mcpuser/.ssh && \
     chmod 700 /home/mcpuser/.ssh
@@ -12,7 +12,8 @@ RUN chown -R mcpuser:mcpuser /home/mcpuser/.ssh && \
     ssh-keygen -A && \
     echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config && \
     echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
-    echo "mcpuser:sshpass123" | chpasswd
+    echo "mcpuser:sshpass123" | chpasswd && \
+    git config --system safe.directory '*'
 
 EXPOSE 2222
 

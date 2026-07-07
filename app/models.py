@@ -206,7 +206,8 @@ class HealthResponse(BaseModel):
 
     status: str = "ok"
     redis: bool = False
-    postgres: bool = False
+    persistent_sessions: bool = False
+    postgres: bool = False  # deprecated — use persistent_sessions
     ready: bool = False
 
 

@@ -265,15 +265,22 @@ class GatewayClient:
             },
         )
 
-    def repo_status(self, session_id: str | None = None) -> dict[str, Any]:
+    def repo_status(self, session_id: str | None = None, project: str | None = None) -> dict[str, Any]:
         commands = {
-            "pwd": "pwd",
             "status": "git status --short",
             "recent_commits": "git log --oneline -10",
-            "tags": "git tag --list --sort=-creatordate | head -10",
+            "tags": "git tag --list --sort=-creatordate",
         }
         output: dict[str, Any] = {}
         for name, command in commands.items():
-            job = self.execute_restricted(command, session_id=session_id)
-            output[name] = self.wait_job(job["job_id"])
+            if project:
+                job = self.execute_project_command(project, command)
+            else:
+                job = self.execute_restricted(command, session_id=session_id)
+            result = self.wait_job(job["job_id"])
+            if name == "tags" and isinstance(result, dict):
+                stdout = (result.get("stdout") or result.get("output") or "")
+                lines = stdout.strip().split("\n")[:10]
+                result["stdout"] = "\n".join(lines)
+            output[name] = result
         return output
