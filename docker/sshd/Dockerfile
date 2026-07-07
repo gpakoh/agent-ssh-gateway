@@ -1,0 +1,19 @@
+FROM alpine:3.19
+
+RUN apk add --no-cache openssh-server && \
+    adduser -D mcpuser && \
+    mkdir -p /home/mcpuser/.ssh && \
+    chmod 700 /home/mcpuser/.ssh
+
+COPY authorized_keys /home/mcpuser/.ssh/authorized_keys
+
+RUN chown -R mcpuser:mcpuser /home/mcpuser/.ssh && \
+    chmod 600 /home/mcpuser/.ssh/authorized_keys && \
+    ssh-keygen -A && \
+    echo "PasswordAuthentication no" >> /etc/ssh/sshd_config && \
+    echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
+    echo "mcpuser:$(openssl rand -base64 32)" | chpasswd
+
+EXPOSE 2222
+
+CMD ["/usr/sbin/sshd", "-D", "-p", "2222"]
