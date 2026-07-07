@@ -42,7 +42,8 @@ trap cleanup EXIT
 info "1. Health (no auth)"
 # ---------------------------------------------------------------------------
 HEALTH=$(curl -sf "$BASE_URL/health" 2>/dev/null || echo "FAIL")
-check "health endpoint" '{"status":"ok"}' "$HEALTH"
+HEALTH_STATUS=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','FAIL'))" 2>/dev/null || echo "FAIL")
+check "health status=ok" "ok" "$HEALTH_STATUS"
 
 # ---------------------------------------------------------------------------
 info "2. Capabilities (no auth)"
@@ -171,6 +172,7 @@ fi
 info "13. Agent token — generate"
 # ---------------------------------------------------------------------------
 TOKEN_RESP=$(curl -sf -X POST -H "X-API-Key: $API_KEY" \
+    -H "Content-Type: application/json" -d '{}' \
     "$BASE_URL/api/agent/token" 2>/dev/null || echo "FAIL")
 AGENT_TOKEN=$(echo "$TOKEN_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('token','FAIL'))" 2>/dev/null || echo "FAIL")
 TOKEN_EXP=$(echo "$TOKEN_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('expires_at','FAIL'))" 2>/dev/null || echo "FAIL")
@@ -196,6 +198,8 @@ fi
 info "15. Agent token — refresh"
 # ---------------------------------------------------------------------------
 REFRESH_RESP=$(curl -sf -X POST -H "X-API-Key: $API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"token\":\"$AGENT_TOKEN\"}" \
     "$BASE_URL/api/agent/token/refresh" 2>/dev/null || echo "FAIL")
 REFRESH_TOKEN=$(echo "$REFRESH_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('token','FAIL'))" 2>/dev/null || echo "FAIL")
 REFRESH_EXP=$(echo "$REFRESH_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('expires_at','FAIL'))" 2>/dev/null || echo "FAIL")
