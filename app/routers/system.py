@@ -20,7 +20,7 @@ from app.models import (
     HealthResponse,
 )
 from app.state import _err
-from app.version import APP_VERSION
+from app.version import APP_VERSION, get_version_source
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -61,6 +61,7 @@ async def get_capabilities():
         hint = "No servers configured. Create one via POST /api/servers or connect directly with POST /api/ssh/connect"
     return CapabilitiesResponse(
         version=APP_VERSION,
+        version_source=get_version_source(),
         auth_mode="api_key" if settings.api_auth_enabled else "none",
         session_timeout=settings.session_timeout,
         cleanup_interval=settings.cleanup_interval,
