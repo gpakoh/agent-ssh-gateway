@@ -1,4 +1,30 @@
 services:
+  sshd:
+    build:
+      context: sshd
+      dockerfile: Dockerfile
+    container_name: ssh-gateway-sshd
+    hostname: sshd
+    networks:
+      internal_net: {}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "sshd", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
   redis:
     image: redis:7-alpine
     container_name: ssh-gateway-redis
