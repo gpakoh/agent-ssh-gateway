@@ -889,9 +889,9 @@ async def gitea_list_branches(owner: str, repo: str, limit: int = 30) -> dict[st
             tool="gitea_list_branches", title="Gitea branches", error="GITEA_TOKEN not configured"
         )
     async with GiteaClient(token) as client:
-        data = await client.list_branches(owner, repo, limit=limit)
+        data = normalize_list_response(await client.list_branches(owner, repo, limit=limit))
     return text_result(
-        tool="gitea_list_branches", title="Gitea branches", text=f"Branches: {len(data)}", data=data
+        tool="gitea_list_branches", title="Gitea branches", text=f"Branches: {data['count']}", data=data
     )
 
 
@@ -906,9 +906,9 @@ async def gitea_list_commits(
             tool="gitea_list_commits", title="Gitea commits", error="GITEA_TOKEN not configured"
         )
     async with GiteaClient(token) as client:
-        data = await client.list_commits(owner, repo, sha=sha, limit=limit)
+        data = normalize_list_response(await client.list_commits(owner, repo, sha=sha, limit=limit))
     return text_result(
-        tool="gitea_list_commits", title="Gitea commits", text=f"Commits: {len(data)}", data=data
+        tool="gitea_list_commits", title="Gitea commits", text=f"Commits: {data['count']}", data=data
     )
 
 
@@ -938,9 +938,9 @@ async def gitea_list_issues(
             tool="gitea_list_issues", title="Gitea issues", error="GITEA_TOKEN not configured"
         )
     async with GiteaClient(token) as client:
-        data = await client.list_issues(owner, repo, state=state, limit=limit)
+        data = normalize_list_response(await client.list_issues(owner, repo, state=state, limit=limit))
     return text_result(
-        tool="gitea_list_issues", title="Gitea issues", text=f"Issues: {len(data)}", data=data
+        tool="gitea_list_issues", title="Gitea issues", text=f"Issues: {data['count']}", data=data
     )
 
 
@@ -970,9 +970,9 @@ async def gitea_list_pull_requests(
             tool="gitea_list_pull_requests", title="Gitea PRs", error="GITEA_TOKEN not configured"
         )
     async with GiteaClient(token) as client:
-        data = await client.list_pull_requests(owner, repo, state=state, limit=limit)
+        data = normalize_list_response(await client.list_pull_requests(owner, repo, state=state, limit=limit))
     return text_result(
-        tool="gitea_list_pull_requests", title="Gitea PRs", text=f"PRs: {len(data)}", data=data
+        tool="gitea_list_pull_requests", title="Gitea PRs", text=f"PRs: {data['count']}", data=data
     )
 
 

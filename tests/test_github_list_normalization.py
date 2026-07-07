@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "chatgpt_remote_mcp"))
 
-from fleet.github_client import normalize_list_response
+from fleet.shared import normalize_list_response
 
 
 def test_bare_list_wrapped():
