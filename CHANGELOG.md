@@ -6,6 +6,36 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.25-alpha] - 2026-07-07
+
+### Fixed
+
+- **Gitea list tools**: normalized bare list responses to MCP-compatible `{"items":[],"count":N}` dict format. (Session 156)
+- **List normalization**: reused shared `normalize_list_response` helper for both GitHub and Gitea tools in repo-provider layer. (Session 156)
+- **Gitea local proxy bypass**: `GiteaClient` now sets `proxy=None` to prevent system squid proxy interception of local Gitea API calls. (Session 157)
+- **CI runner cache**: recovered `runner-python311` after `actions/checkout@v4` cache corruption — stale containers, volumes, and action caches cleaned. (Session 157)
+
+### Verified
+
+- Gitea live smoke: 24/24.
+- Full test suite green.
+- Enforce smoke green.
+- GitHub and Gitea remotes synchronized.
+
+## [0.1.24-alpha] - 2026-07-07
+
+### Changed
+
+- **Codex smoke alignment**: health check now parses JSON status instead of exact string match; agent token send uses `-d '{}'`; refresh sends `{"token":"..."}`; sshd Dockerfile enables password auth for smoke SSH tests. (Session 154)
+- **get_version_source()**: `CapabilitiesResponse` now exposes `version_source` field to distinguish source fallback from pip metadata. (Session 153A)
+
+### Fixed
+
+- **Production version alignment**: `APP_VERSION` fixed from `0.1.19a0` to `0.1.23a0` after version resolution change. (Session 153A)
+- **Reconnect 502**: root cause was missing SSH target in compose — replaced with persistent `sshd` service. (Session 153B)
+- **Alpine locked account**: `adduser -D` creates locked accounts; fixed with `chpasswd` in Dockerfile. (Session 153B)
+- **Full reconnect chain**: fresh connect → execute → stale → reconnect → execute verified end-to-end in production. (Session 153C)
+
 ## [0.1.23-alpha] - 2026-07-07
 
 ### Added
