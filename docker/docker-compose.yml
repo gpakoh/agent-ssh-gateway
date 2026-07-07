@@ -1,4 +1,33 @@
 services:
+  mcp-postgres:
+    image: pgvector/pgvector:pg16
+    container_name: mcp-postgres
+    hostname: mcp-postgres
+    networks:
+      internal_net: {}
+    volumes:
+      - mcp_postgres_data:/var/lib/postgresql/data
+      - ./mcp-postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    environment:
+      POSTGRES_PASSWORD: 99LofZCa3OURoBDVvhUdT8SxF9kRA7eF
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
   sshd:
     build:
       context: sshd
@@ -7,6 +36,8 @@ services:
     hostname: sshd
     networks:
       internal_net: {}
+    volumes:
+      - /media/1TB/Python:/media/1TB/Python:ro
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -100,6 +131,8 @@ networks:
     external: true
 
 volumes:
+  mcp_postgres_data:
+    driver: local
   ssh_keys:
     driver: local
   gateway_logs:
