@@ -10,9 +10,9 @@ COPY authorized_keys /home/mcpuser/.ssh/authorized_keys
 RUN chown -R mcpuser:mcpuser /home/mcpuser/.ssh && \
     chmod 600 /home/mcpuser/.ssh/authorized_keys && \
     ssh-keygen -A && \
-    echo "PasswordAuthentication no" >> /etc/ssh/sshd_config && \
+    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config && \
     echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
-    echo "mcpuser:$(openssl rand -base64 32)" | chpasswd
+    echo "mcpuser:sshpass123" | chpasswd
 
 EXPOSE 2222
 
