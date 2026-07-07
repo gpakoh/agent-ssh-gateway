@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class CodeSearchResult:
     """Result of code search."""
+
     path: str
     line: int
     column: int
@@ -23,6 +24,7 @@ class CodeSearchResult:
 @dataclass
 class CodeInsertion:
     """Code insertion suggestion."""
+
     path: str
     insert_after: str  # Text to insert after
     code: str
@@ -47,37 +49,39 @@ class CodeIntelligence:
     ) -> list[CodeSearchResult]:
         """Search for code pattern in project."""
         results: list[CodeSearchResult] = []
-        
+
         # Use Grep To Find Matches
         cmd = f"cd {path} && grep -rn -C {context_lines} '{query}' --include='*.{language}' 2>/dev/null || true"
         result = await self._ssh.execute(session_id, cmd, timeout=30)
-        
+
         if result["exit_code"] != 0:
             return results
-        
+
         # Parse Grep Output
         lines = result["stdout"].split("\n")
         _current_file = None
         _current_line = 0
-        
+
         for line in lines:
             if line.startswith("--"):
                 continue
-            
+
             # Match: Filename:line:content
-            match = re.match(r'^(.+):(\d+):(.*)$', line)
+            match = re.match(r"^(.+):(\d+):(.*)$", line)
             if match:
                 file_path = match.group(1)
                 line_num = int(match.group(2))
                 content = match.group(3)
-                
-                results.append(CodeSearchResult(
-                    path=file_path,
-                    line=line_num,
-                    column=content.find(query) if query in content else 0,
-                    content=content.strip(),
-                ))
-        
+
+                results.append(
+                    CodeSearchResult(
+                        path=file_path,
+                        line=line_num,
+                        column=content.find(query) if query in content else 0,
+                        content=content.strip(),
+                    )
+                )
+
         return results
 
     async def find_insertion_point(
@@ -88,30 +92,30 @@ class CodeIntelligence:
         language: str = "python",
     ) -> CodeInsertion | None:
         """Find best insertion point based on instruction."""
-        
+
         # Read File
         content = await self._file_editor.read_file(session_id, path)
         lines = content.split("\n")
-        
+
         # Parse Instruction
         instruction_lower = instruction.lower()
-        
+
         # Determine Insertion Strategy Based On Instruction
         if "endpoint" in instruction_lower or "route" in instruction_lower:
             return await self._find_endpoint_insertion(session_id, path, lines, instruction)
-        
+
         elif "import" in instruction_lower:
             return await self._find_import_insertion(lines, instruction)
-        
+
         elif "class" in instruction_lower:
             return await self._find_class_insertion(lines, instruction)
-        
+
         elif "function" in instruction_lower or "def " in instruction_lower:
             return await self._find_function_insertion(lines, instruction)
-        
+
         elif "middleware" in instruction_lower:
             return await self._find_middleware_insertion(lines, instruction)
-        
+
         else:
             # Default: Append To End Of File
             return CodeInsertion(
@@ -129,22 +133,22 @@ class CodeIntelligence:
         # Look For Existing Endpoints
         last_endpoint_line = 0
         in_endpoint = False
-        
+
         for i, line in enumerate(lines):
-            if '@app.' in line or '@router.' in line:
+            if "@app." in line or "@router." in line:
                 in_endpoint = True
                 last_endpoint_line = i
-            elif in_endpoint and line.strip() and not line.startswith(' '):
+            elif in_endpoint and line.strip() and not line.startswith(" "):
                 in_endpoint = False
             elif in_endpoint and i > last_endpoint_line:
                 last_endpoint_line = i
-        
+
         # Find A Good Place After Last Endpoint
         insert_line = last_endpoint_line + 1 if last_endpoint_line > 0 else len(lines)
-        
+
         # Generate Endpoint Code
         endpoint_code = self._generate_endpoint_code(instruction)
-        
+
         return CodeInsertion(
             path=path,
             insert_after=lines[insert_line - 1] if insert_line > 0 else "",
@@ -156,11 +160,11 @@ class CodeIntelligence:
     async def _find_import_insertion(self, lines: list[str], instruction: str) -> CodeInsertion:
         """Find best place to insert import."""
         last_import_line = 0
-        
+
         for i, line in enumerate(lines):
-            if line.startswith('import ') or line.startswith('from '):
+            if line.startswith("import ") or line.startswith("from "):
                 last_import_line = i
-        
+
         return CodeInsertion(
             path="",
             insert_after=lines[last_import_line] if last_import_line >= 0 else "",
@@ -173,15 +177,15 @@ class CodeIntelligence:
         """Find best place to insert class."""
         # Find End Of Last Class Or Module Level
         last_class_end = 0
-        
+
         for i, line in enumerate(lines):
-            if line.startswith('class '):
+            if line.startswith("class "):
                 last_class_end = i
-            elif line.strip() and not line.startswith('#'):
+            elif line.strip() and not line.startswith("#"):
                 current_indent = len(line) - len(line.lstrip())
                 if current_indent == 0 and last_class_end > 0:
                     last_class_end = i - 1
-        
+
         return CodeInsertion(
             path="",
             insert_after=lines[last_class_end] if last_class_end >= 0 else "",
@@ -193,11 +197,11 @@ class CodeIntelligence:
     async def _find_function_insertion(self, lines: list[str], instruction: str) -> CodeInsertion:
         """Find best place to insert function."""
         last_def_line = 0
-        
+
         for i, line in enumerate(lines):
-            if line.startswith('def ') or line.startswith('async def '):
+            if line.startswith("def ") or line.startswith("async def "):
                 last_def_line = i
-        
+
         return CodeInsertion(
             path="",
             insert_after=lines[last_def_line] if last_def_line >= 0 else "",
@@ -210,11 +214,11 @@ class CodeIntelligence:
         """Find best place to insert middleware."""
         # Look For App.add_middleware Or Similar
         last_middleware_line = 0
-        
+
         for i, line in enumerate(lines):
-            if 'middleware' in line.lower() or 'app.add' in line:
+            if "middleware" in line.lower() or "app.add" in line:
                 last_middleware_line = i
-        
+
         return CodeInsertion(
             path="",
             insert_after=lines[last_middleware_line] if last_middleware_line >= 0 else "",
@@ -226,7 +230,7 @@ class CodeIntelligence:
     def _generate_endpoint_code(self, instruction: str) -> str:
         """Generate endpoint code based on instruction."""
         instruction_lower = instruction.lower()
-        
+
         if "health" in instruction_lower:
             return '''
 @app.get("/health")
@@ -234,7 +238,7 @@ async def health_check():
     """Health check endpoint."""
     return {"status": "ok"}
 '''
-        
+
         elif "status" in instruction_lower:
             return '''
 @app.get("/status")
@@ -242,7 +246,7 @@ async def status():
     """Get system status."""
     return {"status": "running", "timestamp": time.time()}
 '''
-        
+
         elif "list" in instruction_lower or "get all" in instruction_lower:
             return '''
 @app.get("/api/items")
@@ -250,7 +254,7 @@ async def list_items():
     """List all items."""
     return {"items": [], "count": 0}
 '''
-        
+
         elif "create" in instruction_lower or "post" in instruction_lower:
             return '''
 @app.post("/api/items")
@@ -259,7 +263,7 @@ async def create_item(request: Request):
     data = await request.json()
     return {"id": str(uuid.uuid4()), "data": data}
 '''
-        
+
         else:
             # Generic Endpoint
             return f'''
@@ -277,7 +281,7 @@ async def new_endpoint():
     ) -> str:
         """Generate code using opencode Big Pickle via adapter."""
         import aiohttp
-        
+
         prompt = f"""You are a code generator. Generate only code, no explanations.
 
 Language: {language}
@@ -296,30 +300,28 @@ Code:"""
         if not adapter_url:
             logger.warning("OPENCODE_ADAPTER_URL is not set, skipping adapter code generation")
             return ""
-        
+
         # Делаем до 3 попыток с задержкой
         for attempt in range(3):
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.post(
                         f"{adapter_url}/api/generate",
-                        json={
-                            "model": "openrouter/auto",
-                            "prompt": prompt,
-                            "stream": False
-                        },
-                        timeout=aiohttp.ClientTimeout(total=180)
+                        json={"model": "openrouter/auto", "prompt": prompt, "stream": False},
+                        timeout=aiohttp.ClientTimeout(total=180),
                     ) as response:
                         if response.status == 200:
                             data = await response.json()
                             generated = data.get("response", "").strip()
-                            
+
                             # Проверяем на ошибку от адаптера
                             if generated.startswith("Error:"):
-                                logger.warning(f"⚠️ Attempt {attempt + 1}: Adapter error: {generated}, waiting...")
+                                logger.warning(
+                                    f"⚠️ Attempt {attempt + 1}: Adapter error: {generated}, waiting..."
+                                )
                                 await asyncio.sleep(5 * (attempt + 1))
                                 continue
-                            
+
                             # Clean Up Markdown Code Blocks
                             if generated.startswith("```"):
                                 lines = generated.split("\n")
@@ -328,22 +330,32 @@ Code:"""
                                 if lines and lines[-1].startswith("```"):
                                     lines = lines[:-1]
                                 generated = "\n".join(lines).strip()
-                            
+
                             if generated and len(generated) > 50:
-                                logger.info("✅ Code generated via OpenRouter (attempt %s)", attempt + 1)
+                                logger.info(
+                                    "✅ Code generated via OpenRouter (attempt %s)", attempt + 1
+                                )
                                 return generated
                             else:
-                                logger.warning("⚠️ Attempt %s: Empty or short response from adapter", attempt + 1)
+                                logger.warning(
+                                    "⚠️ Attempt %s: Empty or short response from adapter",
+                                    attempt + 1,
+                                )
                                 if attempt < 2:
                                     await asyncio.sleep(3)
                                     continue
                         else:
                             text = await response.text()
-                            logger.warning("⚠️ Attempt %s: Adapter returned %s: %s", attempt + 1, response.status, text)
+                            logger.warning(
+                                "⚠️ Attempt %s: Adapter returned %s: %s",
+                                attempt + 1,
+                                response.status,
+                                text,
+                            )
                             if attempt < 2:
                                 await asyncio.sleep(3)
                                 continue
-                            
+
             except TimeoutError:
                 logger.warning("⏱️ Attempt %s: Timeout waiting for adapter", attempt + 1)
                 if attempt < 2:
@@ -354,7 +366,7 @@ Code:"""
                 if attempt < 2:
                     await asyncio.sleep(3)
                     continue
-        
+
         # Fallback To Template Generation
         logger.info("🔄 Using Fallback Code Generation After All Attempts Failed")
         return self._generate_fallback(instruction, language)
@@ -362,7 +374,7 @@ Code:"""
     def _generate_fallback(self, instruction: str, language: str) -> str:
         """Fallback code generation when Ollama is unavailable."""
         instruction_lower = instruction.lower()
-        
+
         if language == "python":
             if "class" in instruction_lower:
                 return self._generate_class(instruction)
@@ -370,7 +382,7 @@ Code:"""
                 return self._generate_function(instruction)
             elif "endpoint" in instruction_lower or "route" in instruction_lower:
                 return self._generate_endpoint_code(instruction)
-        
+
         return f"""# {instruction}
 # TODO: Implement this feature in {language}
 """
@@ -383,7 +395,7 @@ Code:"""
             if word[0].isupper():
                 class_name = word
                 break
-        
+
         return f'''class {class_name}:
     """{instruction}"""
     
@@ -400,10 +412,10 @@ Code:"""
         words = instruction.split()
         func_name = "new_function"
         for word in words:
-            if word.isalpha() and word not in ('a', 'an', 'the', 'new', 'add', 'create'):
+            if word.isalpha() and word not in ("a", "an", "the", "new", "add", "create"):
                 func_name = word.lower()
                 break
-        
+
         return f'''async def {func_name}():
     """{instruction}"""
     # TODO: Implement
@@ -419,21 +431,21 @@ Code:"""
     ) -> str:
         """Suggest code completion based on partial code."""
         # Simple Pattern Matching For Completions
-        if partial_code.strip().endswith('('):
+        if partial_code.strip().endswith("("):
             # Function Call - Suggest Parameters
             return "self, *args, **kwargs"
-        
-        elif 'class ' in partial_code and ':' not in partial_code:
+
+        elif "class " in partial_code and ":" not in partial_code:
             # Class Definition - Suggest Inheritance
-            return "(object):\n    \"\"\"Description\"\"\"\n    \n    def __init__(self):\n        pass"
-        
-        elif 'def ' in partial_code and ':' not in partial_code:
+            return '(object):\n    """Description"""\n    \n    def __init__(self):\n        pass'
+
+        elif "def " in partial_code and ":" not in partial_code:
             # Function Definition - Suggest Body
-            return ":\n    \"\"\"Description\"\"\"\n    pass"
-        
-        elif partial_code.strip().endswith('.'):
+            return ':\n    """Description"""\n    pass'
+
+        elif partial_code.strip().endswith("."):
             # Method Call - Suggest Common Methods
             return "method()"
-        
+
         else:
             return "# Continue implementation here"

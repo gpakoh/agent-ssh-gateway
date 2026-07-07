@@ -7,11 +7,7 @@ from starlette.testclient import TestClient
 from app.config import settings
 from app.main import app
 
-SECRET_STDOUT = (
-    "TOKEN=abc123\n"
-    "password=secret123\n"
-    "Authorization: Bearer test-token\n"
-)
+SECRET_STDOUT = "TOKEN=abc123\npassword=secret123\nAuthorization: Bearer test-token\n"
 SECRET_STDERR = "error: password=admin123"
 
 MOCK_JOB_RESULT = {
@@ -36,6 +32,7 @@ class TestJobsOutputRedaction:
 
     def _setup_mocks(self):
         from app import state as _app_state
+
         _app_state.job_manager = AsyncMock()
         _app_state.job_manager.get_job_result = AsyncMock(return_value=dict(MOCK_JOB_RESULT))
         _app_state.job_manager.get_job_status = AsyncMock(return_value={})

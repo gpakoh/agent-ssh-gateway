@@ -15,7 +15,9 @@ class TestExecuteAsyncMode:
     @classmethod
     def _base_manager_mock(cls):
         mgr = MagicMock()
-        mgr.execute = AsyncMock(return_value={"stdout": "ok", "stderr": "", "exit_code": 0, "duration": 0.1})
+        mgr.execute = AsyncMock(
+            return_value={"stdout": "ok", "stderr": "", "exit_code": 0, "duration": 0.1}
+        )
         mgr.disconnect = AsyncMock()
         mgr.stop_cleanup_task = AsyncMock()
         mgr.list_sessions = AsyncMock(return_value=[])
@@ -26,16 +28,19 @@ class TestExecuteAsyncMode:
     @classmethod
     def _make_session_mock(cls):
         mgr = cls._base_manager_mock()
-        mgr.get_session = AsyncMock(return_value=MagicMock(
-            owner_type="master",
-            owner_name="admin",
-            owner_token_fingerprint=token_fingerprint("secret-42"),
-            is_connected=MagicMock(return_value=True),
-        ))
+        mgr.get_session = AsyncMock(
+            return_value=MagicMock(
+                owner_type="master",
+                owner_name="admin",
+                owner_token_fingerprint=token_fingerprint("secret-42"),
+                is_connected=MagicMock(return_value=True),
+            )
+        )
         return mgr
 
     def _setup_state(self):
         from app import state as _app_state
+
         _app_state.manager = self._make_session_mock()
         _app_state.audit_logger = MagicMock()
         _app_state.job_manager = AsyncMock()
@@ -60,6 +65,7 @@ class TestExecuteAsyncMode:
         with TestClient(app) as client:
             self._setup_state()
             from app import state as _app_state
+
             resp = client.post(
                 "/api/ssh/execute",
                 headers={"X-API-Key": "secret-42"},
@@ -84,6 +90,7 @@ class TestExecuteAsyncMode:
         with TestClient(app) as client:
             self._setup_state()
             from app import state as _app_state
+
             resp = client.post(
                 "/api/ssh/execute",
                 headers={"X-API-Key": "secret-42"},
@@ -107,6 +114,7 @@ class TestExecuteAsyncMode:
         with TestClient(app) as client:
             self._setup_state()
             from app import state as _app_state
+
             resp = client.post(
                 "/api/ssh/execute",
                 headers={"X-API-Key": "secret-42"},
@@ -153,13 +161,17 @@ class TestExecuteAsyncMode:
         monkeypatch.setattr(settings, "api_key", "secret-42")
         monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
         monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
-        monkeypatch.setattr(settings, "agent_token_scopes",
-                            ["ssh:connect", "ssh:execute", "ssh:disconnect", "ssh:files"])
+        monkeypatch.setattr(
+            settings,
+            "agent_token_scopes",
+            ["ssh:connect", "ssh:execute", "ssh:disconnect", "ssh:files"],
+        )
         monkeypatch.setattr(settings, "agent_token_expires_at", None)
         monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
 
         async def _fake_is_agent_token_valid(settings, provided: str, token_store=None):
             from app.auth_middleware import AuthIdentity
+
             if provided in ("agent-token-a", "agent-token-b"):
                 return AuthIdentity(
                     token_type="agent",
@@ -168,6 +180,7 @@ class TestExecuteAsyncMode:
                     scopes=("ssh:connect", "ssh:execute", "ssh:disconnect", "ssh:files"),
                 )
             return None
+
         monkeypatch.setattr(
             "app.auth_middleware.is_agent_token_valid",
             _fake_is_agent_token_valid,
@@ -177,12 +190,15 @@ class TestExecuteAsyncMode:
             self._setup_state()
             # Cross-tenant: session owned by bot-b, request from bot-a
             from app import state as _app_state
-            _app_state.manager.get_session = AsyncMock(return_value=MagicMock(
-                owner_type="agent",
-                owner_name="bot-b",
-                owner_token_fingerprint=token_fingerprint("agent-token-b"),
-                is_connected=MagicMock(return_value=True),
-            ))
+
+            _app_state.manager.get_session = AsyncMock(
+                return_value=MagicMock(
+                    owner_type="agent",
+                    owner_name="bot-b",
+                    owner_token_fingerprint=token_fingerprint("agent-token-b"),
+                    is_connected=MagicMock(return_value=True),
+                )
+            )
             resp = client.post(
                 "/api/ssh/execute",
                 headers={"Authorization": "Bearer agent-token-a"},

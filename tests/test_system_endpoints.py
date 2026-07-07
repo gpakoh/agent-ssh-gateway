@@ -36,9 +36,7 @@ def test_sdk_download_returns_200_with_master_key(monkeypatch):
     monkeypatch.setattr(settings, "api_key", "secret-42")
     monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
     monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
-    monkeypatch.setattr(
-        "app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1"
-    )
+    monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
     with TestClient(app) as client:
         resp = client.get(
             "/api/sdk/download",

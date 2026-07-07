@@ -1,4 +1,5 @@
 """Tests for the mcp-token CLI tool."""
+
 import json
 import os
 import tempfile

@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 class BatchOperationType(Enum):
     """Types of batch operations."""
+
     READ = "read"
     EDIT = "edit"
     CREATE = "create"
@@ -22,6 +23,7 @@ class BatchOperationType(Enum):
 @dataclass
 class BatchOperationResult:
     """Result of a single batch operation."""
+
     operation: str
     path: str
     success: bool
@@ -34,6 +36,7 @@ class BatchOperationResult:
 @dataclass
 class BatchTransactionResult:
     """Result of a batch transaction."""
+
     transaction_id: str
     overall_success: bool
     operations: list[BatchOperationResult]
@@ -103,12 +106,16 @@ class BatchOperationsManager:
 
                 elif op_type == "rename":
                     new_path = op.get("new_path", "")
-                    full_new_path = f"{base_path}/{new_path}" if not new_path.startswith("/") else new_path
+                    full_new_path = (
+                        f"{base_path}/{new_path}" if not new_path.startswith("/") else new_path
+                    )
                     result = await self._execute_rename(session_id, full_path, full_new_path)
 
                 elif op_type == "copy":
                     dest_path = op.get("dest_path", "")
-                    full_dest_path = f"{base_path}/{dest_path}" if not dest_path.startswith("/") else dest_path
+                    full_dest_path = (
+                        f"{base_path}/{dest_path}" if not dest_path.startswith("/") else dest_path
+                    )
                     result = await self._execute_copy(session_id, full_path, full_dest_path)
 
                 elif op_type == "execute":
@@ -121,15 +128,12 @@ class BatchOperationsManager:
                         operation=op_type,
                         path=path,
                         success=False,
-                        error=f"Unknown operation type: {op_type}"
+                        error=f"Unknown operation type: {op_type}",
                     )
 
             except Exception as exc:
                 result = BatchOperationResult(
-                    operation=op_type,
-                    path=path,
-                    success=False,
-                    error=str(exc)
+                    operation=op_type, path=path, success=False, error=str(exc)
                 )
                 logger.error("Batch operation %s failed: %s", op_type, exc)
 
@@ -150,7 +154,7 @@ class BatchOperationsManager:
             commit_result = await self._context.commit_changes(
                 context_id,
                 commit_message or f"Batch: {len(all_changed_files)} files changed",
-                all_changed_files
+                all_changed_files,
             )
             if commit_result.get("success"):
                 git_commit = commit_result.get("hash")
@@ -175,7 +179,7 @@ class BatchOperationsManager:
         # Build summary
         success_count = sum(1 for r in results if r.success)
         failed_count = len(results) - success_count
-        
+
         if overall_success:
             summary = f"✅ Все {len(results)} операций выполнены успешно"
         else:
@@ -220,9 +224,9 @@ class BatchOperationsManager:
         """Create new file."""
         # Use echo to create file
         cmd = f"cat > '{path}' << 'EOF_BATCH'\n{content}\nEOF_BATCH"
-        
+
         result = await self._ssh.execute(session_id, cmd, timeout=30)
-        
+
         return BatchOperationResult(
             operation="create",
             path=path,
@@ -234,7 +238,7 @@ class BatchOperationsManager:
     async def _execute_delete(self, session_id: str, path: str) -> BatchOperationResult:
         """Delete file."""
         result = await self._ssh.execute(session_id, f"rm -f '{path}'", timeout=10)
-        
+
         return BatchOperationResult(
             operation="delete",
             path=path,
@@ -246,10 +250,8 @@ class BatchOperationsManager:
         self, session_id: str, old_path: str, new_path: str
     ) -> BatchOperationResult:
         """Rename file."""
-        result = await self._ssh.execute(
-            session_id, f"mv '{old_path}' '{new_path}'", timeout=10
-        )
-        
+        result = await self._ssh.execute(session_id, f"mv '{old_path}' '{new_path}'", timeout=10)
+
         return BatchOperationResult(
             operation="rename",
             path=f"{old_path} -> {new_path}",
@@ -261,10 +263,8 @@ class BatchOperationsManager:
         self, session_id: str, src_path: str, dest_path: str
     ) -> BatchOperationResult:
         """Copy file."""
-        result = await self._ssh.execute(
-            session_id, f"cp '{src_path}' '{dest_path}'", timeout=10
-        )
-        
+        result = await self._ssh.execute(session_id, f"cp '{src_path}' '{dest_path}'", timeout=10)
+
         return BatchOperationResult(
             operation="copy",
             path=f"{src_path} -> {dest_path}",
@@ -276,10 +276,8 @@ class BatchOperationsManager:
         self, session_id: str, command: str, cwd: str
     ) -> BatchOperationResult:
         """Execute shell command."""
-        result = await self._ssh.execute(
-            session_id, f"cd {cwd} && {command}", timeout=60
-        )
-        
+        result = await self._ssh.execute(session_id, f"cd {cwd} && {command}", timeout=60)
+
         return BatchOperationResult(
             operation="execute",
             path=cwd,

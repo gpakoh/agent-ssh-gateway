@@ -17,7 +17,11 @@ router = APIRouter()
 
 
 @router.post("/api/batch/execute", tags=["files"], response_model=BatchExecuteResponse)
-async def batch_execute(req: BatchExecuteRequest, request: Request, _identity: AuthIdentity = Depends(require_master_key)):
+async def batch_execute(
+    req: BatchExecuteRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_master_key),
+):
     """Execute multiple file operations in a single transaction."""
 
     ctx = await _state.context_manager.get_context(req.context_id)

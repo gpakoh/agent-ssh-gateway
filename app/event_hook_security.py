@@ -11,9 +11,15 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-SENSITIVE_HEADERS = frozenset({
-    "authorization", "x-api-key", "cookie", "set-cookie", "x-webhook-signature",
-})
+SENSITIVE_HEADERS = frozenset(
+    {
+        "authorization",
+        "x-api-key",
+        "cookie",
+        "set-cookie",
+        "x-webhook-signature",
+    }
+)
 
 BLOCKED_NETWORKS = [
     ipaddress.ip_network("127.0.0.0/8"),
@@ -93,7 +99,4 @@ def sign_payload(secret: str | None, payload: bytes, timestamp: str) -> str | No
 def mask_sensitive_headers(headers: dict[str, str] | None) -> dict[str, str]:
     if not headers:
         return {}
-    return {
-        k: "****" if k.lower() in SENSITIVE_HEADERS else v
-        for k, v in headers.items()
-    }
+    return {k: "****" if k.lower() in SENSITIVE_HEADERS else v for k, v in headers.items()}

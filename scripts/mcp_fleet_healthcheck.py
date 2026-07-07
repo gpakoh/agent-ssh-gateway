@@ -19,7 +19,6 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 
 RED = "\033[91m"
 GREEN = "\033[92m"
@@ -40,18 +39,60 @@ class Adapter:
 
 
 ADAPTERS: list[Adapter] = [
-    Adapter("Gateway", "agent-ssh-gateway-mcp", "/etc/agent-ssh-gateway-mcp.env",
-            "https://ssh.xloud.ru/mcp", 86, 8788, 0),
-    Adapter("Context7", "agent-mcp-context7", "/etc/agent-mcp-context7.env",
-            "https://ssh.xloud.ru/mcp/context7", 2, 8780, 8790),
-    Adapter("GitHub", "agent-mcp-github", "/etc/agent-mcp-github.env",
-            "https://ssh.xloud.ru/mcp/github", 8, 8781, 8791),
-    Adapter("Gitea", "agent-mcp-gitea", "/etc/agent-mcp-gitea.env",
-            "https://ssh.xloud.ru/mcp/gitea", 12, 8782, 8792),
-    Adapter("Docker", "agent-mcp-docker", "/etc/agent-mcp-docker.env",
-            "https://ssh.xloud.ru/mcp/docker", 7, 8783, 8793),
-    Adapter("Postgres", "agent-mcp-postgres", "/etc/agent-mcp-postgres.env",
-            "https://ssh.xloud.ru/mcp/postgres", 6, 8784, 8794),
+    Adapter(
+        "Gateway",
+        "agent-ssh-gateway-mcp",
+        "/etc/agent-ssh-gateway-mcp.env",
+        "https://ssh.xloud.ru/mcp",
+        86,
+        8788,
+        0,
+    ),
+    Adapter(
+        "Context7",
+        "agent-mcp-context7",
+        "/etc/agent-mcp-context7.env",
+        "https://ssh.xloud.ru/mcp/context7",
+        2,
+        8780,
+        8790,
+    ),
+    Adapter(
+        "GitHub",
+        "agent-mcp-github",
+        "/etc/agent-mcp-github.env",
+        "https://ssh.xloud.ru/mcp/github",
+        8,
+        8781,
+        8791,
+    ),
+    Adapter(
+        "Gitea",
+        "agent-mcp-gitea",
+        "/etc/agent-mcp-gitea.env",
+        "https://ssh.xloud.ru/mcp/gitea",
+        12,
+        8782,
+        8792,
+    ),
+    Adapter(
+        "Docker",
+        "agent-mcp-docker",
+        "/etc/agent-mcp-docker.env",
+        "https://ssh.xloud.ru/mcp/docker",
+        7,
+        8783,
+        8793,
+    ),
+    Adapter(
+        "Postgres",
+        "agent-mcp-postgres",
+        "/etc/agent-mcp-postgres.env",
+        "https://ssh.xloud.ru/mcp/postgres",
+        6,
+        8784,
+        8794,
+    ),
 ]
 
 
@@ -90,11 +131,15 @@ def get_token_from_env(env_file: str) -> str:
 
 def check_systemd(service: str) -> CheckResult:
     try:
-        out = subprocess.check_output(
-            ["systemctl", "is-active", service],
-            stderr=subprocess.STDOUT,
-            timeout=10,
-        ).decode().strip()
+        out = (
+            subprocess.check_output(
+                ["systemctl", "is-active", service],
+                stderr=subprocess.STDOUT,
+                timeout=10,
+            )
+            .decode()
+            .strip()
+        )
         if out == "active":
             return ok("active")
         return fail(f"not running ({out})")
@@ -102,7 +147,9 @@ def check_systemd(service: str) -> CheckResult:
         return fail(str(e).split("\n")[0][:120])
 
 
-def _mcp_request(full_url: str, body: dict, sid: str | None = None, token: str | None = None) -> tuple[dict, str]:
+def _mcp_request(
+    full_url: str, body: dict, sid: str | None = None, token: str | None = None
+) -> tuple[dict, str]:
     """Send JSON-RPC to an SSE MCP endpoint, read first SSE frame.
 
     Returns (parsed_result_dict, session_id).
@@ -156,14 +203,20 @@ def check_mcp_endpoint(url: str, token: str, expected: int) -> CheckResult:
         return fail("no token found")
 
     try:
-        result, sid = _mcp_request(url, {
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": {"name": "healthcheck", "version": "1.0"},
+        result, sid = _mcp_request(
+            url,
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "healthcheck", "version": "1.0"},
+                },
             },
-        }, token=token)
+            token=token,
+        )
 
         if not sid:
             return fail("no session ID in response")
@@ -171,9 +224,17 @@ def check_mcp_endpoint(url: str, token: str, expected: int) -> CheckResult:
         if "error" in result:
             return fail(result["error"].get("message", str(result["error"])))
 
-        result2, _ = _mcp_request(url, {
-            "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {},
-        }, sid=sid, token=token)
+        result2, _ = _mcp_request(
+            url,
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {},
+            },
+            sid=sid,
+            token=token,
+        )
 
         if "error" in result2:
             return fail(result2["error"].get("message", str(result2["error"])))
@@ -225,14 +286,18 @@ def check_nginx_route(url: str, token: str) -> CheckResult:
             "Authorization": f"Bearer {token}",
         }
 
-        body = json.dumps({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "healthcheck", "version": "1.0"},
-            },
-        })
+        body = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "healthcheck", "version": "1.0"},
+                },
+            }
+        )
 
         host = parsed.hostname
         port = parsed.port or 443
@@ -286,9 +351,9 @@ def print_report(results: dict[str, dict[str, CheckResult]]) -> tuple[int, int]:
     failed_all = 0
     col_w = max(len(a.name) for a in ADAPTERS) + 1
 
-    print(f"\n{BOLD}{'='*62}{RESET}")
-    print(f"{BOLD}  MCP Fleet Healthcheck{' '*34}{RESET}")
-    print(f"{BOLD}{'='*62}{RESET}")
+    print(f"\n{BOLD}{'=' * 62}{RESET}")
+    print(f"{BOLD}  MCP Fleet Healthcheck{' ' * 34}{RESET}")
+    print(f"{BOLD}{'=' * 62}{RESET}")
 
     for a in ADAPTERS:
         r = results[a.name]
@@ -300,7 +365,11 @@ def print_report(results: dict[str, dict[str, CheckResult]]) -> tuple[int, int]:
         nginx_ok = r["nginx"].passed
         all_ok = sys_ok and env_ok and mcp_ok and nginx_ok
 
-        tool_str = f"[{r['endpoint'].tool_count}/{a.expected_tools} tools]" if r['endpoint'].tool_count else ""
+        tool_str = (
+            f"[{r['endpoint'].tool_count}/{a.expected_tools} tools]"
+            if r["endpoint"].tool_count
+            else ""
+        )
 
         if all_ok:
             status = f"{GREEN}OK{RESET}"
@@ -320,7 +389,7 @@ def print_report(results: dict[str, dict[str, CheckResult]]) -> tuple[int, int]:
         if not nginx_ok:
             print(f"         {RED}nginx:   {r['nginx'].detail}{RESET}")
 
-    print(f"  {'─'*58}")
+    print(f"  {'─' * 58}")
     total = passed_all + failed_all
     if failed_all == 0:
         print(f"  {GREEN}{BOLD}All {total}/{total} adapters healthy{RESET}")
@@ -333,9 +402,9 @@ def print_report(results: dict[str, dict[str, CheckResult]]) -> tuple[int, int]:
 
 
 def print_detail(results: dict[str, dict[str, CheckResult]]) -> None:
-    print(f"\n{BOLD}{'='*62}{RESET}")
-    print(f"{BOLD}  Detailed Results{' '*42}{RESET}")
-    print(f"{BOLD}{'='*62}{RESET}")
+    print(f"\n{BOLD}{'=' * 62}{RESET}")
+    print(f"{BOLD}  Detailed Results{' ' * 42}{RESET}")
+    print(f"{BOLD}{'=' * 62}{RESET}")
 
     for a in ADAPTERS:
         r = results[a.name]

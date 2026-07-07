@@ -26,9 +26,7 @@ HTTP_TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 # ── Config ────────────────────────────────────────────────────────────
 INTERNAL_PORT = 8780  # FastMCP streamable-http (no auth, localhost only)
 CONTEXT7_ENV = {
-    "CONTEXT7_MCP_URL": os.environ.get(
-        "CONTEXT7_MCP_URL", "https://mcp.context7.com/mcp"
-    ),
+    "CONTEXT7_MCP_URL": os.environ.get("CONTEXT7_MCP_URL", "https://mcp.context7.com/mcp"),
 }
 
 # ── FastMCP with tools ────────────────────────────────────────────────
@@ -60,9 +58,7 @@ async def _get_session() -> ClientSession:
             env=CONTEXT7_ENV,
         )
         streams = await _exit_stack.enter_async_context(stdio_client(params))
-        _session = await _exit_stack.enter_async_context(
-            ClientSession(*streams)
-        )
+        _session = await _exit_stack.enter_async_context(ClientSession(*streams))
         await _session.initialize()
         return _session
 
@@ -84,23 +80,17 @@ async def _call_upstream(name: str, args: dict) -> str:
 @mcp.tool()
 async def resolve_library_id(query: str, libraryName: str) -> Any:
     """Resolve a package/product name to a Context7-compatible library ID."""
-    return await _call_upstream(
-        "resolve-library-id", {"query": query, "libraryName": libraryName}
-    )
+    return await _call_upstream("resolve-library-id", {"query": query, "libraryName": libraryName})
 
 
 @mcp.tool()
 async def query_docs(libraryId: str, query: str) -> Any:
     """Query Context7 for documentation on a resolved library."""
-    return await _call_upstream(
-        "query-docs", {"libraryId": libraryId, "query": query}
-    )
+    return await _call_upstream("query-docs", {"libraryId": libraryId, "query": query})
 
 
 # ── Auth proxy ────────────────────────────────────────────────────
-def create_auth_proxy(
-    *, upstream_port: int, valid_tokens: set[str]
-) -> Starlette:
+def create_auth_proxy(*, upstream_port: int, valid_tokens: set[str]) -> Starlette:
     """Return an ASGI app that proxies /mcp to the internal FastMCP
     with Bearer header or mcp_token auth."""
     client = httpx.AsyncClient(
@@ -145,7 +135,5 @@ if __name__ == "__main__":
     ).start()
 
     # External auth proxy
-    app = create_auth_proxy(
-        upstream_port=INTERNAL_PORT, valid_tokens={env["token"]}
-    )
+    app = create_auth_proxy(upstream_port=INTERNAL_PORT, valid_tokens={env["token"]})
     uvicorn.run(app, host=env["host"], port=env["port"])

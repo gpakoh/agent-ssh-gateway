@@ -24,7 +24,7 @@ def _now() -> datetime:
 
 
 def _compute_retry_at(attempts: int, base_sec: float, max_sec: float) -> datetime:
-    delay = min(base_sec * (2 ** attempts), max_sec)
+    delay = min(base_sec * (2**attempts), max_sec)
     jitter = delay * random.uniform(0.5, 1.5)
     return _now() + timedelta(seconds=jitter)
 
@@ -42,7 +42,9 @@ class DeliveryService:
         self._running = False
 
     async def create_tables(self):
-        logger.warning("Auto-creating Delivery Tables Via Base.metadata.create_all — Use Alembic For Production Migrations")
+        logger.warning(
+            "Auto-creating Delivery Tables Via Base.metadata.create_all — Use Alembic For Production Migrations"
+        )
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
@@ -76,9 +78,7 @@ class DeliveryService:
             ),
         )
         self._worker_task = asyncio.create_task(
-            self._worker_loop(
-                poll_interval, max_attempts, retry_base_sec, retry_max_sec, lease_ttl
-            )
+            self._worker_loop(poll_interval, max_attempts, retry_base_sec, retry_max_sec, lease_ttl)
         )
         self._cleanup_task = asyncio.create_task(
             self._cleanup_loop(3600, retention_sent_days, retention_dead_days)
@@ -107,9 +107,7 @@ class DeliveryService:
             await session.commit()
         return delivery_id
 
-    async def claim_deliveries(
-        self, limit: int, lease_ttl: float
-    ) -> list[WebhookDelivery]:
+    async def claim_deliveries(self, limit: int, lease_ttl: float) -> list[WebhookDelivery]:
         """Claim pending/failed deliveries with lease."""
         now = _now()
         stale = now - timedelta(seconds=lease_ttl)
@@ -149,9 +147,7 @@ class DeliveryService:
     async def complete(self, delivery_id: str, http_status: int) -> bool:
         async with self._session_factory() as session:
             result = await session.execute(
-                select(WebhookDelivery).where(
-                    WebhookDelivery.delivery_id == delivery_id
-                )
+                select(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
             )
             d = result.scalar_one_or_none()
             if not d:
@@ -174,9 +170,7 @@ class DeliveryService:
     ) -> bool:
         async with self._session_factory() as session:
             result = await session.execute(
-                select(WebhookDelivery).where(
-                    WebhookDelivery.delivery_id == delivery_id
-                )
+                select(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
             )
             d = result.scalar_one_or_none()
             if not d:
@@ -192,16 +186,14 @@ class DeliveryService:
                 d.status = "dead"
                 d.next_retry_at = None
                 dead_count = await session.scalar(
-                    select(func.count()).select_from(WebhookDelivery).where(
-                        WebhookDelivery.status == "dead"
-                    ),
+                    select(func.count())
+                    .select_from(WebhookDelivery)
+                    .where(WebhookDelivery.status == "dead"),
                 )
                 metrics.set_event_hook_dead_letter_count(dead_count or 0)
             else:
                 d.status = "failed"
-                d.next_retry_at = _compute_retry_at(
-                    d.attempts, retry_base_sec, retry_max_sec
-                )
+                d.next_retry_at = _compute_retry_at(d.attempts, retry_base_sec, retry_max_sec)
 
             await session.commit()
             return True
@@ -239,14 +231,10 @@ class DeliveryService:
     ):
         while self._running:
             try:
-                deliveries = await self.claim_deliveries(
-                    limit=20, lease_ttl=lease_ttl
-                )
+                deliveries = await self.claim_deliveries(limit=20, lease_ttl=lease_ttl)
                 for d in deliveries:
                     asyncio.create_task(
-                        self._send_delivery(
-                            d, max_attempts, retry_base_sec, retry_max_sec
-                        )
+                        self._send_delivery(d, max_attempts, retry_base_sec, retry_max_sec)
                     )
             except Exception:
                 logger.exception("Delivery Worker Error")
@@ -311,9 +299,7 @@ class DeliveryService:
             elapsed = (datetime.now(UTC) - start).total_seconds()
             metrics.record_event_hook_latency(elapsed)
 
-    async def _cleanup_loop(
-        self, interval: float, sent_days: int, dead_days: int
-    ):
+    async def _cleanup_loop(self, interval: float, sent_days: int, dead_days: int):
         while self._running:
             try:
                 count = await self.cleanup_old(sent_days, dead_days)
@@ -326,9 +312,7 @@ class DeliveryService:
     async def _get_record(self, delivery_id: str) -> WebhookDelivery | None:
         async with self._session_factory() as session:
             result = await session.execute(
-                select(WebhookDelivery).where(
-                    WebhookDelivery.delivery_id == delivery_id
-                )
+                select(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
             )
             return result.scalar_one_or_none()
 

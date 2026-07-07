@@ -1,4 +1,5 @@
 """Tests for docker inspect output redaction."""
+
 from __future__ import annotations
 
 import json
@@ -7,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "chatgpt_remote_mcp"))
 
-from fleet.docker_client import DockerClient, REDACTED
+from fleet.docker_client import REDACTED, DockerClient
 
 
 def _client() -> DockerClient:

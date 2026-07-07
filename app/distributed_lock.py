@@ -70,9 +70,7 @@ class DistributedLock:
             if acquired:
                 logger.debug("Lock acquired for %s (token=%s)", resource, token[:8])
                 # Start Watchdog For Lease Renewal
-                task = asyncio.create_task(
-                    self._renew_loop(resource, token, ttl)
-                )
+                task = asyncio.create_task(self._renew_loop(resource, token, ttl))
                 self._renewal_tasks[resource] = task
                 return token
 

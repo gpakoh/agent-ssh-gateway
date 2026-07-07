@@ -112,9 +112,7 @@ class TestRecordResult:
         assert router._backends["opencode"].status == BackendStatus.AVAILABLE
 
     def test_rate_limit_triggers_cooldown(self, router):
-        cd = router.record_result(
-            "opencode", 1, stderr="Free usage exceeded, retrying in 7h"
-        )
+        cd = router.record_result("opencode", 1, stderr="Free usage exceeded, retrying in 7h")
         assert cd is not None
         assert cd.reason == "rate_limit"
         assert router._backends["opencode"].status == BackendStatus.COOLDOWN
@@ -174,23 +172,18 @@ class TestFallback:
 class TestCooldownEntry:
     def test_active_when_until_in_future(self):
         cd = CooldownEntry(
-            provider="t", detected_at=time.time(),
-            cooldown_seconds=9999, reason="test"
+            provider="t", detected_at=time.time(), cooldown_seconds=9999, reason="test"
         )
         assert cd.active is True
 
     def test_expired_when_until_in_past(self):
         cd = CooldownEntry(
-            provider="t", detected_at=time.time() - 100,
-            cooldown_seconds=1, reason="test"
+            provider="t", detected_at=time.time() - 100, cooldown_seconds=1, reason="test"
         )
         assert cd.active is False
 
     def test_until_property(self):
-        cd = CooldownEntry(
-            provider="t", detected_at=1000,
-            cooldown_seconds=500, reason="test"
-        )
+        cd = CooldownEntry(provider="t", detected_at=1000, cooldown_seconds=500, reason="test")
         assert cd.until == 1500
 
 
@@ -262,8 +255,10 @@ class TestTryPrimaryFallback:
         policy = TryPrimaryFallback()
         backends = {
             "primary": BackendEntry(
-                name="primary", priority=0,
-                status=BackendStatus.COOLDOWN, cooldown_until=time.time() + 9999,
+                name="primary",
+                priority=0,
+                status=BackendStatus.COOLDOWN,
+                cooldown_until=time.time() + 9999,
             ),
             "fallback": BackendEntry(name="fallback", priority=1),
         }
@@ -303,8 +298,7 @@ class TestRouterAdmin:
 
     def test_get_cooldowns_excludes_expired(self, router):
         cd = CooldownEntry(
-            provider="t", detected_at=time.time() - 9999,
-            cooldown_seconds=1, reason="test"
+            provider="t", detected_at=time.time() - 9999, cooldown_seconds=1, reason="test"
         )
         router._cooldowns.append(cd)
         assert len(router.get_cooldowns()) == 0
@@ -314,8 +308,10 @@ class TestRouterAdmin:
         router._backends["opencode"].cooldown_until = time.time() + 9999
         router._cooldowns.append(
             CooldownEntry(
-                provider="opencode", detected_at=time.time(),
-                cooldown_seconds=9999, reason="test",
+                provider="opencode",
+                detected_at=time.time(),
+                cooldown_seconds=9999,
+                reason="test",
             )
         )
         assert router.reset_backend("opencode") is True

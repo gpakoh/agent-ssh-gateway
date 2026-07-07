@@ -62,13 +62,15 @@ def project_run_opencode(
         'git diff --no-color > "$td/implementation-diff.patch" 2>/dev/null',
     ]
     # Set final status based on exit code
-    parts.extend([
-        "if [ $RC -eq 0 ]; then",
-        "  echo 'Status: needs-review' > \"$td/agent-status.md\"",
-        "else",
-        "  echo 'Status: failed' > \"$td/agent-status.md\"",
-        "fi",
-    ])
+    parts.extend(
+        [
+            "if [ $RC -eq 0 ]; then",
+            "  echo 'Status: needs-review' > \"$td/agent-status.md\"",
+            "else",
+            "  echo 'Status: failed' > \"$td/agent-status.md\"",
+            "fi",
+        ]
+    )
     # Build agent-report.md via heredoc
     parts.append(
         f'cat > "$td/agent-report.md" << REOF\n'

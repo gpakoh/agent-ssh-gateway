@@ -133,9 +133,7 @@ def test_mtls_x_headers_present():
 
 def test_nginx_config_contains_mtls_bypass():
     """nginx config must contain mTLS bypass logic."""
-    result = _ssh_cmd(
-        "grep -R 'ssl_client_verify' /etc/nginx/sites-enabled/gateway.example.com"
-    )
+    result = _ssh_cmd("grep -R 'ssl_client_verify' /etc/nginx/sites-enabled/gateway.example.com")
     assert result.returncode == 0
     assert "SUCCESS" in result.stdout
 

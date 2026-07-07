@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 # Rate Limiting
 # ---------------------------------------------------------------------------
 
+
 def _rate_limit_key(request: Request) -> str:
     """Extract real client IP for rate limiting, respecting trusted proxies."""
     trusted = parse_cidrs(settings.trusted_proxy_cidrs)
@@ -48,27 +49,40 @@ def rate_limit_mutation(requests: int = 30, period: str = "minute"):
 # ---------------------------------------------------------------------------
 
 DANGEROUS_COMMANDS = {
-    'rm -rf /', 'rm -rf /*', 'rm -rf ~', 'rm -rf /root',
-    ':(){ :|:& };:', 'fork bomb', 'dd if=/dev/zero of=/dev/sda',
-    'mkfs.ext4 /dev/sda', 'mkfs.ext3 /dev/sda', 'mkfs /dev/sda',
-    '> /dev/sda', 'mv / /dev/null',
-    'wget http', 'curl http', 'nc -e', 'bash -i',
-    'python -c "import socket', 'python3 -c "import socket',
+    "rm -rf /",
+    "rm -rf /*",
+    "rm -rf ~",
+    "rm -rf /root",
+    ":(){ :|:& };:",
+    "fork bomb",
+    "dd if=/dev/zero of=/dev/sda",
+    "mkfs.ext4 /dev/sda",
+    "mkfs.ext3 /dev/sda",
+    "mkfs /dev/sda",
+    "> /dev/sda",
+    "mv / /dev/null",
+    "wget http",
+    "curl http",
+    "nc -e",
+    "bash -i",
+    'python -c "import socket',
+    'python3 -c "import socket',
     'perl -e "use Socket"',
-    'chmod -R 777 /', 'chmod 777 /',
+    "chmod -R 777 /",
+    "chmod 777 /",
 }
 
 DANGEROUS_PATTERNS = [
-    r';\s*rm\s+-rf',
-    r'&&\s*rm\s+-rf',
-    r'\|\s*bash',
-    r'\|\s*sh\s+-c',
-    r'curl\s+.*\|\s*bash',
-    r'wget\s+.*\|\s*bash',
-    r'nc\s+-[lpe]',
-    r'mkfifo\s+.*\|\s*bash',
-    r'/dev/tcp/',
-    r'/dev/udp/',
+    r";\s*rm\s+-rf",
+    r"&&\s*rm\s+-rf",
+    r"\|\s*bash",
+    r"\|\s*sh\s+-c",
+    r"curl\s+.*\|\s*bash",
+    r"wget\s+.*\|\s*bash",
+    r"nc\s+-[lpe]",
+    r"mkfifo\s+.*\|\s*bash",
+    r"/dev/tcp/",
+    r"/dev/udp/",
 ]
 
 
@@ -82,20 +96,21 @@ def sanitize_command(command: str) -> str:
     Raises ValueError if command matches a known dangerous pattern.
     """
     command_lower = command.lower().strip()
-    
+
     # Check Exact Matches
     for dangerous in DANGEROUS_COMMANDS:
         if dangerous.lower() in command_lower:
             logger.warning("Blocked dangerous command matching pattern: %s", dangerous)
             raise ValueError(f"Command contains dangerous pattern: {dangerous}")
-    
+
     # Check Regex Patterns
     import re
+
     for pattern in DANGEROUS_PATTERNS:
         if re.search(pattern, command_lower):
             logger.warning("Blocked command matching pattern: %s", pattern)
             raise ValueError("Command matches dangerous pattern")
-    
+
     return command
 
 
@@ -104,44 +119,54 @@ def sanitize_command(command: str) -> str:
 # ---------------------------------------------------------------------------
 
 FORBIDDEN_PATHS = {
-    '/etc/passwd', '/etc/shadow', '/etc/hosts', '/etc/crontab',
-    '/var/spool/cron',
-    '/root/.ssh', '/root/.bash_history',
-    '/var/log/auth.log', '/var/log/secure',
-    '/usr/bin',
-    '/proc', '/sys', '/dev', '/boot',
-    '..', '../', '/..',
+    "/etc/passwd",
+    "/etc/shadow",
+    "/etc/hosts",
+    "/etc/crontab",
+    "/var/spool/cron",
+    "/root/.ssh",
+    "/root/.bash_history",
+    "/var/log/auth.log",
+    "/var/log/secure",
+    "/usr/bin",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/boot",
+    "..",
+    "../",
+    "/..",
 }
 
 
 def validate_path(path: str, base_path: str | None = None) -> str:
     """Validate file path to prevent directory traversal.
-    
+
     Args:
         path: File path to validate
         base_path: Optional base directory to restrict access to
-        
+
     Returns:
         Validated path
-        
+
     Raises:
         ValueError: If path is forbidden or contains traversal attempts
     """
     import os
-    
+
     path = path.strip()
-    
+
     # Check For Obvious Traversal Attempts
-    if '..' in path or '~' in path:
+    if ".." in path or "~" in path:
         logger.warning("Blocked path with traversal: %s", path)
         raise ValueError("Path contains directory traversal characters")
-    
+
     # Check Forbidden Paths
     for forbidden in FORBIDDEN_PATHS:
         if forbidden in path:
             logger.warning("Blocked forbidden path: %s", path)
             raise ValueError(f"Access to {forbidden} is forbidden")
-    
+
     # If Base_path Provided, Ensure Path Is Within It
     if base_path:
         abs_path = os.path.abspath(path)
@@ -149,7 +174,7 @@ def validate_path(path: str, base_path: str | None = None) -> str:
         if not abs_path.startswith(abs_base):
             logger.warning("Blocked path outside base: %s (base: %s)", path, base_path)
             raise ValueError("Path is outside allowed directory")
-    
+
     return path
 
 
@@ -157,26 +182,27 @@ def validate_path(path: str, base_path: str | None = None) -> str:
 # Secret Encryption
 # ---------------------------------------------------------------------------
 
+
 class SecretManager:
     """Encrypt/decrypt sensitive data like SSH credentials."""
-    
+
     def __init__(self, master_key: str):
         if not master_key:
             raise RuntimeError(
                 "ENCRYPTION_KEY is required. Generate one with: "
-                "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+                'python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
             )
         self._master_key = master_key
         self._fernet = Fernet(master_key.encode())
-    
+
     def encrypt(self, data: str) -> str:
         """Encrypt string data."""
         return self._fernet.encrypt(data.encode()).decode()
-    
+
     def decrypt(self, encrypted: str) -> str:
         """Decrypt string data."""
         return self._fernet.decrypt(encrypted.encode()).decode()
-    
+
     def hash_secret(self, data: str) -> str:
         """One-way hash for verification using HMAC-SHA256."""
         return hmac.new(self._master_key.encode(), data.encode(), hashlib.sha256).hexdigest()
@@ -261,9 +287,10 @@ def redact_secrets(value: Any) -> Any:
 # Audit Logging
 # ---------------------------------------------------------------------------
 
+
 class AuditLogger:
     """Audit logger for security events."""
-    
+
     def __init__(self, log_file: str = "logs/audit.log"):
         self.logger = logging.getLogger("audit")
         log_path = Path(log_file)
@@ -275,39 +302,37 @@ class AuditLogger:
         ):
             return
         handler = logging.FileHandler(log_file)
-        formatter = logging.Formatter(
-            "%(asctime)s | %(levelname)s | %(message)s"
-        )
+        formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
         self.logger.setLevel(logging.INFO)
-    
+
     def log_command(self, session_id: str, command: str, source_ip: str):
         """Log command execution."""
         self.logger.info(
-            "COMMAND | session=%s | ip=%s | cmd=%s",
-            session_id, source_ip, redact_secrets(command)
+            "COMMAND | session=%s | ip=%s | cmd=%s", session_id, source_ip, redact_secrets(command)
         )
 
     def log_file_access(self, session_id: str, path: str, operation: str, source_ip: str):
         """Log file access."""
         self.logger.info(
             "FILE | session=%s | ip=%s | op=%s | path=%s",
-            session_id, source_ip, operation, redact_secrets(path)
+            session_id,
+            source_ip,
+            operation,
+            redact_secrets(path),
         )
 
     def log_auth(self, username: str, success: bool, source_ip: str):
         """Log authentication attempt."""
         self.logger.info(
-            "AUTH | user=%s | ip=%s | success=%s",
-            redact_secrets(username), source_ip, success
+            "AUTH | user=%s | ip=%s | success=%s", redact_secrets(username), source_ip, success
         )
 
     def log_security_event(self, event_type: str, details: str, source_ip: str):
         """Log generic security event."""
         self.logger.warning(
-            "SECURITY | type=%s | ip=%s | %s",
-            event_type, source_ip, redact_secrets(details)
+            "SECURITY | type=%s | ip=%s | %s", event_type, source_ip, redact_secrets(details)
         )
 
 
@@ -315,22 +340,19 @@ class AuditLogger:
 # Session Security
 # ---------------------------------------------------------------------------
 
+
 class SessionSecurity:
     """Session security utilities."""
-    
+
     @staticmethod
     def generate_secure_token(length: int = 32) -> str:
         """Generate cryptographically secure random token."""
         return secrets.token_urlsafe(length)
-    
+
     @staticmethod
     def verify_token(token: str, expected_hash: str, secret: str) -> bool:
         """Verify token using HMAC."""
-        computed = hmac.new(
-            secret.encode(),
-            token.encode(),
-            hashlib.sha256
-        ).hexdigest()
+        computed = hmac.new(secret.encode(), token.encode(), hashlib.sha256).hexdigest()
         return hmac.compare_digest(computed, expected_hash)
 
 
@@ -338,21 +360,22 @@ class SessionSecurity:
 # IP Whitelist/blacklist
 # ---------------------------------------------------------------------------
 
+
 class IPFilter:
     """IP address filtering."""
-    
+
     def __init__(self):
         self.whitelist: set = set()
         self.blacklist: set = set()
-    
+
     def add_to_whitelist(self, ip: str):
         """Add IP to whitelist."""
         self.whitelist.add(ip)
-    
+
     def add_to_blacklist(self, ip: str):
         """Add IP to blacklist."""
         self.blacklist.add(ip)
-    
+
     def is_allowed(self, ip: str) -> bool:
         """Check if IP is allowed."""
         if ip in self.blacklist:
@@ -365,6 +388,7 @@ class IPFilter:
 # ---------------------------------------------------------------------------
 # Target Host Validation (SSRF Protection)
 # ---------------------------------------------------------------------------
+
 
 def parse_networks(raw: str) -> list[ipaddress._BaseNetwork]:
     """Parse comma-separated CIDR list into ipaddress networks."""

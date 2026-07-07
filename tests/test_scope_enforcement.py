@@ -120,29 +120,35 @@ class TestScopeChecking:
 
 class TestToolExtraction:
     def test_extract_tools_call(self):
-        body = json.dumps({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": "gateway_health", "arguments": {}},
-        }).encode()
+        body = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "gateway_health", "arguments": {}},
+            }
+        ).encode()
         assert extract_tool_from_body(body) == "gateway_health"
 
     def test_extract_initialize_returns_none(self):
-        body = json.dumps({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {},
-        }).encode()
+        body = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {},
+            }
+        ).encode()
         assert extract_tool_from_body(body) is None
 
     def test_extract_tools_list_returns_none(self):
-        body = json.dumps({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/list",
-        }).encode()
+        body = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+            }
+        ).encode()
         assert extract_tool_from_body(body) is None
 
     def test_extract_invalid_json(self):

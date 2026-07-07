@@ -18,9 +18,7 @@ SESSION_EVENTS = {"session.connected", "session.disconnected"}
 COMMAND_EVENTS = {"command.started", "command.completed", "command.failed"}
 
 
-def _build_payload(
-    event: str, session_id: str, **extra
-) -> dict:
+def _build_payload(event: str, session_id: str, **extra) -> dict:
     payload = {
         "event": event,
         "event_id": uuid.uuid4().hex,
@@ -119,9 +117,7 @@ async def emit_event(
         # Add Custom Headers
         if hook.headers_encrypted and _state.secret_manager:
             try:
-                custom = json.loads(
-                    _state.secret_manager.decrypt(hook.headers_encrypted)
-                )
+                custom = json.loads(_state.secret_manager.decrypt(hook.headers_encrypted))
                 if isinstance(custom, dict):
                     delivery_headers.update(custom)
             except Exception:
@@ -143,6 +139,4 @@ async def emit_event(
                     payload_json=payload_json,
                 )
             except Exception:
-                logger.exception(
-                    "Failed to enqueue delivery for hook %s", hook.id
-                )
+                logger.exception("Failed to enqueue delivery for hook %s", hook.id)

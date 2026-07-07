@@ -17,7 +17,9 @@ router = APIRouter()
 
 
 @router.post("/api/snapshots", tags=["snapshots"], response_model=SnapshotActionResponse)
-async def create_snapshot(req: CreateSnapshotRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def create_snapshot(
+    req: CreateSnapshotRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Create a snapshot of current project state."""
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
@@ -37,7 +39,9 @@ async def create_snapshot(req: CreateSnapshotRequest, _identity: AuthIdentity = 
             snapshot_id=snapshot.id,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=_err(500, f"Snapshot creation failed: {exc}")) from exc
+        raise HTTPException(
+            status_code=500, detail=_err(500, f"Snapshot creation failed: {exc}")
+        ) from exc
 
 
 @router.get("/api/snapshots", tags=["snapshots"])
@@ -68,7 +72,9 @@ async def list_snapshots(context_id: str, _identity: AuthIdentity = Depends(requ
 
 
 @router.post("/api/snapshots/restore", tags=["snapshots"], response_model=SnapshotActionResponse)
-async def restore_snapshot(req: RestoreSnapshotRequest, _identity: AuthIdentity = Depends(require_master_key)):
+async def restore_snapshot(
+    req: RestoreSnapshotRequest, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Restore project from snapshot."""
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
@@ -92,7 +98,9 @@ async def restore_snapshot(req: RestoreSnapshotRequest, _identity: AuthIdentity 
 
 
 @router.delete("/api/snapshots/{snapshot_id}", tags=["snapshots"])
-async def delete_snapshot(snapshot_id: str, context_id: str, _identity: AuthIdentity = Depends(require_master_key)):
+async def delete_snapshot(
+    snapshot_id: str, context_id: str, _identity: AuthIdentity = Depends(require_master_key)
+):
     """Delete a snapshot."""
     ctx = await _state.context_manager.get_context(context_id)
     if not ctx:

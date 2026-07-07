@@ -11,6 +11,7 @@ from app.known_hosts import HostKeyStore, KnownHostsPolicy
 
 class InMemoryHostKeyStore(HostKeyStore):
     """Simple in-memory store for policy tests."""
+
     def __init__(self):
         self._keys: dict[tuple[str, int], str] = {}
 

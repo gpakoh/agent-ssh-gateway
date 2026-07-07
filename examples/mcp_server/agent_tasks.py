@@ -16,9 +16,7 @@ ARCHIVE_REL_DIR = ".ai-bridge/archive"
 def validate_task_id(task_id: str) -> None:
     """Raise ValueError if task_id is malformed."""
     if not TASK_ID_RE.match(task_id):
-        raise ValueError(
-            f"Invalid task_id: {task_id!r}. Must match {TASK_ID_RE.pattern}"
-        )
+        raise ValueError(f"Invalid task_id: {task_id!r}. Must match {TASK_ID_RE.pattern}")
 
 
 def _task_dir(task_id: str) -> str:
@@ -117,10 +115,7 @@ def build_current_plan(
 
 def list_agent_tasks(run_cmd, *, project: str) -> dict[str, Any]:
     """List task directories under .ai-bridge/tasks/."""
-    cmd = (
-        f"echo '## Tasks' && "
-        f"ls -1 {TASKS_REL_DIR}/ 2>/dev/null | head -50 || echo '(no tasks)'"
-    )
+    cmd = f"echo '## Tasks' && ls -1 {TASKS_REL_DIR}/ 2>/dev/null | head -50 || echo '(no tasks)'"
     return run_cmd(project, cmd)
 
 
@@ -150,7 +145,8 @@ def read_agent_task_file(run_cmd, *, project: str, task_id: str, filename: str) 
 
 
 def write_agent_task(
-    run_cmd, *,
+    run_cmd,
+    *,
     project: str,
     task_id: str,
     agent: str,
@@ -199,8 +195,6 @@ def write_agent_task(
         f"cat > {td}/agent-status.md << 'SEOF'\n{initial_status}\nSEOF",
     ]
     if worktree_path:
-        parts.append(
-            f"cat > {td}/worktree-path.txt << 'WEOF'\n{worktree_path}\nWEOF"
-        )
+        parts.append(f"cat > {td}/worktree-path.txt << 'WEOF'\n{worktree_path}\nWEOF")
     cmd = "\n".join(parts)
     return run_cmd(project, cmd)

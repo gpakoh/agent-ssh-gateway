@@ -20,7 +20,9 @@ class EventHookStore:
         self._session_factory = async_sessionmaker(self._engine, class_=AsyncSession)
 
     async def create_tables(self):
-        logger.warning("Auto-creating Event Hook Tables Via Base.metadata.create_all — Use Alembic For Production Migrations")
+        logger.warning(
+            "Auto-creating Event Hook Tables Via Base.metadata.create_all — Use Alembic For Production Migrations"
+        )
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
@@ -54,16 +56,12 @@ class EventHookStore:
 
     async def list_hooks(self) -> list[EventHook]:
         async with self._session_factory() as session:
-            result = await session.execute(
-                select(EventHook).order_by(EventHook.created_at)
-            )
+            result = await session.execute(select(EventHook).order_by(EventHook.created_at))
             return list(result.scalars().all())
 
     async def get(self, hook_id: str) -> EventHook | None:
         async with self._session_factory() as session:
-            result = await session.execute(
-                select(EventHook).where(EventHook.id == hook_id)
-            )
+            result = await session.execute(select(EventHook).where(EventHook.id == hook_id))
             return result.scalar_one_or_none()
 
     async def update(
@@ -78,9 +76,7 @@ class EventHookStore:
         is_active: bool | None = None,
     ) -> EventHook | None:
         async with self._session_factory() as session:
-            result = await session.execute(
-                select(EventHook).where(EventHook.id == hook_id)
-            )
+            result = await session.execute(select(EventHook).where(EventHook.id == hook_id))
             hook = result.scalar_one_or_none()
             if not hook:
                 return None
@@ -105,9 +101,7 @@ class EventHookStore:
 
     async def delete(self, hook_id: str) -> bool:
         async with self._session_factory() as session:
-            result = await session.execute(
-                select(EventHook).where(EventHook.id == hook_id)
-            )
+            result = await session.execute(select(EventHook).where(EventHook.id == hook_id))
             hook = result.scalar_one_or_none()
             if not hook:
                 return False
@@ -115,14 +109,10 @@ class EventHookStore:
             await session.commit()
             return True
 
-    async def find_matching(
-        self, event_type: str, session_id: str
-    ) -> list[EventHook]:
+    async def find_matching(self, event_type: str, session_id: str) -> list[EventHook]:
         """Find active hooks matching event_type and optionally session_id."""
         async with self._session_factory() as session:
-            result = await session.execute(
-                select(EventHook).where(EventHook.is_active.is_(True))
-            )
+            result = await session.execute(select(EventHook).where(EventHook.is_active.is_(True)))
             hooks: list[EventHook] = list(result.scalars().all())
             matched = []
             for h in hooks:

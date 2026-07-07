@@ -14,7 +14,6 @@ def test_api_key_placeholder_is_only_in_proxy_locations():
     assert text.count("__API_KEY__") == 5
 
 
-
 def test_default_location_uses_mtls_bypass_or_authelia_fallback():
     text = _template()
     match = re.search(r"location / \{(?P<body>.*?)\n    \}", text, re.S)

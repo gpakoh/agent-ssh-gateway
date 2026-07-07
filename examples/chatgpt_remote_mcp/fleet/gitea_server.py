@@ -41,7 +41,9 @@ async def gitea_get_repo(owner: str, repo: str) -> dict[str, Any]:
 
 @mcp.tool()
 async def gitea_list_branches(
-    owner: str, repo: str, limit: int = 30,
+    owner: str,
+    repo: str,
+    limit: int = 30,
 ) -> list[dict[str, Any]]:
     """List branches in a repository. Returns branch names and commit SHAs."""
     async with _get_client() as client:
@@ -50,8 +52,10 @@ async def gitea_list_branches(
 
 @mcp.tool()
 async def gitea_list_commits(
-    owner: str, repo: str,
-    sha: str | None = None, limit: int = 30,
+    owner: str,
+    repo: str,
+    sha: str | None = None,
+    limit: int = 30,
 ) -> list[dict[str, Any]]:
     """List commits in a repository. Optionally filter by branch SHA."""
     async with _get_client() as client:
@@ -60,7 +64,9 @@ async def gitea_list_commits(
 
 @mcp.tool()
 async def gitea_get_file(
-    owner: str, repo: str, path: str,
+    owner: str,
+    repo: str,
+    path: str,
     branch: str | None = None,
 ) -> dict[str, Any]:
     """Get a file or directory contents from a repository. Returns base64-encoded content or directory listing."""
@@ -70,19 +76,26 @@ async def gitea_get_file(
 
 @mcp.tool()
 async def gitea_list_issues(
-    owner: str, repo: str,
-    state: str = "open", limit: int = 30,
+    owner: str,
+    repo: str,
+    state: str = "open",
+    limit: int = 30,
 ) -> list[dict[str, Any]]:
     """List issues in a repository. State: open, closed, all."""
     async with _get_client() as client:
         return await client.list_issues(
-            owner, repo, state=state, limit=limit,
+            owner,
+            repo,
+            state=state,
+            limit=limit,
         )
 
 
 @mcp.tool()
 async def gitea_get_issue(
-    owner: str, repo: str, issue_number: int,
+    owner: str,
+    repo: str,
+    issue_number: int,
 ) -> dict[str, Any]:
     """Get details of a specific issue by number."""
     async with _get_client() as client:
@@ -91,19 +104,26 @@ async def gitea_get_issue(
 
 @mcp.tool()
 async def gitea_list_pull_requests(
-    owner: str, repo: str,
-    state: str = "open", limit: int = 30,
+    owner: str,
+    repo: str,
+    state: str = "open",
+    limit: int = 30,
 ) -> list[dict[str, Any]]:
     """List pull requests in a repository. State: open, closed, all."""
     async with _get_client() as client:
         return await client.list_pull_requests(
-            owner, repo, state=state, limit=limit,
+            owner,
+            repo,
+            state=state,
+            limit=limit,
         )
 
 
 @mcp.tool()
 async def gitea_get_pull_request(
-    owner: str, repo: str, pull_number: int,
+    owner: str,
+    repo: str,
+    pull_number: int,
 ) -> dict[str, Any]:
     """Get details of a specific pull request by number."""
     async with _get_client() as client:
@@ -112,21 +132,29 @@ async def gitea_get_pull_request(
 
 # ── Gitea Actions (CI/CD) ────────────────────────────────────────
 
+
 @mcp.tool()
 async def gitea_list_action_runs(
-    owner: str, repo: str,
-    status: str | None = None, limit: int = 10,
+    owner: str,
+    repo: str,
+    status: str | None = None,
+    limit: int = 10,
 ) -> dict[str, Any]:
     """List Gitea Actions workflow runs. Optionally filter by status (completed, running, waiting)."""
     async with _get_client() as client:
         return await client.list_action_runs(
-            owner, repo, status=status, limit=limit,
+            owner,
+            repo,
+            status=status,
+            limit=limit,
         )
 
 
 @mcp.tool()
 async def gitea_get_action_run(
-    owner: str, repo: str, run_id: int,
+    owner: str,
+    repo: str,
+    run_id: int,
 ) -> dict[str, Any]:
     """Get details of a specific Gitea Actions workflow run by ID."""
     async with _get_client() as client:
@@ -135,7 +163,9 @@ async def gitea_get_action_run(
 
 @mcp.tool()
 async def gitea_list_action_run_jobs(
-    owner: str, repo: str, run_id: int,
+    owner: str,
+    repo: str,
+    run_id: int,
 ) -> dict[str, Any]:
     """List jobs and their steps for a specific Gitea Actions workflow run."""
     async with _get_client() as client:
@@ -144,7 +174,8 @@ async def gitea_list_action_run_jobs(
 
 @mcp.tool()
 async def gitea_list_workflows(
-    owner: str, repo: str,
+    owner: str,
+    repo: str,
 ) -> dict[str, Any]:
     """List Gitea Actions workflow files in a repository."""
     async with _get_client() as client:
@@ -152,9 +183,7 @@ async def gitea_list_workflows(
 
 
 # ── Auth proxy ───────────────────────────────────────────────────
-def create_auth_proxy(
-    *, upstream_port: int, valid_tokens: set[str]
-) -> Starlette:
+def create_auth_proxy(*, upstream_port: int, valid_tokens: set[str]) -> Starlette:
     client = httpx.AsyncClient(
         base_url=f"http://127.0.0.1:{upstream_port}",
         timeout=HTTP_TIMEOUT,
@@ -195,7 +224,5 @@ if __name__ == "__main__":
         daemon=True,
     ).start()
 
-    app = create_auth_proxy(
-        upstream_port=INTERNAL_PORT, valid_tokens={env["token"]}
-    )
+    app = create_auth_proxy(upstream_port=INTERNAL_PORT, valid_tokens={env["token"]})
     uvicorn.run(app, host=env["host"], port=env["port"])

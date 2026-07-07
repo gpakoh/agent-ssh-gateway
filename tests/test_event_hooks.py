@@ -47,12 +47,20 @@ async def test_create_hook(store):
 @pytest.mark.asyncio
 async def test_list_hooks(store):
     await store.create(
-        url="https://a.com/hook", events=["command.completed"],
-        session_id=None, headers_encrypted=None, secret_encrypted=None, include_output=False,
+        url="https://a.com/hook",
+        events=["command.completed"],
+        session_id=None,
+        headers_encrypted=None,
+        secret_encrypted=None,
+        include_output=False,
     )
     await store.create(
-        url="https://b.com/hook", events=["session.connected"],
-        session_id=None, headers_encrypted=None, secret_encrypted=None, include_output=False,
+        url="https://b.com/hook",
+        events=["session.connected"],
+        session_id=None,
+        headers_encrypted=None,
+        secret_encrypted=None,
+        include_output=False,
     )
     hooks = await store.list_hooks()
     assert len(hooks) == 2
@@ -61,8 +69,12 @@ async def test_list_hooks(store):
 @pytest.mark.asyncio
 async def test_get_hook(store):
     created = await store.create(
-        url="https://c.com/hook", events=["command.failed"],
-        session_id=None, headers_encrypted=None, secret_encrypted=None, include_output=False,
+        url="https://c.com/hook",
+        events=["command.failed"],
+        session_id=None,
+        headers_encrypted=None,
+        secret_encrypted=None,
+        include_output=False,
     )
     fetched = await store.get(created.id)
     assert fetched is not None
@@ -77,8 +89,12 @@ async def test_get_hook_not_found(store):
 @pytest.mark.asyncio
 async def test_update_hook(store):
     created = await store.create(
-        url="https://d.com/hook", events=["command.completed"],
-        session_id=None, headers_encrypted=None, secret_encrypted=None, include_output=False,
+        url="https://d.com/hook",
+        events=["command.completed"],
+        session_id=None,
+        headers_encrypted=None,
+        secret_encrypted=None,
+        include_output=False,
     )
     updated = await store.update(created.id, url="https://d.com/new-hook", is_active=False)
     assert updated is not None
@@ -94,8 +110,12 @@ async def test_update_not_found(store):
 @pytest.mark.asyncio
 async def test_delete_hook(store):
     created = await store.create(
-        url="https://e.com/hook", events=["command.completed"],
-        session_id=None, headers_encrypted=None, secret_encrypted=None, include_output=False,
+        url="https://e.com/hook",
+        events=["command.completed"],
+        session_id=None,
+        headers_encrypted=None,
+        secret_encrypted=None,
+        include_output=False,
     )
     deleted = await store.delete(created.id)
     assert deleted is True
@@ -110,16 +130,28 @@ async def test_delete_not_found(store):
 @pytest.mark.asyncio
 async def test_find_matching_hooks(store):
     h1 = await store.create(
-        url="https://a.com/hook", events=["command.completed"],
-        session_id=None, headers_encrypted=None, secret_encrypted=None, include_output=False,
+        url="https://a.com/hook",
+        events=["command.completed"],
+        session_id=None,
+        headers_encrypted=None,
+        secret_encrypted=None,
+        include_output=False,
     )
     _ = await store.create(
-        url="https://b.com/hook", events=["command.completed"],
-        session_id="sess-1", headers_encrypted=None, secret_encrypted=None, include_output=False,
+        url="https://b.com/hook",
+        events=["command.completed"],
+        session_id="sess-1",
+        headers_encrypted=None,
+        secret_encrypted=None,
+        include_output=False,
     )
     h3 = await store.create(
-        url="https://c.com/hook", events=["session.connected"],
-        session_id=None, headers_encrypted=None, secret_encrypted=None, include_output=False,
+        url="https://c.com/hook",
+        events=["session.connected"],
+        session_id=None,
+        headers_encrypted=None,
+        secret_encrypted=None,
+        include_output=False,
     )
 
     matches = await store.find_matching("command.completed", session_id="sess-2")
@@ -139,27 +171,33 @@ async def test_find_matching_hooks(store):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("url,ok", [
-    ("https://hooks.example.com/callback", True),
-    ("https://10.0.0.1/hook", False),
-    ("https://127.0.0.1/hook", False),
-    ("https://192.168.1.1/hook", False),
-    ("https://169.254.169.254/latest", False),
-    ("https://[::1]/hook", False),
-    ("http://example.com/hook", False),
-    ("https://example.com:22/hook", True),
-    ("file:///etc/passwd", False),
-    ("", False),
-])
+@pytest.mark.parametrize(
+    "url,ok",
+    [
+        ("https://hooks.example.com/callback", True),
+        ("https://10.0.0.1/hook", False),
+        ("https://127.0.0.1/hook", False),
+        ("https://192.168.1.1/hook", False),
+        ("https://169.254.169.254/latest", False),
+        ("https://[::1]/hook", False),
+        ("http://example.com/hook", False),
+        ("https://example.com:22/hook", True),
+        ("file:///etc/passwd", False),
+        ("", False),
+    ],
+)
 def test_validate_url(url, ok):
     result = validate_webhook_url(url, allow_http=False)
     assert result.valid is ok, f"{url}: expected valid={ok}, got {result.reason}"
 
 
-@pytest.mark.parametrize("url,ok", [
-    ("http://example.com/hook", True),
-    ("https://example.com/hook", True),
-])
+@pytest.mark.parametrize(
+    "url,ok",
+    [
+        ("http://example.com/hook", True),
+        ("https://example.com/hook", True),
+    ],
+)
 def test_validate_url_allow_http(url, ok):
     result = validate_webhook_url(url, allow_http=True)
     assert result.valid is ok
@@ -250,7 +288,8 @@ async def test_delivery_enqueue(delivery_service):
 @pytest.mark.asyncio
 async def test_delivery_claim_pending(delivery_service):
     delivery_id = await delivery_service.enqueue(
-        event_id="evt-2", hook_id="hook-2",
+        event_id="evt-2",
+        hook_id="hook-2",
         event_type="session.connected",
         url="http://example.com/hook",
         payload_json="{}",
@@ -258,6 +297,7 @@ async def test_delivery_claim_pending(delivery_service):
     # Manually Age The Record So It's Claimable (>2s Old)
     async with delivery_service._session_factory() as session:
         from sqlalchemy import select as sel
+
         result = await session.execute(
             sel(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
         )
@@ -285,8 +325,11 @@ async def test_delivery_complete(delivery_service):
 async def test_delivery_fail_with_retry(delivery_service):
     d_id = await delivery_service.enqueue("evt-4", "h-4", "a", "http://x.co/h", "{}")
     result = await delivery_service.fail(
-        d_id, last_error="timeout",
-        max_attempts=5, retry_base_sec=2.0, retry_max_sec=300.0,
+        d_id,
+        last_error="timeout",
+        max_attempts=5,
+        retry_base_sec=2.0,
+        retry_max_sec=300.0,
     )
     assert result is True
 
@@ -300,16 +343,25 @@ async def test_delivery_fail_with_retry(delivery_service):
 async def test_delivery_fail_dead_after_max(delivery_service):
     d_id = await delivery_service.enqueue("evt-5", "h-5", "a", "http://x.co/h", "{}")
     await delivery_service.fail(
-        d_id, last_error="first",
-        max_attempts=3, retry_base_sec=2.0, retry_max_sec=300.0,
+        d_id,
+        last_error="first",
+        max_attempts=3,
+        retry_base_sec=2.0,
+        retry_max_sec=300.0,
     )
     await delivery_service.fail(
-        d_id, last_error="second",
-        max_attempts=3, retry_base_sec=2.0, retry_max_sec=300.0,
+        d_id,
+        last_error="second",
+        max_attempts=3,
+        retry_base_sec=2.0,
+        retry_max_sec=300.0,
     )
     await delivery_service.fail(
-        d_id, last_error="third",
-        max_attempts=3, retry_base_sec=2.0, retry_max_sec=300.0,
+        d_id,
+        last_error="third",
+        max_attempts=3,
+        retry_base_sec=2.0,
+        retry_max_sec=300.0,
     )
     rec = await delivery_service._get_record(d_id)
     assert rec.status == "dead"
@@ -319,7 +371,6 @@ async def test_delivery_fail_dead_after_max(delivery_service):
 @pytest.mark.asyncio
 async def test_delivery_claim_skips_young_pending(delivery_service):
     await delivery_service.enqueue("evt-6", "h-6", "a", "http://x.co/h", "{}")
-
 
     claimed = await delivery_service.claim_deliveries(limit=10, lease_ttl=30.0)
     assert len(claimed) == 0
@@ -337,9 +388,8 @@ async def test_delivery_cleanup(delivery_service):
     # Manually Age The Record
     async with delivery_service._session_factory() as s:
         from sqlalchemy import select as sel
-        result = await s.execute(sel(WebhookDelivery).where(
-            WebhookDelivery.delivery_id == d_id
-        ))
+
+        result = await s.execute(sel(WebhookDelivery).where(WebhookDelivery.delivery_id == d_id))
         d = result.scalar_one()
         d.updated_at = datetime.now(UTC) - timedelta(days=10)
         await s.commit()
