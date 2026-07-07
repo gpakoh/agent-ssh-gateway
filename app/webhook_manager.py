@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 class WebhookType(Enum):
     """Webhook types."""
+
     GITHUB = "github"
     GITEA = "gitea"
     GENERIC = "generic"
@@ -16,6 +17,7 @@ class WebhookType(Enum):
 
 class DeployStatus(Enum):
     """Deployment status."""
+
     PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
@@ -25,6 +27,7 @@ class DeployStatus(Enum):
 @dataclass
 class WebhookConfig:
     """Webhook configuration."""
+
     id: str
     name: str
     webhook_type: WebhookType
@@ -57,8 +60,9 @@ class WebhookManager:
     ) -> WebhookConfig:
         """Add a new webhook."""
         import uuid
+
         webhook_id = str(uuid.uuid4())[:8]
-        
+
         config = WebhookConfig(
             id=webhook_id,
             name=name,
@@ -69,7 +73,7 @@ class WebhookManager:
             context_id=context_id,
             notify_url=notify_url,
         )
-        
+
         self._webhooks[webhook_id] = config
         return config
 
@@ -98,27 +102,27 @@ class WebhookManager:
         config = self._webhooks.get(webhook_id)
         if not config:
             return {"status": "error", "message": "Webhook not found"}
-        
+
         if not config.enabled:
             return {"status": "error", "message": "Webhook disabled"}
-        
+
         # Verify Secret (simple Check)
         # In Production, Use HMAC Signature Verification
-        
+
         # Trigger Deployment
         deploy_id = f"deploy_{len(self._deployments)}"
-        
+
         # Log Deployment
         deployment = {
             "id": deploy_id,
             "webhook_id": webhook_id,
             "webhook_name": config.name,
             "status": DeployStatus.PENDING.value,
-            "timestamp": logging.time.time() if hasattr(logging, 'time') else 0,
+            "timestamp": logging.time.time() if hasattr(logging, "time") else 0,
             "payload": payload,
         }
         self._deployments.append(deployment)
-        
+
         return {
             "status": "accepted",
             "deploy_id": deploy_id,
@@ -140,14 +144,14 @@ class WebhookManager:
         config = self._webhooks.get(webhook_id)
         if not config:
             return {"status": "error", "message": "Webhook not found"}
-        
+
         # Run Deploy Command As Background Job
         job_id = await self._job.create_job(
             session_id=session_id,
             command=f"cd {config.target_path} && {config.deploy_command}",
             timeout=600,
         )
-        
+
         return {
             "status": "started",
             "job_id": job_id,

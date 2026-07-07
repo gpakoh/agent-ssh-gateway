@@ -163,10 +163,15 @@ async def test_get_client_unknown(provider):
 def test_authorization_code_flow(provider):
     reg_client = provider._clients
     client_id = "mcp_client_test_1"
-    reg_client[client_id] = type("StoredClient", (), {
-        "client_id": client_id, "redirect_uris": ["https://chatgpt.com/callback"],
-        "client_name": "Test",
-    })()
+    reg_client[client_id] = type(
+        "StoredClient",
+        (),
+        {
+            "client_id": client_id,
+            "redirect_uris": ["https://chatgpt.com/callback"],
+            "client_name": "Test",
+        },
+    )()
     code_verifier = secrets.token_urlsafe(64)
     code_challenge = _generate_code_challenge(code_verifier)
 
@@ -193,38 +198,56 @@ def test_authorization_code_flow(provider):
 
 
 def test_code_reuse_rejected(provider):
-    provider._clients["cid"] = type("S", (), {
-        "client_id": "cid",
-        "redirect_uris": ["https://example.com/cb"],
-        "client_name": "T",
-    })()
+    provider._clients["cid"] = type(
+        "S",
+        (),
+        {
+            "client_id": "cid",
+            "redirect_uris": ["https://example.com/cb"],
+            "client_name": "T",
+        },
+    )()
     cv = secrets.token_urlsafe(64)
     cc = _generate_code_challenge(cv)
-    auth = provider.create_authorization_code("cid", "https://example.com/cb", cc, "s", ["mcp:read"])
+    auth = provider.create_authorization_code(
+        "cid", "https://example.com/cb", cc, "s", ["mcp:read"]
+    )
     provider.exchange_code_for_token("cid", auth["code"], cv, "https://example.com/cb")
     with pytest.raises(ValueError, match="already used"):
         provider.exchange_code_for_token("cid", auth["code"], cv, "https://example.com/cb")
 
 
 def test_pkce_verification_rejects_wrong_verifier(provider):
-    provider._clients["cid2"] = type("S", (), {
-        "client_id": "cid2",
-        "redirect_uris": ["https://example.com/cb"],
-        "client_name": "T",
-    })()
+    provider._clients["cid2"] = type(
+        "S",
+        (),
+        {
+            "client_id": "cid2",
+            "redirect_uris": ["https://example.com/cb"],
+            "client_name": "T",
+        },
+    )()
     cv = secrets.token_urlsafe(64)
     cc = _generate_code_challenge(cv)
-    auth = provider.create_authorization_code("cid2", "https://example.com/cb", cc, "s", ["mcp:read"])
+    auth = provider.create_authorization_code(
+        "cid2", "https://example.com/cb", cc, "s", ["mcp:read"]
+    )
     with pytest.raises(ValueError, match="PKCE verification"):
-        provider.exchange_code_for_token("cid2", auth["code"], "wrong_verifier", "https://example.com/cb")
+        provider.exchange_code_for_token(
+            "cid2", auth["code"], "wrong_verifier", "https://example.com/cb"
+        )
 
 
 def test_access_token_verification(provider):
-    provider._clients["cid3"] = type("S", (), {
-        "client_id": "cid3",
-        "redirect_uris": ["https://example.com/cb"],
-        "client_name": "T",
-    })()
+    provider._clients["cid3"] = type(
+        "S",
+        (),
+        {
+            "client_id": "cid3",
+            "redirect_uris": ["https://example.com/cb"],
+            "client_name": "T",
+        },
+    )()
     cv = secrets.token_urlsafe(64)
     cc = _generate_code_challenge(cv)
     auth = provider.create_authorization_code("cid3", "https://example.com/cb", cc, "s")
@@ -236,11 +259,15 @@ def test_access_token_verification(provider):
 
 
 def test_refresh_token(provider):
-    provider._clients["cid4"] = type("S", (), {
-        "client_id": "cid4",
-        "redirect_uris": ["https://example.com/cb"],
-        "client_name": "T",
-    })()
+    provider._clients["cid4"] = type(
+        "S",
+        (),
+        {
+            "client_id": "cid4",
+            "redirect_uris": ["https://example.com/cb"],
+            "client_name": "T",
+        },
+    )()
     cv = secrets.token_urlsafe(64)
     cc = _generate_code_challenge(cv)
     auth = provider.create_authorization_code("cid4", "https://example.com/cb", cc, "s")
@@ -251,11 +278,15 @@ def test_refresh_token(provider):
 
 
 def test_revoke_token(provider):
-    provider._clients["cid5"] = type("S", (), {
-        "client_id": "cid5",
-        "redirect_uris": ["https://example.com/cb"],
-        "client_name": "T",
-    })()
+    provider._clients["cid5"] = type(
+        "S",
+        (),
+        {
+            "client_id": "cid5",
+            "redirect_uris": ["https://example.com/cb"],
+            "client_name": "T",
+        },
+    )()
     cv = secrets.token_urlsafe(64)
     cc = _generate_code_challenge(cv)
     auth = provider.create_authorization_code("cid5", "https://example.com/cb", cc, "s")

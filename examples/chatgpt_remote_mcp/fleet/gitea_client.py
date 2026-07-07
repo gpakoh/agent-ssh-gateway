@@ -13,20 +13,22 @@ REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 API_BASE = os.environ.get("GITEA_API_BASE", "https://git.example.com/api/v1")
 
-ALLOWED_ENDPOINTS = frozenset({
-    "/repos/{owner}/{repo}",
-    "/repos/{owner}/{repo}/branches",
-    "/repos/{owner}/{repo}/commits",
-    "/repos/{owner}/{repo}/contents/{path}",
-    "/repos/{owner}/{repo}/issues",
-    "/repos/{owner}/{repo}/issues/{number}",
-    "/repos/{owner}/{repo}/pulls",
-    "/repos/{owner}/{repo}/pulls/{number}",
-    "/repos/{owner}/{repo}/actions/runs",
-    "/repos/{owner}/{repo}/actions/runs/{run_id}",
-    "/repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
-    "/repos/{owner}/{repo}/actions/workflows",
-})
+ALLOWED_ENDPOINTS = frozenset(
+    {
+        "/repos/{owner}/{repo}",
+        "/repos/{owner}/{repo}/branches",
+        "/repos/{owner}/{repo}/commits",
+        "/repos/{owner}/{repo}/contents/{path}",
+        "/repos/{owner}/{repo}/issues",
+        "/repos/{owner}/{repo}/issues/{number}",
+        "/repos/{owner}/{repo}/pulls",
+        "/repos/{owner}/{repo}/pulls/{number}",
+        "/repos/{owner}/{repo}/actions/runs",
+        "/repos/{owner}/{repo}/actions/runs/{run_id}",
+        "/repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
+        "/repos/{owner}/{repo}/actions/workflows",
+    }
+)
 
 
 class GiteaClient:
@@ -46,7 +48,8 @@ class GiteaClient:
         )
 
     async def _get(
-        self, endpoint: str,
+        self,
+        endpoint: str,
         params: dict[str, Any] | None = None,
         **path_params: Any,
     ) -> Any:
@@ -64,17 +67,25 @@ class GiteaClient:
         return await self._get("/repos/{owner}/{repo}", owner=owner, repo=repo)
 
     async def list_branches(
-        self, owner: str, repo: str, limit: int = 30,
+        self,
+        owner: str,
+        repo: str,
+        limit: int = 30,
     ) -> list[dict[str, Any]]:
         limit = min(limit, MAX_LIMIT)
         return await self._get(
             "/repos/{owner}/{repo}/branches",
-            params={"limit": limit}, owner=owner, repo=repo,
+            params={"limit": limit},
+            owner=owner,
+            repo=repo,
         )
 
     async def list_commits(
-        self, owner: str, repo: str,
-        sha: str | None = None, limit: int = 30,
+        self,
+        owner: str,
+        repo: str,
+        sha: str | None = None,
+        limit: int = 30,
     ) -> list[dict[str, Any]]:
         limit = min(limit, MAX_LIMIT)
         params: dict[str, Any] = {"limit": limit}
@@ -82,73 +93,101 @@ class GiteaClient:
             params["sha"] = sha
         return await self._get(
             "/repos/{owner}/{repo}/commits",
-            params=params, owner=owner, repo=repo,
+            params=params,
+            owner=owner,
+            repo=repo,
         )
 
     async def get_file(
-        self, owner: str, repo: str,
-        path: str, branch: str | None = None,
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        branch: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, str] = {}
         if branch:
             params["ref"] = branch
         result = await self._get(
             "/repos/{owner}/{repo}/contents/{path}",
-            params=params, owner=owner, repo=repo, path=path,
+            params=params,
+            owner=owner,
+            repo=repo,
+            path=path,
         )
         if isinstance(result, dict) and "content" in result:
             import base64
+
             raw = base64.b64decode(result["content"])
             if len(raw) > MAX_FILE_SIZE:
-                result["content"] = (
-                    f"[truncated {len(raw)} bytes > {MAX_FILE_SIZE} limit]"
-                )
+                result["content"] = f"[truncated {len(raw)} bytes > {MAX_FILE_SIZE} limit]"
                 result["truncated"] = True
         return result
 
     async def list_issues(
-        self, owner: str, repo: str,
-        state: str = "open", limit: int = 30,
+        self,
+        owner: str,
+        repo: str,
+        state: str = "open",
+        limit: int = 30,
     ) -> list[dict[str, Any]]:
         limit = min(limit, MAX_LIMIT)
         return await self._get(
             "/repos/{owner}/{repo}/issues",
             params={"state": state, "limit": limit},
-            owner=owner, repo=repo,
+            owner=owner,
+            repo=repo,
         )
 
     async def get_issue(
-        self, owner: str, repo: str, issue_number: int,
+        self,
+        owner: str,
+        repo: str,
+        issue_number: int,
     ) -> dict[str, Any]:
         return await self._get(
             "/repos/{owner}/{repo}/issues/{number}",
-            owner=owner, repo=repo, number=issue_number,
+            owner=owner,
+            repo=repo,
+            number=issue_number,
         )
 
     async def list_pull_requests(
-        self, owner: str, repo: str,
-        state: str = "open", limit: int = 30,
+        self,
+        owner: str,
+        repo: str,
+        state: str = "open",
+        limit: int = 30,
     ) -> list[dict[str, Any]]:
         limit = min(limit, MAX_LIMIT)
         return await self._get(
             "/repos/{owner}/{repo}/pulls",
             params={"state": state, "limit": limit},
-            owner=owner, repo=repo,
+            owner=owner,
+            repo=repo,
         )
 
     async def get_pull_request(
-        self, owner: str, repo: str, pull_number: int,
+        self,
+        owner: str,
+        repo: str,
+        pull_number: int,
     ) -> dict[str, Any]:
         return await self._get(
             "/repos/{owner}/{repo}/pulls/{number}",
-            owner=owner, repo=repo, number=pull_number,
+            owner=owner,
+            repo=repo,
+            number=pull_number,
         )
 
     # ── Gitea Actions (CI/CD) ──────────────────────────────────────
 
     async def list_action_runs(
-        self, owner: str, repo: str,
-        status: str | None = None, limit: int = 10,
+        self,
+        owner: str,
+        repo: str,
+        status: str | None = None,
+        limit: int = 10,
     ) -> dict[str, Any]:
         limit = min(limit, MAX_LIMIT)
         params: dict[str, Any] = {"limit": limit}
@@ -156,31 +195,46 @@ class GiteaClient:
             params["status"] = status
         return await self._get(
             "/repos/{owner}/{repo}/actions/runs",
-            params=params, owner=owner, repo=repo,
+            params=params,
+            owner=owner,
+            repo=repo,
         )
 
     async def get_action_run(
-        self, owner: str, repo: str, run_id: int,
+        self,
+        owner: str,
+        repo: str,
+        run_id: int,
     ) -> dict[str, Any]:
         return await self._get(
             "/repos/{owner}/{repo}/actions/runs/{run_id}",
-            owner=owner, repo=repo, run_id=run_id,
+            owner=owner,
+            repo=repo,
+            run_id=run_id,
         )
 
     async def list_action_run_jobs(
-        self, owner: str, repo: str, run_id: int,
+        self,
+        owner: str,
+        repo: str,
+        run_id: int,
     ) -> dict[str, Any]:
         return await self._get(
             "/repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
-            owner=owner, repo=repo, run_id=run_id,
+            owner=owner,
+            repo=repo,
+            run_id=run_id,
         )
 
     async def list_workflows(
-        self, owner: str, repo: str,
+        self,
+        owner: str,
+        repo: str,
     ) -> dict[str, Any]:
         return await self._get(
             "/repos/{owner}/{repo}/actions/workflows",
-            owner=owner, repo=repo,
+            owner=owner,
+            repo=repo,
         )
 
     async def aclose(self) -> None:

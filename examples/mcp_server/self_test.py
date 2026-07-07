@@ -62,22 +62,14 @@ def run_self_test(client: GatewayClient) -> dict[str, Any]:
 
     # api_key_present
     if client.api_key:
-        checks.append(
-            check_result("api_key_present", "pass", "GATEWAY_API_KEY is configured.")
-        )
+        checks.append(check_result("api_key_present", "pass", "GATEWAY_API_KEY is configured."))
     else:
-        checks.append(
-            check_result(
-                "api_key_present", "fail", "GATEWAY_API_KEY is missing."
-            )
-        )
+        checks.append(check_result("api_key_present", "fail", "GATEWAY_API_KEY is missing."))
 
     # session_id_present
     if client.session_id:
         checks.append(
-            check_result(
-                "session_id_present", "pass", "GATEWAY_SESSION_ID is configured."
-            )
+            check_result("session_id_present", "pass", "GATEWAY_SESSION_ID is configured.")
         )
     else:
         checks.append(
@@ -92,9 +84,7 @@ def run_self_test(client: GatewayClient) -> dict[str, Any]:
     try:
         data = client.health()
         checks.append(
-            check_result(
-                "gateway_health", "pass", "Gateway health endpoint is reachable.", data
-            )
+            check_result("gateway_health", "pass", "Gateway health endpoint is reachable.", data)
         )
     except GatewayClientError as exc:
         checks.append(check_result("gateway_health", "fail", str(exc)))
@@ -137,9 +127,7 @@ def run_self_test(client: GatewayClient) -> dict[str, Any]:
             )
         )
     except CommandPolicyError as exc:
-        checks.append(
-            check_result("command_policy_allows_safe", "fail", str(exc))
-        )
+        checks.append(check_result("command_policy_allows_safe", "fail", str(exc)))
 
     # command_policy_denies_destructive
     denied_ok = True

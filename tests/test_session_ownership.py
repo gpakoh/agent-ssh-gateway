@@ -14,6 +14,7 @@ from app.main import app
 
 class FakeSession:
     """Minimal stand-in for SessionRecord ownership fields."""
+
     def __init__(self, owner_type="master", owner_name=None, owner_token_fingerprint=None):
         self.owner_type = owner_type
         self.owner_name = owner_name
@@ -45,12 +46,16 @@ class TestEnsureSessionOwner:
 
     def test_master_owns_agent_session(self):
         ident = AuthIdentity(token_type="master", token="m1", name="admin")
-        session = FakeSession(owner_type="agent", owner_name="bot1", owner_token_fingerprint="other")
+        session = FakeSession(
+            owner_type="agent", owner_name="bot1", owner_token_fingerprint="other"
+        )
         ensure_session_owner(session, ident)
 
     def test_master_owns_master_session(self):
         ident = AuthIdentity(token_type="master", token="m1", name="admin")
-        session = FakeSession(owner_type="master", owner_name="admin", owner_token_fingerprint="m1-fp")
+        session = FakeSession(
+            owner_type="master", owner_name="admin", owner_token_fingerprint="m1-fp"
+        )
         ensure_session_owner(session, ident)
 
     def test_master_owns_no_owner_session(self):
@@ -82,7 +87,9 @@ class TestEnsureSessionOwner:
 
     def test_agent_cannot_access_master_session(self):
         ident = AuthIdentity(token_type="agent", token="agent-token-a", name="bot-a")
-        session = FakeSession(owner_type="master", owner_name="admin", owner_token_fingerprint="admin-fp")
+        session = FakeSession(
+            owner_type="master", owner_name="admin", owner_token_fingerprint="admin-fp"
+        )
         with pytest.raises(HTTPException) as exc:
             ensure_session_owner(session, ident)
         assert exc.value.status_code == 403
@@ -138,34 +145,40 @@ class TestSessionOwnershipHTTP:
     @classmethod
     def _make_session_mock(cls):
         mgr = cls._base_mock()
-        mgr.get_session = AsyncMock(return_value=MagicMock(
-            owner_type="agent",
-            owner_name="bot-a",
-            owner_token_fingerprint=token_fingerprint("agent-token-a"),
-            is_connected=MagicMock(return_value=True),
-        ))
+        mgr.get_session = AsyncMock(
+            return_value=MagicMock(
+                owner_type="agent",
+                owner_name="bot-a",
+                owner_token_fingerprint=token_fingerprint("agent-token-a"),
+                is_connected=MagicMock(return_value=True),
+            )
+        )
         return mgr
 
     @classmethod
     def _make_cross_tenant_session_mock(cls):
         mgr = cls._base_mock()
-        mgr.get_session = AsyncMock(return_value=MagicMock(
-            owner_type="agent",
-            owner_name="bot-b",
-            owner_token_fingerprint=token_fingerprint("agent-token-b"),
-            is_connected=MagicMock(return_value=True),
-        ))
+        mgr.get_session = AsyncMock(
+            return_value=MagicMock(
+                owner_type="agent",
+                owner_name="bot-b",
+                owner_token_fingerprint=token_fingerprint("agent-token-b"),
+                is_connected=MagicMock(return_value=True),
+            )
+        )
         return mgr
 
     @classmethod
     def _make_master_session_mock(cls):
         mgr = cls._base_mock()
-        mgr.get_session = AsyncMock(return_value=MagicMock(
-            owner_type="master",
-            owner_name="admin",
-            owner_token_fingerprint=token_fingerprint("secret-42"),
-            is_connected=MagicMock(return_value=True),
-        ))
+        mgr.get_session = AsyncMock(
+            return_value=MagicMock(
+                owner_type="master",
+                owner_name="admin",
+                owner_token_fingerprint=token_fingerprint("secret-42"),
+                is_connected=MagicMock(return_value=True),
+            )
+        )
         return mgr
 
     @classmethod
@@ -174,20 +187,23 @@ class TestSessionOwnershipHTTP:
         monkeypatch.setattr(settings, "api_key", "secret-42")
         monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
         monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
-        monkeypatch.setattr(settings, "agent_token_scopes",
-                            ["ssh:connect", "ssh:execute", "ssh:disconnect", "ssh:files"])
+        monkeypatch.setattr(
+            settings,
+            "agent_token_scopes",
+            ["ssh:connect", "ssh:execute", "ssh:disconnect", "ssh:files"],
+        )
         monkeypatch.setattr(settings, "agent_token_expires_at", None)
 
-        monkeypatch.setattr(
-            "app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1"
-        )
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
 
         # Bypass pydantic-settings __setattr__ issues in CI by working
         # around the token_store + agent_token validation path entirely.
         # Instead of patching settings fields (which pydantic-settings 2.6.0
         # doesn't honour via __setattr__ in Debian Bookworm), we patch
         # is_agent_token_valid at the module level to recognise fixed tokens.
-        async def _fake_is_agent_token_valid(settings, provided: str, token_store=None) -> AuthIdentity | None:
+        async def _fake_is_agent_token_valid(
+            settings, provided: str, token_store=None
+        ) -> AuthIdentity | None:
             if provided in ("agent-token-a", "agent-token-b"):
                 return AuthIdentity(
                     token_type="agent",
@@ -196,6 +212,7 @@ class TestSessionOwnershipHTTP:
                     scopes=("ssh:connect", "ssh:execute", "ssh:disconnect", "ssh:files"),
                 )
             return None
+
         monkeypatch.setattr(
             "app.auth_middleware.is_agent_token_valid",
             _fake_is_agent_token_valid,
@@ -204,6 +221,7 @@ class TestSessionOwnershipHTTP:
     def _override_manager(self, client, mock_mgr):
         """Replace manager on the live app after TestClient lifespan."""
         from app import state as _app_state
+
         _app_state.manager = mock_mgr
 
     def _make_file_editor_mock(self):
@@ -223,7 +241,9 @@ class TestSessionOwnershipHTTP:
                 headers={"X-API-Key": "secret-42"},
                 json={"session_id": "s-1", "command": "ls"},
             )
-        assert resp.status_code in (200, 404), f"Expected 200 or 404, got {resp.status_code}: {resp.text}"
+        assert resp.status_code in (200, 404), (
+            f"Expected 200 or 404, got {resp.status_code}: {resp.text}"
+        )
 
     def test_agent_can_execute_on_own_session(self, monkeypatch):
         self._patch_base(monkeypatch)
@@ -234,7 +254,9 @@ class TestSessionOwnershipHTTP:
                 headers={"Authorization": "Bearer agent-token-a"},
                 json={"session_id": "s-1", "command": "ls"},
             )
-        assert resp.status_code in (200, 404), f"Expected 200 or 404, got {resp.status_code}: {resp.text}"
+        assert resp.status_code in (200, 404), (
+            f"Expected 200 or 404, got {resp.status_code}: {resp.text}"
+        )
 
     def test_agent_cannot_execute_on_other_agent_session(self, monkeypatch):
         self._patch_base(monkeypatch)
@@ -287,6 +309,7 @@ class TestSessionOwnershipHTTP:
             mock_mgr = self._make_cross_tenant_session_mock()
             self._override_manager(client, mock_mgr)
             from app import state as _app_state
+
             _app_state.file_editor = self._make_file_editor_mock()
             resp = client.post(
                 "/api/file/read",
@@ -381,15 +404,19 @@ class TestSessionOwnershipHTTP:
             return rec
 
         mgr = self._base_mock()
-        mgr.get_session = AsyncMock(return_value=MagicMock(
-            owner_type="agent",
-            owner_name="bot-a",
-            owner_token_fingerprint=fp_a,
-        ))
-        mgr.list_sessions = AsyncMock(return_value=[
-            _make_session_rec("s-a", fp_a),
-            _make_session_rec("s-b", fp_b),
-        ])
+        mgr.get_session = AsyncMock(
+            return_value=MagicMock(
+                owner_type="agent",
+                owner_name="bot-a",
+                owner_token_fingerprint=fp_a,
+            )
+        )
+        mgr.list_sessions = AsyncMock(
+            return_value=[
+                _make_session_rec("s-a", fp_a),
+                _make_session_rec("s-b", fp_b),
+            ]
+        )
 
         with TestClient(app) as client:
             self._override_manager(client, mgr)
@@ -423,10 +450,12 @@ class TestSessionOwnershipHTTP:
             return rec
 
         mgr = self._base_mock()
-        mgr.list_sessions = AsyncMock(return_value=[
-            _make_session_rec("s-a", fp_a),
-            _make_session_rec("s-b", fp_b),
-        ])
+        mgr.list_sessions = AsyncMock(
+            return_value=[
+                _make_session_rec("s-a", fp_a),
+                _make_session_rec("s-b", fp_b),
+            ]
+        )
 
         with TestClient(app) as client:
             self._override_manager(client, mgr)
@@ -447,13 +476,16 @@ class TestSessionOwnershipHTTP:
             mock_mgr = self._make_cross_tenant_session_mock()
             self._override_manager(client, mock_mgr)
             from app import state as _app_state
+
             _app_state.file_editor = self._make_file_editor_mock()
             resp = client.post(
                 "/api/file/read",
                 headers={"X-API-Key": "secret-42"},
                 json={"session_id": "s-2", "path": "/etc/hostname"},
             )
-        assert resp.status_code in (200, 422), f"Expected 200 or 422, got {resp.status_code}: {resp.text}"
+        assert resp.status_code in (200, 422), (
+            f"Expected 200 or 422, got {resp.status_code}: {resp.text}"
+        )
 
 
 class TestAuthIdentityFingerprint:

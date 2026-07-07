@@ -1,14 +1,14 @@
 """Tests for OpenCode runner wrapper — opencode_runner_wrapper module."""
- 
+
 from __future__ import annotations
- 
+
 import os
 import shutil
 import tempfile
 from pathlib import Path
- 
+
 import pytest
- 
+
 from scripts.opencode_runner_wrapper import (
     build_result_summary,
     find_opencode_bin,
@@ -18,7 +18,9 @@ from scripts.opencode_runner_wrapper import (
     write_task_file,
 )
 
-OPENCODE_BIN = os.getenv("OPENCODE_BIN") or shutil.which("opencode") or "/root/.opencode/bin/opencode"
+OPENCODE_BIN = (
+    os.getenv("OPENCODE_BIN") or shutil.which("opencode") or "/root/.opencode/bin/opencode"
+)
 pytestmark = pytest.mark.skipif(
     not os.path.exists(OPENCODE_BIN),
     reason="OpenCode binary not available; set OPENCODE_BIN to run integration tests",

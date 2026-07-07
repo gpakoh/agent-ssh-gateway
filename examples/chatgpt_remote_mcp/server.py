@@ -39,9 +39,7 @@ from tool_scopes import (  # noqa: E402
     has_required_scope,
 )
 
-_spec = importlib.util.spec_from_file_location(
-    "mcp_server_module", MCP_SERVER_DIR / "server.py"
-)
+_spec = importlib.util.spec_from_file_location("mcp_server_module", MCP_SERVER_DIR / "server.py")
 _mcp_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mcp_mod)
 mcp = _mcp_mod.mcp
@@ -160,9 +158,7 @@ async def _get_token_scopes(auth_token: str | None) -> list[str]:
     return []
 
 
-async def _check_tool_scope(
-    request: Request, path: str, body: bytes
-) -> JSONResponse | None:
+async def _check_tool_scope(request: Request, path: str, body: bytes) -> JSONResponse | None:
     """Check scope enforcement for a request. Returns blocking response or None."""
     if MCP_SCOPE_ENFORCEMENT == "off":
         return None
@@ -173,10 +169,7 @@ async def _check_tool_scope(
     # Fleet route check
     allowed, scope = check_fleet_route(path, token_scopes)
     if not allowed:
-        msg = (
-            f"SCOPE_DENIED fleet_route={path} required={scope} "
-            f"token_scopes={token_scopes}"
-        )
+        msg = f"SCOPE_DENIED fleet_route={path} required={scope} token_scopes={token_scopes}"
         print(msg, file=sys.stderr)
         if MCP_SCOPE_ENFORCEMENT == "enforce":
             return JSONResponse(
@@ -194,17 +187,13 @@ async def _check_tool_scope(
     if has_required_scope(token_scopes, tool_name):
         if MCP_SCOPE_ENFORCEMENT == "audit":
             print(
-                f"SCOPE_ALLOWED tool={tool_name} required={required} "
-                f"token_scopes={token_scopes}",
+                f"SCOPE_ALLOWED tool={tool_name} required={required} token_scopes={token_scopes}",
                 file=sys.stderr,
             )
         return None
 
     # Denied
-    msg = (
-        f"SCOPE_DENIED tool={tool_name} required={required} "
-        f"token_scopes={token_scopes}"
-    )
+    msg = f"SCOPE_DENIED tool={tool_name} required={required} token_scopes={token_scopes}"
     print(msg, file=sys.stderr)
 
     if MCP_SCOPE_ENFORCEMENT == "enforce":
@@ -321,6 +310,7 @@ CONSENT_HTML = """<!DOCTYPE html>
 
 async def consent_handler(request: Request):
     from urllib.parse import urlencode, urlparse, urlunparse
+
     if request.method == "GET":
         client_id = request.query_params.get("client_id", "")
         redirect_uri = request.query_params.get("redirect_uri", "")
@@ -330,9 +320,13 @@ async def consent_handler(request: Request):
         resource = request.query_params.get("resource", "")
         error = request.query_params.get("error", "")
         html = CONSENT_HTML.format(
-            client_id=client_id, redirect_uri=redirect_uri,
-            scope=scope, state=state, code_challenge=code_challenge,
-            resource=resource, error=error,
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            scope=scope,
+            state=state,
+            code_challenge=code_challenge,
+            resource=resource,
+            error=error,
         )
         return HTMLResponse(html, status_code=200)
 
@@ -347,23 +341,31 @@ async def consent_handler(request: Request):
 
     if not password or password != MCP_AUTHORIZE_PASSWORD:
         from urllib.parse import urlencode
+
         params = {
-            "client_id": client_id, "redirect_uri": redirect_uri,
-            "scope": scope_str, "state": state,
-            "code_challenge": code_challenge, "resource": resource,
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "scope": scope_str,
+            "state": state,
+            "code_challenge": code_challenge,
+            "resource": resource,
             "error": "Invalid password. Try again.",
         }
         return RedirectResponse(url="/oauth/consent?" + urlencode(params), status_code=303)
 
     from examples.mcp_server.oauth_provider import _parse_scopes
+
     prov = getattr(_mcp_mod, "_auth_provider", None)
     if not prov:
         return JSONResponse({"error": "OAuth provider not available"}, status_code=500)
 
     scopes = _parse_scopes(scope_str)
     result = prov.create_authorization_code(
-        client_id=client_id, redirect_uri=redirect_uri,
-        code_challenge=code_challenge, state=state, scopes=scopes,
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        code_challenge=code_challenge,
+        state=state,
+        scopes=scopes,
     )
     parsed = urlparse(redirect_uri)
     qs = {}

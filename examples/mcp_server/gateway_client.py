@@ -15,9 +15,7 @@ from command_policy import validate_readonly_command
 def _project_root() -> str:
     root = os.environ.get("MCP_GATEWAY_PROJECT_ROOT", "").strip().rstrip("/")
     if not root:
-        raise GatewayClientError(
-            "MCP_GATEWAY_PROJECT_ROOT is required for project tools"
-        )
+        raise GatewayClientError("MCP_GATEWAY_PROJECT_ROOT is required for project tools")
     return root
 
 
@@ -53,9 +51,7 @@ def resolve_file_path(path: str) -> str:
             return path
         if not path.startswith(root):
             allowed = root or "(not set)"
-            raise GatewayClientError(
-                f"absolute path {path!r} is outside allowed root {allowed}"
-            )
+            raise GatewayClientError(f"absolute path {path!r} is outside allowed root {allowed}")
         return path
 
     if root:
@@ -91,7 +87,9 @@ class GatewayClient:
         self._reconnect_lock = threading.Lock()
         self._ssh_host = os.environ.get("GATEWAY_SSH_HOST", "")
         self._ssh_port = int(os.environ.get("GATEWAY_SSH_PORT", "22"))
-        self._ssh_user = os.environ.get("GATEWAY_SSH_USER", "") or os.environ.get("GATEWAY_SSH_USERNAME", "")
+        self._ssh_user = os.environ.get("GATEWAY_SSH_USER", "") or os.environ.get(
+            "GATEWAY_SSH_USERNAME", ""
+        )
         self._ssh_password = os.environ.get("GATEWAY_SSH_PASSWORD", "")
         self._ssh_private_key = os.environ.get("GATEWAY_SSH_PRIVATE_KEY", "")
         if not self._ssh_private_key:
@@ -130,9 +128,7 @@ class GatewayClient:
             timeout=30,
         )
         if response.status_code >= 400:
-            raise GatewayClientError(
-                f"auto-reconnect failed: {response.status_code}"
-            )
+            raise GatewayClientError(f"auto-reconnect failed: {response.status_code}")
         data = response.json()
         self.session_id = data["session_id"]
 
@@ -141,15 +137,12 @@ class GatewayClient:
         func: Any,
     ) -> Any:
         @functools.wraps(func)
-        def wrapper(self: "GatewayClient", *args: Any, **kwargs: Any) -> Any:
+        def wrapper(self: GatewayClient, *args: Any, **kwargs: Any) -> Any:
             for attempt in range(2):
                 try:
                     return func(self, *args, **kwargs)
                 except GatewayClientError as e:
-                    if (
-                        attempt == 0
-                        and GatewayClient._SESSION_NOT_FOUND in str(e)
-                    ):
+                    if attempt == 0 and GatewayClient._SESSION_NOT_FOUND in str(e):
                         old_sid = self.session_id
                         with self._reconnect_lock:
                             if self.session_id == old_sid:
@@ -168,9 +161,7 @@ class GatewayClient:
             timeout=30,
         )
         if response.status_code >= 400:
-            raise GatewayClientError(
-                f"GET {path} failed: {response.status_code} {response.text}"
-            )
+            raise GatewayClientError(f"GET {path} failed: {response.status_code} {response.text}")
         return response.json()
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -181,9 +172,7 @@ class GatewayClient:
             timeout=30,
         )
         if response.status_code >= 400:
-            raise GatewayClientError(
-                f"POST {path} failed: {response.status_code} {response.text}"
-            )
+            raise GatewayClientError(f"POST {path} failed: {response.status_code} {response.text}")
         return response.json()
 
     def _require_session_id(self) -> str:
@@ -203,9 +192,7 @@ class GatewayClient:
         return self._get(f"/api/ssh/session/{sid}/health")
 
     @_retry_on_session_not_found
-    def execute_restricted(
-        self, command: str, session_id: str | None = None
-    ) -> dict[str, Any]:
+    def execute_restricted(self, command: str, session_id: str | None = None) -> dict[str, Any]:
         sid = session_id or self._require_session_id()
         safe_command = validate_readonly_command(command)
         return self._post(
@@ -220,9 +207,7 @@ class GatewayClient:
         )
 
     @_retry_on_session_not_found
-    def execute_project_command(
-        self, project: str, command: str
-    ) -> dict[str, Any]:
+    def execute_project_command(self, project: str, command: str) -> dict[str, Any]:
         sid = self._require_session_id()
         root = _project_root()
         proj = _safe_project(project)
@@ -241,31 +226,23 @@ class GatewayClient:
     def job_status(self, job_id: str) -> dict[str, Any]:
         return self._get(f"/api/jobs/{job_id}/status")
 
-    def job_result(
-        self, job_id: str, redact_output: bool = True
-    ) -> dict[str, Any]:
+    def job_result(self, job_id: str, redact_output: bool = True) -> dict[str, Any]:
         return self._get(
             f"/api/jobs/{job_id}/result",
             {"redact_output": str(redact_output).lower()},
         )
 
-    def wait_job(
-        self, job_id: str, timeout_sec: int | None = None
-    ) -> dict[str, Any]:
+    def wait_job(self, job_id: str, timeout_sec: int | None = None) -> dict[str, Any]:
         deadline = time.time() + (timeout_sec or self.job_timeout)
         while time.time() < deadline:
             status = self.job_status(job_id)
             if status.get("status") in {"completed", "failed", "cancelled"}:
                 return self.job_result(job_id)
             time.sleep(1)
-        raise GatewayClientError(
-            f"Job {job_id} did not finish before timeout"
-        )
+        raise GatewayClientError(f"Job {job_id} did not finish before timeout")
 
     @_retry_on_session_not_found
-    def read_file(
-        self, path: str, session_id: str | None = None
-    ) -> dict[str, Any]:
+    def read_file(self, path: str, session_id: str | None = None) -> dict[str, Any]:
         sid = session_id or self._require_session_id()
         return self._post("/api/file/read", {"session_id": sid, "path": path})
 
@@ -288,9 +265,7 @@ class GatewayClient:
             },
         )
 
-    def repo_status(
-        self, session_id: str | None = None
-    ) -> dict[str, Any]:
+    def repo_status(self, session_id: str | None = None) -> dict[str, Any]:
         commands = {
             "pwd": "pwd",
             "status": "git status --short",

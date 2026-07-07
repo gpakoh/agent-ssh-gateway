@@ -1,11 +1,11 @@
 """Pydantic models for API requests and responses."""
 
-
 from pydantic import BaseModel, Field, HttpUrl, SecretStr, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Connection
 # ---------------------------------------------------------------------------
+
 
 class ConnectRequest(BaseModel):
     """Request body for creating an SSH connection."""
@@ -51,6 +51,7 @@ class ConnectResponse(BaseModel):
 # Execution
 # ---------------------------------------------------------------------------
 
+
 class ExecuteRequest(BaseModel):
     """Request body for executing a command."""
 
@@ -79,6 +80,7 @@ class ExecuteResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Session Management
 # ---------------------------------------------------------------------------
+
 
 class DisconnectRequest(BaseModel):
     """Request body for closing a session."""
@@ -198,6 +200,7 @@ class EventHookDeliveryResponse(BaseModel):
 # Health
 # ---------------------------------------------------------------------------
 
+
 class HealthResponse(BaseModel):
     """Health check response."""
 
@@ -266,6 +269,7 @@ class AgentTokenRefreshResponse(BaseModel):
 # Error
 # ---------------------------------------------------------------------------
 
+
 class ErrorResponse(BaseModel):
     """Error response."""
 
@@ -293,6 +297,7 @@ class ValidationErrorResponse(BaseModel):
 # Session Configuration
 # ---------------------------------------------------------------------------
 
+
 class SessionTimeoutRequest(BaseModel):
     """Request to update session timeout."""
 
@@ -319,6 +324,7 @@ class SessionConfigResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Background Jobs
 # ---------------------------------------------------------------------------
+
 
 class JobRunRequest(BaseModel):
     """Request to start a background job."""
@@ -373,6 +379,7 @@ class JobListResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # File Edit
 # ---------------------------------------------------------------------------
+
 
 class EditOperation(BaseModel):
     """Single file edit operation."""
@@ -450,11 +457,16 @@ class PatchApplyResponse(BaseModel):
 # Context Management
 # ---------------------------------------------------------------------------
 
+
 class ContextCreateRequest(BaseModel):
     """Request to create a development context."""
 
     session_id: str = Field(..., min_length=1)
-    name: str | None = Field(default=None, min_length=1, description="Context name (e.g., 'gateway_refactor'). Auto-generated if not provided.")
+    name: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Context name (e.g., 'gateway_refactor'). Auto-generated if not provided.",
+    )
     path: str = Field(..., min_length=1, description="Working directory path")
     branch: str | None = Field(default=None, description="Git branch to checkout/create")
     auto_commit: bool = Field(default=False, description="Auto-commit on successful edits")
@@ -475,6 +487,7 @@ class GitInfoResponse(BaseModel):
 
 class TabStateResponse(BaseModel):
     """Tab (open file) state."""
+
     path: str
     active: bool
     cursor: dict = Field(default_factory=dict)
@@ -484,6 +497,7 @@ class TabStateResponse(BaseModel):
 
 class SmartContextStateResponse(BaseModel):
     """Smart context state."""
+
     tabs: list[TabStateResponse]
     active_tab: str | None = None
     command_history: list[dict] = Field(default_factory=list)
@@ -636,6 +650,7 @@ class ValidateRequest(BaseModel):
 # Smart Context
 # ---------------------------------------------------------------------------
 
+
 class OpenFileRequest(BaseModel):
     """Request to open file in smart context."""
 
@@ -697,12 +712,15 @@ class RemoveBookmarkRequest(BaseModel):
 # Batch Operations
 # ---------------------------------------------------------------------------
 
+
 class BatchOperation(BaseModel):
     """Single batch operation."""
 
     type: str = Field(..., pattern="^(read|edit|create|delete|rename|copy|execute)$")
     path: str = Field(default="", description="File path (relative to context path)")
-    operations: list[EditOperation] = Field(default_factory=list, description="Edit operations (for type=edit)")
+    operations: list[EditOperation] = Field(
+        default_factory=list, description="Edit operations (for type=edit)"
+    )
     content: str = Field(default="", description="File content (for type=create)")
     new_path: str = Field(default="", description="New path (for type=rename)")
     dest_path: str = Field(default="", description="Destination path (for type=copy)")
@@ -714,6 +732,7 @@ class BatchOperation(BaseModel):
     def validate_command(cls, v):
         if v:
             from app.security import sanitize_command
+
             sanitize_command(v)
         return v
 
@@ -769,6 +788,7 @@ class BatchReadResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Code Intelligence
 # ---------------------------------------------------------------------------
+
 
 class CodeSearchRequest(BaseModel):
     """Request to search code."""
@@ -861,6 +881,7 @@ class CodeCompleteResponse(BaseModel):
 # Error Recovery
 # ---------------------------------------------------------------------------
 
+
 class CreateBackupRequest(BaseModel):
     """Request to create a backup."""
 
@@ -903,6 +924,7 @@ class RecoveryActionResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Global Search & Replace
 # ---------------------------------------------------------------------------
+
 
 class GlobalSearchRequest(BaseModel):
     """Request for global search."""
@@ -974,6 +996,7 @@ class GlobalReplaceResponse(BaseModel):
 # File Tree Explorer
 # ---------------------------------------------------------------------------
 
+
 class FileTreeRequest(BaseModel):
     """Request to get file tree."""
 
@@ -1007,6 +1030,7 @@ class FileTreeResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Template Library
 # ---------------------------------------------------------------------------
+
 
 class TemplateInfo(BaseModel):
     """Template information."""
@@ -1054,6 +1078,7 @@ class TemplateRenderResponse(BaseModel):
 # Smart Diff
 # ---------------------------------------------------------------------------
 
+
 class DiffLine(BaseModel):
     """Single diff line."""
 
@@ -1089,6 +1114,7 @@ class FileEditWithContextResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Project Analytics
 # ---------------------------------------------------------------------------
+
 
 class ProjectAnalyticsRequest(BaseModel):
     """Request to analyze project."""
@@ -1154,6 +1180,7 @@ class ProjectAnalyticsResponse(BaseModel):
 # Server Management
 # ---------------------------------------------------------------------------
 
+
 class ServerInfo(BaseModel):
     """Server information."""
 
@@ -1214,6 +1241,7 @@ class ServerConnectResponse(BaseModel):
 # PTY (interactive Terminal)
 # ---------------------------------------------------------------------------
 
+
 class PTYCreateRequest(BaseModel):
     """Request to create PTY session."""
 
@@ -1244,6 +1272,7 @@ class PTYCloseRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Snapshot System
 # ---------------------------------------------------------------------------
+
 
 class SnapshotInfo(BaseModel):
     """Snapshot information."""
@@ -1292,6 +1321,7 @@ class SnapshotActionResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # CI/CD Webhooks
 # ---------------------------------------------------------------------------
+
 
 class WebhookConfigResponse(BaseModel):
     """Webhook configuration."""
@@ -1353,6 +1383,7 @@ class DeploymentInfo(BaseModel):
 # Project Introspection
 # ---------------------------------------------------------------------------
 
+
 class ProjectStructureRequest(BaseModel):
     """Request to get project structure."""
 
@@ -1388,6 +1419,7 @@ class ProjectStructureResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Batch Edit
 # ---------------------------------------------------------------------------
+
 
 class BatchEditOperation(BaseModel):
     """Single file edit operation for batch editing."""
@@ -1457,12 +1489,15 @@ class BulkExecuteResponse(BaseModel):
 # Upload/download (JSON Body Fallback)
 # ---------------------------------------------------------------------------
 
+
 class FileUploadRequest(BaseModel):
     """Request to upload file via JSON body."""
 
     session_id: str = Field(..., min_length=1)
     path: str = Field(..., min_length=1)
-    content: str = Field(..., min_length=1, max_length=10_000_000, description="Base64-encoded content")
+    content: str = Field(
+        ..., min_length=1, max_length=10_000_000, description="Base64-encoded content"
+    )
 
 
 class FileUploadResponse(BaseModel):
@@ -1503,6 +1538,7 @@ class FileWriteResponse(BaseModel):
 # AST Refactor
 # ---------------------------------------------------------------------------
 
+
 class ASTRefactorRenameRequest(BaseModel):
     """Request to rename a symbol using AST.
 
@@ -1511,7 +1547,9 @@ class ASTRefactorRenameRequest(BaseModel):
 
     session_id: str = Field(..., min_length=1)
     path: str | None = Field(default=None, min_length=1, description="Single file path")
-    files: list[str] = Field(default_factory=list, description="Multiple file paths (alternative to 'path')")
+    files: list[str] = Field(
+        default_factory=list, description="Multiple file paths (alternative to 'path')"
+    )
     old_name: str = Field(..., min_length=1)
     new_name: str = Field(..., min_length=1)
 
@@ -1540,7 +1578,9 @@ class ASTRefactorRenameResponse(BaseModel):
     new_name: str
     replacements: int = 0
     code: str = ""
-    files: list[ASTRefactorFileResult] = Field(default_factory=list, description="Results per file when 'files' array used")
+    files: list[ASTRefactorFileResult] = Field(
+        default_factory=list, description="Results per file when 'files' array used"
+    )
     total_files: int = 0
     files_changed: int = 0
 
@@ -1585,8 +1625,10 @@ class ASTAnalyzeResponse(BaseModel):
 # Known Hosts
 # ---------------------------------------------------------------------------
 
+
 class KnownHostEntry(BaseModel):
     """Host key entry from the known-hosts store."""
+
     host: str
     port: int
     key_type: str

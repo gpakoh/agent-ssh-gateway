@@ -41,10 +41,7 @@ def _require_env(name: str) -> str:
 
 
 def _subagents_enabled() -> bool:
-    return (
-        "--enable-subagents" in sys.argv
-        or os.environ.get("RLM_ENABLE_SUBAGENTS", "0") == "1"
-    )
+    return "--enable-subagents" in sys.argv or os.environ.get("RLM_ENABLE_SUBAGENTS", "0") == "1"
 
 
 def _dry_run() -> None:
@@ -74,17 +71,13 @@ def _dry_run() -> None:
         checks.append(("GATEWAY_API_KEY set", has_key))
         if has_key:
             authed = gateway_check_auth()
-            checks.append(
-                ("GET /api/ssh/sessions → API key accepted", authed)
-            )
+            checks.append(("GET /api/ssh/sessions → API key accepted", authed))
 
         session_id = os.environ.get("GATEWAY_SESSION_ID")
         checks.append(("GATEWAY_SESSION_ID set", bool(session_id)))
         if session_id:
             alive = gateway_check_session(session_id)
-            checks.append(
-                (f"GET /api/ssh/session/{session_id}/health → alive", alive)
-            )
+            checks.append((f"GET /api/ssh/session/{session_id}/health → alive", alive))
             if alive:
                 print("\n--- repo_status smoke ---")
                 try:
@@ -118,9 +111,9 @@ def main() -> None:
 
     if len(sys.argv) < 2:
         raise SystemExit(
-            'Usage:'
+            "Usage:"
             '\n  python auditor.py "Investigate why CI is failing"'
-            '\n  python auditor.py --dry-run'
+            "\n  python auditor.py --dry-run"
             '\n  python auditor.py --enable-subagents "Investigate CI failure"'
         )
 
@@ -129,6 +122,7 @@ def main() -> None:
 
     from rlm import RLM  # noqa: PLC0415
     from rlm.logger import RLMLogger  # noqa: PLC0415
+
     logger = RLMLogger(log_dir=os.environ.get("RLM_LOG_DIR", "./logs"))
 
     subagents = _subagents_enabled()

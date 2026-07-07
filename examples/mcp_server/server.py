@@ -208,7 +208,9 @@ if _auth_provider is not None:
         _auth_provider.set_token_store(_token_store)
         _loaded = _auth_provider.load_tokens()
         if _loaded:
-            print(f"  TokenStore: {_loaded} tokens loaded from {_token_store._path}", file=sys.stderr)
+            print(
+                f"  TokenStore: {_loaded} tokens loaded from {_token_store._path}", file=sys.stderr
+            )
     except Exception as _exc:
         print(f"  TokenStore: error loading tokens: {_exc}", file=sys.stderr)
 
@@ -221,13 +223,13 @@ if os.environ.get("MCP_AGENT_BACKEND_ROUTER_ENABLED", "false").strip().lower() =
         _agent_router = AgentBackendRouter(
             fallback_order=[
                 x.strip()
-                for x in os.environ.get(
-                    "MCP_BACKEND_FALLBACK_ORDER", "opencode,mimo"
-                ).split(",")
+                for x in os.environ.get("MCP_BACKEND_FALLBACK_ORDER", "opencode,mimo").split(",")
                 if x.strip()
             ],
         )
-        print(f"  backend router: enabled ({len(_agent_router._backends)} backends)", file=sys.stderr)
+        print(
+            f"  backend router: enabled ({len(_agent_router._backends)} backends)", file=sys.stderr
+        )
     except Exception as _exc:
         print(f"  backend router: init error: {_exc}", file=sys.stderr)
 
@@ -1114,7 +1116,10 @@ async def github_list_commits(
             await client.list_commits(owner, repo, sha=sha, per_page=per_page),
         )
     return text_result(
-        tool="github_list_commits", title="GitHub commits", text=f"Commits: {data['count']}", data=data
+        tool="github_list_commits",
+        title="GitHub commits",
+        text=f"Commits: {data['count']}",
+        data=data,
     )
 
 
@@ -1184,7 +1189,10 @@ async def github_list_pull_requests(
             await client.list_pull_requests(owner, repo, state=state, per_page=per_page),
         )
     return text_result(
-        tool="github_list_pull_requests", title="GitHub PRs", text=f"PRs: {data['count']}", data=data
+        tool="github_list_pull_requests",
+        title="GitHub PRs",
+        text=f"PRs: {data['count']}",
+        data=data,
     )
 
 

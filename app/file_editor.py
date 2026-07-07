@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 # Edit Operations
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class EditOperation:
     """Single file edit operation."""
@@ -29,6 +30,7 @@ class EditOperation:
 # ---------------------------------------------------------------------------
 # File Editor
 # ---------------------------------------------------------------------------
+
 
 class FileEditor:
     """Edit files on remote SSH servers."""
@@ -52,7 +54,7 @@ class FileEditor:
 
     async def write_file(self, session_id: str, path: str, content: str) -> None:
         """Write content to a remote file using base64 encoding via heredoc.
-        
+
         Automatically creates parent directories if they don't exist.
         """
         import base64
@@ -65,7 +67,9 @@ class FileEditor:
                 session_id, f"mkdir -p '{self._escape(parent_dir)}'", timeout=10
             )
             if mkdir_result["exit_code"] != 0:
-                raise ExecutionError(f"Cannot create directory {parent_dir}: {mkdir_result['stderr']}")
+                raise ExecutionError(
+                    f"Cannot create directory {parent_dir}: {mkdir_result['stderr']}"
+                )
 
         MAX_HEREDOC_SIZE = 500 * 1024
         raw = content.encode("utf-8")
@@ -93,7 +97,7 @@ class FileEditor:
         """
         # Check If First Operation Is Create (creates New File)
         is_create = operations and operations[0].get("type") == "create"
-        
+
         if is_create:
             # Start With Empty Content For Create Operation
             content = ""
@@ -125,9 +129,7 @@ class FileEditor:
                     timeout=10,
                 )
                 if backup_result["exit_code"] != 0:
-                    raise ExecutionError(
-                        f"Backup failed: {backup_result['stderr']}"
-                    )
+                    raise ExecutionError(f"Backup failed: {backup_result['stderr']}")
             await self.write_file(session_id, path, content)
 
         return {
@@ -244,9 +246,7 @@ class FileEditor:
         import base64
 
         encoded = base64.b64encode(patch_content.encode("utf-8")).decode("ascii")
-        cmd = (
-            f"echo '{encoded}' | base64 -d | patch -p{strip} 2>&1"
-        )
+        cmd = f"echo '{encoded}' | base64 -d | patch -p{strip} 2>&1"
         result = await self._ssh.execute(session_id, cmd, timeout=30)
 
         if result["exit_code"] != 0 and "succeeded" not in result["stdout"]:

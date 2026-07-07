@@ -24,9 +24,7 @@ class Settings(BaseSettings):
     # SSH defaults
     ssh_default_port: int = 22
     ssh_default_timeout: int = 120  # seconds
-    ssh_strict_host_key_checking: bool = Field(
-        default=True, alias="SSH_STRICT_HOST_KEY_CHECKING"
-    )
+    ssh_strict_host_key_checking: bool = Field(default=True, alias="SSH_STRICT_HOST_KEY_CHECKING")
     known_hosts_store: str = Field(default="", alias="KNOWN_HOSTS_STORE")
     known_hosts_file: str = Field(default="known_hosts", alias="KNOWN_HOSTS_FILE")
 
@@ -57,7 +55,7 @@ class Settings(BaseSettings):
         if not self.jwt_secret:
             raise RuntimeError(
                 "JWT_SECRET must be configured when Web UI auth is enabled. "
-                "Generate one with: python3 -c \"import secrets; print(secrets.token_hex(32))\""
+                'Generate one with: python3 -c "import secrets; print(secrets.token_hex(32))"'
             )
         return self.jwt_secret
 
@@ -87,15 +85,11 @@ class Settings(BaseSettings):
 
     # Redis
     redis_url: str = Field(default="redis://redis:6379/0", alias="REDIS_URL")
-    redis_job_queue_enabled: bool = Field(
-        default=False, alias="REDIS_JOB_QUEUE_ENABLED"
-    )
+    redis_job_queue_enabled: bool = Field(default=False, alias="REDIS_JOB_QUEUE_ENABLED")
 
     # PostgreSQL
     database_url: str = Field(default="", alias="DATABASE_URL")
-    persistent_sessions_enabled: bool = Field(
-        default=False, alias="PERSISTENT_SESSIONS_ENABLED"
-    )
+    persistent_sessions_enabled: bool = Field(default=False, alias="PERSISTENT_SESSIONS_ENABLED")
 
     event_hooks_enabled: bool = Field(default=False, alias="EVENT_HOOKS_ENABLED")
     event_hooks_max: int = Field(default=50, alias="EVENT_HOOKS_MAX")
@@ -109,7 +103,9 @@ class Settings(BaseSettings):
     event_hooks_poll_interval: float = Field(default=5.0, alias="EVENT_HOOKS_POLL_INTERVAL")
     event_hooks_lease_ttl: float = Field(default=30.0, alias="EVENT_HOOKS_LEASE_TTL")
     event_hooks_retention_sent_days: int = Field(default=7, alias="EVENT_HOOKS_RETENTION_SENT_DAYS")
-    event_hooks_retention_dead_days: int = Field(default=30, alias="EVENT_HOOKS_RETENTION_DEAD_DAYS")
+    event_hooks_retention_dead_days: int = Field(
+        default=30, alias="EVENT_HOOKS_RETENTION_DEAD_DAYS"
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -42,7 +42,9 @@ def _setup_globals():
     state_module.bulk_ops = MagicMock()
     state_module.bulk_ops.execute_batch_commands = AsyncMock(return_value=[])
     state_module.context_manager = AsyncMock()
-    state_module.context_manager.get_context = AsyncMock(return_value=MagicMock(session_id="mock-session"))
+    state_module.context_manager.get_context = AsyncMock(
+        return_value=MagicMock(session_id="mock-session")
+    )
     state_module.batch_manager = AsyncMock()
     state_module.server_manager = MagicMock()
     mock_result = MagicMock()
@@ -58,8 +60,14 @@ def _setup_globals():
     yield
 
     for n in [
-        "manager", "audit_logger", "file_editor", "job_manager",
-        "bulk_ops", "context_manager", "batch_manager", "server_manager",
+        "manager",
+        "audit_logger",
+        "file_editor",
+        "job_manager",
+        "bulk_ops",
+        "context_manager",
+        "batch_manager",
+        "server_manager",
     ]:
         try:
             delattr(state_module, n)
@@ -67,13 +75,16 @@ def _setup_globals():
             pass
 
 
-@pytest.mark.parametrize("status,keyword", [
-    (502, "connection"),
-    (504, "timeout"),
-    (404, "not found"),
-    (401, "authentication"),
-    (500, "internal"),
-])
+@pytest.mark.parametrize(
+    "status,keyword",
+    [
+        (502, "connection"),
+        (504, "timeout"),
+        (404, "not found"),
+        (401, "authentication"),
+        (500, "internal"),
+    ],
+)
 def test_err_auto_code(status, keyword):
     result = _err(status, f"some {keyword} error")
     assert result["http_status"] == status
@@ -132,9 +143,7 @@ def _validation_auth(monkeypatch):
     monkeypatch.setattr(settings, "api_key", "test-key")
     monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
     monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
-    monkeypatch.setattr(
-        "app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1"
-    )
+    monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
 
 
 @pytest.mark.asyncio
@@ -175,8 +184,10 @@ async def test_validation_exception_handler_invalid_type(_validation_auth):
         r = await client.post(
             "/api/ssh/connect",
             json={
-                "host": "127.0.0.1", "port": "not-a-number",
-                "username": "test", "password": "test",
+                "host": "127.0.0.1",
+                "port": "not-a-number",
+                "username": "test",
+                "password": "test",
             },
             headers={"X-API-Key": "test-key"},
         )

@@ -195,11 +195,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_create = sub.add_parser("create", help="Create a new bearer token")
     p_create.add_argument("name", help="Human-readable token name")
-    p_create.add_argument("--profile", default=None, choices=list(ACCESS_PROFILES), help="Access profile (default: $MCP_PUBLIC_TOKEN_PROFILE or 'full')")
-    p_create.add_argument("--output", default="text", choices=["text", "json"], help="Output format")
+    p_create.add_argument(
+        "--profile",
+        default=None,
+        choices=list(ACCESS_PROFILES),
+        help="Access profile (default: $MCP_PUBLIC_TOKEN_PROFILE or 'full')",
+    )
+    p_create.add_argument(
+        "--output", default="text", choices=["text", "json"], help="Output format"
+    )
 
     p_list = sub.add_parser("list", help="List stored tokens")
-    p_list.add_argument("--profile", default=None, choices=list(ACCESS_PROFILES), help="Filter by profile")
+    p_list.add_argument(
+        "--profile", default=None, choices=list(ACCESS_PROFILES), help="Filter by profile"
+    )
     p_list.add_argument("--output", default="text", choices=["text", "json"], help="Output format")
 
     p_revoke = sub.add_parser("revoke", help="Revoke a token by ID")
@@ -207,7 +216,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_rotate = sub.add_parser("rotate", help="Rotate a token (revoke old, create new)")
     p_rotate.add_argument("id", help="Token ID to rotate")
-    p_rotate.add_argument("--output", default="text", choices=["text", "json"], help="Output format")
+    p_rotate.add_argument(
+        "--output", default="text", choices=["text", "json"], help="Output format"
+    )
 
     return parser
 

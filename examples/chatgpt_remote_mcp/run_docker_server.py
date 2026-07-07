@@ -1,4 +1,5 @@
 """Entry point for agent-mcp-docker.service."""
+
 from __future__ import annotations
 
 import os
@@ -26,7 +27,5 @@ t = threading.Thread(
 )
 t.start()
 
-app = create_auth_proxy(
-    upstream_port=internal_port, valid_tokens={env["token"]}
-)
+app = create_auth_proxy(upstream_port=internal_port, valid_tokens={env["token"]})
 uvicorn.run(app, host=env["host"], port=public_port)

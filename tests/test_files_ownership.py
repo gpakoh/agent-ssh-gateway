@@ -26,12 +26,14 @@ class TestFileAnalysisOwnership:
     @classmethod
     def _make_cross_tenant_session_mock(cls):
         mgr = cls._base_mock()
-        mgr.get_session = AsyncMock(return_value=MagicMock(
-            owner_type="agent",
-            owner_name="bot-b",
-            owner_token_fingerprint=token_fingerprint("agent-token-b"),
-            is_connected=MagicMock(return_value=True),
-        ))
+        mgr.get_session = AsyncMock(
+            return_value=MagicMock(
+                owner_type="agent",
+                owner_name="bot-b",
+                owner_token_fingerprint=token_fingerprint("agent-token-b"),
+                is_connected=MagicMock(return_value=True),
+            )
+        )
         return mgr
 
     @classmethod
@@ -40,16 +42,18 @@ class TestFileAnalysisOwnership:
         monkeypatch.setattr(settings, "api_key", "secret-42")
         monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
         monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
-        monkeypatch.setattr(settings, "agent_token_scopes",
-                            ["ssh:connect", "ssh:execute", "ssh:disconnect", "ssh:files"])
+        monkeypatch.setattr(
+            settings,
+            "agent_token_scopes",
+            ["ssh:connect", "ssh:execute", "ssh:disconnect", "ssh:files"],
+        )
         monkeypatch.setattr(settings, "agent_token_expires_at", None)
 
-        monkeypatch.setattr(
-            "app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1"
-        )
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
 
         async def _fake_is_agent_token_valid(settings, provided: str, token_store=None):
             from app.auth_middleware import AuthIdentity
+
             if provided in ("agent-token-a", "agent-token-b"):
                 return AuthIdentity(
                     token_type="agent",
@@ -58,6 +62,7 @@ class TestFileAnalysisOwnership:
                     scopes=("ssh:connect", "ssh:execute", "ssh:disconnect", "ssh:files"),
                 )
             return None
+
         monkeypatch.setattr(
             "app.auth_middleware.is_agent_token_valid",
             _fake_is_agent_token_valid,
@@ -65,6 +70,7 @@ class TestFileAnalysisOwnership:
 
     def _override_manager(self, client, mock_mgr):
         from app import state as _app_state
+
         _app_state.manager = mock_mgr
 
     def _make_file_editor_mock(self):
@@ -88,6 +94,7 @@ class TestFileAnalysisOwnership:
         with TestClient(app) as client:
             self._override_manager(client, self._make_cross_tenant_session_mock())
             from app import state as _app_state
+
             _app_state.file_editor = self._make_file_editor_mock()
             resp = client.post(
                 "/api/ast/rename",
@@ -106,6 +113,7 @@ class TestFileAnalysisOwnership:
         with TestClient(app) as client:
             self._override_manager(client, self._make_cross_tenant_session_mock())
             from app import state as _app_state
+
             _app_state.file_editor = self._make_file_editor_mock()
             resp = client.post(
                 "/api/ast/rename",
@@ -117,7 +125,9 @@ class TestFileAnalysisOwnership:
                     "path": "/tmp/test.py",
                 },
             )
-        assert resp.status_code in (200, 500), f"Expected 200 or 500, got {resp.status_code}: {resp.text}"
+        assert resp.status_code in (200, 500), (
+            f"Expected 200 or 500, got {resp.status_code}: {resp.text}"
+        )
 
     # ------------------------------------------------------------------
     # AST extract — agent blocked
@@ -128,6 +138,7 @@ class TestFileAnalysisOwnership:
         with TestClient(app) as client:
             self._override_manager(client, self._make_cross_tenant_session_mock())
             from app import state as _app_state
+
             _app_state.file_editor = self._make_file_editor_mock()
             resp = client.post(
                 "/api/ast/extract",
@@ -147,6 +158,7 @@ class TestFileAnalysisOwnership:
         with TestClient(app) as client:
             self._override_manager(client, self._make_cross_tenant_session_mock())
             from app import state as _app_state
+
             _app_state.file_editor = self._make_file_editor_mock()
             resp = client.post(
                 "/api/ast/extract",
@@ -159,7 +171,9 @@ class TestFileAnalysisOwnership:
                     "func_name": "new_func",
                 },
             )
-        assert resp.status_code in (200, 500), f"Expected 200 or 500, got {resp.status_code}: {resp.text}"
+        assert resp.status_code in (200, 500), (
+            f"Expected 200 or 500, got {resp.status_code}: {resp.text}"
+        )
 
     # ------------------------------------------------------------------
     # AST analyze — agent blocked
@@ -170,6 +184,7 @@ class TestFileAnalysisOwnership:
         with TestClient(app) as client:
             self._override_manager(client, self._make_cross_tenant_session_mock())
             from app import state as _app_state
+
             _app_state.file_editor = self._make_file_editor_mock()
             resp = client.post(
                 "/api/ast/analyze",
@@ -186,6 +201,7 @@ class TestFileAnalysisOwnership:
         with TestClient(app) as client:
             self._override_manager(client, self._make_cross_tenant_session_mock())
             from app import state as _app_state
+
             _app_state.file_editor = self._make_file_editor_mock()
             resp = client.post(
                 "/api/ast/analyze",
@@ -195,7 +211,9 @@ class TestFileAnalysisOwnership:
                     "path": "/tmp/test.py",
                 },
             )
-        assert resp.status_code in (200, 500), f"Expected 200 or 500, got {resp.status_code}: {resp.text}"
+        assert resp.status_code in (200, 500), (
+            f"Expected 200 or 500, got {resp.status_code}: {resp.text}"
+        )
 
     # ------------------------------------------------------------------
     # Bulk read — agent blocked
@@ -206,6 +224,7 @@ class TestFileAnalysisOwnership:
         with TestClient(app) as client:
             self._override_manager(client, self._make_cross_tenant_session_mock())
             from app import state as _app_state
+
             _app_state.file_editor = self._make_file_editor_mock()
             _app_state.bulk_ops = self._make_bulk_ops_mock()
             resp = client.post(
@@ -223,6 +242,7 @@ class TestFileAnalysisOwnership:
         with TestClient(app) as client:
             self._override_manager(client, self._make_cross_tenant_session_mock())
             from app import state as _app_state
+
             _app_state.file_editor = self._make_file_editor_mock()
             _app_state.bulk_ops = self._make_bulk_ops_mock()
             resp = client.post(
@@ -244,6 +264,7 @@ class TestFileAnalysisOwnership:
         with TestClient(app) as client:
             self._override_manager(client, self._make_cross_tenant_session_mock())
             from app import state as _app_state
+
             _app_state.file_editor = self._make_file_editor_mock()
             resp = client.post(
                 "/api/bulk/edit",
@@ -253,9 +274,7 @@ class TestFileAnalysisOwnership:
                     "files": [
                         {
                             "path": "/tmp/test.py",
-                            "operations": [
-                                {"type": "replace", "old": "foo", "new": "bar"}
-                            ],
+                            "operations": [{"type": "replace", "old": "foo", "new": "bar"}],
                         }
                     ],
                 },
@@ -267,6 +286,7 @@ class TestFileAnalysisOwnership:
         with TestClient(app) as client:
             self._override_manager(client, self._make_cross_tenant_session_mock())
             from app import state as _app_state
+
             _app_state.file_editor = self._make_file_editor_mock()
             resp = client.post(
                 "/api/bulk/edit",
@@ -276,9 +296,7 @@ class TestFileAnalysisOwnership:
                     "files": [
                         {
                             "path": "/tmp/test.py",
-                            "operations": [
-                                {"type": "replace", "old": "foo", "new": "bar"}
-                            ],
+                            "operations": [{"type": "replace", "old": "foo", "new": "bar"}],
                         }
                     ],
                 },

@@ -93,8 +93,14 @@ async def add_known_host(
     Supports RSA, ECDSA, and Ed25519 key types.
     """
     proc = await asyncio.create_subprocess_exec(
-        "ssh-keyscan", "-T", "5", "-t", "rsa,ecdsa,ed25519",
-        "-p", str(req.port), req.host,
+        "ssh-keyscan",
+        "-T",
+        "5",
+        "-t",
+        "rsa,ecdsa,ed25519",
+        "-p",
+        str(req.port),
+        req.host,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -111,6 +117,7 @@ async def add_known_host(
             detail=f"ssh-keyscan returned no keys for {req.host}:{req.port}",
         )
     import paramiko
+
     added = 0
     errors = []
     for line in output.splitlines():

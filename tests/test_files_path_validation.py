@@ -20,23 +20,21 @@ def _patch_base(monkeypatch):
     monkeypatch.setattr(settings, "api_key", "secret-42")
     monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
     monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
-    monkeypatch.setattr(
-        "app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1"
-    )
-    monkeypatch.setattr(
-        "app.auth_middleware.is_ip_allowed", lambda ip, nets: True
-    )
+    monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
+    monkeypatch.setattr("app.auth_middleware.is_ip_allowed", lambda ip, nets: True)
 
 
 def _make_manager_mock():
     mgr = MagicMock()
     mgr.execute = AsyncMock(return_value={"stdout": "ok", "stderr": "", "exit_code": 0})
-    mgr.get_session = AsyncMock(return_value=MagicMock(
-        owner_type="master",
-        owner_name="admin",
-        owner_token_fingerprint="fp",
-        is_connected=MagicMock(return_value=True),
-    ))
+    mgr.get_session = AsyncMock(
+        return_value=MagicMock(
+            owner_type="master",
+            owner_name="admin",
+            owner_token_fingerprint="fp",
+            is_connected=MagicMock(return_value=True),
+        )
+    )
     mgr.disconnect = AsyncMock()
     mgr.stop_cleanup_task = AsyncMock()
     mgr.list_sessions = AsyncMock(return_value=[])
@@ -47,6 +45,7 @@ def _make_manager_mock():
 
 def _override_manager(client, mock_mgr):
     from app import state as _app_state
+
     _app_state.manager = mock_mgr
 
 

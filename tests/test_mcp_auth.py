@@ -19,6 +19,7 @@ def token_client(valid_token):
         import importlib
 
         import examples.chatgpt_remote_mcp.server as srv
+
         importlib.reload(srv)
         app = srv.create_proxy_app()
         yield TestClient(app)
@@ -32,6 +33,7 @@ def oauth_client(valid_token):
         import importlib
 
         import examples.chatgpt_remote_mcp.server as srv
+
         importlib.reload(srv)
         app = srv.create_proxy_app()
         yield TestClient(app)

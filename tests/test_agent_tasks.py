@@ -141,9 +141,7 @@ class TestArchiveAgentTask:
             calls.append((project, command))
             return {"stdout": "archived a12345678901", "stderr": "", "exit_code": 0}
 
-        result = archive_agent_task(
-            fake_run_cmd, project="my-proj", task_id="a12345678901"
-        )
+        result = archive_agent_task(fake_run_cmd, project="my-proj", task_id="a12345678901")
         assert result["stdout"] == "archived a12345678901"
         assert ".ai-bridge/archive/" in calls[0][1]
         assert "mv" in calls[0][1]

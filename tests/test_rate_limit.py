@@ -35,7 +35,10 @@ def _setup_globals():
     state_module.file_editor = AsyncMock()
     state_module.file_editor.edit_file = AsyncMock(
         return_value={
-            "path": "/tmp/test.txt", "operations_applied": 0, "changed": False, "success": True,
+            "path": "/tmp/test.txt",
+            "operations_applied": 0,
+            "changed": False,
+            "success": True,
         }
     )
     state_module.job_manager = AsyncMock()
@@ -60,8 +63,13 @@ def _setup_globals():
     yield
 
     for n in [
-        "manager", "audit_logger", "file_editor", "job_manager",
-        "bulk_ops", "context_manager", "batch_manager",
+        "manager",
+        "audit_logger",
+        "file_editor",
+        "job_manager",
+        "bulk_ops",
+        "context_manager",
+        "batch_manager",
     ]:
         try:
             delattr(state_module, n)
@@ -77,11 +85,19 @@ async def test_connect_first_ok_then_429():
     so any request returning 429 validates the limit works.
     """
     transport = ASGITransport(app=main_module.app)
-    async with AsyncClient(transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}) as client:
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}
+    ) as client:
         for _ in range(20):
-            r = await client.post("/api/ssh/connect", json={
-                "host": "127.0.0.1", "port": 22, "username": "test", "password": "test",
-            })
+            r = await client.post(
+                "/api/ssh/connect",
+                json={
+                    "host": "127.0.0.1",
+                    "port": 22,
+                    "username": "test",
+                    "password": "test",
+                },
+            )
             if r.status_code == 429:
                 assert "application/json" in r.headers.get("content-type", "")
                 return
@@ -92,10 +108,16 @@ async def test_connect_first_ok_then_429():
 async def test_execute_ok():
     """POST /api/ssh/execute returns 200 (60/min, not hit by burst tests)."""
     transport = ASGITransport(app=main_module.app)
-    async with AsyncClient(transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}) as client:
-        r = await client.post("/api/ssh/execute", json={
-            "session_id": "test", "command": "ls",
-        })
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}
+    ) as client:
+        r = await client.post(
+            "/api/ssh/execute",
+            json={
+                "session_id": "test",
+                "command": "ls",
+            },
+        )
         assert r.status_code == 200
 
 
@@ -103,11 +125,17 @@ async def test_execute_ok():
 async def test_edit_ok():
     """PATCH /api/file/edit returns 200 (30/min)."""
     transport = ASGITransport(app=main_module.app)
-    async with AsyncClient(transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}) as client:
-        r = await client.patch("/api/file/edit", json={
-            "session_id": "test", "path": "/tmp/test.txt",
-            "operations": [{"type": "append", "text": "hello"}],
-        })
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}
+    ) as client:
+        r = await client.patch(
+            "/api/file/edit",
+            json={
+                "session_id": "test",
+                "path": "/tmp/test.txt",
+                "operations": [{"type": "append", "text": "hello"}],
+            },
+        )
         assert r.status_code == 200
 
 
@@ -115,10 +143,16 @@ async def test_edit_ok():
 async def test_jobs_run_ok():
     """POST /api/jobs/run returns 200 (20/min)."""
     transport = ASGITransport(app=main_module.app)
-    async with AsyncClient(transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}) as client:
-        r = await client.post("/api/jobs/run", json={
-            "session_id": "test", "command": "ls",
-        })
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}
+    ) as client:
+        r = await client.post(
+            "/api/jobs/run",
+            json={
+                "session_id": "test",
+                "command": "ls",
+            },
+        )
         assert r.status_code == 200
 
 
@@ -126,16 +160,26 @@ async def test_jobs_run_ok():
 async def test_bulk_execute_first_ok_then_429():
     """POST /api/bulk/execute: first succeeds, burst returns 429 (10/min)."""
     transport = ASGITransport(app=main_module.app)
-    async with AsyncClient(transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}) as client:
-        r1 = await client.post("/api/bulk/execute", json={
-            "session_id": "test", "commands": ["ls"],
-        })
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-API-Key": "test-key"}
+    ) as client:
+        r1 = await client.post(
+            "/api/bulk/execute",
+            json={
+                "session_id": "test",
+                "commands": ["ls"],
+            },
+        )
         assert r1.status_code == 200
 
         for _ in range(11):
-            r = await client.post("/api/bulk/execute", json={
-                "session_id": "test", "commands": ["ls"],
-            })
+            r = await client.post(
+                "/api/bulk/execute",
+                json={
+                    "session_id": "test",
+                    "commands": ["ls"],
+                },
+            )
             if r.status_code == 429:
                 return
         assert r.status_code == 429

@@ -1,4 +1,5 @@
 """Tests for Mimo runner MCP tool — mimo_tools module."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -25,7 +26,13 @@ def _capture_command(project: str, cmd: str) -> dict:
 
 class TestModelValidation:
     def test_valid_models(self):
-        for m in ["big-pickle", "zen/big-pickle", "claude-sonnet-4", "provider:model", "a:b@1.2+c-d"]:
+        for m in [
+            "big-pickle",
+            "zen/big-pickle",
+            "claude-sonnet-4",
+            "provider:model",
+            "a:b@1.2+c-d",
+        ]:
             assert validate_model(m) == m
 
     def test_none_passes_through(self):
@@ -140,7 +147,7 @@ class TestCommandConstruction:
     def test_uses_absolute_paths(self):
         _capture_command.last_cmd = None
         project_run_mimo(_capture_command, project="test", task_id=TASK_ID)
-        assert '$PROJECT_REAL/$td/' in _capture_command.last_cmd
+        assert "$PROJECT_REAL/$td/" in _capture_command.last_cmd
 
     def test_worktree_path_guard_present(self):
         _capture_command.last_cmd = None
@@ -170,7 +177,15 @@ class TestProjectRunMimo:
 
     def test_returns_structured_result_keys(self):
         result = project_run_mimo(_fake_run_cmd, project="test", task_id=TASK_ID)
-        for key in ("task_id", "status", "exit_code", "stdout", "stderr", "started_at", "finished_at"):
+        for key in (
+            "task_id",
+            "status",
+            "exit_code",
+            "stdout",
+            "stderr",
+            "started_at",
+            "finished_at",
+        ):
             assert key in result, f"missing key: {key}"
 
     def test_status_needs_review_on_zero_exit(self):
@@ -196,6 +211,7 @@ class TestToolRegistration:
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
         import importlib
         import sys
+
         example_dir = EXAMPLE_DIR
         monkeypatch.syspath_prepend(str(example_dir))
         sys.modules.pop("tool_modes", None)
@@ -206,6 +222,7 @@ class TestToolRegistration:
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
         import importlib
         import sys
+
         example_dir = EXAMPLE_DIR
         monkeypatch.syspath_prepend(str(example_dir))
         sys.modules.pop("tool_modes", None)
@@ -223,6 +240,7 @@ class TestServerTool:
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
         import importlib
         import sys
+
         example_dir = EXAMPLE_DIR
         monkeypatch.syspath_prepend(str(example_dir))
         monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")

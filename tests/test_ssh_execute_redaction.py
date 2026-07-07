@@ -22,12 +22,14 @@ class TestExecuteOutputRedaction:
     @classmethod
     def _base_manager_mock(cls):
         mgr = MagicMock()
-        mgr.execute = AsyncMock(return_value={
-            "stdout": SECRET_OUTPUT,
-            "stderr": "error: password=admin123",
-            "exit_code": 0,
-            "duration": 0.1,
-        })
+        mgr.execute = AsyncMock(
+            return_value={
+                "stdout": SECRET_OUTPUT,
+                "stderr": "error: password=admin123",
+                "exit_code": 0,
+                "duration": 0.1,
+            }
+        )
         mgr.disconnect = AsyncMock()
         mgr.stop_cleanup_task = AsyncMock()
         mgr.list_sessions = AsyncMock(return_value=[])
@@ -38,16 +40,19 @@ class TestExecuteOutputRedaction:
     @classmethod
     def _make_session_mock(cls):
         mgr = cls._base_manager_mock()
-        mgr.get_session = AsyncMock(return_value=MagicMock(
-            owner_type="master",
-            owner_name="admin",
-            owner_token_fingerprint=token_fingerprint("secret-42"),
-            is_connected=MagicMock(return_value=True),
-        ))
+        mgr.get_session = AsyncMock(
+            return_value=MagicMock(
+                owner_type="master",
+                owner_name="admin",
+                owner_token_fingerprint=token_fingerprint("secret-42"),
+                is_connected=MagicMock(return_value=True),
+            )
+        )
         return mgr
 
     def _setup_state(self):
         from app import state as _app_state
+
         _app_state.manager = self._make_session_mock()
         _app_state.audit_logger = MagicMock()
         _app_state.job_manager = AsyncMock()

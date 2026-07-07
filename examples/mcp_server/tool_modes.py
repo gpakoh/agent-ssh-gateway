@@ -143,15 +143,11 @@ def get_tool_mode() -> ToolMode:
     raw = os.environ.get("MCP_GATEWAY_TOOL_MODE", DEFAULT_TOOL_MODE).strip().lower()
     if raw not in TOOL_NAMES_BY_MODE:
         allowed = ", ".join(sorted(TOOL_NAMES_BY_MODE))
-        raise ToolModeError(
-            f"Invalid MCP_GATEWAY_TOOL_MODE={raw!r}; expected one of: {allowed}"
-        )
+        raise ToolModeError(f"Invalid MCP_GATEWAY_TOOL_MODE={raw!r}; expected one of: {allowed}")
     return cast(ToolMode, raw)
 
 
-def should_register_tool(
-    tool_name: str, mode: ToolMode | None = None
-) -> bool:
+def should_register_tool(tool_name: str, mode: ToolMode | None = None) -> bool:
     """Return whether a tool should be registered for the selected mode."""
     selected_mode = mode or get_tool_mode()
     if selected_mode not in TOOL_NAMES_BY_MODE:

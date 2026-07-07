@@ -21,9 +21,7 @@ def import_example_module(monkeypatch: pytest.MonkeyPatch, module_name: str):
 
 class TestChatgptModeVisibility:
     def test_excludes_generic_execute(self):
-        assert not should_register_tool(
-            "gateway_execute_restricted", "chatgpt"
-        )
+        assert not should_register_tool("gateway_execute_restricted", "chatgpt")
 
     def test_includes_health(self):
         assert should_register_tool("gateway_health", "chatgpt")
@@ -82,74 +80,56 @@ class TestChatgptModeVisibility:
 
 
 class TestChatgptToolsModule:
-    def test_working_directory_uses_fixed_command(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_working_directory_uses_fixed_command(self, monkeypatch: pytest.MonkeyPatch):
         chatgpt_tools = import_example_module(monkeypatch, "chatgpt_tools")
         client = _FakeClient()
         result = chatgpt_tools.working_directory(client)
         assert result["exit_code"] == 0
         assert client.commands == ["pwd"]
 
-    def test_git_status_uses_fixed_command(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_git_status_uses_fixed_command(self, monkeypatch: pytest.MonkeyPatch):
         chatgpt_tools = import_example_module(monkeypatch, "chatgpt_tools")
         client = _FakeClient()
         result = chatgpt_tools.git_status(client)
         assert result["exit_code"] == 0
         assert client.commands == ["git status --short"]
 
-    def test_run_tests_uses_fixed_command(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_run_tests_uses_fixed_command(self, monkeypatch: pytest.MonkeyPatch):
         chatgpt_tools = import_example_module(monkeypatch, "chatgpt_tools")
         client = _FakeClient()
         result = chatgpt_tools.run_tests(client)
         assert result["exit_code"] == 0
         assert client.commands == ["pytest -q"]
 
-    def test_run_lint_uses_fixed_command(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_run_lint_uses_fixed_command(self, monkeypatch: pytest.MonkeyPatch):
         chatgpt_tools = import_example_module(monkeypatch, "chatgpt_tools")
         client = _FakeClient()
         result = chatgpt_tools.run_lint(client)
         assert result["exit_code"] == 0
         assert client.commands == ["ruff check app tests examples"]
 
-    def test_run_compileall_uses_fixed_command(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_run_compileall_uses_fixed_command(self, monkeypatch: pytest.MonkeyPatch):
         chatgpt_tools = import_example_module(monkeypatch, "chatgpt_tools")
         client = _FakeClient()
         result = chatgpt_tools.run_compileall(client)
         assert result["exit_code"] == 0
-        assert client.commands == [
-            "python -m compileall app tests examples"
-        ]
+        assert client.commands == ["python -m compileall app tests examples"]
 
-    def test_recent_commits_uses_fixed_command(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_recent_commits_uses_fixed_command(self, monkeypatch: pytest.MonkeyPatch):
         chatgpt_tools = import_example_module(monkeypatch, "chatgpt_tools")
         client = _FakeClient()
         result = chatgpt_tools.recent_commits(client)
         assert result["exit_code"] == 0
         assert client.commands == ["git log --oneline -10"]
 
-    def test_git_diff_stat_uses_fixed_command(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_git_diff_stat_uses_fixed_command(self, monkeypatch: pytest.MonkeyPatch):
         chatgpt_tools = import_example_module(monkeypatch, "chatgpt_tools")
         client = _FakeClient()
         result = chatgpt_tools.git_diff_stat(client)
         assert result["exit_code"] == 0
         assert client.commands == ["git diff --stat"]
 
-    def test_show_changes_runs_two_commands(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_show_changes_runs_two_commands(self, monkeypatch: pytest.MonkeyPatch):
         chatgpt_tools = import_example_module(monkeypatch, "chatgpt_tools")
         client = _FakeClient()
         result = chatgpt_tools.show_changes(client)
@@ -165,9 +145,7 @@ class _FakeClient:
     def __init__(self) -> None:
         self.commands: list[str] = []
 
-    def execute_restricted(
-        self, command: str, session_id: str | None = None
-    ) -> dict:
+    def execute_restricted(self, command: str, session_id: str | None = None) -> dict:
         self.commands.append(command)
         return {"job_id": f"job-{len(self.commands)}"}
 

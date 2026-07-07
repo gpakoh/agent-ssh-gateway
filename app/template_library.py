@@ -24,9 +24,8 @@ async def {name}({params}):
                 "params": "",
                 "description": "Example endpoint",
                 "body": "# TODO: Implement",
-            }
+            },
         },
-        
         "pydantic_model": {
             "name": "Pydantic Model",
             "description": "Create a Pydantic model",
@@ -40,9 +39,8 @@ async def {name}({params}):
                 "name": "NewModel",
                 "description": "New model description",
                 "fields": "id: str = Field(...)",
-            }
+            },
         },
-        
         "class": {
             "name": "Python Class",
             "description": "Create a new class",
@@ -66,9 +64,8 @@ async def {name}({params}):
                 "method_params": "",
                 "method_description": "Process method",
                 "method_body": "pass",
-            }
+            },
         },
-        
         "function": {
             "name": "Function",
             "description": "Create a new function",
@@ -83,9 +80,8 @@ async def {name}({params}):
                 "params": "",
                 "description": "Function description",
                 "body": "pass",
-            }
+            },
         },
-        
         "test": {
             "name": "Pytest Test",
             "description": "Create a pytest test",
@@ -107,14 +103,13 @@ async def {name}({params}):
                 "arrange": "# Setup",
                 "act": "# Execute",
                 "assert_code": "assert True",
-            }
+            },
         },
-        
         "docker_compose_service": {
             "name": "Docker Compose Service",
             "description": "Add a service to docker-compose.yml",
             "language": "yaml",
-            "code": '''  {name}:
+            "code": """  {name}:
     image: {image}
     container_name: {name}
     restart: {restart}
@@ -126,7 +121,7 @@ async def {name}({params}):
       - {volume}
     networks:
       - {network}
-''',
+""",
             "params": {
                 "name": "service",
                 "image": "image:latest",
@@ -136,14 +131,13 @@ async def {name}({params}):
                 "env": "KEY=value",
                 "volume": "data:/data",
                 "network": "default",
-            }
+            },
         },
-        
         "nginx_config": {
             "name": "Nginx Config",
             "description": "Nginx server block",
             "language": "nginx",
-            "code": '''server {{
+            "code": """server {{
     listen {port};
     server_name {domain};
     
@@ -153,19 +147,18 @@ async def {name}({params}):
         proxy_set_header X-Real-IP $remote_addr;
     }}
 }}
-''',
+""",
             "params": {
                 "port": "80",
                 "domain": "example.com",
                 "upstream": "localhost:8080",
-            }
+            },
         },
-        
         "github_actions": {
             "name": "GitHub Actions Workflow",
             "description": "CI/CD workflow",
             "language": "yaml",
-            "code": '''name: {name}
+            "code": """name: {name}
 
 on:
   push:
@@ -192,13 +185,13 @@ jobs:
     - name: Run tests
       run: |
         pytest tests/ -x -q
-''',
+""",
             "params": {
                 "name": "CI",
                 "branch": "main",
                 "job_name": "test",
                 "python_version": "3.11",
-            }
+            },
         },
     }
 
@@ -236,10 +229,10 @@ jobs:
         template = cls.TEMPLATES.get(template_id)
         if not template:
             return None
-        
+
         # Merge with defaults
         merged_params = {**template["params"], **params}
-        
+
         try:
             return template["code"].format(**merged_params)
         except KeyError as exc:

@@ -43,7 +43,9 @@ async def github_get_repo(owner: str, repo: str) -> dict[str, Any]:
 
 @mcp.tool()
 async def github_list_branches(
-    owner: str, repo: str, per_page: int = 30,
+    owner: str,
+    repo: str,
+    per_page: int = 30,
 ) -> dict[str, Any]:
     """List branches in a repository. Returns branch names and commit SHAs."""
     async with _get_client() as client:
@@ -53,20 +55,27 @@ async def github_list_branches(
 
 @mcp.tool()
 async def github_list_commits(
-    owner: str, repo: str,
-    sha: str | None = None, per_page: int = 30,
+    owner: str,
+    repo: str,
+    sha: str | None = None,
+    per_page: int = 30,
 ) -> dict[str, Any]:
     """List commits in a repository. Optionally filter by branch SHA."""
     async with _get_client() as client:
         data = await client.list_commits(
-            owner, repo, sha=sha, per_page=per_page,
+            owner,
+            repo,
+            sha=sha,
+            per_page=per_page,
         )
     return normalize_list_response(data)
 
 
 @mcp.tool()
 async def github_get_file(
-    owner: str, repo: str, path: str,
+    owner: str,
+    repo: str,
+    path: str,
     branch: str | None = None,
 ) -> dict[str, Any]:
     """Get a file or directory contents from a repository. Returns base64-encoded content or directory listing."""
@@ -76,20 +85,27 @@ async def github_get_file(
 
 @mcp.tool()
 async def github_list_issues(
-    owner: str, repo: str,
-    state: str = "open", per_page: int = 30,
+    owner: str,
+    repo: str,
+    state: str = "open",
+    per_page: int = 30,
 ) -> dict[str, Any]:
     """List issues in a repository. State: open, closed, all."""
     async with _get_client() as client:
         data = await client.list_issues(
-            owner, repo, state=state, per_page=per_page,
+            owner,
+            repo,
+            state=state,
+            per_page=per_page,
         )
     return normalize_list_response(data)
 
 
 @mcp.tool()
 async def github_get_issue(
-    owner: str, repo: str, issue_number: int,
+    owner: str,
+    repo: str,
+    issue_number: int,
 ) -> dict[str, Any]:
     """Get details of a specific issue by number."""
     async with _get_client() as client:
@@ -98,20 +114,27 @@ async def github_get_issue(
 
 @mcp.tool()
 async def github_list_pull_requests(
-    owner: str, repo: str,
-    state: str = "open", per_page: int = 30,
+    owner: str,
+    repo: str,
+    state: str = "open",
+    per_page: int = 30,
 ) -> dict[str, Any]:
     """List pull requests in a repository. State: open, closed, all."""
     async with _get_client() as client:
         data = await client.list_pull_requests(
-            owner, repo, state=state, per_page=per_page,
+            owner,
+            repo,
+            state=state,
+            per_page=per_page,
         )
     return normalize_list_response(data)
 
 
 @mcp.tool()
 async def github_get_pull_request(
-    owner: str, repo: str, pull_number: int,
+    owner: str,
+    repo: str,
+    pull_number: int,
 ) -> dict[str, Any]:
     """Get details of a specific pull request by number."""
     async with _get_client() as client:
@@ -119,9 +142,7 @@ async def github_get_pull_request(
 
 
 # ── Auth proxy ────────────────────────────────────────────────────
-def create_auth_proxy(
-    *, upstream_port: int, valid_tokens: set[str]
-) -> Starlette:
+def create_auth_proxy(*, upstream_port: int, valid_tokens: set[str]) -> Starlette:
     client = httpx.AsyncClient(
         base_url=f"http://127.0.0.1:{upstream_port}",
         timeout=HTTP_TIMEOUT,
@@ -162,7 +183,5 @@ if __name__ == "__main__":
         daemon=True,
     ).start()
 
-    app = create_auth_proxy(
-        upstream_port=INTERNAL_PORT, valid_tokens={env["token"]}
-    )
+    app = create_auth_proxy(upstream_port=INTERNAL_PORT, valid_tokens={env["token"]})
     uvicorn.run(app, host=env["host"], port=env["port"])

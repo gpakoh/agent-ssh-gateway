@@ -1,4 +1,5 @@
 """Tests for TokenStore persistence."""
+
 import json
 import os
 import tempfile
@@ -80,17 +81,19 @@ def test_token_store_revoke_nonexistent(store_path):
 
 def test_token_store_find_by_hash(store_path):
     store = TokenStore(store_path)
-    store.add(StoredTokenEntry(
-        id="tok_find",
-        token_hash="sha256:findme",
-        name="findable",
-        profile="viewer",
-        scopes=["mcp:read"],
-        created_at="2026-06-26T12:00:00Z",
-        expires_at=None,
-        revoked_at=None,
-        last_used_at=None,
-    ))
+    store.add(
+        StoredTokenEntry(
+            id="tok_find",
+            token_hash="sha256:findme",
+            name="findable",
+            profile="viewer",
+            scopes=["mcp:read"],
+            created_at="2026-06-26T12:00:00Z",
+            expires_at=None,
+            revoked_at=None,
+            last_used_at=None,
+        )
+    )
     found = store.find_by_hash("sha256:findme")
     assert found is not None
     assert found.id == "tok_find"
@@ -99,11 +102,16 @@ def test_token_store_find_by_hash(store_path):
 
 def test_token_store_version_in_file(store_path):
     store = TokenStore(store_path)
-    store.add(StoredTokenEntry(
-        id="tok_v1", token_hash="sha256:v1", name="v1",
-        profile="full", scopes=["mcp:read"],
-        created_at="2026-06-26T12:00:00Z",
-    ))
+    store.add(
+        StoredTokenEntry(
+            id="tok_v1",
+            token_hash="sha256:v1",
+            name="v1",
+            profile="full",
+            scopes=["mcp:read"],
+            created_at="2026-06-26T12:00:00Z",
+        )
+    )
     with open(store_path) as f:
         data = json.load(f)
     assert data["version"] == 1

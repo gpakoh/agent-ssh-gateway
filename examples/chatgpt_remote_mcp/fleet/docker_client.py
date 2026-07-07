@@ -43,7 +43,9 @@ class DockerClient:
     """Read-only async subprocess wrapper for /usr/bin/docker."""
 
     async def _run(
-        self, argv: list[str], timeout: float = SUBPROCESS_TIMEOUT,
+        self,
+        argv: list[str],
+        timeout: float = SUBPROCESS_TIMEOUT,
     ) -> str:
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -52,14 +54,13 @@ class DockerClient:
         )
         try:
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout,
+                proc.communicate(),
+                timeout=timeout,
             )
         except TimeoutError:
             proc.kill()
             await proc.wait()
-            raise RuntimeError(
-                f"Command timed out after {timeout}s: {shlex.join(argv)}"
-            ) from None
+            raise RuntimeError(f"Command timed out after {timeout}s: {shlex.join(argv)}") from None
 
         if proc.returncode != 0:
             err = stderr.decode("utf-8", errors="replace").strip()
@@ -72,42 +73,31 @@ class DockerClient:
 
     def _validate_container_name(self, name: str) -> str:
         if not CONTAINER_NAME_RE.match(name):
-            raise ValueError(
-                f"Invalid container name: {shlex.quote(name)}"
-            )
+            raise ValueError(f"Invalid container name: {shlex.quote(name)}")
         return name
 
     def _validate_image_name(self, name: str) -> str:
         if not IMAGE_NAME_RE.match(name):
-            raise ValueError(
-                f"Invalid image name: {shlex.quote(name)}"
-            )
+            raise ValueError(f"Invalid image name: {shlex.quote(name)}")
         return name
 
     def _validate_service_name(self, name: str) -> str:
         if not SERVICE_NAME_RE.match(name):
-            raise ValueError(
-                f"Invalid service name: {shlex.quote(name)}"
-            )
+            raise ValueError(f"Invalid service name: {shlex.quote(name)}")
         return name
 
     def _validate_compose_file(self, path: str) -> str:
         if not COMPOSE_FILE_RE.match(path):
-            raise ValueError(
-                f"Invalid compose file path: {shlex.quote(path)}"
-            )
+            raise ValueError(f"Invalid compose file path: {shlex.quote(path)}")
         if path.startswith("/"):
-            raise ValueError(
-                f"Absolute path not allowed: {shlex.quote(path)}"
-            )
+            raise ValueError(f"Absolute path not allowed: {shlex.quote(path)}")
         if COMPOSE_PATH_TRAVERSAL_RE.search(path):
-            raise ValueError(
-                f"Path traversal not allowed: {shlex.quote(path)}"
-            )
+            raise ValueError(f"Path traversal not allowed: {shlex.quote(path)}")
         return path
 
     async def ps(
-        self, all: bool = False,
+        self,
+        all: bool = False,
         format: str | None = None,
     ) -> str:
         argv = [DOCKER_BIN, "ps"]
@@ -116,27 +106,34 @@ class DockerClient:
         if format:
             argv.extend(["--format", format])
         else:
-            argv.extend([
-                "--format",
-                "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}",
-            ])
+            argv.extend(
+                [
+                    "--format",
+                    "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}",
+                ]
+            )
         return await self._run(argv)
 
     async def images(
-        self, format: str | None = None,
+        self,
+        format: str | None = None,
     ) -> str:
         argv = [DOCKER_BIN, "images"]
         if format:
             argv.extend(["--format", format])
         else:
-            argv.extend([
-                "--format",
-                "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}",
-            ])
+            argv.extend(
+                [
+                    "--format",
+                    "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}",
+                ]
+            )
         return await self._run(argv)
 
     async def inspect(
-        self, name: str, max_lines: int | None = 500,
+        self,
+        name: str,
+        max_lines: int | None = 500,
     ) -> str:
         self._validate_container_name(name)
         argv = [DOCKER_BIN, "inspect", name]
@@ -177,7 +174,7 @@ class DockerClient:
         """
         m = _SECRET_ENV_KEY_RE.match(s)
         if m:
-            key_part = s[:m.end() - 1]
+            key_part = s[: m.end() - 1]
             return f"{key_part}={REDACTED}"
         return s
 
@@ -186,7 +183,9 @@ class DockerClient:
         return bool(_SECRET_DICT_KEY_RE.search(key))
 
     async def logs(
-        self, container: str, tail: int = 200,
+        self,
+        container: str,
+        tail: int = 200,
     ) -> str:
         self._validate_container_name(container)
         tail = max(1, min(tail, 1000))
@@ -194,20 +193,24 @@ class DockerClient:
         return await self._run(argv)
 
     async def stats(
-        self, format: str | None = None,
+        self,
+        format: str | None = None,
     ) -> str:
         argv = [DOCKER_BIN, "stats", "--no-stream"]
         if format:
             argv.extend(["--format", format])
         else:
-            argv.extend([
-                "--format",
-                "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}",
-            ])
+            argv.extend(
+                [
+                    "--format",
+                    "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}",
+                ]
+            )
         return await self._run(argv)
 
     async def compose_ps(
-        self, project_dir: str | None = None,
+        self,
+        project_dir: str | None = None,
         file_path: str | None = None,
         format: str | None = None,
     ) -> str:
@@ -221,14 +224,17 @@ class DockerClient:
         if format:
             argv.extend(["--format", format])
         else:
-            argv.extend([
-                "--format",
-                "table {{.Name}}\t{{.Status}}",
-            ])
+            argv.extend(
+                [
+                    "--format",
+                    "table {{.Name}}\t{{.Status}}",
+                ]
+            )
         return await self._run(argv, timeout=60.0)
 
     async def compose_services(
-        self, project_dir: str | None = None,
+        self,
+        project_dir: str | None = None,
         file_path: str | None = None,
     ) -> str:
         argv = [DOCKER_BIN, "compose"]
