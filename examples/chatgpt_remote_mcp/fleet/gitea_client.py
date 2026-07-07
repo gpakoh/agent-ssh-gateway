@@ -39,6 +39,7 @@ class GiteaClient:
             raise ValueError("GITEA_TOKEN is required")
         self._client = httpx.AsyncClient(
             base_url=API_BASE,
+            proxy=None,
             headers={
                 "Authorization": f"token {token}",
                 "Accept": "application/json",
