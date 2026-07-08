@@ -100,20 +100,23 @@ class ConfirmStore:
                 continue
             remaining = max(0, int(CONFIRM_TTL_SECONDS - elapsed))
             token_preview = action.confirm_token[:6] + "..."
-            result.append({
-                "action_id": action.action_id,
-                "tool": action.tool,
-                "summary": action.summary,
-                "risk": action.risk,
-                "expires_in_sec": remaining,
-                "confirm_token": token_preview,
-            })
+            result.append(
+                {
+                    "action_id": action.action_id,
+                    "tool": action.tool,
+                    "summary": action.summary,
+                    "risk": action.risk,
+                    "expires_in_sec": remaining,
+                    "confirm_token": token_preview,
+                }
+            )
         return result
 
     def cleanup_expired(self) -> int:
         now = time.monotonic()
         expired = [
-            aid for aid, action in self._actions.items()
+            aid
+            for aid, action in self._actions.items()
             if now - action.created_at > CONFIRM_TTL_SECONDS
         ]
         for aid in expired:
