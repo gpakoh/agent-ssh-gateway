@@ -136,16 +136,19 @@ def project_search_text(
     query: str,
     glob: str | None = None,
 ) -> dict[str, Any]:
-    cmd = "grep -RIn --exclude-dir=.git --exclude-dir=__pycache__"
-    cmd += " --exclude-dir=.venv --exclude-dir=node_modules"
-    cmd += " --exclude='*.pyc' --exclude='*.min.js'"
-    if glob:
-        if not _ALLOWED_PATH_RE.match(glob):
-            raise ValueError(f"invalid glob pattern: {glob!r}")
-        cmd += f" --include='{glob}'"
-    cmd += f" -e {_shell_escape(query)}"
-    cmd += " | head -200"
-    return run_project_command(client, project, cmd)
+    """Search for text across project files using pure Python pathlib — no shell execution."""
+    _validate_project(project)
+    project_dir = _project_root() / project
+    if not project_dir.is_dir():
+        raise ValueError(f"Project directory not found: {project_dir}")
+
+    from app.services.project_search import search_text
+
+    return search_text(
+        root=project_dir,
+        query=query,
+        glob=glob,
+    )
 
 
 def project_find_files(
