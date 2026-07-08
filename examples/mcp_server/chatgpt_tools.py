@@ -30,6 +30,7 @@ def _validate_project(project: str) -> str:
         raise ValueError(f"Path traversal blocked: {project!r}")
     return project.strip("/")
 
+
 # ── Safety helpers ──────────────────────────────────────────────
 
 _OUTPUT_LINE_LIMIT = 2000
@@ -169,7 +170,15 @@ def project_list_files(client: GatewayClient, project: str, pattern: str) -> dic
         raise ValueError(f"Invalid pattern: {pattern!r}")
 
     project_dir = _project_root() / _validate_project(project)
-    exclude_dirs = {".git", "__pycache__", ".venv", "node_modules", ".mypy_cache", ".ruff_cache", ".pytest_cache"}
+    exclude_dirs = {
+        ".git",
+        "__pycache__",
+        ".venv",
+        "node_modules",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".pytest_cache",
+    }
 
     files: list[str] = []
     for p in project_dir.rglob(pattern):
@@ -190,10 +199,18 @@ def project_list_files(client: GatewayClient, project: str, pattern: str) -> dic
     }
 
 
-_EXCLUDE_DIRS = frozenset({
-    ".git", "__pycache__", ".venv", "node_modules",
-    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".benchmarks",
-})
+_EXCLUDE_DIRS = frozenset(
+    {
+        ".git",
+        "__pycache__",
+        ".venv",
+        "node_modules",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".benchmarks",
+    }
+)
 
 
 def project_list_tree(client: GatewayClient, project: str, depth: int = 2) -> dict[str, Any]:

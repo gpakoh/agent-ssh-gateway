@@ -265,7 +265,9 @@ class GatewayClient:
             },
         )
 
-    def repo_status(self, session_id: str | None = None, project: str | None = None) -> dict[str, Any]:
+    def repo_status(
+        self, session_id: str | None = None, project: str | None = None
+    ) -> dict[str, Any]:
         commands = {
             "status": "git status --short",
             "recent_commits": "git log --oneline -10",
@@ -279,7 +281,7 @@ class GatewayClient:
                 job = self.execute_restricted(command, session_id=session_id)
             result = self.wait_job(job["job_id"])
             if name == "tags" and isinstance(result, dict):
-                stdout = (result.get("stdout") or result.get("output") or "")
+                stdout = result.get("stdout") or result.get("output") or ""
                 lines = stdout.strip().split("\n")[:10]
                 result["stdout"] = "\n".join(lines)
             output[name] = result
