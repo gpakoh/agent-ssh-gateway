@@ -26,7 +26,7 @@ known behavior, bugfix history.
 | Context7 | 2 | 8790 | `/mcp/context7` |
 | GitHub | 8 | 8791 | `/mcp/github` |
 | Gitea | 12 | 8792 | `/mcp/gitea` |
-| Docker | 7 | 8793 | `/mcp/docker` |
+| Docker | 14 | 8793 | `/mcp/docker` |
 | Postgres | 6 | 8794 | `/mcp/postgres` |
 
 ---
@@ -222,3 +222,34 @@ In token mode:
 5. **Rotate on suspicion** — if a token might be leaked, `revoke` it and `create` a new one
 6. **Service env files chmod 600** — all `/etc/agent-*-mcp-*.env` files must be 600.
    Fleet healthcheck verifies this automatically
+
+---
+
+## 8. Docker Operations Tools
+
+### Added in Session 160 (2026-07-08)
+
+New Docker tools for container lifecycle management:
+
+| Tool | Purpose | Safety |
+|------|---------|--------|
+| `docker_start` | Start a stopped container | Container name validation |
+| `docker_stop` | Stop a running container | Container name validation, timeout 1-120s |
+| `docker_restart` | Restart a container | Container name validation, timeout 1-120s |
+| `docker_compose_up` | Start Compose services | Path validation, service name validation |
+| `docker_compose_restart` | Restart Compose services | Path validation, service name validation |
+| `docker_compose_build` | Build Compose services | Path validation, service name validation |
+| `docker_compose_logs` | Fetch Compose service logs | Path validation, service name validation, tail 1-1000 |
+
+### Safety
+
+- All Docker commands use argv arrays (`["docker", "restart", "--time", "10", "web"]`) — never `shell=True`
+- Container names validated against `^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`
+- Compose paths validated against path traversal and restricted to allowed roots
+- Service names validated against `^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`
+- Timeouts bounded: 1-120s for stop/restart, 1-300s for compose build
+
+### Not included (reserved for future)
+
+- `docker_compose_down` — too destructive for current scope
+- `docker_rm/rmi/volume_rm/prune/exec/run` — dangerous operations

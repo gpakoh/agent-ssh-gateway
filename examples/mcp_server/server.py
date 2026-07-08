@@ -1312,6 +1312,88 @@ async def docker_compose_services(
     return await DockerClient().compose_services(project_dir=project_dir, file_path=file_path)
 
 
+# ── Docker write tools (Session 160) ─────────────────────────────
+
+
+@register_tool("docker_start")
+async def docker_start(container: str, timeout: int | None = None) -> str:
+    """Start a stopped container."""
+    return await DockerClient().start(container, timeout=timeout)
+
+
+@register_tool("docker_stop")
+async def docker_stop(container: str, timeout: int = 10) -> str:
+    """Stop a running container. timeout: seconds before force kill (1-120, default 10)."""
+    return await DockerClient().stop(container, timeout=timeout)
+
+
+@register_tool("docker_restart")
+async def docker_restart(container: str, timeout: int = 10) -> str:
+    """Restart a container. timeout: seconds before force kill (1-120, default 10)."""
+    return await DockerClient().restart(container, timeout=timeout)
+
+
+@register_tool("docker_compose_up")
+async def docker_compose_up(
+    project_dir: str | None = None,
+    file_path: str | None = None,
+    services: list[str] | None = None,
+    detach: bool = True,
+    build: bool = False,
+    timeout: int = 120,
+) -> str:
+    """Start services in a Docker Compose project. detach=True by default."""
+    return await DockerClient().compose_up(
+        project_dir=project_dir, file_path=file_path,
+        services=services, detach=detach, build=build, timeout=timeout,
+    )
+
+
+@register_tool("docker_compose_restart")
+async def docker_compose_restart(
+    project_dir: str | None = None,
+    file_path: str | None = None,
+    services: list[str] | None = None,
+    timeout: int = 30,
+) -> str:
+    """Restart services in a Docker Compose project."""
+    return await DockerClient().compose_restart(
+        project_dir=project_dir, file_path=file_path,
+        services=services, timeout=timeout,
+    )
+
+
+@register_tool("docker_compose_build")
+async def docker_compose_build(
+    project_dir: str | None = None,
+    file_path: str | None = None,
+    services: list[str] | None = None,
+    no_cache: bool = False,
+    timeout: int = 300,
+) -> str:
+    """Build (or rebuild) services in a Docker Compose project."""
+    return await DockerClient().compose_build(
+        project_dir=project_dir, file_path=file_path,
+        services=services, no_cache=no_cache, timeout=timeout,
+    )
+
+
+@register_tool("docker_compose_logs")
+async def docker_compose_logs(
+    project_dir: str | None = None,
+    file_path: str | None = None,
+    services: list[str] | None = None,
+    tail: int = 100,
+    follow: bool = False,
+    timestamps: bool = False,
+) -> str:
+    """Fetch logs from services in a Docker Compose project. tail: 1-1000 lines."""
+    return await DockerClient().compose_logs(
+        project_dir=project_dir, file_path=file_path,
+        services=services, tail=tail, follow=follow, timestamps=timestamps,
+    )
+
+
 # ── Postgres tools ────────────────────────────────────────────────
 
 

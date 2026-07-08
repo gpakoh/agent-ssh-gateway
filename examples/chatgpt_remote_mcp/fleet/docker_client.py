@@ -1,15 +1,18 @@
-"""Read-only Docker subprocess wrapper for fleet MCP adapter.
+"""Docker subprocess wrapper for fleet MCP adapter.
 
 Each tool builds its own argv list — never accepts a raw command string.
-All tools are read-only. Write/destructive commands have no implementation here.
+Read-only tools are in ps/images/inspect/logs/stats/compose_ps/compose_services.
+Write tools added in Session 160: start/stop/restart/compose_up/restart/build/logs.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shlex
+from pathlib import Path
 
 DOCKER_BIN = "/usr/bin/docker"
 SUBPROCESS_TIMEOUT = 30.0
@@ -94,6 +97,50 @@ class DockerClient:
         if COMPOSE_PATH_TRAVERSAL_RE.search(path):
             raise ValueError(f"Path traversal not allowed: {shlex.quote(path)}")
         return path
+
+    def _resolve_compose_file_path(
+        self,
+        file_path: str | None,
+        project_dir: str | None = None,
+        allowed_roots: set[str] | None = None,
+    ) -> str | None:
+        """Resolve a compose file path with safety checks.
+
+        Relative paths are joined under project_dir if given.
+        Absolute paths are allowed only if inside allowed_roots.
+
+        Returns the resolved path string, or None if file_path is None.
+        """
+        if file_path is None:
+            return None
+
+        if not COMPOSE_FILE_RE.match(file_path):
+            raise ValueError(f"Invalid compose file path: {shlex.quote(file_path)}")
+
+        if COMPOSE_PATH_TRAVERSAL_RE.search(file_path):
+            raise ValueError(f"Path traversal not allowed: {shlex.quote(file_path)}")
+
+        if file_path.startswith("/"):
+            roots = allowed_roots or set()
+            if not roots:
+                raise ValueError(
+                    f"Absolute path {shlex.quote(file_path)} not allowed: "
+                    "no allowed roots configured"
+                )
+            ok = any(file_path.startswith(r) for r in roots)
+            if not ok:
+                raise ValueError(
+                    f"Absolute path {shlex.quote(file_path)} is outside allowed root(s)"
+                )
+            return file_path
+
+        if project_dir:
+            pdir = Path(project_dir).resolve()
+            if not pdir.is_dir():
+                raise ValueError(f"Project directory does not exist: {shlex.quote(project_dir)}")
+            return str(pdir / file_path)
+
+        return file_path
 
     async def ps(
         self,
@@ -245,3 +292,131 @@ class DockerClient:
             argv.extend(["--project-directory", project_dir])
         argv.extend(["config", "--services"])
         return await self._run(argv, timeout=60.0)
+
+    # ── Write operations (Session 160) ──────────────────────────────
+
+    async def start(self, container: str, timeout: int | None = None) -> str:
+        """Start a stopped container."""
+        self._validate_container_name(container)
+        argv = [DOCKER_BIN, "start", container]
+        return await self._run(argv, timeout=float(timeout or SUBPROCESS_TIMEOUT))
+
+    @staticmethod
+    def _stop_argv(container: str, timeout: int = 10) -> list[str]:
+        """Build argv for docker stop (exposed for testing)."""
+        timeout = max(1, min(timeout, 120))
+        return [DOCKER_BIN, "stop", "--time", str(timeout), container]
+
+    async def stop(self, container: str, timeout: int = 10) -> str:
+        """Stop a running container. timeout: sec before force kill (1-120)."""
+        self._validate_container_name(container)
+        return await self._run(self._stop_argv(container, timeout))
+
+    @staticmethod
+    def _restart_argv(container: str, timeout: int = 10) -> list[str]:
+        """Build argv for docker restart (exposed for testing)."""
+        timeout = max(1, min(timeout, 120))
+        return [DOCKER_BIN, "restart", "--time", str(timeout), container]
+
+    async def restart(self, container: str, timeout: int = 10) -> str:
+        """Restart a container. timeout: sec before force kill (1-120)."""
+        self._validate_container_name(container)
+        return await self._run(self._restart_argv(container, timeout))
+
+    # ── Compose write operations (Session 160) ─────────────────────
+
+    def _compose_base_argv(
+        self, file_path: str | None = None, project_dir: str | None = None
+    ) -> list[str]:
+        argv = [DOCKER_BIN, "compose"]
+        if file_path:
+            argv.extend(["-f", file_path])
+        if project_dir:
+            argv.extend(["--project-directory", project_dir])
+        return argv
+
+    async def compose_up(
+        self,
+        project_dir: str | None = None,
+        file_path: str | None = None,
+        services: list[str] | None = None,
+        detach: bool = True,
+        build: bool = False,
+        timeout: int = 120,
+    ) -> str:
+        """Start services. detach=True by default; set build=True to rebuild."""
+        resolved = self._resolve_compose_file_path(file_path, project_dir)
+        argv = self._compose_base_argv(resolved, project_dir)
+        argv.append("up")
+        if detach:
+            argv.append("--detach")
+        if build:
+            argv.append("--build")
+        if services:
+            for s in services:
+                self._validate_service_name(s)
+            argv.extend(services)
+        return await self._run(argv, timeout=float(timeout))
+
+    async def compose_restart(
+        self,
+        project_dir: str | None = None,
+        file_path: str | None = None,
+        services: list[str] | None = None,
+        timeout: int = 30,
+    ) -> str:
+        """Restart services in a compose project."""
+        resolved = self._resolve_compose_file_path(file_path, project_dir)
+        argv = self._compose_base_argv(resolved, project_dir)
+        argv.append("restart")
+        if services:
+            for s in services:
+                self._validate_service_name(s)
+            argv.extend(services)
+        return await self._run(argv, timeout=float(timeout))
+
+    async def compose_build(
+        self,
+        project_dir: str | None = None,
+        file_path: str | None = None,
+        services: list[str] | None = None,
+        no_cache: bool = False,
+        timeout: int = 300,
+    ) -> str:
+        """Build (or rebuild) services. no_cache=True to ignore cache."""
+        resolved = self._resolve_compose_file_path(file_path, project_dir)
+        argv = self._compose_base_argv(resolved, project_dir)
+        argv.append("build")
+        if no_cache:
+            argv.append("--no-cache")
+        if services:
+            for s in services:
+                self._validate_service_name(s)
+            argv.extend(services)
+        return await self._run(argv, timeout=float(timeout))
+
+    async def compose_logs(
+        self,
+        project_dir: str | None = None,
+        file_path: str | None = None,
+        services: list[str] | None = None,
+        tail: int = 100,
+        follow: bool = False,
+        timestamps: bool = False,
+        timeout: int = 30,
+    ) -> str:
+        """Fetch logs from compose services. tail: 1-1000 lines."""
+        resolved = self._resolve_compose_file_path(file_path, project_dir)
+        argv = self._compose_base_argv(resolved, project_dir)
+        argv.append("logs")
+        tail = max(1, min(tail, 1000))
+        argv.extend(["--tail", str(tail)])
+        if follow:
+            argv.append("--follow")
+        if timestamps:
+            argv.append("--timestamps")
+        if services:
+            for s in services:
+                self._validate_service_name(s)
+            argv.extend(services)
+        return await self._run(argv, timeout=float(timeout))
