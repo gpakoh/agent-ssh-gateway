@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "chatgpt_remote_mcp"))
 
 import pytest
-from fleet.docker_client import CONTAINER_NAME_RE, SERVICE_NAME_RE, COMPOSE_FILE_RE, DockerClient
+from fleet.docker_client import COMPOSE_FILE_RE, CONTAINER_NAME_RE, SERVICE_NAME_RE, DockerClient
 
 
 def _client() -> DockerClient:
