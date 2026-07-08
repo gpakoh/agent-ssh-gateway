@@ -44,7 +44,7 @@ ADAPTERS: list[Adapter] = [
         "agent-ssh-gateway-mcp",
         "/etc/agent-ssh-gateway-mcp.env",
         "https://gateway.example.com/mcp",
-        86,
+        96,
         8788,
         0,
     ),
