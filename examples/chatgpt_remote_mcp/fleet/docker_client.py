@@ -11,11 +11,20 @@ import asyncio
 import json
 import re
 import shlex
+from dataclasses import dataclass
 from pathlib import Path
 
 DOCKER_BIN = "/usr/bin/docker"
 SUBPROCESS_TIMEOUT = 30.0
 MAX_OUTPUT_BYTES = 50 * 1024
+
+
+@dataclass
+class RunResult:
+    stdout: str
+    stderr: str
+    exit_code: int
+
 
 CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
 IMAGE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:/{-]{0,255}$")
@@ -72,6 +81,37 @@ class DockerClient:
         if len(result) > MAX_OUTPUT_BYTES:
             result = result[:MAX_OUTPUT_BYTES] + "\n[output truncated]"
         return result
+
+    async def _run_with_result(
+        self,
+        argv: list[str],
+        timeout: float = SUBPROCESS_TIMEOUT,
+    ) -> RunResult:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=timeout,
+            )
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return RunResult(
+                stdout="",
+                stderr=f"Command timed out after {timeout}s",
+                exit_code=-1,
+            )
+
+        exit_code = proc.returncode or 0
+        out = stdout.decode("utf-8", errors="replace")
+        err = stderr.decode("utf-8", errors="replace").strip()
+        if len(out) > MAX_OUTPUT_BYTES:
+            out = out[:MAX_OUTPUT_BYTES] + "\n[output truncated]"
+        return RunResult(stdout=out, stderr=err, exit_code=exit_code)
 
     def _validate_container_name(self, name: str) -> str:
         if not CONTAINER_NAME_RE.match(name):
