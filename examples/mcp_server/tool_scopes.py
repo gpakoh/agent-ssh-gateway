@@ -50,6 +50,7 @@ ACCESS_PROFILES: dict[str, list[str]] = {
 TOOL_SCOPES: dict[str, list[str]] = {
     # ops — mcp:read / mcp:execute
     "gateway_health": ["mcp:read"],
+    "gateway_tools_manifest": ["mcp:read"],
     "gateway_list_sessions": ["mcp:read"],
     "gateway_session_health": ["mcp:read"],
     "gateway_execute_restricted": ["mcp:execute"],
