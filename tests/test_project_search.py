@@ -28,8 +28,7 @@ def sample_project() -> Iterator[Path]:
             "print(SESSION_NOT_FOUND)\n"
         )
         (src / "utils.py").write_text(
-            "from config import SESSION_NOT_FOUND\n"
-            "SESSION_TIMEOUT = 30\n"
+            "from config import SESSION_NOT_FOUND\nSESSION_TIMEOUT = 30\n"
         )
 
         # .git directory (should be pruned)
@@ -142,6 +141,7 @@ class TestSearchText:
     def test_no_shell_invocation(self, sample_project: Path) -> None:
         """Verify the function doesn't indirectly invoke a shell."""
         import subprocess
+
         original = subprocess.run
         calls = []
 
