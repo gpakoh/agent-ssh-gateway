@@ -1714,6 +1714,30 @@ def gateway_project_run_agent(
     )
 
 
+# ── Tools Manifest ──────────────────────────────────────────────
+
+from tools_manifest import build_manifest as _build_manifest  # noqa: E402
+
+_scope_enforcement = os.environ.get("MCP_SCOPE_ENFORCEMENT", "off").strip().lower()
+if _scope_enforcement not in ("off", "audit", "enforce"):
+    _scope_enforcement = "off"
+
+
+@register_tool("gateway_tools_manifest")
+def gateway_tools_manifest() -> dict[str, Any]:
+    """Return a read-only manifest of all registered tools, modes, scopes, and access profiles.
+    No secrets, no env dumps, no network calls, no tool execution."""
+    return run_tool(
+        tool="gateway_tools_manifest",
+        title="Tools manifest",
+        fn=lambda: _build_manifest(
+            registered_tools=mcp._tool_manager.list_tools(),
+            scope_enforcement=_scope_enforcement,
+        ),
+        success_text="Tools manifest built.",
+    )
+
+
 # ── Main ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
