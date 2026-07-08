@@ -1,4 +1,4 @@
-from examples.mcp_server.docker_confirm import ConfirmStore, ConfirmStatus
+from examples.mcp_server.docker_confirm import ConfirmStatus, ConfirmStore
 
 
 class TestConfirmStore:
