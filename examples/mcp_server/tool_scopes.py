@@ -147,6 +147,12 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "docker_compose_restart": ["mcp:docker"],
     "docker_compose_build": ["mcp:docker"],
     "docker_compose_logs": ["mcp:docker"],
+    # dangerous docker operations (Session 164) — mcp:docker
+    "docker_rm": ["mcp:docker"],
+    "docker_compose_down": ["mcp:docker"],
+    "docker_prune": ["mcp:docker"],
+    "docker_confirm": ["mcp:docker"],
+    "docker_pending_actions": ["mcp:docker"],
     # postgres — mcp:postgres
     "postgres_health": ["mcp:postgres"],
     "postgres_list_schemas": ["mcp:postgres"],
