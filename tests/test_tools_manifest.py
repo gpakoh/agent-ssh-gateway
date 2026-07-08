@@ -9,6 +9,7 @@ import pytest
 # Ensure the manifest module is importable
 _MCP_SERVER_DIR = os.path.join(os.path.dirname(__file__), "..", "examples", "mcp_server")
 
+
 # Simulated registered tool (same shape as FastMCP Tool)
 class FakeTool:
     def __init__(self, name: str, description: str = "") -> None:
@@ -47,7 +48,14 @@ class TestBuildManifest:
 
     def test_contains_required_top_fields(self, sample_tools: list[FakeTool]) -> None:
         result = build_manifest(sample_tools, scope_enforcement="enforce", mode_override="chatgpt")
-        for field in ("active_mode", "scope_enforcement", "tool_count", "tools", "modes", "access_profiles"):
+        for field in (
+            "active_mode",
+            "scope_enforcement",
+            "tool_count",
+            "tools",
+            "modes",
+            "access_profiles",
+        ):
             assert field in result, f"Missing field: {field}"
 
     def test_active_mode_is_string(self, sample_tools: list[FakeTool]) -> None:
@@ -165,8 +173,11 @@ class TestBuildManifest:
             if "token" in serialized.lower():
                 pass
         import re
+
         assert not re.search(r"[A-Za-z0-9+/]{40,}", serialized), "Possible API key leaked"
-        assert not re.search(r"gh[pousr]_[A-Za-z0-9]{36,}", serialized), "Possible GitHub token leaked"
+        assert not re.search(r"gh[pousr]_[A-Za-z0-9]{36,}", serialized), (
+            "Possible GitHub token leaked"
+        )
 
     def test_manifest_does_not_contain_env_dump(self, sample_tools: list[FakeTool]) -> None:
         result = build_manifest(sample_tools, mode_override="chatgpt")
