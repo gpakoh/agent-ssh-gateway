@@ -31,6 +31,7 @@ IMAGE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:/{-]{0,255}$")
 SERVICE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 COMPOSE_FILE_RE = re.compile(r"^[a-zA-Z0-9_/.-]{1,256}$")
 COMPOSE_PATH_TRAVERSAL_RE = re.compile(r"(?:^|/)\.\.(?:/|$)")
+ALLOWED_PRUNE_TYPES: set[str] = {"container", "image", "network"}
 
 REDACTED = "<redacted>"
 
@@ -136,6 +137,13 @@ class DockerClient:
         if COMPOSE_PATH_TRAVERSAL_RE.search(path):
             raise ValueError(f"Path traversal not allowed: {shlex.quote(path)}")
         return path
+
+    def _validate_prune_type(self, type: str) -> str:
+        if type not in ALLOWED_PRUNE_TYPES:
+            raise ValueError(
+                f"Unsupported prune type '{type}'. Allowed: {sorted(ALLOWED_PRUNE_TYPES)}"
+            )
+        return type
 
     def _resolve_compose_file_path(
         self,
@@ -451,3 +459,30 @@ class DockerClient:
                 self._validate_service_name(s)
             argv.extend(services)
         return await self._run(argv, timeout=float(timeout))
+
+    async def rm(self, container: str, force: bool = False) -> RunResult:
+        self._validate_container_name(container)
+        argv = [DOCKER_BIN, "rm"]
+        if force:
+            argv.append("-f")
+        argv.append(container)
+        return await self._run_with_result(argv)
+
+    async def compose_down(
+        self,
+        project_dir: str | None = None,
+        file_path: str | None = None,
+        remove_orphans: bool = False,
+        timeout: int = 30,
+    ) -> RunResult:
+        argv = self._compose_base_argv(file_path, project_dir)
+        argv.append("down")
+        if remove_orphans:
+            argv.append("--remove-orphans")
+        argv.extend(["-t", str(timeout)])
+        return await self._run_with_result(argv, timeout=float(timeout) + 10)
+
+    async def prune(self, type: str = "container") -> RunResult:
+        self._validate_prune_type(type)
+        argv = [DOCKER_BIN, type, "prune", "-f"]
+        return await self._run_with_result(argv)
