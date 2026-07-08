@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -64,6 +65,7 @@ from chatgpt_tools import (
     working_directory,
 )
 from command_policy import CommandPolicyError
+from docker_confirm import ConfirmAction, ConfirmStatus, ConfirmStore
 from gateway_client import GatewayClient, GatewayClientError, resolve_file_path
 from handoff import read_handoff, show_handoff_status, write_handoff_plan
 from mcp.server.fastmcp import FastMCP
@@ -75,7 +77,7 @@ from opencode_tools import (
 )
 from self_test import run_self_test
 from tool_modes import should_register_tool
-from tool_results import error_result, text_result
+from tool_results import error_result, text_result, tool_error, tool_success
 from write_modes import WriteModeError, WritePermissionError
 
 from examples.chatgpt_remote_mcp.fleet.context7_server import (
@@ -272,6 +274,9 @@ def _get_pg_client() -> PostgresClient | None:
     if _pg_client is None and PG_DSN is not None:
         _pg_client = PostgresClient(PG_DSN)
     return _pg_client
+
+
+_confirm_store: ConfirmStore = ConfirmStore()
 
 
 def register_tool(name: str):
@@ -1406,6 +1411,164 @@ async def docker_compose_logs(
         tail=tail,
         follow=follow,
         timestamps=timestamps,
+    )
+
+
+# ── Dangerous Docker operations (Session 164) ────────────────────
+
+
+def _confirmation_response(action: ConfirmAction) -> dict[str, Any]:
+    remaining = max(0, int(60 - (time.monotonic() - action.created_at)))
+    return tool_success(
+        tool=action.tool,
+        result={
+            "status": "confirmation_required",
+            "action_id": action.action_id,
+            "confirm_token": action.confirm_token,
+            "expires_in_sec": remaining,
+            "summary": action.summary,
+            "risk": action.risk,
+        },
+        source="docker",
+        dangerous=True,
+    )
+
+
+@register_tool("docker_rm")
+async def docker_rm(container: str, force: bool = False) -> dict[str, Any]:
+    """Remove a container. DANGEROUS: requires confirmation via docker_confirm(token)."""
+    DockerClient()._validate_container_name(container)
+    summary = f"Remove container {container}"
+    action = _confirm_store.create_action(
+        "docker_rm", {"container": container, "force": force}, summary
+    )
+    return _confirmation_response(action)
+
+
+@register_tool("docker_compose_down")
+async def docker_compose_down(
+    project_dir: str | None = None,
+    file_path: str | None = None,
+    remove_orphans: bool = False,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    """Stop and remove a Compose stack. DANGEROUS: requires confirmation."""
+    dc = DockerClient()
+    dc._resolve_compose_file_path(file_path, project_dir)
+    parts = []
+    if project_dir:
+        parts.append(f"project={project_dir}")
+    if file_path:
+        parts.append(f"file={file_path}")
+    summary = f"Compose down {' '.join(parts)}"
+    action = _confirm_store.create_action(
+        "docker_compose_down",
+        {
+            "project_dir": project_dir,
+            "file_path": file_path,
+            "remove_orphans": remove_orphans,
+            "timeout": timeout,
+        },
+        summary,
+    )
+    return _confirmation_response(action)
+
+
+@register_tool("docker_prune")
+async def docker_prune(type: str = "container") -> dict[str, Any]:
+    """Prune Docker resources. DANGEROUS: requires confirmation. Allowed types: container, image, network."""
+    DockerClient()._validate_prune_type(type)
+    summary = f"Prune {type}s"
+    action = _confirm_store.create_action("docker_prune", {"type": type}, summary)
+    return _confirmation_response(action)
+
+
+@register_tool("docker_confirm")
+async def docker_confirm(token: str) -> dict[str, Any]:
+    """Confirm a pending dangerous Docker operation using the one-time token from the confirmation response."""
+    action, status = _confirm_store.confirm_action(token)
+    if action is None:
+        code = {
+            ConfirmStatus.INVALID: "CONFIRM_TOKEN_INVALID",
+            ConfirmStatus.EXPIRED: "CONFIRM_TOKEN_EXPIRED",
+            ConfirmStatus.CONSUMED: "CONFIRM_TOKEN_CONSUMED",
+        }.get(status, "INTERNAL_ERROR")
+        msg = {
+            ConfirmStatus.INVALID: "Invalid confirmation token",
+            ConfirmStatus.EXPIRED: "Confirmation token expired (TTL 60s)",
+            ConfirmStatus.CONSUMED: "Confirmation token already used",
+        }.get(status, "Unknown error")
+        return tool_error(
+            tool="docker_confirm",
+            code=code,
+            message=msg,
+            hint="Call the dangerous tool again to get a new token.",
+            retryable=False,
+            source="docker",
+        )
+
+    dc = DockerClient()
+    tool_name = action.tool
+    kwargs = action.kwargs
+
+    if tool_name == "docker_rm":
+        result = await dc.rm(kwargs["container"], force=kwargs.get("force", False))
+    elif tool_name == "docker_compose_down":
+        result = await dc.compose_down(
+            project_dir=kwargs.get("project_dir"),
+            file_path=kwargs.get("file_path"),
+            remove_orphans=kwargs.get("remove_orphans", False),
+            timeout=kwargs.get("timeout", 30),
+        )
+    elif tool_name == "docker_prune":
+        result = await dc.prune(kwargs["type"])
+    else:
+        return tool_error(
+            tool="docker_confirm",
+            code="INTERNAL_ERROR",
+            message=f"Unknown action tool: {tool_name}",
+            source="docker",
+        )
+
+    if result.exit_code == 0:
+        return tool_success(
+            tool="docker_confirm",
+            result={
+                "action": tool_name,
+                "executed": True,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exit_code": result.exit_code,
+            },
+            source="docker",
+        )
+    else:
+        return tool_error(
+            tool="docker_confirm",
+            code="DOCKER_COMMAND_FAILED",
+            message="Docker command failed",
+            result={
+                "action": tool_name,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exit_code": result.exit_code,
+            },
+            source="docker",
+            retryable=False,
+            hint="Check container name or Docker state.",
+        )
+
+
+@register_tool("docker_pending_actions")
+async def docker_pending_actions() -> dict[str, Any]:
+    """List all pending dangerous Docker operations awaiting confirmation."""
+    _confirm_store.cleanup_expired()
+    pending = _confirm_store.list_pending()
+    count = len(pending)
+    return tool_success(
+        tool="docker_pending_actions",
+        result={"count": count, "items": pending},
+        source="docker",
     )
 
 
