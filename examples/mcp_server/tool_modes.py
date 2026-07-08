@@ -12,6 +12,7 @@ DEFAULT_TOOL_MODE: ToolMode = "standard"
 TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
     "minimal": {
         "gateway_health",
+        "gateway_tools_manifest",
         "gateway_session_health",
         "gateway_execute_restricted",
         "gateway_job_status",
@@ -19,6 +20,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
     },
     "standard": {
         "gateway_health",
+        "gateway_tools_manifest",
         "gateway_list_sessions",
         "gateway_session_health",
         "gateway_execute_restricted",
@@ -30,6 +32,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
     },
     "full": {
         "gateway_health",
+        "gateway_tools_manifest",
         "gateway_list_sessions",
         "gateway_session_health",
         "gateway_execute_restricted",
@@ -45,6 +48,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
     },
     "chatgpt": {
         "gateway_health",
+        "gateway_tools_manifest",
         "gateway_session_health",
         "gateway_job_status",
         "gateway_job_result",
