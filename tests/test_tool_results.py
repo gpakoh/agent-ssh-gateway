@@ -165,6 +165,10 @@ class TestErrorCodes:
             "DEPENDENCY_MISSING",
             "INVALID_INPUT",
             "INTERNAL_ERROR",
+            "CONFIRM_TOKEN_INVALID",
+            "CONFIRM_TOKEN_EXPIRED",
+            "CONFIRM_TOKEN_CONSUMED",
+            "DOCKER_COMMAND_FAILED",
         }
         assert ERROR_CODES == known
 
