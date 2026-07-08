@@ -260,12 +260,8 @@ class DockerClient:
         file_path: str | None = None,
         format: str | None = None,
     ) -> str:
-        argv = [DOCKER_BIN, "compose"]
-        if file_path:
-            self._validate_compose_file(file_path)
-            argv.extend(["-f", file_path])
-        if project_dir:
-            argv.extend(["--project-directory", project_dir])
+        resolved = self._resolve_compose_file_path(file_path, project_dir)
+        argv = self._compose_base_argv(resolved, project_dir)
         argv.append("ps")
         if format:
             argv.extend(["--format", format])
@@ -283,12 +279,8 @@ class DockerClient:
         project_dir: str | None = None,
         file_path: str | None = None,
     ) -> str:
-        argv = [DOCKER_BIN, "compose"]
-        if file_path:
-            self._validate_compose_file(file_path)
-            argv.extend(["-f", file_path])
-        if project_dir:
-            argv.extend(["--project-directory", project_dir])
+        resolved = self._resolve_compose_file_path(file_path, project_dir)
+        argv = self._compose_base_argv(resolved, project_dir)
         argv.extend(["config", "--services"])
         return await self._run(argv, timeout=60.0)
 
