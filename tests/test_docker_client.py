@@ -253,7 +253,14 @@ async def test_compose_logs_invalid_service_raises():
 def test_compose_base_argv_with_file():
     c = _client()
     argv = c._compose_base_argv(file_path="compose.yml", project_dir="/tmp")
-    assert argv == ["/usr/bin/docker", "compose", "-f", "compose.yml", "--project-directory", "/tmp"]
+    assert argv == [
+        "/usr/bin/docker",
+        "compose",
+        "-f",
+        "compose.yml",
+        "--project-directory",
+        "/tmp",
+    ]
 
 
 def test_compose_base_argv_without_file():

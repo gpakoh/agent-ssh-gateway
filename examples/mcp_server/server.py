@@ -432,7 +432,9 @@ def gateway_read_file(path: str, session_id: str | None = None) -> dict[str, Any
 
 
 @register_tool("gateway_repo_status")
-def gateway_repo_status(session_id: str | None = None, project: str | None = None) -> dict[str, Any]:
+def gateway_repo_status(
+    session_id: str | None = None, project: str | None = None
+) -> dict[str, Any]:
     """Collect basic repository status using read-only commands.
 
     Args:
@@ -1344,8 +1346,12 @@ async def docker_compose_up(
 ) -> str:
     """Start services in a Docker Compose project. detach=True by default."""
     return await DockerClient().compose_up(
-        project_dir=project_dir, file_path=file_path,
-        services=services, detach=detach, build=build, timeout=timeout,
+        project_dir=project_dir,
+        file_path=file_path,
+        services=services,
+        detach=detach,
+        build=build,
+        timeout=timeout,
     )
 
 
@@ -1358,8 +1364,10 @@ async def docker_compose_restart(
 ) -> str:
     """Restart services in a Docker Compose project."""
     return await DockerClient().compose_restart(
-        project_dir=project_dir, file_path=file_path,
-        services=services, timeout=timeout,
+        project_dir=project_dir,
+        file_path=file_path,
+        services=services,
+        timeout=timeout,
     )
 
 
@@ -1373,8 +1381,11 @@ async def docker_compose_build(
 ) -> str:
     """Build (or rebuild) services in a Docker Compose project."""
     return await DockerClient().compose_build(
-        project_dir=project_dir, file_path=file_path,
-        services=services, no_cache=no_cache, timeout=timeout,
+        project_dir=project_dir,
+        file_path=file_path,
+        services=services,
+        no_cache=no_cache,
+        timeout=timeout,
     )
 
 
@@ -1389,8 +1400,12 @@ async def docker_compose_logs(
 ) -> str:
     """Fetch logs from services in a Docker Compose project. tail: 1-1000 lines."""
     return await DockerClient().compose_logs(
-        project_dir=project_dir, file_path=file_path,
-        services=services, tail=tail, follow=follow, timestamps=timestamps,
+        project_dir=project_dir,
+        file_path=file_path,
+        services=services,
+        tail=tail,
+        follow=follow,
+        timestamps=timestamps,
     )
 
 
