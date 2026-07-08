@@ -138,6 +138,14 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "docker_stats": ["mcp:docker"],
     "docker_compose_ps": ["mcp:docker"],
     "docker_compose_services": ["mcp:docker"],
+    # docker write operations (Session 160) — mcp:docker
+    "docker_start": ["mcp:docker"],
+    "docker_stop": ["mcp:docker"],
+    "docker_restart": ["mcp:docker"],
+    "docker_compose_up": ["mcp:docker"],
+    "docker_compose_restart": ["mcp:docker"],
+    "docker_compose_build": ["mcp:docker"],
+    "docker_compose_logs": ["mcp:docker"],
     # postgres — mcp:postgres
     "postgres_health": ["mcp:postgres"],
     "postgres_list_schemas": ["mcp:postgres"],
