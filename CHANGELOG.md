@@ -6,6 +6,14 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+### Added
+
+- **Dangerous Docker confirmation guard**: `docker_rm`, `docker_compose_down`, and `docker_prune` now require a one-time confirmation token before execution. Added `docker_confirm` and `docker_pending_actions` tools. Confirmation token is 128-bit (`secrets.token_urlsafe(16)`), 60-second TTL, consumed before Docker operation (prevents double-execute), compared via `hmac.compare_digest()`. Prune limited to `container`/`image`/`network` (no `volume`/`system`). All tools scoped `mcp:docker`, operating exclusively on disposable containers. `docker_exec`, `docker_run`, `docker_rmi`, `docker_volume_rm`, `docker_compose_down -v` intentionally excluded. (Session 164)
+
+### Fixed
+
+- **Fleet healthcheck tool count**: expected tools for Docker adapter updated from 97 to 102 to match new tools. (Session 164)
+
 ## [0.1.25-alpha] - 2026-07-07
 
 ### Fixed
