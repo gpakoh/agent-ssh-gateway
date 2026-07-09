@@ -169,6 +169,19 @@ class TestErrorCodes:
             "CONFIRM_TOKEN_EXPIRED",
             "CONFIRM_TOKEN_CONSUMED",
             "DOCKER_COMMAND_FAILED",
+            "DOCKER_ADMIN_SCOPE_REQUIRED",
+            "DOCKER_EXEC_COMMAND_BLOCKED",
+            "DOCKER_EXEC_CONTAINER_NOT_FOUND",
+            "DOCKER_EXEC_TIMEOUT",
+            "DOCKER_RUN_ALLOWLIST_NOT_CONFIGURED",
+            "DOCKER_RUN_CONTAINER_CREATE_FAILED",
+            "DOCKER_RUN_IMAGE_INVALID",
+            "DOCKER_RUN_IMAGE_NOT_ALLOWED",
+            "DOCKER_RUN_TIMEOUT",
+            "DOCKER_RMI_FAILED",
+            "DOCKER_RMI_INVALID_REFERENCE",
+            "DOCKER_VOLUME_RM_FAILED",
+            "DOCKER_VOLUME_RM_INVALID_NAME",
         }
         assert ERROR_CODES == known
 

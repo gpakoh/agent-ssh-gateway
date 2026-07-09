@@ -223,7 +223,9 @@ class TestSpecificToolMappings:
     def test_all_docker_fleet_requires_docker(self):
         for tool in TOOL_SCOPES:
             if tool.startswith("docker_"):
-                assert "mcp:docker" in get_required_scopes(tool), f"{tool} missing mcp:docker"
+                scopes = get_required_scopes(tool)
+                # Admin-only tools (mcp:docker:admin) are a superset of mcp:docker
+                assert "mcp:docker" in scopes or "mcp:docker:admin" in scopes, f"{tool} missing mcp:docker"
 
     def test_all_postgres_fleet_requires_postgres(self):
         for tool in TOOL_SCOPES:
