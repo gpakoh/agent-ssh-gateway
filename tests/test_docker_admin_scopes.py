@@ -35,9 +35,7 @@ def test_admin_tools_fail_with_only_docker_scope():
 def test_admin_tools_pass_with_combined_scopes():
     token_scopes = ["mcp:docker", "mcp:docker:admin"]
     for tool in ADMIN_TOOLS:
-        assert has_required_scope(token_scopes, tool), (
-            f"{tool} should pass with both scopes"
-        )
+        assert has_required_scope(token_scopes, tool), f"{tool} should pass with both scopes"
 
 
 def test_admin_tools_pass_with_admin_only():
