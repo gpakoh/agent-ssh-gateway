@@ -1764,10 +1764,8 @@ async def docker_confirm(token: str) -> dict[str, Any]:
 
     if result.exit_code == 0:
         return tool_success(
-            tool="docker_confirm",
+            tool=tool_name,
             result={
-                "action": tool_name,
-                "executed": True,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "exit_code": result.exit_code,
@@ -1776,11 +1774,10 @@ async def docker_confirm(token: str) -> dict[str, Any]:
         )
     else:
         return tool_error(
-            tool="docker_confirm",
+            tool=tool_name,
             code="DOCKER_COMMAND_FAILED",
             message="Docker command failed",
             result={
-                "action": tool_name,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "exit_code": result.exit_code,
