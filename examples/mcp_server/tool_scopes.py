@@ -30,6 +30,7 @@ ACCESS_PROFILES: dict[str, list[str]] = {
     "infra": [
         "mcp:read",
         "mcp:docker",
+        "mcp:docker:admin",
         "mcp:postgres",
         "mcp:repo",
     ],
@@ -41,6 +42,7 @@ ACCESS_PROFILES: dict[str, list[str]] = {
         "mcp:execute",
         "mcp:repo",
         "mcp:docker",
+        "mcp:docker:admin",
         "mcp:postgres",
         "mcp:docs",
         "mcp:admin",
@@ -153,6 +155,11 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "docker_prune": ["mcp:docker"],
     "docker_confirm": ["mcp:docker"],
     "docker_pending_actions": ["mcp:docker"],
+    # docker admin operations (Session 165) — mcp:docker:admin
+    "docker_exec": ["mcp:docker:admin"],
+    "docker_run": ["mcp:docker:admin"],
+    "docker_rmi": ["mcp:docker:admin"],
+    "docker_volume_rm": ["mcp:docker:admin"],
     # postgres — mcp:postgres
     "postgres_health": ["mcp:postgres"],
     "postgres_list_schemas": ["mcp:postgres"],
