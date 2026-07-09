@@ -295,3 +295,154 @@ def test_compose_logs_argv_tail_clamped():
         argv.extend(["--tail", "1000"])
         assert "--tail" in argv
         assert "1000" in argv
+
+
+# ── Admin operations validation ──
+
+
+def test_validate_image_tag_valid():
+    c = _client()
+    for name in ["alpine:3.20", "python:3.11-slim", "busybox:1.36"]:
+        assert c._validate_image_tag(name) == name
+
+
+def test_validate_image_tag_invalid():
+    c = _client()
+    for name in ["alpine", "alpine:latest:extra", "image:tag:extra", "", "bad;image:tag"]:
+        with pytest.raises(ValueError, match="Invalid image"):
+            c._validate_image_tag(name)
+
+
+def test_validate_image_ref_valid():
+    c = _client()
+    for name in ["alpine", "alpine:3.20", "python:3.11-slim"]:
+        assert c._validate_image_ref(name) == name
+
+
+def test_validate_volume_name_valid():
+    c = _client()
+    for name in ["data", "my_volume", "pgdata.01"]:
+        assert c._validate_volume_name(name) == name
+
+
+def test_validate_volume_name_invalid():
+    c = _client()
+    for name in ["", "bad;name", "../volume", "volume with space"]:
+        with pytest.raises(ValueError, match="Invalid volume name"):
+            c._validate_volume_name(name)
+
+
+def test_validate_exec_argv_valid():
+    c = _client()
+    c._validate_exec_argv(["ls", "-la"])
+    c._validate_exec_argv(["whoami"])
+    c._validate_exec_argv(["cat", "/etc/hostname"])
+
+
+def test_validate_exec_argv_empty():
+    c = _client()
+    with pytest.raises(ValueError, match="non-empty array"):
+        c._validate_exec_argv([])
+
+
+def test_validate_exec_argv_blocked_env():
+    c = _client()
+    with pytest.raises(ValueError, match="blocked pattern.*env"):
+        c._validate_exec_argv(["env"])
+
+
+def test_validate_exec_argv_blocked_shadow():
+    c = _client()
+    with pytest.raises(ValueError, match="blocked pattern"):
+        c._validate_exec_argv(["cat", "/etc/shadow"])
+
+
+def test_validate_exec_argv_blocked_shell_launcher():
+    c = _client()
+    with pytest.raises(ValueError, match="shell launcher blocked"):
+        c._validate_exec_argv(["sh", "-c", "whoami"])
+    with pytest.raises(ValueError, match="shell launcher blocked"):
+        c._validate_exec_argv(["bash", "-c", "ls"])
+    with pytest.raises(ValueError, match="shell launcher blocked"):
+        c._validate_exec_argv(["ash", "-c", "id"])
+
+
+def test_validate_exec_argv_blocked_ssh():
+    c = _client()
+    with pytest.raises(ValueError, match="blocked pattern"):
+        c._validate_exec_argv(["cat", "/root/.ssh/authorized_keys"])
+
+
+def test_prune_type_admin_accepts():
+    c = _client()
+    assert c._validate_prune_type("volume", admin_scope=True) == "volume"
+    assert c._validate_prune_type("system", admin_scope=True) == "system"
+
+
+def test_prune_type_admin_rejects_without_scope():
+    c = _client()
+    with pytest.raises(ValueError, match="Unsupported prune type"):
+        c._validate_prune_type("volume")
+    with pytest.raises(ValueError, match="Unsupported prune type"):
+        c._validate_prune_type("system")
+
+
+@pytest.mark.asyncio
+async def test_rmi_too_many():
+    c = _client()
+    with pytest.raises(ValueError, match="1-5"):
+        await c.rmi(["a"] * 6)
+
+
+@pytest.mark.asyncio
+async def test_rmi_invalid_ref():
+    c = _client()
+    with pytest.raises(ValueError, match="Invalid image"):
+        await c.rmi(["bad;ref"])
+
+
+@pytest.mark.asyncio
+async def test_volume_rm_too_many():
+    c = _client()
+    with pytest.raises(ValueError, match="1-5"):
+        await c.volume_rm(["a"] * 6)
+
+
+@pytest.mark.asyncio
+async def test_volume_rm_invalid_name():
+    c = _client()
+    with pytest.raises(ValueError, match="Invalid volume name"):
+        await c.volume_rm(["bad;name"])
+
+
+# ── Admin async methods (validation only) ──
+
+
+@pytest.mark.asyncio
+async def test_exec_argv_container_name_validated():
+    c = _client()
+    with pytest.raises(ValueError, match="Invalid container name"):
+        await c.exec("bad;name", ["ls"])
+
+
+@pytest.mark.asyncio
+async def test_run_image_tag_required():
+    c = _client()
+    with pytest.raises(ValueError, match="tag required"):
+        await c.run("alpine", ["whoami"])
+
+
+@pytest.mark.asyncio
+async def test_run_container_name_validated():
+    c = _client()
+    with pytest.raises(ValueError, match="Invalid container name"):
+        await c.run("alpine:3.20", ["whoami"], container_name="bad;name")
+
+
+def test_compose_down_volumes_argv():
+    c = _client()
+    argv = c._compose_base_argv(None, None)
+    argv.append("down")
+    argv.append("--volumes")
+    argv.extend(["-t", "30"])
+    assert "--volumes" in argv
