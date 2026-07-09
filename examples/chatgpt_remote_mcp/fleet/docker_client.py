@@ -32,6 +32,25 @@ SERVICE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 COMPOSE_FILE_RE = re.compile(r"^[a-zA-Z0-9_/.-]{1,256}$")
 COMPOSE_PATH_TRAVERSAL_RE = re.compile(r"(?:^|/)\.\.(?:/|$)")
 ALLOWED_PRUNE_TYPES: set[str] = {"container", "image", "network"}
+ALLOWED_ADMIN_PRUNE_TYPES: set[str] = {"volume", "system"}
+ALLOWED_PRUNE_TYPES_ALL: set[str] = ALLOWED_PRUNE_TYPES | ALLOWED_ADMIN_PRUNE_TYPES
+
+IMAGE_TAG_RE = re.compile(r"^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$")
+IMAGE_REF_RE = re.compile(r"^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$")
+VOLUME_NAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
+
+EXEC_ARGV_DENYLIST: set[str] = {
+    "env",
+    "printenv",
+    "/proc/self/environ",
+    "/proc/1/environ",
+    "/etc/shadow",
+    "/etc/gshadow",
+    "/root/.ssh",
+    "/.ssh/id_",
+}
+
+SHELL_CMDS: set[str] = {"sh", "bash", "ash", "zsh"}
 
 REDACTED = "<redacted>"
 
@@ -138,12 +157,45 @@ class DockerClient:
             raise ValueError(f"Path traversal not allowed: {shlex.quote(path)}")
         return path
 
-    def _validate_prune_type(self, type: str) -> str:
-        if type not in ALLOWED_PRUNE_TYPES:
+    def _validate_prune_type(self, type: str, admin_scope: bool = False) -> str:
+        allowed = ALLOWED_PRUNE_TYPES_ALL if admin_scope else ALLOWED_PRUNE_TYPES
+        if type not in allowed:
             raise ValueError(
-                f"Unsupported prune type '{type}'. Allowed: {sorted(ALLOWED_PRUNE_TYPES)}"
+                f"Unsupported prune type '{type}'. "
+                f"Allowed: {sorted(allowed)}"
             )
         return type
+
+    def _validate_image_tag(self, name: str) -> str:
+        if not IMAGE_TAG_RE.match(name):
+            raise ValueError(f"Invalid image reference (tag required): {shlex.quote(name)}")
+        return name
+
+    def _validate_image_ref(self, name: str) -> str:
+        if not IMAGE_REF_RE.match(name):
+            raise ValueError(f"Invalid image reference: {shlex.quote(name)}")
+        return name
+
+    def _validate_volume_name(self, name: str) -> str:
+        if not VOLUME_NAME_RE.match(name):
+            raise ValueError(f"Invalid volume name: {shlex.quote(name)}")
+        return name
+
+    def _validate_exec_argv(self, argv: list[str]) -> None:
+        if not isinstance(argv, list) or not argv:
+            raise ValueError("command must be a non-empty array of strings")
+        for el in argv:
+            if not isinstance(el, str) or not el:
+                raise ValueError("each argv element must be a non-empty string")
+            if not el.isprintable() or not el.isascii():
+                raise ValueError(f"non-printable/non-ASCII argv element: {shlex.quote(el)}")
+            # denylist check (case-sensitive exact or substring)
+            for blocked in EXEC_ARGV_DENYLIST:
+                if blocked in el:
+                    raise ValueError(f"argv element contains blocked pattern: {shlex.quote(blocked)}")
+        # shell launcher check
+        if len(argv) >= 2 and argv[0] in SHELL_CMDS and argv[1] == "-c":
+            raise ValueError(f"shell launcher blocked: {shlex.quote(argv[0])} -c")
 
     def _resolve_compose_file_path(
         self,
@@ -474,13 +526,61 @@ class DockerClient:
         file_path: str | None = None,
         remove_orphans: bool = False,
         timeout: int = 30,
+        volumes: bool = False,
     ) -> RunResult:
         argv = self._compose_base_argv(file_path, project_dir)
         argv.append("down")
         if remove_orphans:
             argv.append("--remove-orphans")
+        if volumes:
+            argv.append("--volumes")
         argv.extend(["-t", str(timeout)])
         return await self._run_with_result(argv, timeout=float(timeout) + 10)
+
+    async def exec(
+        self,
+        container: str,
+        command: list[str],
+        timeout: int = 30,
+    ) -> RunResult:
+        self._validate_container_name(container)
+        self._validate_exec_argv(command)
+        timeout = max(1, min(timeout, 300))
+        argv = [DOCKER_BIN, "exec", container] + command
+        return await self._run_with_result(argv, timeout=float(timeout))
+
+    async def run(
+        self,
+        image: str,
+        command: list[str],
+        container_name: str | None = None,
+        timeout: int = 60,
+    ) -> RunResult:
+        self._validate_image_tag(image)
+        timeout = max(1, min(timeout, 600))
+        argv = [DOCKER_BIN, "run", "--rm"]
+        if container_name:
+            self._validate_container_name(container_name)
+            argv.extend(["--name", container_name])
+        argv.append(image)
+        argv.extend(command)
+        return await self._run_with_result(argv, timeout=float(timeout))
+
+    async def rmi(self, images: list[str]) -> RunResult:
+        if not images or len(images) > 5:
+            raise ValueError("rmi accepts 1-5 images")
+        for img in images:
+            self._validate_image_ref(img)
+        argv = [DOCKER_BIN, "rmi"] + images
+        return await self._run_with_result(argv)
+
+    async def volume_rm(self, volumes: list[str]) -> RunResult:
+        if not volumes or len(volumes) > 5:
+            raise ValueError("volume_rm accepts 1-5 volumes")
+        for vol in volumes:
+            self._validate_volume_name(vol)
+        argv = [DOCKER_BIN, "volume", "rm"] + volumes
+        return await self._run_with_result(argv)
 
     async def prune(self, type: str = "container") -> RunResult:
         self._validate_prune_type(type)
