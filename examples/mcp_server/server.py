@@ -1538,8 +1538,25 @@ async def docker_exec(
     The system does not guarantee prevention of all data exfiltration through docker_exec.
     """
     dc = DockerClient()
-    dc._validate_container_name(container)
-    dc._validate_exec_argv(command)
+    try:
+        dc._validate_container_name(container)
+    except ValueError as e:
+        return tool_error(
+            tool="docker_exec",
+            code="INVALID_INPUT",
+            message=str(e),
+            source="docker",
+        )
+    try:
+        dc._validate_exec_argv(command)
+    except ValueError as e:
+        return tool_error(
+            tool="docker_exec",
+            code="DOCKER_EXEC_COMMAND_BLOCKED",
+            message=str(e),
+            hint="Use a narrower diagnostic command that does not dump environment variables, SSH keys, or shadow files.",
+            source="docker",
+        )
     timeout = max(1, min(timeout, 300))
     summary = f"Exec in {container}: {' '.join(command)}"
     action = _confirm_store.create_action(
@@ -1574,7 +1591,15 @@ async def docker_run(
     allowed_images = {ref.strip() for ref in allowed_raw.split(",") if ref.strip()}
 
     dc = DockerClient()
-    dc._validate_image_tag(image)
+    try:
+        dc._validate_image_tag(image)
+    except ValueError as e:
+        return tool_error(
+            tool="docker_run",
+            code="DOCKER_RUN_IMAGE_INVALID",
+            message=str(e),
+            source="docker",
+        )
     if image not in allowed_images:
         return tool_error(
             tool="docker_run",
@@ -1584,8 +1609,24 @@ async def docker_run(
             source="docker",
         )
     if container_name:
-        dc._validate_container_name(container_name)
-    dc._validate_exec_argv(command)
+        try:
+            dc._validate_container_name(container_name)
+        except ValueError as e:
+            return tool_error(
+                tool="docker_run",
+                code="INVALID_INPUT",
+                message=str(e),
+                source="docker",
+            )
+    try:
+        dc._validate_exec_argv(command)
+    except ValueError as e:
+        return tool_error(
+            tool="docker_run",
+            code="DOCKER_EXEC_COMMAND_BLOCKED",
+            message=str(e),
+            source="docker",
+        )
     timeout = max(1, min(timeout, 600))
 
     summary = f"Run {image}: {' '.join(command)}"
@@ -1608,8 +1649,6 @@ async def docker_run(
 async def docker_rmi(images: list[str]) -> dict[str, Any]:
     """Remove one or more Docker images (1-5). ADMIN: requires mcp:docker:admin scope + confirmation."""
     dc = DockerClient()
-    for img in images:
-        dc._validate_image_ref(img)
     if not images or len(images) > 5:
         return tool_error(
             tool="docker_rmi",
@@ -1617,6 +1656,16 @@ async def docker_rmi(images: list[str]) -> dict[str, Any]:
             message="docker_rmi accepts 1-5 images.",
             source="docker",
         )
+    for img in images:
+        try:
+            dc._validate_image_ref(img)
+        except ValueError as e:
+            return tool_error(
+                tool="docker_rmi",
+                code="DOCKER_RMI_INVALID_REFERENCE",
+                message=str(e),
+                source="docker",
+            )
     summary = f"Remove image(s): {', '.join(images)}"
     action = _confirm_store.create_action("docker_rmi", {"images": images}, summary)
     return _confirmation_response(action)
@@ -1626,8 +1675,6 @@ async def docker_rmi(images: list[str]) -> dict[str, Any]:
 async def docker_volume_rm(volumes: list[str]) -> dict[str, Any]:
     """Remove one or more Docker volumes (1-5). ADMIN: requires mcp:docker:admin scope + confirmation."""
     dc = DockerClient()
-    for vol in volumes:
-        dc._validate_volume_name(vol)
     if not volumes or len(volumes) > 5:
         return tool_error(
             tool="docker_volume_rm",
@@ -1635,6 +1682,16 @@ async def docker_volume_rm(volumes: list[str]) -> dict[str, Any]:
             message="docker_volume_rm accepts 1-5 volumes.",
             source="docker",
         )
+    for vol in volumes:
+        try:
+            dc._validate_volume_name(vol)
+        except ValueError as e:
+            return tool_error(
+                tool="docker_volume_rm",
+                code="DOCKER_VOLUME_RM_INVALID_NAME",
+                message=str(e),
+                source="docker",
+            )
     summary = f"Remove volume(s): {', '.join(volumes)}"
     action = _confirm_store.create_action("docker_volume_rm", {"volumes": volumes}, summary)
     return _confirmation_response(action)
