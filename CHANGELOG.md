@@ -6,6 +6,17 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.28-alpha] - 2026-07-10
+
+### Changed
+
+- **Canonical MCP response envelope**: `docker_confirm` now returns `tool=<underlying action.tool>` instead of `tool="docker_confirm"`. Result flattened to `stdout`/`stderr`/`exit_code` directly (removed `action`/`executed` wrappers). Non-zero Docker command exit returns `tool_error` with `DOCKER_COMMAND_FAILED`. (Session 167, Batch 1)
+- **Docker dangerous/admin tools**: canonical envelope test coverage for all 7 tools (`docker_rm`, `docker_compose_down`, `docker_prune`, `docker_exec`, `docker_run`, `docker_rmi`, `docker_volume_rm`) — 36 total envelope tests covering `confirmation_required`, validation errors, admin-scope errors, allowlist/denylist errors. No runtime behavior changes. (Session 167, Batch 2)
+
+### Added
+
+- **`assert_tool_envelope` / `assert_docker_envelope` test helpers**: reusable canonical envelope assertions in `tests/helpers.py`. (Session 167)
+
 ## [0.1.27-alpha] - 2026-07-09
 
 ### Added
