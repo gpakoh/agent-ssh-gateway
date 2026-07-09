@@ -9,7 +9,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "mcp_s
 
 from tool_scopes import (
     ACCESS_PROFILES,
-    TOOL_SCOPES,
     get_required_scopes,
     has_required_scope,
 )
