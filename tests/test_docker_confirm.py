@@ -82,3 +82,59 @@ class TestConfirmStore:
         result, status = store.confirm_action(action.confirm_token.upper())
         assert result is None
         assert status == ConfirmStatus.INVALID
+
+
+class TestConfirmStoreAdminActions:
+    def test_create_exec_action(self):
+        store = ConfirmStore()
+        action = store.create_action(
+            "docker_exec",
+            {"container": "web", "command": ["ls", "-la"], "timeout": 30},
+            "Exec in web: ls -la",
+        )
+        assert action.tool == "docker_exec"
+        assert action.kwargs["container"] == "web"
+        assert action.kwargs["command"] == ["ls", "-la"]
+
+    def test_create_run_action(self):
+        store = ConfirmStore()
+        action = store.create_action(
+            "docker_run",
+            {"image": "alpine:3.20", "command": ["whoami"], "timeout": 60},
+            "Run alpine:3.20: whoami",
+        )
+        assert action.tool == "docker_run"
+
+    def test_create_rmi_action(self):
+        store = ConfirmStore()
+        action = store.create_action(
+            "docker_rmi",
+            {"images": ["alpine:3.20"]},
+            "Remove image(s): alpine:3.20",
+        )
+        assert action.tool == "docker_rmi"
+        assert action.kwargs["images"] == ["alpine:3.20"]
+
+    def test_create_volume_rm_action(self):
+        store = ConfirmStore()
+        action = store.create_action(
+            "docker_volume_rm",
+            {"volumes": ["pgdata"]},
+            "Remove volume(s): pgdata",
+        )
+        assert action.tool == "docker_volume_rm"
+        assert action.kwargs["volumes"] == ["pgdata"]
+
+    def test_confirm_exec_action_and_dispatch(self):
+        """Simulate the full confirmation flow for docker_exec."""
+        store = ConfirmStore()
+        action = store.create_action(
+            "docker_exec",
+            {"container": "web", "command": ["ls"], "timeout": 30},
+            "Exec in web: ls",
+        )
+        result, status = store.confirm_action(action.confirm_token)
+        assert status == ConfirmStatus.OK
+        assert result is not None
+        assert result.tool == "docker_exec"
+        assert result.kwargs["container"] == "web"
