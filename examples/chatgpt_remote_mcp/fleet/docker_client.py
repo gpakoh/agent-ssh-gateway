@@ -160,10 +160,7 @@ class DockerClient:
     def _validate_prune_type(self, type: str, admin_scope: bool = False) -> str:
         allowed = ALLOWED_PRUNE_TYPES_ALL if admin_scope else ALLOWED_PRUNE_TYPES
         if type not in allowed:
-            raise ValueError(
-                f"Unsupported prune type '{type}'. "
-                f"Allowed: {sorted(allowed)}"
-            )
+            raise ValueError(f"Unsupported prune type '{type}'. Allowed: {sorted(allowed)}")
         return type
 
     def _validate_image_tag(self, name: str) -> str:
@@ -192,7 +189,9 @@ class DockerClient:
             # denylist check (case-sensitive exact or substring)
             for blocked in EXEC_ARGV_DENYLIST:
                 if blocked in el:
-                    raise ValueError(f"argv element contains blocked pattern: {shlex.quote(blocked)}")
+                    raise ValueError(
+                        f"argv element contains blocked pattern: {shlex.quote(blocked)}"
+                    )
         # shell launcher check
         if len(argv) >= 2 and argv[0] in SHELL_CMDS and argv[1] == "-c":
             raise ValueError(f"shell launcher blocked: {shlex.quote(argv[0])} -c")
