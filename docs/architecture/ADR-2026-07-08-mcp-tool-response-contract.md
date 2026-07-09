@@ -106,8 +106,12 @@ Canonical error codes (extensible):
 - Add `normalize_tool_result()` for wrapping existing arbitrary returns.
 - Zero migration of existing tools.
 
-### Phase 2 (next sessions, tool-by-tool)
+### Phase 2 (in progress, tool-by-tool)
 - Migrate `docker_*` tools to use `tool_results.py` envelope.
+  - **Batch 1 complete (Session 167)**: `docker_confirm` — `tool` now reports underlying tool, flat `result`, `exit_code != 0` uses `tool_error`.
+  - `_confirmation_response()` was already canonical (`tool_success` with `confirmation_required` status).
+  - `docker_pending_actions()` was already canonical.
+  - Next batch: `docker_rm`, `docker_compose_down`, `docker_prune`, `docker_exec`, `docker_run`, `docker_rmi`, `docker_volume_rm` — these all use `_confirmation_response()` (already canonical) and `tool_error()` for validation errors (already canonical), so only test coverage needed.
 - Migrate `postgres_*` tools to use `tool_results.py` envelope.
 - Migrate `Context7` tools to use `tool_results.py` envelope.
 - Keep `text_result()`/`error_result()` working for backward compatibility.
