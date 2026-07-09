@@ -6,6 +6,18 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.27-alpha] - 2026-07-09
+
+### Added
+
+- **Docker admin scope (`mcp:docker:admin`)**: 4 new tools — `docker_exec`, `docker_run`, `docker_rmi`, `docker_volume_rm`. Expanded `docker_prune` to accept `volume`/`system` types. Expanded `docker_compose_down` with `volumes` flag for admin callers. All admin tools require `mcp:docker:admin` scope + confirmation guard. (Session 165)
+
+### Security
+
+- **docker_exec argv denylist**: blocks `env`, `printenv`, `/proc/*/environ`, `/etc/shadow`, `/etc/gshadow`, SSH key paths, and shell+`-c` launchers. All checks performed before confirmation token creation.
+- **docker_run image allowlist**: fail-closed via `MCP_DOCKER_RUN_ALLOWED_IMAGES` env var (comma-separated `image:tag`). Empty/missing var disables the tool entirely.
+- **Flat scope model**: `mcp:docker:admin` is independent — only profiles that explicitly include both `mcp:docker` AND `mcp:docker:admin` gain full access. `infra` and `full` profiles updated.
+
 ## [0.1.26-alpha] - 2026-07-09
 
 ### Added
