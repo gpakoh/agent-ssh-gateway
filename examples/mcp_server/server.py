@@ -1445,14 +1445,30 @@ async def docker_rm(container: str, force: bool = False) -> dict[str, Any]:
     return _confirmation_response(action)
 
 
+def _get_token_scopes() -> list[str]:
+    raw = os.environ.get("MCP_TOKEN_SCOPES", "")
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+
 @register_tool("docker_compose_down")
 async def docker_compose_down(
     project_dir: str | None = None,
     file_path: str | None = None,
     remove_orphans: bool = False,
     timeout: int = 30,
+    volumes: bool = False,
 ) -> dict[str, Any]:
-    """Stop and remove a Compose stack. DANGEROUS: requires confirmation."""
+    """Stop and remove a Compose stack. DANGEROUS: requires confirmation.
+    With mcp:docker:admin scope: use volumes=True to also remove named volumes."""
+    if volumes:
+        scopes = _get_token_scopes()
+        if "mcp:docker:admin" not in scopes:
+            return tool_error(
+                tool="docker_compose_down",
+                code="DOCKER_ADMIN_SCOPE_REQUIRED",
+                message="volumes=true requires mcp:docker:admin scope.",
+                source="docker",
+            )
     dc = DockerClient()
     dc._resolve_compose_file_path(file_path, project_dir)
     parts = []
@@ -1460,6 +1476,8 @@ async def docker_compose_down(
         parts.append(f"project={project_dir}")
     if file_path:
         parts.append(f"file={file_path}")
+    if volumes:
+        parts.append("--volumes")
     summary = f"Compose down {' '.join(parts)}"
     action = _confirm_store.create_action(
         "docker_compose_down",
@@ -1468,6 +1486,7 @@ async def docker_compose_down(
             "file_path": file_path,
             "remove_orphans": remove_orphans,
             "timeout": timeout,
+            "volumes": volumes,
         },
         summary,
     )
@@ -1476,10 +1495,148 @@ async def docker_compose_down(
 
 @register_tool("docker_prune")
 async def docker_prune(type: str = "container") -> dict[str, Any]:
-    """Prune Docker resources. DANGEROUS: requires confirmation. Allowed types: container, image, network."""
-    DockerClient()._validate_prune_type(type)
+    """Prune Docker resources. DANGEROUS: requires confirmation. Allowed types: container, image, network.
+    With mcp:docker:admin scope: also volume, system."""
+    scopes = _get_token_scopes()
+    has_admin = "mcp:docker:admin" in scopes
+    if type in ("volume", "system") and not has_admin:
+        return tool_error(
+            tool="docker_prune",
+            code="DOCKER_ADMIN_SCOPE_REQUIRED",
+            message=f"Prune type '{type}' requires mcp:docker:admin scope.",
+            hint="Request admin scope or use one of: container, image, network.",
+            source="docker",
+        )
+    try:
+        DockerClient()._validate_prune_type(type, admin_scope=has_admin)
+    except ValueError as e:
+        return tool_error(
+            tool="docker_prune",
+            code="INVALID_INPUT",
+            message=str(e),
+            source="docker",
+        )
     summary = f"Prune {type}s"
     action = _confirm_store.create_action("docker_prune", {"type": type}, summary)
+    return _confirmation_response(action)
+
+
+# ── Docker admin operations (Session 165) ────────────────────────
+
+
+@register_tool("docker_exec")
+async def docker_exec(
+    container: str,
+    command: list[str],
+    timeout: int = 30,
+) -> dict[str, Any]:
+    """Execute a command inside an existing container. ADMIN: requires mcp:docker:admin scope + confirmation.
+
+    DANGEROUS: argv is checked against a safety denylist (env, shadow, shell launchers, etc.).
+    This denylist is a safety guardrail, not a security boundary. docker_exec remains
+    an admin-only dangerous operation and requires both mcp:docker:admin and confirmation.
+    The system does not guarantee prevention of all data exfiltration through docker_exec.
+    """
+    dc = DockerClient()
+    dc._validate_container_name(container)
+    dc._validate_exec_argv(command)
+    timeout = max(1, min(timeout, 300))
+    summary = f"Exec in {container}: {' '.join(command)}"
+    action = _confirm_store.create_action(
+        "docker_exec",
+        {"container": container, "command": command, "timeout": timeout},
+        summary,
+    )
+    return _confirmation_response(action)
+
+
+@register_tool("docker_run")
+async def docker_run(
+    image: str,
+    command: list[str],
+    container_name: str | None = None,
+    timeout: int = 60,
+) -> dict[str, Any]:
+    """Create and start a container from an image. ADMIN: requires mcp:docker:admin scope + confirmation.
+
+    Image must be in the MCP_DOCKER_RUN_ALLOWED_IMAGES allowlist.
+    Container runs with --rm and is removed after completion.
+    """
+    allowed_raw = os.environ.get("MCP_DOCKER_RUN_ALLOWED_IMAGES", "").strip()
+    if not allowed_raw:
+        return tool_error(
+            tool="docker_run",
+            code="DOCKER_RUN_ALLOWLIST_NOT_CONFIGURED",
+            message="docker_run requires MCP_DOCKER_RUN_ALLOWED_IMAGES environment variable.",
+            hint="Set MCP_DOCKER_RUN_ALLOWED_IMAGES with comma-separated image:tag entries.",
+            source="docker",
+        )
+    allowed_images = {ref.strip() for ref in allowed_raw.split(",") if ref.strip()}
+
+    dc = DockerClient()
+    dc._validate_image_tag(image)
+    if image not in allowed_images:
+        return tool_error(
+            tool="docker_run",
+            code="DOCKER_RUN_IMAGE_NOT_ALLOWED",
+            message=f"Image '{image}' is not in the configured allowlist.",
+            hint="Only images listed in MCP_DOCKER_RUN_ALLOWED_IMAGES are permitted.",
+            source="docker",
+        )
+    if container_name:
+        dc._validate_container_name(container_name)
+    dc._validate_exec_argv(command)
+    timeout = max(1, min(timeout, 600))
+
+    summary = f"Run {image}: {' '.join(command)}"
+    if container_name:
+        summary += f" (name={container_name})"
+    action = _confirm_store.create_action(
+        "docker_run",
+        {
+            "image": image,
+            "command": command,
+            "container_name": container_name,
+            "timeout": timeout,
+        },
+        summary,
+    )
+    return _confirmation_response(action)
+
+
+@register_tool("docker_rmi")
+async def docker_rmi(images: list[str]) -> dict[str, Any]:
+    """Remove one or more Docker images (1-5). ADMIN: requires mcp:docker:admin scope + confirmation."""
+    dc = DockerClient()
+    for img in images:
+        dc._validate_image_ref(img)
+    if not images or len(images) > 5:
+        return tool_error(
+            tool="docker_rmi",
+            code="DOCKER_RMI_INVALID_REFERENCE",
+            message="docker_rmi accepts 1-5 images.",
+            source="docker",
+        )
+    summary = f"Remove image(s): {', '.join(images)}"
+    action = _confirm_store.create_action("docker_rmi", {"images": images}, summary)
+    return _confirmation_response(action)
+
+
+@register_tool("docker_volume_rm")
+async def docker_volume_rm(volumes: list[str]) -> dict[str, Any]:
+    """Remove one or more Docker volumes (1-5). ADMIN: requires mcp:docker:admin scope + confirmation."""
+    dc = DockerClient()
+    for vol in volumes:
+        dc._validate_volume_name(vol)
+    if not volumes or len(volumes) > 5:
+        return tool_error(
+            tool="docker_volume_rm",
+            code="DOCKER_VOLUME_RM_INVALID_NAME",
+            message="docker_volume_rm accepts 1-5 volumes.",
+            source="docker",
+        )
+    summary = f"Remove volume(s): {', '.join(volumes)}"
+    action = _confirm_store.create_action("docker_volume_rm", {"volumes": volumes}, summary)
     return _confirmation_response(action)
 
 
@@ -1519,9 +1676,27 @@ async def docker_confirm(token: str) -> dict[str, Any]:
             file_path=kwargs.get("file_path"),
             remove_orphans=kwargs.get("remove_orphans", False),
             timeout=kwargs.get("timeout", 30),
+            volumes=kwargs.get("volumes", False),
         )
     elif tool_name == "docker_prune":
         result = await dc.prune(kwargs["type"])
+    elif tool_name == "docker_exec":
+        result = await dc.exec(
+            kwargs["container"],
+            kwargs["command"],
+            timeout=kwargs.get("timeout", 30),
+        )
+    elif tool_name == "docker_run":
+        result = await dc.run(
+            kwargs["image"],
+            kwargs["command"],
+            container_name=kwargs.get("container_name"),
+            timeout=kwargs.get("timeout", 60),
+        )
+    elif tool_name == "docker_rmi":
+        result = await dc.rmi(kwargs["images"])
+    elif tool_name == "docker_volume_rm":
+        result = await dc.volume_rm(kwargs["volumes"])
     else:
         return tool_error(
             tool="docker_confirm",
