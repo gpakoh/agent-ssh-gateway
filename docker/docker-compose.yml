@@ -4,7 +4,8 @@ services:
     container_name: mcp-postgres
     hostname: mcp-postgres
     networks:
-      internal_net: {}
+      internal_net:
+        ipv4_address: 172.19.0.18
     volumes:
       - mcp_postgres_data:/var/lib/postgresql/data
       - ./mcp-postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
