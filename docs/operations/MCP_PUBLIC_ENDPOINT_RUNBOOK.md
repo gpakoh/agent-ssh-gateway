@@ -133,10 +133,10 @@ The `CapabilitiesResponse` endpoint (`/api/capabilities`) returns both `version`
 
 ```bash
 # Check version via local gateway
-curl -s https://ssh.xloud.ru/api/capabilities -H "X-API-Key: $API_KEY" | jq .version
+curl -s http://127.0.0.1:8085/api/capabilities -H "X-API-Key: $API_KEY" | jq .version
 
 # Check version_source
-curl -s https://ssh.xloud.ru/api/capabilities -H "X-API-Key: $API_KEY" | jq .version_source
+curl -s http://127.0.0.1:8085/api/capabilities -H "X-API-Key: $API_KEY" | jq .version_source
 
 # If version shows old pip-installed value, restart service
 sudo systemctl restart agent-ssh-gateway-mcp.service

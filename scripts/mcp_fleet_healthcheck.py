@@ -43,7 +43,7 @@ ADAPTERS: list[Adapter] = [
         "Gateway",
         "agent-ssh-gateway-mcp",
         "/etc/agent-ssh-gateway-mcp.env",
-        "https://ssh.xloud.ru/mcp",
+        "http://127.0.0.1:8788/mcp",
         106,
         8788,
         0,
@@ -52,7 +52,7 @@ ADAPTERS: list[Adapter] = [
         "Context7",
         "agent-mcp-context7",
         "/etc/agent-mcp-context7.env",
-        "https://ssh.xloud.ru/mcp/context7",
+        "http://127.0.0.1:8790/mcp",
         2,
         8780,
         8790,
@@ -61,7 +61,7 @@ ADAPTERS: list[Adapter] = [
         "GitHub",
         "agent-mcp-github",
         "/etc/agent-mcp-github.env",
-        "https://ssh.xloud.ru/mcp/github",
+        "http://127.0.0.1:8791/mcp",
         8,
         8781,
         8791,
@@ -70,7 +70,7 @@ ADAPTERS: list[Adapter] = [
         "Gitea",
         "agent-mcp-gitea",
         "/etc/agent-mcp-gitea.env",
-        "https://ssh.xloud.ru/mcp/gitea",
+        "http://127.0.0.1:8792/mcp",
         12,
         8782,
         8792,
@@ -79,7 +79,7 @@ ADAPTERS: list[Adapter] = [
         "Docker",
         "agent-mcp-docker",
         "/etc/agent-mcp-docker.env",
-        "https://ssh.xloud.ru/mcp/docker",
+        "http://127.0.0.1:8793/mcp",
         7,
         8783,
         8793,
@@ -88,7 +88,7 @@ ADAPTERS: list[Adapter] = [
         "Postgres",
         "agent-mcp-postgres",
         "/etc/agent-mcp-postgres.env",
-        "https://ssh.xloud.ru/mcp/postgres",
+        "http://127.0.0.1:8794/mcp",
         6,
         8784,
         8794,
@@ -147,6 +147,13 @@ def check_systemd(service: str) -> CheckResult:
         return fail(str(e).split("\n")[0][:120])
 
 
+def _make_http_conn(host: str, port: int, use_ssl: bool):
+    if use_ssl:
+        ctx = ssl.create_default_context()
+        return http.client.HTTPSConnection(host, port, context=ctx, timeout=15)
+    return http.client.HTTPConnection(host, port, timeout=15)
+
+
 def _mcp_request(
     full_url: str, body: dict, sid: str | None = None, token: str | None = None
 ) -> tuple[dict, str]:
@@ -167,10 +174,10 @@ def _mcp_request(
     if sid:
         headers["Mcp-Session-Id"] = sid
 
+    use_ssl = parsed.scheme == "https"
     host = parsed.hostname
-    port = parsed.port or 443
-    ctx = ssl.create_default_context()
-    conn = http.client.HTTPSConnection(host, port, context=ctx, timeout=15)
+    port = parsed.port or (443 if use_ssl else 80)
+    conn = _make_http_conn(host, port, use_ssl)
     try:
         conn.request("POST", path_qs, json.dumps(body), headers)
         resp = conn.getresponse()
@@ -299,10 +306,10 @@ def check_nginx_route(url: str, token: str) -> CheckResult:
             }
         )
 
+        use_ssl = parsed.scheme == "https"
         host = parsed.hostname
-        port = parsed.port or 443
-        ctx = ssl.create_default_context()
-        conn = http.client.HTTPSConnection(host, port, context=ctx, timeout=10)
+        port = parsed.port or (443 if use_ssl else 80)
+        conn = _make_http_conn(host, port, use_ssl)
         try:
             conn.request("POST", path_qs, body, headers)
             resp = conn.getresponse()
