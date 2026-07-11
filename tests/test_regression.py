@@ -80,7 +80,7 @@ class TestC3_CidrCheck:
         from app.auth_middleware import parse_cidrs
 
         allowed = parse_cidrs("10.0.0.0/8")
-        assert is_ip_allowed("10.0.1.1", allowed) is False
+        assert is_ip_allowed("172.16.0.1", allowed) is False
         assert is_ip_allowed("10.0.0.1", allowed) is True
 
     def test_is_ip_allowed_empty_list_rejects_all(self):
@@ -99,7 +99,7 @@ class TestC3_CidrCheck:
         # In The Real Code (main.py:314), The Condition Is:
         # If Creds And Is_ip_allowed(creds.get("host", ""), Allowed_nets):
         allowed_nets = parse_cidrs("10.0.0.0/8")
-        creds = {"host": "10.0.1.99", "port": 22, "username": "test"}
+        creds = {"host": "172.16.0.99", "port": 22, "username": "test"}
         if creds and is_ip_allowed(creds["host"], allowed_nets):
             session_id = "would-create"
         else:
