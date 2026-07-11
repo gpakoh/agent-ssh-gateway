@@ -245,6 +245,34 @@ mcp = FastMCP(
 )
 client = GatewayClient()
 
+# ── Docker hostname resolver ────────────────────────────────────────
+
+
+def _resolve_docker_host(hostname: str, network: str = "internal_net") -> str:
+    """Resolve a Docker container name to its IP on a given network.
+
+    Falls back to the hostname as-is when resolution fails (off-host,
+    no Docker, different network, etc.).
+    """
+    import subprocess
+
+    try:
+        fmt = f"{{{{.NetworkSettings.Networks.{network}.IPAddress}}}}"
+        result = subprocess.run(
+            ["docker", "inspect", "-f", fmt, hostname],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            ip = result.stdout.strip()
+            if ip:
+                return ip
+    except Exception:
+        pass
+    return hostname
+
+
 # ── Postgres DSN ────────────────────────────────────────────────────
 PG_DSN: str | None = None
 _pg_env = "/etc/agent-mcp-postgres.env"
@@ -262,8 +290,11 @@ if os.path.exists(_pg_env):
     _u = _pg_vars.get("PGUSER", "")
     _pw = _pg_vars.get("PGPASSWORD", "")
     if all([_h, _d, _u, _pw]):
+        _resolved_host = _resolve_docker_host(_h)
+        if _resolved_host != _h:
+            print(f"  resolved {_h} -> {_resolved_host} via docker inspect", file=sys.stderr)
         PG_DSN = (
-            f"postgresql://{_u}:{_pw}@{_h}:{_p}/{_d}?sslmode=disable&application_name=mcp_gateway"
+            f"postgresql://{_u}:{_pw}@{_resolved_host}:{_p}/{_d}?sslmode=disable&application_name=mcp_gateway"
         )
 
 _pg_client: PostgresClient | None = None
