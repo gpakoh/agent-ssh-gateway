@@ -131,6 +131,7 @@ class TestChatgptToolsModule:
 
     def test_show_changes_runs_two_commands(self, monkeypatch: pytest.MonkeyPatch):
         chatgpt_tools = import_example_module(monkeypatch, "chatgpt_tools")
+        monkeypatch.setattr(chatgpt_tools, "_is_git_repo", lambda client, session_id=None: True)
         client = _FakeClient()
         result = chatgpt_tools.show_changes(client)
         assert "git_status" in result
@@ -139,6 +140,25 @@ class TestChatgptToolsModule:
             "git status --short",
             "git diff --stat",
         ]
+
+    def test_show_changes_not_git_repo_raises(self, monkeypatch: pytest.MonkeyPatch):
+        chatgpt_tools = import_example_module(monkeypatch, "chatgpt_tools")
+        monkeypatch.setattr(chatgpt_tools, "_is_git_repo", lambda client, session_id=None: False)
+        client = _FakeClient()
+        with pytest.raises(ValueError, match="not a git repository"):
+            chatgpt_tools.show_changes(client)
+
+    def test_show_changes_with_project(self, monkeypatch: pytest.MonkeyPatch):
+        chatgpt_tools = import_example_module(monkeypatch, "chatgpt_tools")
+        monkeypatch.setattr(chatgpt_tools, "_project_root", lambda: Path("/tmp"))
+        called = []
+        monkeypatch.setattr(
+            chatgpt_tools, "project_show_changes", lambda client, project: called.append(project) or {}
+        )
+        client = _FakeClient()
+        result = chatgpt_tools.show_changes(client, project="my-project")
+        assert called == ["my-project"]
+        assert result == {}
 
 
 class _FakeClient:

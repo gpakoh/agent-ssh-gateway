@@ -95,7 +95,28 @@ def git_diff_stat(client: GatewayClient, session_id: str | None = None) -> dict[
     return run_readonly_command(client, "git diff --stat", session_id=session_id)
 
 
-def show_changes(client: GatewayClient, session_id: str | None = None) -> dict[str, Any]:
+def _is_git_repo(client: GatewayClient, session_id: str | None = None) -> bool:
+    """Check if the current SSH session working directory is a git repository."""
+    result = run_readonly_command(client, "git rev-parse --git-dir 2>/dev/null", session_id=session_id)
+    output = result.get("output", "") or result.get("stdout", "")
+    exit_code = result.get("exit_code", 1)
+    return exit_code == 0 and ".git" in output or output.strip().endswith(".git")
+
+
+def show_changes(
+    client: GatewayClient,
+    session_id: str | None = None,
+    project: str | None = None,
+) -> dict[str, Any]:
+    if project:
+        return project_show_changes(client, project)
+
+    if not _is_git_repo(client, session_id=session_id):
+        raise ValueError(
+            "SSH session working directory is not a git repository. "
+            "Use gateway_project_show_changes(project=...) to specify a project."
+        )
+
     return {
         "git_status": git_status(client, session_id=session_id),
         "git_diff_stat": git_diff_stat(client, session_id=session_id),
