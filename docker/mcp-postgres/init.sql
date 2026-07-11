@@ -2,6 +2,7 @@ CREATE USER mcp_owner WITH PASSWORD '99LofZCa3OURoBDVvhUdT8SxF9kRA7eF';
 CREATE USER mcp_readonly WITH PASSWORD 'e37CQ6uYzN3BanTZL4J0ArPKeZPI820C';
 
 CREATE DATABASE rag_vectordb OWNER mcp_owner;
+CREATE DATABASE gateway OWNER postgres;
 
 \c rag_vectordb
 
