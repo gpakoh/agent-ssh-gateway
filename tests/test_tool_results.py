@@ -165,6 +165,7 @@ class TestErrorCodes:
             "DEPENDENCY_MISSING",
             "INVALID_INPUT",
             "INTERNAL_ERROR",
+            "FILE_NOT_FOUND",
             "CONFIRM_TOKEN_INVALID",
             "CONFIRM_TOKEN_EXPIRED",
             "CONFIRM_TOKEN_CONSUMED",
