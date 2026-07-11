@@ -112,6 +112,11 @@ Canonical error codes (extensible):
   - **Batch 2 complete (Session 167)**: Envelope test coverage for all 7 remaining dangerous/admin tools: `docker_rm`, `docker_compose_down`, `docker_prune`, `docker_exec`, `docker_run`, `docker_rmi`, `docker_volume_rm`. All confirmed canonical — no raw `str`, no flat dict without `ok/tool/result/error/meta`. 25 new tests covering confirmation_required + all validation/scope/denylist/allowlist error paths.
   - `_confirmation_response()` was already canonical (`tool_success` with `confirmation_required` status).
   - `docker_pending_actions()` was already canonical.
+- Migrate read-only `gateway_*` introspection tools to use `tool_results.py` envelope.
+  - **Batch 3 complete (Session 168)**: 7 read-only gateway tools migrated: `gateway_health`, `gateway_project_working_directory`, `gateway_project_info`, `gateway_project_list_files`, `gateway_project_tree`, `gateway_project_list_tree`, `gateway_tools_manifest`.
+  - Added `_run_gateway()` helper in `server.py` — a thin wrapper that calls `tool_success()`/`tool_error()` with `source="gateway"` and `read_only=True`.
+  - `GatewayClientError` → `INTERNAL_ERROR`, `CommandPolicyError`/`WritePermissionError`/`WriteModeError` → `POLICY_VIOLATION`.
+  - 16 new envelope tests in `tests/test_gateway_envelope.py`.
 - Migrate `postgres_*` tools to use `tool_results.py` envelope.
 - Migrate `Context7` tools to use `tool_results.py` envelope.
 - Keep `text_result()`/`error_result()` working for backward compatibility.
