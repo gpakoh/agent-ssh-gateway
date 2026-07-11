@@ -305,6 +305,33 @@ def run_tool(
     return text_result(tool=tool, title=title, text=success_text, data=data)
 
 
+def _run_gateway(
+    tool: str,
+    fn: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    """Execute a read-only gateway tool with canonical response envelope."""
+    try:
+        data = fn()
+    except (GatewayClientError, CommandPolicyError, WritePermissionError, WriteModeError) as exc:
+        if isinstance(exc, (CommandPolicyError, WritePermissionError, WriteModeError)):
+            code = "POLICY_VIOLATION"
+        else:
+            code = "INTERNAL_ERROR"
+        return tool_error(
+            tool=tool,
+            code=code,
+            message=str(exc),
+            source="gateway",
+            read_only=True,
+        )
+    return tool_success(
+        tool=tool,
+        result=data,
+        source="gateway",
+        read_only=True,
+    )
+
+
 def _split_lines(value: str | None) -> list[str] | None:
     """Split newline-separated string into list, or return None."""
     if value is None:
@@ -315,12 +342,7 @@ def _split_lines(value: str | None) -> list[str] | None:
 @register_tool("gateway_health")
 def gateway_health() -> dict[str, Any]:
     """Check gateway health."""
-    return run_tool(
-        tool="gateway_health",
-        title="Gateway health",
-        fn=client.health,
-        success_text="Gateway is reachable.",
-    )
+    return _run_gateway(tool="gateway_health", fn=client.health)
 
 
 @register_tool("gateway_list_sessions")
@@ -550,11 +572,9 @@ def gateway_run_compileall(session_id: str | None = None) -> dict[str, Any]:
 @register_tool("gateway_project_working_directory")
 def gateway_project_working_directory(project: str) -> dict[str, Any]:
     """Print working directory within MCP_GATEWAY_PROJECT_ROOT/{project}."""
-    return run_tool(
+    return _run_gateway(
         tool="gateway_project_working_directory",
-        title="Project working directory",
         fn=lambda: project_working_directory(client, project),
-        success_text="Collected project working directory.",
     )
 
 
@@ -563,11 +583,9 @@ def gateway_project_info(project: str) -> dict[str, Any]:
     """Return resolved project metadata for a configured project name.
     Read-only. Does not execute user-provided shell commands.
     """
-    return run_tool(
+    return _run_gateway(
         tool="gateway_project_info",
-        title="Project info",
         fn=lambda: project_info(client, project),
-        success_text="Resolved project info.",
     )
 
 
@@ -689,33 +707,27 @@ def gateway_project_find_files(project: str, pattern: str) -> dict[str, Any]:
 @register_tool("gateway_project_list_files")
 def gateway_project_list_files(project: str, pattern: str) -> dict[str, Any]:
     """List files matching a glob pattern using Python pathlib — no shell execution."""
-    return run_tool(
+    return _run_gateway(
         tool="gateway_project_list_files",
-        title="Project list files",
         fn=lambda: project_list_files(client, project, pattern),
-        success_text="Listed project files.",
     )
 
 
 @register_tool("gateway_project_tree")
 def gateway_project_tree(project: str, depth: int = 2, glob: str | None = None) -> dict[str, Any]:
     """List project directory tree up to a given depth."""
-    return run_tool(
+    return _run_gateway(
         tool="gateway_project_tree",
-        title="Project tree",
         fn=lambda: project_tree(client, project, depth=depth, glob=glob),
-        success_text="Listed project tree.",
     )
 
 
 @register_tool("gateway_project_list_tree")
 def gateway_project_list_tree(project: str, depth: int = 2) -> dict[str, Any]:
     """List project directory tree using Python pathlib — no shell execution."""
-    return run_tool(
+    return _run_gateway(
         tool="gateway_project_list_tree",
-        title="Project list tree",
         fn=lambda: project_list_tree(client, project, depth=depth),
-        success_text="Listed project tree.",
     )
 
 
@@ -2119,14 +2131,12 @@ if _scope_enforcement not in ("off", "audit", "enforce"):
 def gateway_tools_manifest() -> dict[str, Any]:
     """Return a read-only manifest of all registered tools, modes, scopes, and access profiles.
     No secrets, no env dumps, no network calls, no tool execution."""
-    return run_tool(
+    return _run_gateway(
         tool="gateway_tools_manifest",
-        title="Tools manifest",
         fn=lambda: _build_manifest(
             registered_tools=mcp._tool_manager.list_tools(),
             scope_enforcement=_scope_enforcement,
         ),
-        success_text="Tools manifest built.",
     )
 
 
