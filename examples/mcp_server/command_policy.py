@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 ALLOWED_COMMAND_PREFIXES: tuple[str, ...] = (
+    "git rev-parse",
     "git status",
     "git log",
     "git diff",
