@@ -6,6 +6,14 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.30-alpha] - 2026-07-11
+
+### Security
+
+- **Remove hardcoded POSTGRES_PASSWORD from docker-compose.yml**: credential moved to gitignored `docker/.env`, tracked compose uses `${POSTGRES_PASSWORD:?...}` required env var reference. Real secret never tracked. `docker/.env.example` added with placeholders. (Session 170)
+- **Add `scripts/check_no_hardcoded_secrets.py`**: scans tracked config/compose/docs for literal credential patterns, exits 1 on detection. Wired into test suite as `test_no_hardcoded_secrets_in_tracked_configs`. (Session 170)
+- **Secrets rotation runbook**: `docs/operations/SECRETS_ROTATION_RUNBOOK.md` documents rotation procedure, verification checklist, and anti-patterns. No real secrets documented. (Session 170)
+
 ## [0.1.29-alpha] - 2026-07-11
 
 ### Changed
