@@ -30,25 +30,29 @@ mcp = FastMCP("docker-remote")
 async def docker_ps(
     all: bool = False,
     format: str | None = None,
+    limit: int = 50,
 ) -> str:
     """List running containers. Use all=True to include stopped containers.
 
     format: Go template string for docker ps --format (default: table with Names/Image/Status/Ports).
+    limit: max containers to return (default 50, set higher for full list).
     """
     client = _get_client()
-    return await client.ps(all=all, format=format or None)
+    return await client.ps(all=all, format=format or None, limit=limit)
 
 
 @mcp.tool()
 async def docker_images(
     format: str | None = None,
+    limit: int = 50,
 ) -> str:
     """List Docker images on the host.
 
     format: Go template string for docker images --format (default: table with Repository/Tag/ID/Size).
+    limit: max images to return (default 50, set higher for full list).
     """
     client = _get_client()
-    return await client.images(format=format or None)
+    return await client.images(format=format or None, limit=limit)
 
 
 @mcp.tool()
@@ -72,27 +76,31 @@ async def docker_logs(container: str, tail: int = 200) -> str:
 @mcp.tool()
 async def docker_stats(
     format: str | None = None,
+    limit: int = 50,
 ) -> str:
     """Show live resource usage statistics for all running containers (CPU, memory, network, block I/O).
 
     format: Go template string (default: table with Name/CPUPerc/MemUsage/NetIO/BlockIO).
+    limit: max containers to return (default 50, set higher for full list).
     """
     client = _get_client()
-    return await client.stats(format=format or None)
+    return await client.stats(format=format or None, limit=limit)
 
 
 @mcp.tool()
 async def docker_compose_ps(
     project_dir: str | None = None,
     file_path: str | None = None,
+    limit: int = 50,
 ) -> str:
     """List containers in a Docker Compose project.
 
     project_dir: path to directory containing compose file (e.g. /media/1TB/Python/web_ssh/web-ssh-gateway/docker).
     file_path: path to compose file (mutually exclusive with project_dir).
+    limit: max services to return (default 50).
     """
     client = _get_client()
-    return await client.compose_ps(project_dir=project_dir, file_path=file_path)
+    return await client.compose_ps(project_dir=project_dir, file_path=file_path, limit=limit)
 
 
 @mcp.tool()

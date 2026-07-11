@@ -446,3 +446,59 @@ def test_compose_down_volumes_argv():
     argv.append("--volumes")
     argv.extend(["-t", "30"])
     assert "--volumes" in argv
+
+
+# ── _truncate_table_output ──
+
+_HEADER = "NAMES\tIMAGE\tSTATUS\tPORTS"
+_SEP = "--\t--\t--\t--"
+
+
+def _table(lines: list[str]) -> str:
+    return "\n".join([_HEADER, _SEP] + lines)
+
+
+def test_truncate_no_truncation_needed():
+    output = _table(["web\nginx:alpine\traunning", "db\tpostgres:16\traunning"])
+    result = DockerClient._truncate_table_output(output, limit=50)
+    assert result == output
+    assert "showing" not in result
+
+
+def test_truncate_limits_data_rows():
+    rows = [f"app{i}\tnginx:{i}\traunning" for i in range(100)]
+    output = _table(rows)
+    result = DockerClient._truncate_table_output(output, limit=10)
+    lines = result.splitlines()
+    assert len(lines) == 2 + 10 + 1  # header + sep + 10 data rows + truncation notice
+    assert "showing 10 of 100 results" in lines[-1]
+    assert "use limit or filter" in lines[-1]
+
+
+def test_truncate_empty_output():
+    result = DockerClient._truncate_table_output("", limit=10)
+    assert result == ""
+
+
+def test_truncate_header_only():
+    result = DockerClient._truncate_table_output(_HEADER + "\n" + _SEP, limit=10)
+    lines = result.splitlines()
+    assert len(lines) == 2
+    assert "showing" not in result
+
+
+def test_truncate_exact_boundary():
+    rows = [f"app{i}\tnginx\traunning" for i in range(5)]
+    output = _table(rows)
+    result = DockerClient._truncate_table_output(output, limit=5)
+    assert result == output
+    assert "showing" not in result
+
+
+def test_truncate_preserves_header_format():
+    rows = [f"app{i}\tnginx\traunning" for i in range(30)]
+    output = _table(rows)
+    result = DockerClient._truncate_table_output(output, limit=5)
+    lines = result.splitlines()
+    assert lines[0] == _HEADER
+    assert lines[1] == _SEP

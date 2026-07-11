@@ -240,10 +240,32 @@ class DockerClient:
 
         return file_path
 
+    @staticmethod
+    def _truncate_table_output(output: str, limit: int) -> str:
+        """Truncate tabular docker output to *limit* data rows, preserving the header.
+
+        Docker table output always starts with a header line followed by a separator
+        line (dashes).  We keep both plus *limit* data lines and append a notice when
+        truncated.
+        """
+        lines = output.splitlines()
+        if len(lines) <= 2:
+            return output
+        header = lines[:2]
+        data = lines[2:]
+        if len(data) <= limit:
+            return output
+        truncated = data[:limit]
+        total = len(data)
+        return "\n".join(header + truncated) + (
+            f"\n[showing {limit} of {total} results — use limit or filter to narrow]"
+        )
+
     async def ps(
         self,
         all: bool = False,
         format: str | None = None,
+        limit: int = 50,
     ) -> str:
         argv = [DOCKER_BIN, "ps"]
         if all:
@@ -257,11 +279,13 @@ class DockerClient:
                     "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}",
                 ]
             )
-        return await self._run(argv)
+        result = await self._run(argv)
+        return self._truncate_table_output(result, limit)
 
     async def images(
         self,
         format: str | None = None,
+        limit: int = 50,
     ) -> str:
         argv = [DOCKER_BIN, "images"]
         if format:
@@ -273,7 +297,8 @@ class DockerClient:
                     "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}",
                 ]
             )
-        return await self._run(argv)
+        result = await self._run(argv)
+        return self._truncate_table_output(result, limit)
 
     async def inspect(
         self,
@@ -340,6 +365,7 @@ class DockerClient:
     async def stats(
         self,
         format: str | None = None,
+        limit: int = 50,
     ) -> str:
         argv = [DOCKER_BIN, "stats", "--no-stream"]
         if format:
@@ -351,13 +377,15 @@ class DockerClient:
                     "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}",
                 ]
             )
-        return await self._run(argv)
+        result = await self._run(argv)
+        return self._truncate_table_output(result, limit)
 
     async def compose_ps(
         self,
         project_dir: str | None = None,
         file_path: str | None = None,
         format: str | None = None,
+        limit: int = 50,
     ) -> str:
         resolved = self._resolve_compose_file_path(file_path, project_dir)
         argv = self._compose_base_argv(resolved, project_dir)
@@ -371,7 +399,8 @@ class DockerClient:
                     "table {{.Name}}\t{{.Status}}",
                 ]
             )
-        return await self._run(argv, timeout=60.0)
+        result = await self._run(argv, timeout=60.0)
+        return self._truncate_table_output(result, limit)
 
     async def compose_services(
         self,
