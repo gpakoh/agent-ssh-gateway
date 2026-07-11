@@ -111,10 +111,12 @@ class OAuthProxyMiddleware(BaseHTTPMiddleware):
                 return JSONResponse(
                     {"error": "mcp_token is not accepted in oauth mode"},
                     status_code=401,
+                    headers={"WWW-Authenticate": f'Bearer realm="mcp", resource="{MCP_PUBLIC_URL}/"'},
                 )
             return JSONResponse(
                 {"error": "Missing Authorization: Bearer header"},
                 status_code=401,
+                headers={"WWW-Authenticate": f'Bearer realm="mcp", resource="{MCP_PUBLIC_URL}/"'},
             )
 
         # token mode: Bearer or mcp_token query param
@@ -214,7 +216,10 @@ async def _check_tool_scope(request: Request, path: str, body: bytes) -> JSONRes
 
 async def proxy_request(request: Request) -> StreamingResponse | JSONResponse:
     """Proxy an HTTP request to the internal MCP server."""
-    url = f"{MCP_INTERNAL_URL}{request.url.path}"
+    target_path = request.url.path
+    if target_path == "/":
+        target_path = "/mcp"
+    url = f"{MCP_INTERNAL_URL}{target_path}"
     if request.url.query:
         url = f"{url}?{request.url.query}"
 
@@ -379,11 +384,44 @@ async def consent_handler(request: Request):
     return RedirectResponse(url=urlunparse(parsed._replace(query=urlencode(qs))), status_code=303)
 
 
+async def openid_configuration(request: Request) -> JSONResponse:
+    """Return minimal OpenID Connect discovery metadata."""
+    base = MCP_PUBLIC_URL.rstrip("/")
+    scopes = getattr(_mcp_mod, "SUPPORTED_SCOPES", None)
+    if scopes is None:
+        scopes = [
+            "mcp:read", "mcp:project", "mcp:handoff", "mcp:agent-run",
+            "mcp:execute", "mcp:repo", "mcp:docker", "mcp:postgres",
+            "mcp:docs", "mcp:admin",
+        ]
+    return JSONResponse({
+        "issuer": f"{base}/",
+        "authorization_endpoint": f"{base}/authorize",
+        "token_endpoint": f"{base}/token",
+        "registration_endpoint": f"{base}/register",
+        "jwks_uri": f"{base}/.well-known/jwks",
+        "scopes_supported": scopes,
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic", "none"],
+        "code_challenge_methods_supported": ["S256"],
+        "subject_types_supported": ["public"],
+        "id_token_signing_alg_values_supported": ["RS256"],
+    })
+
+
+async def jwks(request: Request) -> JSONResponse:
+    """Return empty JWKS (no ID token signing support)."""
+    return JSONResponse({"keys": []})
+
+
 def create_proxy_app() -> Starlette:
     """Create auth-guarded proxy to internal MCP server."""
     proxy = Starlette()
     proxy.add_middleware(OAuthProxyMiddleware)
     proxy.add_route("/oauth/consent", consent_handler, methods=["GET", "POST"])
+    proxy.add_route("/.well-known/openid-configuration", openid_configuration, methods=["GET"])
+    proxy.add_route("/.well-known/jwks", jwks, methods=["GET"])
     proxy.add_route("/", proxy_request, methods=["GET", "POST", "DELETE"])
     proxy.add_route("/{path:path}", proxy_request, methods=["GET", "POST", "DELETE"])
     return proxy
