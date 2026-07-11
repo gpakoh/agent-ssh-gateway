@@ -1,4 +1,6 @@
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -111,4 +113,16 @@ def test_default_server_configs_are_empty_by_default() -> None:
     assert re.search(pattern, config_text), (
         "SERVER_DEFAULT_CONFIGS must default to an empty JSON object. "
         "Do not hardcode infrastructure hosts in source code."
+    )
+
+
+def test_no_hardcoded_secrets_in_tracked_configs() -> None:
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "check_no_hardcoded_secrets.py")],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, (
+        f"check_no_hardcoded_secrets.py failed:\n{result.stdout}\n{result.stderr}"
     )
