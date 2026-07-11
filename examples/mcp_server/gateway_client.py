@@ -62,7 +62,23 @@ def resolve_file_path(path: str) -> str:
 
 
 class GatewayClientError(RuntimeError):
-    """Raised when the gateway returns an error."""
+    """Raised when the gateway returns an error.
+
+    Attributes:
+        status_code: HTTP status code from the gateway, or None for client-side errors.
+        body: Parsed JSON body from the gateway response, or None.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        body: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body
 
 
 class GatewayClient:
@@ -161,7 +177,16 @@ class GatewayClient:
             timeout=30,
         )
         if response.status_code >= 400:
-            raise GatewayClientError(f"GET {path} failed: {response.status_code} {response.text}")
+            body: dict[str, Any] | None = None
+            try:
+                body = response.json()
+            except Exception:
+                pass
+            raise GatewayClientError(
+                f"GET {path} failed: {response.status_code} {response.text}",
+                status_code=response.status_code,
+                body=body,
+            )
         return response.json()
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -172,7 +197,16 @@ class GatewayClient:
             timeout=30,
         )
         if response.status_code >= 400:
-            raise GatewayClientError(f"POST {path} failed: {response.status_code} {response.text}")
+            body: dict[str, Any] | None = None
+            try:
+                body = response.json()
+            except Exception:
+                pass
+            raise GatewayClientError(
+                f"POST {path} failed: {response.status_code} {response.text}",
+                status_code=response.status_code,
+                body=body,
+            )
         return response.json()
 
     def _require_session_id(self) -> str:

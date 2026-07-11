@@ -301,8 +301,40 @@ def run_tool(
     try:
         data = fn()
     except (GatewayClientError, CommandPolicyError, WritePermissionError, WriteModeError) as exc:
-        return error_result(tool=tool, title=title, error=str(exc))
+        if isinstance(exc, (CommandPolicyError, WritePermissionError, WriteModeError)):
+            return error_result(tool=tool, title=title, error=str(exc))
+        code, retryable = _classify_gateway_error(exc)
+        hint = "The requested file does not exist at the specified path" if code == "FILE_NOT_FOUND" else None
+        return tool_error(
+            tool=tool,
+            code=code,
+            message=str(exc),
+            retryable=retryable,
+            hint=hint,
+            source="gateway",
+        )
     return text_result(tool=tool, title=title, text=success_text, data=data)
+
+
+def _classify_gateway_error(exc: GatewayClientError) -> tuple[str, bool]:
+    """Classify a GatewayClientError into (error_code, retryable)."""
+    status = exc.status_code
+    msg = str(exc).lower()
+
+    if status == 404 and ("file not found" in msg or "cannot read" in msg):
+        return "FILE_NOT_FOUND", False
+
+    if status is not None and status >= 500:
+        return "INTERNAL_ERROR", True
+
+    if status == 404:
+        return "INTERNAL_ERROR", False
+    if status == 502:
+        return "INTERNAL_ERROR", True
+    if status == 504:
+        return "INTERNAL_ERROR", True
+
+    return "INTERNAL_ERROR", True
 
 
 def _run_gateway(
@@ -315,12 +347,18 @@ def _run_gateway(
     except (GatewayClientError, CommandPolicyError, WritePermissionError, WriteModeError) as exc:
         if isinstance(exc, (CommandPolicyError, WritePermissionError, WriteModeError)):
             code = "POLICY_VIOLATION"
+            retryable = False
         else:
-            code = "INTERNAL_ERROR"
+            code, retryable = _classify_gateway_error(exc)
+        hint = None
+        if code == "FILE_NOT_FOUND":
+            hint = "The requested file does not exist at the specified path"
         return tool_error(
             tool=tool,
             code=code,
             message=str(exc),
+            retryable=retryable,
+            hint=hint,
             source="gateway",
             read_only=True,
         )
