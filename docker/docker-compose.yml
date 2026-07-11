@@ -9,7 +9,7 @@ services:
       - mcp_postgres_data:/var/lib/postgresql/data
       - ./mcp-postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     environment:
-      POSTGRES_PASSWORD: 99LofZCa3OURoBDVvhUdT8SxF9kRA7eF
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
