@@ -6,6 +6,18 @@ This project follows semantic versioning where practical, but the public API is 
 
 ## [Unreleased]
 
+## [0.1.29-alpha] - 2026-07-11
+
+### Changed
+
+- **Gateway read-only tools canonical envelope**: 7 tools migrated from `run_tool()`/`text_result()` to `tool_success()`/`tool_error()` via `_run_gateway()` helper. Envelope includes `ok/tool/result/error/meta` with `source="gateway"` and `read_only=True`. Error mapping: `GatewayClientError`→`INTERNAL_ERROR`, `CommandPolicyError`/`WritePermissionError`/`WriteModeError`→`POLICY_VIOLATION`. (Session 168, Batch 3)
+- **Fleet healthcheck expected tool count**: Gateway `102→106` to match actual `v0.1.27-alpha` Docker admin tool count. (Session 168-F)
+
+### Added
+
+- **`_run_gateway()` helper**: thin wrapper in `server.py` for read-only gateway tool canonical envelope responses.
+- **`test_gateway_envelope.py`**: 16 tests covering success/error envelopes for all 7 migrated gateway tools, including error code routing for `GatewayClientError`, `CommandPolicyError`, `WritePermissionError`, `WriteModeError`.
+
 ## [0.1.28-alpha] - 2026-07-10
 
 ### Changed
