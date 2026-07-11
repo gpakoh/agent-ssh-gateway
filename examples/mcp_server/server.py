@@ -1326,15 +1326,15 @@ async def github_get_pull_request(owner: str, repo: str, pull_number: int) -> di
 
 
 @register_tool("docker_ps")
-async def docker_ps(all: bool = False, format: str | None = None) -> str:
-    """List running containers. Use all=True to include stopped containers."""
-    return await DockerClient().ps(all=all, format=format)
+async def docker_ps(all: bool = False, format: str | None = None, limit: int = 50) -> str:
+    """List running containers. Use all=True to include stopped containers. limit: max rows (default 50)."""
+    return await DockerClient().ps(all=all, format=format, limit=limit)
 
 
 @register_tool("docker_images")
-async def docker_images(format: str | None = None) -> str:
-    """List Docker images on the host."""
-    return await DockerClient().images(format=format)
+async def docker_images(format: str | None = None, limit: int = 50) -> str:
+    """List Docker images on the host. limit: max rows (default 50)."""
+    return await DockerClient().images(format=format, limit=limit)
 
 
 @register_tool("docker_inspect")
@@ -1350,15 +1350,17 @@ async def docker_logs(container: str, tail: int = 200) -> str:
 
 
 @register_tool("docker_stats")
-async def docker_stats(format: str | None = None) -> str:
-    """Show live resource usage statistics for all running containers (CPU, memory, network, block I/O)."""
-    return await DockerClient().stats(format=format)
+async def docker_stats(format: str | None = None, limit: int = 50) -> str:
+    """Show live resource usage statistics for all running containers. limit: max rows (default 50)."""
+    return await DockerClient().stats(format=format, limit=limit)
 
 
 @register_tool("docker_compose_ps")
-async def docker_compose_ps(project_dir: str | None = None, file_path: str | None = None) -> str:
-    """List containers in a Docker Compose project."""
-    return await DockerClient().compose_ps(project_dir=project_dir, file_path=file_path)
+async def docker_compose_ps(
+    project_dir: str | None = None, file_path: str | None = None, limit: int = 50
+) -> str:
+    """List containers in a Docker Compose project. limit: max rows (default 50)."""
+    return await DockerClient().compose_ps(project_dir=project_dir, file_path=file_path, limit=limit)
 
 
 @register_tool("docker_compose_services")
