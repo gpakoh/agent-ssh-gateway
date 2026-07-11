@@ -564,12 +564,12 @@ def gateway_git_diff_stat(session_id: str | None = None) -> dict[str, Any]:
 
 
 @register_tool("gateway_show_changes")
-def gateway_show_changes(session_id: str | None = None) -> dict[str, Any]:
+def gateway_show_changes(session_id: str | None = None, project: str | None = None) -> dict[str, Any]:
     """Show combined git status and diff stat."""
     return run_tool(
         tool="gateway_show_changes",
         title="Show changes",
-        fn=lambda: show_changes(client, session_id=session_id),
+        fn=lambda: show_changes(client, session_id=session_id, project=project),
         success_text="Collected repository change summary.",
     )
 
