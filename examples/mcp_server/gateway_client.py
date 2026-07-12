@@ -169,12 +169,17 @@ class GatewayClient:
 
         return wrapper
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        timeout: int = 30,
+    ) -> dict[str, Any]:
         response = httpx.get(
             f"{self.base_url}{path}",
             params=params,
             headers=self._headers(),
-            timeout=30,
+            timeout=timeout,
         )
         if response.status_code >= 400:
             body: dict[str, Any] | None = None
@@ -187,7 +192,14 @@ class GatewayClient:
                 status_code=response.status_code,
                 body=body,
             )
-        return response.json()
+        data = response.json()
+        if isinstance(data, dict) and data.get("error") == "NOT_SUPPORTED":
+            raise GatewayClientError(
+                "NOT_SUPPORTED",
+                status_code=response.status_code,
+                body=data,
+            )
+        return data
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         response = httpx.post(
@@ -266,8 +278,36 @@ class GatewayClient:
             {"redact_output": str(redact_output).lower()},
         )
 
-    def wait_job(self, job_id: str, timeout_sec: int | None = None) -> dict[str, Any]:
-        deadline = time.time() + (timeout_sec or self.job_timeout)
+    def wait_job(self, job_id: str, timeout: int | None = None) -> dict[str, Any]:
+        """Wait for job completion using long-poll, falling back to polling.
+
+        Falls back to polling on NOT_SUPPORTED (multi-worker) or 404 (old gateway).
+        No fallback on PERMISSION_DENIED, JOB_NOT_FOUND, or other real errors.
+        """
+        effective_timeout = timeout or self.job_timeout
+        http_timeout = effective_timeout + 5
+
+        try:
+            result = self._get(
+                f"/api/jobs/{job_id}/wait",
+                params={"timeout": effective_timeout},
+                timeout=http_timeout,
+            )
+            return result
+        except GatewayClientError as exc:
+            should_fallback = False
+            if exc.status_code == 404:
+                should_fallback = True
+            elif exc.body and exc.body.get("error") == "NOT_SUPPORTED":
+                should_fallback = True
+            elif exc.status_code == 200 and exc.body and exc.body.get("error") == "NOT_SUPPORTED":
+                should_fallback = True
+
+            if not should_fallback:
+                raise
+
+        # Polling fallback
+        deadline = time.time() + effective_timeout
         while time.time() < deadline:
             status = self.job_status(job_id)
             if status.get("status") in {"completed", "failed", "cancelled"}:
