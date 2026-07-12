@@ -150,7 +150,6 @@ class TestChatgptToolsModule:
 
     def test_show_changes_with_project(self, monkeypatch: pytest.MonkeyPatch):
         chatgpt_tools = import_example_module(monkeypatch, "chatgpt_tools")
-        monkeypatch.setattr(chatgpt_tools, "_project_root", lambda: Path("/tmp"))
         called = []
         monkeypatch.setattr(
             chatgpt_tools, "project_show_changes", lambda client, project: called.append(project) or {}
