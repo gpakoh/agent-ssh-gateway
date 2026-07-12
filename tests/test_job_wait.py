@@ -1,7 +1,6 @@
 """Tests for GET /api/jobs/{job_id}/wait long-poll endpoint."""
 
-import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from starlette.testclient import TestClient
 
