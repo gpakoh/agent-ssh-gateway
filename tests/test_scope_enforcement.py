@@ -74,14 +74,14 @@ class TestScopeDataIntegrity:
 
 class TestScopeChecking:
     def test_has_required_scope_match(self):
-        assert has_required_scope(["mcp:read"], "gateway_health")
+        assert has_required_scope(["mcp:read"], "health")
 
     def test_has_required_scope_no_match(self):
-        assert not has_required_scope(["mcp:docker"], "gateway_health")
+        assert not has_required_scope(["mcp:docker"], "health")
 
     def test_has_required_scope_multiple_allowed(self):
-        assert has_required_scope(["mcp:project"], "gateway_read_file")
-        assert has_required_scope(["mcp:read"], "gateway_read_file")
+        assert has_required_scope(["mcp:project"], "read_file")
+        assert has_required_scope(["mcp:read"], "read_file")
 
     def test_has_required_scope_unknown_tool_admin_only(self):
         assert not has_required_scope(["mcp:read"], "unknown_tool")
@@ -94,25 +94,25 @@ class TestScopeChecking:
 
     def test_has_required_scope_viewer_denied(self):
         viewer = get_profile_scopes("viewer")
-        assert has_required_scope(viewer, "gateway_health")  # mcp:read
+        assert has_required_scope(viewer, "health")  # mcp:read
         assert not has_required_scope(viewer, "project_run_opencode")  # mcp:agent-run
-        assert not has_required_scope(viewer, "gateway_project_run_pytest")
+        assert not has_required_scope(viewer, "project_run_pytest")
         assert not has_required_scope(viewer, "docker_ps")
         assert not has_required_scope(viewer, "postgres_select")
 
     def test_has_required_scope_agent_runner(self):
         ar = get_profile_scopes("agent-runner")
         assert has_required_scope(ar, "project_run_opencode")
-        assert has_required_scope(ar, "gateway_project_run_mimo")
+        assert has_required_scope(ar, "project_run_mimo")
         assert not has_required_scope(ar, "docker_ps")
-        assert not has_required_scope(ar, "gateway_execute_restricted")
+        assert not has_required_scope(ar, "execute_restricted")
 
     def test_has_required_scope_infra(self):
         infra = get_profile_scopes("infra")
         assert has_required_scope(infra, "docker_ps")
         assert has_required_scope(infra, "postgres_select")
-        assert has_required_scope(infra, "gateway_health")
-        assert not has_required_scope(infra, "gateway_project_tree")
+        assert has_required_scope(infra, "health")
+        assert not has_required_scope(infra, "project_tree")
 
 
 # ── Tool extraction ──────────────────────────────────────────────
@@ -125,10 +125,10 @@ class TestToolExtraction:
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "tools/call",
-                "params": {"name": "gateway_health", "arguments": {}},
+                "params": {"name": "health", "arguments": {}},
             }
         ).encode()
-        assert extract_tool_from_body(body) == "gateway_health"
+        assert extract_tool_from_body(body) == "health"
 
     def test_extract_initialize_returns_none(self):
         body = json.dumps(
@@ -201,14 +201,14 @@ class TestFleetRouteScoping:
 
 class TestSpecificToolMappings:
     def test_gateway_execute_restricted_requires_execute(self):
-        assert get_required_scopes("gateway_execute_restricted") == ["mcp:execute"]
-        assert not has_required_scope(["mcp:read"], "gateway_execute_restricted")
+        assert get_required_scopes("execute_restricted") == ["mcp:execute"]
+        assert not has_required_scope(["mcp:read"], "execute_restricted")
 
     def test_project_run_opencode_requires_agent_run(self):
         assert get_required_scopes("project_run_opencode") == ["mcp:agent-run"]
 
     def test_gateway_project_run_mimo_requires_agent_run(self):
-        assert get_required_scopes("gateway_project_run_mimo") == ["mcp:agent-run"]
+        assert get_required_scopes("project_run_mimo") == ["mcp:agent-run"]
 
     def test_all_gitea_fleet_requires_repo(self):
         for tool in TOOL_SCOPES:

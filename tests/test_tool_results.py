@@ -11,9 +11,9 @@ from examples.mcp_server.tool_results import (
 
 class TestToolSuccess:
     def test_basic_success(self):
-        result = tool_success("gateway_health", {"status": "ok"})
+        result = tool_success("health", {"status": "ok"})
         assert result["ok"] is True
-        assert result["tool"] == "gateway_health"
+        assert result["tool"] == "health"
         assert result["result"] == {"status": "ok"}
         assert result["error"] is None
         assert isinstance(result["meta"], dict)
@@ -77,8 +77,8 @@ class TestToolSuccess:
         assert result["meta"]["warnings"] == []
 
     def test_success_meta_has_tool_name(self):
-        result = tool_success("gateway_health")
-        assert result["meta"]["tool"] == "gateway_health"
+        result = tool_success("health")
+        assert result["meta"]["tool"] == "health"
 
     def test_success_unique_request_ids(self):
         r1 = tool_success("tool")
@@ -199,7 +199,7 @@ class TestEnvelopeContract:
     def test_checks_failed_not_error(self):
         """Non-zero exit from a check tool is ok:true, outcome:failed — NOT an error."""
         result = tool_success(
-            tool="gateway_project_run_lint",
+            tool="project_run_lint",
             result={"outcome": "failed", "exit_code": 1, "stdout": "", "stderr": "lint errors"},
         )
         assert result["ok"] is True
