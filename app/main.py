@@ -335,6 +335,10 @@ app = FastAPI(
         {"name": "known-hosts", "description": "Host key store management. Master key only."},
         {"name": "logs", "description": "Remote log reading (journald, docker). Master key only."},
         {
+            "name": "auth",
+            "description": "Authentication diagnostics (whoami). Requires scope: `auth:read` for agent tokens.",
+        },
+        {
             "name": "help",
             "description": "API help and endpoint discovery. Accessible with any valid API key.",
         },
