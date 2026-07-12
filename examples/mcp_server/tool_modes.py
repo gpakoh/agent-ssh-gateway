@@ -30,6 +30,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "wait_job",
         "read_file",
         "repo_status",
+        "project_apply_patch",
     },
     "full": {
         "health",
@@ -115,6 +116,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "project_read_handoff",
         "project_write_handoff_plan",
         "project_show_handoff_status",
+        "project_apply_patch",
         "docker_ps",
         "docker_images",
         "docker_inspect",

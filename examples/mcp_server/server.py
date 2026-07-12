@@ -361,6 +361,17 @@ def instrumented(tool_name: str):
     return decorator
 
 
+def _validate_project(project: str) -> str:
+    """Validate and return project name. Raises ValueError on invalid input."""
+    if not project:
+        raise ValueError("project argument is required")
+    parts = project.strip("/").split("/")
+    for p in parts:
+        if p in ("..", ".", "~", ""):
+            raise ValueError(f"Invalid project name: {project!r}")
+    return "/".join(parts)
+
+
 import hashlib as _hashlib
 
 
@@ -597,6 +608,60 @@ def gateway_execute_argv(
             stderr=raw.get("stderr", ""),
             execution_duration_ms=int(raw.get("duration", 0) * 1000),
         ),
+        source="gateway",
+    )
+
+
+@register_tool("project_apply_patch")
+@instrumented("project_apply_patch")
+def gateway_project_apply_patch(
+    session_id: str,
+    project: str,
+    patch: str,
+    expected_hashes: dict[str, str],
+    strip: int = 1,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Apply a unified diff patch to project files.
+
+    Args:
+        session_id: Active SSH session ID.
+        project: Project name (registered in MCP_GATEWAY_PROJECT_ROOT).
+        patch: Unified diff content.
+        expected_hashes: Per-file sha256 hashes for safety check.
+        strip: Strip leading path components (default 1 for a/b prefix).
+        dry_run: Preview changes without applying.
+
+    Returns:
+        Contract v1 dict with per-file status (not a JSON string).
+    """
+    _validate_project(project)
+    try:
+        raw = client.apply_patch(
+            project=project,
+            patch=patch,
+            expected_hashes=expected_hashes,
+            strip=strip,
+            dry_run=dry_run,
+            session_id=session_id,
+        )
+    except GatewayClientError as e:
+        return tool_error(
+            tool="project_apply_patch",
+            code="TOOL_EXECUTION_FAILED",
+            message=str(e),
+        )
+    return tool_success(
+        tool="project_apply_patch",
+        result={
+            "success": raw.get("success", False),
+            "files_applied": raw.get("files_applied", 0),
+            "files_failed": raw.get("files_failed", 0),
+            "hunks_applied": raw.get("hunks_applied", 0),
+            "preview": raw.get("preview"),
+            "errors": raw.get("errors", []),
+            "files": raw.get("files", []),
+        },
         source="gateway",
     )
 
