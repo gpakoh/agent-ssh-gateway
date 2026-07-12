@@ -216,7 +216,7 @@ class TestToolRegistration:
         monkeypatch.syspath_prepend(str(example_dir))
         sys.modules.pop("tool_modes", None)
         tm = importlib.import_module("tool_modes")
-        assert tm.should_register_tool("gateway_project_run_mimo") is True
+        assert tm.should_register_tool("project_run_mimo") is True
 
     def test_visible_in_tools_for_chatgpt(self, monkeypatch):
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
@@ -228,7 +228,7 @@ class TestToolRegistration:
         sys.modules.pop("tool_modes", None)
         tm = importlib.import_module("tool_modes")
         tools = tm.tools_for_mode()
-        assert "gateway_project_run_mimo" in tools
+        assert "project_run_mimo" in tools
 
 
 class TestServerTool:
