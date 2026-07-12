@@ -188,7 +188,7 @@ class TestEnvelopeContract:
         assert result["error"]["details"]["required_binary"] == "uv"
 
     def test_meta_always_present(self):
-        result = tool_success({"outcome": "passed"})
+        result = tool_success("test_tool", {"outcome": "passed"})
         assert "contract_version" in result["meta"]
         assert "tool" in result["meta"]
         assert "request_id" in result["meta"]
@@ -208,7 +208,7 @@ class TestEnvelopeContract:
 
     def test_meta_duration_ms_tracks_total_time(self):
         start = time.time()
-        result = tool_success({"outcome": "passed"})
+        result = tool_success("test_tool", {"outcome": "passed"})
         elapsed = int((time.time() - start) * 1000)
         assert result["meta"]["duration_ms"] <= elapsed + 5
 
