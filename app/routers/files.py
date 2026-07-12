@@ -2,8 +2,10 @@
 
 import asyncio
 import logging
+import os
 import shlex
 import time
+import uuid
 from typing import Any
 
 from fastapi import (
@@ -47,8 +49,17 @@ from app.models import (
     FileWriteResponse,
     PatchApplyRequest,
     PatchApplyResponse,
+    ProjectPatchApplyRequest,
+    ProjectPatchApplyResponse,
+    ProjectPatchFileResult,
     ProjectStructureRequest,
     ProjectStructureResponse,
+)
+from app.patch_apply import (
+    HashMismatchError,
+    PatchApplier,
+    PatchValidationError,
+    RollbackFailedError,
 )
 from app.security import rate_limit_mutation, validate_path
 from app.state import _err
@@ -149,6 +160,215 @@ async def file_patch(
         req.strip,
     )
     return PatchApplyResponse(**result)
+
+
+@router.post("/api/projects/{project}/apply-patch", response_model=ProjectPatchApplyResponse)
+async def project_apply_patch(
+    project: str,
+    req: ProjectPatchApplyRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("project:patch")),
+):
+    """Apply a unified diff patch to project files with hash verification and rollback."""
+    # Session ownership
+    session = await _state.manager.get_session(req.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=_err(404, "Session not found"))
+    ensure_session_owner(session, _identity)
+
+    applier = PatchApplier()
+    rid = uuid.uuid4().hex[:12]
+
+    try:
+        # Validate patch size
+        applier._validate_patch_size(len(req.patch.encode("utf-8")))
+
+        # Parse patch
+        files = applier._parse_patch(req.patch, strip=req.strip)
+
+        # Validate limits
+        applier._validate_file_count(len(files))
+        total_hunks = sum(f["hunk_count"] for f in files)
+        applier._validate_hunk_count(total_hunks)
+
+        # Validate forbidden ops
+        applier._validate_no_forbidden_ops(files)
+
+        # Resolve project path via registry
+        from examples.mcp_server.project_registry import get_project_registry
+
+        registry = get_project_registry()
+        try:
+            project_root = registry.resolve(project)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=404, detail=_err(404, str(exc))
+            ) from exc
+
+        file_results: list[ProjectPatchFileResult] = []
+
+        # Dry run: apply in memory only
+        if req.dry_run:
+            preview_parts = []
+            for f in files:
+                full_path = project_root / f["path"]
+                if full_path.exists():
+                    original = full_path.read_text(encoding="utf-8", errors="replace")
+                else:
+                    original = ""
+                new_content = applier._apply_in_memory(original, f)
+                if original != new_content:
+                    preview_parts.append(f"--- {f['path']}\n+++ {f['path']}\n{new_content}")
+                file_results.append(
+                    ProjectPatchFileResult(
+                        path=f["path"],
+                        status="dry_run",
+                        hunks_applied=f["hunk_count"],
+                    )
+                )
+            return ProjectPatchApplyResponse(
+                success=True,
+                files_applied=len(files),
+                files_failed=0,
+                hunks_applied=total_hunks,
+                preview="\n".join(preview_parts),
+                files=file_results,
+            )
+
+        # Apply: read, verify hashes, apply in memory
+        prepared: list[tuple[object, str, str, int]] = []
+
+        for f in files:
+            full_path = project_root / f["path"]
+
+            # Check file size
+            if full_path.exists():
+                file_size = full_path.stat().st_size
+                if file_size > applier.MAX_FILE_SIZE:
+                    raise PatchValidationError(
+                        f"File '{f['path']}' is {file_size} bytes, exceeds {applier.MAX_FILE_SIZE} limit"
+                    )
+                original = full_path.read_text(encoding="utf-8", errors="replace")
+            else:
+                original = ""
+
+            # Verify hash for existing files
+            if f["path"] in req.expected_hashes and full_path.exists():
+                applier._check_hash(f["path"], original, req.expected_hashes[f["path"]])
+
+            new_content = applier._apply_in_memory(original, f)
+            prepared.append((full_path, original, new_content, f["hunk_count"]))
+
+        # Transactional write with rollback
+        completed: list[tuple[object, object]] = []
+
+        for full_path, _original, new_content, _hunk_count in prepared:
+            import shutil
+
+            backup = full_path.parent / f".{full_path.name}.mcp-patch-{rid}.bak"
+            tmp = full_path.parent / f".{full_path.name}.mcp-patch-{rid}.tmp"
+
+            try:
+                # Backup
+                if full_path.exists():
+                    shutil.copy2(str(full_path), str(backup))
+                else:
+                    backup.write_text("", encoding="utf-8")
+
+                # Write temp file
+                tmp.write_text(new_content, encoding="utf-8")
+
+                # fsync
+                fd = os.open(str(tmp), os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+
+                # Atomic rename
+                os.rename(str(tmp), str(full_path))
+
+                completed.append((full_path, backup))
+
+            except Exception as exc:
+                logger.error("Patch write failed for %s: %s", full_path, exc)
+                # Rollback completed files
+                rollback_errors = []
+                for rb_path, rb_backup in completed:
+                    try:
+                        os.rename(str(rb_backup), str(rb_path))
+                    except Exception as rb_exc:
+                        rollback_errors.append(f"{rb_path}: {rb_exc}")
+                        logger.error("Rollback failed for %s: %s", rb_path, rb_exc)
+
+                # Cleanup temp files
+                for rb_path, _ in completed:
+                    tmp_rb = rb_path.parent / f".{rb_path.name}.mcp-patch-{rid}.tmp"
+                    try:
+                        tmp_rb.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+                if rollback_errors:
+                    raise RollbackFailedError(
+                        f"Write failed for {full_path} and rollback also failed: "
+                        + "; ".join(rollback_errors)
+                    ) from exc
+
+                file_results.append(
+                    ProjectPatchFileResult(
+                        path=str(full_path.relative_to(project_root)),
+                        status="failed",
+                        error=str(exc),
+                    )
+                )
+                return ProjectPatchApplyResponse(
+                    success=False,
+                    files_applied=0,
+                    files_failed=1,
+                    hunks_applied=0,
+                    errors=file_results,
+                    files=file_results,
+                )
+
+        # Cleanup backups on success
+        for rb_path, rb_backup in completed:
+            try:
+                rb_backup.unlink(missing_ok=True)
+            except Exception:
+                pass
+            tmp = rb_path.parent / f".{rb_path.name}.mcp-patch-{rid}.tmp"
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        file_results = [
+            ProjectPatchFileResult(
+                path=str(p.relative_to(project_root)),
+                status="applied",
+                hunks_applied=h,
+            )
+            for p, _, _, h in prepared
+        ]
+
+        return ProjectPatchApplyResponse(
+            success=True,
+            files_applied=len(prepared),
+            files_failed=0,
+            hunks_applied=sum(h for _, _, _, h in prepared),
+            files=file_results,
+        )
+
+    except (PatchValidationError, HashMismatchError) as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
+    except RollbackFailedError as exc:
+        raise HTTPException(status_code=500, detail=_err(500, str(exc))) from exc
+    except Exception as exc:
+        logger.error("Patch apply failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail=_err(500, f"Patch apply failed: {exc}")
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
