@@ -64,6 +64,7 @@ VALID_AGENT_SCOPES: set[str] = {
     "jobs:run",
     "auth:read",
     "diagnostics:read",
+    "project:patch",
 }
 
 # ---------------------------------------------------------------------------
