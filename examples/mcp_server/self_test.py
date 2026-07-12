@@ -84,10 +84,10 @@ def run_self_test(client: GatewayClient) -> dict[str, Any]:
     try:
         data = client.health()
         checks.append(
-            check_result("gateway_health", "pass", "Gateway health endpoint is reachable.", data)
+            check_result("health", "pass", "Gateway health endpoint is reachable.", data)
         )
     except GatewayClientError as exc:
-        checks.append(check_result("gateway_health", "fail", str(exc)))
+        checks.append(check_result("health", "fail", str(exc)))
 
     # session_health
     if client.session_id:

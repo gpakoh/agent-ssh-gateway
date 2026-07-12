@@ -68,12 +68,12 @@ class TestSelfTest:
     def test_full_mode_includes_self_test(self, monkeypatch: pytest.MonkeyPatch):
         tool_modes = _import(monkeypatch, "tool_modes")
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "full")
-        assert tool_modes.should_register_tool("gateway_self_test") is True
+        assert tool_modes.should_register_tool("self_test") is True
 
     def test_standard_mode_excludes_self_test(self, monkeypatch: pytest.MonkeyPatch):
         tool_modes = _import(monkeypatch, "tool_modes")
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "standard")
-        assert tool_modes.should_register_tool("gateway_self_test") is False
+        assert tool_modes.should_register_tool("self_test") is False
 
     def test_check_result_shape(self, monkeypatch: pytest.MonkeyPatch):
         self_test = _import(monkeypatch, "self_test")

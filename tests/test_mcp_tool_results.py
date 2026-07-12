@@ -24,7 +24,7 @@ class TestTextResult:
     def test_shape(self):
         tr = _import_tool_results()
         result = tr.text_result(
-            tool="gateway_health",
+            tool="health",
             title="Gateway health",
             text="ok",
             data={"status": "ok"},
@@ -33,14 +33,14 @@ class TestTextResult:
         assert result["content"][0]["type"] == "text"
         assert result["content"][0]["text"] == "ok"
         assert result["structuredContent"] == {"status": "ok"}
-        assert result["_meta"]["agent_ssh_gateway_tool"] == "gateway_health"
+        assert result["_meta"]["agent_ssh_gateway_tool"] == "health"
         assert result["_meta"]["agent_ssh_gateway_title"] == "Gateway health"
         assert "isError" not in result
 
     def test_default_data_is_empty(self):
         tr = _import_tool_results()
         result = tr.text_result(
-            tool="gateway_health",
+            tool="health",
             title="Gateway health",
             text="ok",
         )
@@ -49,7 +49,7 @@ class TestTextResult:
     def test_no_isError(self):
         tr = _import_tool_results()
         result = tr.text_result(
-            tool="gateway_health",
+            tool="health",
             title="Gateway health",
             text="ok",
         )
@@ -60,7 +60,7 @@ class TestErrorResult:
     def test_shape(self):
         tr = _import_tool_results()
         result = tr.error_result(
-            tool="gateway_execute_restricted",
+            tool="execute_restricted",
             title="Restricted execute",
             error="denied",
         )
@@ -69,12 +69,12 @@ class TestErrorResult:
         assert result["content"][0]["type"] == "text"
         assert "denied" in result["content"][0]["text"]
         assert result["structuredContent"]["error"] == "denied"
-        assert result["_meta"]["agent_ssh_gateway_tool"] == "gateway_execute_restricted"
+        assert result["_meta"]["agent_ssh_gateway_tool"] == "execute_restricted"
 
     def test_with_data(self):
         tr = _import_tool_results()
         result = tr.error_result(
-            tool="gateway_health",
+            tool="health",
             title="Health",
             error="timeout",
             data={"code": 504},

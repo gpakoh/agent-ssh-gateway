@@ -103,15 +103,15 @@ class TestHandoffToolVisibility:
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "full")
         tm = _import(monkeypatch, "tool_modes")
 
-        assert tm.should_register_tool("gateway_write_handoff_plan") is True
-        assert tm.should_register_tool("gateway_read_handoff") is True
-        assert tm.should_register_tool("gateway_show_handoff_status") is True
+        assert tm.should_register_tool("write_handoff_plan") is True
+        assert tm.should_register_tool("read_handoff") is True
+        assert tm.should_register_tool("show_handoff_status") is True
 
     def test_standard_excludes_handoff_tools(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "standard")
         tm = _import(monkeypatch, "tool_modes")
 
-        assert tm.should_register_tool("gateway_write_handoff_plan") is False
+        assert tm.should_register_tool("write_handoff_plan") is False
 
 
 class TestReadHandoff:
