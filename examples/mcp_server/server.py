@@ -1388,18 +1388,18 @@ async def docker_stats(format: str | None = None, limit: int = 50) -> str:
 
 @register_tool("docker_compose_ps")
 async def docker_compose_ps(
-    project_dir: str | None = None, file_path: str | None = None, limit: int = 50
+    project_dir: str | None = None, limit: int = 50
 ) -> str:
     """List containers in a Docker Compose project. limit: max rows (default 50)."""
-    return await DockerClient().compose_ps(project_dir=project_dir, file_path=file_path, limit=limit)
+    return await DockerClient().compose_ps(project_dir=project_dir, limit=limit)
 
 
 @register_tool("docker_compose_services")
 async def docker_compose_services(
-    project_dir: str | None = None, file_path: str | None = None
+    project_dir: str | None = None,
 ) -> str:
     """List service names defined in a Docker Compose project."""
-    return await DockerClient().compose_services(project_dir=project_dir, file_path=file_path)
+    return await DockerClient().compose_services(project_dir=project_dir)
 
 
 # ── Docker write tools (Session 160) ─────────────────────────────
@@ -1426,7 +1426,6 @@ async def docker_restart(container: str, timeout: int = 10) -> str:
 @register_tool("docker_compose_up")
 async def docker_compose_up(
     project_dir: str | None = None,
-    file_path: str | None = None,
     services: list[str] | None = None,
     detach: bool = True,
     build: bool = False,
@@ -1435,7 +1434,6 @@ async def docker_compose_up(
     """Start services in a Docker Compose project. detach=True by default."""
     return await DockerClient().compose_up(
         project_dir=project_dir,
-        file_path=file_path,
         services=services,
         detach=detach,
         build=build,
@@ -1446,14 +1444,12 @@ async def docker_compose_up(
 @register_tool("docker_compose_restart")
 async def docker_compose_restart(
     project_dir: str | None = None,
-    file_path: str | None = None,
     services: list[str] | None = None,
     timeout: int = 30,
 ) -> str:
     """Restart services in a Docker Compose project."""
     return await DockerClient().compose_restart(
         project_dir=project_dir,
-        file_path=file_path,
         services=services,
         timeout=timeout,
     )
@@ -1462,7 +1458,6 @@ async def docker_compose_restart(
 @register_tool("docker_compose_build")
 async def docker_compose_build(
     project_dir: str | None = None,
-    file_path: str | None = None,
     services: list[str] | None = None,
     no_cache: bool = False,
     timeout: int = 300,
@@ -1470,7 +1465,6 @@ async def docker_compose_build(
     """Build (or rebuild) services in a Docker Compose project."""
     return await DockerClient().compose_build(
         project_dir=project_dir,
-        file_path=file_path,
         services=services,
         no_cache=no_cache,
         timeout=timeout,
@@ -1480,7 +1474,6 @@ async def docker_compose_build(
 @register_tool("docker_compose_logs")
 async def docker_compose_logs(
     project_dir: str | None = None,
-    file_path: str | None = None,
     services: list[str] | None = None,
     tail: int = 100,
     follow: bool = False,
@@ -1489,7 +1482,6 @@ async def docker_compose_logs(
     """Fetch logs from services in a Docker Compose project. tail: 1-1000 lines."""
     return await DockerClient().compose_logs(
         project_dir=project_dir,
-        file_path=file_path,
         services=services,
         tail=tail,
         follow=follow,
@@ -1536,7 +1528,6 @@ def _get_token_scopes() -> list[str]:
 @register_tool("docker_compose_down")
 async def docker_compose_down(
     project_dir: str | None = None,
-    file_path: str | None = None,
     remove_orphans: bool = False,
     timeout: int = 30,
     volumes: bool = False,
@@ -1553,12 +1544,10 @@ async def docker_compose_down(
                 source="docker",
             )
     dc = DockerClient()
-    dc._resolve_compose_file_path(file_path, project_dir)
+    dc._validate_project_dir(project_dir)
     parts = []
     if project_dir:
         parts.append(f"project={project_dir}")
-    if file_path:
-        parts.append(f"file={file_path}")
     if volumes:
         parts.append("--volumes")
     summary = f"Compose down {' '.join(parts)}"
@@ -1566,7 +1555,6 @@ async def docker_compose_down(
         "docker_compose_down",
         {
             "project_dir": project_dir,
-            "file_path": file_path,
             "remove_orphans": remove_orphans,
             "timeout": timeout,
             "volumes": volumes,
@@ -1813,7 +1801,6 @@ async def docker_confirm(token: str) -> dict[str, Any]:
     elif tool_name == "docker_compose_down":
         result = await dc.compose_down(
             project_dir=kwargs.get("project_dir"),
-            file_path=kwargs.get("file_path"),
             remove_orphans=kwargs.get("remove_orphans", False),
             timeout=kwargs.get("timeout", 30),
             volumes=kwargs.get("volumes", False),

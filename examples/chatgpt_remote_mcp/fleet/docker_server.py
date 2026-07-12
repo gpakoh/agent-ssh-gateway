@@ -90,31 +90,27 @@ async def docker_stats(
 @mcp.tool()
 async def docker_compose_ps(
     project_dir: str | None = None,
-    file_path: str | None = None,
     limit: int = 50,
 ) -> str:
     """List containers in a Docker Compose project.
 
     project_dir: path to directory containing compose file (e.g. /media/1TB/Python/web_ssh/web-ssh-gateway/docker).
-    file_path: path to compose file (mutually exclusive with project_dir).
     limit: max services to return (default 50).
     """
     client = _get_client()
-    return await client.compose_ps(project_dir=project_dir, file_path=file_path, limit=limit)
+    return await client.compose_ps(project_dir=project_dir, limit=limit)
 
 
 @mcp.tool()
 async def docker_compose_services(
     project_dir: str | None = None,
-    file_path: str | None = None,
 ) -> str:
     """List service names defined in a Docker Compose project (uses compose config --services).
 
     project_dir: path to directory containing compose file.
-    file_path: path to compose file.
     """
     client = _get_client()
-    return await client.compose_services(project_dir=project_dir, file_path=file_path)
+    return await client.compose_services(project_dir=project_dir)
 
 
 def create_auth_proxy(*, upstream_port: int, valid_tokens: set[str]) -> Starlette:
