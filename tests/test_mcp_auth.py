@@ -4,11 +4,17 @@ import os
 from unittest.mock import patch
 
 import pytest
+from starlette.responses import JSONResponse
 
 
 @pytest.fixture
 def valid_token():
     return "test-token-123"
+
+
+async def _mock_proxy(request):
+    """Stub upstream — the middleware is what we test, not the real MCP server."""
+    return JSONResponse({"ok": True})
 
 
 @pytest.fixture
@@ -21,6 +27,7 @@ def token_client(valid_token):
         import examples.chatgpt_remote_mcp.server as srv
 
         importlib.reload(srv)
+        srv.proxy_request = _mock_proxy
         app = srv.create_proxy_app()
         yield TestClient(app)
 
@@ -35,6 +42,7 @@ def oauth_client(valid_token):
         import examples.chatgpt_remote_mcp.server as srv
 
         importlib.reload(srv)
+        srv.proxy_request = _mock_proxy
         app = srv.create_proxy_app()
         yield TestClient(app)
 

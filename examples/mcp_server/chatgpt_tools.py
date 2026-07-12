@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
-import signal
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,7 @@ def _resolve_project(project_name: str) -> Path:
     try:
         return get_project_registry().resolve(project_name)
     except ValueError as e:
-        raise GatewayClientError(404, str(e)) from e
+        raise GatewayClientError(str(e), status_code=404) from e
 
 
 def _validate_project(project: str) -> str:
@@ -265,32 +265,25 @@ def _safe_glob(
 
     project_root = project_dir.resolve()
     results: list[str] = []
+    start = time.monotonic()
 
-    def handler(signum: int, frame: Any) -> None:
-        raise TimeoutError("glob timed out")
-
-    prev_handler = signal.getsignal(signal.SIGALRM)
-    signal.signal(signal.SIGALRM, handler)
-    signal.alarm(GLOB_TIMEOUT_S)
-    try:
-        for path in project_root.glob(pattern):
-            try:
-                resolved = path.resolve()
-                rel = resolved.relative_to(project_root)
-            except ValueError:
-                continue
-            if not resolved.is_file():
-                continue
-            if len(rel.parts) > MAX_GLOB_DEPTH:
-                continue
-            if any(part in EXCLUDE_DIRS for part in rel.parts):
-                continue
-            results.append(str(rel))
-            if len(results) >= max_results:
-                break
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, prev_handler)
+    for path in project_root.glob(pattern):
+        if time.monotonic() - start > GLOB_TIMEOUT_S:
+            break
+        try:
+            resolved = path.resolve()
+            rel = resolved.relative_to(project_root)
+        except ValueError:
+            continue
+        if not resolved.is_file():
+            continue
+        if len(rel.parts) > MAX_GLOB_DEPTH:
+            continue
+        if any(part in EXCLUDE_DIRS for part in rel.parts):
+            continue
+        results.append(str(rel))
+        if len(results) >= max_results:
+            break
 
     results.sort()
     return {
