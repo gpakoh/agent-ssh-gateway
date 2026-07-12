@@ -546,6 +546,50 @@ def gateway_wait_job(job_id: str, timeout_sec: int | None = None) -> dict[str, A
     )
 
 
+@register_tool("job_wait")
+@instrumented("job_wait")
+def gateway_job_wait(job_id: str, timeout_sec: int | None = None) -> dict[str, Any]:
+    """Wait for a background job to complete using long-poll.
+
+    Uses the Gateway long-poll endpoint. Falls back to polling if the
+    Gateway does not support long-poll (multi-worker or old version).
+
+    Args:
+        job_id: Background job identifier.
+        timeout_sec: Maximum seconds to wait (default: 180).
+
+    Returns:
+        Contract v1 dict with job result or WAIT_TIMEOUT error.
+    """
+    try:
+        result = client.wait_job(job_id, timeout_sec=timeout_sec)
+    except GatewayClientError as exc:
+        code, retryable = _classify_gateway_error(exc)
+        return tool_error(
+            tool="job_wait",
+            code=code,
+            message=str(exc),
+            retryable=retryable,
+            source="gateway",
+        )
+
+    if result.get("wait_timed_out"):
+        return tool_error(
+            tool="job_wait",
+            code="WAIT_TIMEOUT",
+            message=f"Job {job_id} did not complete within timeout",
+            retryable=True,
+            details={"job_id": job_id, "status": result.get("status", "running")},
+            source="gateway",
+        )
+
+    return tool_success(
+        tool="job_wait",
+        result=result,
+        source="gateway",
+    )
+
+
 @register_tool("read_file")
 def gateway_read_file(path: str, session_id: str | None = None) -> dict[str, Any]:
     """Read a file through the gateway file API.
