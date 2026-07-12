@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import app.build_info as build_info
 import app.state as state
 from app.agent_token_store import AgentTokenStore
 from app.auth_middleware import auth_check, is_ip_allowed, parse_cidrs
@@ -68,6 +69,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
+    build_info.set_started_at()
     await init_auth_db()
     state.host_key_store = create_host_key_store(settings)
     if not isinstance(state.host_key_store, NullHostKeyStore):

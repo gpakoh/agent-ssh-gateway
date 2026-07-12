@@ -209,6 +209,10 @@ class HealthResponse(BaseModel):
     persistent_sessions: bool = False
     postgres: bool = False  # deprecated — use persistent_sessions
     ready: bool = False
+    build_sha: str = ""
+    build_time: str = ""
+    started_at: str = ""
+    version: str = ""
 
 
 class CapabilitiesResponse(BaseModel):
