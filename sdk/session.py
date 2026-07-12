@@ -41,7 +41,7 @@ class GatewaySession:
             session_id=self.session_id, command=command
         )
         return self.client.wait_job(
-            job_id=job["job_id"], timeout=timeout
+            job_id=job["job_id"], timeout_sec=timeout
         )
 
     def read(self, path: str) -> str:
@@ -93,7 +93,7 @@ class AsyncGatewaySession:
             session_id=self.session_id, command=command
         )
         return await self.client.wait_job(
-            job_id=job["job_id"], timeout=timeout
+            job_id=job["job_id"], timeout_sec=timeout
         )
 
     async def read(self, path: str) -> str:

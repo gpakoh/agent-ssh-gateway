@@ -185,7 +185,7 @@ class TestAsyncGatewaySessionRun:
         client.execute_restricted.assert_awaited_once_with(
             session_id="sid-async-1", command="echo hello"
         )
-        client.wait_job.assert_awaited_once_with(job_id="job-42", timeout=None)
+        client.wait_job.assert_awaited_once_with(job_id="job-42", timeout_sec=None)
         assert result["status"] == "completed"
         assert result["stdout"] == "hello\n"
 
@@ -198,7 +198,7 @@ class TestAsyncGatewaySessionRun:
         async with AsyncGatewaySession(client) as gw:
             await gw.run("sleep 10", timeout=30)
 
-        client.wait_job.assert_awaited_once_with(job_id="job-99", timeout=30)
+        client.wait_job.assert_awaited_once_with(job_id="job-99", timeout_sec=30)
 
     async def test_run_does_not_pass_session_id_to_wait_job(self):
         """wait_job uses auth, not session_id."""
@@ -312,7 +312,7 @@ class TestGatewaySessionRun:
         client.execute_restricted.assert_called_once_with(
             session_id="sid-1", command="echo hello"
         )
-        client.wait_job.assert_called_once_with(job_id="job-42", timeout=None)
+        client.wait_job.assert_called_once_with(job_id="job-42", timeout_sec=None)
         assert result["status"] == "completed"
         assert result["stdout"] == "hello\n"
 
@@ -325,7 +325,7 @@ class TestGatewaySessionRun:
         with GatewaySession(client) as gw:
             gw.run("sleep 10", timeout=30)
 
-        client.wait_job.assert_called_once_with(job_id="job-99", timeout=30)
+        client.wait_job.assert_called_once_with(job_id="job-99", timeout_sec=30)
 
     def test_run_does_not_pass_session_id_to_wait_job(self):
         """wait_job uses auth, not session_id."""
