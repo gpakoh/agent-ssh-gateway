@@ -768,7 +768,7 @@ def gateway_project_find_files(project: str, pattern: str) -> dict[str, Any]:
     return run_tool(
         tool="project_find_files",
         title="Project find files",
-        fn=lambda: project_find_files(client, project, pattern),
+        fn=lambda: project_find_files(project, pattern),
         success_text="Found project files.",
     )
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -245,19 +246,89 @@ def project_search_text(
     )
 
 
+EXCLUDE_DIRS = frozenset({".git", ".venv", "node_modules", "__pycache__"})
+MAX_GLOB_RESULTS = 200
+MAX_GLOB_DEPTH = 20
+GLOB_TIMEOUT_S = 5
+
+
+def _safe_glob(
+    project_dir: Path,
+    pattern: str,
+    max_results: int = MAX_GLOB_RESULTS,
+) -> dict[str, Any]:
+    """Safe glob: returns {"files": [...], "count": N, "truncated": bool}."""
+    if pattern.startswith("/"):
+        raise ValueError("POLICY_DENIED: absolute pattern not allowed")
+    if ".." in Path(pattern).parts:
+        raise ValueError("POLICY_DENIED: path traversal in pattern")
+
+    project_root = project_dir.resolve()
+    results: list[str] = []
+
+    def handler(signum: int, frame: Any) -> None:
+        raise TimeoutError("glob timed out")
+
+    prev_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, handler)
+    signal.alarm(GLOB_TIMEOUT_S)
+    try:
+        for path in project_root.glob(pattern):
+            try:
+                resolved = path.resolve()
+                rel = resolved.relative_to(project_root)
+            except ValueError:
+                continue
+            if not resolved.is_file():
+                continue
+            if len(rel.parts) > MAX_GLOB_DEPTH:
+                continue
+            if any(part in EXCLUDE_DIRS for part in rel.parts):
+                continue
+            results.append(str(rel))
+            if len(results) >= max_results:
+                break
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, prev_handler)
+
+    results.sort()
+    return {
+        "files": results,
+        "count": len(results),
+        "truncated": len(results) >= max_results,
+    }
+
+
 def project_find_files(
-    client: GatewayClient,
     project: str,
     pattern: str,
 ) -> dict[str, Any]:
-    if not _ALLOWED_PATH_RE.match(pattern):
-        raise ValueError(f"invalid pattern: {pattern!r}")
-    cmd = (
-        f"find . -not -path '*/.git/*' -not -path '*/__pycache__/*'"
-        f" -not -path '*/.venv/*' -not -path '*/node_modules/*'"
-        f" -type f -name '{pattern}' | sort | head -200"
-    )
-    return run_project_command(client, project, cmd)
+    project_dir = _resolve_project(project)
+    try:
+        glob_result = _safe_glob(project_dir, pattern)
+    except ValueError as e:
+        code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
+        return tool_error(
+            "project_find_files",
+            code=code.strip(),
+            message=msg.strip(),
+            tool_name="project_find_files",
+        )
+
+    result = {
+        "pattern": pattern,
+        "files": glob_result["files"],
+        "count": glob_result["count"],
+    }
+    meta = tool_success("project_find_files", result, tool_name="project_find_files")["meta"]
+    meta["truncated"] = glob_result.get("truncated", False)
+    return {
+        "ok": True,
+        "result": result,
+        "error": None,
+        "meta": meta,
+    }
 
 
 def project_list_files(client: GatewayClient, project: str, pattern: str) -> dict[str, Any]:
