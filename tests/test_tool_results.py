@@ -304,6 +304,9 @@ class TestErrorCodes:
             "DOCKER_VOLUME_RM_INVALID_NAME",
             "TOOL_EXECUTION_FAILED",
             "POLICY_DENIED",
+            "WAIT_TIMEOUT",
+            "JOB_NOT_FOUND",
+            "PERMISSION_DENIED",
         }
         assert ERROR_CODES == known
 
