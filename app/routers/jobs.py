@@ -2,10 +2,11 @@
 
 import asyncio
 import json
+import os
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_scope
@@ -24,6 +25,8 @@ from app.security import rate_limit_mutation, redact_secrets
 from app.state import _err
 
 router = APIRouter(tags=["jobs"])
+
+_GATEWAY_WORKERS = os.environ.get("GATEWAY_WORKERS", "1")
 
 
 @router.post("/api/jobs/run", response_model=JobRunResponse)
@@ -166,6 +169,49 @@ async def jobs_cancel(job_id: str, _identity: AuthIdentity = Depends(require_sco
     """Cancel a running job."""
     await _state.job_manager.cancel_job(job_id)
     return {"status": "cancelled", "job_id": job_id}
+
+
+@router.get("/api/jobs/{job_id}/wait")
+async def jobs_wait(
+    job_id: str,
+    request: Request,
+    timeout: float = Query(default=30.0, ge=0.1, le=300.0),
+    _identity: AuthIdentity = Depends(require_scope("jobs:read")),
+):
+    """Long-poll: wait for job completion or timeout."""
+    if _GATEWAY_WORKERS != "1":
+        return JSONResponse(
+            status_code=200,
+            content={
+                "error": "NOT_SUPPORTED",
+                "detail": "Long-poll requires GATEWAY_WORKERS=1",
+            },
+        )
+
+    try:
+        result = await _state.job_manager.wait_for_completion(
+            job_id=job_id,
+            identity_sub=_identity.fingerprint,
+            timeout_s=timeout,
+        )
+    except Exception:
+        from app.exceptions import JobNotFoundError, PermissionDeniedError
+
+        import sys
+        exc_type = sys.exc_info()[0]
+        if exc_type is JobNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail=_err(404, f"Job {job_id} not found"),
+            )
+        if exc_type is PermissionDeniedError:
+            raise HTTPException(
+                status_code=403,
+                detail=_err(403, "Job belongs to a different owner"),
+            )
+        raise
+
+    return result
 
 
 # ---------------------------------------------------------------------------
