@@ -12,6 +12,8 @@ ALLOWED_COMMAND_PREFIXES: tuple[str, ...] = (
     "pytest -q",
     "ruff check",
     "mypy",
+    "uv ",
+    "command -v uv",
     "find ",
     "grep ",
     "sed -n",

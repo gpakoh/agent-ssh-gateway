@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
 from gateway_client import GatewayClient, GatewayClientError
 from project_registry import get_project_registry
-from tool_results import build_command_result
+from tool_results import build_command_result, tool_error, tool_success
 
 
 def _resolve_project(project_name: str) -> Path:
@@ -70,6 +71,67 @@ def _limit_output(output: str) -> str:
         lines = lines[:_OUTPUT_LINE_LIMIT]
         lines.append(f"[... truncated to {_OUTPUT_LINE_LIMIT} lines]")
     return "\n".join(lines)
+
+
+# ── uv runner helpers ───────────────────────────────────────────
+
+_UV_TOOL_MAP: dict[str, list[str]] = {
+    "ruff": ["ruff", "check"],
+    "mypy": ["mypy"],
+    "pytest": ["pytest"],
+    "compileall": ["python", "-m", "compileall"],
+}
+
+
+def _validate_targets(project_dir: str, targets: list[str]) -> list[str]:
+    """Validate all targets: relative, no traversal, inside project root."""
+    root = Path(project_dir).resolve()
+    validated = []
+    for t in targets:
+        p = Path(t)
+        if p.is_absolute():
+            raise ValueError(f"POLICY_DENIED: absolute target not allowed: {t}")
+        if ".." in p.parts:
+            raise ValueError(f"POLICY_DENIED: path traversal in target: {t}")
+        resolved = (root / p).resolve()
+        resolved.relative_to(root)
+        validated.append(t)
+    return validated
+
+
+def _build_uv_argv(tool: str, project_dir: str, targets: list[str]) -> list[str]:
+    """Build argv list for ``uv run <tool>``. Validates targets first."""
+    if tool not in _UV_TOOL_MAP:
+        raise ValueError(f"INVALID_INPUT: unknown tool '{tool}'")
+    if not targets:
+        raise ValueError("INVALID_INPUT: at least one target required")
+    validated = _validate_targets(project_dir, targets)
+    cmd = _UV_TOOL_MAP[tool]
+    return ["uv", "run", "--frozen", "--directory", project_dir, "--"] + cmd + ["--"] + validated
+
+
+def _map_uv_exit_code(tool: str, exit_code: int) -> tuple[str, str | None]:
+    """Map uv exit code to (outcome, error_code).
+
+    Returns ``(outcome, None)`` for success/check-failed and
+    ``(None, error_code)`` for infrastructure errors.
+    """
+    if tool == "pytest":
+        if exit_code == 0:
+            return ("passed", None)
+        elif exit_code == 1:
+            return ("failed", None)
+        elif exit_code == 5:
+            return ("failed", None)  # NO_TESTS
+        else:
+            return (None, "TOOL_EXECUTION_FAILED")
+
+    if exit_code == 0:
+        return ("passed", None)
+    elif exit_code == 1:
+        return ("failed", None)
+    else:
+        return (None, "TOOL_EXECUTION_FAILED")
 
 
 # ── Basic read-only helpers ─────────────────────────────────────
@@ -351,28 +413,151 @@ def project_show_file_diff(
 def project_run_pytest(
     client: GatewayClient,
     project: str,
-    target: str,
+    target: list[str] | None = None,
 ) -> dict[str, Any]:
-    safe = _safe_test_target(target)
-    return run_project_command(client, project, f"pytest -q {safe}")
+    """Run pytest on project targets via uv."""
+    project_dir = _resolve_project(project)
+    targets = target or ["."]
+    try:
+        validated = _validate_targets(str(project_dir), targets)
+        argv = _build_uv_argv("pytest", str(project_dir), validated)
+    except ValueError as e:
+        code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
+        return tool_error(code.strip(), msg.strip(), tool_name="project_run_pytest")
+
+    check_result = client.execute_project_command(str(project_dir), "command -v uv")
+    if check_result.get("exit_code", 1) != 0:
+        return tool_error(
+            "DEPENDENCY_MISSING",
+            "Required executable 'uv' was not found",
+            hint="Install uv on the SSH target or configure another backend",
+            retryable=False,
+            details={"required_binary": "uv"},
+            tool_name="project_run_pytest",
+        )
+
+    command = " ".join(shlex.quote(a) for a in argv)
+    result = client.execute_project_command(str(project_dir), command)
+    raw = client.wait_job(result["job_id"])
+    outcome, error_code = _map_uv_exit_code("pytest", raw.get("exit_code", -1))
+    if error_code:
+        return tool_error(
+            error_code,
+            f"pytest failed with exit code {raw.get('exit_code')}",
+            details={"exit_code": raw.get("exit_code"), "stderr": raw.get("stderr", "")},
+            tool_name="project_run_pytest",
+        )
+    return tool_success(
+        build_command_result(
+            outcome=outcome,
+            exit_code=raw.get("exit_code", 0),
+            stdout=raw.get("stdout") or raw.get("output", ""),
+            stderr=raw.get("stderr", ""),
+            execution_duration_ms=raw.get("execution_duration_ms"),
+            job_id=raw.get("job_id"),
+        ),
+        tool_name="project_run_pytest",
+    )
 
 
 def project_run_ruff(
     client: GatewayClient,
     project: str,
-    target: str,
+    target: list[str] | None = None,
 ) -> dict[str, Any]:
-    safe = _safe_test_target(target)
-    return run_project_command(client, project, f"ruff check {safe}")
+    """Run ruff check on project targets via uv."""
+    project_dir = _resolve_project(project)
+    targets = target or ["."]
+    try:
+        validated = _validate_targets(str(project_dir), targets)
+        argv = _build_uv_argv("ruff", str(project_dir), validated)
+    except ValueError as e:
+        code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
+        return tool_error(code.strip(), msg.strip(), tool_name="project_run_ruff")
+
+    check_result = client.execute_project_command(str(project_dir), "command -v uv")
+    if check_result.get("exit_code", 1) != 0:
+        return tool_error(
+            "DEPENDENCY_MISSING",
+            "Required executable 'uv' was not found",
+            hint="Install uv on the SSH target or configure another backend",
+            retryable=False,
+            details={"required_binary": "uv"},
+            tool_name="project_run_ruff",
+        )
+
+    command = " ".join(shlex.quote(a) for a in argv)
+    result = client.execute_project_command(str(project_dir), command)
+    raw = client.wait_job(result["job_id"])
+    outcome, error_code = _map_uv_exit_code("ruff", raw.get("exit_code", -1))
+    if error_code:
+        return tool_error(
+            error_code,
+            f"Ruff failed with exit code {raw.get('exit_code')}",
+            details={"exit_code": raw.get("exit_code"), "stderr": raw.get("stderr", "")},
+            tool_name="project_run_ruff",
+        )
+    return tool_success(
+        build_command_result(
+            outcome=outcome,
+            exit_code=raw.get("exit_code", 0),
+            stdout=raw.get("stdout") or raw.get("output", ""),
+            stderr=raw.get("stderr", ""),
+            execution_duration_ms=raw.get("execution_duration_ms"),
+            job_id=raw.get("job_id"),
+        ),
+        tool_name="project_run_ruff",
+    )
 
 
 def project_run_mypy(
     client: GatewayClient,
     project: str,
-    target: str,
+    target: list[str] | None = None,
 ) -> dict[str, Any]:
-    safe = _safe_test_target(target)
-    return run_project_command(client, project, f"mypy {safe}")
+    """Run mypy on project targets via uv."""
+    project_dir = _resolve_project(project)
+    targets = target or ["."]
+    try:
+        validated = _validate_targets(str(project_dir), targets)
+        argv = _build_uv_argv("mypy", str(project_dir), validated)
+    except ValueError as e:
+        code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
+        return tool_error(code.strip(), msg.strip(), tool_name="project_run_mypy")
+
+    check_result = client.execute_project_command(str(project_dir), "command -v uv")
+    if check_result.get("exit_code", 1) != 0:
+        return tool_error(
+            "DEPENDENCY_MISSING",
+            "Required executable 'uv' was not found",
+            hint="Install uv on the SSH target or configure another backend",
+            retryable=False,
+            details={"required_binary": "uv"},
+            tool_name="project_run_mypy",
+        )
+
+    command = " ".join(shlex.quote(a) for a in argv)
+    result = client.execute_project_command(str(project_dir), command)
+    raw = client.wait_job(result["job_id"])
+    outcome, error_code = _map_uv_exit_code("mypy", raw.get("exit_code", -1))
+    if error_code:
+        return tool_error(
+            error_code,
+            f"Mypy failed with exit code {raw.get('exit_code')}",
+            details={"exit_code": raw.get("exit_code"), "stderr": raw.get("stderr", "")},
+            tool_name="project_run_mypy",
+        )
+    return tool_success(
+        build_command_result(
+            outcome=outcome,
+            exit_code=raw.get("exit_code", 0),
+            stdout=raw.get("stdout") or raw.get("output", ""),
+            stderr=raw.get("stderr", ""),
+            execution_duration_ms=raw.get("execution_duration_ms"),
+            job_id=raw.get("job_id"),
+        ),
+        tool_name="project_run_mypy",
+    )
 
 
 # ── Project git info tools ──────────────────────────────────────
@@ -512,5 +697,51 @@ def project_run_lint(client: GatewayClient, project: str) -> dict[str, Any]:
     return run_project_command(client, project, "ruff check app tests examples")
 
 
-def project_run_compileall(client: GatewayClient, project: str) -> dict[str, Any]:
-    return run_project_command(client, project, "python -m compileall app tests examples")
+def project_run_compileall(
+    client: GatewayClient,
+    project: str,
+    target: list[str] | None = None,
+) -> dict[str, Any]:
+    """Run compileall on project targets via uv."""
+    project_dir = _resolve_project(project)
+    targets = target or ["."]
+    try:
+        validated = _validate_targets(str(project_dir), targets)
+        argv = _build_uv_argv("compileall", str(project_dir), validated)
+    except ValueError as e:
+        code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
+        return tool_error(code.strip(), msg.strip(), tool_name="project_run_compileall")
+
+    check_result = client.execute_project_command(str(project_dir), "command -v uv")
+    if check_result.get("exit_code", 1) != 0:
+        return tool_error(
+            "DEPENDENCY_MISSING",
+            "Required executable 'uv' was not found",
+            hint="Install uv on the SSH target or configure another backend",
+            retryable=False,
+            details={"required_binary": "uv"},
+            tool_name="project_run_compileall",
+        )
+
+    command = " ".join(shlex.quote(a) for a in argv)
+    result = client.execute_project_command(str(project_dir), command)
+    raw = client.wait_job(result["job_id"])
+    outcome, error_code = _map_uv_exit_code("compileall", raw.get("exit_code", -1))
+    if error_code:
+        return tool_error(
+            error_code,
+            f"compileall failed with exit code {raw.get('exit_code')}",
+            details={"exit_code": raw.get("exit_code"), "stderr": raw.get("stderr", "")},
+            tool_name="project_run_compileall",
+        )
+    return tool_success(
+        build_command_result(
+            outcome=outcome,
+            exit_code=raw.get("exit_code", 0),
+            stdout=raw.get("stdout") or raw.get("output", ""),
+            stderr=raw.get("stderr", ""),
+            execution_duration_ms=raw.get("execution_duration_ms"),
+            job_id=raw.get("job_id"),
+        ),
+        tool_name="project_run_compileall",
+    )

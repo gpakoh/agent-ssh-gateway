@@ -302,6 +302,8 @@ class TestErrorCodes:
             "DOCKER_RMI_INVALID_REFERENCE",
             "DOCKER_VOLUME_RM_FAILED",
             "DOCKER_VOLUME_RM_INVALID_NAME",
+            "TOOL_EXECUTION_FAILED",
+            "POLICY_DENIED",
         }
         assert ERROR_CODES == known
 
