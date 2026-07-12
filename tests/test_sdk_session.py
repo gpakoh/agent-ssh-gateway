@@ -286,3 +286,128 @@ class TestAsyncGatewaySessionHealth:
 
         client.session_health.assert_awaited_once_with(session_id="sid-async-1")
         assert result["status"] == "healthy"
+
+
+# ---------------------------------------------------------------------------
+# GatewaySession — operational methods (sync)
+# ---------------------------------------------------------------------------
+
+
+class TestGatewaySessionRun:
+    """run() executes command and waits for job completion."""
+
+    def test_run_calls_execute_restricted_then_wait_job(self):
+        client = MagicMock()
+        client.connect.return_value = "sid-1"
+        client.execute_restricted.return_value = {"job_id": "job-42"}
+        client.wait_job.return_value = {
+            "status": "completed",
+            "stdout": "hello\n",
+            "exit_code": 0,
+        }
+
+        with GatewaySession(client) as gw:
+            result = gw.run("echo hello")
+
+        client.execute_restricted.assert_called_once_with(
+            session_id="sid-1", command="echo hello"
+        )
+        client.wait_job.assert_called_once_with(job_id="job-42", timeout=None)
+        assert result["status"] == "completed"
+        assert result["stdout"] == "hello\n"
+
+    def test_run_passes_timeout(self):
+        client = MagicMock()
+        client.connect.return_value = "sid-1"
+        client.execute_restricted.return_value = {"job_id": "job-99"}
+        client.wait_job.return_value = {"status": "completed"}
+
+        with GatewaySession(client) as gw:
+            gw.run("sleep 10", timeout=30)
+
+        client.wait_job.assert_called_once_with(job_id="job-99", timeout=30)
+
+    def test_run_does_not_pass_session_id_to_wait_job(self):
+        """wait_job uses auth, not session_id."""
+        client = MagicMock()
+        client.connect.return_value = "sid-1"
+        client.execute_restricted.return_value = {"job_id": "job-7"}
+        client.wait_job.return_value = {"status": "completed"}
+
+        with GatewaySession(client) as gw:
+            gw.run("pwd")
+
+        call_kwargs = client.wait_job.call_args
+        assert "session_id" not in call_kwargs.kwargs
+        assert "session_id" not in (call_kwargs[0] if call_kwargs[0] else ())
+
+
+class TestGatewaySessionRead:
+    """read() returns file content string."""
+
+    def test_read_extracts_content_from_response(self):
+        client = MagicMock()
+        client.connect.return_value = "sid-1"
+        client.read_file.return_value = {"content": "file contents here"}
+
+        with GatewaySession(client) as gw:
+            result = gw.read("/etc/hostname")
+
+        client.read_file.assert_called_once_with(session_id="sid-1", path="/etc/hostname")
+        assert result == "file contents here"
+
+    def test_read_returns_empty_string_on_missing_content(self):
+        client = MagicMock()
+        client.connect.return_value = "sid-1"
+        client.read_file.return_value = {}
+
+        with GatewaySession(client) as gw:
+            result = gw.read("/nonexistent")
+
+        assert result == ""
+
+
+class TestGatewaySessionWrite:
+    """write() returns raw Gateway response — no auto-confirmation."""
+
+    def test_write_returns_raw_response(self):
+        client = MagicMock()
+        client.connect.return_value = "sid-1"
+        client.write_file.return_value = {
+            "status": "ok",
+            "pending_confirmation": {"file": "app.py", "hash": "abc"},
+        }
+
+        with GatewaySession(client) as gw:
+            result = gw.write("app.py", "new content")
+
+        client.write_file.assert_called_once_with(
+            session_id="sid-1", path="app.py", content="new content"
+        )
+        assert "pending_confirmation" in result
+        assert result["pending_confirmation"]["hash"] == "abc"
+
+    def test_write_returns_ok_without_confirmation(self):
+        client = MagicMock()
+        client.connect.return_value = "sid-1"
+        client.write_file.return_value = {"status": "ok"}
+
+        with GatewaySession(client) as gw:
+            result = gw.write("README.md", "# Hello")
+
+        assert result == {"status": "ok"}
+
+
+class TestGatewaySessionHealth:
+    """session_health() delegates to client."""
+
+    def test_session_health_passes_session_id(self):
+        client = MagicMock()
+        client.connect.return_value = "sid-1"
+        client.session_health.return_value = {"status": "healthy", "uptime": 120}
+
+        with GatewaySession(client) as gw:
+            result = gw.session_health()
+
+        client.session_health.assert_called_once_with(session_id="sid-1")
+        assert result["status"] == "healthy"
