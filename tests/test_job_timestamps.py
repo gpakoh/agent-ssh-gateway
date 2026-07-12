@@ -1,9 +1,6 @@
 """Tests for monotonic timestamp fields on JobRecord."""
 
-import time
-from unittest.mock import AsyncMock, MagicMock, patch
-
-from app.job_manager import JobManager, JobRecord
+from app.job_manager import JobRecord
 
 
 class TestJobRecordMonoTimestamps:
