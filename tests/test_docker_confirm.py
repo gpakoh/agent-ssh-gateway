@@ -1,6 +1,35 @@
 from examples.mcp_server.docker_confirm import ConfirmStatus, ConfirmStore
 
 
+class TestConfirmFlow:
+    def test_confirm_flow(self):
+        store = ConfirmStore()
+        action = store.create_action("docker_stop", {"container": "web"}, summary="Stop web", risk="high")
+        token = action.confirm_token
+        result, status = store.confirm_action(token)
+        assert status == ConfirmStatus.OK
+        assert result is not None
+        assert result.tool == "docker_stop"
+
+    def test_confirm_replay_blocked(self):
+        store = ConfirmStore()
+        action = store.create_action("docker_stop", {"container": "web"}, summary="Stop web", risk="high")
+        token = action.confirm_token
+        store.confirm_action(token)
+        result, status = store.confirm_action(token)
+        assert status == ConfirmStatus.CONSUMED
+        assert result is None
+
+    def test_expired_token(self, monkeypatch):
+        store = ConfirmStore()
+        action = store.create_action("docker_stop", {"container": "web"}, summary="Stop web", risk="high")
+        token = action.confirm_token
+        monkeypatch.setattr("time.monotonic", lambda: 999999.0)
+        result, status = store.confirm_action(token)
+        assert status == ConfirmStatus.EXPIRED
+        assert result is None
+
+
 class TestConfirmStore:
     def test_create_action_returns_action(self):
         store = ConfirmStore()
