@@ -61,6 +61,7 @@ VALID_AGENT_SCOPES: set[str] = {
     "ssh:port-check",
     "jobs:read",
     "jobs:run",
+    "auth:read",
     "diagnostics:read",
 }
 
@@ -247,6 +248,12 @@ async def verify_master_api_key(request: Request, expected_key: str) -> AuthIden
 # ---------------------------------------------------------------------------
 
 ALWAYS_PUBLIC = frozenset({"/", "/health", "/api/capabilities"})
+PUBLIC_AUTH_PATHS = frozenset({
+    "/api/auth/check",
+    "/api/auth/register",
+    "/api/auth/login",
+    "/api/auth/verify",
+})
 
 
 def _normalise_path(path: str) -> str:
@@ -278,8 +285,8 @@ async def auth_check(
     if request.method == "GET" and (path == "/static" or path.startswith("/static/")):
         return None
 
-    # Auth endpoints are always public
-    if path.startswith("/api/auth/"):
+    # Public auth endpoints (register, login, verify, check — no API key required)
+    if path in PUBLIC_AUTH_PATHS:
         return None
 
     # Fail-closed: Auth Enabled But No Key Configured

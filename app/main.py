@@ -51,6 +51,7 @@ from app.ssh_manager import (
 )
 from app.state import _err
 from app.user_auth import init_auth_db
+from app.routers.auth import router as auth_identity_router
 from app.user_auth import router as auth_router
 from app.version import APP_VERSION
 from app.webhook_manager import WebhookManager
@@ -947,6 +948,7 @@ app.include_router(logs_router)
 app.include_router(templates_router)
 app.include_router(event_hooks_router)
 app.include_router(auth_router)
+app.include_router(auth_identity_router)
 
 # Static Files Mount (after All Router Includes So Static Routes Take Precedence)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
