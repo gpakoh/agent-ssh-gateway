@@ -378,6 +378,23 @@ class JobListResponse(BaseModel):
     count: int
 
 
+class JobWaitResponse(BaseModel):
+    """Long-poll wait response."""
+
+    job_id: str
+    status: str
+    wait_timed_out: bool = False
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int | None = None
+    created_at: float | None = None
+    started_at: float | None = None
+    completed_at: float | None = None
+    duration: float | None = None
+    error_message: str | None = None
+    owner_id: str = ""
+
+
 # ---------------------------------------------------------------------------
 # File Edit
 # ---------------------------------------------------------------------------
