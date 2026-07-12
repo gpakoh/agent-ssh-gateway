@@ -189,5 +189,5 @@ class PatchApplier:
                 f"@@ -{hunk['source_start']},{hunk['source_length']} "
                 f"+{hunk['target_start']},{hunk['target_length']} @@"
             )
-            lines.extend(hunk["lines"])
+            lines.extend(ln.rstrip("\n") for ln in hunk["lines"])
         return "\n".join(lines) + "\n"
