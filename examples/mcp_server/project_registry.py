@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from examples.mcp_server.config import ALLOWED_PROJECT_ROOTS, PROJECT_MAP
