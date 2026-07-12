@@ -5,6 +5,7 @@ This server is intentionally kept outside the gateway core.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -356,6 +357,31 @@ def instrumented(tool_name: str):
             return sync_wrapper
 
     return decorator
+
+
+import hashlib as _hashlib
+
+
+def compute_toolset_hash(mcp_instance: FastMCP) -> str:
+    """Compute SHA-256 hash of the canonical tool manifest.
+
+    Canonical form: sorted list of {name, inputSchema} objects as compact JSON.
+    Uses items.sort(key=lambda item: item["name"]) — NOT sorted(dicts).
+    """
+    tools_dict = {}
+    if hasattr(mcp_instance, "_tool_manager"):
+        tm = mcp_instance._tool_manager
+        if hasattr(tm, "_tools"):
+            tools_dict = tm._tools
+
+    items = []
+    for name, tool_obj in tools_dict.items():
+        schema = getattr(tool_obj, "parameters", None) or {}
+        items.append({"name": name, "inputSchema": schema})
+
+    items.sort(key=lambda item: item["name"])
+    canonical = json.dumps(items, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + _hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def run_tool(
