@@ -1406,21 +1406,38 @@ async def docker_compose_services(
 
 
 @register_tool("docker_start")
-async def docker_start(container: str, timeout: int | None = None) -> str:
-    """Start a stopped container."""
-    return await DockerClient().start(container, timeout=timeout)
+async def docker_start(container: str, timeout: int | None = None) -> dict[str, Any]:
+    """Start a stopped container. DANGEROUS: requires confirmation via confirm_operation(token)."""
+    DockerClient()._validate_container_name(container)
+    summary = f"Start container {container}"
+    action = _confirm_store.create_action(
+        "docker_start", {"container": container, "timeout": timeout}, summary, risk="medium"
+    )
+    return _confirmation_response(action)
 
 
 @register_tool("docker_stop")
-async def docker_stop(container: str, timeout: int = 10) -> str:
-    """Stop a running container. timeout: seconds before force kill (1-120, default 10)."""
-    return await DockerClient().stop(container, timeout=timeout)
+async def docker_stop(container: str, timeout: int = 10) -> dict[str, Any]:
+    """Stop a running container. DANGEROUS: requires confirmation via confirm_operation(token).
+    timeout: seconds before force kill (1-120, default 10)."""
+    DockerClient()._validate_container_name(container)
+    summary = f"Stop container {container}"
+    action = _confirm_store.create_action(
+        "docker_stop", {"container": container, "timeout": timeout}, summary, risk="medium"
+    )
+    return _confirmation_response(action)
 
 
 @register_tool("docker_restart")
-async def docker_restart(container: str, timeout: int = 10) -> str:
-    """Restart a container. timeout: seconds before force kill (1-120, default 10)."""
-    return await DockerClient().restart(container, timeout=timeout)
+async def docker_restart(container: str, timeout: int = 10) -> dict[str, Any]:
+    """Restart a container. DANGEROUS: requires confirmation via confirm_operation(token).
+    timeout: seconds before force kill (1-120, default 10)."""
+    DockerClient()._validate_container_name(container)
+    summary = f"Restart container {container}"
+    action = _confirm_store.create_action(
+        "docker_restart", {"container": container, "timeout": timeout}, summary, risk="medium"
+    )
+    return _confirmation_response(action)
 
 
 @register_tool("docker_compose_up")
@@ -1490,6 +1507,77 @@ async def docker_compose_logs(
 
 
 # ── Dangerous Docker operations (Session 164) ────────────────────
+
+
+async def _docker_start_impl(container: str, timeout: int | None = None) -> str:
+    return await DockerClient().start(container, timeout=timeout)
+
+
+async def _docker_stop_impl(container: str, timeout: int = 10) -> str:
+    return await DockerClient().stop(container, timeout=timeout)
+
+
+async def _docker_restart_impl(container: str, timeout: int = 10) -> str:
+    return await DockerClient().restart(container, timeout=timeout)
+
+
+async def _docker_rm_impl(container: str, force: bool = False) -> str:
+    return await DockerClient().rm(container, force=force)
+
+
+async def _docker_compose_down_impl(
+    project_dir: str | None = None,
+    remove_orphans: bool = False,
+    timeout: int = 30,
+    volumes: bool = False,
+) -> str:
+    return await DockerClient().compose_down(
+        project_dir=project_dir,
+        remove_orphans=remove_orphans,
+        timeout=timeout,
+        volumes=volumes,
+    )
+
+
+async def _docker_prune_impl(type: str = "container") -> str:
+    return await DockerClient().prune(type)
+
+
+async def _docker_exec_impl(container: str, command: list[str], timeout: int = 30) -> str:
+    return await DockerClient().exec(container, command, timeout=timeout)
+
+
+async def _docker_run_impl(
+    image: str,
+    command: list[str],
+    container_name: str | None = None,
+    timeout: int = 60,
+) -> str:
+    return await DockerClient().run(
+        image, command, container_name=container_name, timeout=timeout
+    )
+
+
+async def _docker_rmi_impl(images: list[str]) -> str:
+    return await DockerClient().rmi(images)
+
+
+async def _docker_volume_rm_impl(volumes: list[str]) -> str:
+    return await DockerClient().volume_rm(volumes)
+
+
+_CONFIRM_HANDLERS: dict[str, Callable[..., Any]] = {
+    "docker_start": _docker_start_impl,
+    "docker_stop": _docker_stop_impl,
+    "docker_restart": _docker_restart_impl,
+    "docker_rm": _docker_rm_impl,
+    "docker_compose_down": _docker_compose_down_impl,
+    "docker_prune": _docker_prune_impl,
+    "docker_exec": _docker_exec_impl,
+    "docker_run": _docker_run_impl,
+    "docker_rmi": _docker_rmi_impl,
+    "docker_volume_rm": _docker_volume_rm_impl,
+}
 
 
 def _confirmation_response(action: ConfirmAction) -> dict[str, Any]:
@@ -1768,8 +1856,8 @@ async def docker_volume_rm(volumes: list[str]) -> dict[str, Any]:
     return _confirmation_response(action)
 
 
-@register_tool("docker_confirm")
-async def docker_confirm(token: str) -> dict[str, Any]:
+@register_tool("confirm_operation")
+async def confirm_operation(token: str) -> dict[str, Any]:
     """Confirm a pending dangerous Docker operation using the one-time token from the confirmation response."""
     action, status = _confirm_store.confirm_action(token)
     if action is None:
@@ -1784,7 +1872,7 @@ async def docker_confirm(token: str) -> dict[str, Any]:
             ConfirmStatus.CONSUMED: "Confirmation token already used",
         }.get(status, "Unknown error")
         return tool_error(
-            tool="docker_confirm",
+            tool="confirm_operation",
             code=code,
             message=msg,
             hint="Call the dangerous tool again to get a new token.",
@@ -1792,70 +1880,41 @@ async def docker_confirm(token: str) -> dict[str, Any]:
             source="docker",
         )
 
-    dc = DockerClient()
-    tool_name = action.tool
-    kwargs = action.kwargs
-
-    if tool_name == "docker_rm":
-        result = await dc.rm(kwargs["container"], force=kwargs.get("force", False))
-    elif tool_name == "docker_compose_down":
-        result = await dc.compose_down(
-            project_dir=kwargs.get("project_dir"),
-            remove_orphans=kwargs.get("remove_orphans", False),
-            timeout=kwargs.get("timeout", 30),
-            volumes=kwargs.get("volumes", False),
-        )
-    elif tool_name == "docker_prune":
-        result = await dc.prune(kwargs["type"])
-    elif tool_name == "docker_exec":
-        result = await dc.exec(
-            kwargs["container"],
-            kwargs["command"],
-            timeout=kwargs.get("timeout", 30),
-        )
-    elif tool_name == "docker_run":
-        result = await dc.run(
-            kwargs["image"],
-            kwargs["command"],
-            container_name=kwargs.get("container_name"),
-            timeout=kwargs.get("timeout", 60),
-        )
-    elif tool_name == "docker_rmi":
-        result = await dc.rmi(kwargs["images"])
-    elif tool_name == "docker_volume_rm":
-        result = await dc.volume_rm(kwargs["volumes"])
-    else:
+    handler = _CONFIRM_HANDLERS.get(action.tool)
+    if not handler:
         return tool_error(
-            tool="docker_confirm",
+            tool="confirm_operation",
             code="INTERNAL_ERROR",
-            message=f"Unknown action tool: {tool_name}",
+            message=f"No handler for {action.tool}",
             source="docker",
         )
 
-    if result.exit_code == 0:
-        return tool_success(
-            tool=tool_name,
-            result={
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "exit_code": result.exit_code,
-            },
-            source="docker",
-        )
-    else:
+    try:
+        result = await handler(**action.kwargs)
+    except Exception as exc:
         return tool_error(
-            tool=tool_name,
+            tool=action.tool,
             code="DOCKER_COMMAND_FAILED",
-            message="Docker command failed",
-            result={
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "exit_code": result.exit_code,
-            },
+            message=str(exc),
             source="docker",
             retryable=False,
-            hint="Check container name or Docker state.",
         )
+
+    if isinstance(result, dict) and "ok" in result:
+        return result
+
+    if isinstance(result, str):
+        return tool_success(
+            tool=action.tool,
+            result={"output": result},
+            source="docker",
+        )
+
+    return tool_success(
+        tool=action.tool,
+        result=result,
+        source="docker",
+    )
 
 
 @register_tool("docker_pending_actions")
