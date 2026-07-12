@@ -35,6 +35,30 @@ class GatewaySession:
             except Exception:
                 pass
 
+    def run(self, command: str, timeout: int | None = None) -> dict:
+        """Execute command and wait for completion. Returns job result dict."""
+        job = self.client.execute_restricted(
+            session_id=self.session_id, command=command
+        )
+        return self.client.wait_job(
+            job_id=job["job_id"], timeout=timeout
+        )
+
+    def read(self, path: str) -> str:
+        """Read file content from remote host."""
+        result = self.client.read_file(session_id=self.session_id, path=path)
+        return result.get("content", "")
+
+    def write(self, path: str, content: str) -> dict:
+        """Write file. Returns raw Gateway response — may contain pending_confirmation."""
+        return self.client.write_file(
+            session_id=self.session_id, path=path, content=content
+        )
+
+    def session_health(self) -> dict:
+        """Check SSH session health."""
+        return self.client.session_health(session_id=self.session_id)
+
 
 class AsyncGatewaySession:
     """Async context manager for SSH Gateway.
