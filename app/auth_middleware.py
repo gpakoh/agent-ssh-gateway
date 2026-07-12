@@ -61,6 +61,7 @@ VALID_AGENT_SCOPES: set[str] = {
     "ssh:port-check",
     "jobs:read",
     "jobs:run",
+    "diagnostics:read",
 }
 
 # ---------------------------------------------------------------------------
