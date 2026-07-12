@@ -11,15 +11,17 @@ import re
 from pathlib import Path
 from typing import Any
 
-from gateway_client import GatewayClient
+from gateway_client import GatewayClient, GatewayClientError
+from project_registry import get_project_registry
 from tool_results import build_command_result
 
 
-def _project_root() -> Path:
-    root = os.environ.get("MCP_GATEWAY_PROJECT_ROOT", "").strip().rstrip("/")
-    if not root:
-        raise ValueError("MCP_GATEWAY_PROJECT_ROOT is not set")
-    return Path(root)
+def _resolve_project(project_name: str) -> Path:
+    """Resolve a project name to a validated filesystem path via the registry."""
+    try:
+        return get_project_registry().resolve(project_name)
+    except ValueError as e:
+        raise GatewayClientError(404, str(e)) from e
 
 
 def _validate_project(project: str) -> str:
@@ -168,7 +170,7 @@ def project_search_text(
 ) -> dict[str, Any]:
     """Search for text across project files using pure Python pathlib — no shell execution."""
     _validate_project(project)
-    project_dir = _project_root() / project
+    project_dir = _resolve_project(project)
     if not project_dir.is_dir():
         raise ValueError(f"Project directory not found: {project_dir}")
 
@@ -202,7 +204,7 @@ def project_list_files(client: GatewayClient, project: str, pattern: str) -> dic
     if not pattern or ".." in pattern:
         raise ValueError(f"Invalid pattern: {pattern!r}")
 
-    project_dir = _project_root() / _validate_project(project)
+    project_dir = _resolve_project(_validate_project(project))
     exclude_dirs = {
         ".git",
         "__pycache__",
@@ -250,7 +252,7 @@ def project_list_tree(client: GatewayClient, project: str, depth: int = 2) -> di
     """List project directory tree using Python pathlib — no shell execution."""
     project = _validate_project(project)
     depth = min(max(depth, 1), 5)
-    project_dir = _project_root() / project
+    project_dir = _resolve_project(project)
 
     entries: list[str] = []
     for p in sorted(project_dir.rglob("*")):
@@ -282,7 +284,7 @@ def project_tree(
         raise ValueError(f"invalid glob: {glob!r}")
     project = _validate_project(project)
     depth = min(max(depth, 1), 5)
-    project_dir = _project_root() / project
+    project_dir = _resolve_project(project)
 
     entries: list[str] = []
     for p in sorted(project_dir.rglob("*")):
@@ -472,10 +474,10 @@ def project_working_directory(client: GatewayClient, project: str) -> dict[str, 
 def project_info(client: GatewayClient, project: str) -> dict[str, Any]:
     """Resolve project path metadata — no shell execution."""
     project = _validate_project(project)
-    resolved = _project_root() / project
+    resolved = _resolve_project(project)
     return {
         "project": project,
-        "root": str(_project_root()),
+        "root": str(resolved),
         "resolved_path": str(resolved),
         "exists": resolved.exists(),
         "is_dir": resolved.is_dir(),
