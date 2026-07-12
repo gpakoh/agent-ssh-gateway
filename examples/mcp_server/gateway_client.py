@@ -309,6 +309,30 @@ class GatewayClient:
             },
         )
 
+    @_retry_on_session_not_found
+    def apply_patch(
+        self,
+        project: str,
+        patch: str,
+        expected_hashes: dict[str, str],
+        strip: int = 1,
+        dry_run: bool = False,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply a unified diff patch to project files via Gateway."""
+        sid = session_id or self._require_session_id()
+        proj = _safe_project(project)
+        return self._post(
+            f"/api/projects/{proj}/apply-patch",
+            {
+                "session_id": sid,
+                "patch": patch,
+                "expected_hashes": expected_hashes,
+                "strip": strip,
+                "dry_run": dry_run,
+            },
+        )
+
     def job_status(self, job_id: str) -> dict[str, Any]:
         return self._get(f"/api/jobs/{job_id}/status")
 
