@@ -31,6 +31,7 @@ from app.models import (
 )
 from app.project_analytics import ProjectAnalytics
 from app.redis_queue import RedisJobQueue
+from app.routers.auth import router as auth_identity_router
 from app.search_replace import GlobalSearchReplace
 from app.security import (
     SECURITY_HEADERS,
@@ -51,7 +52,6 @@ from app.ssh_manager import (
 )
 from app.state import _err
 from app.user_auth import init_auth_db
-from app.routers.auth import router as auth_identity_router
 from app.user_auth import router as auth_router
 from app.version import APP_VERSION
 from app.webhook_manager import WebhookManager
@@ -915,9 +915,9 @@ async def validation_exception_handler(request, exc: RequestValidationError):
 # ---------------------------------------------------------------------------
 
 from app.routers.batch import router as batch_router  # noqa: E402
-from app.routers.diagnostics import router as diagnostics_router  # noqa: E402
 from app.routers.code import router as code_router  # noqa: E402
 from app.routers.context import router as context_router  # noqa: E402
+from app.routers.diagnostics import router as diagnostics_router  # noqa: E402
 from app.routers.event_hooks import router as event_hooks_router  # noqa: E402
 from app.routers.files import router as files_router  # noqa: E402
 from app.routers.git import router as git_router  # noqa: E402
