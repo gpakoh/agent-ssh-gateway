@@ -67,6 +67,7 @@ from chatgpt_tools import (
 from command_policy import CommandPolicyError
 from docker_confirm import ConfirmAction, ConfirmStatus, ConfirmStore
 from gateway_client import GatewayClient, GatewayClientError, resolve_file_path
+from project_registry import get_project_registry
 from handoff import read_handoff, show_handoff_status, write_handoff_plan
 from mcp.server.fastmcp import FastMCP
 from mimo_tools import (
