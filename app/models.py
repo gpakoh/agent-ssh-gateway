@@ -77,6 +77,49 @@ class ExecuteResponse(BaseModel):
     duration: float = 0.0
 
 
+class ExecuteArgvRequest(BaseModel):
+    """Request body for executing an argv command with stdin."""
+
+    session_id: str = Field(..., min_length=1)
+    argv: list[str] = Field(..., min_length=1)
+    stdin: str = Field(default="", max_length=1_048_576)
+    timeout_s: int = Field(default=30, ge=1, le=3600)
+
+    @field_validator("argv")
+    @classmethod
+    def validate_argv(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("argv must not be empty")
+        total = 0
+        for arg in v:
+            if len(arg) > 255:
+                raise ValueError(f"Individual arg too long ({len(arg)} chars, max 255)")
+            if "\x00" in arg:
+                raise ValueError("NUL byte not allowed in argv")
+            total += len(arg.encode("utf-8"))
+        if total > 65536:
+            raise ValueError(f"Total argv UTF-8 length {total} exceeds 65536 bytes")
+        return v
+
+    @field_validator("stdin")
+    @classmethod
+    def validate_stdin_utf8(cls, v: str) -> str:
+        try:
+            v.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("stdin must be valid UTF-8") from exc
+        return v
+
+
+class ExecuteArgvResponse(BaseModel):
+    """Response after argv command execution."""
+
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int = -1
+    duration: float = 0.0
+
+
 # ---------------------------------------------------------------------------
 # Session Management
 # ---------------------------------------------------------------------------
@@ -474,6 +517,38 @@ class PatchApplyResponse(BaseModel):
 
     success: bool = True
     output: str
+
+
+class ProjectPatchApplyRequest(BaseModel):
+    """Request to apply a unified diff patch to project files."""
+
+    session_id: str = Field(..., min_length=1)
+    project: str = Field(..., min_length=1)
+    patch: str = Field(..., min_length=1, max_length=1_048_576)
+    expected_hashes: dict[str, str] = Field(default_factory=dict)
+    strip: int = Field(default=1, ge=0)
+    dry_run: bool = Field(default=False)
+
+
+class ProjectPatchFileResult(BaseModel):
+    """Result of applying patch to a single file."""
+
+    path: str
+    status: str  # "applied", "skipped", "failed"
+    hunks_applied: int = 0
+    error: str | None = None
+
+
+class ProjectPatchApplyResponse(BaseModel):
+    """Response after applying a unified diff patch."""
+
+    success: bool = True
+    files_applied: int = 0
+    files_failed: int = 0
+    hunks_applied: int = 0
+    preview: str | None = None
+    errors: list[ProjectPatchFileResult] = Field(default_factory=list)
+    files: list[ProjectPatchFileResult] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
