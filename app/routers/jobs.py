@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_scope
+from app.exceptions import JobNotFoundError, PermissionDeniedError
 from app.models import (
     BulkExecuteRequest,
     BulkExecuteResponse,
@@ -194,22 +195,16 @@ async def jobs_wait(
             identity_sub=_identity.fingerprint,
             timeout_s=timeout,
         )
-    except Exception:
-        from app.exceptions import JobNotFoundError, PermissionDeniedError
-
-        import sys
-        exc_type = sys.exc_info()[0]
-        if exc_type is JobNotFoundError:
-            raise HTTPException(
-                status_code=404,
-                detail=_err(404, f"Job {job_id} not found"),
-            )
-        if exc_type is PermissionDeniedError:
-            raise HTTPException(
-                status_code=403,
-                detail=_err(403, "Job belongs to a different owner"),
-            )
-        raise
+    except JobNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=_err(404, f"Job {job_id} not found"),
+        ) from None
+    except PermissionDeniedError:
+        raise HTTPException(
+            status_code=403,
+            detail=_err(403, "Job belongs to a different owner"),
+        ) from None
 
     return result
 
