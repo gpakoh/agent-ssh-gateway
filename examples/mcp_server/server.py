@@ -995,6 +995,26 @@ def gateway_latency_report() -> dict[str, Any]:
     )
 
 
+@register_tool("diagnostics_latency")
+def gateway_diagnostics_latency() -> dict[str, Any]:
+    """Return MCP-side latency breakdown and gateway latency summary."""
+    tracker = get_tracker()
+    mcp_summary = tracker.summary()
+
+    try:
+        gw_data = client._get("/api/diagnostics/latency")
+    except Exception:
+        gw_data = {"error": "gateway diagnostics unavailable"}
+
+    return tool_success(
+        {
+            "mcp": mcp_summary,
+            "gateway": gw_data,
+        },
+        tool_name="diagnostics_latency",
+    )
+
+
 @register_tool("read_handoff")
 def gateway_read_handoff(session_id: str | None = None) -> dict[str, Any]:
     """Read .ai-bridge handoff files."""

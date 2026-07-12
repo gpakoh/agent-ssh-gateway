@@ -30,9 +30,26 @@ class LatencyTracker:
                     "max_ms": max(durations),
                     "avg_ms": sum(durations) / len(durations),
                 }
+            by_category: dict[str, dict] = {}
+            for name, durations in self._records.items():
+                cat = name.split("_", 1)[0] if "_" in name else name
+                if cat not in by_category:
+                    by_category[cat] = {"count": 0, "total_ms": 0.0}
+                by_category[cat]["count"] += len(durations)
+                by_category[cat]["total_ms"] += sum(durations)
+            for cat_data in by_category.values():
+                if cat_data["count"] > 0:
+                    cat_data["avg_ms"] = round(
+                        cat_data["total_ms"] / cat_data["count"], 1
+                    )
+                else:
+                    cat_data["avg_ms"] = 0.0
+                cat_data["total_ms"] = round(cat_data["total_ms"], 1)
+
             return {
                 "total_calls": sum(len(v) for v in self._records.values()),
                 "by_tool": by_tool,
+                "by_category": by_category,
             }
 
 
