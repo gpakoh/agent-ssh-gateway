@@ -410,42 +410,43 @@ def project_show_file_diff(
 # ── Project test target tools ───────────────────────────────────
 
 
-def project_run_pytest(
+def _run_uv_tool(
     client: GatewayClient,
     project: str,
+    tool_key: str,
+    tool_name: str,
     target: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run pytest on project targets via uv."""
+    """Run a uv-backed tool via SSH gateway. Shared by all uv runner tools."""
     project_dir = _resolve_project(project)
     targets = target or ["."]
     try:
-        validated = _validate_targets(str(project_dir), targets)
-        argv = _build_uv_argv("pytest", str(project_dir), validated)
+        argv = _build_uv_argv(tool_key, str(project_dir), targets)
     except ValueError as e:
         code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
-        return tool_error(code.strip(), msg.strip(), tool_name="project_run_pytest")
+        return tool_error(code=code.strip(), message=msg.strip(), tool_name=tool_name)
 
     check_result = client.execute_project_command(str(project_dir), "command -v uv")
     if check_result.get("exit_code", 1) != 0:
         return tool_error(
-            "DEPENDENCY_MISSING",
-            "Required executable 'uv' was not found",
+            code="DEPENDENCY_MISSING",
+            message="Required executable 'uv' was not found",
             hint="Install uv on the SSH target or configure another backend",
             retryable=False,
             details={"required_binary": "uv"},
-            tool_name="project_run_pytest",
+            tool_name=tool_name,
         )
 
     command = " ".join(shlex.quote(a) for a in argv)
     result = client.execute_project_command(str(project_dir), command)
     raw = client.wait_job(result["job_id"])
-    outcome, error_code = _map_uv_exit_code("pytest", raw.get("exit_code", -1))
+    outcome, error_code = _map_uv_exit_code(tool_key, raw.get("exit_code", -1))
     if error_code:
         return tool_error(
-            error_code,
-            f"pytest failed with exit code {raw.get('exit_code')}",
+            code=error_code,
+            message=f"{tool_key} failed with exit code {raw.get('exit_code')}",
             details={"exit_code": raw.get("exit_code"), "stderr": raw.get("stderr", "")},
-            tool_name="project_run_pytest",
+            tool_name=tool_name,
         )
     return tool_success(
         build_command_result(
@@ -456,8 +457,16 @@ def project_run_pytest(
             execution_duration_ms=raw.get("execution_duration_ms"),
             job_id=raw.get("job_id"),
         ),
-        tool_name="project_run_pytest",
+        tool_name=tool_name,
     )
+
+
+def project_run_pytest(
+    client: GatewayClient,
+    project: str,
+    target: list[str] | None = None,
+) -> dict[str, Any]:
+    return _run_uv_tool(client, project, "pytest", "project_run_pytest", target)
 
 
 def project_run_ruff(
@@ -465,49 +474,7 @@ def project_run_ruff(
     project: str,
     target: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run ruff check on project targets via uv."""
-    project_dir = _resolve_project(project)
-    targets = target or ["."]
-    try:
-        validated = _validate_targets(str(project_dir), targets)
-        argv = _build_uv_argv("ruff", str(project_dir), validated)
-    except ValueError as e:
-        code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
-        return tool_error(code.strip(), msg.strip(), tool_name="project_run_ruff")
-
-    check_result = client.execute_project_command(str(project_dir), "command -v uv")
-    if check_result.get("exit_code", 1) != 0:
-        return tool_error(
-            "DEPENDENCY_MISSING",
-            "Required executable 'uv' was not found",
-            hint="Install uv on the SSH target or configure another backend",
-            retryable=False,
-            details={"required_binary": "uv"},
-            tool_name="project_run_ruff",
-        )
-
-    command = " ".join(shlex.quote(a) for a in argv)
-    result = client.execute_project_command(str(project_dir), command)
-    raw = client.wait_job(result["job_id"])
-    outcome, error_code = _map_uv_exit_code("ruff", raw.get("exit_code", -1))
-    if error_code:
-        return tool_error(
-            error_code,
-            f"Ruff failed with exit code {raw.get('exit_code')}",
-            details={"exit_code": raw.get("exit_code"), "stderr": raw.get("stderr", "")},
-            tool_name="project_run_ruff",
-        )
-    return tool_success(
-        build_command_result(
-            outcome=outcome,
-            exit_code=raw.get("exit_code", 0),
-            stdout=raw.get("stdout") or raw.get("output", ""),
-            stderr=raw.get("stderr", ""),
-            execution_duration_ms=raw.get("execution_duration_ms"),
-            job_id=raw.get("job_id"),
-        ),
-        tool_name="project_run_ruff",
-    )
+    return _run_uv_tool(client, project, "ruff", "project_run_ruff", target)
 
 
 def project_run_mypy(
@@ -515,49 +482,7 @@ def project_run_mypy(
     project: str,
     target: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run mypy on project targets via uv."""
-    project_dir = _resolve_project(project)
-    targets = target or ["."]
-    try:
-        validated = _validate_targets(str(project_dir), targets)
-        argv = _build_uv_argv("mypy", str(project_dir), validated)
-    except ValueError as e:
-        code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
-        return tool_error(code.strip(), msg.strip(), tool_name="project_run_mypy")
-
-    check_result = client.execute_project_command(str(project_dir), "command -v uv")
-    if check_result.get("exit_code", 1) != 0:
-        return tool_error(
-            "DEPENDENCY_MISSING",
-            "Required executable 'uv' was not found",
-            hint="Install uv on the SSH target or configure another backend",
-            retryable=False,
-            details={"required_binary": "uv"},
-            tool_name="project_run_mypy",
-        )
-
-    command = " ".join(shlex.quote(a) for a in argv)
-    result = client.execute_project_command(str(project_dir), command)
-    raw = client.wait_job(result["job_id"])
-    outcome, error_code = _map_uv_exit_code("mypy", raw.get("exit_code", -1))
-    if error_code:
-        return tool_error(
-            error_code,
-            f"Mypy failed with exit code {raw.get('exit_code')}",
-            details={"exit_code": raw.get("exit_code"), "stderr": raw.get("stderr", "")},
-            tool_name="project_run_mypy",
-        )
-    return tool_success(
-        build_command_result(
-            outcome=outcome,
-            exit_code=raw.get("exit_code", 0),
-            stdout=raw.get("stdout") or raw.get("output", ""),
-            stderr=raw.get("stderr", ""),
-            execution_duration_ms=raw.get("execution_duration_ms"),
-            job_id=raw.get("job_id"),
-        ),
-        tool_name="project_run_mypy",
-    )
+    return _run_uv_tool(client, project, "mypy", "project_run_mypy", target)
 
 
 # ── Project git info tools ──────────────────────────────────────
@@ -702,46 +627,4 @@ def project_run_compileall(
     project: str,
     target: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run compileall on project targets via uv."""
-    project_dir = _resolve_project(project)
-    targets = target or ["."]
-    try:
-        validated = _validate_targets(str(project_dir), targets)
-        argv = _build_uv_argv("compileall", str(project_dir), validated)
-    except ValueError as e:
-        code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
-        return tool_error(code.strip(), msg.strip(), tool_name="project_run_compileall")
-
-    check_result = client.execute_project_command(str(project_dir), "command -v uv")
-    if check_result.get("exit_code", 1) != 0:
-        return tool_error(
-            "DEPENDENCY_MISSING",
-            "Required executable 'uv' was not found",
-            hint="Install uv on the SSH target or configure another backend",
-            retryable=False,
-            details={"required_binary": "uv"},
-            tool_name="project_run_compileall",
-        )
-
-    command = " ".join(shlex.quote(a) for a in argv)
-    result = client.execute_project_command(str(project_dir), command)
-    raw = client.wait_job(result["job_id"])
-    outcome, error_code = _map_uv_exit_code("compileall", raw.get("exit_code", -1))
-    if error_code:
-        return tool_error(
-            error_code,
-            f"compileall failed with exit code {raw.get('exit_code')}",
-            details={"exit_code": raw.get("exit_code"), "stderr": raw.get("stderr", "")},
-            tool_name="project_run_compileall",
-        )
-    return tool_success(
-        build_command_result(
-            outcome=outcome,
-            exit_code=raw.get("exit_code", 0),
-            stdout=raw.get("stdout") or raw.get("output", ""),
-            stderr=raw.get("stderr", ""),
-            execution_duration_ms=raw.get("execution_duration_ms"),
-            job_id=raw.get("job_id"),
-        ),
-        tool_name="project_run_compileall",
-    )
+    return _run_uv_tool(client, project, "compileall", "project_run_compileall", target)
