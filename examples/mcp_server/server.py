@@ -80,7 +80,7 @@ from opencode_tools import (
 )
 from self_test import run_self_test
 from tool_modes import should_register_tool
-from tool_results import error_result, text_result, tool_error, tool_success
+from tool_results import build_command_result, error_result, text_result, tool_error, tool_success
 from write_modes import WriteModeError, WritePermissionError
 
 from examples.chatgpt_remote_mcp.fleet.context7_server import (
@@ -554,6 +554,50 @@ def gateway_execute_restricted(command: str, session_id: str | None = None) -> d
         title="Restricted execute",
         fn=_exec,
         success_text="Command submitted as a background job.",
+    )
+
+
+@register_tool("execute_argv")
+def gateway_execute_argv(
+    session_id: str,
+    argv: list[str],
+    stdin: str = "",
+    timeout_s: int = 30,
+) -> dict[str, Any]:
+    """Execute explicit argv serialized as a safely quoted POSIX command.
+
+    Args:
+        session_id: Active SSH session ID.
+        argv: Command and arguments as a list.
+        stdin: Optional stdin content (UTF-8 only).
+        timeout_s: Execution timeout (1-3600).
+
+    Returns:
+        Contract v1 dict with stdout/stderr/exit_code (not a JSON string).
+    """
+    try:
+        raw = client.execute_argv(
+            argv=argv,
+            stdin=stdin,
+            timeout_s=timeout_s,
+            session_id=session_id,
+        )
+    except GatewayClientError as e:
+        return tool_error(
+            tool="execute_argv",
+            code="TOOL_EXECUTION_FAILED",
+            message=str(e),
+        )
+    return tool_success(
+        tool="execute_argv",
+        result=build_command_result(
+            outcome="passed" if raw.get("exit_code", 1) == 0 else "failed",
+            exit_code=raw.get("exit_code", -1),
+            stdout=raw.get("stdout", ""),
+            stderr=raw.get("stderr", ""),
+            execution_duration_ms=int(raw.get("duration", 0) * 1000),
+        ),
+        source="gateway",
     )
 
 
