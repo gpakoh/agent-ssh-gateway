@@ -92,6 +92,7 @@ from examples.chatgpt_remote_mcp.fleet.github_client import (
 from examples.chatgpt_remote_mcp.fleet.postgres_client import PostgresClient
 
 # OAuth provider and settings
+from examples.mcp_server.latency_metrics import get_tracker
 from examples.mcp_server.oauth_provider import (
     DEFAULT_SCOPES,
     SUPPORTED_SCOPES,
@@ -321,6 +322,42 @@ def register_tool(name: str):
     return decorator
 
 
+def instrumented(tool_name: str):
+    """Decorator that wraps a tool function with latency tracking."""
+
+    def decorator(func):
+        import asyncio
+
+        if asyncio.iscoroutinefunction(func):
+
+            async def async_wrapper(*args, **kwargs):
+                tracker = get_tracker()
+                with tracker.measure(tool_name):
+                    result = await func(*args, **kwargs)
+                if isinstance(result, dict) and "meta" in result:
+                    recs = tracker.records.get(tool_name, [])
+                    if recs:
+                        result["meta"]["duration_ms"] = int(recs[-1])
+                return result
+
+            return async_wrapper
+        else:
+
+            def sync_wrapper(*args, **kwargs):
+                tracker = get_tracker()
+                with tracker.measure(tool_name):
+                    result = func(*args, **kwargs)
+                if isinstance(result, dict) and "meta" in result:
+                    recs = tracker.records.get(tool_name, [])
+                    if recs:
+                        result["meta"]["duration_ms"] = int(recs[-1])
+                return result
+
+            return sync_wrapper
+
+    return decorator
+
+
 def run_tool(
     *,
     tool: str,
@@ -409,12 +446,14 @@ def _split_lines(value: str | None) -> list[str] | None:
 
 
 @register_tool("health")
+@instrumented("health")
 def gateway_health() -> dict[str, Any]:
     """Check gateway health."""
     return _run_gateway(tool="health", fn=client.health)
 
 
 @register_tool("list_sessions")
+@instrumented("list_sessions")
 def gateway_list_sessions() -> dict[str, Any]:
     """List current SSH sessions visible to the configured API key."""
 
@@ -944,6 +983,15 @@ def gateway_self_test() -> dict[str, Any]:
         title="Gateway self-test",
         text=f"Gateway MCP self-test status: {status}",
         data=data,
+    )
+
+
+@register_tool("latency_report")
+def gateway_latency_report() -> dict[str, Any]:
+    """Return accumulated per-tool latency statistics."""
+    return tool_success(
+        get_tracker().summary(),
+        tool_name="latency_report",
     )
 
 
