@@ -148,6 +148,23 @@ class GatewayClient:
         data = response.json()
         self.session_id = data["session_id"]
 
+    def connect(self) -> str:
+        """Establish SSH session and return session_id."""
+        self._reconnect_session()
+        return self.session_id
+
+    def disconnect(self, session_id: str | None = None) -> None:
+        """Close SSH session. Best-effort — never raises."""
+        sid = session_id or self.session_id
+        if not sid:
+            return
+        try:
+            self._post("/api/ssh/disconnect", {"session_id": sid})
+        except Exception:
+            pass
+        if sid == self.session_id:
+            self.session_id = ""
+
     @staticmethod
     def _retry_on_session_not_found(
         func: Any,
