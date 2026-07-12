@@ -423,7 +423,7 @@ class JobManager:
 
         try:
             await asyncio.wait_for(event.wait(), timeout=timeout_s)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {"job_id": job_id, "status": "running", "wait_timed_out": True}
         except asyncio.CancelledError:
             # Client disconnected — job UNCHANGED
