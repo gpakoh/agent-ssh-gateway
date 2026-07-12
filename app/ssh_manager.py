@@ -476,6 +476,105 @@ class SSHSessionManager:
             "duration": round(duration, 3),
         }
 
+    async def execute_argv(
+        self,
+        session_id: str,
+        command_str: str,
+        stdin_data: bytes,
+        timeout: int = 30,
+    ) -> CommandResult:
+        """Execute a pre-serialized command with optional stdin data.
+
+        Unlike execute(), this method writes stdin_data to the channel before
+        shutting down write, then reads stdout/stderr concurrently.
+        """
+        async with self._lock:
+            record = self._sessions.get(session_id)
+        if not record:
+            raise SessionNotFoundError(f"Session {session_id} not found")
+
+        if not record.is_connected():
+            logger.warning("Session %s disconnected, attempting auto-reconnect", session_id)
+            reconnected = await self.reconnect(session_id)
+            if not reconnected:
+                raise ConnectionError(
+                    f"Session {session_id} is disconnected and reconnection failed"
+                )
+
+        record.touch()
+        host, port, username = record.host, record.port, record.username
+        client = record.client
+        loop = asyncio.get_event_loop()
+        start = time.time()
+
+        _emit(
+            "command.started",
+            session_id=session_id,
+            host=host,
+            port=port,
+            username=username,
+            command=command_str,
+        )
+
+        try:
+            stdin, stdout, stderr = await loop.run_in_executor(
+                None,
+                lambda: client.exec_command(command_str, timeout=timeout),
+            )
+
+            # Write stdin data if any, then shutdown write
+            if stdin_data:
+                stdin.write(stdin_data)
+            stdin.channel.shutdown_write()
+
+            # Read stdout and stderr concurrently with timeout
+            out_data = await asyncio.wait_for(
+                loop.run_in_executor(None, stdout.read),
+                timeout=timeout,
+            )
+            err_data = await asyncio.wait_for(
+                loop.run_in_executor(None, stderr.read),
+                timeout=timeout,
+            )
+            exit_code = stdout.channel.recv_exit_status()
+        except builtins.TimeoutError:
+            raise TimeoutError(
+                f"Command timed out after {timeout}s: {command_str}"
+            ) from None
+        except SSHException as exc:
+            logger.warning(
+                "SSH error during execution for session %s: %s", session_id, exc
+            )
+            raise ExecutionError(f"SSH error during execution: {exc}") from exc
+        except Exception as exc:
+            raise ExecutionError(f"Execution error: {exc}") from exc
+
+        duration = time.time() - start
+        record.touch()
+
+        out_text = out_data.decode("utf-8", errors="replace")
+        err_text = err_data.decode("utf-8", errors="replace")
+
+        _emit(
+            "command.completed" if exit_code == 0 else "command.failed",
+            session_id=session_id,
+            host=host,
+            port=port,
+            username=username,
+            command=command_str,
+            exit_code=exit_code,
+            duration=duration,
+            stdout=out_text,
+            stderr=err_text,
+        )
+
+        return {
+            "stdout": out_text,
+            "stderr": err_text,
+            "exit_code": exit_code,
+            "duration": round(duration, 3),
+        }
+
     # ------------------------------------------------------------------
     # Streaming Execute (websocket)
     # ------------------------------------------------------------------
