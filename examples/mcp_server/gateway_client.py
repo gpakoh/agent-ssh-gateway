@@ -278,13 +278,13 @@ class GatewayClient:
             {"redact_output": str(redact_output).lower()},
         )
 
-    def wait_job(self, job_id: str, timeout: int | None = None) -> dict[str, Any]:
+    def wait_job(self, job_id: str, timeout_sec: int | None = None) -> dict[str, Any]:
         """Wait for job completion using long-poll, falling back to polling.
 
         Falls back to polling on NOT_SUPPORTED (multi-worker) or 404 (old gateway).
         No fallback on PERMISSION_DENIED, JOB_NOT_FOUND, or other real errors.
         """
-        effective_timeout = timeout or self.job_timeout
+        effective_timeout = timeout_sec or self.job_timeout
         http_timeout = effective_timeout + 5
 
         try:

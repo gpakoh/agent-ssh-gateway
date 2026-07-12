@@ -39,7 +39,7 @@ class TestGatewayClientWaitJob:
             "exit_code": 0,
         }
         with patch.object(client, "_get", return_value=completed_response) as mock_get:
-            result = client.wait_job("j1", timeout=10)
+            result = client.wait_job("j1", timeout_sec=10)
             assert result["status"] == "completed"
             mock_get.assert_called_once_with(
                 "/api/jobs/j1/wait",
@@ -55,7 +55,7 @@ class TestGatewayClientWaitJob:
             "wait_timed_out": True,
         }
         with patch.object(client, "_get", return_value=timeout_response):
-            result = client.wait_job("j1", timeout=0.5)
+            result = client.wait_job("j1", timeout_sec=0.5)
             assert result.get("wait_timed_out") is True
 
     def test_fallback_on_not_supported(self):
@@ -79,7 +79,7 @@ class TestGatewayClientWaitJob:
             }
 
         with patch.object(client, "_get", side_effect=_mock_get):
-            result = client.wait_job("j1", timeout=10)
+            result = client.wait_job("j1", timeout_sec=10)
             assert result["status"] == "completed"
             assert call_count >= 2
 
@@ -100,7 +100,7 @@ class TestGatewayClientWaitJob:
             }
 
         with patch.object(client, "_get", side_effect=_mock_get):
-            result = client.wait_job("j1", timeout=10)
+            result = client.wait_job("j1", timeout_sec=10)
             assert result["status"] == "completed"
             assert call_count >= 2
 
@@ -117,7 +117,7 @@ class TestGatewayClientWaitJob:
             ),
         ):
             try:
-                client.wait_job("j1", timeout=10)
+                client.wait_job("j1", timeout_sec=10)
                 assert False, "Should have raised"
             except GatewayClientError as e:
                 assert e.status_code == 403
