@@ -30,7 +30,6 @@ CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
 IMAGE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:/{-]{0,255}$")
 SERVICE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 COMPOSE_FILE_RE = re.compile(r"^[a-zA-Z0-9_/.-]{1,256}$")
-COMPOSE_PATH_TRAVERSAL_RE = re.compile(r"(?:^|/)\.\.(?:/|$)")
 ALLOWED_PRUNE_TYPES: set[str] = {"container", "image", "network"}
 ALLOWED_ADMIN_PRUNE_TYPES: set[str] = {"volume", "system"}
 ALLOWED_PRUNE_TYPES_ALL: set[str] = ALLOWED_PRUNE_TYPES | ALLOWED_ADMIN_PRUNE_TYPES
@@ -148,14 +147,25 @@ class DockerClient:
             raise ValueError(f"Invalid service name: {shlex.quote(name)}")
         return name
 
-    def _validate_compose_file(self, path: str) -> str:
-        if not COMPOSE_FILE_RE.match(path):
-            raise ValueError(f"Invalid compose file path: {shlex.quote(path)}")
-        if path.startswith("/"):
-            raise ValueError(f"Absolute path not allowed: {shlex.quote(path)}")
-        if COMPOSE_PATH_TRAVERSAL_RE.search(path):
-            raise ValueError(f"Path traversal not allowed: {shlex.quote(path)}")
-        return path
+    def _validate_project_dir(self, project_dir: str | None) -> None:
+        """Validate that project_dir exists and is under an allowed root."""
+        if project_dir is None:
+            return
+        resolved = Path(project_dir).resolve()
+        if not resolved.is_dir():
+            raise ValueError(f"Project directory does not exist: {shlex.quote(project_dir)}")
+        from examples.mcp_server.config import ALLOWED_PROJECT_ROOTS
+
+        for root in ALLOWED_PROJECT_ROOTS:
+            try:
+                resolved.relative_to(Path(root).resolve())
+                return
+            except ValueError:
+                continue
+        raise ValueError(
+            f"Project directory {shlex.quote(project_dir)} is outside allowed roots: "
+            f"{ALLOWED_PROJECT_ROOTS}"
+        )
 
     def _validate_prune_type(self, type: str, admin_scope: bool = False) -> str:
         allowed = ALLOWED_PRUNE_TYPES_ALL if admin_scope else ALLOWED_PRUNE_TYPES
@@ -195,50 +205,6 @@ class DockerClient:
         # shell launcher check
         if len(argv) >= 2 and argv[0] in SHELL_CMDS and argv[1] == "-c":
             raise ValueError(f"shell launcher blocked: {shlex.quote(argv[0])} -c")
-
-    def _resolve_compose_file_path(
-        self,
-        file_path: str | None,
-        project_dir: str | None = None,
-        allowed_roots: set[str] | None = None,
-    ) -> str | None:
-        """Resolve a compose file path with safety checks.
-
-        Relative paths are joined under project_dir if given.
-        Absolute paths are allowed only if inside allowed_roots.
-
-        Returns the resolved path string, or None if file_path is None.
-        """
-        if file_path is None:
-            return None
-
-        if not COMPOSE_FILE_RE.match(file_path):
-            raise ValueError(f"Invalid compose file path: {shlex.quote(file_path)}")
-
-        if COMPOSE_PATH_TRAVERSAL_RE.search(file_path):
-            raise ValueError(f"Path traversal not allowed: {shlex.quote(file_path)}")
-
-        if file_path.startswith("/"):
-            roots = allowed_roots or set()
-            if not roots:
-                raise ValueError(
-                    f"Absolute path {shlex.quote(file_path)} not allowed: "
-                    "no allowed roots configured"
-                )
-            ok = any(file_path.startswith(r) for r in roots)
-            if not ok:
-                raise ValueError(
-                    f"Absolute path {shlex.quote(file_path)} is outside allowed root(s)"
-                )
-            return file_path
-
-        if project_dir:
-            pdir = Path(project_dir).resolve()
-            if not pdir.is_dir():
-                raise ValueError(f"Project directory does not exist: {shlex.quote(project_dir)}")
-            return str(pdir / file_path)
-
-        return file_path
 
     @staticmethod
     def _truncate_table_output(output: str, limit: int) -> str:
@@ -383,12 +349,11 @@ class DockerClient:
     async def compose_ps(
         self,
         project_dir: str | None = None,
-        file_path: str | None = None,
         format: str | None = None,
         limit: int = 50,
     ) -> str:
-        resolved = self._resolve_compose_file_path(file_path, project_dir)
-        argv = self._compose_base_argv(resolved, project_dir)
+        self._validate_project_dir(project_dir)
+        argv = self._compose_base_argv(project_dir)
         argv.append("ps")
         if format:
             argv.extend(["--format", format])
@@ -405,10 +370,9 @@ class DockerClient:
     async def compose_services(
         self,
         project_dir: str | None = None,
-        file_path: str | None = None,
     ) -> str:
-        resolved = self._resolve_compose_file_path(file_path, project_dir)
-        argv = self._compose_base_argv(resolved, project_dir)
+        self._validate_project_dir(project_dir)
+        argv = self._compose_base_argv(project_dir)
         argv.extend(["config", "--services"])
         return await self._run(argv, timeout=60.0)
 
@@ -444,12 +408,8 @@ class DockerClient:
 
     # ── Compose write operations (Session 160) ─────────────────────
 
-    def _compose_base_argv(
-        self, file_path: str | None = None, project_dir: str | None = None
-    ) -> list[str]:
+    def _compose_base_argv(self, project_dir: str | None = None) -> list[str]:
         argv = [DOCKER_BIN, "compose"]
-        if file_path:
-            argv.extend(["-f", file_path])
         if project_dir:
             argv.extend(["--project-directory", project_dir])
         return argv
@@ -457,15 +417,14 @@ class DockerClient:
     async def compose_up(
         self,
         project_dir: str | None = None,
-        file_path: str | None = None,
         services: list[str] | None = None,
         detach: bool = True,
         build: bool = False,
         timeout: int = 120,
     ) -> str:
         """Start services. detach=True by default; set build=True to rebuild."""
-        resolved = self._resolve_compose_file_path(file_path, project_dir)
-        argv = self._compose_base_argv(resolved, project_dir)
+        self._validate_project_dir(project_dir)
+        argv = self._compose_base_argv(project_dir)
         argv.append("up")
         if detach:
             argv.append("--detach")
@@ -480,13 +439,12 @@ class DockerClient:
     async def compose_restart(
         self,
         project_dir: str | None = None,
-        file_path: str | None = None,
         services: list[str] | None = None,
         timeout: int = 30,
     ) -> str:
         """Restart services in a compose project."""
-        resolved = self._resolve_compose_file_path(file_path, project_dir)
-        argv = self._compose_base_argv(resolved, project_dir)
+        self._validate_project_dir(project_dir)
+        argv = self._compose_base_argv(project_dir)
         argv.append("restart")
         if services:
             for s in services:
@@ -497,14 +455,13 @@ class DockerClient:
     async def compose_build(
         self,
         project_dir: str | None = None,
-        file_path: str | None = None,
         services: list[str] | None = None,
         no_cache: bool = False,
         timeout: int = 300,
     ) -> str:
         """Build (or rebuild) services. no_cache=True to ignore cache."""
-        resolved = self._resolve_compose_file_path(file_path, project_dir)
-        argv = self._compose_base_argv(resolved, project_dir)
+        self._validate_project_dir(project_dir)
+        argv = self._compose_base_argv(project_dir)
         argv.append("build")
         if no_cache:
             argv.append("--no-cache")
@@ -517,7 +474,6 @@ class DockerClient:
     async def compose_logs(
         self,
         project_dir: str | None = None,
-        file_path: str | None = None,
         services: list[str] | None = None,
         tail: int = 100,
         follow: bool = False,
@@ -525,8 +481,8 @@ class DockerClient:
         timeout: int = 30,
     ) -> str:
         """Fetch logs from compose services. tail: 1-1000 lines."""
-        resolved = self._resolve_compose_file_path(file_path, project_dir)
-        argv = self._compose_base_argv(resolved, project_dir)
+        self._validate_project_dir(project_dir)
+        argv = self._compose_base_argv(project_dir)
         argv.append("logs")
         tail = max(1, min(tail, 1000))
         argv.extend(["--tail", str(tail)])
@@ -551,12 +507,12 @@ class DockerClient:
     async def compose_down(
         self,
         project_dir: str | None = None,
-        file_path: str | None = None,
         remove_orphans: bool = False,
         timeout: int = 30,
         volumes: bool = False,
     ) -> RunResult:
-        argv = self._compose_base_argv(file_path, project_dir)
+        self._validate_project_dir(project_dir)
+        argv = self._compose_base_argv(project_dir)
         argv.append("down")
         if remove_orphans:
             argv.append("--remove-orphans")
