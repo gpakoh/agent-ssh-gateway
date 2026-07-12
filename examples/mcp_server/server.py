@@ -8,9 +8,11 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
+import time as _time
 from collections.abc import Callable
 from typing import Any
+
+_mcp_started_at = _time.time()
 
 from agent_tasks import (
     archive_agent_task as _archive_agent_task,
@@ -474,8 +476,38 @@ def _split_lines(value: str | None) -> list[str] | None:
 @register_tool("health")
 @instrumented("health")
 def gateway_health() -> dict[str, Any]:
-    """Check gateway health."""
-    return _run_gateway(tool="health", fn=client.health)
+    """Check gateway + MCP health with build metadata and toolset hash."""
+    from datetime import UTC, datetime
+
+    gateway_data = client.health()
+
+    mcp_build_sha = os.environ.get("BUILD_SHA", "").strip() or "unknown"
+    mcp_build_time = os.environ.get("BUILD_TIME", "").strip()
+    mcp_started_at = ""
+    if _mcp_started_at:
+        mcp_started_at = datetime.fromtimestamp(
+            _mcp_started_at, tz=UTC
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    toolset_hash = compute_toolset_hash(mcp)
+
+    tools_count = 0
+    if hasattr(mcp, "_tool_manager"):
+        tm = mcp._tool_manager
+        if hasattr(tm, "_tools"):
+            tools_count = len(tm._tools)
+
+    return {
+        "mcp": {
+            "build_sha": mcp_build_sha,
+            "build_time": mcp_build_time,
+            "started_at": mcp_started_at,
+            "toolset_hash": toolset_hash,
+            "tools_count": tools_count,
+            "contract_version": "1",
+        },
+        "gateway": gateway_data,
+    }
 
 
 @register_tool("list_sessions")
