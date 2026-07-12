@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "chatgpt_remote_mcp"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 from fleet.docker_client import COMPOSE_FILE_RE, CONTAINER_NAME_RE, SERVICE_NAME_RE, DockerClient
@@ -86,76 +87,87 @@ def test_invalid_compose_file_names():
         assert not COMPOSE_FILE_RE.match(name), f"should reject: {name}"
 
 
-# ── Compose path resolving ──
+# ── Compose file_path rejection ──
 
 
-def test_compose_relative_path_resolved_under_project_dir():
+def test_compose_ps_rejects_file_path():
     c = _client()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        result = c._resolve_compose_file_path("docker-compose.yml", project_dir=tmpdir)
-        assert result == os.path.join(tmpdir, "docker-compose.yml")
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        c.compose_ps(file_path="/some/path/docker-compose.yml")
 
 
-def test_compose_relative_path_defaults_to_raw():
+def test_compose_services_rejects_file_path():
     c = _client()
-    result = c._resolve_compose_file_path("docker-compose.yml", project_dir=None)
-    assert result == "docker-compose.yml"
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        c.compose_services(file_path="/some/path/docker-compose.yml")
 
 
-def test_compose_none_path_returns_none():
+@pytest.mark.asyncio
+async def test_compose_up_rejects_file_path():
     c = _client()
-    assert c._resolve_compose_file_path(None, project_dir=None) is None
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        await c.compose_up(file_path="/some/path/docker-compose.yml")
 
 
-def test_compose_absolute_path_inside_allowed_root():
+@pytest.mark.asyncio
+async def test_compose_restart_rejects_file_path():
     c = _client()
-    result = c._resolve_compose_file_path(
-        "/media/1TB/Python/web_ssh/web-ssh-gateway/docker/docker-compose.yml",
-        project_dir=None,
-        allowed_roots={"/media/1TB/Python/web_ssh"},
-    )
-    assert result == "/media/1TB/Python/web_ssh/web-ssh-gateway/docker/docker-compose.yml"
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        await c.compose_restart(file_path="/some/path/docker-compose.yml")
 
 
-def test_compose_absolute_path_outside_allowed_root():
+@pytest.mark.asyncio
+async def test_compose_build_rejects_file_path():
     c = _client()
-    with pytest.raises(ValueError, match="outside allowed root"):
-        c._resolve_compose_file_path(
-            "/etc/passwd",
-            project_dir=None,
-            allowed_roots={"/media/1TB/Python/web_ssh"},
-        )
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        await c.compose_build(file_path="/some/path/docker-compose.yml")
 
 
-def test_compose_absolute_path_no_roots_configured():
+@pytest.mark.asyncio
+async def test_compose_logs_rejects_file_path():
     c = _client()
-    with pytest.raises(ValueError, match="no allowed roots"):
-        c._resolve_compose_file_path("/etc/passwd", project_dir=None, allowed_roots=set())
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        await c.compose_logs(file_path="/some/path/docker-compose.yml")
 
 
-def test_compose_path_traversal_blocked():
+@pytest.mark.asyncio
+async def test_compose_down_rejects_file_path():
     c = _client()
-    for path in ["../etc/passwd", "foo/../../etc/passwd"]:
-        with pytest.raises(ValueError, match="traversal"):
-            c._resolve_compose_file_path(path, project_dir="/opt/proj")
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        await c.compose_down(file_path="/some/path/docker-compose.yml")
 
 
-def test_compose_project_dir_must_exist():
+# ── Compose project_dir validation ──
+
+
+def test_compose_ps_validates_project_dir_exists():
     c = _client()
     with pytest.raises(ValueError, match="does not exist"):
-        c._resolve_compose_file_path("docker-compose.yml", project_dir="/nonexistent/path/xyz123")
+        c._validate_project_dir("/nonexistent/path/xyz123")
 
 
-def test_compose_path_validation_rejects_empty():
+def test_compose_ps_validates_project_dir_allowed_root():
     c = _client()
-    with pytest.raises(ValueError, match="Invalid compose file path"):
-        c._resolve_compose_file_path("", project_dir=None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with pytest.raises(ValueError, match="outside allowed roots"):
+            c._validate_project_dir(tmpdir)
 
 
-def test_compose_path_validation_rejects_too_long():
+def test_compose_ps_with_valid_project_dir():
     c = _client()
-    with pytest.raises(ValueError, match="Invalid compose file path"):
-        c._resolve_compose_file_path("a" * 257, project_dir=None)
+    c._validate_project_dir(None)  # None is always valid
+
+
+def test_compose_base_argv_no_project_dir():
+    c = _client()
+    argv = c._compose_base_argv(project_dir=None)
+    assert argv == ["/usr/bin/docker", "compose"]
+
+
+def test_compose_base_argv_with_project_dir():
+    c = _client()
+    argv = c._compose_base_argv(project_dir="/some/path")
+    assert argv == ["/usr/bin/docker", "compose", "--project-directory", "/some/path"]
 
 
 # ── Container write operations (validation only, no real docker) ──
@@ -211,68 +223,62 @@ def test_stop_timeout_clamped():
 @pytest.mark.asyncio
 async def test_compose_up_path_traversal_raises():
     c = _client()
-    with pytest.raises(ValueError, match="traversal"):
-        await c.compose_up(project_dir="/tmp", file_path="../bad.yml")
+    with pytest.raises(ValueError, match="does not exist"):
+        await c.compose_up(project_dir="/tmp/../bad")
 
 
 @pytest.mark.asyncio
 async def test_compose_up_invalid_service_raises():
     c = _client()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        with pytest.raises(ValueError, match="Invalid service name"):
-            await c.compose_up(project_dir=tmpdir, services=["ok", "bad;name"])
+    with pytest.raises(ValueError, match="Invalid service name"):
+        await c.compose_up(project_dir=None, services=["ok", "bad;name"])
 
 
 @pytest.mark.asyncio
 async def test_compose_restart_invalid_service_raises():
     c = _client()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        with pytest.raises(ValueError, match="Invalid service name"):
-            await c.compose_restart(project_dir=tmpdir, services=["bad;name"])
+    with pytest.raises(ValueError, match="Invalid service name"):
+        await c.compose_restart(project_dir=None, services=["bad;name"])
 
 
 @pytest.mark.asyncio
 async def test_compose_build_invalid_service_raises():
     c = _client()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        with pytest.raises(ValueError, match="Invalid service name"):
-            await c.compose_build(project_dir=tmpdir, services=["bad;name"])
+    with pytest.raises(ValueError, match="Invalid service name"):
+        await c.compose_build(project_dir=None, services=["bad;name"])
 
 
 @pytest.mark.asyncio
 async def test_compose_logs_invalid_service_raises():
     c = _client()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        with pytest.raises(ValueError, match="Invalid service name"):
-            await c.compose_logs(project_dir=tmpdir, services=["bad;name"])
+    with pytest.raises(ValueError, match="Invalid service name"):
+        await c.compose_logs(project_dir=None, services=["bad;name"])
 
 
 # ── Compose argv construction ──
 
 
-def test_compose_base_argv_with_file():
+def test_compose_base_argv_with_project_dir():
     c = _client()
-    argv = c._compose_base_argv(file_path="compose.yml", project_dir="/tmp")
+    argv = c._compose_base_argv(project_dir="/tmp")
     assert argv == [
         "/usr/bin/docker",
         "compose",
-        "-f",
-        "compose.yml",
         "--project-directory",
         "/tmp",
     ]
 
 
-def test_compose_base_argv_without_file():
+def test_compose_base_argv_without_project_dir():
     c = _client()
-    argv = c._compose_base_argv(file_path=None, project_dir=None)
+    argv = c._compose_base_argv(project_dir=None)
     assert argv == ["/usr/bin/docker", "compose"]
 
 
 def test_compose_up_argv_detach():
     c = _client()
     with tempfile.TemporaryDirectory() as tmpdir:
-        argv = c._compose_base_argv(None, tmpdir)
+        argv = c._compose_base_argv(project_dir=tmpdir)
         argv.append("up")
         argv.append("--detach")
         assert "--detach" in argv
@@ -281,7 +287,7 @@ def test_compose_up_argv_detach():
 def test_compose_build_argv_no_cache():
     c = _client()
     with tempfile.TemporaryDirectory() as tmpdir:
-        argv = c._compose_base_argv(None, tmpdir)
+        argv = c._compose_base_argv(project_dir=tmpdir)
         argv.append("build")
         argv.append("--no-cache")
         assert "--no-cache" in argv
@@ -290,7 +296,7 @@ def test_compose_build_argv_no_cache():
 def test_compose_logs_argv_tail_clamped():
     c = _client()
     with tempfile.TemporaryDirectory() as tmpdir:
-        argv = c._compose_base_argv(None, tmpdir)
+        argv = c._compose_base_argv(project_dir=tmpdir)
         argv.append("logs")
         argv.extend(["--tail", "1000"])
         assert "--tail" in argv
@@ -441,7 +447,7 @@ async def test_run_container_name_validated():
 
 def test_compose_down_volumes_argv():
     c = _client()
-    argv = c._compose_base_argv(None, None)
+    argv = c._compose_base_argv(project_dir=None)
     argv.append("down")
     argv.append("--volumes")
     argv.extend(["-t", "30"])
