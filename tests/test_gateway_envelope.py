@@ -15,7 +15,7 @@ sys.path.insert(0, str(_BASE / "tests"))
 sys.path.insert(0, str(_BASE / "examples" / "mcp_server"))
 
 from helpers import assert_tool_envelope  # noqa: E402
-from tool_results import tool_error, tool_success  # noqa: E402
+from tool_results import CONTRACT_VERSION, tool_error, tool_success  # noqa: E402
 
 GATEWAY_READ_TOOLS = [
     "gateway_health",
@@ -43,6 +43,22 @@ class TestGatewaySuccessEnvelope:
             assert result["result"] == {"data": "sample"}
             assert result["meta"].get("source") == "gateway"
             assert result["meta"].get("read_only") is True
+
+    def test_each_tool_has_contract_meta(self):
+        for tool_name in GATEWAY_READ_TOOLS:
+            result = tool_success(
+                tool=tool_name,
+                result={"data": "sample"},
+                source="gateway",
+                read_only=True,
+            )
+            assert result["meta"]["contract_version"] == CONTRACT_VERSION
+            assert result["meta"]["tool"] == tool_name
+            assert isinstance(result["meta"]["request_id"], str)
+            assert len(result["meta"]["request_id"]) > 0
+            assert isinstance(result["meta"]["duration_ms"], (int, float))
+            assert isinstance(result["meta"]["truncated"], bool)
+            assert isinstance(result["meta"]["warnings"], list)
 
     def test_preserves_complex_payload(self):
         payload = {
@@ -182,6 +198,21 @@ class TestGatewayErrorEnvelope:
         assert result["error"]["hint"] == "Check gateway availability and try again"
         assert result["error"]["retryable"] is True
 
+    def test_error_has_contract_meta(self):
+        for tool_name in GATEWAY_READ_TOOLS:
+            result = tool_error(
+                tool=tool_name,
+                code="INTERNAL_ERROR",
+                message="fail",
+                source="gateway",
+            )
+            assert result["meta"]["contract_version"] == CONTRACT_VERSION
+            assert result["meta"]["tool"] == tool_name
+            assert isinstance(result["meta"]["request_id"], str)
+            assert isinstance(result["meta"]["duration_ms"], (int, float))
+            assert isinstance(result["meta"]["truncated"], bool)
+            assert isinstance(result["meta"]["warnings"], list)
+
 
 class TestGatewayResultFieldErrorHandling:
     """Gateway helper maps exceptions to the correct error codes."""
@@ -256,6 +287,11 @@ class TestGatewayResultFieldErrorHandling:
         result = self._run_gateway(fn=lambda: None)
         assert_tool_envelope(result, ok=True, tool="gateway_health", source="gateway")
         assert result["result"] is None
+
+    def test_success_has_contract_meta(self):
+        result = self._run_gateway(fn=_return_sample_data)
+        assert result["meta"]["contract_version"] == CONTRACT_VERSION
+        assert result["meta"]["tool"] == "gateway_health"
 
 
 # ── Exception-raising helpers ──────────────────────────────────────

@@ -1,4 +1,7 @@
+import time
+
 from examples.mcp_server.tool_results import (
+    CONTRACT_VERSION,
     ERROR_CODES,
     normalize_tool_result,
     tool_error,
@@ -50,6 +53,37 @@ class TestToolSuccess:
     def test_success_extra_meta(self):
         result = tool_success("tool", request_id="abc-123")
         assert result["meta"]["request_id"] == "abc-123"
+
+    def test_success_meta_has_contract_version(self):
+        result = tool_success("tool")
+        assert result["meta"]["contract_version"] == CONTRACT_VERSION
+
+    def test_success_meta_has_request_id(self):
+        result = tool_success("tool")
+        assert isinstance(result["meta"]["request_id"], str)
+        assert len(result["meta"]["request_id"]) > 0
+
+    def test_success_meta_has_duration_ms_default(self):
+        result = tool_success("tool")
+        assert result["meta"]["duration_ms"] == 0
+        assert isinstance(result["meta"]["duration_ms"], (int, float))
+
+    def test_success_meta_has_truncated_default(self):
+        result = tool_success("tool")
+        assert result["meta"]["truncated"] is False
+
+    def test_success_meta_has_warnings_default(self):
+        result = tool_success("tool")
+        assert result["meta"]["warnings"] == []
+
+    def test_success_meta_has_tool_name(self):
+        result = tool_success("gateway_health")
+        assert result["meta"]["tool"] == "gateway_health"
+
+    def test_success_unique_request_ids(self):
+        r1 = tool_success("tool")
+        r2 = tool_success("tool")
+        assert r1["meta"]["request_id"] != r2["meta"]["request_id"]
 
 
 class TestToolError:
@@ -105,6 +139,86 @@ class TestToolError:
         assert result["meta"]["trace_id"] == "t-1"
         assert result["meta"]["source"] == "gateway"
 
+    def test_error_meta_has_contract_version(self):
+        result = tool_error("tool")
+        assert result["meta"]["contract_version"] == CONTRACT_VERSION
+
+    def test_error_meta_has_request_id(self):
+        result = tool_error("tool")
+        assert isinstance(result["meta"]["request_id"], str)
+        assert len(result["meta"]["request_id"]) > 0
+
+    def test_error_meta_has_duration_ms_default(self):
+        result = tool_error("tool")
+        assert result["meta"]["duration_ms"] == 0
+
+    def test_error_meta_has_truncated_default(self):
+        result = tool_error("tool")
+        assert result["meta"]["truncated"] is False
+
+    def test_error_meta_has_warnings_default(self):
+        result = tool_error("tool")
+        assert result["meta"]["warnings"] == []
+
+    def test_error_meta_has_tool_name(self):
+        result = tool_error("docker_restart")
+        assert result["meta"]["tool"] == "docker_restart"
+
+
+class TestEnvelopeContract:
+    """Tests for the v1 response envelope contract."""
+
+    def test_tool_success_envelope(self):
+        result = tool_success("my_tool", {"outcome": "passed"})
+        assert result["ok"] is True
+        assert result["result"]["outcome"] == "passed"
+        assert result["error"] is None
+        assert result["meta"]["contract_version"] == "1"
+
+    def test_tool_error_envelope(self):
+        result = tool_error(
+            "my_tool", "DEPENDENCY_MISSING", "uv not found",
+            hint="Install uv", retryable=False,
+            details={"required_binary": "uv"},
+        )
+        assert result["ok"] is False
+        assert result["result"] is None
+        assert result["error"]["code"] == "DEPENDENCY_MISSING"
+        assert result["error"]["retryable"] is False
+        assert result["error"]["details"]["required_binary"] == "uv"
+
+    def test_meta_always_present(self):
+        result = tool_success({"outcome": "passed"})
+        assert "contract_version" in result["meta"]
+        assert "tool" in result["meta"]
+        assert "request_id" in result["meta"]
+        assert "duration_ms" in result["meta"]
+        assert "truncated" in result["meta"]
+        assert "warnings" in result["meta"]
+
+    def test_checks_failed_not_error(self):
+        """Non-zero exit from a check tool is ok:true, outcome:failed — NOT an error."""
+        result = tool_success(
+            tool="gateway_project_run_lint",
+            result={"outcome": "failed", "exit_code": 1, "stdout": "", "stderr": "lint errors"},
+        )
+        assert result["ok"] is True
+        assert result["error"] is None
+        assert result["result"]["outcome"] == "failed"
+
+    def test_meta_duration_ms_tracks_total_time(self):
+        start = time.time()
+        result = tool_success({"outcome": "passed"})
+        elapsed = int((time.time() - start) * 1000)
+        assert result["meta"]["duration_ms"] <= elapsed + 5
+
+    def test_request_id_is_uuid_format(self):
+        result = tool_success("tool")
+        rid = result["meta"]["request_id"]
+        parts = rid.split("-")
+        assert len(parts) == 5, f"request_id {rid!r} doesn't look like a UUID"
+        assert all(len(p) > 0 for p in parts)
+
 
 class TestNormalizeToolResult:
     def test_canonical_dict_passthrough(self):
@@ -150,6 +264,11 @@ class TestNormalizeToolResult:
     def test_source_preserved(self):
         result = normalize_tool_result("docker_ps", "ok", source="docker")
         assert result["meta"]["source"] == "docker"
+
+    def test_normalize_result_has_contract_meta(self):
+        result = normalize_tool_result("tool", "ok")
+        assert result["meta"]["contract_version"] == CONTRACT_VERSION
+        assert result["meta"]["tool"] == "tool"
 
 
 class TestErrorCodes:

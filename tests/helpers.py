@@ -14,6 +14,7 @@ def assert_tool_envelope(
     dangerous: bool | None = None,
     has_result: bool = True,
     has_error: bool | None = None,
+    check_meta_contract: bool = False,
 ) -> None:
     """Assert that *response* follows the canonical MCP tool response envelope."""
     assert isinstance(response, dict), f"expected dict, got {type(response).__name__}"
@@ -69,6 +70,31 @@ def assert_tool_envelope(
 
     if not has_result:
         assert response["result"] is None, f"expected result=None, got {response['result']!r}"
+
+    if check_meta_contract:
+        meta = response["meta"]
+        assert "contract_version" in meta, "meta missing 'contract_version'"
+        assert isinstance(meta["contract_version"], str), (
+            f"contract_version must be str, got {type(meta['contract_version']).__name__}"
+        )
+        assert "request_id" in meta, "meta missing 'request_id'"
+        assert isinstance(meta["request_id"], str), (
+            f"request_id must be str, got {type(meta['request_id']).__name__}"
+        )
+        assert len(meta["request_id"]) > 0, "request_id must not be empty"
+        assert "duration_ms" in meta, "meta missing 'duration_ms'"
+        assert isinstance(meta["duration_ms"], (int, float)), (
+            f"duration_ms must be numeric, got {type(meta['duration_ms']).__name__}"
+        )
+        assert meta["duration_ms"] >= 0, f"duration_ms must be >= 0, got {meta['duration_ms']}"
+        assert "truncated" in meta, "meta missing 'truncated'"
+        assert isinstance(meta["truncated"], bool), (
+            f"truncated must be bool, got {type(meta['truncated']).__name__}"
+        )
+        assert "warnings" in meta, "meta missing 'warnings'"
+        assert isinstance(meta["warnings"], list), (
+            f"warnings must be list, got {type(meta['warnings']).__name__}"
+        )
 
 
 def assert_docker_envelope(
