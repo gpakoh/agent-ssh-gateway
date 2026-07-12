@@ -48,6 +48,15 @@ class JobRecord:
     started_at: float | None = None
     completed_at: float | None = None
     error_message: str | None = None
+
+    # Monotonic timestamps (relative to process start; do NOT survive restart)
+    queued_at_mono: float | None = None
+    acquired_at_mono: float | None = None
+    command_started_at_mono: float | None = None
+    command_finished_at_mono: float | None = None
+    completed_at_mono: float | None = None
+    ssh_connect_started_at_mono: float | None = None
+    ssh_connected_at_mono: float | None = None
     progress: dict = field(default_factory=dict)
     _listeners: list = field(default_factory=list, repr=False)
     _listener_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -80,6 +89,8 @@ class JobRecord:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "duration": self.duration,
+            "queued_at_mono": self.queued_at_mono,
+            "completed_at_mono": self.completed_at_mono,
             "error_message": self.error_message,
             "progress": self.progress,
         }
@@ -205,6 +216,7 @@ class JobManager:
                 session_id=session_id,
                 command=command,
             )
+            job.queued_at_mono = time.monotonic()
             self._jobs[job_id] = job
 
         # Start The Job In Background
@@ -223,6 +235,7 @@ class JobManager:
 
         job.status = "running"
         job.started_at = time.time()
+        job.acquired_at_mono = time.monotonic()
         await job.notify_listeners(
             {
                 "type": "status",
@@ -232,7 +245,7 @@ class JobManager:
         )
 
         try:
-            # Use Streaming Execution For Real-time Output
+            job.command_started_at_mono = time.monotonic()
             async for msg_type, msg_data in self._ssh_manager.execute_stream(
                 job.session_id, job.command, cancel_event=job.cancel_event
             ):
@@ -264,6 +277,7 @@ class JobManager:
                     )
                 elif msg_type == "exit":
                     job.exit_code = int(msg_data)
+                    job.command_finished_at_mono = time.monotonic()
                     await job.notify_listeners(
                         {
                             "type": "exit",
@@ -295,6 +309,7 @@ class JobManager:
             )
         finally:
             job.completed_at = time.time()
+            job.completed_at_mono = time.monotonic()
             job.completed_event.set()
             await job.notify_listeners(
                 {
