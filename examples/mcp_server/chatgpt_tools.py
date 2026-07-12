@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from gateway_client import GatewayClient
+from tool_results import build_command_result
 
 
 def _project_root() -> Path:
@@ -76,7 +77,15 @@ def run_readonly_command(
     client: GatewayClient, command: str, session_id: str | None = None
 ) -> dict[str, Any]:
     job = client.execute_restricted(command, session_id=session_id)
-    return client.wait_job(job["job_id"])
+    raw = client.wait_job(job["job_id"])
+    return build_command_result(
+        outcome="passed" if raw.get("exit_code", 1) == 0 else "failed",
+        exit_code=raw.get("exit_code", -1),
+        stdout=raw.get("stdout") or raw.get("output", ""),
+        stderr=raw.get("stderr", ""),
+        execution_duration_ms=raw.get("execution_duration_ms"),
+        job_id=job.get("job_id"),
+    )
 
 
 def working_directory(client: GatewayClient, session_id: str | None = None) -> dict[str, Any]:
@@ -445,7 +454,15 @@ def run_project_command(
     command: str,
 ) -> dict[str, Any]:
     job = client.execute_project_command(project, command)
-    return client.wait_job(job["job_id"])
+    raw = client.wait_job(job["job_id"])
+    return build_command_result(
+        outcome="passed" if raw.get("exit_code", 1) == 0 else "failed",
+        exit_code=raw.get("exit_code", -1),
+        stdout=raw.get("stdout") or raw.get("output", ""),
+        stderr=raw.get("stderr", ""),
+        execution_duration_ms=raw.get("execution_duration_ms"),
+        job_id=job.get("job_id"),
+    )
 
 
 def project_working_directory(client: GatewayClient, project: str) -> dict[str, Any]:

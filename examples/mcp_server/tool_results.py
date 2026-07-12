@@ -138,6 +138,28 @@ def tool_error(
     }
 
 
+def build_command_result(
+    outcome: str,
+    exit_code: int,
+    stdout: str = "",
+    stderr: str = "",
+    execution_duration_ms: int | None = None,
+    job_id: str | None = None,
+    timestamps: dict | None = None,
+) -> dict:
+    result = {
+        "outcome": outcome,
+        "exit_code": exit_code,
+        "stdout": stdout,
+        "stderr": stderr,
+        "execution_duration_ms": execution_duration_ms,
+        "job_id": job_id,
+    }
+    if timestamps:
+        result["timestamps"] = timestamps
+    return result
+
+
 # Legacy helpers — kept for backward compatibility.
 # Use tool_success() / tool_error() for new code.
 

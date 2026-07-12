@@ -271,7 +271,10 @@ class GatewayClient:
         while time.time() < deadline:
             status = self.job_status(job_id)
             if status.get("status") in {"completed", "failed", "cancelled"}:
-                return self.job_result(job_id)
+                result = self.job_result(job_id)
+                if "execution_duration_ms" not in result and result.get("duration") is not None:
+                    result["execution_duration_ms"] = int(result["duration"] * 1000)
+                return result
             time.sleep(1)
         raise GatewayClientError(f"Job {job_id} did not finish before timeout")
 
