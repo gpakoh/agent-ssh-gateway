@@ -56,6 +56,7 @@ class AuthIdentity:
 VALID_AGENT_SCOPES: set[str] = {
     "ssh:connect",
     "ssh:execute",
+    "ssh:execute:argv",
     "ssh:disconnect",
     "ssh:files",
     "ssh:port-check",
