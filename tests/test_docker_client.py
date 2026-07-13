@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 import tempfile
 from pathlib import Path
@@ -258,7 +257,7 @@ async def test_compose_logs_invalid_service_raises():
 # ── Compose argv construction ──
 
 
-def test_compose_base_argv_with_project_dir():
+def test_compose_base_argv_with_project_dir_tmp():
     c = _client()
     argv = c._compose_base_argv(project_dir="/tmp")
     assert argv == [
