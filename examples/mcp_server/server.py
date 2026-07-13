@@ -87,7 +87,7 @@ from write_modes import WriteModeError, WritePermissionError
 from examples.chatgpt_remote_mcp.fleet.context7_server import (
     _call_upstream as _call_context7_upstream,
 )
-from examples.chatgpt_remote_mcp.fleet.docker_client import DockerClient
+from examples.chatgpt_remote_mcp.fleet.docker_client import DockerClient, RunResult
 from examples.chatgpt_remote_mcp.fleet.gitea_client import GiteaClient
 from examples.chatgpt_remote_mcp.fleet.github_client import (
     GitHubClient,
@@ -393,7 +393,7 @@ def compute_toolset_hash(mcp_instance: FastMCP) -> str:
         schema = getattr(tool_obj, "parameters", None) or {}
         items.append({"name": name, "inputSchema": schema})
 
-    items.sort(key=lambda item: item["name"])
+    items.sort(key=lambda item: item["name"])  # type: ignore[arg-type,return-value]
     canonical = json.dumps(items, sort_keys=True, separators=(",", ":"))
     return "sha256:" + _hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -1801,7 +1801,7 @@ async def _docker_restart_impl(container: str, timeout: int = 10) -> str:
     return await DockerClient().restart(container, timeout=timeout)
 
 
-async def _docker_rm_impl(container: str, force: bool = False) -> str:
+async def _docker_rm_impl(container: str, force: bool = False) -> RunResult:
     return await DockerClient().rm(container, force=force)
 
 
@@ -1810,7 +1810,7 @@ async def _docker_compose_down_impl(
     remove_orphans: bool = False,
     timeout: int = 30,
     volumes: bool = False,
-) -> str:
+) -> RunResult:
     return await DockerClient().compose_down(
         project_dir=project_dir,
         remove_orphans=remove_orphans,
@@ -1819,11 +1819,11 @@ async def _docker_compose_down_impl(
     )
 
 
-async def _docker_prune_impl(type: str = "container") -> str:
+async def _docker_prune_impl(type: str = "container") -> RunResult:
     return await DockerClient().prune(type)
 
 
-async def _docker_exec_impl(container: str, command: list[str], timeout: int = 30) -> str:
+async def _docker_exec_impl(container: str, command: list[str], timeout: int = 30) -> RunResult:
     return await DockerClient().exec(container, command, timeout=timeout)
 
 
@@ -1832,17 +1832,17 @@ async def _docker_run_impl(
     command: list[str],
     container_name: str | None = None,
     timeout: int = 60,
-) -> str:
+) -> RunResult:
     return await DockerClient().run(
         image, command, container_name=container_name, timeout=timeout
     )
 
 
-async def _docker_rmi_impl(images: list[str]) -> str:
+async def _docker_rmi_impl(images: list[str]) -> RunResult:
     return await DockerClient().rmi(images)
 
 
-async def _docker_volume_rm_impl(volumes: list[str]) -> str:
+async def _docker_volume_rm_impl(volumes: list[str]) -> RunResult:
     return await DockerClient().volume_rm(volumes)
 
 

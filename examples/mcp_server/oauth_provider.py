@@ -243,9 +243,9 @@ class GatewayOAuthProvider:
 
         return OAuthClientInformationFull(
             client_id=stored.client_id,
-            redirect_uris=stored.redirect_uris,
+            redirect_uris=stored.redirect_uris,  # type: ignore[arg-type]
             client_name=stored.client_name,
-            token_endpoint_auth_method=stored.token_endpoint_auth_method,
+            token_endpoint_auth_method=stored.token_endpoint_auth_method,  # type: ignore[arg-type]
             grant_types=stored.grant_types,
             response_types=stored.response_types,
             scope=" ".join(stored.scopes),
@@ -456,7 +456,7 @@ class GatewayOAuthProvider:
             expires_at=stored.expires_at,
             client_id=stored.client_id,
             code_challenge=stored.code_challenge,
-            redirect_uri=stored.redirect_uri,
+            redirect_uri=stored.redirect_uri,  # type: ignore[arg-type]
             redirect_uri_provided_explicitly=True,
         )
 

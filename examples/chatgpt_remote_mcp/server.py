@@ -40,6 +40,7 @@ from tool_scopes import (  # noqa: E402
 )
 
 _spec = importlib.util.spec_from_file_location("mcp_server_module", MCP_SERVER_DIR / "server.py")
+assert _spec is not None, f"Could not find spec for {MCP_SERVER_DIR / 'server.py'}"
 _mcp_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mcp_mod)
 mcp = _mcp_mod.mcp
@@ -339,7 +340,7 @@ async def consent_handler(request: Request):
     password = form.get("password", "")
     client_id = form.get("client_id", "")
     redirect_uri = form.get("redirect_uri", "")
-    scope_str = form.get("scope", "mcp:read mcp:project")
+    scope_str: str = str(form.get("scope", "mcp:read mcp:project"))
     state = form.get("state", "")
     code_challenge = form.get("code_challenge", "")
     resource = form.get("resource", "")

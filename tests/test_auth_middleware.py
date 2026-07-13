@@ -450,6 +450,16 @@ def test_settings_env_agent_token_gets_startup_expiry():
     assert cfg.agent_token_expires_at > datetime.now(UTC)
 
 
+def test_settings_agent_token_ttl_zero_no_expiry():
+    cfg = Settings(agent_token="static-agent", agent_token_ttl=0)
+    assert cfg.agent_token_expires_at is None
+
+
+def test_settings_agent_token_ttl_negative_no_expiry():
+    cfg = Settings(agent_token="static-agent", agent_token_ttl=-1)
+    assert cfg.agent_token_expires_at is None
+
+
 @pytest.mark.asyncio
 async def test_verify_api_key_accepts_non_expired_agent_token(monkeypatch):
     req = _mock_request()
@@ -476,6 +486,18 @@ async def test_verify_api_key_rejects_expired_agent_token(monkeypatch):
         datetime.now(UTC) - timedelta(seconds=1),
     )
     assert await verify_api_key(req, "main-key", settings=settings) is None
+
+
+@pytest.mark.asyncio
+async def test_verify_api_key_accepts_agent_token_ttl_zero(monkeypatch):
+    req = _mock_request()
+    req.headers = {"X-API-Key": "agent-no-expire"}
+    monkeypatch.setattr(settings, "agent_token", "agent-no-expire")
+    monkeypatch.setattr(settings, "agent_token_expires_at", None)
+    monkeypatch.setattr(settings, "agent_token_scopes", ["ssh:execute"])
+    identity = await verify_api_key(req, "main-key", settings=settings)
+    assert identity is not None
+    assert identity.token_type == "agent"
 
 
 def test_ws_auth_rejects_expired_agent_token(ws_settings, monkeypatch):

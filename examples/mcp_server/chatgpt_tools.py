@@ -110,7 +110,7 @@ def _build_uv_argv(tool: str, project_dir: str, targets: list[str]) -> list[str]
     return ["uv", "run", "--frozen", "--directory", project_dir, "--"] + cmd + ["--"] + validated
 
 
-def _map_uv_exit_code(tool: str, exit_code: int) -> tuple[str, str | None]:
+def _map_uv_exit_code(tool: str, exit_code: int) -> tuple[str | None, str | None]:
     """Map uv exit code to (outcome, error_code).
 
     Returns ``(outcome, None)`` for success/check-failed and

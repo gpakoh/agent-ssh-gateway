@@ -7,16 +7,17 @@ Revision ID: 001_tz_aware_timestamps
 Revises: None (first Alembic migration)
 Create Date: 2026-07-13
 """
-from typing import Sequence, Union
+from collections.abc import Sequence
+
+from sqlalchemy import text
 
 from alembic import op
-from sqlalchemy import text
 
 # revision identifiers, used by Alembic.
 revision: str = "001_tz_aware_timestamps"
-down_revision: Union[str, None] = None
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = None
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 # All (table, column) pairs that need conversion.
 # Derived from information_schema inspection of the live gateway database.
