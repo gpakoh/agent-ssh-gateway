@@ -613,7 +613,6 @@ Expected: success (all tests pass or known skips).
 - [ ] **Step 1: Push to GitHub master**
 
 ```bash
-GIT_TOKEN=$(python3 -c "import yaml; print(yaml.safe_load(open('/root/.config/gh/hosts.yml'))['github.com']['oauth_token'])")
 cd /media/1TB/Python/web_ssh/web-ssh-gateway
-git push "https://gpakoh:${GIT_TOKEN}@github.com/gpakoh/agent-ssh-gateway.git" master
+git push https://github.com/gpakoh/agent-ssh-gateway.git master
 ```

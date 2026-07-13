@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, TypedDict
 
 from starlette.requests import Request
+
+
+class FleetEnv(TypedDict):
+    token: str
+    host: str
+    port: int
 
 
 def extract_auth_token(request: Request, valid_tokens: set[str]) -> str | None:
@@ -50,7 +56,7 @@ def normalize_list_response(
     return {"items": [], "count": 0, "error": "unexpected response type"}
 
 
-def get_fleet_env() -> dict[str, str]:
+def get_fleet_env() -> FleetEnv:
     """Read standard fleet env vars, raise if missing."""
     token = os.environ.get("MCP_PUBLIC_TOKEN", "")
     host = os.environ.get("MCP_HOST", "127.0.0.1")

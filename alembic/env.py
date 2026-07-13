@@ -4,12 +4,12 @@ Supports both sync (postgresql://) and async (postgresql+asyncpg://) URLs.
 When DATABASE_URL env var is set, it overrides the alembic.ini value.
 """
 
-import asyncio
 import os
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
+
+from alembic import context
 
 # Alembic Config object
 config = context.config

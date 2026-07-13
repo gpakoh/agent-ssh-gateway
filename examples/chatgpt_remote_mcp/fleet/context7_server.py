@@ -75,6 +75,7 @@ async def _call_upstream(name: str, args: dict) -> str:
                 _reset_session()
                 continue
             raise
+    raise RuntimeError("_call_upstream: unreachable")
 
 
 @mcp.tool()

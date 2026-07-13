@@ -113,7 +113,7 @@ class Settings(BaseSettings):
     )
 
     def model_post_init(self, __context) -> None:
-        if self.agent_token and self.agent_token_expires_at is None:
+        if self.agent_token and self.agent_token_expires_at is None and self.agent_token_ttl > 0:
             self.agent_token_expires_at = datetime.now(UTC) + timedelta(
                 seconds=self.agent_token_ttl
             )
