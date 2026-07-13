@@ -7,7 +7,6 @@ from starlette.testclient import TestClient
 from app.config import settings
 from app.main import app
 
-
 MOCK_JOB = {
     "job_id": "job-1",
     "session_id": "s-1",
