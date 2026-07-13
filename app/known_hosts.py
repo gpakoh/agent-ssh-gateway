@@ -357,7 +357,7 @@ if _sa_available:
         key_data = Column(Text, nullable=False)
         fingerprint = Column(String(128), nullable=False)
         updated_at = Column(
-            DateTime,
+            DateTime(timezone=True),
             default=lambda: datetime.now(UTC),
             onupdate=lambda: datetime.now(UTC),
         )
