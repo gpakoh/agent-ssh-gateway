@@ -703,7 +703,7 @@ git commit -m "fix: update expected tool count 97→102 for Docker confirmation 
 - [ ] **Step 1: Push to remotes**
 
 ```bash
-git push gitea master && GIT_TOKEN=$(python3 -c "import yaml; print(yaml.safe_load(open('/root/.config/gh/hosts.yml'))['github.com']['oauth_token'])") && git push "https://gpakoh:${GIT_TOKEN}@github.com/gpakoh/agent-ssh-gateway.git" master
+git push gitea master && git push https://github.com/gpakoh/agent-ssh-gateway.git master
 ```
 
 - [ ] **Step 2: Restart service**
