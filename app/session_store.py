@@ -38,9 +38,9 @@ class PersistentSession(Base):
     password_encrypted = Column(Text, nullable=True)
     private_key_encrypted = Column(Text, nullable=True)
     key_passphrase_encrypted = Column(Text, nullable=True)
-    connected_at = Column(DateTime, default=lambda: datetime.now(UTC))
-    last_activity = Column(DateTime, default=lambda: datetime.now(UTC))
-    expires_at = Column(DateTime, nullable=False)
+    connected_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    last_activity = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    expires_at = Column(DateTime(timezone=True), nullable=False)
     is_active = Column(Boolean, default=True)
     reconnect_count = Column(Integer, default=0)
     metadata_json = Column(JSON, default=dict)
@@ -72,9 +72,9 @@ class EventHook(Base):
     secret_encrypted = Column(Text, nullable=True)
     include_output = Column(Boolean, default=False)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at = Column(
-        DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
     )
 
     def to_dict(self) -> dict:
@@ -103,14 +103,14 @@ class WebhookDelivery(Base):
     payload_json = Column(Text, nullable=False)
     status = Column(String(16), default="pending", index=True)
     attempts = Column(Integer, default=0)
-    next_retry_at = Column(DateTime, nullable=True)
+    next_retry_at = Column(DateTime(timezone=True), nullable=True)
     last_error = Column(Text, nullable=True)
     http_status = Column(Integer, nullable=True)
     leased_by = Column(String(64), nullable=True)
-    leased_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+    leased_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at = Column(
-        DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
     )
 
 

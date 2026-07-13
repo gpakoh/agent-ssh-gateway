@@ -81,7 +81,7 @@ services:
     hostname: web-ssh-gateway
     networks:
       proxmox_macvlan:
-        ipv4_address: 10.0.0.145
+        ipv4_address: 10.10.10.145
       internal_net: {}
     ports:
       - "8085:8085"
