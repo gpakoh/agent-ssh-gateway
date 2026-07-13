@@ -32,12 +32,12 @@ from tools_manifest import build_manifest  # noqa: E402
 def sample_tools() -> list[FakeTool]:
     """Return a small set of known tools matching the registered set."""
     return [
-        FakeTool("gateway_health"),
-        FakeTool("gateway_project_search_text"),
-        FakeTool("gateway_tools_manifest"),
+        FakeTool("health"),
+        FakeTool("project_search_text"),
+        FakeTool("tools_manifest"),
         FakeTool("docker_restart"),
         FakeTool("docker_compose_up"),
-        FakeTool("gateway_project_run_agent"),
+        FakeTool("project_run_agent"),
     ]
 
 
@@ -107,12 +107,12 @@ class TestBuildManifest:
     def test_known_tool_search_text_present(self, sample_tools: list[FakeTool]) -> None:
         result = build_manifest(sample_tools, mode_override="chatgpt")
         names = [t["name"] for t in result["tools"]]
-        assert "gateway_project_search_text" in names
+        assert "project_search_text" in names
 
     def test_known_tool_run_agent_present(self, sample_tools: list[FakeTool]) -> None:
         result = build_manifest(sample_tools, mode_override="chatgpt")
         names = [t["name"] for t in result["tools"]]
-        assert "gateway_project_run_agent" in names
+        assert "project_run_agent" in names
 
     def test_known_tool_docker_restart_present(self, sample_tools: list[FakeTool]) -> None:
         result = build_manifest(sample_tools, mode_override="chatgpt")
@@ -127,12 +127,12 @@ class TestBuildManifest:
     def test_manifest_tool_itself_present(self, sample_tools: list[FakeTool]) -> None:
         result = build_manifest(sample_tools, mode_override="chatgpt")
         names = [t["name"] for t in result["tools"]]
-        assert "gateway_tools_manifest" in names
+        assert "tools_manifest" in names
 
     def test_scopes_for_known_tool(self, sample_tools: list[FakeTool]) -> None:
         result = build_manifest(sample_tools, mode_override="chatgpt")
         by_name = {t["name"]: t for t in result["tools"]}
-        assert "mcp:project" in by_name["gateway_project_search_text"]["scopes"]
+        assert "mcp:project" in by_name["project_search_text"]["scopes"]
 
     def test_modes_present(self, sample_tools: list[FakeTool]) -> None:
         result = build_manifest(sample_tools, mode_override="chatgpt")

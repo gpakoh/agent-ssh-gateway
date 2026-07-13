@@ -148,6 +148,23 @@ class GatewayClient:
         data = response.json()
         self.session_id = data["session_id"]
 
+    def connect(self) -> str:
+        """Establish SSH session and return session_id."""
+        self._reconnect_session()
+        return self.session_id
+
+    def disconnect(self, session_id: str | None = None) -> None:
+        """Close SSH session. Best-effort — never raises."""
+        sid = session_id or self.session_id
+        if not sid:
+            return
+        try:
+            self._post("/api/ssh/disconnect", {"session_id": sid})
+        except Exception:
+            pass
+        if sid == self.session_id:
+            self.session_id = ""
+
     @staticmethod
     def _retry_on_session_not_found(
         func: Any,
@@ -169,12 +186,17 @@ class GatewayClient:
 
         return wrapper
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        timeout: int = 30,
+    ) -> dict[str, Any]:
         response = httpx.get(
             f"{self.base_url}{path}",
             params=params,
             headers=self._headers(),
-            timeout=30,
+            timeout=timeout,
         )
         if response.status_code >= 400:
             body: dict[str, Any] | None = None
@@ -187,7 +209,14 @@ class GatewayClient:
                 status_code=response.status_code,
                 body=body,
             )
-        return response.json()
+        data = response.json()
+        if isinstance(data, dict) and data.get("error") == "NOT_SUPPORTED":
+            raise GatewayClientError(
+                "NOT_SUPPORTED",
+                status_code=response.status_code,
+                body=data,
+            )
+        return data
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         response = httpx.post(
@@ -257,6 +286,53 @@ class GatewayClient:
             },
         )
 
+    @_retry_on_session_not_found
+    def execute_argv(
+        self,
+        argv: list[str],
+        stdin: str = "",
+        timeout_s: int = 30,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute explicit argv via /api/ssh/execute-argv.
+
+        Uses shlex.join on the Gateway side — no bash -c wrapping.
+        """
+        sid = session_id or self._require_session_id()
+        return self._post(
+            "/api/ssh/execute-argv",
+            {
+                "session_id": sid,
+                "argv": argv,
+                "stdin": stdin,
+                "timeout_s": timeout_s,
+            },
+        )
+
+    @_retry_on_session_not_found
+    def apply_patch(
+        self,
+        project: str,
+        patch: str,
+        expected_hashes: dict[str, str],
+        strip: int = 1,
+        dry_run: bool = False,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply a unified diff patch to project files via Gateway."""
+        sid = session_id or self._require_session_id()
+        proj = _safe_project(project)
+        return self._post(
+            f"/api/projects/{proj}/apply-patch",
+            {
+                "session_id": sid,
+                "patch": patch,
+                "expected_hashes": expected_hashes,
+                "strip": strip,
+                "dry_run": dry_run,
+            },
+        )
+
     def job_status(self, job_id: str) -> dict[str, Any]:
         return self._get(f"/api/jobs/{job_id}/status")
 
@@ -267,11 +343,42 @@ class GatewayClient:
         )
 
     def wait_job(self, job_id: str, timeout_sec: int | None = None) -> dict[str, Any]:
-        deadline = time.time() + (timeout_sec or self.job_timeout)
+        """Wait for job completion using long-poll, falling back to polling.
+
+        Falls back to polling on NOT_SUPPORTED (multi-worker) or 404 (old gateway).
+        No fallback on PERMISSION_DENIED, JOB_NOT_FOUND, or other real errors.
+        """
+        effective_timeout = timeout_sec or self.job_timeout
+        http_timeout = effective_timeout + 5
+
+        try:
+            result = self._get(
+                f"/api/jobs/{job_id}/wait",
+                params={"timeout": effective_timeout},
+                timeout=http_timeout,
+            )
+            return result
+        except GatewayClientError as exc:
+            should_fallback = False
+            if exc.status_code == 404:
+                should_fallback = True
+            elif exc.body and exc.body.get("error") == "NOT_SUPPORTED":
+                should_fallback = True
+            elif exc.status_code == 200 and exc.body and exc.body.get("error") == "NOT_SUPPORTED":
+                should_fallback = True
+
+            if not should_fallback:
+                raise
+
+        # Polling fallback
+        deadline = time.time() + effective_timeout
         while time.time() < deadline:
             status = self.job_status(job_id)
             if status.get("status") in {"completed", "failed", "cancelled"}:
-                return self.job_result(job_id)
+                result = self.job_result(job_id)
+                if "execution_duration_ms" not in result and result.get("duration") is not None:
+                    result["execution_duration_ms"] = int(result["duration"] * 1000)
+                return result
             time.sleep(1)
         raise GatewayClientError(f"Job {job_id} did not finish before timeout")
 
