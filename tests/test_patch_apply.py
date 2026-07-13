@@ -2,8 +2,6 @@
 
 import hashlib
 import textwrap
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -82,7 +80,7 @@ def test_compute_file_hash():
 
 
 def test_check_hash_match():
-    from app.patch_apply import PatchApplier, HashMismatchError
+    from app.patch_apply import PatchApplier
 
     applier = PatchApplier.__new__(PatchApplier)
     content = "hello\n"
@@ -93,7 +91,7 @@ def test_check_hash_match():
 
 
 def test_check_hash_mismatch():
-    from app.patch_apply import PatchApplier, HashMismatchError
+    from app.patch_apply import HashMismatchError, PatchApplier
 
     applier = PatchApplier.__new__(PatchApplier)
     content = "hello\n"
