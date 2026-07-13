@@ -8,7 +8,7 @@ import pytest
 EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "mcp_server"
 sys.path.insert(0, str(EXAMPLE_DIR))
 
-from chatgpt_tools import _safe_glob
+from chatgpt_tools import _safe_glob  # noqa: E402
 
 
 def test_simple_glob(tmp_path: Path) -> None:
