@@ -16,7 +16,7 @@ from typing import Any
 CONFIRM_TTL_SECONDS = 60
 
 
-class ConfirmStatus(str, enum.Enum):
+class ConfirmStatus(enum.StrEnum):
     OK = "ok"
     INVALID = "invalid"
     EXPIRED = "expired"
