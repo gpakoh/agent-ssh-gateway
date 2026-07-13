@@ -8,7 +8,7 @@ import pytest
 EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "mcp_server"
 
 sys.path.insert(0, str(EXAMPLE_DIR))
-from chatgpt_tools import _build_uv_argv
+from chatgpt_tools import _build_uv_argv  # noqa: E402
 
 
 def test_build_ruff_argv():
