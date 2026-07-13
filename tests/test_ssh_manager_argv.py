@@ -1,7 +1,6 @@
 """Tests for execute_argv on SSHSessionManager."""
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -11,11 +10,6 @@ def _make_mock_record():
     record = MagicMock()
     record.is_connected.return_value = True
     record.touch = MagicMock()
-
-    # Mock SSH client and exec_command
-    stdin_channel = MagicMock()
-    stdout_channel = MagicMock()
-    stderr_channel = MagicMock()
 
     stdin_file = MagicMock()
     stdout_file = MagicMock()
