@@ -6,7 +6,6 @@ by wrapping fixed allowlisted commands in semantic functions.
 
 from __future__ import annotations
 
-import os
 import re
 import shlex
 import time
