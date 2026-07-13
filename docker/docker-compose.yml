@@ -91,6 +91,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - API_KEY=${API_KEY:?set API_KEY}
       - AGENT_TOKEN=${AGENT_TOKEN:?set AGENT_TOKEN}
+      - AGENT_TOKEN_TTL=${AGENT_TOKEN_TTL:-0}
       - AGENT_TOKEN_SCOPES=["ssh:connect","ssh:execute","ssh:files","ssh:disconnect","ssh:port-check","jobs:read"]
       - SSH_STRICT_HOST_KEY_CHECKING=false
       - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET}
