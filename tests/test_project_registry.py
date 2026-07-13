@@ -6,18 +6,26 @@ from examples.mcp_server.project_registry import ProjectRegistry
 
 
 @pytest.fixture
-def registry():
+def project_root(tmp_path):
+    root = tmp_path / "projects"
+    root.mkdir()
+    (root / "web-ssh-gateway").mkdir()
+    return root
+
+
+@pytest.fixture
+def registry(project_root):
     return ProjectRegistry(
         projects={
-            "web-ssh-gateway": "/media/1TB/Python/web_ssh/web-ssh-gateway",
+            "web-ssh-gateway": str(project_root / "web-ssh-gateway"),
         },
-        allowed_roots=["/media/1TB/Python/"],
+        allowed_roots=[str(project_root)],
     )
 
 
-def test_resolve_known_project(registry):
+def test_resolve_known_project(registry, project_root):
     path = registry.resolve("web-ssh-gateway")
-    assert path == Path("/media/1TB/Python/web_ssh/web-ssh-gateway")
+    assert path == project_root / "web-ssh-gateway"
 
 
 def test_resolve_unknown_project(registry):
@@ -25,7 +33,7 @@ def test_resolve_unknown_project(registry):
         registry.resolve("nonexistent")
 
 
-def test_resolve_symlink_escape(tmp_path, registry):
+def test_resolve_symlink_escape(tmp_path):
     root = tmp_path / "allowed"
     root.mkdir()
     escape = tmp_path / "escape"
