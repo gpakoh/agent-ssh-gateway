@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 EXAMPLES_DIR = Path(__file__).resolve().parents[1] / "examples"
 MCP_SERVER_DIR = EXAMPLES_DIR / "mcp_server"
@@ -118,6 +118,6 @@ class TestGatewayClientWaitJob:
         ):
             try:
                 client.wait_job("j1", timeout_sec=10)
-                assert False, "Should have raised"
+                raise AssertionError("Should have raised")
             except GatewayClientError as e:
                 assert e.status_code == 403
