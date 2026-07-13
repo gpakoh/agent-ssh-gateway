@@ -5,11 +5,14 @@ This server is intentionally kept outside the gateway core.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
-import time
+import time as _time
 from collections.abc import Callable
 from typing import Any
+
+_mcp_started_at = _time.time()
 
 from agent_tasks import (
     archive_agent_task as _archive_agent_task,
@@ -77,7 +80,7 @@ from opencode_tools import (
 )
 from self_test import run_self_test
 from tool_modes import should_register_tool
-from tool_results import error_result, text_result, tool_error, tool_success
+from tool_results import build_command_result, error_result, text_result, tool_error, tool_success
 from write_modes import WriteModeError, WritePermissionError
 
 from examples.chatgpt_remote_mcp.fleet.context7_server import (
@@ -92,6 +95,7 @@ from examples.chatgpt_remote_mcp.fleet.github_client import (
 from examples.chatgpt_remote_mcp.fleet.postgres_client import PostgresClient
 
 # OAuth provider and settings
+from examples.mcp_server.latency_metrics import get_tracker
 from examples.mcp_server.oauth_provider import (
     DEFAULT_SCOPES,
     SUPPORTED_SCOPES,
@@ -321,6 +325,78 @@ def register_tool(name: str):
     return decorator
 
 
+def instrumented(tool_name: str):
+    """Decorator that wraps a tool function with latency tracking."""
+
+    def decorator(func):
+        import asyncio
+
+        if asyncio.iscoroutinefunction(func):
+
+            async def async_wrapper(*args, **kwargs):
+                tracker = get_tracker()
+                with tracker.measure(tool_name):
+                    result = await func(*args, **kwargs)
+                if isinstance(result, dict) and "meta" in result:
+                    recs = tracker.records.get(tool_name, [])
+                    if recs:
+                        result["meta"]["duration_ms"] = int(recs[-1])
+                return result
+
+            return async_wrapper
+        else:
+
+            def sync_wrapper(*args, **kwargs):
+                tracker = get_tracker()
+                with tracker.measure(tool_name):
+                    result = func(*args, **kwargs)
+                if isinstance(result, dict) and "meta" in result:
+                    recs = tracker.records.get(tool_name, [])
+                    if recs:
+                        result["meta"]["duration_ms"] = int(recs[-1])
+                return result
+
+            return sync_wrapper
+
+    return decorator
+
+
+def _validate_project(project: str) -> str:
+    """Validate and return project name. Raises ValueError on invalid input."""
+    if not project:
+        raise ValueError("project argument is required")
+    parts = project.strip("/").split("/")
+    for p in parts:
+        if p in ("..", ".", "~", ""):
+            raise ValueError(f"Invalid project name: {project!r}")
+    return "/".join(parts)
+
+
+import hashlib as _hashlib
+
+
+def compute_toolset_hash(mcp_instance: FastMCP) -> str:
+    """Compute SHA-256 hash of the canonical tool manifest.
+
+    Canonical form: sorted list of {name, inputSchema} objects as compact JSON.
+    Uses items.sort(key=lambda item: item["name"]) — NOT sorted(dicts).
+    """
+    tools_dict = {}
+    if hasattr(mcp_instance, "_tool_manager"):
+        tm = mcp_instance._tool_manager
+        if hasattr(tm, "_tools"):
+            tools_dict = tm._tools
+
+    items = []
+    for name, tool_obj in tools_dict.items():
+        schema = getattr(tool_obj, "parameters", None) or {}
+        items.append({"name": name, "inputSchema": schema})
+
+    items.sort(key=lambda item: item["name"])
+    canonical = json.dumps(items, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + _hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def run_tool(
     *,
     tool: str,
@@ -408,13 +484,45 @@ def _split_lines(value: str | None) -> list[str] | None:
     return [line.strip() for line in value.split("\n") if line.strip()]
 
 
-@register_tool("gateway_health")
+@register_tool("health")
+@instrumented("health")
 def gateway_health() -> dict[str, Any]:
-    """Check gateway health."""
-    return _run_gateway(tool="gateway_health", fn=client.health)
+    """Check gateway + MCP health with build metadata and toolset hash."""
+    from datetime import UTC, datetime
+
+    gateway_data = client.health()
+
+    mcp_build_sha = os.environ.get("BUILD_SHA", "").strip() or "unknown"
+    mcp_build_time = os.environ.get("BUILD_TIME", "").strip()
+    mcp_started_at = ""
+    if _mcp_started_at:
+        mcp_started_at = datetime.fromtimestamp(
+            _mcp_started_at, tz=UTC
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    toolset_hash = compute_toolset_hash(mcp)
+
+    tools_count = 0
+    if hasattr(mcp, "_tool_manager"):
+        tm = mcp._tool_manager
+        if hasattr(tm, "_tools"):
+            tools_count = len(tm._tools)
+
+    return {
+        "mcp": {
+            "build_sha": mcp_build_sha,
+            "build_time": mcp_build_time,
+            "started_at": mcp_started_at,
+            "toolset_hash": toolset_hash,
+            "tools_count": tools_count,
+            "contract_version": "1",
+        },
+        "gateway": gateway_data,
+    }
 
 
-@register_tool("gateway_list_sessions")
+@register_tool("list_sessions")
+@instrumented("list_sessions")
 def gateway_list_sessions() -> dict[str, Any]:
     """List current SSH sessions visible to the configured API key."""
 
@@ -423,14 +531,14 @@ def gateway_list_sessions() -> dict[str, Any]:
         return data
 
     return run_tool(
-        tool="gateway_list_sessions",
+        tool="list_sessions",
         title="List sessions",
         fn=_list,
         success_text="Retrieved session list.",
     )
 
 
-@register_tool("gateway_session_health")
+@register_tool("session_health")
 def gateway_session_health(session_id: str | None = None) -> dict[str, Any]:
     """Check an SSH session health."""
 
@@ -438,14 +546,14 @@ def gateway_session_health(session_id: str | None = None) -> dict[str, Any]:
         return client.session_health(session_id=session_id)
 
     return run_tool(
-        tool="gateway_session_health",
+        tool="session_health",
         title="Session health",
         fn=_health,
         success_text="Session health retrieved.",
     )
 
 
-@register_tool("gateway_execute_restricted")
+@register_tool("execute_restricted")
 def gateway_execute_restricted(command: str, session_id: str | None = None) -> dict[str, Any]:
     """Execute an allowlisted read-only command as a redacted async job."""
 
@@ -453,14 +561,112 @@ def gateway_execute_restricted(command: str, session_id: str | None = None) -> d
         return client.execute_restricted(command, session_id=session_id)
 
     return run_tool(
-        tool="gateway_execute_restricted",
+        tool="execute_restricted",
         title="Restricted execute",
         fn=_exec,
         success_text="Command submitted as a background job.",
     )
 
 
-@register_tool("gateway_job_status")
+@register_tool("execute_argv")
+def gateway_execute_argv(
+    session_id: str,
+    argv: list[str],
+    stdin: str = "",
+    timeout_s: int = 30,
+) -> dict[str, Any]:
+    """Execute explicit argv serialized as a safely quoted POSIX command.
+
+    Args:
+        session_id: Active SSH session ID.
+        argv: Command and arguments as a list.
+        stdin: Optional stdin content (UTF-8 only).
+        timeout_s: Execution timeout (1-3600).
+
+    Returns:
+        Contract v1 dict with stdout/stderr/exit_code (not a JSON string).
+    """
+    try:
+        raw = client.execute_argv(
+            argv=argv,
+            stdin=stdin,
+            timeout_s=timeout_s,
+            session_id=session_id,
+        )
+    except GatewayClientError as e:
+        return tool_error(
+            tool="execute_argv",
+            code="TOOL_EXECUTION_FAILED",
+            message=str(e),
+        )
+    return tool_success(
+        tool="execute_argv",
+        result=build_command_result(
+            outcome="passed" if raw.get("exit_code", 1) == 0 else "failed",
+            exit_code=raw.get("exit_code", -1),
+            stdout=raw.get("stdout", ""),
+            stderr=raw.get("stderr", ""),
+            execution_duration_ms=int(raw.get("duration", 0) * 1000),
+        ),
+        source="gateway",
+    )
+
+
+@register_tool("project_apply_patch")
+@instrumented("project_apply_patch")
+def gateway_project_apply_patch(
+    session_id: str,
+    project: str,
+    patch: str,
+    expected_hashes: dict[str, str],
+    strip: int = 1,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Apply a unified diff patch to project files.
+
+    Args:
+        session_id: Active SSH session ID.
+        project: Project name (registered in MCP_GATEWAY_PROJECT_ROOT).
+        patch: Unified diff content.
+        expected_hashes: Per-file sha256 hashes for safety check.
+        strip: Strip leading path components (default 1 for a/b prefix).
+        dry_run: Preview changes without applying.
+
+    Returns:
+        Contract v1 dict with per-file status (not a JSON string).
+    """
+    _validate_project(project)
+    try:
+        raw = client.apply_patch(
+            project=project,
+            patch=patch,
+            expected_hashes=expected_hashes,
+            strip=strip,
+            dry_run=dry_run,
+            session_id=session_id,
+        )
+    except GatewayClientError as e:
+        return tool_error(
+            tool="project_apply_patch",
+            code="TOOL_EXECUTION_FAILED",
+            message=str(e),
+        )
+    return tool_success(
+        tool="project_apply_patch",
+        result={
+            "success": raw.get("success", False),
+            "files_applied": raw.get("files_applied", 0),
+            "files_failed": raw.get("files_failed", 0),
+            "hunks_applied": raw.get("hunks_applied", 0),
+            "preview": raw.get("preview"),
+            "errors": raw.get("errors", []),
+            "files": raw.get("files", []),
+        },
+        source="gateway",
+    )
+
+
+@register_tool("job_status")
 def gateway_job_status(job_id: str) -> dict[str, Any]:
     """Get background job status."""
 
@@ -469,14 +675,14 @@ def gateway_job_status(job_id: str) -> dict[str, Any]:
         return data
 
     return run_tool(
-        tool="gateway_job_status",
+        tool="job_status",
         title="Job status",
         fn=_status,
         success_text=f"Job {job_id} status retrieved.",
     )
 
 
-@register_tool("gateway_job_result")
+@register_tool("job_result")
 def gateway_job_result(job_id: str, redact_output: bool = True) -> dict[str, Any]:
     """Get background job result."""
 
@@ -485,14 +691,14 @@ def gateway_job_result(job_id: str, redact_output: bool = True) -> dict[str, Any
         return data
 
     return run_tool(
-        tool="gateway_job_result",
+        tool="job_result",
         title="Job result",
         fn=_result,
         success_text=f"Job {job_id} result retrieved.",
     )
 
 
-@register_tool("gateway_wait_job")
+@register_tool("wait_job")
 def gateway_wait_job(job_id: str, timeout_sec: int | None = None) -> dict[str, Any]:
     """Wait for a background job and return its result."""
 
@@ -500,14 +706,58 @@ def gateway_wait_job(job_id: str, timeout_sec: int | None = None) -> dict[str, A
         return client.wait_job(job_id, timeout_sec=timeout_sec)
 
     return run_tool(
-        tool="gateway_wait_job",
+        tool="wait_job",
         title="Wait job",
         fn=_wait,
         success_text=f"Job {job_id} completed.",
     )
 
 
-@register_tool("gateway_read_file")
+@register_tool("job_wait")
+@instrumented("job_wait")
+def gateway_job_wait(job_id: str, timeout_sec: int | None = None) -> dict[str, Any]:
+    """Wait for a background job to complete using long-poll.
+
+    Uses the Gateway long-poll endpoint. Falls back to polling if the
+    Gateway does not support long-poll (multi-worker or old version).
+
+    Args:
+        job_id: Background job identifier.
+        timeout_sec: Maximum seconds to wait (default: 180).
+
+    Returns:
+        Contract v1 dict with job result or WAIT_TIMEOUT error.
+    """
+    try:
+        result = client.wait_job(job_id, timeout_sec=timeout_sec)
+    except GatewayClientError as exc:
+        code, retryable = _classify_gateway_error(exc)
+        return tool_error(
+            tool="job_wait",
+            code=code,
+            message=str(exc),
+            retryable=retryable,
+            source="gateway",
+        )
+
+    if result.get("wait_timed_out"):
+        return tool_error(
+            tool="job_wait",
+            code="WAIT_TIMEOUT",
+            message=f"Job {job_id} did not complete within timeout",
+            retryable=True,
+            details={"job_id": job_id, "status": result.get("status", "running")},
+            source="gateway",
+        )
+
+    return tool_success(
+        tool="job_wait",
+        result=result,
+        source="gateway",
+    )
+
+
+@register_tool("read_file")
 def gateway_read_file(path: str, session_id: str | None = None) -> dict[str, Any]:
     """Read a file through the gateway file API.
 
@@ -520,14 +770,14 @@ def gateway_read_file(path: str, session_id: str | None = None) -> dict[str, Any
         return client.read_file(resolved, session_id=session_id)
 
     return run_tool(
-        tool="gateway_read_file",
+        tool="read_file",
         title="Read file",
         fn=_read,
         success_text=f"File {resolved} read successfully.",
     )
 
 
-@register_tool("gateway_repo_status")
+@register_tool("repo_status")
 def gateway_repo_status(
     session_id: str | None = None, project: str | None = None
 ) -> dict[str, Any]:
@@ -543,192 +793,192 @@ def gateway_repo_status(
         return client.repo_status(session_id=session_id, project=project)
 
     return run_tool(
-        tool="gateway_repo_status",
+        tool="repo_status",
         title="Repository status",
         fn=_status,
         success_text="Collected repository status.",
     )
 
 
-@register_tool("gateway_working_directory")
+@register_tool("working_directory")
 def gateway_working_directory(session_id: str | None = None) -> dict[str, Any]:
     """Print working directory on the SSH target."""
     return run_tool(
-        tool="gateway_working_directory",
+        tool="working_directory",
         title="Working directory",
         fn=lambda: working_directory(client, session_id=session_id),
         success_text="Collected current working directory.",
     )
 
 
-@register_tool("gateway_git_status")
+@register_tool("git_status")
 def gateway_git_status(session_id: str | None = None) -> dict[str, Any]:
     """Show git working tree status (short format)."""
     return run_tool(
-        tool="gateway_git_status",
+        tool="git_status",
         title="Git status",
         fn=lambda: git_status(client, session_id=session_id),
         success_text="Collected git status.",
     )
 
 
-@register_tool("gateway_recent_commits")
+@register_tool("recent_commits")
 def gateway_recent_commits(session_id: str | None = None) -> dict[str, Any]:
     """List recent commits (git log --oneline -10)."""
     return run_tool(
-        tool="gateway_recent_commits",
+        tool="recent_commits",
         title="Recent commits",
         fn=lambda: recent_commits(client, session_id=session_id),
         success_text="Collected recent commits.",
     )
 
 
-@register_tool("gateway_git_diff_stat")
+@register_tool("git_diff_stat")
 def gateway_git_diff_stat(session_id: str | None = None) -> dict[str, Any]:
     """Show uncommitted diff stat (git diff --stat)."""
     return run_tool(
-        tool="gateway_git_diff_stat",
+        tool="git_diff_stat",
         title="Git diff stat",
         fn=lambda: git_diff_stat(client, session_id=session_id),
         success_text="Collected git diff stat.",
     )
 
 
-@register_tool("gateway_show_changes")
+@register_tool("show_changes")
 def gateway_show_changes(session_id: str | None = None, project: str | None = None) -> dict[str, Any]:
     """Show combined git status and diff stat."""
     return run_tool(
-        tool="gateway_show_changes",
+        tool="show_changes",
         title="Show changes",
         fn=lambda: show_changes(client, session_id=session_id, project=project),
         success_text="Collected repository change summary.",
     )
 
 
-@register_tool("gateway_run_tests")
+@register_tool("run_tests")
 def gateway_run_tests(session_id: str | None = None) -> dict[str, Any]:
     """Run test suite (pytest -q)."""
     return run_tool(
-        tool="gateway_run_tests",
+        tool="run_tests",
         title="Run tests",
         fn=lambda: run_tests(client, session_id=session_id),
         success_text="Ran test suite.",
     )
 
 
-@register_tool("gateway_run_lint")
+@register_tool("run_lint")
 def gateway_run_lint(session_id: str | None = None) -> dict[str, Any]:
     """Run ruff linter on the project."""
     return run_tool(
-        tool="gateway_run_lint",
+        tool="run_lint",
         title="Run lint",
         fn=lambda: run_lint(client, session_id=session_id),
         success_text="Ran lint checks.",
     )
 
 
-@register_tool("gateway_run_compileall")
+@register_tool("run_compileall")
 def gateway_run_compileall(session_id: str | None = None) -> dict[str, Any]:
     """Run Python compileall on the project."""
     return run_tool(
-        tool="gateway_run_compileall",
+        tool="run_compileall",
         title="Run compileall",
         fn=lambda: run_compileall(client, session_id=session_id),
         success_text="Ran Python compileall.",
     )
 
 
-@register_tool("gateway_project_working_directory")
+@register_tool("project_working_directory")
 def gateway_project_working_directory(project: str) -> dict[str, Any]:
     """Print working directory within MCP_GATEWAY_PROJECT_ROOT/{project}."""
     return _run_gateway(
-        tool="gateway_project_working_directory",
+        tool="project_working_directory",
         fn=lambda: project_working_directory(client, project),
     )
 
 
-@register_tool("gateway_project_info")
+@register_tool("project_info")
 def gateway_project_info(project: str) -> dict[str, Any]:
     """Return resolved project metadata for a configured project name.
     Read-only. Does not execute user-provided shell commands.
     """
     return _run_gateway(
-        tool="gateway_project_info",
+        tool="project_info",
         fn=lambda: project_info(client, project),
     )
 
 
-@register_tool("gateway_project_git_status")
+@register_tool("project_git_status")
 def gateway_project_git_status(project: str) -> dict[str, Any]:
     """Show git working tree status within a project directory."""
     return run_tool(
-        tool="gateway_project_git_status",
+        tool="project_git_status",
         title="Project git status",
         fn=lambda: project_git_status(client, project),
         success_text="Collected project git status.",
     )
 
 
-@register_tool("gateway_project_recent_commits")
+@register_tool("project_recent_commits")
 def gateway_project_recent_commits(project: str) -> dict[str, Any]:
     """List recent commits within a project (git log --oneline -10)."""
     return run_tool(
-        tool="gateway_project_recent_commits",
+        tool="project_recent_commits",
         title="Project recent commits",
         fn=lambda: project_recent_commits(client, project),
         success_text="Collected project recent commits.",
     )
 
 
-@register_tool("gateway_project_git_diff_stat")
+@register_tool("project_git_diff_stat")
 def gateway_project_git_diff_stat(project: str) -> dict[str, Any]:
     """Show uncommitted diff stat within a project."""
     return run_tool(
-        tool="gateway_project_git_diff_stat",
+        tool="project_git_diff_stat",
         title="Project git diff stat",
         fn=lambda: project_git_diff_stat(client, project),
         success_text="Collected project git diff stat.",
     )
 
 
-@register_tool("gateway_project_show_changes")
+@register_tool("project_show_changes")
 def gateway_project_show_changes(project: str) -> dict[str, Any]:
     """Show combined git status and diff stat within a project."""
     return run_tool(
-        tool="gateway_project_show_changes",
+        tool="project_show_changes",
         title="Project show changes",
         fn=lambda: project_show_changes(client, project),
         success_text="Collected project change summary.",
     )
 
 
-@register_tool("gateway_project_run_tests")
+@register_tool("project_run_tests")
 def gateway_project_run_tests(project: str) -> dict[str, Any]:
     """Run test suite within a project (pytest -q)."""
     return run_tool(
-        tool="gateway_project_run_tests",
+        tool="project_run_tests",
         title="Project run tests",
         fn=lambda: project_run_tests(client, project),
         success_text="Ran project test suite.",
     )
 
 
-@register_tool("gateway_project_run_lint")
+@register_tool("project_run_lint")
 def gateway_project_run_lint(project: str) -> dict[str, Any]:
     """Run ruff linter within a project."""
     return run_tool(
-        tool="gateway_project_run_lint",
+        tool="project_run_lint",
         title="Project run lint",
         fn=lambda: project_run_lint(client, project),
         success_text="Ran project lint checks.",
     )
 
 
-@register_tool("gateway_project_run_compileall")
+@register_tool("project_run_compileall")
 def gateway_project_run_compileall(project: str) -> dict[str, Any]:
     """Run Python compileall within a project."""
     return run_tool(
-        tool="gateway_project_run_compileall",
+        tool="project_run_compileall",
         title="Project run compileall",
         fn=lambda: project_run_compileall(client, project),
         success_text="Ran project Python compileall.",
@@ -738,238 +988,267 @@ def gateway_project_run_compileall(project: str) -> dict[str, Any]:
 # ── Phase 2 project tools ─────────────────────────────────────────
 
 
-@register_tool("gateway_project_read_file")
+@register_tool("project_read_file")
 def gateway_project_read_file(project: str, path: str) -> dict[str, Any]:
     """Read a file within MCP_GATEWAY_PROJECT_ROOT/{project}."""
     return run_tool(
-        tool="gateway_project_read_file",
+        tool="project_read_file",
         title="Project read file",
         fn=lambda: project_read_file(client, project, path),
         success_text="Read project file.",
     )
 
 
-@register_tool("gateway_project_search_text")
+@register_tool("project_search_text")
 def gateway_project_search_text(
     project: str, query: str, glob: str | None = None
 ) -> dict[str, Any]:
     """Search for text across project files using grep."""
     return run_tool(
-        tool="gateway_project_search_text",
+        tool="project_search_text",
         title="Project search text",
         fn=lambda: project_search_text(client, project, query, glob=glob),
         success_text="Searched project text.",
     )
 
 
-@register_tool("gateway_project_find_files")
+@register_tool("project_find_files")
 def gateway_project_find_files(project: str, pattern: str) -> dict[str, Any]:
     """Find files matching a glob pattern in the project."""
     return run_tool(
-        tool="gateway_project_find_files",
+        tool="project_find_files",
         title="Project find files",
-        fn=lambda: project_find_files(client, project, pattern),
+        fn=lambda: project_find_files(project, pattern),
         success_text="Found project files.",
     )
 
 
-@register_tool("gateway_project_list_files")
+@register_tool("project_list_files")
 def gateway_project_list_files(project: str, pattern: str) -> dict[str, Any]:
     """List files matching a glob pattern using Python pathlib — no shell execution."""
     return _run_gateway(
-        tool="gateway_project_list_files",
+        tool="project_list_files",
         fn=lambda: project_list_files(client, project, pattern),
     )
 
 
-@register_tool("gateway_project_tree")
+@register_tool("project_tree")
 def gateway_project_tree(project: str, depth: int = 2, glob: str | None = None) -> dict[str, Any]:
     """List project directory tree up to a given depth."""
     return _run_gateway(
-        tool="gateway_project_tree",
+        tool="project_tree",
         fn=lambda: project_tree(client, project, depth=depth, glob=glob),
     )
 
 
-@register_tool("gateway_project_list_tree")
+@register_tool("project_list_tree")
 def gateway_project_list_tree(project: str, depth: int = 2) -> dict[str, Any]:
     """List project directory tree using Python pathlib — no shell execution."""
     return _run_gateway(
-        tool="gateway_project_list_tree",
+        tool="project_list_tree",
         fn=lambda: project_list_tree(client, project, depth=depth),
     )
 
 
-@register_tool("gateway_project_git_diff")
+@register_tool("project_git_diff")
 def gateway_project_git_diff(project: str, path: str | None = None) -> dict[str, Any]:
     """Show git diff (uncommitted changes) in a project."""
     return run_tool(
-        tool="gateway_project_git_diff",
+        tool="project_git_diff",
         title="Project git diff",
         fn=lambda: project_git_diff(client, project, path=path),
         success_text="Collected project git diff.",
     )
 
 
-@register_tool("gateway_project_git_diff_cached")
+@register_tool("project_git_diff_cached")
 def gateway_project_git_diff_cached(project: str, path: str | None = None) -> dict[str, Any]:
     """Show git --cached diff (staged changes) in a project."""
     return run_tool(
-        tool="gateway_project_git_diff_cached",
+        tool="project_git_diff_cached",
         title="Project git diff cached",
         fn=lambda: project_git_diff_cached(client, project, path=path),
         success_text="Collected project staged diff.",
     )
 
 
-@register_tool("gateway_project_show_file_diff")
+@register_tool("project_show_file_diff")
 def gateway_project_show_file_diff(project: str, path: str) -> dict[str, Any]:
     """Show uncommitted diff for a specific file in the project."""
     return run_tool(
-        tool="gateway_project_show_file_diff",
+        tool="project_show_file_diff",
         title="Project show file diff",
         fn=lambda: project_show_file_diff(client, project, path),
         success_text="Collected file diff.",
     )
 
 
-@register_tool("gateway_project_run_pytest")
+@register_tool("project_run_pytest")
 def gateway_project_run_pytest(project: str, target: str) -> dict[str, Any]:
     """Run pytest on a specific target within the project."""
     return run_tool(
-        tool="gateway_project_run_pytest",
+        tool="project_run_pytest",
         title="Project run pytest",
         fn=lambda: project_run_pytest(client, project, target),
         success_text="Ran project pytest.",
     )
 
 
-@register_tool("gateway_project_run_ruff")
+@register_tool("project_run_ruff")
 def gateway_project_run_ruff(project: str, target: str) -> dict[str, Any]:
     """Run ruff linter on a specific target within the project."""
     return run_tool(
-        tool="gateway_project_run_ruff",
+        tool="project_run_ruff",
         title="Project run ruff",
         fn=lambda: project_run_ruff(client, project, target),
         success_text="Ran project ruff check.",
     )
 
 
-@register_tool("gateway_project_run_mypy")
+@register_tool("project_run_mypy")
 def gateway_project_run_mypy(project: str, target: str) -> dict[str, Any]:
     """Run mypy type checker on a specific target within the project."""
     return run_tool(
-        tool="gateway_project_run_mypy",
+        tool="project_run_mypy",
         title="Project run mypy",
         fn=lambda: project_run_mypy(client, project, target),
         success_text="Ran project mypy.",
     )
 
 
-@register_tool("gateway_project_remotes")
+@register_tool("project_remotes")
 def gateway_project_remotes(project: str) -> dict[str, Any]:
     """List git remotes for the project."""
     return run_tool(
-        tool="gateway_project_remotes",
+        tool="project_remotes",
         title="Project remotes",
         fn=lambda: project_remotes(client, project),
         success_text="Collected project remotes.",
     )
 
 
-@register_tool("gateway_project_current_branch")
+@register_tool("project_current_branch")
 def gateway_project_current_branch(project: str) -> dict[str, Any]:
     """Show current git branch for the project."""
     return run_tool(
-        tool="gateway_project_current_branch",
+        tool="project_current_branch",
         title="Project current branch",
         fn=lambda: project_current_branch(client, project),
         success_text="Collected project current branch.",
     )
 
 
-@register_tool("gateway_project_commit_head")
+@register_tool("project_commit_head")
 def gateway_project_commit_head(project: str) -> dict[str, Any]:
     """Show HEAD commit SHA for the project."""
     return run_tool(
-        tool="gateway_project_commit_head",
+        tool="project_commit_head",
         title="Project commit HEAD",
         fn=lambda: project_commit_head(client, project),
         success_text="Collected project HEAD commit.",
     )
 
 
-@register_tool("gateway_project_read_handoff")
+@register_tool("project_read_handoff")
 def gateway_project_read_handoff(project: str) -> dict[str, Any]:
     """Read .ai-bridge handoff files for a project."""
     return run_tool(
-        tool="gateway_project_read_handoff",
+        tool="project_read_handoff",
         title="Project read handoff",
         fn=lambda: project_read_handoff(client, project),
         success_text="Read project handoff.",
     )
 
 
-@register_tool("gateway_project_write_handoff_plan")
+@register_tool("project_write_handoff_plan")
 def gateway_project_write_handoff_plan(
     project: str, task: str, agent: str = "opencode", notes: str | None = None
 ) -> dict[str, Any]:
     """Write .ai-bridge/current-plan.md for a project (requires MCP_GATEWAY_WRITE_MODE=handoff)."""
     return run_tool(
-        tool="gateway_project_write_handoff_plan",
+        tool="project_write_handoff_plan",
         title="Project write handoff",
         fn=lambda: project_write_handoff_plan(client, project, task, agent=agent, notes=notes),
         success_text="Wrote project handoff plan.",
     )
 
 
-@register_tool("gateway_project_show_handoff_status")
+@register_tool("project_show_handoff_status")
 def gateway_project_show_handoff_status(project: str) -> dict[str, Any]:
     """Show .ai-bridge file listing for a project."""
     return run_tool(
-        tool="gateway_project_show_handoff_status",
+        tool="project_show_handoff_status",
         title="Project handoff status",
         fn=lambda: project_show_handoff_status(client, project),
         success_text="Checked project handoff status.",
     )
 
 
-@register_tool("gateway_self_test")
+@register_tool("self_test")
 def gateway_self_test() -> dict[str, Any]:
     """Run read-only diagnostics for the MCP gateway example."""
     data = run_self_test(client)
     status = data.get("status", "unknown")
     return text_result(
-        tool="gateway_self_test",
+        tool="self_test",
         title="Gateway self-test",
         text=f"Gateway MCP self-test status: {status}",
         data=data,
     )
 
 
-@register_tool("gateway_read_handoff")
+@register_tool("latency_report")
+def gateway_latency_report() -> dict[str, Any]:
+    """Return accumulated per-tool latency statistics."""
+    return tool_success(
+        get_tracker().summary(),
+        tool_name="latency_report",
+    )
+
+
+@register_tool("diagnostics_latency")
+def gateway_diagnostics_latency() -> dict[str, Any]:
+    """Return MCP-side latency breakdown and gateway latency summary."""
+    tracker = get_tracker()
+    mcp_summary = tracker.summary()
+
+    try:
+        gw_data = client._get("/api/diagnostics/latency")
+    except Exception:
+        gw_data = {"error": "gateway diagnostics unavailable"}
+
+    return tool_success(
+        {
+            "mcp": mcp_summary,
+            "gateway": gw_data,
+        },
+        tool_name="diagnostics_latency",
+    )
+
+
+@register_tool("read_handoff")
 def gateway_read_handoff(session_id: str | None = None) -> dict[str, Any]:
     """Read .ai-bridge handoff files."""
     return run_tool(
-        tool="gateway_read_handoff",
+        tool="read_handoff",
         title="Read handoff",
         fn=lambda: read_handoff(client, session_id=session_id),
         success_text="Read .ai-bridge handoff files.",
     )
 
 
-@register_tool("gateway_show_handoff_status")
+@register_tool("show_handoff_status")
 def gateway_show_handoff_status(session_id: str | None = None) -> dict[str, Any]:
     """Show compact handoff file availability."""
     return run_tool(
-        tool="gateway_show_handoff_status",
+        tool="show_handoff_status",
         title="Handoff status",
         fn=lambda: show_handoff_status(client, session_id=session_id),
         success_text="Collected .ai-bridge handoff status.",
     )
 
 
-@register_tool("gateway_write_handoff_plan")
+@register_tool("write_handoff_plan")
 def gateway_write_handoff_plan(
     task: str,
     agent: str = "opencode",
@@ -978,7 +1257,7 @@ def gateway_write_handoff_plan(
 ) -> dict[str, Any]:
     """Write .ai-bridge/current-plan.md given a task description."""
     return run_tool(
-        tool="gateway_write_handoff_plan",
+        tool="write_handoff_plan",
         title="Write handoff plan",
         fn=lambda: write_handoff_plan(
             client,
@@ -1388,45 +1667,61 @@ async def docker_stats(format: str | None = None, limit: int = 50) -> str:
 
 @register_tool("docker_compose_ps")
 async def docker_compose_ps(
-    project_dir: str | None = None, file_path: str | None = None, limit: int = 50
+    project_dir: str | None = None, limit: int = 50
 ) -> str:
     """List containers in a Docker Compose project. limit: max rows (default 50)."""
-    return await DockerClient().compose_ps(project_dir=project_dir, file_path=file_path, limit=limit)
+    return await DockerClient().compose_ps(project_dir=project_dir, limit=limit)
 
 
 @register_tool("docker_compose_services")
 async def docker_compose_services(
-    project_dir: str | None = None, file_path: str | None = None
+    project_dir: str | None = None,
 ) -> str:
     """List service names defined in a Docker Compose project."""
-    return await DockerClient().compose_services(project_dir=project_dir, file_path=file_path)
+    return await DockerClient().compose_services(project_dir=project_dir)
 
 
 # ── Docker write tools (Session 160) ─────────────────────────────
 
 
 @register_tool("docker_start")
-async def docker_start(container: str, timeout: int | None = None) -> str:
-    """Start a stopped container."""
-    return await DockerClient().start(container, timeout=timeout)
+async def docker_start(container: str, timeout: int | None = None) -> dict[str, Any]:
+    """Start a stopped container. DANGEROUS: requires confirmation via confirm_operation(token)."""
+    DockerClient()._validate_container_name(container)
+    summary = f"Start container {container}"
+    action = _confirm_store.create_action(
+        "docker_start", {"container": container, "timeout": timeout}, summary, risk="medium"
+    )
+    return _confirmation_response(action)
 
 
 @register_tool("docker_stop")
-async def docker_stop(container: str, timeout: int = 10) -> str:
-    """Stop a running container. timeout: seconds before force kill (1-120, default 10)."""
-    return await DockerClient().stop(container, timeout=timeout)
+async def docker_stop(container: str, timeout: int = 10) -> dict[str, Any]:
+    """Stop a running container. DANGEROUS: requires confirmation via confirm_operation(token).
+    timeout: seconds before force kill (1-120, default 10)."""
+    DockerClient()._validate_container_name(container)
+    summary = f"Stop container {container}"
+    action = _confirm_store.create_action(
+        "docker_stop", {"container": container, "timeout": timeout}, summary, risk="medium"
+    )
+    return _confirmation_response(action)
 
 
 @register_tool("docker_restart")
-async def docker_restart(container: str, timeout: int = 10) -> str:
-    """Restart a container. timeout: seconds before force kill (1-120, default 10)."""
-    return await DockerClient().restart(container, timeout=timeout)
+async def docker_restart(container: str, timeout: int = 10) -> dict[str, Any]:
+    """Restart a container. DANGEROUS: requires confirmation via confirm_operation(token).
+    timeout: seconds before force kill (1-120, default 10)."""
+    DockerClient()._validate_container_name(container)
+    summary = f"Restart container {container}"
+    action = _confirm_store.create_action(
+        "docker_restart", {"container": container, "timeout": timeout}, summary, risk="medium"
+    )
+    return _confirmation_response(action)
 
 
 @register_tool("docker_compose_up")
 async def docker_compose_up(
     project_dir: str | None = None,
-    file_path: str | None = None,
     services: list[str] | None = None,
     detach: bool = True,
     build: bool = False,
@@ -1435,7 +1730,6 @@ async def docker_compose_up(
     """Start services in a Docker Compose project. detach=True by default."""
     return await DockerClient().compose_up(
         project_dir=project_dir,
-        file_path=file_path,
         services=services,
         detach=detach,
         build=build,
@@ -1446,14 +1740,12 @@ async def docker_compose_up(
 @register_tool("docker_compose_restart")
 async def docker_compose_restart(
     project_dir: str | None = None,
-    file_path: str | None = None,
     services: list[str] | None = None,
     timeout: int = 30,
 ) -> str:
     """Restart services in a Docker Compose project."""
     return await DockerClient().compose_restart(
         project_dir=project_dir,
-        file_path=file_path,
         services=services,
         timeout=timeout,
     )
@@ -1462,7 +1754,6 @@ async def docker_compose_restart(
 @register_tool("docker_compose_build")
 async def docker_compose_build(
     project_dir: str | None = None,
-    file_path: str | None = None,
     services: list[str] | None = None,
     no_cache: bool = False,
     timeout: int = 300,
@@ -1470,7 +1761,6 @@ async def docker_compose_build(
     """Build (or rebuild) services in a Docker Compose project."""
     return await DockerClient().compose_build(
         project_dir=project_dir,
-        file_path=file_path,
         services=services,
         no_cache=no_cache,
         timeout=timeout,
@@ -1480,7 +1770,6 @@ async def docker_compose_build(
 @register_tool("docker_compose_logs")
 async def docker_compose_logs(
     project_dir: str | None = None,
-    file_path: str | None = None,
     services: list[str] | None = None,
     tail: int = 100,
     follow: bool = False,
@@ -1489,7 +1778,6 @@ async def docker_compose_logs(
     """Fetch logs from services in a Docker Compose project. tail: 1-1000 lines."""
     return await DockerClient().compose_logs(
         project_dir=project_dir,
-        file_path=file_path,
         services=services,
         tail=tail,
         follow=follow,
@@ -1498,6 +1786,77 @@ async def docker_compose_logs(
 
 
 # ── Dangerous Docker operations (Session 164) ────────────────────
+
+
+async def _docker_start_impl(container: str, timeout: int | None = None) -> str:
+    return await DockerClient().start(container, timeout=timeout)
+
+
+async def _docker_stop_impl(container: str, timeout: int = 10) -> str:
+    return await DockerClient().stop(container, timeout=timeout)
+
+
+async def _docker_restart_impl(container: str, timeout: int = 10) -> str:
+    return await DockerClient().restart(container, timeout=timeout)
+
+
+async def _docker_rm_impl(container: str, force: bool = False) -> str:
+    return await DockerClient().rm(container, force=force)
+
+
+async def _docker_compose_down_impl(
+    project_dir: str | None = None,
+    remove_orphans: bool = False,
+    timeout: int = 30,
+    volumes: bool = False,
+) -> str:
+    return await DockerClient().compose_down(
+        project_dir=project_dir,
+        remove_orphans=remove_orphans,
+        timeout=timeout,
+        volumes=volumes,
+    )
+
+
+async def _docker_prune_impl(type: str = "container") -> str:
+    return await DockerClient().prune(type)
+
+
+async def _docker_exec_impl(container: str, command: list[str], timeout: int = 30) -> str:
+    return await DockerClient().exec(container, command, timeout=timeout)
+
+
+async def _docker_run_impl(
+    image: str,
+    command: list[str],
+    container_name: str | None = None,
+    timeout: int = 60,
+) -> str:
+    return await DockerClient().run(
+        image, command, container_name=container_name, timeout=timeout
+    )
+
+
+async def _docker_rmi_impl(images: list[str]) -> str:
+    return await DockerClient().rmi(images)
+
+
+async def _docker_volume_rm_impl(volumes: list[str]) -> str:
+    return await DockerClient().volume_rm(volumes)
+
+
+_CONFIRM_HANDLERS: dict[str, Callable[..., Any]] = {
+    "docker_start": _docker_start_impl,
+    "docker_stop": _docker_stop_impl,
+    "docker_restart": _docker_restart_impl,
+    "docker_rm": _docker_rm_impl,
+    "docker_compose_down": _docker_compose_down_impl,
+    "docker_prune": _docker_prune_impl,
+    "docker_exec": _docker_exec_impl,
+    "docker_run": _docker_run_impl,
+    "docker_rmi": _docker_rmi_impl,
+    "docker_volume_rm": _docker_volume_rm_impl,
+}
 
 
 def _confirmation_response(action: ConfirmAction) -> dict[str, Any]:
@@ -1536,7 +1895,6 @@ def _get_token_scopes() -> list[str]:
 @register_tool("docker_compose_down")
 async def docker_compose_down(
     project_dir: str | None = None,
-    file_path: str | None = None,
     remove_orphans: bool = False,
     timeout: int = 30,
     volumes: bool = False,
@@ -1553,12 +1911,10 @@ async def docker_compose_down(
                 source="docker",
             )
     dc = DockerClient()
-    dc._resolve_compose_file_path(file_path, project_dir)
+    dc._validate_project_dir(project_dir)
     parts = []
     if project_dir:
         parts.append(f"project={project_dir}")
-    if file_path:
-        parts.append(f"file={file_path}")
     if volumes:
         parts.append("--volumes")
     summary = f"Compose down {' '.join(parts)}"
@@ -1566,7 +1922,6 @@ async def docker_compose_down(
         "docker_compose_down",
         {
             "project_dir": project_dir,
-            "file_path": file_path,
             "remove_orphans": remove_orphans,
             "timeout": timeout,
             "volumes": volumes,
@@ -1780,8 +2135,8 @@ async def docker_volume_rm(volumes: list[str]) -> dict[str, Any]:
     return _confirmation_response(action)
 
 
-@register_tool("docker_confirm")
-async def docker_confirm(token: str) -> dict[str, Any]:
+@register_tool("confirm_operation")
+async def confirm_operation(token: str) -> dict[str, Any]:
     """Confirm a pending dangerous Docker operation using the one-time token from the confirmation response."""
     action, status = _confirm_store.confirm_action(token)
     if action is None:
@@ -1796,7 +2151,7 @@ async def docker_confirm(token: str) -> dict[str, Any]:
             ConfirmStatus.CONSUMED: "Confirmation token already used",
         }.get(status, "Unknown error")
         return tool_error(
-            tool="docker_confirm",
+            tool="confirm_operation",
             code=code,
             message=msg,
             hint="Call the dangerous tool again to get a new token.",
@@ -1804,71 +2159,41 @@ async def docker_confirm(token: str) -> dict[str, Any]:
             source="docker",
         )
 
-    dc = DockerClient()
-    tool_name = action.tool
-    kwargs = action.kwargs
-
-    if tool_name == "docker_rm":
-        result = await dc.rm(kwargs["container"], force=kwargs.get("force", False))
-    elif tool_name == "docker_compose_down":
-        result = await dc.compose_down(
-            project_dir=kwargs.get("project_dir"),
-            file_path=kwargs.get("file_path"),
-            remove_orphans=kwargs.get("remove_orphans", False),
-            timeout=kwargs.get("timeout", 30),
-            volumes=kwargs.get("volumes", False),
-        )
-    elif tool_name == "docker_prune":
-        result = await dc.prune(kwargs["type"])
-    elif tool_name == "docker_exec":
-        result = await dc.exec(
-            kwargs["container"],
-            kwargs["command"],
-            timeout=kwargs.get("timeout", 30),
-        )
-    elif tool_name == "docker_run":
-        result = await dc.run(
-            kwargs["image"],
-            kwargs["command"],
-            container_name=kwargs.get("container_name"),
-            timeout=kwargs.get("timeout", 60),
-        )
-    elif tool_name == "docker_rmi":
-        result = await dc.rmi(kwargs["images"])
-    elif tool_name == "docker_volume_rm":
-        result = await dc.volume_rm(kwargs["volumes"])
-    else:
+    handler = _CONFIRM_HANDLERS.get(action.tool)
+    if not handler:
         return tool_error(
-            tool="docker_confirm",
+            tool="confirm_operation",
             code="INTERNAL_ERROR",
-            message=f"Unknown action tool: {tool_name}",
+            message=f"No handler for {action.tool}",
             source="docker",
         )
 
-    if result.exit_code == 0:
-        return tool_success(
-            tool=tool_name,
-            result={
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "exit_code": result.exit_code,
-            },
-            source="docker",
-        )
-    else:
+    try:
+        result = await handler(**action.kwargs)
+    except Exception as exc:
         return tool_error(
-            tool=tool_name,
+            tool=action.tool,
             code="DOCKER_COMMAND_FAILED",
-            message="Docker command failed",
-            result={
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "exit_code": result.exit_code,
-            },
+            message=str(exc),
             source="docker",
             retryable=False,
-            hint="Check container name or Docker state.",
         )
+
+    if isinstance(result, dict) and "ok" in result:
+        return result
+
+    if isinstance(result, str):
+        return tool_success(
+            tool=action.tool,
+            result={"output": result},
+            source="docker",
+        )
+
+    return tool_success(
+        tool=action.tool,
+        result=result,
+        source="docker",
+    )
 
 
 @register_tool("docker_pending_actions")
@@ -1995,7 +2320,7 @@ async def query_docs(libraryId: str, query: str) -> str:
 # ── Agent Handoff v2 tools ──────────────────────────────────────────
 
 
-@register_tool("gateway_project_write_agent_task")
+@register_tool("project_write_agent_task")
 def gateway_project_write_agent_task(
     project: str,
     task_id: str,
@@ -2030,18 +2355,18 @@ def gateway_project_write_agent_task(
         )
 
     return run_tool(
-        tool="gateway_project_write_agent_task",
+        tool="project_write_agent_task",
         title="Write agent task",
         fn=_fn,
         success_text="Wrote agent task.",
     )
 
 
-@register_tool("gateway_project_read_agent_status")
+@register_tool("project_read_agent_status")
 def gateway_project_read_agent_status(project: str, task_id: str) -> dict[str, Any]:
     """Read .ai-bridge/tasks/<task_id>/agent-status.md."""
     return run_tool(
-        tool="gateway_project_read_agent_status",
+        tool="project_read_agent_status",
         title="Read agent status",
         fn=lambda: _read_agent_task_file(
             lambda p, c: run_project_command(client, p, c),
@@ -2053,11 +2378,11 @@ def gateway_project_read_agent_status(project: str, task_id: str) -> dict[str, A
     )
 
 
-@register_tool("gateway_project_read_agent_report")
+@register_tool("project_read_agent_report")
 def gateway_project_read_agent_report(project: str, task_id: str) -> dict[str, Any]:
     """Read .ai-bridge/tasks/<task_id>/agent-report.md."""
     return run_tool(
-        tool="gateway_project_read_agent_report",
+        tool="project_read_agent_report",
         title="Read agent report",
         fn=lambda: _read_agent_task_file(
             lambda p, c: run_project_command(client, p, c),
@@ -2069,11 +2394,11 @@ def gateway_project_read_agent_report(project: str, task_id: str) -> dict[str, A
     )
 
 
-@register_tool("gateway_project_read_agent_diff")
+@register_tool("project_read_agent_diff")
 def gateway_project_read_agent_diff(project: str, task_id: str) -> dict[str, Any]:
     """Read .ai-bridge/tasks/<task_id>/implementation-diff.patch."""
     return run_tool(
-        tool="gateway_project_read_agent_diff",
+        tool="project_read_agent_diff",
         title="Read agent diff",
         fn=lambda: _read_agent_task_file(
             lambda p, c: run_project_command(client, p, c),
@@ -2085,11 +2410,11 @@ def gateway_project_read_agent_diff(project: str, task_id: str) -> dict[str, Any
     )
 
 
-@register_tool("gateway_project_list_agent_tasks")
+@register_tool("project_list_agent_tasks")
 def gateway_project_list_agent_tasks(project: str) -> dict[str, Any]:
     """List task directories under .ai-bridge/tasks/."""
     return run_tool(
-        tool="gateway_project_list_agent_tasks",
+        tool="project_list_agent_tasks",
         title="List agent tasks",
         fn=lambda: _list_agent_tasks(
             lambda p, c: run_project_command(client, p, c),
@@ -2099,11 +2424,11 @@ def gateway_project_list_agent_tasks(project: str) -> dict[str, Any]:
     )
 
 
-@register_tool("gateway_project_archive_agent_task")
+@register_tool("project_archive_agent_task")
 def gateway_project_archive_agent_task(project: str, task_id: str) -> dict[str, Any]:
     """Move .ai-bridge/tasks/<task_id>/ -> .ai-bridge/archive/<task_id>/."""
     return run_tool(
-        tool="gateway_project_archive_agent_task",
+        tool="project_archive_agent_task",
         title="Archive agent task",
         fn=lambda: _archive_agent_task(
             lambda p, c: run_project_command(client, p, c),
@@ -2138,7 +2463,7 @@ def project_run_opencode(
     )
 
 
-@register_tool("gateway_project_run_mimo")
+@register_tool("project_run_mimo")
 def gateway_project_run_mimo(
     project: str,
     task_id: str,
@@ -2151,7 +2476,7 @@ def gateway_project_run_mimo(
 
     assert_handoff_write_allowed()
     return run_tool(
-        tool="gateway_project_run_mimo",
+        tool="project_run_mimo",
         title="Run mimo task",
         fn=lambda: _project_run_mimo(
             lambda p, c: run_project_command(client, p, c),
@@ -2163,7 +2488,7 @@ def gateway_project_run_mimo(
     )
 
 
-@register_tool("gateway_project_run_agent")
+@register_tool("project_run_agent")
 def gateway_project_run_agent(
     project: str,
     task_id: str,
@@ -2176,7 +2501,7 @@ def gateway_project_run_agent(
 
     assert_handoff_write_allowed()
     return run_tool(
-        tool="gateway_project_run_agent",
+        tool="project_run_agent",
         title="Run agent task (router)",
         fn=lambda: _project_run_agent(
             lambda p, c: run_project_command(client, p, c),
@@ -2198,12 +2523,12 @@ if _scope_enforcement not in ("off", "audit", "enforce"):
     _scope_enforcement = "off"
 
 
-@register_tool("gateway_tools_manifest")
+@register_tool("tools_manifest")
 def gateway_tools_manifest() -> dict[str, Any]:
     """Return a read-only manifest of all registered tools, modes, scopes, and access profiles.
     No secrets, no env dumps, no network calls, no tool execution."""
     return _run_gateway(
-        tool="gateway_tools_manifest",
+        tool="tools_manifest",
         fn=lambda: _build_manifest(
             registered_tools=mcp._tool_manager.list_tools(),
             scope_enforcement=_scope_enforcement,

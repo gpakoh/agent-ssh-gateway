@@ -21,59 +21,59 @@ def import_example_module(monkeypatch: pytest.MonkeyPatch, module_name: str):
 
 class TestChatgptModeVisibility:
     def test_excludes_generic_execute(self):
-        assert not should_register_tool("gateway_execute_restricted", "chatgpt")
+        assert not should_register_tool("execute_restricted", "chatgpt")
 
     def test_includes_health(self):
-        assert should_register_tool("gateway_health", "chatgpt")
+        assert should_register_tool("health", "chatgpt")
 
     def test_includes_session_health(self):
-        assert should_register_tool("gateway_session_health", "chatgpt")
+        assert should_register_tool("session_health", "chatgpt")
 
     def test_includes_git_status(self):
-        assert should_register_tool("gateway_git_status", "chatgpt")
+        assert should_register_tool("git_status", "chatgpt")
 
     def test_includes_recent_commits(self):
-        assert should_register_tool("gateway_recent_commits", "chatgpt")
+        assert should_register_tool("recent_commits", "chatgpt")
 
     def test_includes_git_diff_stat(self):
-        assert should_register_tool("gateway_git_diff_stat", "chatgpt")
+        assert should_register_tool("git_diff_stat", "chatgpt")
 
     def test_includes_show_changes(self):
-        assert should_register_tool("gateway_show_changes", "chatgpt")
+        assert should_register_tool("show_changes", "chatgpt")
 
     def test_includes_run_tests(self):
-        assert should_register_tool("gateway_run_tests", "chatgpt")
+        assert should_register_tool("run_tests", "chatgpt")
 
     def test_includes_run_lint(self):
-        assert should_register_tool("gateway_run_lint", "chatgpt")
+        assert should_register_tool("run_lint", "chatgpt")
 
     def test_includes_run_compileall(self):
-        assert should_register_tool("gateway_run_compileall", "chatgpt")
+        assert should_register_tool("run_compileall", "chatgpt")
 
     def test_includes_working_directory(self):
-        assert should_register_tool("gateway_working_directory", "chatgpt")
+        assert should_register_tool("working_directory", "chatgpt")
 
     def test_includes_handoff_tools(self):
-        assert should_register_tool("gateway_read_handoff", "chatgpt")
-        assert should_register_tool("gateway_write_handoff_plan", "chatgpt")
-        assert should_register_tool("gateway_show_handoff_status", "chatgpt")
+        assert should_register_tool("read_handoff", "chatgpt")
+        assert should_register_tool("write_handoff_plan", "chatgpt")
+        assert should_register_tool("show_handoff_status", "chatgpt")
 
     def test_includes_jobs(self):
-        assert should_register_tool("gateway_job_status", "chatgpt")
-        assert should_register_tool("gateway_job_result", "chatgpt")
-        assert should_register_tool("gateway_wait_job", "chatgpt")
+        assert should_register_tool("job_status", "chatgpt")
+        assert should_register_tool("job_result", "chatgpt")
+        assert should_register_tool("wait_job", "chatgpt")
 
     def test_includes_read_file(self):
-        assert should_register_tool("gateway_read_file", "chatgpt")
+        assert should_register_tool("read_file", "chatgpt")
 
     def test_includes_repo_status(self):
-        assert should_register_tool("gateway_repo_status", "chatgpt")
+        assert should_register_tool("repo_status", "chatgpt")
 
     def test_excludes_list_sessions(self):
-        assert not should_register_tool("gateway_list_sessions", "chatgpt")
+        assert not should_register_tool("list_sessions", "chatgpt")
 
     def test_excludes_self_test(self):
-        assert not should_register_tool("gateway_self_test", "chatgpt")
+        assert not should_register_tool("self_test", "chatgpt")
 
     def test_chatgpt_is_known_mode(self):
         assert "chatgpt" in TOOL_NAMES_BY_MODE
@@ -150,7 +150,6 @@ class TestChatgptToolsModule:
 
     def test_show_changes_with_project(self, monkeypatch: pytest.MonkeyPatch):
         chatgpt_tools = import_example_module(monkeypatch, "chatgpt_tools")
-        monkeypatch.setattr(chatgpt_tools, "_project_root", lambda: Path("/tmp"))
         called = []
         monkeypatch.setattr(
             chatgpt_tools, "project_show_changes", lambda client, project: called.append(project) or {}

@@ -1,5 +1,8 @@
 import time
+import uuid
 from typing import Any
+
+CONTRACT_VERSION = "1"
 
 ERROR_CODES = {
     "TOOL_NOT_FOUND",
@@ -30,6 +33,11 @@ ERROR_CODES = {
     "DOCKER_RMI_FAILED",
     "DOCKER_VOLUME_RM_INVALID_NAME",
     "DOCKER_VOLUME_RM_FAILED",
+    "TOOL_EXECUTION_FAILED",
+    "POLICY_DENIED",
+    "WAIT_TIMEOUT",
+    "JOB_NOT_FOUND",
+    "PERMISSION_DENIED",
 }
 
 SAFE_SOURCE_VALUES = {
@@ -48,21 +56,33 @@ def _now_ms() -> float:
     return time.monotonic()
 
 
+def _make_meta(tool_name: str | None = None) -> dict:
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "tool": tool_name or "unknown",
+        "request_id": str(uuid.uuid4()),
+        "duration_ms": 0,
+        "truncated": False,
+        "warnings": [],
+    }
+
+
 def tool_success(
     tool: str,
     result: Any = None,
     *,
+    tool_name: str | None = None,
     duration_ms: float | None = None,
     redacted: bool = False,
     truncated: bool = False,
     source: str = "unknown",
     **extra_meta: Any,
 ) -> dict[str, Any]:
-    meta: dict[str, Any] = {
-        "redacted": bool(redacted),
-        "truncated": bool(truncated),
-        "source": source if source in SAFE_SOURCE_VALUES else "unknown",
-    }
+    effective_tool = tool_name or tool
+    meta = _make_meta(effective_tool)
+    meta["redacted"] = bool(redacted)
+    meta["truncated"] = bool(truncated)
+    meta["source"] = source if source in SAFE_SOURCE_VALUES else "unknown"
     if duration_ms is not None:
         meta["duration_ms"] = round(duration_ms, 1)
     meta.update(extra_meta)
@@ -81,9 +101,11 @@ def tool_error(
     code: str = "INTERNAL_ERROR",
     message: str = "An unexpected error occurred",
     *,
+    tool_name: str | None = None,
     result: Any = None,
     retryable: bool = False,
     hint: str | None = None,
+    details: dict[str, Any] | None = None,
     duration_ms: float | None = None,
     redacted: bool = False,
     truncated: bool = False,
@@ -93,11 +115,11 @@ def tool_error(
     if code not in ERROR_CODES:
         code = "INTERNAL_ERROR"
 
-    meta: dict[str, Any] = {
-        "redacted": bool(redacted),
-        "truncated": bool(truncated),
-        "source": source if source in SAFE_SOURCE_VALUES else "unknown",
-    }
+    effective_tool = tool_name or tool
+    meta = _make_meta(effective_tool)
+    meta["redacted"] = bool(redacted)
+    meta["truncated"] = bool(truncated)
+    meta["source"] = source if source in SAFE_SOURCE_VALUES else "unknown"
     if duration_ms is not None:
         meta["duration_ms"] = round(duration_ms, 1)
     meta.update(extra_meta)
@@ -109,6 +131,8 @@ def tool_error(
     }
     if hint is not None:
         error["hint"] = str(hint)
+    if details is not None:
+        error["details"] = details
 
     return {
         "ok": False,
@@ -117,6 +141,28 @@ def tool_error(
         "error": error,
         "meta": meta,
     }
+
+
+def build_command_result(
+    outcome: str,
+    exit_code: int,
+    stdout: str = "",
+    stderr: str = "",
+    execution_duration_ms: int | None = None,
+    job_id: str | None = None,
+    timestamps: dict | None = None,
+) -> dict:
+    result = {
+        "outcome": outcome,
+        "exit_code": exit_code,
+        "stdout": stdout,
+        "stderr": stderr,
+        "execution_duration_ms": execution_duration_ms,
+        "job_id": job_id,
+    }
+    if timestamps:
+        result["timestamps"] = timestamps
+    return result
 
 
 # Legacy helpers — kept for backward compatibility.

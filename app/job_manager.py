@@ -6,6 +6,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
+from app.exceptions import JobNotFoundError, PermissionDeniedError
 from app.ssh_manager import (
     ExecutionError,
     SessionNotFoundError,
@@ -15,6 +16,7 @@ from app.ssh_manager import (
 logger = logging.getLogger(__name__)
 
 MAX_STDOUT_SIZE = 10 * 1024 * 1024  # 10 MB per job
+TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
 
 
 def _make_job_error_logger(job_id: str):
@@ -47,7 +49,17 @@ class JobRecord:
     created_at: float = field(default_factory=time.time)
     started_at: float | None = None
     completed_at: float | None = None
+    owner_id: str = ""
     error_message: str | None = None
+
+    # Monotonic timestamps (relative to process start; do NOT survive restart)
+    queued_at_mono: float | None = None
+    acquired_at_mono: float | None = None
+    command_started_at_mono: float | None = None
+    command_finished_at_mono: float | None = None
+    completed_at_mono: float | None = None
+    ssh_connect_started_at_mono: float | None = None
+    ssh_connected_at_mono: float | None = None
     progress: dict = field(default_factory=dict)
     _listeners: list = field(default_factory=list, repr=False)
     _listener_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -79,7 +91,10 @@ class JobRecord:
             "created_at": self.created_at,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
+            "owner_id": self.owner_id,
             "duration": self.duration,
+            "queued_at_mono": self.queued_at_mono,
+            "completed_at_mono": self.completed_at_mono,
             "error_message": self.error_message,
             "progress": self.progress,
         }
@@ -193,7 +208,7 @@ class JobManager:
     # Create And Run Job
     # ------------------------------------------------------------------
 
-    async def create_job(self, session_id: str, command: str) -> str:
+    async def create_job(self, session_id: str, command: str, owner_id: str = "") -> str:
         """Create a new background job."""
         async with self._lock:
             if len(self._jobs) >= self._max_jobs:
@@ -204,7 +219,9 @@ class JobManager:
                 job_id=job_id,
                 session_id=session_id,
                 command=command,
+                owner_id=owner_id,
             )
+            job.queued_at_mono = time.monotonic()
             self._jobs[job_id] = job
 
         # Start The Job In Background
@@ -223,6 +240,7 @@ class JobManager:
 
         job.status = "running"
         job.started_at = time.time()
+        job.acquired_at_mono = time.monotonic()
         await job.notify_listeners(
             {
                 "type": "status",
@@ -232,7 +250,7 @@ class JobManager:
         )
 
         try:
-            # Use Streaming Execution For Real-time Output
+            job.command_started_at_mono = time.monotonic()
             async for msg_type, msg_data in self._ssh_manager.execute_stream(
                 job.session_id, job.command, cancel_event=job.cancel_event
             ):
@@ -264,6 +282,7 @@ class JobManager:
                     )
                 elif msg_type == "exit":
                     job.exit_code = int(msg_data)
+                    job.command_finished_at_mono = time.monotonic()
                     await job.notify_listeners(
                         {
                             "type": "exit",
@@ -295,6 +314,7 @@ class JobManager:
             )
         finally:
             job.completed_at = time.time()
+            job.completed_at_mono = time.monotonic()
             job.completed_event.set()
             await job.notify_listeners(
                 {
@@ -376,6 +396,40 @@ class JobManager:
                 "status": "cancelled",
             }
         )
+
+    async def wait_for_completion(
+        self, job_id: str, identity_sub: str, timeout_s: float
+    ) -> dict:
+        """Long-poll: wait for job completion or timeout.
+
+        Returns job.to_dict() on completion, or
+        {"job_id": ..., "status": "running", "wait_timed_out": True} on timeout.
+        Raises JobNotFoundError, PermissionDeniedError, re-raises CancelledError.
+        """
+        job = await self.get_job(job_id)
+        if not job:
+            raise JobNotFoundError(job_id)
+
+        if job.owner_id != identity_sub:
+            raise PermissionDeniedError("Job belongs to a different owner")
+
+        if job.status in TERMINAL_STATES:
+            return job.to_dict()
+
+        event = job.completed_event
+        # Re-check after subscribe (race with fast jobs)
+        if job.status in TERMINAL_STATES:
+            return job.to_dict()
+
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout_s)
+        except TimeoutError:
+            return {"job_id": job_id, "status": "running", "wait_timed_out": True}
+        except asyncio.CancelledError:
+            # Client disconnected — job UNCHANGED
+            raise
+
+        return job.to_dict()
 
     async def wait_for_all_jobs(self) -> None:
         """Wait for all active (pending/running) jobs to complete."""

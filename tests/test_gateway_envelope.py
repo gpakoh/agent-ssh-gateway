@@ -15,16 +15,16 @@ sys.path.insert(0, str(_BASE / "tests"))
 sys.path.insert(0, str(_BASE / "examples" / "mcp_server"))
 
 from helpers import assert_tool_envelope  # noqa: E402
-from tool_results import tool_error, tool_success  # noqa: E402
+from tool_results import CONTRACT_VERSION, tool_error, tool_success  # noqa: E402
 
 GATEWAY_READ_TOOLS = [
-    "gateway_health",
-    "gateway_project_working_directory",
-    "gateway_project_info",
-    "gateway_project_list_files",
-    "gateway_project_tree",
-    "gateway_project_list_tree",
-    "gateway_tools_manifest",
+    "health",
+    "project_working_directory",
+    "project_info",
+    "project_list_files",
+    "project_tree",
+    "project_list_tree",
+    "tools_manifest",
 ]
 
 
@@ -44,6 +44,22 @@ class TestGatewaySuccessEnvelope:
             assert result["meta"].get("source") == "gateway"
             assert result["meta"].get("read_only") is True
 
+    def test_each_tool_has_contract_meta(self):
+        for tool_name in GATEWAY_READ_TOOLS:
+            result = tool_success(
+                tool=tool_name,
+                result={"data": "sample"},
+                source="gateway",
+                read_only=True,
+            )
+            assert result["meta"]["contract_version"] == CONTRACT_VERSION
+            assert result["meta"]["tool"] == tool_name
+            assert isinstance(result["meta"]["request_id"], str)
+            assert len(result["meta"]["request_id"]) > 0
+            assert isinstance(result["meta"]["duration_ms"], (int, float))
+            assert isinstance(result["meta"]["truncated"], bool)
+            assert isinstance(result["meta"]["warnings"], list)
+
     def test_preserves_complex_payload(self):
         payload = {
             "project": "my-project",
@@ -54,12 +70,12 @@ class TestGatewaySuccessEnvelope:
             "is_git_repo": True,
         }
         result = tool_success(
-            tool="gateway_project_info",
+            tool="project_info",
             result=payload,
             source="gateway",
             read_only=True,
         )
-        assert_tool_envelope(result, ok=True, tool="gateway_project_info", source="gateway")
+        assert_tool_envelope(result, ok=True, tool="project_info", source="gateway")
         assert result["result"] == payload
 
     def test_preserves_files_list_payload(self):
@@ -71,12 +87,12 @@ class TestGatewaySuccessEnvelope:
             "count": 2,
         }
         result = tool_success(
-            tool="gateway_project_list_files",
+            tool="project_list_files",
             result=payload,
             source="gateway",
             read_only=True,
         )
-        assert_tool_envelope(result, ok=True, tool="gateway_project_list_files", source="gateway")
+        assert_tool_envelope(result, ok=True, tool="project_list_files", source="gateway")
         assert result["result"] == payload
 
     def test_preserves_manifest_payload(self):
@@ -88,35 +104,35 @@ class TestGatewaySuccessEnvelope:
             "profiles": {},
         }
         result = tool_success(
-            tool="gateway_tools_manifest",
+            tool="tools_manifest",
             result=payload,
             source="gateway",
             read_only=True,
         )
-        assert_tool_envelope(result, ok=True, tool="gateway_tools_manifest", source="gateway")
+        assert_tool_envelope(result, ok=True, tool="tools_manifest", source="gateway")
         assert result["result"] == payload
 
     def test_preserves_health_payload(self):
         payload = {"status": "ok", "version": "0.1.28"}
         result = tool_success(
-            tool="gateway_health",
+            tool="health",
             result=payload,
             source="gateway",
             read_only=True,
         )
-        assert_tool_envelope(result, ok=True, tool="gateway_health", source="gateway")
+        assert_tool_envelope(result, ok=True, tool="health", source="gateway")
         assert result["result"] == payload
 
     def test_preserves_working_directory_payload(self):
         payload = {"stdout": "/data/projects/my-project\n", "stderr": "", "exit_code": 0}
         result = tool_success(
-            tool="gateway_project_working_directory",
+            tool="project_working_directory",
             result=payload,
             source="gateway",
             read_only=True,
         )
         assert_tool_envelope(
-            result, ok=True, tool="gateway_project_working_directory", source="gateway"
+            result, ok=True, tool="project_working_directory", source="gateway"
         )
         assert result["result"] == payload
         assert result["meta"].get("read_only") is True
@@ -147,11 +163,11 @@ class TestGatewayErrorEnvelope:
         assert result["meta"].get("read_only") is True
 
     def test_internal_error(self):
-        self._assert_gateway_error("gateway_health", "INTERNAL_ERROR", retryable=False)
+        self._assert_gateway_error("health", "INTERNAL_ERROR", retryable=False)
 
     def test_policy_violation(self):
         self._assert_gateway_error(
-            "gateway_project_working_directory", "POLICY_VIOLATION", retryable=False
+            "project_working_directory", "POLICY_VIOLATION", retryable=False
         )
 
     def test_error_for_each_tool(self):
@@ -168,7 +184,7 @@ class TestGatewayErrorEnvelope:
 
     def test_error_with_hint(self):
         result = tool_error(
-            tool="gateway_tools_manifest",
+            tool="tools_manifest",
             code="INTERNAL_ERROR",
             message="Manifest build failed",
             retryable=True,
@@ -177,10 +193,25 @@ class TestGatewayErrorEnvelope:
             read_only=True,
         )
         assert_tool_envelope(
-            result, ok=False, tool="gateway_tools_manifest", source="gateway", has_error=True
+            result, ok=False, tool="tools_manifest", source="gateway", has_error=True
         )
         assert result["error"]["hint"] == "Check gateway availability and try again"
         assert result["error"]["retryable"] is True
+
+    def test_error_has_contract_meta(self):
+        for tool_name in GATEWAY_READ_TOOLS:
+            result = tool_error(
+                tool=tool_name,
+                code="INTERNAL_ERROR",
+                message="fail",
+                source="gateway",
+            )
+            assert result["meta"]["contract_version"] == CONTRACT_VERSION
+            assert result["meta"]["tool"] == tool_name
+            assert isinstance(result["meta"]["request_id"], str)
+            assert isinstance(result["meta"]["duration_ms"], (int, float))
+            assert isinstance(result["meta"]["truncated"], bool)
+            assert isinstance(result["meta"]["warnings"], list)
 
 
 class TestGatewayResultFieldErrorHandling:
@@ -205,14 +236,14 @@ class TestGatewayResultFieldErrorHandling:
             else:
                 code = "INTERNAL_ERROR"
             return tool_error(
-                tool="gateway_health",
+                tool="health",
                 code=code,
                 message=str(exc),
                 source="gateway",
                 read_only=True,
             )
         return tool_success(
-            tool="gateway_health",
+            tool="health",
             result=data,
             source="gateway",
             read_only=True,
@@ -221,7 +252,7 @@ class TestGatewayResultFieldErrorHandling:
     def test_gateway_client_error_maps_to_internal_error(self):
         result = self._run_gateway(fn=_raise_gateway_client_error)
         assert_tool_envelope(
-            result, ok=False, tool="gateway_health", source="gateway", has_error=True
+            result, ok=False, tool="health", source="gateway", has_error=True
         )
         assert result["error"]["code"] == "INTERNAL_ERROR"
         assert result["meta"].get("read_only") is True
@@ -229,33 +260,38 @@ class TestGatewayResultFieldErrorHandling:
     def test_command_policy_error_maps_to_policy_violation(self):
         result = self._run_gateway(fn=_raise_command_policy_error)
         assert_tool_envelope(
-            result, ok=False, tool="gateway_health", source="gateway", has_error=True
+            result, ok=False, tool="health", source="gateway", has_error=True
         )
         assert result["error"]["code"] == "POLICY_VIOLATION"
 
     def test_write_permission_error_maps_to_policy_violation(self):
         result = self._run_gateway(fn=_raise_write_permission_error)
         assert_tool_envelope(
-            result, ok=False, tool="gateway_health", source="gateway", has_error=True
+            result, ok=False, tool="health", source="gateway", has_error=True
         )
         assert result["error"]["code"] == "POLICY_VIOLATION"
 
     def test_write_mode_error_maps_to_policy_violation(self):
         result = self._run_gateway(fn=_raise_write_mode_error)
         assert_tool_envelope(
-            result, ok=False, tool="gateway_health", source="gateway", has_error=True
+            result, ok=False, tool="health", source="gateway", has_error=True
         )
         assert result["error"]["code"] == "POLICY_VIOLATION"
 
     def test_success_returns_data(self):
         result = self._run_gateway(fn=_return_sample_data)
-        assert_tool_envelope(result, ok=True, tool="gateway_health", source="gateway")
+        assert_tool_envelope(result, ok=True, tool="health", source="gateway")
         assert result["result"] == {"status": "ok"}
 
     def test_success_with_none_data(self):
         result = self._run_gateway(fn=lambda: None)
-        assert_tool_envelope(result, ok=True, tool="gateway_health", source="gateway")
+        assert_tool_envelope(result, ok=True, tool="health", source="gateway")
         assert result["result"] is None
+
+    def test_success_has_contract_meta(self):
+        result = self._run_gateway(fn=_return_sample_data)
+        assert result["meta"]["contract_version"] == CONTRACT_VERSION
+        assert result["meta"]["tool"] == "health"
 
 
 # ── Exception-raising helpers ──────────────────────────────────────
