@@ -8,17 +8,22 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
+import time
 from pathlib import Path
 from typing import Any
 
-from gateway_client import GatewayClient
+from gateway_client import GatewayClient, GatewayClientError
+from project_registry import get_project_registry
+from tool_results import build_command_result, tool_error, tool_success
 
 
-def _project_root() -> Path:
-    root = os.environ.get("MCP_GATEWAY_PROJECT_ROOT", "").strip().rstrip("/")
-    if not root:
-        raise ValueError("MCP_GATEWAY_PROJECT_ROOT is not set")
-    return Path(root)
+def _resolve_project(project_name: str) -> Path:
+    """Resolve a project name to a validated filesystem path via the registry."""
+    try:
+        return get_project_registry().resolve(project_name)
+    except ValueError as e:
+        raise GatewayClientError(str(e), status_code=404) from e
 
 
 def _validate_project(project: str) -> str:
@@ -69,6 +74,67 @@ def _limit_output(output: str) -> str:
     return "\n".join(lines)
 
 
+# ── uv runner helpers ───────────────────────────────────────────
+
+_UV_TOOL_MAP: dict[str, list[str]] = {
+    "ruff": ["ruff", "check"],
+    "mypy": ["mypy"],
+    "pytest": ["pytest"],
+    "compileall": ["python", "-m", "compileall"],
+}
+
+
+def _validate_targets(project_dir: str, targets: list[str]) -> list[str]:
+    """Validate all targets: relative, no traversal, inside project root."""
+    root = Path(project_dir).resolve()
+    validated = []
+    for t in targets:
+        p = Path(t)
+        if p.is_absolute():
+            raise ValueError(f"POLICY_DENIED: absolute target not allowed: {t}")
+        if ".." in p.parts:
+            raise ValueError(f"POLICY_DENIED: path traversal in target: {t}")
+        resolved = (root / p).resolve()
+        resolved.relative_to(root)
+        validated.append(t)
+    return validated
+
+
+def _build_uv_argv(tool: str, project_dir: str, targets: list[str]) -> list[str]:
+    """Build argv list for ``uv run <tool>``. Validates targets first."""
+    if tool not in _UV_TOOL_MAP:
+        raise ValueError(f"INVALID_INPUT: unknown tool '{tool}'")
+    if not targets:
+        raise ValueError("INVALID_INPUT: at least one target required")
+    validated = _validate_targets(project_dir, targets)
+    cmd = _UV_TOOL_MAP[tool]
+    return ["uv", "run", "--frozen", "--directory", project_dir, "--"] + cmd + ["--"] + validated
+
+
+def _map_uv_exit_code(tool: str, exit_code: int) -> tuple[str, str | None]:
+    """Map uv exit code to (outcome, error_code).
+
+    Returns ``(outcome, None)`` for success/check-failed and
+    ``(None, error_code)`` for infrastructure errors.
+    """
+    if tool == "pytest":
+        if exit_code == 0:
+            return ("passed", None)
+        elif exit_code == 1:
+            return ("failed", None)
+        elif exit_code == 5:
+            return ("failed", None)  # NO_TESTS
+        else:
+            return (None, "TOOL_EXECUTION_FAILED")
+
+    if exit_code == 0:
+        return ("passed", None)
+    elif exit_code == 1:
+        return ("failed", None)
+    else:
+        return (None, "TOOL_EXECUTION_FAILED")
+
+
 # ── Basic read-only helpers ─────────────────────────────────────
 
 
@@ -76,7 +142,15 @@ def run_readonly_command(
     client: GatewayClient, command: str, session_id: str | None = None
 ) -> dict[str, Any]:
     job = client.execute_restricted(command, session_id=session_id)
-    return client.wait_job(job["job_id"])
+    raw = client.wait_job(job["job_id"])
+    return build_command_result(
+        outcome="passed" if raw.get("exit_code", 1) == 0 else "failed",
+        exit_code=raw.get("exit_code", -1),
+        stdout=raw.get("stdout") or raw.get("output", ""),
+        stderr=raw.get("stderr", ""),
+        execution_duration_ms=raw.get("execution_duration_ms"),
+        job_id=job.get("job_id"),
+    )
 
 
 def working_directory(client: GatewayClient, session_id: str | None = None) -> dict[str, Any]:
@@ -159,7 +233,7 @@ def project_search_text(
 ) -> dict[str, Any]:
     """Search for text across project files using pure Python pathlib — no shell execution."""
     _validate_project(project)
-    project_dir = _project_root() / project
+    project_dir = _resolve_project(project)
     if not project_dir.is_dir():
         raise ValueError(f"Project directory not found: {project_dir}")
 
@@ -172,19 +246,82 @@ def project_search_text(
     )
 
 
+EXCLUDE_DIRS = frozenset({".git", ".venv", "node_modules", "__pycache__"})
+MAX_GLOB_RESULTS = 200
+MAX_GLOB_DEPTH = 20
+GLOB_TIMEOUT_S = 5
+
+
+def _safe_glob(
+    project_dir: Path,
+    pattern: str,
+    max_results: int = MAX_GLOB_RESULTS,
+) -> dict[str, Any]:
+    """Safe glob: returns {"files": [...], "count": N, "truncated": bool}."""
+    if pattern.startswith("/"):
+        raise ValueError("POLICY_DENIED: absolute pattern not allowed")
+    if ".." in Path(pattern).parts:
+        raise ValueError("POLICY_DENIED: path traversal in pattern")
+
+    project_root = project_dir.resolve()
+    results: list[str] = []
+    start = time.monotonic()
+
+    for path in project_root.glob(pattern):
+        if time.monotonic() - start > GLOB_TIMEOUT_S:
+            break
+        try:
+            resolved = path.resolve()
+            rel = resolved.relative_to(project_root)
+        except ValueError:
+            continue
+        if not resolved.is_file():
+            continue
+        if len(rel.parts) > MAX_GLOB_DEPTH:
+            continue
+        if any(part in EXCLUDE_DIRS for part in rel.parts):
+            continue
+        results.append(str(rel))
+        if len(results) >= max_results:
+            break
+
+    results.sort()
+    return {
+        "files": results,
+        "count": len(results),
+        "truncated": len(results) >= max_results,
+    }
+
+
 def project_find_files(
-    client: GatewayClient,
     project: str,
     pattern: str,
 ) -> dict[str, Any]:
-    if not _ALLOWED_PATH_RE.match(pattern):
-        raise ValueError(f"invalid pattern: {pattern!r}")
-    cmd = (
-        f"find . -not -path '*/.git/*' -not -path '*/__pycache__/*'"
-        f" -not -path '*/.venv/*' -not -path '*/node_modules/*'"
-        f" -type f -name '{pattern}' | sort | head -200"
-    )
-    return run_project_command(client, project, cmd)
+    project_dir = _resolve_project(project)
+    try:
+        glob_result = _safe_glob(project_dir, pattern)
+    except ValueError as e:
+        code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
+        return tool_error(
+            "project_find_files",
+            code=code.strip(),
+            message=msg.strip(),
+            tool_name="project_find_files",
+        )
+
+    result = {
+        "pattern": pattern,
+        "files": glob_result["files"],
+        "count": glob_result["count"],
+    }
+    meta = tool_success("project_find_files", result, tool_name="project_find_files")["meta"]
+    meta["truncated"] = glob_result.get("truncated", False)
+    return {
+        "ok": True,
+        "result": result,
+        "error": None,
+        "meta": meta,
+    }
 
 
 def project_list_files(client: GatewayClient, project: str, pattern: str) -> dict[str, Any]:
@@ -193,7 +330,7 @@ def project_list_files(client: GatewayClient, project: str, pattern: str) -> dic
     if not pattern or ".." in pattern:
         raise ValueError(f"Invalid pattern: {pattern!r}")
 
-    project_dir = _project_root() / _validate_project(project)
+    project_dir = _resolve_project(_validate_project(project))
     exclude_dirs = {
         ".git",
         "__pycache__",
@@ -241,7 +378,7 @@ def project_list_tree(client: GatewayClient, project: str, depth: int = 2) -> di
     """List project directory tree using Python pathlib — no shell execution."""
     project = _validate_project(project)
     depth = min(max(depth, 1), 5)
-    project_dir = _project_root() / project
+    project_dir = _resolve_project(project)
 
     entries: list[str] = []
     for p in sorted(project_dir.rglob("*")):
@@ -273,7 +410,7 @@ def project_tree(
         raise ValueError(f"invalid glob: {glob!r}")
     project = _validate_project(project)
     depth = min(max(depth, 1), 5)
-    project_dir = _project_root() / project
+    project_dir = _resolve_project(project)
 
     entries: list[str] = []
     for p in sorted(project_dir.rglob("*")):
@@ -337,31 +474,79 @@ def project_show_file_diff(
 # ── Project test target tools ───────────────────────────────────
 
 
+def _run_uv_tool(
+    client: GatewayClient,
+    project: str,
+    tool_key: str,
+    tool_name: str,
+    target: list[str] | None = None,
+) -> dict[str, Any]:
+    """Run a uv-backed tool via SSH gateway. Shared by all uv runner tools."""
+    project_dir = _resolve_project(project)
+    targets = target or ["."]
+    try:
+        argv = _build_uv_argv(tool_key, str(project_dir), targets)
+    except ValueError as e:
+        code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
+        return tool_error(code=code.strip(), message=msg.strip(), tool_name=tool_name)
+
+    check_result = client.execute_project_command(str(project_dir), "command -v uv")
+    if check_result.get("exit_code", 1) != 0:
+        return tool_error(
+            code="DEPENDENCY_MISSING",
+            message="Required executable 'uv' was not found",
+            hint="Install uv on the SSH target or configure another backend",
+            retryable=False,
+            details={"required_binary": "uv"},
+            tool_name=tool_name,
+        )
+
+    command = " ".join(shlex.quote(a) for a in argv)
+    result = client.execute_project_command(str(project_dir), command)
+    raw = client.wait_job(result["job_id"])
+    outcome, error_code = _map_uv_exit_code(tool_key, raw.get("exit_code", -1))
+    if error_code:
+        return tool_error(
+            code=error_code,
+            message=f"{tool_key} failed with exit code {raw.get('exit_code')}",
+            details={"exit_code": raw.get("exit_code"), "stderr": raw.get("stderr", "")},
+            tool_name=tool_name,
+        )
+    return tool_success(
+        build_command_result(
+            outcome=outcome,
+            exit_code=raw.get("exit_code", 0),
+            stdout=raw.get("stdout") or raw.get("output", ""),
+            stderr=raw.get("stderr", ""),
+            execution_duration_ms=raw.get("execution_duration_ms"),
+            job_id=raw.get("job_id"),
+        ),
+        tool_name=tool_name,
+    )
+
+
 def project_run_pytest(
     client: GatewayClient,
     project: str,
-    target: str,
+    target: list[str] | None = None,
 ) -> dict[str, Any]:
-    safe = _safe_test_target(target)
-    return run_project_command(client, project, f"pytest -q {safe}")
+    return _run_uv_tool(client, project, "pytest", "project_run_pytest", target)
 
 
 def project_run_ruff(
     client: GatewayClient,
     project: str,
-    target: str,
+    target: list[str] | None = None,
 ) -> dict[str, Any]:
-    safe = _safe_test_target(target)
-    return run_project_command(client, project, f"ruff check {safe}")
+    return _run_uv_tool(client, project, "ruff", "project_run_ruff", target)
 
 
 def project_run_mypy(
     client: GatewayClient,
     project: str,
-    target: str,
+    target: list[str] | None = None,
 ) -> dict[str, Any]:
-    safe = _safe_test_target(target)
-    return run_project_command(client, project, f"mypy {safe}")
+    return _run_uv_tool(client, project, "mypy", "project_run_mypy", target)
 
 
 # ── Project git info tools ──────────────────────────────────────
@@ -445,7 +630,15 @@ def run_project_command(
     command: str,
 ) -> dict[str, Any]:
     job = client.execute_project_command(project, command)
-    return client.wait_job(job["job_id"])
+    raw = client.wait_job(job["job_id"])
+    return build_command_result(
+        outcome="passed" if raw.get("exit_code", 1) == 0 else "failed",
+        exit_code=raw.get("exit_code", -1),
+        stdout=raw.get("stdout") or raw.get("output", ""),
+        stderr=raw.get("stderr", ""),
+        execution_duration_ms=raw.get("execution_duration_ms"),
+        job_id=job.get("job_id"),
+    )
 
 
 def project_working_directory(client: GatewayClient, project: str) -> dict[str, Any]:
@@ -455,10 +648,10 @@ def project_working_directory(client: GatewayClient, project: str) -> dict[str, 
 def project_info(client: GatewayClient, project: str) -> dict[str, Any]:
     """Resolve project path metadata — no shell execution."""
     project = _validate_project(project)
-    resolved = _project_root() / project
+    resolved = _resolve_project(project)
     return {
         "project": project,
-        "root": str(_project_root()),
+        "root": str(resolved),
         "resolved_path": str(resolved),
         "exists": resolved.exists(),
         "is_dir": resolved.is_dir(),
@@ -493,5 +686,9 @@ def project_run_lint(client: GatewayClient, project: str) -> dict[str, Any]:
     return run_project_command(client, project, "ruff check app tests examples")
 
 
-def project_run_compileall(client: GatewayClient, project: str) -> dict[str, Any]:
-    return run_project_command(client, project, "python -m compileall app tests examples")
+def project_run_compileall(
+    client: GatewayClient,
+    project: str,
+    target: list[str] | None = None,
+) -> dict[str, Any]:
+    return _run_uv_tool(client, project, "compileall", "project_run_compileall", target)

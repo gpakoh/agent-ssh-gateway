@@ -24,52 +24,52 @@ class TestToolModeDefaults:
 
     def test_all_modes_have_health(self):
         for mode in TOOL_NAMES_BY_MODE:
-            assert "gateway_health" in TOOL_NAMES_BY_MODE[mode]
+            assert "health" in TOOL_NAMES_BY_MODE[mode]
 
     def test_standard_includes_session_listing(self):
-        assert "gateway_list_sessions" in TOOL_NAMES_BY_MODE["standard"]
-        assert "gateway_read_file" in TOOL_NAMES_BY_MODE["standard"]
-        assert "gateway_repo_status" in TOOL_NAMES_BY_MODE["standard"]
+        assert "list_sessions" in TOOL_NAMES_BY_MODE["standard"]
+        assert "read_file" in TOOL_NAMES_BY_MODE["standard"]
+        assert "repo_status" in TOOL_NAMES_BY_MODE["standard"]
 
     def test_minimal_excludes_read_repo_jobwait(self):
         minimal = TOOL_NAMES_BY_MODE["minimal"]
-        assert "gateway_read_file" not in minimal
-        assert "gateway_repo_status" not in minimal
-        assert "gateway_wait_job" not in minimal
-        assert "gateway_list_sessions" not in minimal
+        assert "read_file" not in minimal
+        assert "repo_status" not in minimal
+        assert "wait_job" not in minimal
+        assert "list_sessions" not in minimal
 
     def test_minimal_includes_health_execute_jobs(self):
         minimal = TOOL_NAMES_BY_MODE["minimal"]
-        assert "gateway_health" in minimal
-        assert "gateway_execute_restricted" in minimal
-        assert "gateway_job_status" in minimal
-        assert "gateway_job_result" in minimal
+        assert "health" in minimal
+        assert "execute_restricted" in minimal
+        assert "job_status" in minimal
+        assert "job_result" in minimal
 
 
 class TestShouldRegisterTool:
     def test_health_in_all_modes(self):
         for mode in TOOL_NAMES_BY_MODE:
-            assert should_register_tool("gateway_health", mode)
+            assert should_register_tool("health", mode)
 
     def test_list_sessions_not_in_minimal(self):
-        assert not should_register_tool("gateway_list_sessions", "minimal")
-        assert should_register_tool("gateway_list_sessions", "standard")
+        assert not should_register_tool("list_sessions", "minimal")
+        assert should_register_tool("list_sessions", "standard")
 
     def test_read_file_not_in_minimal(self):
-        assert not should_register_tool("gateway_read_file", "minimal")
-        assert should_register_tool("gateway_read_file", "standard")
+        assert not should_register_tool("read_file", "minimal")
+        assert should_register_tool("read_file", "standard")
 
     def test_wait_job_not_in_minimal(self):
-        assert not should_register_tool("gateway_wait_job", "minimal")
-        assert should_register_tool("gateway_wait_job", "standard")
+        assert not should_register_tool("wait_job", "minimal")
+        assert should_register_tool("wait_job", "standard")
 
     def test_unknown_tool_returns_false(self):
         for mode in TOOL_NAMES_BY_MODE:
-            assert not should_register_tool("gateway_write_file", mode)
+            assert not should_register_tool("write_file", mode)
 
     def test_unknown_mode_raises(self):
         with pytest.raises(ToolModeError):
-            should_register_tool("gateway_health", mode="nonexistent")  # type: ignore[arg-type]
+            should_register_tool("health", mode="nonexistent")  # type: ignore[arg-type]
 
 
 class TestGetToolMode:
@@ -94,18 +94,18 @@ class TestGetToolMode:
 class TestToolsForMode:
     def test_tools_for_minimal(self):
         names = tools_for_mode("minimal")
-        assert "gateway_health" in names
-        assert "gateway_list_sessions" not in names
+        assert "health" in names
+        assert "list_sessions" not in names
 
     def test_tools_for_standard(self):
         names = tools_for_mode("standard")
-        assert "gateway_health" in names
-        assert "gateway_list_sessions" in names
-        assert "gateway_read_file" in names
+        assert "health" in names
+        assert "list_sessions" in names
+        assert "read_file" in names
 
     def test_tools_for_full(self):
         names = tools_for_mode("full")
-        assert "gateway_repo_status" in names
+        assert "repo_status" in names
 
     def test_tools_for_none_uses_default(self):
         mode = tools_for_mode()

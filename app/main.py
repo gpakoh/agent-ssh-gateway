@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import app.build_info as build_info
 import app.state as state
 from app.agent_token_store import AgentTokenStore
 from app.auth_middleware import auth_check, is_ip_allowed, parse_cidrs
@@ -30,6 +31,7 @@ from app.models import (
 )
 from app.project_analytics import ProjectAnalytics
 from app.redis_queue import RedisJobQueue
+from app.routers.auth import router as auth_identity_router
 from app.search_replace import GlobalSearchReplace
 from app.security import (
     SECURITY_HEADERS,
@@ -68,6 +70,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
+    build_info.set_started_at()
     await init_auth_db()
     state.host_key_store = create_host_key_store(settings)
     if not isinstance(state.host_key_store, NullHostKeyStore):
@@ -331,6 +334,10 @@ app = FastAPI(
         {"name": "webhooks", "description": "CI/CD webhooks. Master key only."},
         {"name": "known-hosts", "description": "Host key store management. Master key only."},
         {"name": "logs", "description": "Remote log reading (journald, docker). Master key only."},
+        {
+            "name": "auth",
+            "description": "Authentication diagnostics (whoami). Requires scope: `auth:read` for agent tokens.",
+        },
         {
             "name": "help",
             "description": "API help and endpoint discovery. Accessible with any valid API key.",
@@ -910,6 +917,7 @@ async def validation_exception_handler(request, exc: RequestValidationError):
 from app.routers.batch import router as batch_router  # noqa: E402
 from app.routers.code import router as code_router  # noqa: E402
 from app.routers.context import router as context_router  # noqa: E402
+from app.routers.diagnostics import router as diagnostics_router  # noqa: E402
 from app.routers.event_hooks import router as event_hooks_router  # noqa: E402
 from app.routers.files import router as files_router  # noqa: E402
 from app.routers.git import router as git_router  # noqa: E402
@@ -926,6 +934,7 @@ from app.routers.templates import router as templates_router  # noqa: E402
 from app.routers.webhooks import router as webhooks_router  # noqa: E402
 
 app.include_router(batch_router)
+app.include_router(diagnostics_router)
 app.include_router(code_router)
 app.include_router(project_inspection_router)
 app.include_router(ssh_router)
@@ -943,6 +952,7 @@ app.include_router(logs_router)
 app.include_router(templates_router)
 app.include_router(event_hooks_router)
 app.include_router(auth_router)
+app.include_router(auth_identity_router)
 
 # Static Files Mount (after All Router Includes So Static Routes Take Precedence)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")

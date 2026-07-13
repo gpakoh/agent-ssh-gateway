@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 import time
 import uuid
 from datetime import UTC, datetime
@@ -41,6 +42,8 @@ from app.models import (
     ConnectResponse,
     DisconnectRequest,
     DisconnectResponse,
+    ExecuteArgvRequest,
+    ExecuteArgvResponse,
     ExecuteRequest,
     ExecuteResponse,
     JobRunResponse,
@@ -336,6 +339,73 @@ async def ssh_execute(
         stdout = redact_secrets(stdout)
         stderr = redact_secrets(stderr)
     return ExecuteResponse(
+        stdout=stdout,
+        stderr=stderr,
+        exit_code=result["exit_code"],
+        duration=result.get("duration", 0.0),
+    )
+
+
+@router.post("/api/ssh/execute-argv", response_model=ExecuteArgvResponse)
+@rate_limit_mutation(60, "minute")
+async def ssh_execute_argv(
+    req: ExecuteArgvRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:execute:argv")),
+):
+    """Execute an argv command with stdin support on an existing SSH session.
+
+    argv is serialized via shlex.join — no bash -c wrapping.
+    """
+    command_str = shlex.join(req.argv)
+
+    decision = evaluate_command_policy(
+        command_str,
+        mode=settings.command_policy_mode,
+        profile=settings.command_policy_profile,
+    )
+
+    _state.audit_logger.log_security_event(
+        "COMMAND_POLICY_DECISION",
+        (
+            f"session_id={req.session_id}; "
+            f"command={command_str}; "
+            f"allowed={decision.allowed}; "
+            f"reason={decision.reason}; "
+            f"profile={decision.profile}; "
+            f"mode={decision.mode}; "
+            f"command_root={decision.command_root}"
+        ),
+        request.client.host if request.client else "unknown",
+    )
+
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=_err(403, f"Command denied by policy: {decision.reason}"),
+        )
+
+    _state.audit_logger.log_command(req.session_id, command_str, request.client.host)
+
+    session = await _state.manager.get_session(req.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=_err(404, "Session not found"))
+    ensure_session_owner(session, _identity)
+
+    stdin_bytes = req.stdin.encode("utf-8") if req.stdin else b""
+
+    result = await _state.manager.execute_argv(
+        session_id=req.session_id,
+        command_str=command_str,
+        stdin_data=stdin_bytes,
+        timeout=req.timeout_s,
+    )
+
+    max_output = 10 * 1024 * 1024
+    stdout = result["stdout"][:max_output]
+    stderr = result["stderr"][:max_output]
+
+    return ExecuteArgvResponse(
         stdout=stdout,
         stderr=stderr,
         exit_code=result["exit_code"],
