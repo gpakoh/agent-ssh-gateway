@@ -26,6 +26,10 @@ COPY --chown=appuser:appuser app/ ./app/
 # Copy SDK for download endpoint
 COPY --chown=appuser:appuser sdk/ ./sdk/
 
+# Copy Alembic for database migrations
+COPY --chown=appuser:appuser alembic.ini ./alembic.ini
+COPY --chown=appuser:appuser alembic/ ./alembic/
+
 # Security: Create necessary directories
 RUN mkdir -p /app/ssh_keys /app/logs /app/data /tmp && \
     chown -R appuser:appuser /app /tmp
