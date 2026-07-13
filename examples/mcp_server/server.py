@@ -2,6 +2,7 @@
 
 This server is intentionally kept outside the gateway core.
 """
+# ruff: noqa: E402 — late imports intentional for --reload compat
 
 from __future__ import annotations
 
@@ -1860,7 +1861,7 @@ _CONFIRM_HANDLERS: dict[str, Callable[..., Any]] = {
 
 
 def _confirmation_response(action: ConfirmAction) -> dict[str, Any]:
-    remaining = max(0, int(60 - (time.monotonic() - action.created_at)))
+    remaining = max(0, int(60 - (_time.monotonic() - action.created_at)))
     return tool_success(
         tool=action.tool,
         result={
