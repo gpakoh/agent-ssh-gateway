@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app.auth_middleware import token_fingerprint
 from app.config import settings
 from app.main import app
 
