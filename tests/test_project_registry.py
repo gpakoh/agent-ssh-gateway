@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 from examples.mcp_server.project_registry import ProjectRegistry
