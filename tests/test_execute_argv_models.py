@@ -30,7 +30,7 @@ def test_execute_argv_request_empty_argv_rejected():
 
     try:
         ExecuteArgvRequest(session_id="x", argv=[])
-        assert False, "Should have raised ValidationError"
+        raise AssertionError("Should have raised ValidationError")
     except ValidationError:
         pass
 
@@ -40,7 +40,7 @@ def test_execute_argv_request_arg_too_long_rejected():
 
     try:
         ExecuteArgvRequest(session_id="x", argv=["x" * 256])
-        assert False, "Should have raised ValidationError"
+        raise AssertionError("Should have raised ValidationError")
     except ValidationError:
         pass
 
@@ -50,7 +50,7 @@ def test_execute_argv_request_nul_in_arg_rejected():
 
     try:
         ExecuteArgvRequest(session_id="x", argv=["hello\x00world"])
-        assert False, "Should have raised ValidationError"
+        raise AssertionError("Should have raised ValidationError")
     except ValidationError:
         pass
 
@@ -60,13 +60,13 @@ def test_execute_argv_request_timeout_bounds():
 
     try:
         ExecuteArgvRequest(session_id="x", argv=["ls"], timeout_s=0)
-        assert False, "Should have raised ValidationError"
+        raise AssertionError("Should have raised ValidationError")
     except ValidationError:
         pass
 
     try:
         ExecuteArgvRequest(session_id="x", argv=["ls"], timeout_s=3601)
-        assert False, "Should have raised ValidationError"
+        raise AssertionError("Should have raised ValidationError")
     except ValidationError:
         pass
 
@@ -80,7 +80,7 @@ def test_execute_argv_request_total_argv_length():
             session_id="x",
             argv=["a" * 30000, "b" * 30000, "c" * 6000],
         )
-        assert False, "Should have raised ValidationError"
+        raise AssertionError("Should have raised ValidationError")
     except ValidationError:
         pass
 
@@ -92,7 +92,7 @@ def test_execute_argv_request_stdin_limit():
         ExecuteArgvRequest(
             session_id="x", argv=["ls"], stdin="x" * (1024 * 1024 + 1)
         )
-        assert False, "Should have raised ValidationError"
+        raise AssertionError("Should have raised ValidationError")
     except ValidationError:
         pass
 
