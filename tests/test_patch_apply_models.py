@@ -28,7 +28,7 @@ def test_patch_apply_request_empty_patch_rejected():
         ProjectPatchApplyRequest(
             session_id="x", project="p", patch="", expected_hashes={}
         )
-        assert False, "Should have raised ValidationError"
+        raise AssertionError("Should have raised ValidationError")
     except ValidationError:
         pass
 
@@ -43,7 +43,7 @@ def test_patch_apply_request_empty_project_rejected():
             patch="--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n",
             expected_hashes={},
         )
-        assert False, "Should have raised ValidationError"
+        raise AssertionError("Should have raised ValidationError")
     except ValidationError:
         pass
 
@@ -59,7 +59,7 @@ def test_patch_apply_request_strip_bounds():
             expected_hashes={},
             strip=-1,
         )
-        assert False, "Should have raised ValidationError"
+        raise AssertionError("Should have raised ValidationError")
     except ValidationError:
         pass
 
