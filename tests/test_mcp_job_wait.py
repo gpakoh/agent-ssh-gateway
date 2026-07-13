@@ -2,7 +2,7 @@
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 EXAMPLES_DIR = Path(__file__).resolve().parents[1] / "examples"
 MCP_SERVER_DIR = EXAMPLES_DIR / "mcp_server"
