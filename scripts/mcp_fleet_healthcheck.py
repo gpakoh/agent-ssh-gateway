@@ -175,7 +175,7 @@ def _mcp_request(
         headers["Mcp-Session-Id"] = sid
 
     use_ssl = parsed.scheme == "https"
-    host = parsed.hostname
+    host = parsed.hostname or ""
     port = parsed.port or (443 if use_ssl else 80)
     conn = _make_http_conn(host, port, use_ssl)
     try:
@@ -307,7 +307,7 @@ def check_nginx_route(url: str, token: str) -> CheckResult:
         )
 
         use_ssl = parsed.scheme == "https"
-        host = parsed.hostname
+        host = parsed.hostname or ""
         port = parsed.port or (443 if use_ssl else 80)
         conn = _make_http_conn(host, port, use_ssl)
         try:

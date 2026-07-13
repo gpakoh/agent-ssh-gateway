@@ -1,6 +1,6 @@
 [project]
 name = "agent-ssh-gateway"
-version = "0.1.30a0"
+version = "0.1.31a0"
 description = "A self-hosted SSH gateway API for agents, automation, and CI/CD workflows."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -49,6 +49,7 @@ dev = [
   "pytest",
   "pytest-asyncio",
   "httpx",
+  "httpx2",
   "ruff",
   "mypy",
   "types-PyYAML",
@@ -67,6 +68,18 @@ include = ["app*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = [
+  "error",
+  # aiosqlite background threads outlive event loop during test teardown —
+  # known upstream issue, not our code. Module filter targets pytest's collector.
+  "ignore::pytest.PytestUnhandledThreadExceptionWarning:_pytest.threadexception",
+  # Unclosed sockets/event loops from aiosqlite GC — same root cause.
+  "ignore::pytest.PytestUnraisableExceptionWarning:_pytest.unraisableexception",
+  # aiosqlite connections GC'd before .close() — third-party cleanup ordering.
+  "ignore::ResourceWarning:aiosqlite.core",
+  # Event loop ResourceWarning from asyncio GC — test teardown artifact.
+  "ignore::ResourceWarning:asyncio",
+]
 
 [tool.ruff]
 target-version = "py311"
@@ -79,6 +92,7 @@ ignore = ["B008", "E501"]
 [tool.mypy]
 python_version = "3.11"
 strict = false
+explicit_package_bases = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 disallow_untyped_defs = true
@@ -95,3 +109,12 @@ disable_error_code = [
   "attr-defined",
 ]
 plugins = ["sqlalchemy.ext.mypy.plugin"]
+exclude = [
+  "examples/rlm_gateway_auditor",
+  "tests/",
+  "sdk/",
+]
+
+[[tool.mypy.overrides]]
+module = "scripts.*"
+follow_imports = "skip"

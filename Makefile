@@ -7,7 +7,7 @@ lint:
 	ruff check examples/ tests/ scripts/
 
 mypy:
-	python -m mypy examples/mcp_server/ --ignore-missing-imports --allow-untyped-calls 2>&1 | tail -20
+	set -o pipefail; python -m mypy . 2>&1 | tail -20
 
 compileall:
 	python -m compileall examples/ tests/ -q

@@ -4,7 +4,29 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
-## [Unreleased]
+## [0.1.31a0] - 2026-07-13
+
+### Added
+
+- **`POST /api/ssh/execute-argv` endpoint**: execute commands with explicit argv list (no shell splitting). Supports stdin injection. Scoped `ssh:execute:argv`. (Session 171)
+- **`POST /api/projects/{project}/apply-patch` endpoint**: unified diff apply with validation, content-hash checks, and automatic rollback on failure. (Session 171)
+- **MCP `execute_argv` tool**: agent-facing tool wrapping the new endpoint. (Session 171)
+- **MCP `project_apply_patch` tool**: agent-facing tool wrapping patch apply. (Session 171)
+- **Alembic migration framework**: `alembic/` directory with `001_tz_aware_timestamps.py` migration for timezone-aware session timestamps. (Session 172)
+- **`httpx2` dev dependency**: next-gen HTTP client for testing. (Session 173)
+
+### Fixed
+
+- **Lint cleanup**: removed unused imports, fixed import sorting, added `noqa E402` for `sys.path` manipulations across `app/`, `tests/`, `examples/`. (Session 171)
+- **Unclosed file handle**: `tests/test_regression.py` now uses `with open()` context manager. (Session 173)
+- **Warning policy**: replaced blanket `ignore` with strict `error` + 4 precise ignores for aiosqlite/asyncio teardown artifacts. StarletteDeprecationWarning rule removed (never fired). (Session 173)
+
+### Changed
+
+- **mypy config**: `explicit_package_bases = true` added, duplicate module errors resolved. `make mypy` target now uses `set -o pipefail` and checks full project (`python -m mypy .`). (Session 172)
+- **Fleet typing**: `context7_server.py`, `shared.py`, `server.py` type annotations improved. (Session 172)
+- **`app/session_store.py`**: type fixes and cleanup. (Session 172)
+- **`app/known_hosts.py`**: type annotation fixes. (Session 172)
 
 ## [0.1.30-alpha] - 2026-07-11
 

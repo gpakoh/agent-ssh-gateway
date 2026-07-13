@@ -489,7 +489,8 @@ class TestMypyFoundBugs:
         """
         import app.main as main_module
 
-        src = open(main_module.__file__).read()
+        with open(main_module.__file__) as f:
+            src = f.read()
         # Find the shutdown gather block (lines ~388-395)
         # Verify 'err' is used in the result handling, not 'exc'
         # Before fix: "for sid, exc in zip" — after fix: "for sid, err in zip"

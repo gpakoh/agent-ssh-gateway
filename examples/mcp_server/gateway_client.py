@@ -151,6 +151,7 @@ class GatewayClient:
     def connect(self) -> str:
         """Establish SSH session and return session_id."""
         self._reconnect_session()
+        assert self.session_id is not None
         return self.session_id
 
     def disconnect(self, session_id: str | None = None) -> None:
