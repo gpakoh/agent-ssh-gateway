@@ -1,0 +1,47 @@
+version: 1
+registry_root: /media/1TB/Python
+
+projects:
+  web-ssh-gateway:
+    root: web_ssh/web-ssh-gateway
+    type: fastapi
+    description: "API-first SSH gateway for agents, CI/CD, and infra teams"
+    tags: [gateway, ssh, mcp]
+
+  nod-gateway:
+    root: NOD_gateway
+    type: monorepo
+    description: "NOD platform — master server, gateway client, tg bot, web UI, payment"
+    tags: [nod, platform]
+
+  quart-platform:
+    root: quart-platform
+    type: platform
+    description: "Quart platform umbrella"
+    tags: [quart, platform]
+
+  quart-core:
+    root: quart-platform/quart-core
+    parent: quart-platform
+    type: service
+    description: "Quart-core async microframework"
+    tags: [quart, async, web]
+
+  kojo-bot-service:
+    root: quart-platform/kojo-bot-service
+    parent: quart-platform
+    type: service
+    description: "Kojo Telegram bot service"
+    tags: [bot, telegram, aiogram]
+
+  pricetuner-scraper:
+    root: scraper
+    type: selenium
+    description: "PriceTuner price scraping with Selenium"
+    tags: [scraper, selenium]
+
+  tg-audio-bot:
+    root: tg_audio_bot
+    type: aiogram
+    description: "Telegram audio processing bot"
+    tags: [bot, telegram, audio]
