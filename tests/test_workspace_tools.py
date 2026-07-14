@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+from app.workspace.policy import WorkspacePolicyError
+from app.workspace.registry import reset_registry
 from app.workspace.tools import project_info, project_tree, workspace_list_projects
-from app.workspace.registry import WorkspaceRegistry, reset_registry
 
 
 @pytest.fixture(autouse=True)
@@ -54,7 +55,7 @@ class TestProjectInfo:
         assert "parent" not in info
 
     def test_info_unknown_project(self):
-        with pytest.raises(Exception):
+        with pytest.raises((WorkspacePolicyError, KeyError)):
             project_info("nonexistent-project")
 
 
