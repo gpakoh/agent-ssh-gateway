@@ -1,6 +1,6 @@
-"""Read-only workspace tools — list projects, project info, project tree, search, git inspection.
+"""Workspace tools — read, search, git, write, edit, patch.
 
-Phase A foundation + Phase B search and git tools. No file edit, or write.
+Phase A (list/info/tree) + Phase B (search/git) + Phase C1 (write/edit/patch).
 All filesystem access goes through WorkspacePolicy for path containment
 and secret filtering.
 """
@@ -9,6 +9,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.workspace.edit import (  # noqa: F401
+    project_apply_patch,
+    project_file_edit,
+    project_file_write,
+)
 from app.workspace.files import (  # noqa: F401
     project_file_read,
     project_find_files,

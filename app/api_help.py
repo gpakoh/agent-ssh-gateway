@@ -117,6 +117,14 @@ def build_api_help(request: Request) -> dict[str, Any]:
             "response": '{"job_id":"job_abc123","status":"queued"}',
         },
         {
+            "title": "Write a file to a workspace project",
+            "endpoint": "POST /api/workspace/projects/{project_id}/files/write",
+            "scope": "project:write",
+            "curl": 'curl -s -X POST http://localhost:8085/api/workspace/projects/my-project/files/write \\\n  -H "X-API-Key: $API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"path":"src/main.py","content":"def main():\\n    print(\\"hello\\")\\n"}\'',
+            "response": '{"project_id":"my-project","path":"src/main.py","size":38,"encoding":"utf-8"}',
+            "note": "Responses are metadata only \u2014 never full file content. Scope: project:write.",
+        },
+        {
             "title": "Save a server for quick reconnect",
             "endpoint": "POST /api/servers",
             "scope": "master_key",
@@ -197,6 +205,9 @@ def build_api_help(request: Request) -> dict[str, Any]:
                 },
             },
             "available_scopes": sorted(VALID_AGENT_SCOPES),
+            "scope_notes": {
+                "project:write": "Required for workspace file write/edit/patch operations. Implies project:read. Create agent tokens with this scope for file mutation.",
+            },
             "scope_endpoints": scope_routes,
             "master_only_count": len(master_only),
         },
@@ -1587,6 +1598,86 @@ def build_api_help(request: Request) -> dict[str, Any]:
                 "Known hosts accumulate over time. Periodically audit GET /api/known-hosts and remove stale entries.",
                 "If a host key changes unexpectedly (man-in-the-middle warning), use DELETE /api/known-hosts/{host} to clear it, then reconnect.",
                 "Empty backup list means no recovery points exist. Create one before your next risky operation.",
+            ],
+        },
+        "workspace_write_workflow": {
+            "title": "Workspace write \u2014 create, edit, patch project files",
+            "overview": "Write, edit, and patch files inside registered workspace projects. These endpoints mutate files on disk atomically (via os.replace). All writes are validated against the project's WorkspacePolicy: path traversal, symlink escape, and hidden path writes are blocked. Responses contain metadata only \u2014 never full file content.",
+            "prerequisite": "Requires agent token with `project:write` scope. Master key tokens have full access. Projects must be registered in projects.yaml.",
+            "scope_note": "The `project:write` scope is required. It implies `project:read`. Create an agent token with project:write scope via POST /api/agent/token.",
+            "sections": [
+                {
+                    "name": "write_file",
+                    "title": "Create or overwrite a file",
+                    "endpoints": [
+                        {
+                            "endpoint": "POST /api/workspace/projects/{project_id}/files/write",
+                            "scope": "project:write",
+                            "description": "Write (create or overwrite) a UTF-8 text file inside a project. Atomic write via os.replace \u2014 original file is never corrupted on failure. Max content size: 1 MB.",
+                        },
+                    ],
+                },
+                {
+                    "name": "edit_file",
+                    "title": "Search and replace in a file",
+                    "endpoints": [
+                        {
+                            "endpoint": "POST /api/workspace/projects/{project_id}/files/edit",
+                            "scope": "project:write",
+                            "description": "Edit a file by replacing the first occurrence of old_string with new_string. Returns a unified diff of the change. If old_string equals new_string, replaced=false and no write occurs.",
+                        },
+                    ],
+                },
+                {
+                    "name": "patch_file",
+                    "title": "Apply a unified diff patch",
+                    "endpoints": [
+                        {
+                            "endpoint": "POST /api/workspace/projects/{project_id}/files/patch",
+                            "scope": "project:write",
+                            "description": "Apply a unified diff patch to a file. Returns backup_hash (SHA-256 of pre-mutation content) for audit/rollback. Patch format must be valid unified diff with @@ hunk headers.",
+                        },
+                    ],
+                },
+            ],
+            "important": "All write responses return metadata only \u2014 never full file content. The edit endpoint includes a diff field showing what changed. The patch endpoint includes a backup_hash for rollback verification.",
+            "examples": [
+                {
+                    "endpoint": "POST /api/workspace/projects/{project_id}/files/write",
+                    "title": "Create or overwrite a project file",
+                    "body": '{"path":"src/main.py","content":"def main():\\n    print(\\"hello\\")\\n"}',
+                    "response": '{"project_id":"my-project","path":"src/main.py","size":38,"encoding":"utf-8"}',
+                    "notes": "Creates the file if it does not exist, overwrites if it does. Atomic write \u2014 no partial writes on failure.",
+                },
+                {
+                    "endpoint": "POST /api/workspace/projects/{project_id}/files/edit",
+                    "title": "Edit a file by search-and-replace",
+                    "body": '{"path":"src/main.py","old_string":"print(\\"hello\\")","new_string":"print(\\"world\\")"}',
+                    "response": '{"project_id":"my-project","path":"src/main.py","size":36,"encoding":"utf-8","old_string":"print(\\"hello\\")","new_string":"print(\\"world\\")","diff":"--- a/src/main.py\\n+++ b/src/main.py\\n@@ -1 +1 @@\\n-def main():\\n-    print(\\"hello\\")\\n+def main():\\n+    print(\\"world\\")\\n","replaced":true}',
+                    "notes": "Replaces the first occurrence only. Returns unified diff. If old_string not found, returns 404. If old_string == new_string, replaced=false.",
+                },
+                {
+                    "endpoint": "POST /api/workspace/projects/{project_id}/files/patch",
+                    "title": "Apply a unified diff patch",
+                    "body": '{"path":"src/main.py","patch":"--- a/src/main.py\\n+++ b/src/main.py\\n@@ -1 +1 @@\\n-def main():\\n-    print(\\"hello\\")\\n+def main():\\n-    print(\\"world\\")\\n+    print(\\"goodbye\\")\\n"}',
+                    "response": '{"project_id":"my-project","path":"src/main.py","size":45,"encoding":"utf-8","applied":true,"backup_hash":"sha256:e3b0c44..."}',
+                    "notes": "backup_hash is SHA-256 of the file content before the patch was applied. Use for audit trail or rollback verification.",
+                },
+            ],
+            "error_mapping": {
+                "403": "ScopeDeniedError, HiddenPathError — caller lacks project:write scope or writes to a hidden/secret path",
+                "400": "TraversalError, SymlinkEscapeError, PatchError, WriteError (binary/parent missing) — bad path or patch format",
+                "404": "Unknown project or old_string not found in file",
+                "413": "WriteError: content exceeds maximum size (1 MB)",
+                "500": "WriteError: unexpected I/O failure during atomic write",
+            },
+            "safety_notes": [
+                "All writes are atomic \u2014 os.replace() on a temp file. Original is never corrupted.",
+                "Symlink components in the path are rejected (SymlinkEscapeError).",
+                "Hidden paths (starting with .) and secret paths are blocked (HiddenPathError).",
+                "Path traversal (../) is rejected (TraversalError).",
+                "Responses never include full file content \u2014 only metadata and diffs.",
+                "backup_hash in patch responses enables audit/rollback without storing file content.",
             ],
         },
         "ssh_trust_workflow": {
