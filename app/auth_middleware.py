@@ -381,10 +381,10 @@ async def auth_check(
     return HTTPException(
         status_code=401,
         detail={
-            "message": "Invalid or missing API key. Provide via X-API-Key header",
+            "message": "Invalid or missing API key.",
             "code": "INVALID_API_KEY",
             "retryable": False,
-            "hint": "Provide a valid X-API-Key header in your requests",
+            "hint": "Provide a valid API key via the X-API-Key header",
             "http_status": 401,
         },
     )

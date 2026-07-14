@@ -21,6 +21,8 @@ This router should not contain feature-specific POST/DELETE workflows.
 
 ## Feature routers
 
+- `app/routers/auth.py` — auth diagnostic routes (whoami, auth check)
+- `app/routers/diagnostics.py` — latency breakdown, system info, session check
 - `app/routers/servers.py` — server inventory and connection routes
 - `app/routers/snapshots.py` — snapshot create/list/restore/delete routes
 - `app/routers/webhooks.py` — webhook and deployment routes
