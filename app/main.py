@@ -932,6 +932,7 @@ from app.routers.ssh import router as ssh_router  # noqa: E402
 from app.routers.system import router as system_router  # noqa: E402
 from app.routers.templates import router as templates_router  # noqa: E402
 from app.routers.webhooks import router as webhooks_router  # noqa: E402
+from app.routers.workspace import router as workspace_router  # noqa: E402
 
 app.include_router(batch_router)
 app.include_router(diagnostics_router)
@@ -953,6 +954,7 @@ app.include_router(templates_router)
 app.include_router(event_hooks_router)
 app.include_router(auth_router)
 app.include_router(auth_identity_router)
+app.include_router(workspace_router)
 
 # Static Files Mount (after All Router Includes So Static Routes Take Precedence)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
