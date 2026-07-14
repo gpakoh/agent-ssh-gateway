@@ -104,6 +104,29 @@ class TestProjectFileRead:
         assert out["start_line"] == 10
         assert out["end_line"] == 14
 
+    def test_file_read_respects_max_bytes_without_reading_full_file(self, tmp_project, monkeypatch):
+        from app.workspace.files import project_file_read
+
+        registry = _make_registry(tmp_project.root)
+        large_file = tmp_project.src / "large_text.txt"
+        large_file.write_text("abcdef", encoding="utf-8")
+
+        def fail_read_bytes(self):
+            raise AssertionError("read_bytes must not be used for capped reads")
+
+        monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
+
+        out = project_file_read(
+            "test-project",
+            "src/large_text.txt",
+            max_bytes=3,
+            registry=registry,
+        )
+
+        assert out["content"] == "abc"
+        assert out["size"] == 6
+        assert out["truncated"] is True
+
     def test_file_read_hidden_secret_rejected(self, tmp_project):
         from app.workspace.files import project_file_read
 
