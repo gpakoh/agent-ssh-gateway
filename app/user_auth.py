@@ -9,11 +9,14 @@ from pathlib import Path
 import bcrypt
 import jwt
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, Integer, String, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from app import state as _state
+from app.auth_middleware import verify_api_key
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -118,12 +121,31 @@ def verify_jwt(token: str) -> dict | None:
 
 
 @router.get("/api/auth/check")
-async def auth_check_users():
-    SessionLocal = get_auth_sessionmaker()
-    async with SessionLocal() as session:
-        result = await session.execute(select(func.count(User.id)))
-        count = result.scalar() or 0
-    return {"users_count": count}
+async def auth_check_users(request: Request):
+    token_store = getattr(_state, "agent_token_store", None)
+    identity = await verify_api_key(
+        request,
+        settings.api_key,
+        settings.agent_token,
+        settings,
+        token_store,
+    )
+    if identity is not None:
+        return {
+            "valid": True,
+            "auth_mode": "api_key",
+            "key_name": identity.name or "default",
+        }
+    return JSONResponse(
+        status_code=401,
+        content={
+            "message": "Invalid or missing API key",
+            "code": "INVALID_API_KEY",
+            "retryable": False,
+            "hint": "Provide a valid X-API-Key header with your API key",
+            "http_status": 401,
+        },
+    )
 
 
 @router.post("/api/auth/register", status_code=201)

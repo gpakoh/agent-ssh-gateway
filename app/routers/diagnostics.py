@@ -3,9 +3,11 @@
 import time
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_scope
+from app.models import SessionCheckRequest
 
 router = APIRouter(tags=["diagnostics"])
 
@@ -76,4 +78,43 @@ async def diagnostics_latency(
         "mcp": {
             "note": "MCP latency is process-local. Use the diagnostics_latency MCP tool.",
         },
+    }
+
+
+@router.post("/api/session/check", response_model=None)
+async def session_check(
+    body: SessionCheckRequest,
+    _identity: AuthIdentity = Depends(require_scope("diagnostics:read")),
+) -> JSONResponse | dict:
+    """Check whether an SSH session is still alive.
+
+    Does not execute any remote command — only inspects local session state.
+    Scope: diagnostics:read (master key bypasses scope checks).
+    """
+    mgr = _state.manager
+    if mgr is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "message": "SSH manager not initialized",
+                "code": "SERVICE_UNAVAILABLE",
+                "retryable": True,
+                "hint": "The gateway is still starting up. Retry in a few seconds.",
+                "http_status": 503,
+            },
+        )
+
+    record = await mgr.get_session(body.session_id)
+    if record is None:
+        return {
+            "valid": False,
+            "code": "SESSION_NOT_FOUND",
+            "hint": "Create a session via POST /api/ssh/connect",
+        }
+
+    status = "connected" if record.is_connected() else "disconnected"
+    return {
+        "valid": True,
+        "session_id": body.session_id,
+        "status": status,
     }

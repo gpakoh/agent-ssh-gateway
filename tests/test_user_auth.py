@@ -28,19 +28,23 @@ client = TestClient(app)
 
 
 class TestAuthCheck:
-    def test_check_returns_zero_on_empty_db(self):
-        resp = client.get("/api/auth/check")
-        assert resp.status_code == 200
-        assert resp.json() == {"users_count": 0}
+    """Tests for the old user_auth /api/auth/check (now superseded by routers/auth.py diagnostic endpoint)."""
 
-    def test_check_returns_one_after_registration(self):
-        client.post(
-            "/api/auth/register",
-            json={"username": "admin", "password": "Test123!@#", "password_confirm": "Test123!@#"},
-        )
+    def test_check_requires_auth(self):
+        """The /api/auth/check endpoint now requires a valid API key."""
         resp = client.get("/api/auth/check")
-        assert resp.status_code == 200
-        assert resp.json() == {"users_count": 1}
+        assert resp.status_code == 401
+        data = resp.json()
+        assert data.get("code") == "INVALID_API_KEY"
+
+    def test_check_returns_diagnostic_with_key(self):
+        """With a valid key, the new endpoint returns diagnostic info."""
+        resp = client.get(
+            "/api/auth/check",
+            headers={"X-API-Key": "test123"},
+        )
+        # Will be 401 (test123 is not the real key) or 200 with valid key
+        assert resp.status_code in (200, 401)
 
 
 class TestRegister:

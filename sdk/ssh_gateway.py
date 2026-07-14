@@ -247,7 +247,7 @@ class SSHGatewayClient:
         return r.json()
 
     def upload_file(self, local_path: str, remote_path: str) -> dict:
-        """Upload file to remote server (base64)."""
+        """Upload file to remote server (base64 via legacy upload endpoint)."""
         if not self._ssh_session:
             raise RuntimeError("Not connected. Call ssh_connect() first.")
 
@@ -265,6 +265,45 @@ class SSHGatewayClient:
                 "path": remote_path,
                 "content": encoded,
             },
+        )
+        r.raise_for_status()
+        return r.json()
+
+    # ── Phase C0: Diagnostic helpers ──────────────────────────────
+
+    def auth_check(self) -> dict:
+        """Check if current API key is valid.
+
+        Returns:
+            dict with keys: valid (bool), auth_mode (str), key_name (str)
+
+        Raises:
+            requests.HTTPError: on network or server errors.
+        """
+        r = self.session.get(f"{self.base_url}/api/auth/check")
+        r.raise_for_status()
+        return r.json()
+
+    def session_check(self, session_id: str | None = None) -> dict:
+        """Check if an SSH session is alive.
+
+        Args:
+            session_id: Session to check. Uses current session if None.
+
+        Returns:
+            dict with keys: valid (bool), session_id (str), status (str),
+            or valid=False with code and hint on failure.
+
+        Raises:
+            RuntimeError: if no session_id provided and no current session.
+        """
+        sid = session_id or (self._ssh_session.session_id if self._ssh_session else None)
+        if not sid:
+            raise RuntimeError("No session_id provided and no active session.")
+
+        r = self.session.post(
+            f"{self.base_url}/api/session/check",
+            json={"session_id": sid},
         )
         r.raise_for_status()
         return r.json()
@@ -397,3 +436,81 @@ def connect(
     client = SSHGatewayClient(base_url)
     client.ssh_connect(host, username, password)
     return client
+
+
+class quick:
+    """One-shot helpers that connect, perform an operation, and disconnect.
+
+    Usage:
+        from sdk.ssh_gateway import quick
+
+        # Run a command
+        result = quick.run(
+            host="192.168.1.100",
+            username="root",
+            password="secret",
+            command="ls -la",
+        )
+
+        # Read a file
+        content = quick.read(
+            host="192.168.1.100",
+            username="root",
+            private_key=open("~/.ssh/id_rsa").read(),
+            path="/etc/hostname",
+        )
+    """
+
+    @staticmethod
+    def run(
+        host: str,
+        username: str,
+        command: str = "echo hello",
+        password: str = "",
+        private_key: str = "",
+        port: int = 22,
+        base_url: str = "https://gateway.example.com",
+        api_key: str = "",
+    ) -> dict:
+        """Connect, execute a command, disconnect, return result.
+
+        Always disconnects in finally block, even on error.
+        """
+        client = SSHGatewayClient(base_url)
+        if api_key:
+            client.session.headers["X-API-Key"] = api_key
+        try:
+            client.ssh_connect(host, username, password=password, port=port, private_key=private_key)
+            return client.execute(command)
+        finally:
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+
+    @staticmethod
+    def read(
+        host: str,
+        username: str,
+        path: str = "/etc/hostname",
+        password: str = "",
+        private_key: str = "",
+        port: int = 22,
+        base_url: str = "https://gateway.example.com",
+        api_key: str = "",
+    ) -> str:
+        """Connect, read a file, disconnect, return content.
+
+        Always disconnects in finally block, even on error.
+        """
+        client = SSHGatewayClient(base_url)
+        if api_key:
+            client.session.headers["X-API-Key"] = api_key
+        try:
+            client.ssh_connect(host, username, password=password, port=port, private_key=private_key)
+            return client.read_file(path)
+        finally:
+            try:
+                client.disconnect()
+            except Exception:
+                pass

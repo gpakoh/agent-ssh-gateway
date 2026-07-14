@@ -258,6 +258,31 @@ class HealthResponse(BaseModel):
     version: str = ""
 
 
+class AuthCheckResponse(BaseModel):
+    """Response for GET /api/auth/check."""
+
+    valid: bool
+    auth_mode: str | None = None
+    key_name: str | None = None
+    hint: str | None = None
+
+
+class SessionCheckRequest(BaseModel):
+    """Request body for POST /api/session/check."""
+
+    session_id: str = Field(..., min_length=1)
+
+
+class SessionCheckResponse(BaseModel):
+    """Response for POST /api/session/check."""
+
+    valid: bool
+    session_id: str | None = None
+    status: str | None = None
+    code: str | None = None
+    hint: str | None = None
+
+
 class CapabilitiesResponse(BaseModel):
     """API capabilities / environment information."""
 
