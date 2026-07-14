@@ -107,9 +107,13 @@ def project_file_read(
     if _is_binary_path(full):
         raise WorkspacePolicyError("Binary content is not returned")
 
-    # Read up to max_bytes
-    raw = full.read_bytes()
-    truncated = len(raw) > max_bytes
+    file_size = full.stat().st_size
+
+    # Read only a bounded prefix. Do not call read_bytes(): workspace files may
+    # be arbitrarily large and max_bytes is a response cap, not an allocation cap.
+    with open(full, "rb") as f:
+        raw = f.read(max_bytes + 1)
+    truncated = len(raw) > max_bytes or file_size > max_bytes
     raw = raw[:max_bytes]
 
     try:
@@ -140,7 +144,7 @@ def project_file_read(
         "project_id": project_id,
         "path": relative_path,
         "type": "file",
-        "size": full.stat().st_size,
+        "size": file_size,
         "encoding": "utf-8",
         "content": "\n".join(sliced),
         "start_line": effective_start + 1,

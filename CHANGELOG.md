@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.32a1] - 2026-07-14
+
+### Fixed
+
+- **Workspace file read DoS guard**: project_file_read now reads only a bounded prefix (max_bytes + 1) instead of loading the full file into memory before truncation.
+
+### Documentation
+
+- Added Phase C1 write tools draft spec with symlink-safe write preflight, exact-read requirements, and atomic os.replace contract.
+
 ## [0.1.32a0] - 2026-07-14
 
 ### Added
