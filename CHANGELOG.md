@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.33a0] - 2026-07-15
+
+### Added
+
+- **Workspace Phase C1 — write/edit/patch tools**: `project_file_write`, `project_file_edit`, `project_apply_patch` in `app/workspace/edit.py`. All writes validated through `WorkspacePolicy`, symlink-safe preflight, and atomic `os.replace()`. (Sessions 178-181)
+
+- **REST wiring — 3 write endpoints** (scoped `project:write`):
+  - `POST /api/workspace/projects/{id}/files/write` — create/overwrite UTF-8 files
+  - `POST /api/workspace/projects/{id}/files/edit` — search-and-replace edit
+  - `POST /api/workspace/projects/{id}/files/patch` — unified diff apply
+
+- **MCP wiring — 3 agent tools**: `workspace_file_write`, `workspace_file_edit`, `workspace_apply_patch` (scoped `mcp:project`).
+
+- **Security test suite**: 52 tests covering write/edit/patch rejection for traversal, symlinks, hidden paths, scope denial, content size, binary content, and missing files.
+
+### Fixed
+
+- **Atomic write hardening**: `_atomic_write` now uses unique temp file with `O_EXCL` and `created_tmp` flag to prevent symlink-follow and double-close. (Session 181)
+- **Response content-leak prevention**: `project_apply_patch` no longer returns `patch` in response body — docstrings and MCP stripping aligned.
+- **Error mapper alignment (v3.1)**: traversal/symlink → 400, hidden/scope → 403, content too large → 413, write I/O failure → 500, unknown/not-found → 404.
+
+### Changed
+
+- **`scope_registry_for_identity`**: master tokens receive `ALL_SCOPES`; agent tokens receive exactly their granted scopes without manual additions. Scope hierarchy (`SCOPE_IMPLIES`) handles implication.
+- **Audit logging**: write/edit/patch endpoints log identity name, token type, and fingerprint prefix.
+
 ## [0.1.32a1] - 2026-07-14
 
 ### Fixed
