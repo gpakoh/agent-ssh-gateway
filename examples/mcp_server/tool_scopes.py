@@ -170,6 +170,10 @@ TOOL_SCOPES: dict[str, list[str]] = {
     # docs — mcp:docs
     "resolve_library_id": ["mcp:docs"],
     "query_docs": ["mcp:docs"],
+    # workspace write — mcp:project
+    "workspace_file_write": ["mcp:project"],
+    "workspace_file_edit": ["mcp:project"],
+    "workspace_apply_patch": ["mcp:project"],
 }
 
 FLEET_ROUTE_SCOPES: dict[str, list[str]] = {
