@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.32a0] - 2026-07-14
+
+### Added
+
+- **Workspace Control Plane Phase A**: `app/workspace/` module with `WorkspacePolicy`, `WorkspaceRegistry`, `ProjectInfo` model, YAML-based 7-project config with parent-child relationships. (Sessions 174-175)
+- **Workspace Phase B — file/git tools**: `project_file_read`, `project_find_files` (glob), `project_search_text` (ripgrep), `project_git_status`, `project_git_branch`, `project_git_log`, `project_git_diff` — all read-only, paths validated through `WorkspacePolicy`. (Session 176)
+- **Workspace REST wiring — 9 endpoints**: `GET /api/workspace/projects`, `projects/{id}`, `projects/{id}/tree`, `projects/{id}/files/read`, `files/find`, `search`, `git/status`, `git/branch`, `git/log`, `git/diff`. Thin wrappers calling into `app.workspace.tools`. (Session 177)
+- **DX diagnostics endpoints**:
+  - `GET /api/auth/check` — public auth diagnostic (valid key or structured 401)
+  - `POST /api/session/check` — session state diagnostic (scoped `diagnostics:read`)
+- **Agent token persistence fix**: runtime version now correctly persisted and aligned across sessions. (Session 174)
+
+### Fixed
+
+- **Lint cleanup**: removed unused import, narrowed generic exception type in workspace policy. (Session 176)
+- **Workspace blocker resolutions**: `PermissionError` as base for policy violations, stable project IDs invariant, temp fixture isolation. (Session 174)
+
+### Changed
+
+- **`app/models.py`**: added `AuthCheckResponse`, `SessionCheckRequest`, `SessionCheckResponse` schemas.
+
 ## [0.1.31a0] - 2026-07-13
 
 ### Added
