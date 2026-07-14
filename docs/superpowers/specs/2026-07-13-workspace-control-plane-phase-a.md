@@ -16,7 +16,7 @@ Transform web-ssh-gateway from a single-project SSH gateway into a multi-project
 | Registry format | `projects.yaml` (existing file, extended) | Don't break working contract; mapping by project_id already tested |
 | Project selection | Per-request `project_id` | Explicit boundary, safer, easier to audit |
 | Architecture pattern | Thin Wrapper (library layer) | Minimal complexity for 3 tools; easy to extract later |
-| Secrets filtering | Built-in patterns + YAML override in WorkspacePolicy | Security boundary separate from tree-builder |
+| Secrets filtering | Built-in patterns in `WorkspacePolicy` only | No YAML override in Phase A; security boundary separate from tree-builder |
 
 ## Invariants
 
