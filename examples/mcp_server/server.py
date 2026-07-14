@@ -11,6 +11,7 @@ import os
 import sys
 import time as _time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 _mcp_started_at = _time.time()
@@ -2535,6 +2536,183 @@ def gateway_tools_manifest() -> dict[str, Any]:
             scope_enforcement=_scope_enforcement,
         ),
     )
+
+
+# ── Workspace write tools (Phase C1) ─────────────────────────────
+
+_workspace_registry_cache = None
+
+
+def _get_workspace_registry():
+    """Get or create the workspace registry, resolving projects.yaml path.
+
+    Uses a lazy cache to avoid re-parsing YAML on every call.
+    """
+    global _workspace_registry_cache
+    if _workspace_registry_cache is not None:
+        return _workspace_registry_cache
+
+    from app.workspace.policy import ALL_SCOPES
+    from app.workspace.registry import WorkspaceRegistry, set_registry_root
+
+    # Try to find projects.yaml relative to this file's location
+    # or use the repo root as fallback
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    projects_yaml = repo_root / "projects.yaml"
+
+    if projects_yaml.exists():
+        set_registry_root(repo_root)
+        _workspace_registry_cache = WorkspaceRegistry.load(
+            projects_yaml, granted_scopes=ALL_SCOPES
+        )
+        return _workspace_registry_cache
+
+    # Fallback: try environment variable
+    env_root = os.environ.get("WORKSPACE_REGISTRY_ROOT", "")
+    if env_root:
+        env_path = Path(env_root)
+        if env_path.is_dir():
+            set_registry_root(env_path)
+            _workspace_registry_cache = WorkspaceRegistry.load(
+                env_path / "projects.yaml", granted_scopes=ALL_SCOPES
+            )
+            return _workspace_registry_cache
+
+    # Last resort: use current working directory
+    cwd = Path.cwd()
+    if (cwd / "projects.yaml").exists():
+        set_registry_root(cwd)
+        _workspace_registry_cache = WorkspaceRegistry.load(
+            cwd / "projects.yaml", granted_scopes=ALL_SCOPES
+        )
+        return _workspace_registry_cache
+
+    raise RuntimeError(
+        "Cannot find projects.yaml. Set WORKSPACE_REGISTRY_ROOT or "
+        "ensure projects.yaml exists in the repo root."
+    )
+
+
+@register_tool("workspace_file_write")
+@instrumented("workspace_file_write")
+def gateway_workspace_file_write(
+    project_id: str,
+    relative_path: str,
+    content: str,
+    max_bytes: int = 1_000_000,
+) -> dict[str, Any]:
+    """Write (create or overwrite) a UTF-8 text file inside a project.
+
+    Args:
+        project_id: Registered project identifier.
+        relative_path: Project-relative file path.
+        content: UTF-8 text content to write.
+        max_bytes: Maximum content size in bytes (default 1MB).
+
+    Returns:
+        Contract v1 dict with project_id, path, size, encoding.
+    """
+    try:
+        from app.workspace.edit import project_file_write
+
+        registry = _get_workspace_registry()
+        result = project_file_write(
+            project_id=project_id,
+            relative_path=relative_path,
+            content=content,
+            max_bytes=max_bytes,
+            registry=registry,
+        )
+        return tool_success(tool="workspace_file_write", result=result)
+    except Exception as exc:
+        return tool_error(
+            tool="workspace_file_write",
+            code="TOOL_EXECUTION_FAILED",
+            message=str(exc),
+        )
+
+
+@register_tool("workspace_file_edit")
+@instrumented("workspace_file_edit")
+def gateway_workspace_file_edit(
+    project_id: str,
+    relative_path: str,
+    old_string: str,
+    new_string: str,
+    max_bytes: int = 1_000_000,
+) -> dict[str, Any]:
+    """Edit a file by replacing the first occurrence of old_string with new_string.
+
+    Args:
+        project_id: Registered project identifier.
+        relative_path: Project-relative file path.
+        old_string: Literal string to find and replace (must not be empty).
+        new_string: Replacement string.
+        max_bytes: Maximum file size in bytes (default 1MB).
+
+    Returns:
+        Contract v1 dict with project_id, path, size, diff, replaced.
+    """
+    try:
+        from app.workspace.edit import project_file_edit
+
+        registry = _get_workspace_registry()
+        result = project_file_edit(
+            project_id=project_id,
+            relative_path=relative_path,
+            old_string=old_string,
+            new_string=new_string,
+            max_bytes=max_bytes,
+            registry=registry,
+        )
+        return tool_success(tool="workspace_file_edit", result=result)
+    except Exception as exc:
+        return tool_error(
+            tool="workspace_file_edit",
+            code="TOOL_EXECUTION_FAILED",
+            message=str(exc),
+        )
+
+
+@register_tool("workspace_apply_patch")
+@instrumented("workspace_apply_patch")
+def gateway_workspace_apply_patch(
+    project_id: str,
+    relative_path: str,
+    patch: str,
+    max_bytes: int = 1_000_000,
+) -> dict[str, Any]:
+    """Apply a unified diff patch to a file inside a project.
+
+    Args:
+        project_id: Registered project identifier.
+        relative_path: Project-relative file path.
+        patch: Unified diff text (single file).
+        max_bytes: Maximum file size in bytes (default 1MB).
+
+    Returns:
+        Dict with project_id, path, size, applied, backup_hash (patch stripped).
+    """
+    try:
+        from app.workspace.edit import project_apply_patch
+
+        registry = _get_workspace_registry()
+        result = project_apply_patch(
+            project_id=project_id,
+            relative_path=relative_path,
+            patch=patch,
+            max_bytes=max_bytes,
+            registry=registry,
+        )
+        # Strip patch content from response to avoid leaking input
+        result.pop("patch", None)
+        return tool_success(tool="workspace_apply_patch", result=result)
+    except Exception as exc:
+        return tool_error(
+            tool="workspace_apply_patch",
+            code="TOOL_EXECUTION_FAILED",
+            message=str(exc),
+        )
 
 
 # ── Main ─────────────────────────────────────────────────────────

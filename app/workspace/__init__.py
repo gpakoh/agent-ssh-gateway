@@ -20,7 +20,10 @@ from app.workspace.registry import (
     reset_registry,
 )
 from app.workspace.tools import (
+    project_apply_patch,
+    project_file_edit,
     project_file_read,
+    project_file_write,
     project_find_files,
     project_git_branch,
     project_git_diff,
@@ -44,7 +47,10 @@ __all__ = [
     "WorkspacePolicyError",
     "WorkspaceRegistry",
     "load_registry",
+    "project_apply_patch",
+    "project_file_edit",
     "project_file_read",
+    "project_file_write",
     "project_find_files",
     "project_git_branch",
     "project_git_diff",
