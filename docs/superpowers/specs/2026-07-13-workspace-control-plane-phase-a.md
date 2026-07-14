@@ -1,7 +1,7 @@
 # Workspace Control Plane — Phase A Design
 
 **Date:** 2026-07-13
-**Status:** Approved
+**Status:** Draft
 **Scope:** Phase A only — registry/info foundation
 
 ## Overview
@@ -28,6 +28,7 @@ Transform web-ssh-gateway from a single-project SSH gateway into a multi-project
 6. Phase A is read-only: list, info, tree. No file content, no search, no git, no docker, no write/edit
 7. Tools are sync `def` — no async without real I/O
 8. Router/MCP wiring is future work — Phase A deliverable is package + tools + tests + shims
+9. Project IDs are stable — rename requires migration, never silently change
 
 ## Data Model
 
@@ -48,42 +49,49 @@ projects:
   web-ssh-gateway:
     root: web_ssh/web-ssh-gateway
     type: fastapi
-    description: "API-first SSH gateway for agents"
+    description: "API-first SSH gateway for agents, CI/CD, and infra teams"
     tags: [gateway, ssh, mcp]
-    compose: docker/docker-compose.yml
 
   nod-gateway:
     root: NOD_gateway
-    type: python
-    description: "NOD IoT gateway platform"
-    tags: [iot, gateway]
+    type: monorepo
+    description: "NOD platform — master server, gateway client, tg bot, web UI, payment"
+    tags: [nod, platform]
 
   quart-platform:
     root: quart-platform
-    type: python
-    description: "Quart async web platform"
-    tags: [web, quart]
+    type: platform
+    description: "Quart platform umbrella"
+    tags: [quart, platform]
 
-  scraper:
+  quart-core:
+    root: quart-platform/quart-core
+    parent: quart-platform
+    type: service
+    description: "Quart-core async microframework"
+    tags: [quart, async, web]
+
+  kojo-bot-service:
+    root: quart-platform/kojo-bot-service
+    parent: quart-platform
+    type: service
+    description: "Kojo Telegram bot service"
+    tags: [bot, telegram, aiogram]
+
+  pricetuner-scraper:
     root: scraper
-    type: python
-    description: "PriceTuner scraper"
-    tags: [scraper, pricetuner]
-    compose: docker-compose.yml
+    type: selenium
+    description: "PriceTuner price scraping with Selenium"
+    tags: [scraper, selenium]
 
   tg-audio-bot:
     root: tg_audio_bot
-    type: python
-    description: "Telegram audio bot"
-    tags: [telegram, bot]
-    compose: docker/docker-compose.yml
-
-  flash-attention:
-    root: flash-attention
-    type: upstream
-    description: "Dao-AILab flash-attention (upstream fork)"
-    tags: [ml, cuda]
+    type: aiogram
+    description: "Telegram audio processing bot"
+    tags: [bot, telegram, audio]
 ```
+
+**Note:** `quart-platform` is a parent project. `quart-core` and `kojo-bot-service` declare `parent: quart-platform`. Total: 7 projects (1 parent + 6 leaf).
 
 ### Models (`app/workspace/models.py`)
 
@@ -95,9 +103,10 @@ from pathlib import Path
 class Project:
     project_id: str
     root: Path            # absolute, resolved from registry_root + relative
-    type: str             # fastapi | python | upstream
+    type: str             # fastapi | monorepo | platform | service | selenium | aiogram
     description: str
     tags: list[str]
+    parent: str | None = None  # project_id of parent project
     compose: str | None = None
 
 @dataclass(frozen=True)
@@ -121,7 +130,7 @@ class WorkspaceConfig:
 ### Typed Exceptions
 
 ```python
-class WorkspacePolicyError(Exception): ...
+class WorkspacePolicyError(PermissionError): ...
 class TraversalError(WorkspacePolicyError): ...
 class SymlinkEscapeError(WorkspacePolicyError): ...
 class HiddenPathError(WorkspacePolicyError): ...
@@ -318,17 +327,18 @@ import app.workspace_registry
 
 | Test | Coverage |
 |------|----------|
-| `test_load_projects_yaml` | Loads 6 projects from projects.yaml |
+| `test_load_projects_yaml` | Loads projects from temp registry fixture |
 | `test_project_lookup_valid` | resolve_project returns Project for known ID |
 | `test_project_lookup_unknown` | resolve_project raises error for unknown ID |
 | `test_project_root_resolved` | root is absolute Path from registry_root + relative |
 | `test_unique_project_ids` | No duplicate project_ids in registry |
+| `test_parent_child_relationship` | quart-core has parent=quart-platform |
 
 ### test_workspace_tools.py
 
 | Test | Coverage |
 |------|----------|
-| `test_list_projects_returns_all` | workspace_list_projects returns 6 projects |
+| `test_list_projects_returns_all` | workspace_list_projects returns all projects from fixture |
 | `test_project_info_valid` | project_info returns metadata for known project |
 | `test_project_info_unknown` | project_info raises error for unknown ID |
 | `test_tree_root` | project_tree with empty path returns root children |
@@ -339,8 +349,9 @@ import app.workspace_registry
 
 ## Acceptance Criteria
 
-- [ ] `projects.yaml` loads 6 projects
-- [ ] `project_tree` works for all 6 projects
+- [ ] Unit tests on temp fixtures pass (no live filesystem dependency)
+- [ ] Real smoke: `WorkspaceRegistry.load("projects.yaml")` loads all projects
+- [ ] Real smoke: `project_tree` works for all 7 projects
 - [ ] `ruff check .` clean
 - [ ] `python3 -m mypy .` clean
 - [ ] `pytest -q` green
