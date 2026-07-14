@@ -15,6 +15,10 @@ from app.workspace.registry import (  # noqa: F401
     set_registry_root,
 )
 from app.workspace.tools import (  # noqa: F401
+    project_git_branch,
+    project_git_diff,
+    project_git_log,
+    project_git_status,
     project_info,
     project_tree,
     workspace_list_projects,

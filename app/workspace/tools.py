@@ -1,6 +1,6 @@
-"""Read-only workspace tools — list projects, project info, project tree.
+"""Read-only workspace tools — list projects, project info, project tree, search, git inspection.
 
-These are the Phase A foundation tools. No file read, edit, search, or git.
+Phase A foundation + Phase B search and git tools. No file edit, or write.
 All filesystem access goes through WorkspacePolicy for path containment
 and secret filtering.
 """
@@ -9,7 +9,18 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.workspace.files import (  # noqa: F401
+    project_file_read,
+    project_find_files,
+)
+from app.workspace.git import (  # noqa: F401
+    project_git_branch,
+    project_git_diff,
+    project_git_log,
+    project_git_status,
+)
 from app.workspace.registry import WorkspaceRegistry, get_registry
+from app.workspace.search import project_search_text  # noqa: F401
 
 
 def workspace_list_projects(registry: WorkspaceRegistry | None = None) -> list[dict[str, Any]]:
