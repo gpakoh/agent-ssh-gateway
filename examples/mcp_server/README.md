@@ -105,13 +105,13 @@ All require the `mcp:project` scope.
 | `workspace_file_write` | yes | yes | — |
 | `workspace_file_edit` | yes | yes | — |
 | `workspace_apply_patch` | yes | yes | — |
-| `workspace_preview_write` | yes | yes | — |
-| `workspace_preview_edit` | yes | yes | — |
-| `workspace_preview_patch` | yes | yes | — |
-| `workspace_verify` | yes | yes | — |
+| `workspace_preview_write` | yes | yes | yes |
+| `workspace_preview_edit` | yes | yes | yes |
+| `workspace_preview_patch` | yes | yes | yes |
+| `workspace_verify` | yes | yes | yes |
 
-**chatgpt mode** intentionally excludes all workspace tools — it is
-read-only by design (no write, no preview, no verify via MCP).
+**chatgpt mode** intentionally excludes workspace write tools. It remains
+read-only: preview and verify tools are available, while write/edit/patch are hidden.
 
 ### Safe flag
 
