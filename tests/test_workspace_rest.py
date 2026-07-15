@@ -743,7 +743,12 @@ class TestEditFileEndpoint:
                 },
             )
         assert resp.status_code == 200
-        assert "secret_replacement" not in resp.json().get("old_string", "")
+        body = resp.json()
+        receipt = body.get("receipt")
+        assert receipt is not None
+        assert "content" not in receipt
+        assert "patch" not in receipt
+        assert "raw" not in receipt
 
 
 # ---------------------------------------------------------------------------
