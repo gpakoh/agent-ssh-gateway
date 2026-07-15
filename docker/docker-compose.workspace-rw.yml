@@ -10,5 +10,7 @@ name: web-ssh-gateway
 
 services:
   web-ssh-gateway:
+    environment:
+      - WORKSPACE_READONLY=false
     volumes:
       - /media/1TB/Python:/media/1TB/Python:rw
