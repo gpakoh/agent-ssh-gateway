@@ -16,6 +16,8 @@ import sys
 
 import pytest
 
+pytestmark = pytest.mark.host_smoke
+
 NGINX_HOST = os.environ.get("NGINX_HOST", "")
 
 if not NGINX_HOST:

@@ -21,10 +21,13 @@ from scripts.opencode_runner_wrapper import (
 OPENCODE_BIN = (
     os.getenv("OPENCODE_BIN") or shutil.which("opencode") or "/root/.opencode/bin/opencode"
 )
-pytestmark = pytest.mark.skipif(
-    not os.path.exists(OPENCODE_BIN),
-    reason="OpenCode binary not available; set OPENCODE_BIN to run integration tests",
-)
+pytestmark = [
+    pytest.mark.host_smoke,
+    pytest.mark.skipif(
+        not os.path.exists(OPENCODE_BIN),
+        reason="OpenCode binary not available; set OPENCODE_BIN to run integration tests",
+    ),
+]
 
 
 class TestValidateTaskId:
