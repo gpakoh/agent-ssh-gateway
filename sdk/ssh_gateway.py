@@ -387,6 +387,187 @@ class SSHGatewayClient:
                 pass
             self._ssh_session = None
 
+    # ── Workspace preview/verify/safe write helpers ────────────────
+
+    @staticmethod
+    def workspace_preview_write(
+        project_id: str,
+        path: str,
+        content: str,
+        max_bytes: int = 1_000_000,
+        base_url: str = "https://gateway.example.com",
+        api_key: str = "",
+    ) -> dict:
+        """Preview a file write without writing to disk.
+
+        Returns diff, hashes, and size changes. No disk mutation.
+        """
+        client = SSHGatewayClient(base_url)
+        if api_key:
+            client.session.headers["X-API-Key"] = api_key
+        r = client.session.post(
+            f"{base_url}/api/workspace/projects/{project_id}/files/preview/write",
+            json={"path": path, "content": content, "max_bytes": max_bytes},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    @staticmethod
+    def workspace_preview_edit(
+        project_id: str,
+        path: str,
+        old_string: str,
+        new_string: str,
+        max_bytes: int = 1_000_000,
+        base_url: str = "https://gateway.example.com",
+        api_key: str = "",
+    ) -> dict:
+        """Preview a file edit without writing to disk.
+
+        Returns diff, hashes, and size changes. No disk mutation.
+        """
+        client = SSHGatewayClient(base_url)
+        if api_key:
+            client.session.headers["X-API-Key"] = api_key
+        r = client.session.post(
+            f"{base_url}/api/workspace/projects/{project_id}/files/preview/edit",
+            json={
+                "path": path,
+                "old_string": old_string,
+                "new_string": new_string,
+                "max_bytes": max_bytes,
+            },
+        )
+        r.raise_for_status()
+        return r.json()
+
+    @staticmethod
+    def workspace_preview_patch(
+        project_id: str,
+        path: str,
+        patch: str,
+        max_bytes: int = 1_000_000,
+        base_url: str = "https://gateway.example.com",
+        api_key: str = "",
+    ) -> dict:
+        """Preview a patch application without writing to disk.
+
+        Returns diff, hashes, and size changes. No disk mutation.
+        """
+        client = SSHGatewayClient(base_url)
+        if api_key:
+            client.session.headers["X-API-Key"] = api_key
+        r = client.session.post(
+            f"{base_url}/api/workspace/projects/{project_id}/files/preview/patch",
+            json={"path": path, "patch": patch, "max_bytes": max_bytes},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    @staticmethod
+    def workspace_verify(
+        project_id: str,
+        path: str,
+        expected_hash: str,
+        base_url: str = "https://gateway.example.com",
+        api_key: str = "",
+    ) -> dict:
+        """Verify a file's current hash matches expected hash.
+
+        Returns matches, current_hash, file_exists.
+        """
+        client = SSHGatewayClient(base_url)
+        if api_key:
+            client.session.headers["X-API-Key"] = api_key
+        r = client.session.post(
+            f"{base_url}/api/workspace/projects/{project_id}/files/verify",
+            json={"path": path, "expected_hash": expected_hash},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    @staticmethod
+    def workspace_write(
+        project_id: str,
+        path: str,
+        content: str,
+        max_bytes: int = 1_000_000,
+        safe: bool = False,
+        base_url: str = "https://gateway.example.com",
+        api_key: str = "",
+    ) -> dict:
+        """Write (create or overwrite) a file inside a project.
+
+        Args:
+            safe: if True, include nested receipt in response.
+        """
+        client = SSHGatewayClient(base_url)
+        if api_key:
+            client.session.headers["X-API-Key"] = api_key
+        r = client.session.post(
+            f"{base_url}/api/workspace/projects/{project_id}/files/write",
+            json={"path": path, "content": content, "max_bytes": max_bytes, "safe": safe},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    @staticmethod
+    def workspace_edit(
+        project_id: str,
+        path: str,
+        old_string: str,
+        new_string: str,
+        max_bytes: int = 1_000_000,
+        safe: bool = False,
+        base_url: str = "https://gateway.example.com",
+        api_key: str = "",
+    ) -> dict:
+        """Edit a file by replacing first occurrence of old_string.
+
+        Args:
+            safe: if True, include nested receipt in response.
+        """
+        client = SSHGatewayClient(base_url)
+        if api_key:
+            client.session.headers["X-API-Key"] = api_key
+        r = client.session.post(
+            f"{base_url}/api/workspace/projects/{project_id}/files/edit",
+            json={
+                "path": path,
+                "old_string": old_string,
+                "new_string": new_string,
+                "max_bytes": max_bytes,
+                "safe": safe,
+            },
+        )
+        r.raise_for_status()
+        return r.json()
+
+    @staticmethod
+    def workspace_patch(
+        project_id: str,
+        path: str,
+        patch: str,
+        max_bytes: int = 1_000_000,
+        safe: bool = False,
+        base_url: str = "https://gateway.example.com",
+        api_key: str = "",
+    ) -> dict:
+        """Apply a unified diff patch to a file.
+
+        Args:
+            safe: if True, include nested receipt in response.
+        """
+        client = SSHGatewayClient(base_url)
+        if api_key:
+            client.session.headers["X-API-Key"] = api_key
+        r = client.session.post(
+            f"{base_url}/api/workspace/projects/{project_id}/files/patch",
+            json={"path": path, "patch": patch, "max_bytes": max_bytes, "safe": safe},
+        )
+        r.raise_for_status()
+        return r.json()
+
 
 class BackgroundJob:
     """Background job with streaming logs."""
