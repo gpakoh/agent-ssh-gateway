@@ -1609,14 +1609,20 @@ def build_api_help(request: Request) -> dict[str, Any]:
                 "title": "Optional `safe` flag — receipt metadata",
                 "overview": "All write endpoints accept an optional boolean `safe` parameter (default: false). When `safe=true`, the response includes a nested `receipt` object with metadata about the mutation. Receipts are metadata-only — they never contain file content, patch text, or old_string/new_string.",
                 "receipt_schema": {
-                    "receipt_id": "string — unique receipt identifier (links to audit trail)",
+                    "receipt_id": "string — unique receipt identifier (rcpt_xxx)",
+                    "snapshot_id": "string|null — links to a Snapshot for rollback (None until linked by caller)",
                     "project_id": "string — registered project identifier",
                     "relative_path": "string — project-relative file path",
-                    "operation": "string — operation type (write/edit/patch)",
-                    "before_hash": "string|null — SHA-256 of file content before mutation (null for new files)",
-                    "after_hash": "string|null — SHA-256 of file content after mutation (null if file deleted)",
-                    "size": "int — content size in bytes",
+                    "operation": "string — 'write', 'edit', or 'patch'",
                     "file_exists_before": "bool — true if file existed before mutation",
+                    "before_hash": "string|null — SHA-256 of file content before mutation (null for new files)",
+                    "after_hash": "string — SHA-256 of file content after mutation",
+                    "size_before": "int — byte size before mutation (0 if new file)",
+                    "size_after": "int — byte size after mutation",
+                    "changed": "bool — true if content actually changed",
+                    "verified": "bool — true if read-back hash matches after_hash",
+                    "diff_summary": "string — brief description (e.g. 'created (5 lines)', 'write: +2/-1 lines')",
+                    "error": "string|null — error message if verification failed, null otherwise",
                 },
                 "important": "Receipts are metadata-only. They never contain: file content, patch text, old_string, new_string, absolute host paths. Receipts do NOT enable rollback — rollback is a separate lifecycle not exposed via these endpoints.",
             },
@@ -1673,21 +1679,21 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "endpoint": "POST /api/workspace/projects/{project_id}/files/write",
                     "title": "Write with receipt (safe=true)",
                     "body": '{"path":"src/main.py","content":"def main():\\n    print(\\"hello\\")\\n","safe":true}',
-                    "response": '{"project_id":"my-project","path":"src/main.py","size":38,"encoding":"utf-8","receipt":{"receipt_id":"r_abc123","project_id":"my-project","relative_path":"src/main.py","operation":"write","before_hash":"sha256:e3b0c44...","after_hash":"sha256:9f86d08...","size":38,"file_exists_before":true}}',
-                    "notes": "Receipt is metadata-only. before_hash is the pre-mutation content hash. No file content in receipt.",
+                    "response": '{"project_id":"my-project","path":"src/main.py","size":38,"encoding":"utf-8","receipt":{"receipt_id":"rcpt_a1b2c3d4e5f6","snapshot_id":null,"operation":"write","file_exists_before":true,"before_hash":"sha256:e3b0c44...","after_hash":"sha256:9f86d08...","size_before":32,"size_after":38,"changed":true,"verified":true,"diff_summary":"write: +1/-0 lines"}}',
+                    "notes": "Receipt is metadata-only. before_hash is the pre-mutation content hash. verified=true means read-back confirmed the hash. snapshot_id is null until caller links a snapshot.",
                 },
                 {
                     "endpoint": "POST /api/workspace/projects/{project_id}/files/edit",
                     "title": "Edit with receipt (safe=true)",
                     "body": '{"path":"src/main.py","old_string":"print(\\"hello\\")","new_string":"print(\\"world\\")","safe":true}',
-                    "response": '{"project_id":"my-project","path":"src/main.py","size":36,"encoding":"utf-8","old_string":"print(\\"hello\\")","new_string":"print(\\"world\\")","diff":"--- a/src/main.py\\n+++ b/src/main.py\\n@@ -1 +1 @@\\n-def main():\\n-    print(\\"hello\\")\\n+def main():\\n+    print(\\"world\\")\\n","replaced":true,"receipt":{"receipt_id":"r_def456","project_id":"my-project","relative_path":"src/main.py","operation":"edit","before_hash":"sha256:e3b0c44...","after_hash":"sha256:9f86d08...","size":36,"file_exists_before":true}}',
-                    "notes": "Receipt links to audit trail via receipt_id. Diff and receipt are separate — diff shows what changed, receipt shows metadata for verification.",
+                    "response": '{"project_id":"my-project","path":"src/main.py","size":36,"encoding":"utf-8","old_string":"print(\\"hello\\")","new_string":"print(\\"world\\")","diff":"--- a/src/main.py\\n+++ b/src/main.py\\n@@ -1 +1 @@\\n-def main():\\n-    print(\\"hello\\")\\n+def main():\\n+    print(\\"world\\")\\n","replaced":true,"receipt":{"receipt_id":"rcpt_f6e5d4c3b2a1","snapshot_id":null,"operation":"edit","file_exists_before":true,"before_hash":"sha256:e3b0c44...","after_hash":"sha256:9f86d08...","size_before":38,"size_after":36,"changed":true,"verified":true,"diff_summary":"edit: +0/-1 lines"}}',
+                    "notes": "Receipt links to audit trail via receipt_id. Diff shows what changed, receipt shows metadata for verification.",
                 },
                 {
                     "endpoint": "POST /api/workspace/projects/{project_id}/files/patch",
                     "title": "Patch with receipt (safe=true)",
                     "body": '{"path":"src/main.py","patch":"--- a/src/main.py\\n+++ b/src/main.py\\n@@ -1 +1 @@\\n-def main():\\n-    print(\\"hello\\")\\n+def main():\\n-    print(\\"world\\")\\n+    print(\\"goodbye\\")\\n","safe":true}',
-                    "response": '{"project_id":"my-project","path":"src/main.py","size":45,"encoding":"utf-8","applied":true,"backup_hash":"sha256:e3b0c44...","receipt":{"receipt_id":"r_ghi789","project_id":"my-project","relative_path":"src/main.py","operation":"patch","before_hash":"sha256:e3b0c44...","after_hash":"sha256:7c8a2f1...","size":45,"file_exists_before":true}}',
+                    "response": '{"project_id":"my-project","path":"src/main.py","size":45,"encoding":"utf-8","applied":true,"backup_hash":"sha256:e3b0c44...","receipt":{"receipt_id":"rcpt_1a2b3c4d5e6f","snapshot_id":null,"operation":"patch","file_exists_before":true,"before_hash":"sha256:e3b0c44...","after_hash":"sha256:7c8a2f1...","size_before":38,"size_after":45,"changed":true,"verified":true,"diff_summary":"patch: +1/-1 lines"}}',
                     "notes": "backup_hash is for audit. Receipt is metadata for verification. Rollback is NOT available via this endpoint.",
                 },
             ],
@@ -1774,8 +1780,8 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "endpoint": "POST /api/workspace/projects/{project_id}/files/verify",
                     "title": "Verify file hash before edit",
                     "body": '{"path":"src/main.py","expected_hash":"sha256:e3b0c44..."}',
-                    "response": '{"project_id":"my-project","path":"src/main.py","file_exists":true,"current_hash":"sha256:e3b0c44...","match":true}',
-                    "notes": "Use before editing to confirm the file hasn't changed since you last read it.",
+                    "response": '{"project_id":"my-project","path":"src/main.py","file_exists":true,"current_hash":"sha256:e3b0c44...","matches":true}',
+                    "notes": "Use before editing to confirm the file hasn't changed since you last read it. Field is 'matches' (plural), not 'match'.",
                 },
             ],
             "error_mapping": {
@@ -1789,9 +1795,173 @@ def build_api_help(request: Request) -> dict[str, Any]:
             ],
             "safety_notes": [
                 "Preview is read-only — no disk writes, no side effects.",
-                "Verify returns match (bool) and current_hash — no file content.",
+                "Verify returns matches (bool, plural) and current_hash — no file content.",
                 "Both validate paths through WorkspacePolicy (traversal, symlink, hidden).",
                 "Preview/verify do NOT create snapshots or receipts — they are stateless.",
+            ],
+        },
+        "sdk_workflow_examples": {
+            "title": "SDK Agent Workflow \u2014 preview \u2192 safe write \u2192 verify",
+            "overview": "End-to-end Python SDK examples showing the recommended agent workflow: preview what would change, apply the write with safe=true to get a receipt, then verify the file hash matches expectations. All three steps use the same SSHGatewayClient from sdk/ssh_gateway.py.",
+            "prerequisite": "Requires agent token with `project:read` (for preview/verify) and `project:write` (for safe write) scopes.",
+            "scope_note": "Preview and verify require explicit `project:read` scope. A token with only `project:write` does NOT get preview/verify access. Create tokens with both scopes if you need the full workflow.",
+            "sdk_helpers": [
+                "SSHGatewayClient.workspace_preview_write(project_id, path, content, ...) \u2014 preview write",
+                "SSHGatewayClient.workspace_preview_edit(project_id, path, old_string, new_string, ...) \u2014 preview edit",
+                "SSHGatewayClient.workspace_preview_patch(project_id, path, patch, ...) \u2014 preview patch",
+                "SSHGatewayClient.workspace_verify(project_id, path, expected_hash, ...) \u2014 verify hash",
+                "SSHGatewayClient.workspace_write(project_id, path, content, safe=True, ...) \u2014 safe write",
+                "SSHGatewayClient.workspace_edit(project_id, path, old_string, new_string, safe=True, ...) \u2014 safe edit",
+                "SSHGatewayClient.workspace_patch(project_id, path, patch, safe=True, ...) \u2014 safe patch",
+            ],
+            "examples": [
+                {
+                    "title": "Full workflow: preview \u2192 safe write \u2192 verify",
+                    "description": "The recommended 3-step workflow for any file modification. Preview first to confirm the diff, write with safe=true to get a receipt, verify the hash to confirm success.",
+                    "code": (
+                        "from ssh_gateway import SSHGatewayClient\n"
+                        "\n"
+                        "BASE = 'https://gateway.example.com'\n"
+                        "KEY = 'your-agent-token'\n"
+                        "PID = 'my-project'\n"
+                        "\n"
+                        "# Step 1: Preview \u2014 what would change?\n"
+                        "preview = SSHGatewayClient.workspace_preview_write(\n"
+                        "    project_id=PID, path='src/config.py',\n"
+                        "    content='DEBUG = False\\nLOG_LEVEL = \"INFO\"\\n',\n"
+                        "    base_url=BASE, api_key=KEY,\n"
+                        ")\n"
+                        "print(f'Diff: {preview[\"diff\"][:120]}...')\n"
+                        "print(f'After hash: {preview[\"after_hash\"]}')\n"
+                        "print(f'Changed: {preview[\"changed\"]}')\n"
+                        "\n"
+                        "# Step 2: Safe write \u2014 apply and get receipt\n"
+                        "result = SSHGatewayClient.workspace_write(\n"
+                        "    project_id=PID, path='src/config.py',\n"
+                        "    content='DEBUG = False\\nLOG_LEVEL = \"INFO\"\\n',\n"
+                        "    safe=True, base_url=BASE, api_key=KEY,\n"
+                        ")\n"
+                        "receipt = result['receipt']\n"
+                        "print(f'Receipt: {receipt[\"receipt_id\"]}')\n"
+                        "print(f'Before: {receipt[\"before_hash\"]}')\n"
+                        "print(f'After:  {receipt[\"after_hash\"]}')\n"
+                        "print(f'Verified: {receipt[\"verified\"]}')\n"
+                        "\n"
+                        "# Step 3: Verify \u2014 confirm the file matches expectations\n"
+                        "verify = SSHGatewayClient.workspace_verify(\n"
+                        "    project_id=PID, path='src/config.py',\n"
+                        "    expected_hash=receipt['after_hash'],\n"
+                        "    base_url=BASE, api_key=KEY,\n"
+                        ")\n"
+                        "assert verify['matches'], f'Hash mismatch: {verify[\"current_hash\"]}'\n"
+                        "print('Verified OK')"
+                    ),
+                    "notes": [
+                        "Preview returns: before_hash, after_hash, diff, changed, size_before, size_after. No write occurs.",
+                        "safe=True returns a receipt with: receipt_id, snapshot_id (null), operation, before_hash, after_hash, size_before, size_after, changed, verified, diff_summary.",
+                        "Verify returns: matches (plural, bool), current_hash, file_exists. Field is 'matches' not 'match'.",
+                        "Rollback is NOT part of this workflow. Use SnapshotStore directly if rollback is needed.",
+                    ],
+                },
+                {
+                    "title": "Edit workflow: preview \u2192 safe edit \u2192 verify",
+                    "description": "Same pattern for search-and-replace edits.",
+                    "code": (
+                        "from ssh_gateway import SSHGatewayClient\n"
+                        "\n"
+                        "PID = 'my-project'\n"
+                        "\n"
+                        "# Preview the edit\n"
+                        "preview = SSHGatewayClient.workspace_preview_edit(\n"
+                        "    project_id=PID, path='src/main.py',\n"
+                        "    old_string='DEBUG = True', new_string='DEBUG = False',\n"
+                        "    base_url='https://gateway.example.com',\n"
+                        "    api_key='your-agent-token',\n"
+                        ")\n"
+                        "if not preview.get('replaced'):\n"
+                        "    print('old_string not found or no change needed')\n"
+                        "else:\n"
+                        "    # Apply the edit with safe=true\n"
+                        "    result = SSHGatewayClient.workspace_edit(\n"
+                        "        project_id=PID, path='src/main.py',\n"
+                        "        old_string='DEBUG = True', new_string='DEBUG = False',\n"
+                        "        safe=True,\n"
+                        "        base_url='https://gateway.example.com',\n"
+                        "        api_key='your-agent-token',\n"
+                        "    )\n"
+                        "    receipt = result['receipt']\n"
+                        "    print(f'Edit receipt: {receipt[\"receipt_id\"]}')\n"
+                        "    print(f'Verified: {receipt[\"verified\"]}')\n"
+                        "\n"
+                        "    # Verify the hash matches\n"
+                        "    verify = SSHGatewayClient.workspace_verify(\n"
+                        "        project_id=PID, path='src/main.py',\n"
+                        "        expected_hash=receipt['after_hash'],\n"
+                        "        base_url='https://gateway.example.com',\n"
+                        "        api_key='your-agent-token',\n"
+                        "    )\n"
+                        "    assert verify['matches']"
+                    ),
+                    "notes": [
+                        "workspace_preview_edit returns a 'replaced' flag. If False, the old_string was not found or would produce no change.",
+                        "workspace_edit with safe=True returns a receipt. receipt['verified'] indicates read-back hash confirmation.",
+                        "verify confirms the write succeeded: verify['matches'] (plural) should be True.",
+                    ],
+                },
+            ],
+            "important": "Rollback is NOT available via these SDK methods. The SDK has no rollback helper. If rollback is needed, callers must use SnapshotStore.capture() and SnapshotStore.rollback() directly (Python API, not exposed via REST/MCP).",
+            "not_exposed": [
+                "Rollback \u2014 no SDK method, no REST endpoint, no MCP tool for rollback",
+                "Snapshot creation \u2014 not part of write/edit/patch; callers manage snapshots themselves",
+                "File content in receipts \u2014 receipts are metadata-only (receipt_id, snapshot_id, operation, before_hash, after_hash, size_before, size_after, changed, verified, diff_summary)",
+            ],
+            "safety_notes": [
+                "Preview is always safe \u2014 no disk writes, no side effects.",
+                "safe=True on write/edit/patch returns a receipt but does NOT create a snapshot.",
+                "Receipts never contain file content, patch text, or old_string/new_string values.",
+                "The SDK methods are thin wrappers around the REST endpoints \u2014 no hidden logic.",
+            ],
+        },
+        "mcp_workspace_tools": {
+            "title": "MCP Workspace Tools \u2014 write/edit/patch (safe flag not yet wired)",
+            "overview": "The MCP server exposes workspace write/edit/patch tools in standard and full modes. These tools call the C1 library directly \u2014 the safe=true receipt parameter is NOT yet wired through MCP. Preview and verify are REST-only (no MCP tools exist).",
+            "status": "C1 write tools are live. safe=true receipt wiring for MCP is planned (Agent 3). Preview/verify MCP tools are not planned.",
+            "scope_note": "All workspace MCP tools require the `mcp:project` scope. Create a scoped token with `mcp:project` for MCP workspace operations.",
+            "tools": [
+                {
+                    "name": "workspace_file_write",
+                    "mode": "standard, full",
+                    "scope": "mcp:project",
+                    "description": "Create or overwrite a file in a registered project. Returns basic metadata (project_id, path, size, encoding). safe=true NOT yet wired \u2014 receipt not returned via MCP.",
+                    "safe_status": "NOT YET AVAILABLE via MCP. Use REST API with safe=true for receipts.",
+                },
+                {
+                    "name": "workspace_file_edit",
+                    "mode": "standard, full",
+                    "scope": "mcp:project",
+                    "description": "Search-and-replace edit on a file. Returns diff preview and basic metadata. safe=true NOT yet wired.",
+                    "safe_status": "NOT YET AVAILABLE via MCP. Use REST API with safe=true for receipts.",
+                },
+                {
+                    "name": "workspace_apply_patch",
+                    "mode": "standard, full",
+                    "scope": "mcp:project",
+                    "description": "Apply a unified diff patch to a file. Returns applied flag and basic metadata. safe=true NOT yet wired.",
+                    "safe_status": "NOT YET AVAILABLE via MCP. Use REST API with safe=true for receipts.",
+                },
+            ],
+            "not_available_as_mcp": [
+                "safe=true receipt \u2014 MCP write tools do not pass safe parameter yet. Use REST API for receipts.",
+                "Preview (write/edit/patch) \u2014 REST-only endpoints, no MCP tools. Use REST API for preview operations.",
+                "Verify (hash check) \u2014 REST-only endpoint, no MCP tool. Use REST API for verify operations.",
+                "Rollback \u2014 not exposed via MCP, REST, or SDK. See rollback note below.",
+            ],
+            "rollback_note": "Rollback is NOT available via MCP tools, REST endpoints, or SDK methods. Rollback is a separate lifecycle managed by SnapshotStore (Python API only). Agents cannot trigger rollback through any remote interface.",
+            "example_prompt": "Use the agent-ssh-gateway MCP server. Write src/main.py with the updated config. Do not use rollback.",
+            "safety_notes": [
+                "MCP workspace tools are C1-only \u2014 no safe receipts, no preview, no verify.",
+                "For the full preview \u2192 safe write \u2192 verify workflow, use the REST API directly.",
+                "MCP tool output is structured (structuredContent) \u2014 no raw file content in responses.",
             ],
         },
         "ssh_trust_workflow": {
