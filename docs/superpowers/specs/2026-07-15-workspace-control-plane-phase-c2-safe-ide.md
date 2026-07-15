@@ -1,7 +1,7 @@
 # Phase C2 — Safe IDE Workflow
 
 > **Date:** 2026-07-15
-> **Status:** Final — ADR decisions closed, ready for implementation
+> **Status:** Draft / Target Architecture — ADR decisions closed, implementation in progress
 > **Depends on:** Phase C1 (write/edit/patch tools), Phase B (git tools), Phase A (project registry)
 > **Audience:** Agent 2 (Receipt Storage & In-Memory Cap), Agent 3 (Rollback/Snapshot/Cleanup), Agent 4 (Audit & CI Hardening)
 
@@ -96,9 +96,50 @@ The audit trail is persistent (survives gateway restart).
 
 ---
 
-## 3. API Contracts
+## 3. Implementation Status
 
-### 3.1 Preview
+The table below tracks what exists today. Everything outside the **Designed** column is a forward-looking target for C2.
+
+| Component | Designed | Implemented (proto) | Wired REST | Wired MCP | Tested CI | Release-ready |
+|-----------|----------|---------------------|------------|-----------|-----------|---------------|
+| `ChangeReceipt` dataclass | ✅ | ✅ | — | — | — | — |
+| `ChangePreview` dataclass | ✅ | — | — | — | — | — |
+| `project_file_preview` | ✅ | — | — | — | — | — |
+| Safe write/edit/patch (`safe=`) | ✅ | partial¹ | — | — | — | — |
+| `project_file_verify` | ✅ | — | — | — | — | — |
+| `project_file_rollback` | ✅ | ✅ | — | — | — | — |
+| Snapshot (`save/list/load`) | ✅ | ✅ | — | — | — | — |
+| WorkspaceAuditLogger | ✅ | ✅ | — | — | — | — |
+| REST endpoints (all C2) | ✅ | — | — | — | — | — |
+| MCP tools (all C2) | ✅ | — | — | — | — | — |
+| SDK `ChangeReceipt` helpers | — | — | — | — | — | — |
+| Auth scopes (`project:rollback`, `workspace:snapshot`) | ✅ | — | — | — | — | — |
+| Rollback staleness check (`STALE_SNAPSHOT`) | ✅ | ✅² | — | — | — | — |
+| Memory cap + LRU eviction | ✅ | — | — | — | — | — |
+| Audit JSONL to disk | ✅ | ✅³ | — | — | — | — |
+| Production hardening (DOS bounds, snapshot purge, rotation) | — | — | — | — | — | — |
+
+**Notes:**
+
+¹ `safe=` parameter exists on `project_file_write`/`edit`/`apply_patch` but returns a simplified dict — not yet a full `ChangeReceipt` with read-back verify.
+
+² Rollback with `STALE_SNAPSHOT` check is prototyped in `app/workspace/snapshot.py` but has a confirmed **BLOCKER**: the staleness guard is not always invoked before write (see Agent 3 findings).
+
+³ `WorkspaceAuditLogger` is implemented but uses unbounded in-memory buffering when `log_path=None`; memory limit enforcement is a to-do.
+
+**Key gaps (must close before C2 can ship):**
+
+1. **Rollback staleness BLOCKER** — `rollback()` must verify current file hash against `expected_current_hash` before every write; current prototype may skip this check.
+2. **REST/MCP wiring** — zero C2 endpoints are reachable over HTTP or MCP.
+3. **Auth scopes** — `project:rollback` and `workspace:snapshot` are not registered in policy.
+4. **Receipt correctness** — `ChangeReceipt` must be metadata-only (no `rollback_content`), include `receipt_id` and `file_exists_before`. Rollback content lives in `SnapshotStore`.
+5. **CI separation** — workspace tools tests are not portable; real `/media/1TB/Python` smoke tests and auth-boundary tests cannot run in GitHub CI.
+
+---
+
+## 4. API Contracts
+
+### 4.1 Preview
 
 Preview shows what a write/edit/patch would do **without making any changes**.
 
@@ -159,7 +200,7 @@ class ChangePreview:
 6. Check for warnings: binary content, size > `max_bytes`, path is hidden/secret.
 7. Never write, never create directories, never snapshot.
 
-### 3.2 Safe Apply (Write / Edit / Patch)
+### 4.2 Safe Apply (Write / Edit / Patch)
 
 The existing C1 `project_file_write`, `project_file_edit`, `project_file_apply_patch` functions get a **new optional parameter** `safe: bool = True`.
 
@@ -204,7 +245,7 @@ Safe workflow:
 
 The C1-only fields (`size`, `path`, `project_id`, `encoding`, `diff`, `replaced`, `applied`, `backup_hash`) remain present for backward compatibility. New C2 fields are additive.
 
-### 3.3 ChangeReceipt Helpers
+### 4.3 ChangeReceipt Helpers
 
 ```python
 # Reconstructed from the receipt dict
@@ -221,7 +262,7 @@ class ChangeReceipt:
         """Summary for audit log (excludes rollback_content, diff)."""
 ```
 
-### 3.4 Verify
+### 4.4 Verify
 
 ```python
 def project_file_verify(
@@ -236,7 +277,7 @@ Returns `{"path": ..., "verified": bool, "current_sha256": str, "expected_sha256
 
 Re-reads the file from disk and compares its sha256 against the receipt's `sha256_after`. Also checks that the file exists (if receipt said it should) or does not exist (if receipt said it was a new file).
 
-### 3.5 Rollback
+### 4.5 Rollback
 
 ```python
 def project_file_rollback(
@@ -268,7 +309,7 @@ def project_file_rollback(
 }
 ```
 
-### 3.6 Snapshot (Direct)
+### 4.6 Snapshot (Direct)
 
 ```python
 def project_file_snapshot(
@@ -282,7 +323,7 @@ Creates a snapshot of the current file state without any mutation. Returns `{"pa
 
 Used for manual checkpointing by the agent.
 
-### 3.7 Snapshot List
+### 4.7 Snapshot List
 
 ```python
 def project_list_snapshots(
@@ -294,7 +335,7 @@ def project_list_snapshots(
 
 Returns all snapshots for a project (or a specific file). Each entry has `path`, `snapshot_path`, `sha256`, `timestamp`, `size`.
 
-### 3.8 Audit Query
+### 4.8 Audit Query
 
 ```python
 def project_get_audit(
@@ -309,7 +350,7 @@ Returns audit trail entries, most recent first. Supports filtering by path.
 
 ---
 
-## 4. REST Surface
+## 5. REST Surface
 
 All new endpoints under `/api/workspace/projects/{project_id}/`:
 
@@ -327,7 +368,7 @@ All new endpoints under `/api/workspace/projects/{project_id}/`:
 
 The `safe` parameter on write/edit/patch is a JSON body field (`"safe": true`).
 
-### 4.1 Preview Endpoint
+### 5.1 Preview Endpoint
 
 ```
 POST /api/workspace/projects/{project_id}/files/preview
@@ -340,7 +381,7 @@ Body: {
 Response: 200 ChangePreview
 ```
 
-### 4.2 Verify Endpoint
+### 5.2 Verify Endpoint
 
 ```
 POST /api/workspace/projects/{project_id}/files/verify
@@ -351,7 +392,7 @@ Body: {
 Response: 200 { "verified": bool, "current_sha256": ..., "expected_sha256": ... }
 ```
 
-### 4.3 Rollback Endpoint
+### 5.3 Rollback Endpoint
 
 ```
 POST /api/workspace/projects/{project_id}/files/rollback
@@ -364,7 +405,7 @@ Response: 200 rollback receipt
 
 ---
 
-## 5. MCP Surface
+## 6. MCP Surface
 
 Three new MCP tools:
 
@@ -378,7 +419,7 @@ Existing `workspace_file_write`, `workspace_file_edit`, `workspace_apply_patch` 
 
 ---
 
-## 6. SDK Surface
+## 7. SDK Surface
 
 ```python
 # Preview
@@ -401,7 +442,7 @@ The SDK helper `ChangeReceipt` class provides `.can_rollback()`, `.is_verified()
 
 ---
 
-## 7. Receipt Storage
+## 8. Receipt Storage
 
 Receipts are **memory-only** in C2. The caller (agent, SDK) must keep the receipt dict if they want to verify or rollback later. Receipts are evicted on gateway restart or when a global memory byte cap is exceeded (LRU eviction, oldest first). The memory cap is configurable via `RECEIPT_MEMORY_CAP_BYTES` (default 64 MiB).
 
@@ -411,46 +452,46 @@ The audit trail is always persisted (JSON lines file, append-only). The audit tr
 
 ---
 
-## 8. Security & Threat Model
+## 9. Security & Threat Model
 
-### 8.1 Receipt Trust
+### 9.1 Receipt Trust
 
 The receipt is generated server-side and signed only by the content hash. The caller trusts the receipt because it came from the server. If the caller loses the receipt, rollback is impossible — there is no "admin undo" API.
 
 **Risk:** A compromised agent token could forge a receipt with a fake `sha256_before` to trick rollback into restoring arbitrary content.
 **Mitigation:** Rollback always re-reads the current file and checks `current_sha256 == receipt.sha256_after` before restoring. This ensures the file state matches what the receipt describes. If the receipt's `sha256_after` does not match the current file, rollback is rejected. This makes receipt forgery useless for rollback attacks — the attacker would need to also modify the current file to match the forged receipt's `sha256_after`, at which point they already have write access.
 
-### 8.2 Rollback Staleness
+### 9.2 Rollback Staleness
 
 If the file was modified (by another agent, another session, or manually) after the receipt was issued, rollback is rejected. This prevents accidental overwrites of newer changes.
 
-### 8.3 Rollback Path Safety
+### 9.3 Rollback Path Safety
 
 Rollback re-validates the path through `WorkspacePolicy.validate_write` before writing. Symlink escape, traversal, and hidden path checks apply.
 
-### 8.4 Snapshot Security
+### 9.4 Snapshot Security
 
 Snapshots are stored inside the project directory (under `.ssh-gateway-snapshots/`) and inherit the project's secret path filtering. The `.ssh-gateway-snapshots/` directory is added to the secret path patterns list so it is not visible in tree/file listings.
 
 The audit trail is stored at gateway level (`{data_dir}/.ssh-gateway-audit/`) — outside any project directory — so it cannot be tampered with from within a project.
 
-### 8.5 Audit Integrity
+### 9.5 Audit Integrity
 
 The audit trail is append-only JSON lines. No deletion or modification of past entries. If disk fills up, audit logging degrades gracefully (log warning, skip write).
 
-### 8.6 Content Leak Prevention
+### 9.6 Content Leak Prevention
 
 - The receipt's `rollback_content` field contains the **original** file content. The caller already has this content (they provided the new content), so no new information is leaked.
 - The receipt's `diff` field is computed server-side from the before/after content.
 - The audit trail excludes `rollback_content` and diff to keep it compact.
 
-### 8.7 Race Conditions
+### 9.7 Race Conditions
 
 Between "before snapshot" and "apply", another agent could modify the file. The read-back verify step catches this: if `verified=False`, the caller knows the file state does not match expectations. They can retry or investigate.
 
 Rollback detects this via the staleness check (current sha256 vs receipt's sha256_after).
 
-### 8.8 Denial of Service
+### 9.8 Denial of Service
 
 - Snapshot file storage: max 1 snapshot per file path, max 10 snapshots per project.
 - In-memory receipt storage: bounded by a global memory byte cap (configurable via `RECEIPT_MEMORY_CAP_BYTES`, default 64 MiB). When the cap is exceeded, the oldest receipt is evicted (LRU). This prevents unbounded memory growth from large rollback_content payloads.
@@ -459,9 +500,9 @@ Rollback detects this via the staleness check (current sha256 vs receipt's sha25
 
 ---
 
-## 9. Implementation Tasks (for Session 2+)
+## 10. Implementation Tasks (for Session 2+)
 
-### 9.1 Core: `app/workspace/receipts.py` (new)
+### 10.1 Core: `app/workspace/receipts.py` (new)
 
 - `ChangeReceipt` dataclass
 - `ChangePreview` dataclass
@@ -474,7 +515,7 @@ Rollback detects this via the staleness check (current sha256 vs receipt's sha25
 
 **Tests:** `tests/test_workspace_receipts.py` — hash computation, before/after state, read-back verify on real files, memory cap eviction.
 
-### 9.2 Core: `app/workspace/snapshot.py` (new)
+### 10.2 Core: `app/workspace/snapshot.py` (new)
 
 - `save_snapshot(project_root, relative_path) -> dict`
 - `list_snapshots(project_root, relative_path) -> list`
@@ -486,7 +527,7 @@ Rollback detects this via the staleness check (current sha256 vs receipt's sha25
 
 **Tests:** `tests/test_workspace_snapshot.py` — create snapshot, verify content, list, cleanup.
 
-### 9.3 Core: `app/workspace/audit.py` (new)
+### 10.3 Core: `app/workspace/audit.py` (new)
 
 - `write_audit_entry(data_dir: Path, entry: dict) -> None`
 - `query_audit(data_dir: Path, path=None, limit=50) -> list[dict]`
@@ -496,25 +537,25 @@ Rollback detects this via the staleness check (current sha256 vs receipt's sha25
 
 **Tests:** `tests/test_workspace_audit.py` — write entries, query by path, verify ordering, verify no content fields leaked.
 
-### 9.4 Core: Modify `app/workspace/edit.py`
+### 10.4 Core: Modify `app/workspace/edit.py`
 
 - Add `safe: bool = True` parameter to `project_file_write`, `project_file_edit`, `project_apply_patch`.
 - When `safe=True` (default): snapshot before, compute receipt, read-back verify, return receipt.
 - When `safe=False`: return existing C1 dict (no change).
 
-### 9.5 REST: Modify `app/routers/workspace.py`
+### 10.5 REST: Modify `app/routers/workspace.py`
 
 - Accept `safe` in request body for write/edit/patch endpoints.
 - Add preview/verify/rollback endpoints.
 - Add snapshot/snapshots/audit endpoints.
 
-### 9.6 Auth: Add `workspace:snapshot` and `project:rollback` scopes
+### 10.6 Auth: Add `workspace:snapshot` and `project:rollback` scopes
 
 - Add `"workspace:snapshot"` and `"project:rollback"` to `VALID_AGENT_SCOPES` and `ALL_SCOPES`.
 - `project_file_rollback` requires `project:rollback` scope.
 - `project_file_snapshot` requires `workspace:snapshot` scope.
 
-### 9.7 Tests: `tests/test_workspace_receipts.py`, `tests/test_workspace_snapshot.py`, `tests/test_workspace_audit.py`
+### 10.7 Tests: `tests/test_workspace_receipts.py`, `tests/test_workspace_snapshot.py`, `tests/test_workspace_audit.py`
 
 - Unit tests for each module.
 - Integration tests for safe apply → verify → rollback cycle.
@@ -522,7 +563,7 @@ Rollback detects this via the staleness check (current sha256 vs receipt's sha25
 
 ---
 
-## 10. ADR Decisions
+## 11. ADR Decisions
 
 All open decisions from the initial draft are closed as follows:
 
@@ -538,7 +579,7 @@ All open decisions from the initial draft are closed as follows:
 
 ---
 
-## 11. Compatibility with C1
+## 12. Compatibility with C1
 
 - **No breaking changes:** C1 API unchanged when `safe=False`.
 - **No removed fields:** C1 response fields remain in C2-safe response.
