@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.main import app
+from app.workspace.models import ProjectInfo
 from app.workspace.registry import WorkspaceRegistry
 
 
@@ -23,6 +24,62 @@ def _auth_bypass(monkeypatch):
     monkeypatch.setattr(
         "app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1"
     )
+
+
+@pytest.fixture(autouse=True)
+def _workspace_test_registry(monkeypatch, tmp_path: Path):
+    """Use a temp project registry instead of host-specific /media/1TB paths."""
+    project_ids = [
+        "web-ssh-gateway",
+        "nod-gateway",
+        "quart-platform",
+        "quart-core",
+        "kojo-bot-service",
+        "pricetuner-scraper",
+        "tg-audio-bot",
+    ]
+
+    projects: dict[str, ProjectInfo] = {}
+    for project_id in project_ids:
+        root = tmp_path / project_id
+        root.mkdir(parents=True)
+        projects[project_id] = ProjectInfo(
+            project_id=project_id,
+            root=root,
+            type="app",
+            description=f"{project_id} test fixture",
+            tags=["test"],
+            parent="quart-platform" if project_id in {"quart-core", "kojo-bot-service"} else None,
+        )
+
+    web_root = tmp_path / "web-ssh-gateway"
+    (web_root / "pyproject.toml").write_text("[project]\nname = 'fixture'\n", encoding="utf-8")
+    policy_path = web_root / "app" / "workspace"
+    policy_path.mkdir(parents=True)
+    (policy_path / "policy.py").write_text(
+        "class WorkspacePolicy:\n    pass\n",
+        encoding="utf-8",
+    )
+
+    registry = WorkspaceRegistry(
+        projects,
+        [tmp_path],
+        granted_scopes={
+            "project:read",
+            "project:write",
+            "workspace:read",
+            "workspace:write",
+        },
+    )
+
+    def fake_get_registry(*_args: Any, **_kwargs: Any) -> WorkspaceRegistry:
+        return registry
+
+    monkeypatch.setattr("app.workspace.tools.get_registry", fake_get_registry)
+    monkeypatch.setattr("app.workspace.files.get_registry", fake_get_registry)
+    monkeypatch.setattr("app.workspace.search.get_registry", fake_get_registry)
+    monkeypatch.setattr("app.workspace.git.get_registry", fake_get_registry)
+    monkeypatch.setattr("app.routers.workspace.get_registry", fake_get_registry)
 
 
 client = TestClient(app)
