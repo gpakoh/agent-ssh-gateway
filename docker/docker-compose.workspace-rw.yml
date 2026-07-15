@@ -1,10 +1,10 @@
-# docker-compose.workspace-rw.yml — single RW mount for MCP workspace tools
+# docker-compose.workspace-rw.yml — repo-only RW mount for MCP workspace tools
 #
 # Usage:
 #   docker compose -f docker/docker-compose.yml -f docker/docker-compose.workspace-rw.yml up -d
 #
-# Scope: only /media/1TB/Python is switched to :rw.
-# Everything else stays :ro / read_only: true.
+# Scope: only the repo directory is switched to :rw.
+# Base /media/1TB/Python:ro stays.  projects.yaml, ssh_keys, read_only unchanged.
 
 name: web-ssh-gateway
 
@@ -13,4 +13,4 @@ services:
     environment:
       - WORKSPACE_READONLY=false
     volumes:
-      - /media/1TB/Python:/media/1TB/Python:rw
+      - /media/1TB/Python/web_ssh/web-ssh-gateway:/media/1TB/Python/web_ssh/web-ssh-gateway:rw
