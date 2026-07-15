@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     api_auth_enabled: bool = Field(default=True, alias="API_AUTH_ENABLED")
     ssh_key_upload_enabled: bool = Field(default=False, alias="SSH_KEY_UPLOAD_ENABLED")
     ssh_key_upload_dir: str = Field(default="./ssh_keys", alias="SSH_KEY_UPLOAD_DIR")
+    workspace_readonly: bool = Field(default=True, alias="WORKSPACE_READONLY")
     command_policy_mode: str = Field(default="audit", alias="COMMAND_POLICY_MODE")
     command_policy_profile: str = Field(default="default", alias="COMMAND_POLICY_PROFILE")
     command_output_redaction_enabled: bool = Field(
@@ -106,6 +107,9 @@ class Settings(BaseSettings):
     event_hooks_retention_dead_days: int = Field(
         default=30, alias="EVENT_HOOKS_RETENTION_DEAD_DAYS"
     )
+
+    # Workspace
+    workspace_readonly: bool = Field(default=False, alias="WORKSPACE_READONLY")
 
     model_config = SettingsConfigDict(
         env_file=".env",

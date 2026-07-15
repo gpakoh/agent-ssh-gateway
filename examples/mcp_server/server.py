@@ -2615,6 +2615,14 @@ def gateway_workspace_file_write(
         Contract v1 dict with project_id, path, size, encoding.
         If safe=True, includes nested receipt dict.
     """
+    from app.config import settings as _settings
+
+    if _settings.workspace_readonly:
+        return tool_error(
+            tool="workspace_file_write",
+            code="WORKSPACE_READONLY",
+            message="Workspace is in read-only mode",
+        )
     try:
         from app.workspace.edit import project_file_write
 
@@ -2660,6 +2668,14 @@ def gateway_workspace_file_edit(
         Contract v1 dict with project_id, path, size, diff, replaced.
         If safe=True, includes nested receipt dict.
     """
+    from app.config import settings as _settings
+
+    if _settings.workspace_readonly:
+        return tool_error(
+            tool="workspace_file_edit",
+            code="WORKSPACE_READONLY",
+            message="Workspace is in read-only mode",
+        )
     try:
         from app.workspace.edit import project_file_edit
 
@@ -2704,6 +2720,14 @@ def gateway_workspace_apply_patch(
         Dict with project_id, path, size, applied, backup_hash (patch stripped).
         If safe=True, includes nested receipt dict.
     """
+    from app.config import settings as _settings
+
+    if _settings.workspace_readonly:
+        return tool_error(
+            tool="workspace_apply_patch",
+            code="WORKSPACE_READONLY",
+            message="Workspace is in read-only mode",
+        )
     try:
         from app.workspace.edit import project_apply_patch
 
