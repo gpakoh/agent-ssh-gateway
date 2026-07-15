@@ -157,6 +157,13 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "project_run_opencode",
         "project_run_mimo",
         "project_run_agent",
+        "workspace_file_write",
+        "workspace_file_edit",
+        "workspace_apply_patch",
+        "workspace_preview_write",
+        "workspace_preview_edit",
+        "workspace_preview_patch",
+        "workspace_verify",
     },
 }
 

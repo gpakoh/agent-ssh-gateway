@@ -174,6 +174,11 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "workspace_file_write": ["mcp:project"],
     "workspace_file_edit": ["mcp:project"],
     "workspace_apply_patch": ["mcp:project"],
+    # workspace preview/verify — mcp:project
+    "workspace_preview_write": ["mcp:project"],
+    "workspace_preview_edit": ["mcp:project"],
+    "workspace_preview_patch": ["mcp:project"],
+    "workspace_verify": ["mcp:project"],
 }
 
 FLEET_ROUTE_SCOPES: dict[str, list[str]] = {
