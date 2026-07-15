@@ -1760,7 +1760,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                         {
                             "endpoint": "POST /api/workspace/projects/{project_id}/files/verify",
                             "scope": "project:read",
-                            "description": "Check if a file's current SHA-256 matches an expected hash. Returns match (bool), current_hash, file_exists. No content returned.",
+                            "description": "Check if a file's current SHA-256 matches an expected hash. Returns matches (bool, plural), current_hash, file_exists. No content returned.",
                         },
                     ],
                 },
@@ -1771,7 +1771,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "endpoint": "POST /api/workspace/projects/{project_id}/files/preview/write",
                     "title": "Preview writing a new file",
                     "body": '{"path":"src/util.py","content":"def helper():\\n    pass\\n"}',
-                    "response": '{"project_id":"my-project","path":"src/util.py","operation":"write","file_exists":false,"size_before":0,"size_after":25,"hash_after":"sha256:...","diff":"--- /dev/null\\n+++ b/src/util.py\\n@@ -0 +1,2 @@\\n+def helper():\\n+    pass\\n"}',
+                    "response": '{"project_id":"my-project","path":"src/util.py","file_exists_before":false,"size_before":0,"size_after":25,"after_hash":"sha256:...","diff":"--- /dev/null\\n+++ b/src/util.py\\n@@ -0 +1,2 @@\\n+def helper():\\n+    pass\\n"}',
                     "notes": "No write occurs. Response shows what would happen.",
                 },
                 {
