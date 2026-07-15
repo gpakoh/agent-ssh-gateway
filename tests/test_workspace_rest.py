@@ -1514,3 +1514,132 @@ class TestVerifyFileEndpoint:
         assert resp.status_code == 403
         body = resp.json()
         assert body["detail"]["code"] == "MISSING_SCOPE"
+
+
+# ---------------------------------------------------------------------------
+# Issue #10: absolute path leak prevention
+# ---------------------------------------------------------------------------
+
+_ABS_PATH_PATTERNS = [
+    "/media/",
+    "/tmp/",
+    "/root/",
+    "/home/",
+    "/var/",
+    "/opt/",
+    "/srv/",
+    "C:\\",
+    "D:\\",
+]
+
+
+def _assert_no_absolute_paths(body_text: str, tmp_path: Path):
+    """Assert error response contains no host absolute paths."""
+    for pattern in _ABS_PATH_PATTERNS:
+        assert pattern not in body_text, (
+            f"Error response leaks absolute path pattern {pattern!r}"
+        )
+    assert str(tmp_path) not in body_text, (
+        "Error response leaks test fixture tmp_path"
+    )
+
+
+class TestNoAbsolutePathLeak:
+    """Issue #10: error messages must not leak host absolute paths."""
+
+    def test_write_missing_parent_no_leak(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/write",
+                json={
+                    "path": "nonexistent-dir/file.txt",
+                    "content": "data",
+                },
+            )
+        assert resp.status_code == 400
+        _assert_no_absolute_paths(resp.text, write_ws["tmp_path"])
+        detail = resp.json()["detail"]
+        assert "Parent directory does not exist" in detail["message"]
+        assert str(write_ws["project"]) not in detail["message"]
+
+    def test_edit_missing_parent_no_leak(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/edit",
+                json={
+                    "path": "nonexistent-dir/file.txt",
+                    "old_string": "a",
+                    "new_string": "b",
+                },
+            )
+        # edit calls _exact_read first → "File not found" → 404
+        assert resp.status_code == 404
+        _assert_no_absolute_paths(resp.text, write_ws["tmp_path"])
+
+    def test_patch_missing_parent_no_leak(self, write_ws):
+        patch_text = _make_patch("nonexistent-dir/file.txt", "a", "b")
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/patch",
+                json={
+                    "path": "nonexistent-dir/file.txt",
+                    "patch": patch_text,
+                },
+            )
+        # patch calls _exact_read first → "File not found" → 404
+        assert resp.status_code == 404
+        _assert_no_absolute_paths(resp.text, write_ws["tmp_path"])
+
+    def test_preview_write_missing_parent_no_leak(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/write",
+                json={
+                    "path": "nonexistent-dir/file.txt",
+                    "content": "data",
+                },
+            )
+        assert resp.status_code == 400
+        _assert_no_absolute_paths(resp.text, write_ws["tmp_path"])
+        detail = resp.json()["detail"]
+        assert "Parent directory does not exist" in detail["message"]
+
+    def test_file_not_found_error_no_leak(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/edit",
+                json={
+                    "path": "src/does-not-exist.py",
+                    "old_string": "a",
+                    "new_string": "b",
+                },
+            )
+        assert resp.status_code == 404
+        _assert_no_absolute_paths(resp.text, write_ws["tmp_path"])
+
+    def test_hidden_path_error_no_leak(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/write",
+                json={"path": ".env", "content": "EVIL=true"},
+            )
+        assert resp.status_code == 403
+        _assert_no_absolute_paths(resp.text, write_ws["tmp_path"])

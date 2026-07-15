@@ -69,13 +69,13 @@ def project_file_preview_write(
     # Check parent directory exists
     if not full.parent.exists():
         raise WorkspacePolicyError(
-            f"Parent directory does not exist: {full.parent}"
+            "Parent directory does not exist"
         )
 
     # Read before state
     file_exists = full.exists() and full.is_file()
     if file_exists:
-        old_content, old_size = _exact_read(full, max_bytes)
+        old_content, old_size = _exact_read(full, max_bytes, label=relative_path)
     else:
         old_content = None
         old_size = 0
@@ -153,7 +153,7 @@ def project_file_preview_edit(
     if full.is_dir():
         raise WorkspacePolicyError(f"Path is a directory: {relative_path}")
 
-    old_content, old_size = _exact_read(full, max_bytes)
+    old_content, old_size = _exact_read(full, max_bytes, label=relative_path)
 
     if old_string not in old_content:
         raise WorkspacePolicyError("old_string not found in file content")
@@ -233,7 +233,7 @@ def project_file_preview_patch(
     if full.is_dir():
         raise WorkspacePolicyError(f"Path is a directory: {relative_path}")
 
-    old_content, old_size = _exact_read(full, max_bytes)
+    old_content, old_size = _exact_read(full, max_bytes, label=relative_path)
 
     hunks = _parse_unified_diff(patch)
     if not hunks:
