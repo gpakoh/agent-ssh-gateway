@@ -1,4 +1,4 @@
-.PHONY: test check lint ruff mypy compileall clean wrapper-self-test agent-handoff-smoke
+.PHONY: test check lint ruff mypy compileall clean wrapper-self-test agent-handoff-smoke host-smoke
 
 test:
 	pytest -q tests/test_agent_tasks.py tests/test_mcp_handoff.py tests/test_mcp_chatgpt_tools.py tests/test_mcp_tool_modes.py tests/test_mcp_opencode.py tests/test_opencode_runner_wrapper.py
@@ -22,6 +22,12 @@ wrapper-self-test:
 
 agent-handoff-smoke: wrapper-self-test
 	@echo "Agent handoff smoke: OK (dry-run + self-test)"
+
+# ── Live boundary smoke (requires real host environment) ──────────
+# Requires: /media/1TB/Python workspace, nginx/mTLS certs, Redis.
+# NOT run in GitHub CI — GitHub covers portable correctness only.
+host-smoke:
+	pytest -m host_smoke -v
 
 clean:
 	find . -type d -name "__pycache__" -prune -exec rm -rf {} +

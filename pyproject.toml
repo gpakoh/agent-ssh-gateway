@@ -52,6 +52,7 @@ dependencies = [
 dev = [
   "pytest",
   "pytest-asyncio",
+  "pytest-cov",
   "httpx",
   "httpx2",
   "ruff",
@@ -72,6 +73,10 @@ include = ["app*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+  "host_smoke: tests requiring live infrastructure (SSH host, nginx, specific filesystem paths). Excluded from CI via -m 'not host_smoke'.",
+  "integration: tests that exercise multiple components together (router + registry + policy).",
+]
 filterwarnings = [
   "error",
   # aiosqlite background threads outlive event loop during test teardown —
