@@ -427,6 +427,95 @@ class TestWriteFileEndpoint:
         body_text = resp.text
         assert str(write_ws["tmp_path"]) not in body_text
 
+    def test_safe_false_no_receipt(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/write",
+                json={"path": "out.txt", "content": "data", "safe": False},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "receipt" not in data
+
+    def test_safe_true_receipt_present(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/write",
+                json={"path": "out.txt", "content": "safe data", "safe": True},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "receipt" in data
+        r = data["receipt"]
+        assert r["receipt_id"].startswith("rcpt_")
+        assert r["operation"] == "write"
+        assert r["after_hash"].startswith("sha256:")
+        assert r["verified"] is True
+        assert (write_ws["project"] / "out.txt").read_text() == "safe data"
+
+    def test_safe_true_receipt_no_content_leak(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/write",
+                json={"path": "out.txt", "content": "secret stuff", "safe": True},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body.get("content") is None
+        assert "secret stuff" not in resp.text
+
+    def test_agent_with_write_scope_safe(self, write_ws):
+        from unittest.mock import AsyncMock
+        registry = _mock_registry(write_ws["project"])
+        identity = _mock_agent_identity(scopes=("project:write",))
+        with (
+            patch(
+                "app.auth_middleware.verify_api_key",
+                AsyncMock(return_value=identity),
+            ),
+            patch(
+                "app.routers.workspace.get_registry", return_value=registry
+            ),
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/write",
+                json={"path": "agent.txt", "content": "agent data", "safe": True},
+                headers={"X-API-Key": "agent-token"},
+            )
+        assert resp.status_code == 200
+        assert "receipt" in resp.json()
+
+    def test_agent_without_write_scope_denied(self, write_ws):
+        from unittest.mock import AsyncMock
+        registry = _mock_registry(write_ws["project"])
+        identity = _mock_agent_identity(scopes=("project:read",))
+        with (
+            patch(
+                "app.auth_middleware.verify_api_key",
+                AsyncMock(return_value=identity),
+            ),
+            patch(
+                "app.routers.workspace.get_registry", return_value=registry
+            ),
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/write",
+                json={"path": "x.txt", "content": "data", "safe": True},
+                headers={"X-API-Key": "agent-token"},
+            )
+        assert resp.status_code == 403
+        body = resp.json()
+        assert body["detail"]["code"] == "MISSING_SCOPE"
+
 
 # ---------------------------------------------------------------------------
 # File edit — POST /api/workspace/projects/{project_id}/files/edit
@@ -597,6 +686,64 @@ class TestEditFileEndpoint:
         assert resp.status_code == 403
         body_text = resp.text
         assert str(write_ws["tmp_path"]) not in body_text
+
+    def test_safe_false_no_receipt(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/edit",
+                json={
+                    "path": "src/main.py",
+                    "old_string": "hello",
+                    "new_string": "world",
+                    "safe": False,
+                },
+            )
+        assert resp.status_code == 200
+        assert "receipt" not in resp.json()
+
+    def test_safe_true_receipt_present(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/edit",
+                json={
+                    "path": "src/main.py",
+                    "old_string": "hello",
+                    "new_string": "world",
+                    "safe": True,
+                },
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "receipt" in data
+        r = data["receipt"]
+        assert r["receipt_id"].startswith("rcpt_")
+        assert r["operation"] == "edit"
+        assert r["verified"] is True
+        assert r["after_hash"].startswith("sha256:")
+        assert (write_ws["project"] / "src" / "main.py").read_text() == "print('world')\n"
+
+    def test_safe_true_receipt_no_content_leak(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/edit",
+                json={
+                    "path": "src/main.py",
+                    "old_string": "hello",
+                    "new_string": "secret_replacement",
+                    "safe": True,
+                },
+            )
+        assert resp.status_code == 200
+        assert "secret_replacement" not in resp.json().get("old_string", "")
 
 
 # ---------------------------------------------------------------------------
@@ -773,6 +920,54 @@ class TestPatchFileEndpoint:
         assert resp.status_code == 403
         body_text = resp.text
         assert str(write_ws["tmp_path"]) not in body_text
+
+    def test_safe_false_no_receipt(self, write_ws):
+        patch_text = _make_patch("src/main.py", "print('hello')", "print('world')")
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/patch",
+                json={"path": "src/main.py", "patch": patch_text, "safe": False},
+            )
+        assert resp.status_code == 200
+        assert "receipt" not in resp.json()
+
+    def test_safe_true_receipt_present(self, write_ws):
+        patch_text = _make_patch("src/main.py", "print('hello')", "print('world')")
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/patch",
+                json={"path": "src/main.py", "patch": patch_text, "safe": True},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "receipt" in data
+        r = data["receipt"]
+        assert r["receipt_id"].startswith("rcpt_")
+        assert r["operation"] == "patch"
+        assert r["verified"] is True
+        assert r["after_hash"].startswith("sha256:")
+        assert (write_ws["project"] / "src" / "main.py").read_text() == "print('world')\n"
+
+    def test_safe_true_receipt_no_content_leak(self, write_ws):
+        patch_text = _make_patch("src/main.py", "print('hello')", "print('secret')")
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/patch",
+                json={"path": "src/main.py", "patch": patch_text, "safe": True},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body.get("patch") is None
+        assert "print('secret')" not in resp.text
 
 
 # ---------------------------------------------------------------------------
