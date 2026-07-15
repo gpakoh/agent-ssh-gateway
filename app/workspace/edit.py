@@ -38,13 +38,19 @@ class WriteError(WorkspacePolicyError):
 
 
 def _exact_read(
-    file_path: Path, max_bytes: int = _WRITE_MAX_BYTES
+    file_path: Path, max_bytes: int = _WRITE_MAX_BYTES, *, label: str = ""
 ) -> tuple[str, int]:
     """Read an entire text file, rejecting files that exceed *max_bytes*.
 
     Unlike ``project_file_read`` (which truncates), this helper rejects
     files larger than *max_bytes*.  Used by edit/patch tools that need
     full content for safe mutation.
+
+    Args:
+        file_path: absolute path to the file.
+        max_bytes: maximum allowed file size (default 1 MB).
+        label: optional relative path for error messages (avoids leaking
+            host absolute paths).
 
     Returns:
         Tuple of (content: str, size: int).
@@ -53,10 +59,11 @@ def _exact_read(
         WorkspacePolicyError: file not found, is a directory, binary,
             exceeds max_bytes, or not valid UTF-8.
     """
+    display = label or file_path.name
     if not file_path.exists():
-        raise WorkspacePolicyError(f"File not found: {file_path}")
+        raise WorkspacePolicyError(f"File not found: {display}")
     if file_path.is_dir():
-        raise WorkspacePolicyError(f"Path is a directory, not a file: {file_path}")
+        raise WorkspacePolicyError(f"Path is a directory, not a file: {display}")
 
     if _is_binary_path(file_path):
         raise WorkspacePolicyError("Binary content is not returned")
@@ -72,7 +79,7 @@ def _exact_read(
         content = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise WorkspacePolicyError(
-            f"Cannot decode file as UTF-8: {file_path}"
+            f"Cannot decode file as UTF-8: {display}"
         ) from exc
 
     return content, file_size
@@ -95,7 +102,7 @@ def _symlink_safe_preflight(target_path: Path, project_root: Path) -> None:
         relative = target_path.relative_to(project_root)
     except ValueError as exc:
         raise WorkspacePolicyError(
-            f"Path {target_path} is not under project root {project_root}"
+            "Path is not under project root"
         ) from exc
 
     partial = project_root
@@ -103,7 +110,7 @@ def _symlink_safe_preflight(target_path: Path, project_root: Path) -> None:
         partial = partial / part
         if partial.exists() and partial.is_symlink():
             raise SymlinkEscapeError(
-                f"Symlink component rejected: {partial} is a symlink"
+                f"Symlink component rejected: .../{'/'.join(relative.parts)} is a symlink"
             )
 
 
@@ -120,7 +127,7 @@ def _atomic_write(target_path: Path, content_bytes: bytes) -> None:
     """
     if not target_path.parent.exists():
         raise WriteError(
-            f"Parent directory does not exist: {target_path.parent}"
+            "Parent directory does not exist"
         )
 
     # Unique, unpredictable name in the same directory
@@ -140,7 +147,13 @@ def _atomic_write(target_path: Path, content_bytes: bytes) -> None:
     except Exception as exc:
         if created_tmp and tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
-        raise WriteError(f"Write failed: {exc}") from exc
+        # OSError strerror is path-safe; str(exc) may include paths — strip them
+        safe_msg = getattr(exc, "strerror", None) or re.sub(
+            r"[:']?/[^\s:'\"]+", "", str(exc)
+        ).strip(" :'")
+        if not safe_msg:
+            safe_msg = type(exc).__name__
+        raise WriteError(f"Write failed: {safe_msg}") from exc
 
 
 def _make_diff(old_content: str, new_content: str, file_label: str = "") -> str:
@@ -285,7 +298,7 @@ def project_file_edit(
 
     _symlink_safe_preflight(full, project_root)
 
-    old_content, file_size = _exact_read(full, max_bytes)
+    old_content, file_size = _exact_read(full, max_bytes, label=relative_path)
 
     if old_string not in old_content:
         raise WriteError("old_string not found in file content")
@@ -492,7 +505,7 @@ def project_apply_patch(
 
     _symlink_safe_preflight(full, project_root)
 
-    old_content, file_size = _exact_read(full, max_bytes)
+    old_content, file_size = _exact_read(full, max_bytes, label=relative_path)
 
     # Compute backup hash before any mutation
     backup_hash = _compute_backup_hash(old_content)
