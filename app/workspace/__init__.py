@@ -14,6 +14,12 @@ from app.workspace.policy import (
     WorkspacePolicy,
     WorkspacePolicyError,
 )
+from app.workspace.preview import (
+    project_file_preview_edit,
+    project_file_preview_patch,
+    project_file_preview_write,
+    project_file_verify,
+)
 from app.workspace.receipts import ChangeReceipt, compute_hash, make_receipt
 from app.workspace.registry import (
     WorkspaceRegistry,
@@ -53,7 +59,11 @@ __all__ = [
     "make_receipt",
     "project_apply_patch",
     "project_file_edit",
+    "project_file_preview_edit",
+    "project_file_preview_patch",
+    "project_file_preview_write",
     "project_file_read",
+    "project_file_verify",
     "project_file_write",
     "project_find_files",
     "project_git_branch",
