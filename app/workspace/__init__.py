@@ -14,6 +14,7 @@ from app.workspace.policy import (
     WorkspacePolicy,
     WorkspacePolicyError,
 )
+from app.workspace.receipts import ChangeReceipt, compute_hash, make_receipt
 from app.workspace.registry import (
     WorkspaceRegistry,
     load_registry,
@@ -37,6 +38,7 @@ from app.workspace.tools import (
 
 __all__ = [
     "ALL_SCOPES",
+    "ChangeReceipt",
     "HiddenPathError",
     "ProjectInfo",
     "ScopeDeniedError",
@@ -46,7 +48,9 @@ __all__ = [
     "WorkspacePolicy",
     "WorkspacePolicyError",
     "WorkspaceRegistry",
+    "compute_hash",
     "load_registry",
+    "make_receipt",
     "project_apply_patch",
     "project_file_edit",
     "project_file_read",
