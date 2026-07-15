@@ -79,6 +79,7 @@ def _workspace_test_registry(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("app.workspace.files.get_registry", fake_get_registry)
     monkeypatch.setattr("app.workspace.search.get_registry", fake_get_registry)
     monkeypatch.setattr("app.workspace.git.get_registry", fake_get_registry)
+    monkeypatch.setattr("app.workspace.preview.get_registry", fake_get_registry)
     monkeypatch.setattr("app.routers.workspace.get_registry", fake_get_registry)
 
 
@@ -772,3 +773,544 @@ class TestPatchFileEndpoint:
         assert resp.status_code == 403
         body_text = resp.text
         assert str(write_ws["tmp_path"]) not in body_text
+
+
+# ---------------------------------------------------------------------------
+# Preview write — POST /api/workspace/projects/{project_id}/files/preview/write
+# ---------------------------------------------------------------------------
+
+
+class TestPreviewWriteEndpoint:
+    def test_preview_write_success(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/write",
+                json={"path": "new.txt", "content": "hello world"},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["project_id"] == "test-project"
+        assert data["path"] == "new.txt"
+        assert data["file_exists_before"] is False
+        assert data["changed"] is True
+        assert data["before_hash"] is None
+        assert data["after_hash"] is not None
+        assert "diff" in data
+        # Must NOT have written to disk
+        assert not (write_ws["project"] / "new.txt").exists()
+
+    def test_preview_write_existing_file(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/write",
+                json={"path": "src/main.py", "content": "new content"},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["file_exists_before"] is True
+        assert data["changed"] is True
+        # Must NOT have overwritten the file on disk
+        assert (write_ws["project"] / "src" / "main.py").read_text() == "print('hello')\n"
+
+    def test_preview_write_traversal(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/write",
+                json={"path": "../escape.txt", "content": "data"},
+            )
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["detail"]["code"] == "TRAVERSALERROR"
+
+    def test_preview_write_hidden_path(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/write",
+                json={"path": ".env", "content": "EVIL=true"},
+            )
+        assert resp.status_code == 403
+        body = resp.json()
+        assert "HIDDEN" in body["detail"]["code"]
+
+    def test_preview_write_unknown_project(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/nonexistent/files/preview/write",
+                json={"path": "x.txt", "content": "data"},
+            )
+        assert resp.status_code == 404
+
+    def test_preview_write_no_content_leak(self, write_ws):
+        """Error must not leak absolute file system paths."""
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/write",
+                json={"path": ".env", "content": "EVIL=true"},
+            )
+        assert resp.status_code == 403
+        assert str(write_ws["tmp_path"]) not in resp.text
+
+    def test_agent_with_read_scope(self, write_ws):
+        from unittest.mock import AsyncMock
+        registry = _mock_registry(write_ws["project"])
+        identity = _mock_agent_identity(scopes=("project:read",))
+        with (
+            patch(
+                "app.auth_middleware.verify_api_key",
+                AsyncMock(return_value=identity),
+            ),
+            patch(
+                "app.routers.workspace.get_registry", return_value=registry
+            ),
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/write",
+                json={"path": "new.txt", "content": "hello"},
+                headers={"X-API-Key": "agent-token"},
+            )
+        assert resp.status_code == 200
+        assert not (write_ws["project"] / "new.txt").exists()
+
+    def test_agent_without_read_scope_denied(self, write_ws):
+        from unittest.mock import AsyncMock
+        registry = _mock_registry(write_ws["project"])
+        identity = _mock_agent_identity(scopes=("project:write",))
+        with (
+            patch(
+                "app.auth_middleware.verify_api_key",
+                AsyncMock(return_value=identity),
+            ),
+            patch(
+                "app.routers.workspace.get_registry", return_value=registry
+            ),
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/write",
+                json={"path": "new.txt", "content": "hello"},
+                headers={"X-API-Key": "agent-token"},
+            )
+        assert resp.status_code == 403
+        body = resp.json()
+        assert body["detail"]["code"] == "MISSING_SCOPE"
+
+
+# ---------------------------------------------------------------------------
+# Preview edit — POST /api/workspace/projects/{project_id}/files/preview/edit
+# ---------------------------------------------------------------------------
+
+
+class TestPreviewEditEndpoint:
+    def test_preview_edit_success(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/edit",
+                json={
+                    "path": "src/main.py",
+                    "old_string": "hello",
+                    "new_string": "world",
+                },
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["project_id"] == "test-project"
+        assert data["changed"] is True
+        assert data["replaced"] is True
+        assert "diff" in data
+        # Must NOT have changed the file on disk
+        assert (write_ws["project"] / "src" / "main.py").read_text() == "print('hello')\n"
+
+    def test_preview_edit_traversal(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/edit",
+                json={
+                    "path": "../escape.txt",
+                    "old_string": "a",
+                    "new_string": "b",
+                },
+            )
+        assert resp.status_code == 400
+
+    def test_preview_edit_hidden_path(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/edit",
+                json={
+                    "path": ".env",
+                    "old_string": "SECRET",
+                    "new_string": "EVIL",
+                },
+            )
+        assert resp.status_code == 403
+
+    def test_preview_edit_unknown_project(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/nonexistent/files/preview/edit",
+                json={
+                    "path": "x.txt",
+                    "old_string": "a",
+                    "new_string": "b",
+                },
+            )
+        assert resp.status_code == 404
+
+    def test_preview_edit_old_string_not_found(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/edit",
+                json={
+                    "path": "src/main.py",
+                    "old_string": "DOES_NOT_EXIST",
+                    "new_string": "b",
+                },
+            )
+        assert resp.status_code == 404
+        body = resp.json()
+        assert "not found" in body["detail"].get("message", "").lower()
+
+    def test_agent_with_read_scope(self, write_ws):
+        from unittest.mock import AsyncMock
+        registry = _mock_registry(write_ws["project"])
+        identity = _mock_agent_identity(scopes=("project:read",))
+        with (
+            patch(
+                "app.auth_middleware.verify_api_key",
+                AsyncMock(return_value=identity),
+            ),
+            patch(
+                "app.routers.workspace.get_registry", return_value=registry
+            ),
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/edit",
+                json={
+                    "path": "src/main.py",
+                    "old_string": "hello",
+                    "new_string": "world",
+                },
+                headers={"X-API-Key": "agent-token"},
+            )
+        assert resp.status_code == 200
+        # Must NOT have changed the file on disk
+        assert (write_ws["project"] / "src" / "main.py").read_text() == "print('hello')\n"
+
+    def test_agent_without_read_scope_denied(self, write_ws):
+        from unittest.mock import AsyncMock
+        registry = _mock_registry(write_ws["project"])
+        identity = _mock_agent_identity(scopes=("ssh:connect",))
+        with (
+            patch(
+                "app.auth_middleware.verify_api_key",
+                AsyncMock(return_value=identity),
+            ),
+            patch(
+                "app.routers.workspace.get_registry", return_value=registry
+            ),
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/edit",
+                json={
+                    "path": "src/main.py",
+                    "old_string": "hello",
+                    "new_string": "world",
+                },
+                headers={"X-API-Key": "agent-token"},
+            )
+        assert resp.status_code == 403
+        body = resp.json()
+        assert body["detail"]["code"] == "MISSING_SCOPE"
+
+
+# ---------------------------------------------------------------------------
+# Preview patch — POST /api/workspace/projects/{project_id}/files/preview/patch
+# ---------------------------------------------------------------------------
+
+
+class TestPreviewPatchEndpoint:
+    def test_preview_patch_success(self, write_ws):
+        patch_text = _make_patch("src/main.py", "print('hello')", "print('world')")
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/patch",
+                json={"path": "src/main.py", "patch": patch_text},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["project_id"] == "test-project"
+        assert data["changed"] is True
+        assert "diff" in data
+        # Must NOT have changed the file on disk
+        assert (write_ws["project"] / "src" / "main.py").read_text() == "print('hello')\n"
+
+    def test_preview_patch_traversal(self, write_ws):
+        patch_text = _make_patch("escape.txt", "a", "b")
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/patch",
+                json={"path": "../escape.txt", "patch": patch_text},
+            )
+        assert resp.status_code == 400
+
+    def test_preview_patch_hidden_path(self, write_ws):
+        patch_text = _make_patch(".env", "SECRET", "EVIL")
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/patch",
+                json={"path": ".env", "patch": patch_text},
+            )
+        assert resp.status_code == 403
+
+    def test_preview_patch_invalid_patch(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/patch",
+                json={"path": "src/main.py", "patch": "not a patch"},
+            )
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["detail"]["code"] == "PATCHERROR"
+
+    def test_preview_patch_unknown_project(self, write_ws):
+        patch_text = _make_patch("x.txt", "a", "b")
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/nonexistent/files/preview/patch",
+                json={"path": "x.txt", "patch": patch_text},
+            )
+        assert resp.status_code == 404
+
+    def test_agent_with_read_scope(self, write_ws):
+        from unittest.mock import AsyncMock
+        patch_text = _make_patch("src/main.py", "print('hello')", "print('world')")
+        registry = _mock_registry(write_ws["project"])
+        identity = _mock_agent_identity(scopes=("project:read",))
+        with (
+            patch(
+                "app.auth_middleware.verify_api_key",
+                AsyncMock(return_value=identity),
+            ),
+            patch(
+                "app.routers.workspace.get_registry", return_value=registry
+            ),
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/patch",
+                json={"path": "src/main.py", "patch": patch_text},
+                headers={"X-API-Key": "agent-token"},
+            )
+        assert resp.status_code == 200
+        # Must NOT have changed the file on disk
+        assert (write_ws["project"] / "src" / "main.py").read_text() == "print('hello')\n"
+
+    def test_agent_without_read_scope_denied(self, write_ws):
+        from unittest.mock import AsyncMock
+        patch_text = _make_patch("src/main.py", "print('hello')", "print('world')")
+        registry = _mock_registry(write_ws["project"])
+        identity = _mock_agent_identity(scopes=("ssh:connect",))
+        with (
+            patch(
+                "app.auth_middleware.verify_api_key",
+                AsyncMock(return_value=identity),
+            ),
+            patch(
+                "app.routers.workspace.get_registry", return_value=registry
+            ),
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/preview/patch",
+                json={"path": "src/main.py", "patch": patch_text},
+                headers={"X-API-Key": "agent-token"},
+            )
+        assert resp.status_code == 403
+        body = resp.json()
+        assert body["detail"]["code"] == "MISSING_SCOPE"
+
+
+# ---------------------------------------------------------------------------
+# Verify — POST /api/workspace/projects/{project_id}/files/verify
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyFileEndpoint:
+    def test_verify_match(self, write_ws):
+        import hashlib
+        content = (write_ws["project"] / "src" / "main.py").read_bytes()
+        expected_hash = "sha256:" + hashlib.sha256(content).hexdigest()
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/verify",
+                json={"path": "src/main.py", "expected_hash": expected_hash},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["matches"] is True
+        assert data["current_hash"] == expected_hash
+        assert data["file_exists"] is True
+
+    def test_verify_mismatch(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/verify",
+                json={
+                    "path": "src/main.py",
+                    "expected_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                },
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["matches"] is False
+        assert data["file_exists"] is True
+
+    def test_verify_missing_file(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/verify",
+                json={
+                    "path": "nonexistent.txt",
+                    "expected_hash": "sha256:abc",
+                },
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["matches"] is False
+        assert data["current_hash"] is None
+        assert data["file_exists"] is False
+
+    def test_verify_traversal(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/verify",
+                json={"path": "../escape.txt", "expected_hash": "sha256:abc"},
+            )
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["detail"]["code"] == "TRAVERSALERROR"
+
+    def test_verify_hidden_path(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/verify",
+                json={"path": ".env", "expected_hash": "sha256:abc"},
+            )
+        assert resp.status_code == 403
+
+    def test_verify_unknown_project(self, write_ws):
+        registry = _mock_registry(write_ws["project"])
+        with patch(
+            "app.routers.workspace.get_registry", return_value=registry
+        ):
+            resp = _post(
+                "/api/workspace/projects/nonexistent/files/verify",
+                json={"path": "x.txt", "expected_hash": "sha256:abc"},
+            )
+        assert resp.status_code == 404
+
+    def test_agent_with_read_scope(self, write_ws):
+        import hashlib
+        from unittest.mock import AsyncMock
+        content = (write_ws["project"] / "src" / "main.py").read_bytes()
+        expected_hash = "sha256:" + hashlib.sha256(content).hexdigest()
+        registry = _mock_registry(write_ws["project"])
+        identity = _mock_agent_identity(scopes=("project:read",))
+        with (
+            patch(
+                "app.auth_middleware.verify_api_key",
+                AsyncMock(return_value=identity),
+            ),
+            patch(
+                "app.routers.workspace.get_registry", return_value=registry
+            ),
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/verify",
+                json={"path": "src/main.py", "expected_hash": expected_hash},
+                headers={"X-API-Key": "agent-token"},
+            )
+        assert resp.status_code == 200
+        assert resp.json()["matches"] is True
+
+    def test_agent_without_read_scope_denied(self, write_ws):
+        from unittest.mock import AsyncMock
+        registry = _mock_registry(write_ws["project"])
+        identity = _mock_agent_identity(scopes=("ssh:connect",))
+        with (
+            patch(
+                "app.auth_middleware.verify_api_key",
+                AsyncMock(return_value=identity),
+            ),
+            patch(
+                "app.routers.workspace.get_registry", return_value=registry
+            ),
+        ):
+            resp = _post(
+                "/api/workspace/projects/test-project/files/verify",
+                json={"path": "src/main.py", "expected_hash": "sha256:abc"},
+                headers={"X-API-Key": "agent-token"},
+            )
+        assert resp.status_code == 403
+        body = resp.json()
+        assert body["detail"]["code"] == "MISSING_SCOPE"

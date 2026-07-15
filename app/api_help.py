@@ -1680,6 +1680,90 @@ def build_api_help(request: Request) -> dict[str, Any]:
                 "backup_hash in patch responses enables audit/rollback without storing file content.",
             ],
         },
+        "workspace_preview_verify_workflow": {
+            "title": "Workspace preview & verify — C2.1 read/metadata tools",
+            "overview": "Preview what a write/edit/patch would produce without writing to disk. Verify a file's current hash against an expected value. Both are read-only, metadata-only operations. No file content is returned unless the caller already supplied it.",
+            "prerequisite": "Requires agent token with `project:read` scope (or higher). Projects must be registered in projects.yaml.",
+            "scope_note": "Preview and verify require explicit `project:read` scope. An agent token with only `project:write` does NOT automatically get preview/verify access — create the token with both `project:read` and `project:write` scopes if you need both read preview and write operations.",
+            "sections": [
+                {
+                    "name": "preview_write",
+                    "title": "Preview a file write",
+                    "endpoints": [
+                        {
+                            "endpoint": "POST /api/workspace/projects/{project_id}/files/preview/write",
+                            "scope": "project:read",
+                            "description": "Show what a write would produce: diff (new file → full diff, overwrite → old vs new), size delta, hash before/after. Does NOT write to disk.",
+                        },
+                    ],
+                },
+                {
+                    "name": "preview_edit",
+                    "title": "Preview a file edit",
+                    "endpoints": [
+                        {
+                            "endpoint": "POST /api/workspace/projects/{project_id}/files/preview/edit",
+                            "scope": "project:read",
+                            "description": "Show the unified diff that an edit would produce, without writing. Returns old/new strings, replaced flag, size delta, hash before/after.",
+                        },
+                    ],
+                },
+                {
+                    "name": "preview_patch",
+                    "title": "Preview a patch",
+                    "endpoints": [
+                        {
+                            "endpoint": "POST /api/workspace/projects/{project_id}/files/preview/patch",
+                            "scope": "project:read",
+                            "description": "Validate a unified diff patch and show the resulting diff, without applying it. Returns applied flag, size delta, hash before/after.",
+                        },
+                    ],
+                },
+                {
+                    "name": "verify",
+                    "title": "Verify file hash",
+                    "endpoints": [
+                        {
+                            "endpoint": "POST /api/workspace/projects/{project_id}/files/verify",
+                            "scope": "project:read",
+                            "description": "Check if a file's current SHA-256 matches an expected hash. Returns match (bool), current_hash, file_exists. No content returned.",
+                        },
+                    ],
+                },
+            ],
+            "important": "Preview and verify are read-only metadata tools. They never write to disk. Rollback is NOT exposed via these endpoints. For rollback, see workspace_write_workflow (snapshot-based, separate scope).",
+            "examples": [
+                {
+                    "endpoint": "POST /api/workspace/projects/{project_id}/files/preview/write",
+                    "title": "Preview writing a new file",
+                    "body": '{"path":"src/util.py","content":"def helper():\\n    pass\\n"}',
+                    "response": '{"project_id":"my-project","path":"src/util.py","operation":"write","file_exists":false,"size_before":0,"size_after":25,"hash_after":"sha256:...","diff":"--- /dev/null\\n+++ b/src/util.py\\n@@ -0 +1,2 @@\\n+def helper():\\n+    pass\\n"}',
+                    "notes": "No write occurs. Response shows what would happen.",
+                },
+                {
+                    "endpoint": "POST /api/workspace/projects/{project_id}/files/verify",
+                    "title": "Verify file hash before edit",
+                    "body": '{"path":"src/main.py","expected_hash":"sha256:e3b0c44..."}',
+                    "response": '{"project_id":"my-project","path":"src/main.py","file_exists":true,"current_hash":"sha256:e3b0c44...","match":true}',
+                    "notes": "Use before editing to confirm the file hasn't changed since you last read it.",
+                },
+            ],
+            "error_mapping": {
+                "403": "ScopeDeniedError, HiddenPathError — caller lacks project:read scope or path is hidden",
+                "400": "TraversalError, SymlinkEscapeError, PatchError — bad path or patch format",
+                "404": "Unknown project, file not found (verify), old_string not found (preview/edit)",
+            },
+            "not_exposed": [
+                "Rollback — see workspace_write_workflow for snapshot-based rollback (separate scope, separate lifecycle)",
+                "File content in responses — preview returns diff/metadata only, never full file content unless caller supplied it",
+            ],
+            "safety_notes": [
+                "Preview is read-only — no disk writes, no side effects.",
+                "Verify returns match (bool) and current_hash — no file content.",
+                "Both validate paths through WorkspacePolicy (traversal, symlink, hidden).",
+                "Preview/verify do NOT create snapshots or receipts — they are stateless.",
+            ],
+        },
         "ssh_trust_workflow": {
             "title": "SSH Trust Flow \u2014 safe host key verification",
             "overview": "Before establishing an SSH connection, the gateway checks whether the remote host's key is known. This section documents the three trust states, how the UI behaves in each, and how to manage known hosts manually.",
