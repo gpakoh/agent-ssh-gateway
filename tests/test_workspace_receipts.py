@@ -248,8 +248,8 @@ class TestMakeReceipt:
     def test_write_overwrite(self, receipt_workspace):
         path = receipt_workspace["project"] / "README.md"
         old = path.read_text()
-        # Write new content so verification can succeed
-        path.write_text("new content")
+        # Write new content with write_bytes for cross-platform hash consistency
+        path.write_bytes(b"new content")
         receipt = make_receipt(
             project_id="receipt-project",
             relative_path="README.md",
@@ -267,7 +267,8 @@ class TestMakeReceipt:
         path = receipt_workspace["project"] / "src" / "main.py"
         old = path.read_text()
         new = old.replace("pass", "return 0")
-        path.write_text(new)
+        # Write with write_bytes for cross-platform hash consistency
+        path.write_bytes(new.encode("utf-8"))
         receipt = make_receipt(
             project_id="receipt-project",
             relative_path="src/main.py",

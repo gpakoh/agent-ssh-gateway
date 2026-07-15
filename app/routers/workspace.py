@@ -24,6 +24,12 @@ from app.workspace.policy import (
     TraversalError,
     WorkspacePolicyError,
 )
+from app.workspace.preview import (
+    project_file_preview_edit,
+    project_file_preview_patch,
+    project_file_preview_write,
+    project_file_verify,
+)
 from app.workspace.registry import WorkspaceRegistry, get_registry
 from app.workspace.tools import (
     project_file_read,
@@ -397,6 +403,84 @@ def patch_file(
         registry = registry_for_identity(_identity)
         return project_apply_patch(
             project_id, path, patch, registry=registry
+        )
+    except (KeyError, WorkspacePolicyError) as exc:
+        raise _map_workspace_error(exc) from exc
+
+
+# ---------------------------------------------------------------------------
+# Preview / Verify — read-only, require master key
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/workspace/projects/{project_id}/files/preview/write")
+def preview_write(
+    project_id: str,
+    path: str = Body(..., alias="path"),
+    content: str = Body(...),
+    max_bytes: int = Body(1_000_000, ge=1, le=2_000_000),
+    _identity: AuthIdentity = Depends(require_scope("project:read")),
+) -> dict[str, Any]:
+    """Preview a file write without writing to disk."""
+    try:
+        registry = registry_for_identity(_identity)
+        return project_file_preview_write(
+            project_id, path, content, max_bytes=max_bytes, registry=registry
+        )
+    except (KeyError, WorkspacePolicyError) as exc:
+        raise _map_workspace_error(exc) from exc
+
+
+@router.post("/api/workspace/projects/{project_id}/files/preview/edit")
+def preview_edit(
+    project_id: str,
+    path: str = Body(..., alias="path"),
+    old_string: str = Body(...),
+    new_string: str = Body(...),
+    max_bytes: int = Body(1_000_000, ge=1, le=2_000_000),
+    _identity: AuthIdentity = Depends(require_scope("project:read")),
+) -> dict[str, Any]:
+    """Preview a file edit without writing to disk."""
+    try:
+        registry = registry_for_identity(_identity)
+        return project_file_preview_edit(
+            project_id, path, old_string, new_string,
+            max_bytes=max_bytes, registry=registry,
+        )
+    except (KeyError, WorkspacePolicyError) as exc:
+        raise _map_workspace_error(exc) from exc
+
+
+@router.post("/api/workspace/projects/{project_id}/files/preview/patch")
+def preview_patch(
+    project_id: str,
+    path: str = Body(..., alias="path"),
+    patch: str = Body(...),
+    max_bytes: int = Body(1_000_000, ge=1, le=2_000_000),
+    _identity: AuthIdentity = Depends(require_scope("project:read")),
+) -> dict[str, Any]:
+    """Preview a patch application without writing to disk."""
+    try:
+        registry = registry_for_identity(_identity)
+        return project_file_preview_patch(
+            project_id, path, patch, max_bytes=max_bytes, registry=registry
+        )
+    except (KeyError, WorkspacePolicyError) as exc:
+        raise _map_workspace_error(exc) from exc
+
+
+@router.post("/api/workspace/projects/{project_id}/files/verify")
+def verify_file(
+    project_id: str,
+    path: str = Body(..., alias="path"),
+    expected_hash: str = Body(...),
+    _identity: AuthIdentity = Depends(require_scope("project:read")),
+) -> dict[str, Any]:
+    """Verify a file's current hash matches expected hash."""
+    try:
+        registry = registry_for_identity(_identity)
+        return project_file_verify(
+            project_id, path, expected_hash, registry=registry
         )
     except (KeyError, WorkspacePolicyError) as exc:
         raise _map_workspace_error(exc) from exc
