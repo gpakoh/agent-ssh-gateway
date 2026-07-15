@@ -99,6 +99,7 @@ services:
       - JWT_EXPIRES_MINUTES=${JWT_EXPIRES_MINUTES:-1440}
       - PERSISTENT_SESSIONS_ENABLED=true
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@mcp-postgres:5432/gateway
+      - WORKSPACE_READONLY=${WORKSPACE_READONLY:-true}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:?set ENCRYPTION_KEY}
     volumes:
       - ../projects.yaml:/app/projects.yaml:ro
