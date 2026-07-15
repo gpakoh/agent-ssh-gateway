@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.workspace.policy import WorkspacePolicyError
 from app.workspace.registry import reset_registry
 from app.workspace.tools import project_info, project_tree, workspace_list_projects
+
+
+def _real_workspace_available() -> bool:
+    """Return True only on the production/dev host with real projects mounted."""
+    return Path("/media/1TB/Python/web_ssh/web-ssh-gateway").exists()
+
+
+pytestmark = pytest.mark.skipif(
+    not _real_workspace_available(),
+    reason="real /media/1TB/Python workspace is not available",
+)
 
 
 @pytest.fixture(autouse=True)
