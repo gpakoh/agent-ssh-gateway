@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_master_key
+from app.config import settings
 from app.diff_generator import DiffGenerator
 from app.git_manager import GitStatus
 from app.models import (
@@ -191,11 +192,20 @@ async def context_file_read(
     return FileReadResponse(path=req.path, content=content)
 
 
+def _assert_rw() -> None:
+    if settings.workspace_readonly:
+        raise HTTPException(
+            status_code=403,
+            detail=_err(403, "WORKSPACE_READONLY: write operations are disabled"),
+        )
+
+
 @router.patch("/api/context/file/edit", response_model=FileEditWithContextResponse)
 async def context_file_edit(
     req: FileEditWithContextRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Edit a file with context awareness (auto-commit, validation)."""
+    _assert_rw()
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
         raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
