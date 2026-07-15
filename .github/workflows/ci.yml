@@ -38,11 +38,3 @@ jobs:
 
       - name: Tests (portable)
         run: pytest -m "not host_smoke" --junitxml=test-results.xml --cov=app --cov-report=term-missing -q
-
-      - name: Upload test results
-        if: ${{ always() && github.server_url == 'https://github.com' }}
-        uses: actions/upload-artifact@v4
-        continue-on-error: true
-        with:
-          name: test-results-py${{ matrix.python-version }}
-          path: test-results.xml
