@@ -1641,7 +1641,13 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "legacy_file_mutation": [
                         "PATCH /api/file/edit",
                         "POST /api/file/patch",
+                        "POST /api/file/upload",
+                        "POST /api/file/upload/json",
                         "POST /api/file/write",
+                        "POST /api/projects/{project}/apply-patch",
+                        "POST /api/ast/rename",
+                        "POST /api/refactor/rename",
+                        "POST /api/ast/extract",
                         "PATCH /api/batch/edit",
                         "POST /api/bulk/edit",
                         "PATCH /api/context/file/edit",
