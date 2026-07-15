@@ -17,9 +17,9 @@ Errors use `isError: true` with an `Error:` prefix in the text.
 `MCP_GATEWAY_TOOL_MODE` controls which tools are exposed to the MCP client.
 
 - `minimal` — health, session health, restricted execute, job status/result. Suitable for limited-scope automation.
-- `standard` — default read/audit workflow. Includes file reading, repo status, session listing, and job waiting.
-- `full` — reserved for diagnostics and handoff/context tools. Adds `gateway_self_test`.
-- `chatgpt` — designed for ChatGPT remote MCP. Replaces `gateway_execute_restricted` with high-level read-only tools (`gateway_git_status`, `gateway_run_tests`, etc.).
+- `standard` — default read/audit workflow. Includes file reading, repo status, session listing, job waiting, and all workspace tools (write, edit, patch, preview ×3, verify).
+- `full` — reserved for diagnostics, handoff, and workspace tools. Adds `gateway_self_test` plus all standard workspace tools.
+- `chatgpt` — designed for ChatGPT remote MCP. Replaces `gateway_execute_restricted` with high-level read-only tools. **No workspace tools** — write, preview, and verify are intentionally excluded.
 
 Tool mode controls visibility only. Write permissions are orthogonal — see [Handoff mode](#handoff-mode) below.
 
@@ -93,10 +93,47 @@ Tools:
 - `gateway_show_handoff_status` — compact handoff file availability check
 - `gateway_write_handoff_plan` — write `.ai-bridge/current-plan.md` (requires `WRITE_MODE=handoff`)
 
+## Workspace tools
+
+The MCP server exposes scoped workspace write, preview, and verify tools.
+All require the `mcp:project` scope.
+
+### Available by mode
+
+| Tool | standard | full | chatgpt |
+|------|----------|------|---------|
+| `workspace_file_write` | yes | yes | — |
+| `workspace_file_edit` | yes | yes | — |
+| `workspace_apply_patch` | yes | yes | — |
+| `workspace_preview_write` | yes | yes | yes |
+| `workspace_preview_edit` | yes | yes | yes |
+| `workspace_preview_patch` | yes | yes | yes |
+| `workspace_verify` | yes | yes | yes |
+
+**chatgpt mode** intentionally excludes workspace write tools. It remains
+read-only: preview and verify tools are available, while write/edit/patch are hidden.
+
+### Safe flag
+
+`workspace_file_write`, `workspace_file_edit`, and `workspace_apply_patch`
+accept an optional `safe` parameter (bool, default `false`). When `safe=true`,
+the response includes a receipt object with: `receipt_id`, `before_hash`,
+`after_hash`, `changed`, `verified`, `diff_summary`. Safe is fully wired
+through MCP to the C1 library.
+
+### Preview and verify
+
+Preview tools return diff metadata without writing to disk.
+`workspace_verify` returns `matches` (bool, plural), `current_hash`,
+and `file_exists`. No file content is returned.
+
+### Rollback
+
+**Rollback is NOT available** via MCP tools, REST endpoints, or SDK.
+Rollback is a separate lifecycle managed by SnapshotStore (Python API only).
+
 ## Excluded by design
 
-- source file write/edit/upload
-- token management
 - unrestricted command execution
 - deployment or destructive operations
 - WebSocket/PTTY streaming
@@ -167,6 +204,7 @@ appear automatically. An example file lives at
 | `ssh:execute` | `gateway_execute_restricted` |
 | `ssh:files` | `gateway_read_file` |
 | `jobs:read` | `gateway_job_status`, `gateway_job_result`, `gateway_wait_job` |
+| `mcp:project` | `workspace_file_write`, `workspace_file_edit`, `workspace_apply_patch`, `workspace_preview_write`, `workspace_preview_edit`, `workspace_preview_patch`, `workspace_verify` |
 
 Use a **scoped agent token**, not a master key. The `scopes` parameter on
 `POST /api/tokens/create` allows setting custom scopes.
