@@ -180,6 +180,7 @@ async def project_apply_patch(
     _identity: AuthIdentity = Depends(require_scope("project:patch")),
 ):
     """Apply a unified diff patch to project files with hash verification and rollback."""
+    _assert_rw()
     # Session ownership
     session = await _state.manager.get_session(req.session_id)
     if session is None:
@@ -496,6 +497,7 @@ async def file_upload(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Upload file to remote server (base64 encoded via query params)."""
+    _assert_rw()
     await _check_session_ownership(session_id, request)
 
     import base64
@@ -519,6 +521,7 @@ async def file_upload_json(
 
     Preferred for large files (>2KB) where query params may fail.
     """
+    _assert_rw()
     await _check_session_ownership(req.session_id, request)
 
     import base64
@@ -605,6 +608,7 @@ async def ast_rename(
 
     Supports single file ('path') or multiple files ('files' array).
     """
+    _assert_rw()
     await _check_session_ownership(req.session_id, request)
 
     # Validate All Paths First
@@ -700,6 +704,7 @@ async def refactor_rename(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Alias for /api/ast/rename — AST-aware symbol renaming."""
+    _assert_rw()
     return await ast_rename(req, request)
 
 
@@ -710,6 +715,7 @@ async def ast_extract(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Extract a block of code into a new function."""
+    _assert_rw()
     await _check_session_ownership(req.session_id, request)
 
     try:
