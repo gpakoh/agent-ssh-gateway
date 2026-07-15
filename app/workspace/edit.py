@@ -169,6 +169,7 @@ def project_file_write(
     content: str,
     max_bytes: int = _WRITE_MAX_BYTES,
     registry: WorkspaceRegistry | None = None,
+    safe: bool = False,
 ) -> dict[str, Any]:
     """Write (create or overwrite) a UTF-8 text file inside a project.
 
@@ -178,9 +179,11 @@ def project_file_write(
         content: UTF-8 text content to write.
         max_bytes: maximum allowed content size (default 1 MB).
         registry: optional WorkspaceRegistry instance.
+        safe: if True, include change receipt in response.
 
     Returns:
         Dict with project_id, path, size, encoding.
+        If safe=True, includes nested receipt dict.
 
     Raises:
         WriteError: content exceeds max_bytes, binary content, or write failed.
@@ -211,16 +214,35 @@ def project_file_write(
     if b"\x00" in utf8_bytes:
         raise WriteError("Binary content is not allowed")
 
-    _symlink_safe_preflight(full, project_root)
+    before_content = None
+    if safe:
+        from app.workspace.receipts import read_file_bytes
+        raw, _ = read_file_bytes(full)
+        if raw is not None:
+            before_content = raw.decode("utf-8", errors="replace")
 
     _atomic_write(full, utf8_bytes)
 
-    return {
+    result: dict[str, Any] = {
         "project_id": project_id,
         "path": relative_path,
         "size": len(utf8_bytes),
         "encoding": "utf-8",
     }
+
+    if safe:
+        from app.workspace.receipts import make_receipt
+        receipt = make_receipt(
+            project_id=project_id,
+            relative_path=relative_path,
+            operation="write",
+            file_path=full,
+            before_content=before_content,
+            after_content=content,
+        )
+        result["receipt"] = receipt.to_dict()
+
+    return result
 
 
 def project_file_edit(
@@ -230,6 +252,7 @@ def project_file_edit(
     new_string: str,
     max_bytes: int = _WRITE_MAX_BYTES,
     registry: WorkspaceRegistry | None = None,
+    safe: bool = False,
 ) -> dict[str, Any]:
     """Edit a file by replacing the first occurrence of old_string with new_string.
 
@@ -240,20 +263,21 @@ def project_file_edit(
         new_string: replacement string.
         max_bytes: maximum file size in bytes (default 1 MB).
         registry: optional WorkspaceRegistry instance.
+        safe: if True, include change receipt in response.
 
     Returns:
         Dict with project_id, path, size, encoding, old_string, new_string,
-        diff, replaced.
+        diff, replaced. If safe=True, includes nested receipt dict.
 
     Raises:
-        WorkspacePolicyError: old_string empty, not found, content exceeds max.
+        WriteError: old_string empty, not found, content exceeds max.
         HiddenPathError: write to hidden/secret path denied.
         SymlinkEscapeError: any path component is a symlink.
         ScopeDeniedError: project:write scope required.
         TraversalError: path traversal detected.
     """
     if not old_string:
-        raise WorkspacePolicyError("old_string must not be empty")
+        raise WriteError("old_string must not be empty")
 
     r = registry or get_registry()
     full = r._policy.validate_write(project_id, relative_path)
@@ -264,10 +288,12 @@ def project_file_edit(
     old_content, file_size = _exact_read(full, max_bytes)
 
     if old_string not in old_content:
-        raise WorkspacePolicyError("old_string not found in file content")
+        raise WriteError("old_string not found in file content")
 
     if old_string == new_string:
-        return {
+        from app.workspace.receipts import compute_hash
+
+        result: dict[str, Any] = {
             "project_id": project_id,
             "path": relative_path,
             "size": file_size,
@@ -277,12 +303,23 @@ def project_file_edit(
             "diff": "",
             "replaced": False,
         }
+        if safe:
+            result["receipt"] = {
+                "before_hash": compute_hash(old_content),
+                "after_hash": compute_hash(old_content),
+                "size_before": file_size,
+                "size_after": file_size,
+                "changed": False,
+                "verified": True,
+                "diff_summary": "edit: no change",
+            }
+        return result
 
     new_content = old_content.replace(old_string, new_string, 1)
     new_bytes = new_content.encode("utf-8")
 
     if len(new_bytes) > max_bytes:
-        raise WorkspacePolicyError(
+        raise WriteError(
             f"Content after edit exceeds maximum of {max_bytes} bytes"
         )
 
@@ -290,7 +327,7 @@ def project_file_edit(
 
     _atomic_write(full, new_bytes)
 
-    return {
+    result = {
         "project_id": project_id,
         "path": relative_path,
         "size": len(new_bytes),
@@ -300,6 +337,21 @@ def project_file_edit(
         "diff": diff,
         "replaced": True,
     }
+
+    if safe:
+        from app.workspace.receipts import make_receipt
+
+        receipt = make_receipt(
+            project_id=project_id,
+            relative_path=relative_path,
+            operation="edit",
+            file_path=full,
+            before_content=old_content,
+            after_content=new_content,
+        )
+        result["receipt"] = receipt.to_dict()
+
+    return result
 
 
 # ── Patch helpers ────────────────────────────────────────────────
@@ -412,6 +464,7 @@ def project_apply_patch(
     patch: str,
     max_bytes: int = _WRITE_MAX_BYTES,
     registry: WorkspaceRegistry | None = None,
+    safe: bool = False,
 ) -> dict[str, Any]:
     """Apply a unified diff patch to a file inside a project.
 
@@ -421,9 +474,11 @@ def project_apply_patch(
         patch: unified diff text (single file).
         max_bytes: maximum file size in bytes (default 1 MB).
         registry: optional WorkspaceRegistry instance.
+        safe: if True, include change receipt in response.
 
     Returns:
         Dict with project_id, path, size, encoding, applied, backup_hash.
+        If safe=True, includes nested receipt dict.
 
     Raises:
         PatchError: patch format invalid, hunk conflict, file not found.
@@ -464,13 +519,13 @@ def project_apply_patch(
     new_bytes = new_content.encode("utf-8")
 
     if len(new_bytes) > max_bytes:
-        raise WorkspacePolicyError(
+        raise WriteError(
             f"Patched content exceeds maximum of {max_bytes} bytes"
         )
 
     _atomic_write(full, new_bytes)
 
-    return {
+    result: dict[str, Any] = {
         "project_id": project_id,
         "path": relative_path,
         "size": len(new_bytes),
@@ -478,3 +533,18 @@ def project_apply_patch(
         "applied": True,
         "backup_hash": backup_hash,
     }
+
+    if safe:
+        from app.workspace.receipts import make_receipt
+
+        receipt = make_receipt(
+            project_id=project_id,
+            relative_path=relative_path,
+            operation="patch",
+            file_path=full,
+            before_content=old_content,
+            after_content=new_content,
+        )
+        result["receipt"] = receipt.to_dict()
+
+    return result

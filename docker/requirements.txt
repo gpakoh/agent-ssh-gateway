@@ -1,7 +1,13 @@
 # Runtime dependencies for Docker image.
 # Keep in sync with [project.dependencies] in ../pyproject.toml.
+#
+# Categories:
+#   runtime         — core app deps, mirrors pyproject.toml [project.dependencies]
+#   docker-deploy   — Alembic sync engine, runtime validation; not in pyproject.toml
+#                     but required in the Docker image for migration/validation paths.
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
+mcp>=1.28.0
 paramiko==3.5.0
 pydantic==2.9.0
 pydantic-settings==2.6.0
@@ -18,11 +24,12 @@ prometheus-client==0.20.0
 asyncpg==0.29.0
 sqlalchemy==2.0.0
 alembic==1.13.0
-psycopg2-binary==2.9.9
-pytest-asyncio>=0.21.0
-jsonschema==4.26.0
 aiosqlite>=0.20.0
 bcrypt==4.2.1
 PyJWT==2.10.1
 unidiff>=0.7.5
 PyYAML==6.0.1
+# docker-deploy: Alembic sync engine (psycopg2 for synchronous migrations)
+psycopg2-binary==2.9.9
+# docker-deploy: runtime validation/template paths
+jsonschema==4.26.0
