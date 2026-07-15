@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from app.auth_middleware import AuthIdentity, require_master_key, require_scope
+from app.config import settings
 from app.state import _err
 from app.workspace.edit import (
     PatchError,
@@ -52,6 +53,20 @@ router = APIRouter(tags=["workspace"])
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _require_writable() -> None:
+    """Raise 403 if workspace is in readonly mode."""
+    if settings.workspace_readonly:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": "Workspace is in read-only mode",
+                "code": "WORKSPACE_READONLY",
+                "retryable": False,
+                "hint": "Set WORKSPACE_READONLY=false to enable write operations",
+            },
+        )
 
 
 def registry_for_identity(identity: AuthIdentity) -> WorkspaceRegistry:
@@ -347,6 +362,14 @@ def git_diff(
 # ---------------------------------------------------------------------------
 
 
+def _assert_rw() -> None:
+    if settings.workspace_readonly:
+        raise HTTPException(
+            status_code=403,
+            detail=_err(403, "WORKSPACE_READONLY: write operations are disabled"),
+        )
+
+
 @router.post("/api/workspace/projects/{project_id}/files/write")
 def write_file(
     project_id: str,
@@ -356,6 +379,7 @@ def write_file(
     _identity: AuthIdentity = Depends(require_scope("project:write")),
 ) -> dict[str, Any]:
     """Write (create or overwrite) a UTF-8 text file."""
+    _assert_rw()
     fp = _identity.fingerprint[:12]
     logger.info("write_file project=%s path=%s by=%s type=%s fp=%s safe=%s",
                 project_id, path, _identity.name, _identity.token_type, fp, safe)
@@ -378,6 +402,7 @@ def edit_file(
     _identity: AuthIdentity = Depends(require_scope("project:write")),
 ) -> dict[str, Any]:
     """Edit a file by replacing the first occurrence of old_string."""
+    _assert_rw()
     fp = _identity.fingerprint[:12]
     logger.info("edit_file project=%s path=%s by=%s type=%s fp=%s safe=%s",
                 project_id, path, _identity.name, _identity.token_type, fp, safe)
@@ -399,6 +424,7 @@ def patch_file(
     _identity: AuthIdentity = Depends(require_scope("project:write")),
 ) -> dict[str, Any]:
     """Apply a unified diff patch to a file."""
+    _assert_rw()
     fp = _identity.fingerprint[:12]
     logger.info("patch_file project=%s path=%s by=%s type=%s fp=%s safe=%s",
                 project_id, path, _identity.name, _identity.token_type, fp, safe)
