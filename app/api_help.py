@@ -1652,6 +1652,17 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     },
                 },
                 "rollback_note": "Rollback is NOT available at the Docker/deployment level. Snapshots exist at the application level (SnapshotStore.capture/rollback) but are not auto-created by write endpoints and are not exposed via REST. There is no automatic file-system rollback mechanism.",
+                "operational_notes": {
+                    "title": "C2.5 operational rules",
+                    "rules": [
+                        "Default is always readonly. Never deploy with WORKSPACE_READONLY=false without explicit operator approval.",
+                        "Write-test mode is temporary. Use it only for validating write/edit/patch endpoints, then immediately revert to readonly.",
+                        "After write testing, restore the stack with: WORKSPACE_READONLY=true docker compose -f docker/docker-compose.yml up -d (without the workspace-rw overlay).",
+                        "Verify readonly after reverting: GET /api/workspace/projects/{project_id}/files/write should return 403.",
+                        "No rollback is exposed via REST. Write/edit/patch are one-way. Snapshots must be captured before writes if rollback is needed.",
+                        "ssh_keys and projects.yaml volumes are ALWAYS :ro — even in write-test mode. Only the project workspace mount is writable.",
+                    ],
+                },
             },
             "sections": [
                 {
