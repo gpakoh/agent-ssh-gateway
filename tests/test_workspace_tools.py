@@ -16,10 +16,13 @@ def _real_workspace_available() -> bool:
     return Path("/media/1TB/Python/web_ssh/web-ssh-gateway").exists()
 
 
-pytestmark = pytest.mark.skipif(
-    not _real_workspace_available(),
-    reason="real /media/1TB/Python workspace is not available",
-)
+pytestmark = [
+    pytest.mark.host_smoke,
+    pytest.mark.skipif(
+        not _real_workspace_available(),
+        reason="real /media/1TB/Python workspace is not available",
+    ),
+]
 
 
 @pytest.fixture(autouse=True)
