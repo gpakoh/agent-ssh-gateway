@@ -1643,10 +1643,10 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     },
                     "write_test": {
                         "title": "Write test — explicit rw override",
-                        "description": "Testing only. Sets WORKSPACE_READONLY=false and uses a workspace-rw compose overlay to switch volumes to :rw and disable container readonly. Revoke after testing.",
+                        "description": "Testing only. Sets WORKSPACE_READONLY=false and uses the explicit workspace-rw compose overlay. Only /media/1TB/Python is switched to :rw; container read_only, projects.yaml, and ssh_keys remain read-only. Revoke after testing.",
                         "docker_command": "WORKSPACE_READONLY=false docker compose -f docker/docker-compose.yml -f docker/docker-compose.workspace-rw.yml up -d",
-                        "docker_flags": "read_only: false (overlay), writeable project volumes",
-                        "volume_mounts": "../projects.yaml:/app/projects.yaml:rw, /media/1TB/Python:/media/1TB/Python:rw, ssh_keys:/app/ssh_keys:rw",
+                        "docker_flags": "read_only: true (preserved), writeable project workspace mount only",
+                        "volume_mounts": "../projects.yaml:/app/projects.yaml:ro, /media/1TB/Python:/media/1TB/Python:rw, ssh_keys:/app/ssh_keys:ro",
                         "app_env": "WORKSPACE_READONLY=false",
                         "warning": "Do NOT use in production. Enables write access to project directories inside the container.",
                     },
