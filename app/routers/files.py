@@ -115,6 +115,14 @@ async def file_read(
     return FileReadResponse(path=validated, content=content)
 
 
+def _assert_rw() -> None:
+    if settings.workspace_readonly:
+        raise HTTPException(
+            status_code=403,
+            detail=_err(403, "WORKSPACE_READONLY: write operations are disabled"),
+        )
+
+
 @router.patch("/api/file/edit", response_model=FileEditResponse)
 @rate_limit_mutation(30, "minute")
 async def file_edit(
@@ -123,6 +131,7 @@ async def file_edit(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Edit a remote file using patch operations."""
+    _assert_rw()
     await _check_session_ownership(req.session_id, request)
 
     try:
@@ -152,6 +161,7 @@ async def file_patch(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Apply a unified diff patch."""
+    _assert_rw()
     await _check_session_ownership(req.session_id, request)
 
     result = await _state.file_editor.apply_patch(
@@ -562,6 +572,7 @@ async def file_write(
     Use for Python code with quotes, special chars, or large content.
     Mode: 'write' (overwrite) or 'append' (append to end).
     """
+    _assert_rw()
     await _check_session_ownership(req.session_id, request)
 
     try:
@@ -927,6 +938,7 @@ async def batch_edit(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Edit multiple files in a single request."""
+    _assert_rw()
     await _check_session_ownership(req.session_id, request)
 
     results = []
@@ -1034,6 +1046,7 @@ async def bulk_edit_files(
             ]
         }
     """
+    _assert_rw()
     await _check_session_ownership(req.session_id, request)
 
     results = []
