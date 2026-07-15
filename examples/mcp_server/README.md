@@ -93,10 +93,22 @@ Tools:
 - `gateway_show_handoff_status` — compact handoff file availability check
 - `gateway_write_handoff_plan` — write `.ai-bridge/current-plan.md` (requires `WRITE_MODE=handoff`)
 
+## Workspace tools
+
+The MCP server exposes scoped workspace write tools (requires `mcp:project` scope):
+
+- `workspace_file_write` — create or overwrite a file in a registered project
+- `workspace_file_edit` — search-and-replace edit on a file
+- `workspace_apply_patch` — apply a unified diff patch to a file
+
+**Note:** These tools call the C1 library directly. The `safe=true` receipt parameter is NOT yet wired through MCP — use the REST API with `safe=true` for receipt metadata.
+
+**Preview and verify** (read-only, no disk writes) are available via the REST API only — no MCP tools exist for preview/verify. Use the REST endpoints directly for the full preview → safe write → verify workflow.
+
+**Rollback is NOT available** via MCP tools, REST endpoints, or SDK. Rollback is a separate lifecycle managed by SnapshotStore (Python API only). Agents cannot trigger rollback through any remote interface.
+
 ## Excluded by design
 
-- source file write/edit/upload
-- token management
 - unrestricted command execution
 - deployment or destructive operations
 - WebSocket/PTTY streaming
@@ -167,6 +179,7 @@ appear automatically. An example file lives at
 | `ssh:execute` | `gateway_execute_restricted` |
 | `ssh:files` | `gateway_read_file` |
 | `jobs:read` | `gateway_job_status`, `gateway_job_result`, `gateway_wait_job` |
+| `mcp:project` | `workspace_file_write`, `workspace_file_edit`, `workspace_apply_patch` |
 
 Use a **scoped agent token**, not a master key. The `scopes` parameter on
 `POST /api/tokens/create` allows setting custom scopes.
