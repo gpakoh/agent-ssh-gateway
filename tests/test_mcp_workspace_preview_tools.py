@@ -36,25 +36,33 @@ ALL_WRITE_TOOLS = [
 ]
 
 
-def _registered_tool_names() -> set[str]:
-    import examples.mcp_server.server as srv
+def _registered_tool_names(mode: str = "chatgpt") -> set[str]:
+    with patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": mode}):
+        import examples.mcp_server.server as srv
+        importlib.reload(srv)
+        names = {t.name for t in srv.mcp._tool_manager._tools.values()}
+    return names
 
-    importlib.reload(srv)
-    return {t.name for t in srv.mcp._tool_manager._tools.values()}
 
-
-def test_preview_tools_registered():
-    """All 4 preview/verify tools must appear in the MCP tool registry."""
-    names = _registered_tool_names()
+def test_preview_tools_registered_in_chatgpt():
+    """All 4 preview/verify tools must appear in chatgpt mode registry."""
+    names = _registered_tool_names("chatgpt")
     for name in ALL_PREVIEW_TOOLS:
-        assert name in names, f"{name!r} not registered"
+        assert name in names, f"{name!r} not registered in chatgpt"
 
 
-def test_write_tools_registered():
-    """Existing write tools must still be registered."""
-    names = _registered_tool_names()
+def test_write_tools_registered_in_standard():
+    """Write tools must be registered in standard mode."""
+    names = _registered_tool_names("standard")
     for name in ALL_WRITE_TOOLS:
-        assert name in names, f"{name!r} not registered"
+        assert name in names, f"{name!r} not registered in standard"
+
+
+def test_write_tools_not_registered_in_chatgpt():
+    """Write tools must NOT be registered in chatgpt (read-only safe mode)."""
+    names = _registered_tool_names("chatgpt")
+    for name in ALL_WRITE_TOOLS:
+        assert name not in names, f"{name!r} should not be registered in chatgpt"
 
 
 # ── Scope enforcement ───────────────────────────────────────────
@@ -91,21 +99,46 @@ def test_write_tools_have_safe_scope():
 # ── tool_modes.py registration ──────────────────────────────────
 
 def test_chatgpt_mode_includes_preview_tools():
-    """chatgpt mode must include all preview/verify tools."""
-    from examples.mcp_server.tool_modes import TOOL_NAMES_BY_MODE
-
-    chatgpt = TOOL_NAMES_BY_MODE["chatgpt"]
+    """chatgpt mode must include preview/verify tools."""
+    import examples.mcp_server.tool_modes as tm
+    importlib.reload(tm)
+    chatgpt = tm.TOOL_NAMES_BY_MODE["chatgpt"]
     for name in ALL_PREVIEW_TOOLS:
         assert name in chatgpt, f"{name!r} missing from chatgpt mode"
 
 
-def test_chatgpt_mode_includes_write_tools():
-    """chatgpt mode must include all write tools."""
-    from examples.mcp_server.tool_modes import TOOL_NAMES_BY_MODE
-
-    chatgpt = TOOL_NAMES_BY_MODE["chatgpt"]
+def test_chatgpt_mode_excludes_write_tools():
+    """chatgpt mode must NOT include write tools (read-only safe mode)."""
+    import examples.mcp_server.tool_modes as tm
+    importlib.reload(tm)
     for name in ALL_WRITE_TOOLS:
-        assert name in chatgpt, f"{name!r} missing from chatgpt mode"
+        assert not tm.should_register_tool(name, "chatgpt"), (
+            f"{name!r} should not be available in chatgpt"
+        )
+
+
+def test_standard_mode_includes_all_workspace():
+    """standard mode must include all 7 workspace tools."""
+    import examples.mcp_server.tool_modes as tm
+    importlib.reload(tm)
+    for name in ALL_PREVIEW_TOOLS + ALL_WRITE_TOOLS:
+        assert tm.should_register_tool(name, "standard"), f"{name!r} missing from standard"
+
+
+def test_full_mode_includes_all_workspace():
+    """full mode must include all 7 workspace tools."""
+    import examples.mcp_server.tool_modes as tm
+    importlib.reload(tm)
+    for name in ALL_PREVIEW_TOOLS + ALL_WRITE_TOOLS:
+        assert tm.should_register_tool(name, "full"), f"{name!r} missing from full"
+
+
+def test_minimal_mode_excludes_all_workspace():
+    """minimal mode must NOT include any workspace tools."""
+    import examples.mcp_server.tool_modes as tm
+    importlib.reload(tm)
+    for name in ALL_PREVIEW_TOOLS + ALL_WRITE_TOOLS:
+        assert not tm.should_register_tool(name, "minimal"), f"{name!r} should not be in minimal"
 
 
 # ── safe=false (default) ────────────────────────────────────────
