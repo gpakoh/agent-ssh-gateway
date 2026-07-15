@@ -108,9 +108,6 @@ class Settings(BaseSettings):
         default=30, alias="EVENT_HOOKS_RETENTION_DEAD_DAYS"
     )
 
-    # Workspace
-    workspace_readonly: bool = Field(default=False, alias="WORKSPACE_READONLY")
-
     model_config = SettingsConfigDict(
         env_file=".env",
         populate_by_name=True,
