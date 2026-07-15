@@ -1629,6 +1629,30 @@ def build_api_help(request: Request) -> dict[str, Any]:
                 "overview": "Snapshots (used for rollback) are created by the caller via SnapshotStore.capture(), not by the write endpoints. Calling write/edit/patch with safe=true does NOT create a snapshot. If you need rollback capability, you must explicitly capture a snapshot before the write operation.",
             },
             "rollback_note": "Rollback is NOT exposed via these REST endpoints. Rollback is a separate operation handled by SnapshotStore.rollback() and is not part of the write/edit/patch API contract.",
+            "deploy_notes": {
+                "title": "Docker deployment modes — readonly vs write",
+                "overview": "Write/edit/patch endpoints are gated at two levels: the application setting WORKSPACE_READONLY (default: false) and Docker container readonly enforcement. In practice, the Docker layer is the primary gate — the app setting exists but is not wired to write-logic guards.",
+                "modes": {
+                    "default_readonly": {
+                        "title": "Default — readonly container",
+                        "description": "Production deployment. Container filesystem is read-only. All project volumes mounted :ro. Write endpoints return 400.",
+                        "docker_flags": "read_only: true (docker-compose.yml line 116)",
+                        "volume_mounts": "../projects.yaml:/app/projects.yaml:ro, /media/1TB/Python:/media/1TB/Python:ro, ssh_keys:/app/ssh_keys:ro",
+                        "app_env": "WORKSPACE_READONLY not set (defaults to false in config.py — but Docker enforces readonly at filesystem level)",
+                        "result": "Write/edit/patch requests fail with OS-level permission errors. The container cannot create temp files or use os.replace().",
+                    },
+                    "write_test": {
+                        "title": "Write test — explicit rw override",
+                        "description": "Testing only. Uses docker-compose.override.yml to switch volumes to :rw and disable container readonly. Revoke after testing.",
+                        "docker_command": "docker compose -f docker/docker-compose.yml -f docker/docker-compose.override.yml up -d",
+                        "docker_flags": "read_only: false (override), writeable project volumes",
+                        "volume_mounts": "../projects.yaml:/app/projects.yaml:rw, /media/1TB/Python:/media/1TB/Python:rw, ssh_keys:/app/ssh_keys:rw",
+                        "app_env": "WORKSPACE_READONLY=false (explicit)",
+                        "warning": "Do NOT use in production. Enables write access to project directories inside the container.",
+                    },
+                },
+                "rollback_note": "Rollback is NOT available at the Docker/deployment level. Snapshots exist at the application level (SnapshotStore.capture/rollback) but are not auto-created by write endpoints and are not exposed via REST. There is no automatic file-system rollback mechanism.",
+            },
             "sections": [
                 {
                     "name": "write_file",
