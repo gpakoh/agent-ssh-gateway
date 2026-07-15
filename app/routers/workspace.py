@@ -352,16 +352,17 @@ def write_file(
     project_id: str,
     path: str = Body(..., alias="path"),
     content: str = Body(...),
+    safe: bool = Body(False),
     _identity: AuthIdentity = Depends(require_scope("project:write")),
 ) -> dict[str, Any]:
     """Write (create or overwrite) a UTF-8 text file."""
     fp = _identity.fingerprint[:12]
-    logger.info("write_file project=%s path=%s by=%s type=%s fp=%s",
-                project_id, path, _identity.name, _identity.token_type, fp)
+    logger.info("write_file project=%s path=%s by=%s type=%s fp=%s safe=%s",
+                project_id, path, _identity.name, _identity.token_type, fp, safe)
     try:
         registry = registry_for_identity(_identity)
         return project_file_write(
-            project_id, path, content, registry=registry
+            project_id, path, content, registry=registry, safe=safe
         )
     except (KeyError, WorkspacePolicyError) as exc:
         raise _map_workspace_error(exc) from exc
@@ -373,16 +374,17 @@ def edit_file(
     path: str = Body(..., alias="path"),
     old_string: str = Body(...),
     new_string: str = Body(...),
+    safe: bool = Body(False),
     _identity: AuthIdentity = Depends(require_scope("project:write")),
 ) -> dict[str, Any]:
     """Edit a file by replacing the first occurrence of old_string."""
     fp = _identity.fingerprint[:12]
-    logger.info("edit_file project=%s path=%s by=%s type=%s fp=%s",
-                project_id, path, _identity.name, _identity.token_type, fp)
+    logger.info("edit_file project=%s path=%s by=%s type=%s fp=%s safe=%s",
+                project_id, path, _identity.name, _identity.token_type, fp, safe)
     try:
         registry = registry_for_identity(_identity)
         return project_file_edit(
-            project_id, path, old_string, new_string, registry=registry
+            project_id, path, old_string, new_string, registry=registry, safe=safe
         )
     except (KeyError, WorkspacePolicyError) as exc:
         raise _map_workspace_error(exc) from exc
@@ -393,16 +395,17 @@ def patch_file(
     project_id: str,
     path: str = Body(..., alias="path"),
     patch: str = Body(...),
+    safe: bool = Body(False),
     _identity: AuthIdentity = Depends(require_scope("project:write")),
 ) -> dict[str, Any]:
     """Apply a unified diff patch to a file."""
     fp = _identity.fingerprint[:12]
-    logger.info("patch_file project=%s path=%s by=%s type=%s fp=%s",
-                project_id, path, _identity.name, _identity.token_type, fp)
+    logger.info("patch_file project=%s path=%s by=%s type=%s fp=%s safe=%s",
+                project_id, path, _identity.name, _identity.token_type, fp, safe)
     try:
         registry = registry_for_identity(_identity)
         return project_apply_patch(
-            project_id, path, patch, registry=registry
+            project_id, path, patch, registry=registry, safe=safe
         )
     except (KeyError, WorkspacePolicyError) as exc:
         raise _map_workspace_error(exc) from exc
