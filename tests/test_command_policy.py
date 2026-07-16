@@ -449,3 +449,136 @@ class TestAuditModeWouldAllow:
         )
         assert d.allowed is True
         assert "would_allow=False" in d.reason
+
+
+# ---------------------------------------------------------------------------
+# testlint argument-shape: command / find / sed
+# ---------------------------------------------------------------------------
+
+
+class TestTestlintCommandFindSed:
+    """Argument-shape checks for command/find/sed under testlint profile."""
+
+    def test_command_v_uv_allowed(self):
+        """'command -v uv' is a safe existence check — allowed."""
+        from app.command_policy import check_argument_shape
+        ok, _reason = check_argument_shape("command -v uv")
+        assert ok is False  # not dangerous
+
+    def test_find_name_glob_allowed(self):
+        """'find . -name "*.py"' — no -exec, safe listing — allowed."""
+        from app.command_policy import check_argument_shape
+        ok, _reason = check_argument_shape('find . -name "*.py"')
+        assert ok is False  # not dangerous
+
+    def test_find_exec_blocked(self):
+        """'find . -exec rm {} +' — arbitrary execution — blocked."""
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("find . -exec rm {} +")
+        assert ok is True
+        assert "-exec" in reason
+
+    def test_find_execdir_blocked(self):
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("find . -execdir sh -c 'echo hi' +")
+        assert ok is True
+        assert "-execdir" in reason
+
+    def test_sed_n_readonly_allowed(self):
+        """'sed -n 1,5p file.py' — read-only extraction — allowed."""
+        from app.command_policy import check_argument_shape
+        ok, _reason = check_argument_shape("sed -n 1,5p file.py")
+        assert ok is False  # not dangerous
+
+    def test_sed_i_blocked(self):
+        """'sed -i s/foo/bar/ file' — in-place mutation — blocked."""
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("sed -i 's/foo/bar/' file")
+        assert ok is True
+        assert "-i" in reason
+
+    def test_sed_in_place_blocked(self):
+        """'sed --in-place ...' — long form — blocked."""
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("sed --in-place 's/x/y/' f.txt")
+        assert ok is True
+        assert "--in-place" in reason
+
+    def test_sed_ni_combined_blocked(self):
+        """'sed -ni ...' — combined flags containing -i — blocked."""
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("sed -ni '1,3p' file.txt")
+        assert ok is True
+        assert "in-place" in reason.lower() or "sed" in reason
+
+    def test_command_no_v_blocked(self):
+        """'command ls' — executes ls, not just existence check — blocked."""
+        from app.command_policy import check_argument_shape
+        ok, _reason = check_argument_shape("command ls")
+        assert ok is True  # blocked: no -v flag
+
+    def test_command_p_blocked(self):
+        """'command -p ls' — -p flag not allowed — blocked."""
+        from app.command_policy import check_argument_shape
+        ok, _reason = check_argument_shape("command -p ls")
+        assert ok is True
+
+    def test_tee_still_blocked(self):
+        """tee not in TESTLINT_ROOTS — blocked at profile gate."""
+        d = evaluate_command_policy("tee out.txt", mode="enforce", profile="testlint")
+        assert d.allowed is False
+
+    def test_dd_still_blocked(self):
+        """dd in DENIED_ROOTS — blocked."""
+        d = evaluate_command_policy("dd if=/dev/zero of=/tmp/out", mode="enforce", profile="testlint")
+        assert d.allowed is False
+
+    def test_cp_still_blocked(self):
+        """cp in DENIED_ROOTS — blocked."""
+        d = evaluate_command_policy("cp a.txt b.txt", mode="enforce", profile="testlint")
+        assert d.allowed is False
+
+    def test_python_c_still_blocked(self):
+        """python with -c flag — blocked by argument shape."""
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("python -c 'import os'")
+        assert ok is True
+        assert "exec flag" in reason.lower() or "blocked" in reason.lower()
+
+    # Full-policy integration: testlint allowlist
+    def test_command_v_uv_passes_testlint(self):
+        """Full pipeline: command -v uv under testlint — allowed."""
+        d = evaluate_command_policy("command -v uv", mode="enforce", profile="testlint")
+        assert d.allowed is True
+
+    def test_find_glob_passes_testlint(self):
+        d = evaluate_command_policy('find . -name "*.py"', mode="enforce", profile="testlint")
+        assert d.allowed is True
+
+    def test_find_exec_fails_testlint(self):
+        d = evaluate_command_policy("find . -exec rm {} +", mode="enforce", profile="testlint")
+        assert d.allowed is False
+
+    def test_sed_n_passes_testlint(self):
+        d = evaluate_command_policy("sed -n 1,5p file.py", mode="enforce", profile="testlint")
+        assert d.allowed is True
+
+    def test_sed_i_fails_testlint(self):
+        d = evaluate_command_policy("sed -i 's/foo/bar/' f", mode="enforce", profile="testlint")
+        assert d.allowed is False
+
+    def test_tee_fails_testlint(self):
+        d = evaluate_command_policy("tee out.txt", mode="enforce", profile="testlint")
+        assert d.allowed is False
+
+    def test_dd_fails_testlint(self):
+        d = evaluate_command_policy("dd if=/dev/zero of=/tmp/out", mode="enforce", profile="testlint")
+        assert d.allowed is False
+
+    def test_cp_fails_testlint(self):
+        d = evaluate_command_policy("cp a.txt b.txt", mode="enforce", profile="testlint")
+        assert d.allowed is False
+
+    def test_python_c_fails_testlint(self):
+        d = evaluate_command_policy("python -c 'import os'", mode="enforce", profile="testlint")
+        assert d.allowed is False

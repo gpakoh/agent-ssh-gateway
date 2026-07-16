@@ -31,7 +31,7 @@ from app.auth_middleware import (
     require_scope,
     ws_auth_check,
 )
-from app.command_policy import evaluate_command_policy
+from app.command_policy import evaluate_command_policy, parse_key_profiles, profile_for_identity
 from app.config import settings
 from app.models import (
     AgentTokenRefreshRequest,
@@ -281,11 +281,17 @@ async def ssh_execute(
         _state.audit_logger.log_security_event("BLOCKED_COMMAND", str(exc), request.client.host)
         raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
 
-    # Command Policy Evaluation
+    # Command Policy Evaluation — server-owned profile resolution
+    key_profiles = parse_key_profiles(settings.command_policy_key_profiles)
+    effective_profile = profile_for_identity(
+        _identity.fingerprint[:12] if _identity else None,
+        key_profiles=key_profiles,
+        default_profile=settings.command_policy_profile,
+    )
     decision = evaluate_command_policy(
         req.command,
         mode=settings.command_policy_mode,
-        profile=settings.command_policy_profile,
+        profile=effective_profile,
     )
 
     _state.audit_logger.log_security_event(
@@ -359,10 +365,17 @@ async def ssh_execute_argv(
     """
     command_str = shlex.join(req.argv)
 
+    # Server-owned profile resolution
+    key_profiles = parse_key_profiles(settings.command_policy_key_profiles)
+    effective_profile = profile_for_identity(
+        _identity.fingerprint[:12] if _identity else None,
+        key_profiles=key_profiles,
+        default_profile=settings.command_policy_profile,
+    )
     decision = evaluate_command_policy(
         command_str,
         mode=settings.command_policy_mode,
-        profile=settings.command_policy_profile,
+        profile=effective_profile,
     )
 
     _state.audit_logger.log_security_event(
@@ -565,10 +578,18 @@ async def ssh_execute_stream(websocket: WebSocket):
             await websocket.close()
             return
 
+        # Server-owned profile resolution
+        key_profiles = parse_key_profiles(settings.command_policy_key_profiles)
+        effective_profile = profile_for_identity(
+            identity.fingerprint[:12] if identity else None,
+            key_profiles=key_profiles,
+            default_profile=settings.command_policy_profile,
+        )
+
         decision = evaluate_command_policy(
             command,
             mode=settings.command_policy_mode,
-            profile=settings.command_policy_profile,
+            profile=effective_profile,
         )
 
         _state.audit_logger.log_security_event(

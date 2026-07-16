@@ -201,6 +201,12 @@ EXEC_FLAGS: set[str] = {
 # find -exec is dangerous (arbitrary command execution)
 FIND_DENYLIST: set[str] = {"-exec", "-execdir", "-ok", "-okdir"}
 
+# sed -i / --in-place mutates files in place — not read-only
+SED_INPLACE_DENYLIST: set[str] = {"-i", "--in-place"}
+
+# command -v is safe (existence check); command <anything-else> can execute
+COMMAND_ALLOWED_FLAGS: set[str] = {"-v"}
+
 
 def _extract_single_flags(arg: str) -> list[str]:
     """Extract single-letter flags from a combined flag argument.
@@ -254,6 +260,22 @@ def check_argument_shape(command: str) -> tuple[bool, str]:
             if arg in FIND_DENYLIST:
                 return True, f"find argument '{arg}' blocked (arbitrary execution)"
 
+    # Check sed -i / --in-place (in-place file mutation)
+    if effective[0] == "sed":
+        for arg in effective[1:]:
+            if arg in SED_INPLACE_DENYLIST:
+                return True, f"sed argument '{arg}' blocked (in-place mutation not allowed)"
+            # Combined: sed -ni → contains -i
+            if any(flag in SED_INPLACE_DENYLIST for flag in _extract_single_flags(arg)):
+                return True, f"sed argument '{arg}' contains in-place flag (not allowed)"
+
+    # Check command: only "command -v <tool>" (existence check) is safe
+    if effective[0] == "command":
+        flags = [a for a in effective[1:] if a.startswith("-")]
+        # Only -v is allowed; no other flags
+        if not flags or any(f not in COMMAND_ALLOWED_FLAGS for f in flags):
+            return True, "command without -v flag blocked (only command -v <tool> allowed)"
+
     return False, ""
 
 
@@ -278,6 +300,7 @@ GIT_READONLY_SUBCOMMANDS: set[str] = {
 TESTLINT_ROOTS: set[str] = READONLY_ROOTS | {
     "pytest", "ruff", "mypy", "pyright", "flake8", "black", "isort",
     "compileall", "python", "uv",
+    "command", "find", "sed",
 }
 
 PROJECT_AUTOMATION_ROOTS: set[str] = TESTLINT_ROOTS | {
@@ -635,3 +658,48 @@ def evaluate_command_policy(
         mode=mode_value,
         command_root=root,
     )
+
+
+# ---------------------------------------------------------------------------
+# Server-owned profile resolution
+# ---------------------------------------------------------------------------
+
+
+def profile_for_identity(
+    identity_fingerprint: str | None = None,
+    *,
+    key_profiles: dict[str, str] | None = None,
+    default_profile: str = "default",
+) -> str:
+    """Resolve the effective command policy profile for an authenticated identity.
+
+    Server-owned mapping: API key fingerprint → profile name.
+    If no mapping exists for the fingerprint, falls back to default_profile.
+
+    Args:
+        identity_fingerprint: truncated API key hash (first 12 chars).
+        key_profiles: mapping from fingerprint to profile name.
+        default_profile: fallback profile if no mapping found.
+
+    Returns:
+        Profile name string.
+    """
+    if not identity_fingerprint or not key_profiles:
+        return default_profile
+
+    return key_profiles.get(identity_fingerprint, default_profile)
+
+
+def parse_key_profiles(raw: str) -> dict[str, str]:
+    """Parse COMMAND_POLICY_KEY_PROFILES JSON string into dict.
+
+    Returns empty dict on parse failure (fail-open to default profile).
+    """
+    import json
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return {}
