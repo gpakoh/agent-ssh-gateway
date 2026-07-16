@@ -198,8 +198,11 @@ EXEC_FLAGS: set[str] = {
     "-w",   # ruby: enable warnings (dangerous when combined with -e)
 }
 
-# find -exec is dangerous (arbitrary command execution)
-FIND_DENYLIST: set[str] = {"-exec", "-execdir", "-ok", "-okdir"}
+# find -exec / write-capability flags are dangerous
+FIND_DENYLIST: set[str] = {
+    "-exec", "-execdir", "-ok", "-okdir",
+    "-delete", "-fprintf", "-fls",
+}
 
 # sed -i / --in-place mutates files in place — not read-only
 SED_INPLACE_DENYLIST: set[str] = {"-i", "--in-place"}
