@@ -68,6 +68,42 @@ This mode hides the generic `gateway_execute_restricted` tool and exposes high-l
 
 This is intended to reduce platform-level blocking and avoid exposing a generic SSH command surface.
 
+## Command policy
+
+SSH commands executed through the MCP server are subject to `COMMAND_POLICY_MODE` on the gateway. This is independent of tool mode and workspace settings.
+
+### How it works
+
+1. MCP tools (`execute_restricted`, `execute_argv`, `project_run_*`) route through the gateway REST API
+2. The gateway evaluates `COMMAND_POLICY_MODE` + `COMMAND_POLICY_PROFILE` for every command
+3. Denied commands return `COMMAND_POLICY_DENIED` (WebSocket) or HTTP 403 (REST)
+
+### Response contract
+
+**REST:** `{"detail": {"code": "FORBIDDEN", "message": "Command denied by policy: <reason>"}}`
+
+**WebSocket:** `{"type": "error", "code": "COMMAND_POLICY_DENIED", "message": "Command denied by policy: <reason>"}`
+
+### Profiles
+
+- `default` — full access, only blocks metacharacters and dangerous argument shapes
+- `readonly` — read-only commands only (cat, ls, git status, head, tail, find, grep)
+- `testlint` — test/lint tools only (pytest, ruff, mypy)
+- `project-automation` — git + read-only commands for CI/CD
+- `ops` — docker + systemctl + git for infrastructure
+- `docker-admin` — full docker + compose operations
+
+### Client-side allowlist
+
+`execute_restricted` has an additional client-side allowlist (`validate_readonly_command`) that restricts which commands the MCP client can submit, regardless of gateway policy. This is a defense-in-depth layer — the gateway policy is the authoritative gate.
+
+### Configuration
+
+```bash
+export COMMAND_POLICY_MODE=enforce
+export COMMAND_POLICY_PROFILE=readonly
+```
+
 ## Handoff mode
 
 Handoff tools are full-mode tools. They remain write-disabled unless `MCP_GATEWAY_WRITE_MODE` is set to `handoff` or `full`.

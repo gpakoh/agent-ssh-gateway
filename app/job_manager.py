@@ -6,6 +6,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
+from app.command_policy import evaluate_command_policy
+from app.config import settings
 from app.exceptions import JobNotFoundError, PermissionDeniedError
 from app.ssh_manager import (
     ExecutionError,
@@ -248,6 +250,37 @@ class JobManager:
                 "message": f"Started: {job.command}",
             }
         )
+
+        # Defensive command policy check (primary check is at router level)
+        decision = evaluate_command_policy(
+            job.command,
+            mode=settings.command_policy_mode,
+            profile=settings.command_policy_profile,
+        )
+        if not decision.allowed:
+            job.status = "failed"
+            job.error_message = f"Command denied by policy: {decision.reason}"
+            job.completed_at = time.time()
+            job.completed_at_mono = time.monotonic()
+            job.completed_event.set()
+            logger.warning(
+                "Job %s denied by policy: %s", job.job_id, decision.reason
+            )
+            await job.notify_listeners(
+                {
+                    "type": "error",
+                    "error": job.error_message,
+                }
+            )
+            await job.notify_listeners(
+                {
+                    "type": "status",
+                    "status": "failed",
+                    "duration": job.duration,
+                    "exit_code": -1,
+                }
+            )
+            return
 
         try:
             job.command_started_at_mono = time.monotonic()
