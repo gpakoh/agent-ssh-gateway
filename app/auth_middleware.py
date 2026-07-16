@@ -279,6 +279,12 @@ async def auth_check(
 
     # Auth Disabled — Everything Is Public
     if not settings.api_auth_enabled:
+        request.state.auth_identity = AuthIdentity(
+            token_type="master",
+            token="",
+            name="auth-disabled",
+            scopes=("*",),
+        )
         return None
 
     # Always‑public Health Endpoint

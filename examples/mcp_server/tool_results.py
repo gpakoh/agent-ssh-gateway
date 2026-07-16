@@ -97,7 +97,7 @@ def tool_success(
 
 
 def tool_error(
-    tool: str,
+    tool: str = "",
     code: str = "INTERNAL_ERROR",
     message: str = "An unexpected error occurred",
     *,

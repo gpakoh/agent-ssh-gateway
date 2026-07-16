@@ -5,6 +5,9 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 
+from app.command_policy import evaluate_command_policy
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -276,6 +279,20 @@ class BatchOperationsManager:
         self, session_id: str, command: str, cwd: str
     ) -> BatchOperationResult:
         """Execute shell command."""
+        # Defensive command policy check (primary check is at router level)
+        decision = evaluate_command_policy(
+            command,
+            mode=settings.command_policy_mode,
+            profile=settings.command_policy_profile,
+        )
+        if not decision.allowed:
+            return BatchOperationResult(
+                operation="execute",
+                path=cwd,
+                success=False,
+                error=f"Command denied by policy: {decision.reason}",
+            )
+
         result = await self._ssh.execute(session_id, f"cd {cwd} && {command}", timeout=60)
 
         return BatchOperationResult(

@@ -1707,6 +1707,35 @@ def build_api_help(request: Request) -> dict[str, Any]:
                         "WORKSPACE_READONLY does not replace COMMAND_POLICY_MODE. File I/O and SSH command execution have independent gates.",
                     ],
                 },
+                "command_policy": {
+                    "title": "COMMAND_POLICY_MODE — SSH command execution gate",
+                    "overview": "COMMAND_POLICY_MODE (default: 'enforce') controls whether SSH commands are allowed, blocked, or audited. It operates independently from WORKSPACE_READONLY — one gates file I/O, the other gates SSH command execution. Both are enforced simultaneously.",
+                    "modes": {
+                        "off": "No policy evaluation. All commands pass through. Use only for development.",
+                        "audit": "Commands are evaluated and logged but always allowed. Use for monitoring before enforcement.",
+                        "enforce": "Commands that violate the active profile are denied with 403 / COMMAND_POLICY_DENIED. Use in production.",
+                    },
+                    "profiles": {
+                        "default": "Full access. Only blocks metacharacters and dangerous argument shapes.",
+                        "readonly": "Read-only commands only (cat, ls, git status, head, tail, find, grep). Blocks write commands (rm, mv, cp, chmod, systemctl, docker, etc.).",
+                        "testlint": "Test/lint tools only (pytest, ruff, mypy). Blocks all other commands.",
+                        "project-automation": "Git + read-only commands for CI/CD pipelines. Blocks destructive operations.",
+                        "ops": "Docker + systemctl + git operations for infrastructure teams.",
+                        "docker-admin": "Full Docker + compose operations.",
+                    },
+                    "response_contract": {
+                        "rest": "HTTP 403 with body: {\"detail\": {\"code\": \"FORBIDDEN\", \"message\": \"Command denied by policy: <reason>\", ...}}",
+                        "websocket": "{\"type\": \"error\", \"code\": \"COMMAND_POLICY_DENIED\", \"message\": \"Command denied by policy: <reason>\"} (connection closed)",
+                    },
+                    "endpoints_gated": [
+                        "POST /api/ssh/execute — command policy checked before execution",
+                        "POST /api/ssh/execute-argv — argv joined via shlex, then policy checked",
+                        "POST /api/jobs/run — policy checked before job creation",
+                        "WS /api/ssh/execute/stream — policy checked in WebSocket handler",
+                    ],
+                    "interaction_with_workspace_readonly": "WORKSPACE_READONLY and COMMAND_POLICY_MODE are independent. A command can be blocked by either gate. WORKSPACE_READONLY blocks file write/edit endpoints; COMMAND_POLICY_MODE blocks SSH command execution. Both return 403 but with different codes (WORKSPACE_READONLY vs FORBIDDEN).",
+                    "mcp_notes": "MCP tools (execute_restricted, execute_argv, project_run_*) route through the same REST endpoints and are subject to the same command policy. The MCP server has an additional client-side allowlist (validate_readonly_command) for execute_restricted.",
+                },
             },
             "sections": [
                 {
