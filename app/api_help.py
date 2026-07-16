@@ -1655,20 +1655,22 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "also_gated": [
                         "POST /api/scaffold/python-class",
                         "POST /api/templates/render",
+                        "POST /api/code/insert",
+                        "POST /api/replace/global",
                     ],
-                    "not_gated": [
-                        "Read-only file ops: /api/file/read, /api/batch/read, /api/bulk/read",
-                        "Preview/verify: /api/workspace/projects/{id}/files/preview, /api/workspace/projects/{id}/files/verify",
-                        "Config stores: /api/servers, /api/webhooks, /api/webhooks/{id}/deploy",
-                        "Event hooks: /api/event-hooks",
-                        "Git ops: /api/git/backup, /api/git/restore, /api/git/diff",
-                        "SSH command execution: /api/ssh/execute, /api/ssh/connect, /api/ssh/sessions",
-                        "Deploy/deployment: /api/webhooks/{id}/deploy (separate control)",
-                        "Template listing: /api/command-templates (read-only)",
-                        "Analytics, diagnostics, metrics, logs",
-                    ],
-                    "note": "WORKSPACE_READONLY is a file-I/O gate only. SSH command execution and deploy are covered by COMMAND_POLICY_MODE and webhook auth respectively — independent controls.",
-                },
+                    "not_gated_by_workspace_readonly": {
+                        "description": "These endpoints mutate state but are NOT blocked by WORKSPACE_READONLY. They have their own auth controls (master_key, webhook auth, snapshot lifecycle).",
+                        "endpoints": [
+                            "POST /api/snapshots/restore — restores files from a snapshot; guarded by master_key, not file-I/O",
+                            "POST /api/git/init — initialises a git repo; guarded by master_key",
+                            "POST /api/git/commit — creates a git commit; guarded by master_key",
+                            "POST /api/recovery/backup — stashes working tree; guarded by master_key",
+                            "POST /api/recovery/restore — pops stash; guarded by master_key",
+                            "POST /api/webhooks/{id}/deploy — triggers deploy; guarded by webhook auth, separate control",
+                        ],
+                        "note": "These are intentional exclusions. WORKSPACE_READONLY is a file-I/O gate. Git/snapshot/deploy operations have their own auth and lifecycle.",
+                    },
+                    },
                 "modes": {
                     "default_readonly": {
                         "title": "Default — readonly (production)",
