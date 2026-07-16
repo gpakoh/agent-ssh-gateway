@@ -17,7 +17,12 @@ MCP_DIR = str(Path(__file__).resolve().parents[1] / "examples" / "mcp_server")
 if MCP_DIR not in sys.path:
     sys.path.insert(0, MCP_DIR)
 
+from examples.mcp_server.opencode_tools import (  # noqa: E402
+    CommandPolicyError as OpenCodeCommandPolicyError,
+)
 from examples.mcp_server.opencode_tools import project_run_opencode  # noqa: E402
+
+CommandPolicyError = OpenCodeCommandPolicyError
 
 
 def _fake_run_cmd(project: str, command: str) -> dict:
@@ -29,8 +34,6 @@ class TestProjectRunOpencodeBlocked:
 
     def test_raises_command_policy_error(self):
         """Must raise CommandPolicyError, never execute."""
-        from command_policy import CommandPolicyError
-
         with pytest.raises(CommandPolicyError, match="blocked"):
             project_run_opencode(
                 _fake_run_cmd,
@@ -41,7 +44,6 @@ class TestProjectRunOpencodeBlocked:
     def test_run_cmd_never_called(self):
         """The run_cmd callable must NEVER be invoked."""
         mock_run = MagicMock(return_value={"stdout": "", "stderr": "", "exit_code": 0})
-        from command_policy import CommandPolicyError
 
         with pytest.raises(CommandPolicyError):
             project_run_opencode(
@@ -53,8 +55,6 @@ class TestProjectRunOpencodeBlocked:
 
     def test_no_dangerously_skip_permissions_in_any_path(self):
         """Even if someone catches the error, no command with the flag was built."""
-        from command_policy import CommandPolicyError
-
         with pytest.raises(CommandPolicyError, match="--dangerously-skip-permissions"):
             project_run_opencode(
                 _fake_run_cmd,
@@ -64,8 +64,6 @@ class TestProjectRunOpencodeBlocked:
 
     def test_model_override_also_blocked(self):
         """Even with a model override, the tool is blocked."""
-        from command_policy import CommandPolicyError
-
         with pytest.raises(CommandPolicyError, match="blocked"):
             project_run_opencode(
                 _fake_run_cmd,
@@ -76,8 +74,6 @@ class TestProjectRunOpencodeBlocked:
 
     def test_error_message_includes_safe_alternatives(self):
         """Error message suggests safe alternatives."""
-        from command_policy import CommandPolicyError
-
         with pytest.raises(CommandPolicyError, match="project_run_pytest"):
             project_run_opencode(
                 _fake_run_cmd,
@@ -105,19 +101,23 @@ class TestServerWrapperBlocked:
         example_dir = Path(__file__).resolve().parents[1] / "examples" / "mcp_server"
         monkeypatch.syspath_prepend(str(example_dir))
         # Clear ALL modules that server.py imports so a clean reimport occurs
-        clear_prefixes = ("mcp_server", "tool_modes", "opencode_tools", "command_policy",
+        clear_prefixes = ("server", "mcp_server", "tool_modes", "opencode_tools", "command_policy",
                           "gateway_client", "handoff", "self_test", "write_modes",
                           "docker_confirm", "agent_tools", "agent_tasks",
                           "agent_backend_router", "chatgpt_tools", "mimo_tools")
+        saved_modules = {}
         for name in list(sys.modules):
             if any(p in name for p in clear_prefixes):
-                sys.modules.pop(name, None)
-        server = importlib.import_module("server")
-        tool_fn = getattr(server, "project_run_opencode", None)
-        assert tool_fn is not None
+                saved_modules[name] = sys.modules.pop(name)
+        try:
+            server = importlib.import_module("server")
+            tool_fn = getattr(server, "project_run_opencode", None)
+            assert tool_fn is not None
 
-        result = tool_fn(project="test", task_id="2026-06-25-fix-auth-opencode")
-        # run_tool catches CommandPolicyError → MCP error response
-        assert result.get("isError") is True
-        err_msg = result.get("structuredContent", {}).get("error", "")
-        assert "blocked" in err_msg.lower()
+            result = tool_fn(project="test", task_id="2026-06-25-fix-auth-opencode")
+            # run_tool catches CommandPolicyError → MCP error response
+            assert result.get("isError") is True
+            err_msg = result.get("structuredContent", {}).get("error", "")
+            assert "blocked" in err_msg.lower()
+        finally:
+            sys.modules.update(saved_modules)
