@@ -107,3 +107,47 @@ def test_malformed_command_is_denied_in_enforce():
     )
 
     assert decision.allowed is False
+
+
+def test_echo_redirect_denied_in_enforce():
+    """Shell redirect > must be blocked in enforce mode (file-write guardrail)."""
+    decision = evaluate_command_policy(
+        "echo owned > /tmp/pwned",
+        mode="enforce",
+        profile="default",
+    )
+
+    assert decision.allowed is False
+    assert ">" in decision.reason
+
+
+def test_echo_append_denied_in_enforce():
+    """Shell redirect >> must be blocked in enforce mode."""
+    decision = evaluate_command_policy(
+        "echo more >> /tmp/pwned",
+        mode="enforce",
+        profile="default",
+    )
+
+    assert decision.allowed is False
+    assert ">>" in decision.reason
+
+
+def test_echo_redirect_allowed_in_audit():
+    """Audit mode logs but does not block shell redirects."""
+    decision = evaluate_command_policy(
+        "echo owned > /tmp/pwned",
+        mode="audit",
+        profile="default",
+    )
+
+    assert decision.allowed is True
+    assert "AUDIT_ONLY" in decision.reason
+
+
+def test_default_mode_is_enforce():
+    """Default COMMAND_POLICY_MODE must be 'enforce', not 'audit'."""
+    from app.config import Settings
+
+    s = Settings()
+    assert s.command_policy_mode == "enforce"
