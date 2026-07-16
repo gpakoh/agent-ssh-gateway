@@ -5,6 +5,7 @@ Tests verify the COMMAND_POLICY_DENIED response contract for each endpoint type.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -342,12 +343,12 @@ class TestMcpExecuteArgvContract:
 
 
 class TestMcpProjectRunPytest:
-    """MCP project_run_pytest must call execute_project_command with correct command."""
+    """MCP project_run_pytest must call execute_raw with correct command."""
 
-    def test_calls_execute_project_command(self):
+    def test_calls_execute_raw(self):
         client = _new_gateway_client()
 
-        # Two calls to execute_project_command: (1) uv check, (2) pytest run
+        # Two calls to execute_raw: (1) uv check, (2) pytest run
         mock_responses = [
             {"exit_code": 0, "stdout": "", "stderr": ""},  # uv check
             {"job_id": "pytest-job-1", "status": "running"},  # pytest run
@@ -363,7 +364,7 @@ class TestMcpProjectRunPytest:
             ):
                 with patch.object(
                     client,
-                    "execute_project_command",
+                    "execute_raw",
                     side_effect=mock_responses,
                 ) as mock_exec:
                     with patch.object(
@@ -383,9 +384,9 @@ class TestMcpProjectRunPytest:
         # Second call: run pytest command
         assert mock_exec.call_count == 2
         uv_check_call = mock_exec.call_args_list[0]
-        assert "command -v uv" in uv_check_call[0][1]
+        assert "command -v uv" in uv_check_call[0][0]
         pytest_call = mock_exec.call_args_list[1]
-        assert "pytest" in pytest_call[0][1]
+        assert "pytest" in pytest_call[0][0]
 
 
 # ---------------------------------------------------------------------------
@@ -472,3 +473,501 @@ class TestCommandPolicyProfileIntegration:
             headers=_auth_headers(),
         )
         assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Audit fields — effective profile is logged, not caller-requested profile
+# ---------------------------------------------------------------------------
+
+
+class TestAuditEffectiveProfile:
+    """COMMAND_POLICY_DECISION audit events must include effective profile,
+    policy_mode, command_root, allowed, reason.  Must NOT include
+    caller-requested profile or raw secrets."""
+
+    def test_audit_logs_effective_profile_from_settings(self, client, monkeypatch):
+        """Audit event profile= field matches the server settings, not any caller input."""
+        _setup_test(monkeypatch)
+        monkeypatch.setattr(settings, "command_policy_mode", "enforce")
+        monkeypatch.setattr(settings, "command_policy_profile", "readonly")
+
+        mock_session = MagicMock()
+        mock_session.owner_type = "master"
+        mock_session.owner_token_fingerprint = None
+        _app_state = _setup_test(monkeypatch)
+        _app_state.manager.get_session = AsyncMock(return_value=mock_session)
+        _app_state.manager.execute = AsyncMock(
+            return_value={"stdout": "ok", "stderr": "", "exit_code": 0, "duration": 0.1}
+        )
+
+        resp = client.post(
+            "/api/ssh/execute",
+            json={"session_id": "sid", "command": "ls -la"},
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 200
+
+        calls = _app_state.audit_logger.log_security_event.call_args_list
+        policy_calls = [c for c in calls if "COMMAND_POLICY_DECISION" in str(c)]
+        assert len(policy_calls) >= 1
+        detail = policy_calls[0][0][1]
+        # Effective profile must be "readonly" (from settings), not anything else
+        assert "profile=readonly" in detail
+        assert "mode=enforce" in detail
+        assert "allowed=True" in detail
+
+    def test_audit_does_not_log_caller_requested_profile(self, client, monkeypatch):
+        """Even if the HTTP body contained a profile field, audit logs server's effective profile."""
+        _setup_test(monkeypatch)
+        monkeypatch.setattr(settings, "command_policy_mode", "enforce")
+        monkeypatch.setattr(settings, "command_policy_profile", "readonly")
+
+        mock_session = MagicMock()
+        mock_session.owner_type = "master"
+        mock_session.owner_token_fingerprint = None
+        _app_state = _setup_test(monkeypatch)
+        _app_state.manager.get_session = AsyncMock(return_value=mock_session)
+        _app_state.manager.execute = AsyncMock(
+            return_value={"stdout": "ok", "stderr": "", "exit_code": 0, "duration": 0.1}
+        )
+
+        # Send a body with a fake "profile" field (should be ignored by the server)
+        resp = client.post(
+            "/api/ssh/execute",
+            json={"session_id": "sid", "command": "ls -la", "profile": "docker-admin"},
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 200
+
+        calls = _app_state.audit_logger.log_security_event.call_args_list
+        policy_calls = [c for c in calls if "COMMAND_POLICY_DECISION" in str(c)]
+        assert len(policy_calls) >= 1
+        detail = policy_calls[0][0][1]
+        # Must NOT contain docker-admin — server used readonly from settings
+        assert "profile=readonly" in detail
+        assert "docker-admin" not in detail
+
+    def test_execute_argv_audit_logs_effective_profile(self, client, monkeypatch):
+        """execute_argv audit event includes effective profile from settings."""
+        _setup_test(monkeypatch)
+        monkeypatch.setattr(settings, "command_policy_mode", "enforce")
+        monkeypatch.setattr(settings, "command_policy_profile", "readonly")
+
+        mock_session = MagicMock()
+        mock_session.owner_type = "master"
+        mock_session.owner_token_fingerprint = None
+        _app_state = _setup_test(monkeypatch)
+        _app_state.manager.get_session = AsyncMock(return_value=mock_session)
+        _app_state.manager.execute_argv = AsyncMock(
+            return_value={"stdout": "ok", "stderr": "", "exit_code": 0, "duration": 0.1}
+        )
+
+        resp = client.post(
+            "/api/ssh/execute-argv",
+            json={"session_id": "sid", "argv": ["ls", "-la"]},
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 200
+
+        calls = _app_state.audit_logger.log_security_event.call_args_list
+        policy_calls = [c for c in calls if "COMMAND_POLICY_DECISION" in str(c)]
+        assert len(policy_calls) >= 1
+        detail = policy_calls[0][0][1]
+        assert "profile=readonly" in detail
+        assert "mode=enforce" in detail
+        assert "command_root=ls" in detail
+
+
+# ---------------------------------------------------------------------------
+# No-escalation: caller cannot raise profile via body or headers
+# ---------------------------------------------------------------------------
+
+
+class TestNoEscalation:
+    """Caller must not be able to escalate from readonly/default to
+    docker-admin, ops, or any higher-privilege profile."""
+
+    def test_readonly_cannot_escalate_to_docker_admin(self, client, monkeypatch):
+        """POST /api/ssh/execute with profile=docker-admin in body → still readonly."""
+        _setup_test(monkeypatch)
+        monkeypatch.setattr(settings, "command_policy_mode", "enforce")
+        monkeypatch.setattr(settings, "command_policy_profile", "readonly")
+
+        resp = client.post(
+            "/api/ssh/execute",
+            json={
+                "session_id": "sid",
+                "command": "docker system prune -f",
+                "profile": "docker-admin",
+            },
+            headers=_auth_headers(),
+        )
+        # docker system prune is denied by readonly — escalation attempt must fail
+        assert resp.status_code == 403
+
+    def test_default_cannot_escalate_to_ops(self, client, monkeypatch):
+        """POST /api/ssh/execute with profile=ops in body → still default.
+        Claiming higher-profile must not bypass server settings.
+        docker system prune is allowed by default but denied by readonly;
+        this test proves body.profile is ignored regardless."""
+        _setup_test(monkeypatch)
+        monkeypatch.setattr(settings, "command_policy_mode", "enforce")
+        monkeypatch.setattr(settings, "command_policy_profile", "readonly")
+
+        resp = client.post(
+            "/api/ssh/execute",
+            json={
+                "session_id": "sid",
+                "command": "docker system prune -f",
+                "profile": "ops",
+            },
+            headers=_auth_headers(),
+        )
+        # docker denied by readonly — claiming ops must not bypass
+        assert resp.status_code == 403
+
+    def test_readonly_cannot_escalate_to_project_automation(self, client, monkeypatch):
+        """POST /api/ssh/execute with profile=project-automation → still readonly."""
+        _setup_test(monkeypatch)
+        monkeypatch.setattr(settings, "command_policy_mode", "enforce")
+        monkeypatch.setattr(settings, "command_policy_profile", "readonly")
+
+        resp = client.post(
+            "/api/ssh/execute",
+            json={
+                "session_id": "sid",
+                "command": "git push origin main",
+                "profile": "project-automation",
+            },
+            headers=_auth_headers(),
+        )
+        # git push is denied by readonly — escalation attempt must fail
+        assert resp.status_code == 403
+
+    def test_execute_argv_no_escalation_via_body(self, client, monkeypatch):
+        """execute_argv: body.profile is ignored, server uses settings."""
+        _setup_test(monkeypatch)
+        monkeypatch.setattr(settings, "command_policy_mode", "enforce")
+        monkeypatch.setattr(settings, "command_policy_profile", "readonly")
+
+        resp = client.post(
+            "/api/ssh/execute-argv",
+            json={
+                "session_id": "sid",
+                "argv": ["docker", "system", "prune", "-f"],
+                "profile": "docker-admin",
+            },
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# execute_argv — metachar denial (redirect/pipe still blocked)
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteArgvMetacharStillBlocked:
+    """execute_argv must block shell metacharacters even when body.profile claims
+    a higher-privilege profile."""
+
+    def test_redirect_gt_still_denied_with_profile_claim(self, client, monkeypatch):
+        """argv=['sh','-c','echo x > f'] with profile=docker-admin → still FORBIDDEN."""
+        _setup_test(monkeypatch)
+        monkeypatch.setattr(settings, "command_policy_mode", "enforce")
+        monkeypatch.setattr(settings, "command_policy_profile", "readonly")
+
+        resp = client.post(
+            "/api/ssh/execute-argv",
+            json={
+                "session_id": "sid",
+                "argv": ["sh", "-c", "echo x > f"],
+                "profile": "docker-admin",
+            },
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["code"] == "FORBIDDEN"
+
+    def test_pipe_still_denied_with_profile_claim(self, client, monkeypatch):
+        """argv=['sh','-c','echo x | cat'] with profile=ops → still FORBIDDEN."""
+        _setup_test(monkeypatch)
+        monkeypatch.setattr(settings, "command_policy_mode", "enforce")
+        monkeypatch.setattr(settings, "command_policy_profile", "readonly")
+
+        resp = client.post(
+            "/api/ssh/execute-argv",
+            json={
+                "session_id": "sid",
+                "argv": ["sh", "-c", "echo x | cat"],
+                "profile": "ops",
+            },
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Jobs / batch use canonical policy (no profile override)
+# ---------------------------------------------------------------------------
+
+
+class TestJobsBulkBatchCanonicalPolicy:
+    """Jobs and batch endpoints use settings.command_policy_profile, never body.profile."""
+
+    @pytest.mark.asyncio
+    async def test_jobs_uses_settings_profile(self, monkeypatch):
+        """POST /api/jobs/run with profile=docker-admin in body → still readonly."""
+        from httpx import ASGITransport, AsyncClient
+
+        from app import state as state_module
+        from app.main import app as main_app
+
+        monkeypatch.setattr(settings, "api_auth_enabled", False)
+        monkeypatch.setattr(settings, "command_policy_mode", "enforce")
+        monkeypatch.setattr(settings, "command_policy_profile", "readonly")
+        state_module.audit_logger = MagicMock()
+        state_module.manager = MagicMock()
+        state_module.manager.get_session = AsyncMock(return_value={"id": "s1"})
+
+        transport = ASGITransport(app=main_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post(
+                "/api/jobs/run",
+                json={
+                    "session_id": "s1",
+                    "command": "docker system prune -f",
+                    "profile": "docker-admin",
+                },
+            )
+            assert resp.status_code == 403  # docker denied by readonly
+
+            calls = state_module.audit_logger.log_security_event.call_args_list
+            policy_calls = [c for c in calls if "COMMAND_POLICY_DECISION" in str(c)]
+            assert len(policy_calls) >= 1
+            detail = policy_calls[0][0][1]
+            assert "profile=readonly" in detail
+            assert "docker-admin" not in detail
+
+    @pytest.mark.asyncio
+    async def test_bulk_execute_uses_settings_profile(self, monkeypatch):
+        """POST /api/bulk/execute with profile=ops → still uses settings profile."""
+        from httpx import ASGITransport, AsyncClient
+
+        from app import state as state_module
+        from app.main import app as main_app
+
+        monkeypatch.setattr(settings, "api_auth_enabled", False)
+        monkeypatch.setattr(settings, "command_policy_mode", "enforce")
+        monkeypatch.setattr(settings, "command_policy_profile", "readonly")
+        state_module.audit_logger = MagicMock()
+        state_module.manager = MagicMock()
+
+        transport = ASGITransport(app=main_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post(
+                "/api/bulk/execute",
+                json={
+                    "session_id": "s1",
+                    "commands": ["docker system prune -f"],
+                    "profile": "ops",
+                },
+            )
+            assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Server-owned profile routing — integration test
+# ---------------------------------------------------------------------------
+
+
+class TestServerOwnedProfileRouting:
+    """Prove that COMMAND_POLICY_KEY_PROFILES maps API key fingerprint → profile,
+    that the effective profile is used for policy evaluation, that body.profile
+    is ignored, and that no client can escalate."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_key_profile(self, monkeypatch):
+        """Set up API key 'secret-c3' with fingerprint mapped to testlint."""
+        import hashlib
+
+        # Compute fingerprint for the test API key
+        fingerprint = hashlib.sha256(b"secret-c3").hexdigest()[:12]
+
+        monkeypatch.setattr(settings, "api_auth_enabled", True)
+        monkeypatch.setattr(settings, "api_key", "secret-c3")
+        monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
+        monkeypatch.setattr(settings, "command_policy_mode", "enforce")
+        # Server default is readonly — but key mapping overrides to testlint
+        monkeypatch.setattr(settings, "command_policy_profile", "readonly")
+        monkeypatch.setattr(
+            settings,
+            "command_policy_key_profiles",
+            json.dumps({fingerprint: "testlint"}),
+        )
+        monkeypatch.setattr(
+            "app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1"
+        )
+
+        from app import state as _app_state
+
+        _app_state.audit_logger = MagicMock()
+        _app_state.manager = MagicMock()
+        # Mock async methods for successful execution path
+        mock_session = MagicMock()
+        mock_session.owner_type = "master"
+        mock_session.owner_token_fingerprint = None
+        _app_state.manager.get_session = AsyncMock(return_value=mock_session)
+        _app_state.manager.execute = AsyncMock(
+            return_value={"stdout": "ok", "stderr": "", "exit_code": 0, "duration": 0.1}
+        )
+
+    def test_command_v_uv_allowed(self, client):
+        """'command -v uv' is allowed under testlint (via key mapping)."""
+        resp = client.post(
+            "/api/ssh/execute",
+            json={"session_id": "sid", "command": "command -v uv"},
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 200
+
+    def test_uv_run_pytest_allowed(self, client):
+        """'uv run --directory /tmp/proj -- pytest -q' is allowed under testlint."""
+        resp = client.post(
+            "/api/ssh/execute",
+            json={
+                "session_id": "sid",
+                "command": "uv run --directory /tmp/proj -- pytest -q",
+            },
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 200
+
+    def test_tee_blocked(self, client):
+        """'tee out.txt' is blocked by testlint (not in allowlist)."""
+        resp = client.post(
+            "/api/ssh/execute",
+            json={"session_id": "sid", "command": "tee out.txt"},
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 403
+        assert "testlint" in resp.json()["detail"]["message"]
+
+    def test_python_c_exec_blocked(self, client):
+        """'python3 -c ...' is blocked by testlint (exec flag detection)."""
+        resp = client.post(
+            "/api/ssh/execute",
+            json={
+                "session_id": "sid",
+                "command": "python3 -c 'import os; print(os.getcwd())'",
+            },
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 403
+
+    def test_body_profile_docker_admin_ignored(self, client):
+        """body.profile=docker-admin is ignored — server uses testlint from key mapping."""
+        resp = client.post(
+            "/api/ssh/execute",
+            json={
+                "session_id": "sid",
+                "command": "command -v uv",
+                "profile": "docker-admin",
+            },
+            headers=_auth_headers(),
+        )
+        # command -v uv is allowed by testlint — body.profile ignored, not escalated
+        assert resp.status_code == 200
+
+        # Verify audit shows testlint, not docker-admin
+        from app import state as _app_state
+
+        calls = _app_state.audit_logger.log_security_event.call_args_list
+        policy_calls = [c for c in calls if "COMMAND_POLICY_DECISION" in str(c)]
+        assert len(policy_calls) >= 1
+        detail = policy_calls[0][0][1]
+        assert "profile=testlint" in detail
+        assert "docker-admin" not in detail
+
+    def test_body_profile_ops_ignored(self, client):
+        """body.profile=ops is ignored — server uses testlint from key mapping."""
+        resp = client.post(
+            "/api/ssh/execute",
+            json={
+                "session_id": "sid",
+                "command": "command -v uv",
+                "profile": "ops",
+            },
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 200
+
+        from app import state as _app_state
+
+        calls = _app_state.audit_logger.log_security_event.call_args_list
+        policy_calls = [c for c in calls if "COMMAND_POLICY_DECISION" in str(c)]
+        assert len(policy_calls) >= 1
+        detail = policy_calls[0][0][1]
+        assert "profile=testlint" in detail
+
+    def test_no_escalation_tee_via_docker_admin_claim(self, client):
+        """'tee out.txt' with profile=docker-admin → still blocked (testlint enforced)."""
+        resp = client.post(
+            "/api/ssh/execute",
+            json={
+                "session_id": "sid",
+                "command": "tee out.txt",
+                "profile": "docker-admin",
+            },
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 403
+
+    def test_no_escalation_python_exec_via_ops_claim(self, client):
+        """'python3 -c ...' with profile=ops → still blocked (testlint enforced)."""
+        resp = client.post(
+            "/api/ssh/execute",
+            json={
+                "session_id": "sid",
+                "command": "python3 -c 'import os'",
+                "profile": "ops",
+            },
+            headers=_auth_headers(),
+        )
+        assert resp.status_code == 403
+
+    def test_unmapped_key_uses_server_default(self, client, monkeypatch):
+        """A different API key (not in key_profiles) falls back to server default (readonly)."""
+        import hashlib
+
+        # Different API key — not in the key_profiles mapping
+        other_key = "other-key-xyz"
+
+        monkeypatch.setattr(settings, "api_key", other_key)
+        # Keep same key_profiles — the other key is NOT in it
+        fingerprint_c3 = hashlib.sha256(b"secret-c3").hexdigest()[:12]
+        monkeypatch.setattr(
+            settings,
+            "command_policy_key_profiles",
+            json.dumps({fingerprint_c3: "testlint"}),
+        )
+
+        from app import state as _app_state
+
+        _app_state.audit_logger = MagicMock()
+
+        # 'tee out.txt' is denied by both readonly and testlint — 403
+        resp = client.post(
+            "/api/ssh/execute",
+            json={"session_id": "sid", "command": "tee out.txt"},
+            headers={"X-API-Key": other_key},
+        )
+        assert resp.status_code == 403
+
+        # Verify audit shows readonly (server default), not testlint
+        calls = _app_state.audit_logger.log_security_event.call_args_list
+        policy_calls = [c for c in calls if "COMMAND_POLICY_DECISION" in str(c)]
+        assert len(policy_calls) >= 1
+        detail = policy_calls[0][0][1]
+        assert "profile=readonly" in detail
+        assert "testlint" not in detail
