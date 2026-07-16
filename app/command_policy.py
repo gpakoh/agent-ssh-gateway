@@ -98,6 +98,8 @@ DANGEROUS_TOKENS: tuple[str, ...] = (
     " netcat ",
     "bash -c",
     "sh -c",
+    " > ",
+    " >> ",
 )
 
 OPS_ALLOWED_SYSTEMCTL_ACTIONS: set[str] = {

@@ -1728,15 +1728,17 @@ async def docker_compose_up(
     detach: bool = True,
     build: bool = False,
     timeout: int = 120,
-) -> str:
-    """Start services in a Docker Compose project. detach=True by default."""
-    return await DockerClient().compose_up(
-        project_dir=project_dir,
-        services=services,
-        detach=detach,
-        build=build,
-        timeout=timeout,
+) -> dict[str, Any]:
+    """Start services in a Docker Compose project. DANGEROUS: requires confirmation via confirm_operation(token)."""
+    svc_list = ", ".join(services) if services else "all services"
+    summary = f"Compose up ({svc_list}) in {project_dir or 'default dir'}"
+    action = _confirm_store.create_action(
+        "docker_compose_up",
+        {"project_dir": project_dir, "services": services, "detach": detach, "build": build, "timeout": timeout},
+        summary,
+        risk="medium",
     )
+    return _confirmation_response(action)
 
 
 @register_tool("docker_compose_restart")
@@ -1744,13 +1746,17 @@ async def docker_compose_restart(
     project_dir: str | None = None,
     services: list[str] | None = None,
     timeout: int = 30,
-) -> str:
-    """Restart services in a Docker Compose project."""
-    return await DockerClient().compose_restart(
-        project_dir=project_dir,
-        services=services,
-        timeout=timeout,
+) -> dict[str, Any]:
+    """Restart services in a Docker Compose project. DANGEROUS: requires confirmation via confirm_operation(token)."""
+    svc_list = ", ".join(services) if services else "all services"
+    summary = f"Compose restart ({svc_list}) in {project_dir or 'default dir'}"
+    action = _confirm_store.create_action(
+        "docker_compose_restart",
+        {"project_dir": project_dir, "services": services, "timeout": timeout},
+        summary,
+        risk="medium",
     )
+    return _confirmation_response(action)
 
 
 @register_tool("docker_compose_build")
@@ -1759,14 +1765,17 @@ async def docker_compose_build(
     services: list[str] | None = None,
     no_cache: bool = False,
     timeout: int = 300,
-) -> str:
-    """Build (or rebuild) services in a Docker Compose project."""
-    return await DockerClient().compose_build(
-        project_dir=project_dir,
-        services=services,
-        no_cache=no_cache,
-        timeout=timeout,
+) -> dict[str, Any]:
+    """Build (or rebuild) services in a Docker Compose project. DANGEROUS: requires confirmation via confirm_operation(token)."""
+    svc_list = ", ".join(services) if services else "all services"
+    summary = f"Compose build ({svc_list}) in {project_dir or 'default dir'}"
+    action = _confirm_store.create_action(
+        "docker_compose_build",
+        {"project_dir": project_dir, "services": services, "no_cache": no_cache, "timeout": timeout},
+        summary,
+        risk="medium",
     )
+    return _confirmation_response(action)
 
 
 @register_tool("docker_compose_logs")

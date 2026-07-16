@@ -167,3 +167,76 @@ class TestConfirmStoreAdminActions:
         assert result is not None
         assert result.tool == "docker_exec"
         assert result.kwargs["container"] == "web"
+
+
+class TestConfirmStoreComposeActions:
+    def test_create_compose_up_action(self):
+        store = ConfirmStore()
+        action = store.create_action(
+            "docker_compose_up",
+            {"project_dir": "/app", "services": ["web", "redis"], "detach": True, "build": False, "timeout": 120},
+            "Compose up (web, redis) in /app",
+            risk="medium",
+        )
+        assert action.tool == "docker_compose_up"
+        assert action.risk == "medium"
+        assert action.kwargs["services"] == ["web", "redis"]
+
+    def test_create_compose_restart_action(self):
+        store = ConfirmStore()
+        action = store.create_action(
+            "docker_compose_restart",
+            {"project_dir": "/app", "services": None, "timeout": 30},
+            "Compose restart (all services) in /app",
+            risk="medium",
+        )
+        assert action.tool == "docker_compose_restart"
+        assert action.risk == "medium"
+
+    def test_create_compose_build_action(self):
+        store = ConfirmStore()
+        action = store.create_action(
+            "docker_compose_build",
+            {"project_dir": "/app", "services": ["web"], "no_cache": True, "timeout": 300},
+            "Compose build (web) in /app",
+            risk="medium",
+        )
+        assert action.tool == "docker_compose_build"
+        assert action.kwargs["no_cache"] is True
+
+    def test_confirm_compose_up_flow(self):
+        store = ConfirmStore()
+        action = store.create_action(
+            "docker_compose_up",
+            {"project_dir": "/app", "services": ["web"]},
+            "Compose up (web) in /app",
+            risk="medium",
+        )
+        result, status = store.confirm_action(action.confirm_token)
+        assert status == ConfirmStatus.OK
+        assert result is not None
+        assert result.tool == "docker_compose_up"
+
+    def test_confirm_compose_restart_flow(self):
+        store = ConfirmStore()
+        action = store.create_action(
+            "docker_compose_restart",
+            {"project_dir": "/app"},
+            "Compose restart (all services) in /app",
+            risk="medium",
+        )
+        result, status = store.confirm_action(action.confirm_token)
+        assert status == ConfirmStatus.OK
+        assert result.tool == "docker_compose_restart"
+
+    def test_confirm_compose_build_flow(self):
+        store = ConfirmStore()
+        action = store.create_action(
+            "docker_compose_build",
+            {"project_dir": "/app", "services": ["api"]},
+            "Compose build (api) in /app",
+            risk="medium",
+        )
+        result, status = store.confirm_action(action.confirm_token)
+        assert status == ConfirmStatus.OK
+        assert result.tool == "docker_compose_build"
