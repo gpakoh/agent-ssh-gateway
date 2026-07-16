@@ -10,6 +10,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_scope
+from app.command_policy import evaluate_command_policy
+from app.config import settings
 from app.exceptions import JobNotFoundError, PermissionDeniedError
 from app.models import (
     BulkExecuteRequest,
@@ -43,6 +45,28 @@ async def jobs_run(
         raise HTTPException(
             status_code=404, detail=_err(404, f"Session {req.session_id} not found")
         )
+
+    # Command Policy Evaluation
+    decision = evaluate_command_policy(
+        req.command,
+        mode=settings.command_policy_mode,
+        profile=settings.command_policy_profile,
+    )
+    source_ip = request.client.host if request.client else "unknown"
+    _state.audit_logger.log_security_event(
+        "COMMAND_POLICY_DECISION",
+        f"session_id={req.session_id}; command={req.command}; "
+        f"allowed={decision.allowed}; reason={decision.reason}; "
+        f"profile={decision.profile}; mode={decision.mode}; "
+        f"command_root={decision.command_root}",
+        source_ip,
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=_err(403, f"Command denied by policy: {decision.reason}"),
+        )
+
     job_id = await _state.job_manager.create_job(
         session_id=req.session_id,
         command=req.command,
@@ -108,6 +132,28 @@ async def bulk_execute(
     _identity: AuthIdentity = Depends(require_scope("jobs:run")),
 ):
     """Execute multiple commands concurrently."""
+    # Command Policy Evaluation — check all commands before execution
+    source_ip = request.client.host if request.client else "unknown"
+    for cmd in req.commands:
+        decision = evaluate_command_policy(
+            cmd,
+            mode=settings.command_policy_mode,
+            profile=settings.command_policy_profile,
+        )
+        _state.audit_logger.log_security_event(
+            "COMMAND_POLICY_DECISION",
+            f"bulk_execute; command={cmd}; "
+            f"allowed={decision.allowed}; reason={decision.reason}; "
+            f"profile={decision.profile}; mode={decision.mode}; "
+            f"command_root={decision.command_root}",
+            source_ip,
+        )
+        if not decision.allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=_err(403, f"Command denied by policy: {decision.reason}"),
+            )
+
     start_time = time.time()
     results = await _state.bulk_ops.execute_batch_commands(
         req.session_id,

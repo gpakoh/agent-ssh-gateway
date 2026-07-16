@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_master_key
+from app.command_policy import evaluate_command_policy
+from app.config import settings
 from app.models import (
     BatchExecuteRequest,
     BatchExecuteResponse,
@@ -23,6 +25,29 @@ async def batch_execute(
     _identity: AuthIdentity = Depends(require_master_key),
 ):
     """Execute multiple file operations in a single transaction."""
+
+    # Command Policy Evaluation — check execute-type operations before execution
+    source_ip = request.client.host if request.client else "unknown"
+    for op in req.operations:
+        if op.type == "execute" and op.command:
+            decision = evaluate_command_policy(
+                op.command,
+                mode=settings.command_policy_mode,
+                profile=settings.command_policy_profile,
+            )
+            _state.audit_logger.log_security_event(
+                "COMMAND_POLICY_DECISION",
+                f"batch_execute; command={op.command}; "
+                f"allowed={decision.allowed}; reason={decision.reason}; "
+                f"profile={decision.profile}; mode={decision.mode}; "
+                f"command_root={decision.command_root}",
+                source_ip,
+            )
+            if not decision.allowed:
+                raise HTTPException(
+                    status_code=403,
+                    detail=_err(403, f"Command denied by policy: {decision.reason}"),
+                )
 
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
