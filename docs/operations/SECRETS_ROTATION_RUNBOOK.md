@@ -84,3 +84,13 @@ docker compose -p web-ssh-gateway -f docker/docker-compose.yml up -d --no-deps \
 - [ ] `python scripts/check_no_hardcoded_secrets.py` exits 0
 - [ ] Postgres container shows `(healthy)` status
 - [ ] Old password is rejected
+
+## Historical token status
+
+| Token | Status | Evidence |
+|-------|--------|----------|
+| `AGENT_TOKEN` (pre-Session 146) | **ROTATED** | CHANGELOG.md:195 — "Rotated exposed API_KEY, AGENT_TOKEN, JWT_SECRET across all environments. (Session 146)". No `.env` or `docker/.env` was ever tracked in git — old values do not exist in repo history. Current `.env.example` placeholder: `change-me-generate-long-random-agent-token`. |
+| `API_KEY` (pre-Session 146) | **ROTATED** | Same session. See above. |
+| `JWT_SECRET` (pre-Session 146) | **ROTATED** | Same session. See above. |
+
+**Note:** Commit `bbf3b84` does not exist in this repository's git history. The pre-Session 146 tokens were rotated in the runtime `docker/.env` (gitignored) and are not recoverable from tracked files.
