@@ -1652,7 +1652,22 @@ def build_api_help(request: Request) -> dict[str, Any]:
                         "POST /api/bulk/edit",
                         "PATCH /api/context/file/edit",
                     ],
-                    "not_gated": "Read-only endpoints (/api/file/read, /api/batch/read, preview, verify, git, analytics) and SSH command execution (/api/ssh/execute) are unaffected by WORKSPACE_READONLY. Command execution is gated separately by COMMAND_POLICY_MODE.",
+                    "also_gated": [
+                        "POST /api/scaffold/python-class",
+                        "POST /api/templates/render",
+                    ],
+                    "not_gated": [
+                        "Read-only file ops: /api/file/read, /api/batch/read, /api/bulk/read",
+                        "Preview/verify: /api/workspace/projects/{id}/files/preview, /api/workspace/projects/{id}/files/verify",
+                        "Config stores: /api/servers, /api/webhooks, /api/webhooks/{id}/deploy",
+                        "Event hooks: /api/event-hooks",
+                        "Git ops: /api/git/backup, /api/git/restore, /api/git/diff",
+                        "SSH command execution: /api/ssh/execute, /api/ssh/connect, /api/ssh/sessions",
+                        "Deploy/deployment: /api/webhooks/{id}/deploy (separate control)",
+                        "Template listing: /api/command-templates (read-only)",
+                        "Analytics, diagnostics, metrics, logs",
+                    ],
+                    "note": "WORKSPACE_READONLY is a file-I/O gate only. SSH command execution and deploy are covered by COMMAND_POLICY_MODE and webhook auth respectively — independent controls.",
                 },
                 "modes": {
                     "default_readonly": {
