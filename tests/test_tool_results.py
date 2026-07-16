@@ -307,6 +307,7 @@ class TestErrorCodes:
             "WAIT_TIMEOUT",
             "JOB_NOT_FOUND",
             "PERMISSION_DENIED",
+            "DANGEROUS_PERMISSIONS_BLOCKED",
         }
         assert ERROR_CODES == known
 

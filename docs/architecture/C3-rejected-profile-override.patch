@@ -1,0 +1,399 @@
+diff --git a/app/models.py b/app/models.py
+index 48a75d5..e1ac2cf 100644
+--- a/app/models.py
++++ b/app/models.py
+@@ -66,6 +66,11 @@ class ExecuteRequest(BaseModel):
+         default=None,
+         description="Override command output redaction for this request.",
+     )
++    profile: str | None = Field(
++        default=None,
++        description="Override command policy profile for this request (e.g. 'testlint'). "
++        "When None, uses the server default from COMMAND_POLICY_PROFILE.",
++    )
+ 
+ 
+ class ExecuteResponse(BaseModel):
+@@ -84,6 +89,11 @@ class ExecuteArgvRequest(BaseModel):
+     argv: list[str] = Field(..., min_length=1)
+     stdin: str = Field(default="", max_length=1_048_576)
+     timeout_s: int = Field(default=30, ge=1, le=3600)
++    profile: str | None = Field(
++        default=None,
++        description="Override command policy profile for this request (e.g. 'testlint'). "
++        "When None, uses the server default from COMMAND_POLICY_PROFILE.",
++    )
+ 
+     @field_validator("argv")
+     @classmethod
+diff --git a/app/routers/ssh.py b/app/routers/ssh.py
+index 18ab7b3..7c5de6b 100644
+--- a/app/routers/ssh.py
++++ b/app/routers/ssh.py
+@@ -282,10 +282,11 @@ async def ssh_execute(
+         raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
+ 
+     # Command Policy Evaluation
++    effective_profile = req.profile or settings.command_policy_profile
+     decision = evaluate_command_policy(
+         req.command,
+         mode=settings.command_policy_mode,
+-        profile=settings.command_policy_profile,
++        profile=effective_profile,
+     )
+ 
+     _state.audit_logger.log_security_event(
+@@ -359,10 +360,11 @@ async def ssh_execute_argv(
+     """
+     command_str = shlex.join(req.argv)
+ 
++    effective_profile = req.profile or settings.command_policy_profile
+     decision = evaluate_command_policy(
+         command_str,
+         mode=settings.command_policy_mode,
+-        profile=settings.command_policy_profile,
++        profile=effective_profile,
+     )
+ 
+     _state.audit_logger.log_security_event(
+diff --git a/examples/mcp_server/chatgpt_tools.py b/examples/mcp_server/chatgpt_tools.py
+index 50fe609..4627bc5 100644
+--- a/examples/mcp_server/chatgpt_tools.py
++++ b/examples/mcp_server/chatgpt_tools.py
+@@ -479,6 +479,8 @@ def _run_uv_tool(
+     tool_key: str,
+     tool_name: str,
+     target: list[str] | None = None,
++    *,
++    profile: str | None = None,
+ ) -> dict[str, Any]:
+     """Run a uv-backed tool via SSH gateway. Shared by all uv runner tools."""
+     project_dir = _resolve_project(project)
+@@ -489,7 +491,7 @@ def _run_uv_tool(
+         code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
+         return tool_error(code=code.strip(), message=msg.strip(), tool_name=tool_name)
+ 
+-    check_result = client.execute_project_command(str(project_dir), "command -v uv")
++    check_result = client.execute_project_command(str(project_dir), "command -v uv", profile=profile)
+     if check_result.get("exit_code", 1) != 0:
+         return tool_error(
+             code="DEPENDENCY_MISSING",
+@@ -501,7 +503,7 @@ def _run_uv_tool(
+         )
+ 
+     command = " ".join(shlex.quote(a) for a in argv)
+-    result = client.execute_project_command(str(project_dir), command)
++    result = client.execute_project_command(str(project_dir), command, profile=profile)
+     raw = client.wait_job(result["job_id"])
+     outcome, error_code = _map_uv_exit_code(tool_key, raw.get("exit_code", -1))
+     if error_code:
+@@ -529,7 +531,7 @@ def project_run_pytest(
+     project: str,
+     target: list[str] | None = None,
+ ) -> dict[str, Any]:
+-    return _run_uv_tool(client, project, "pytest", "project_run_pytest", target)
++    return _run_uv_tool(client, project, "pytest", "project_run_pytest", target, profile="testlint")
+ 
+ 
+ def project_run_ruff(
+@@ -537,7 +539,7 @@ def project_run_ruff(
+     project: str,
+     target: list[str] | None = None,
+ ) -> dict[str, Any]:
+-    return _run_uv_tool(client, project, "ruff", "project_run_ruff", target)
++    return _run_uv_tool(client, project, "ruff", "project_run_ruff", target, profile="testlint")
+ 
+ 
+ def project_run_mypy(
+@@ -545,7 +547,7 @@ def project_run_mypy(
+     project: str,
+     target: list[str] | None = None,
+ ) -> dict[str, Any]:
+-    return _run_uv_tool(client, project, "mypy", "project_run_mypy", target)
++    return _run_uv_tool(client, project, "mypy", "project_run_mypy", target, profile="testlint")
+ 
+ 
+ # ── Project git info tools ──────────────────────────────────────
+diff --git a/examples/mcp_server/gateway_client.py b/examples/mcp_server/gateway_client.py
+index a1a8fd7..d3be558 100644
+--- a/examples/mcp_server/gateway_client.py
++++ b/examples/mcp_server/gateway_client.py
+@@ -9,7 +9,6 @@ import time
+ from typing import Any
+ 
+ import httpx
+-from command_policy import validate_readonly_command
+ 
+ 
+ def _project_root() -> str:
+@@ -256,36 +255,35 @@ class GatewayClient:
+         return self._get(f"/api/ssh/session/{sid}/health")
+ 
+     @_retry_on_session_not_found
+-    def execute_restricted(self, command: str, session_id: str | None = None) -> dict[str, Any]:
++    def execute_restricted(self, command: str, session_id: str | None = None, profile: str | None = None) -> dict[str, Any]:
+         sid = session_id or self._require_session_id()
+-        safe_command = validate_readonly_command(command)
+-        return self._post(
+-            "/api/ssh/execute",
+-            {
+-                "session_id": sid,
+-                "command": safe_command,
+-                "async_mode": True,
+-                "redact_output": True,
+-                "timeout": self.command_timeout,
+-            },
+-        )
++        body: dict[str, Any] = {
++            "session_id": sid,
++            "command": command,
++            "async_mode": True,
++            "redact_output": True,
++            "timeout": self.command_timeout,
++        }
++        if profile:
++            body["profile"] = profile
++        return self._post("/api/ssh/execute", body)
+ 
+     @_retry_on_session_not_found
+-    def execute_project_command(self, project: str, command: str) -> dict[str, Any]:
++    def execute_project_command(self, project: str, command: str, profile: str | None = None) -> dict[str, Any]:
+         sid = self._require_session_id()
+         root = _project_root()
+         proj = _safe_project(project)
+         full_command = f"cd {root}/{proj} && {command}"
+-        return self._post(
+-            "/api/ssh/execute",
+-            {
+-                "session_id": sid,
+-                "command": full_command,
+-                "async_mode": True,
+-                "redact_output": True,
+-                "timeout": self.command_timeout,
+-            },
+-        )
++        body: dict[str, Any] = {
++            "session_id": sid,
++            "command": full_command,
++            "async_mode": True,
++            "redact_output": True,
++            "timeout": self.command_timeout,
++        }
++        if profile:
++            body["profile"] = profile
++        return self._post("/api/ssh/execute", body)
+ 
+     @_retry_on_session_not_found
+     def execute_argv(
+diff --git a/examples/mcp_server/server.py b/examples/mcp_server/server.py
+index d30d9a6..8994084 100644
+--- a/examples/mcp_server/server.py
++++ b/examples/mcp_server/server.py
+@@ -2501,8 +2501,13 @@ def project_run_opencode(
+     task_id: str,
+     model: str | None = None,
+ ) -> dict[str, Any]:
+-    """Execute an existing handoff task via agent CLI.
+-    Requires write mode handoff or full."""
++    """BLOCKED for explicit profile wiring — builds multi-line bash with --dangerously-skip-permissions.
++
++    Currently uses global command_policy_profile (default). Needs:
++    - Explicit profile='project-automation' in execute_project_command
++    - Confirm-store gate (like docker dangerous tools)
++    - Task-id shell-injection audit (single-quote wrapping, not shlex)
++    Design decision pending: whether agent CLI execution warrants confirm-step."""
+     from write_modes import assert_handoff_write_allowed
+ 
+     assert_handoff_write_allowed()
+@@ -2525,9 +2530,13 @@ def gateway_project_run_mimo(
+     task_id: str,
+     model: str | None = None,
+ ) -> dict[str, Any]:
+-    """Execute an existing handoff task via Mimo CLI inside a disposable git worktree.
+-    Requires write mode handoff or full. See spec for 11 pre-flight guards.
+-    Mimo runs with --dangerously-skip-permissions — only valid in disposable worktrees."""
++    """BLOCKED for explicit profile wiring — builds multi-line bash with --dangerously-skip-permissions.
++
++    Currently uses global command_policy_profile (default). Needs:
++    - Explicit profile='project-automation' in execute_project_command
++    - Confirm-store gate (like docker dangerous tools)
++    - 11 pre-flight guards are shell-level only, no gateway-side enforcement
++    Design decision pending: whether agent CLI execution warrants confirm-step."""
+     from write_modes import assert_handoff_write_allowed
+ 
+     assert_handoff_write_allowed()
+diff --git a/tests/test_c3_command_policy_contract.py b/tests/test_c3_command_policy_contract.py
+index 31a8154..b3e68e3 100644
+--- a/tests/test_c3_command_policy_contract.py
++++ b/tests/test_c3_command_policy_contract.py
+@@ -5,6 +5,7 @@ Tests verify the COMMAND_POLICY_DENIED response contract for each endpoint type.
+ 
+ from __future__ import annotations
+ 
++import inspect
+ import sys
+ from pathlib import Path
+ from unittest.mock import AsyncMock, MagicMock, patch
+@@ -289,17 +290,13 @@ class TestMcpExecuteRestricted:
+ 
+         client = _new_gateway_client()
+ 
+-        # validate_readonly_command has its own MCP-level allowlist;
+-        # mock it to bypass client-side check so we test server-side propagation.
+-        with patch(
+-            "examples.mcp_server.gateway_client.validate_readonly_command",
+-            return_value="systemctl restart nginx",
++        # Gateway now delegates policy to server; no client-side validate_readonly_command.
++        # Just mock the HTTP layer to return 403.
++        with patch.object(
++            client, "_post", side_effect=GatewayClientError("Request failed: 403")
+         ):
+-            with patch.object(
+-                client, "_post", side_effect=GatewayClientError("Request failed: 403")
+-            ):
+-                with pytest.raises(GatewayClientError, match="403"):
+-                    client.execute_restricted("systemctl restart nginx")
++            with pytest.raises(GatewayClientError, match="403"):
++                client.execute_restricted("systemctl restart nginx")
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -472,3 +469,138 @@ class TestCommandPolicyProfileIntegration:
+             headers=_auth_headers(),
+         )
+         assert resp.status_code == 403
++
++
++# ---------------------------------------------------------------------------
++# execute_argv — shell redirect metachar denial
++# ---------------------------------------------------------------------------
++
++
++class TestExecuteArgvRedirectMetachar:
++    """execute_argv with shell redirect metachars must be denied even in enforce-readonly."""
++
++    def test_redirect_gt_denied(self, client, monkeypatch):
++        """argv=['sh','-c','echo x > f'] → joined command contains '>' → FORBIDDEN."""
++        _setup_test(monkeypatch)
++        _setup_enforce_readonly(monkeypatch)
++
++        resp = client.post(
++            "/api/ssh/execute-argv",
++            json={"session_id": "sid", "argv": ["sh", "-c", "echo x > f"]},
++            headers=_auth_headers(),
++        )
++        assert resp.status_code == 403
++        assert resp.json()["detail"]["code"] == "FORBIDDEN"
++
++    def test_redirect_appended_denied(self, client, monkeypatch):
++        """argv=['sh','-c','echo x >> f'] → FORBIDDEN."""
++        _setup_test(monkeypatch)
++        _setup_enforce_readonly(monkeypatch)
++
++        resp = client.post(
++            "/api/ssh/execute-argv",
++            json={"session_id": "sid", "argv": ["sh", "-c", "echo x >> /tmp/f"]},
++            headers=_auth_headers(),
++        )
++        assert resp.status_code == 403
++
++    def test_pipe_denied(self, client, monkeypatch):
++        """argv=['sh','-c','echo x | cat'] → FORBIDDEN."""
++        _setup_test(monkeypatch)
++        _setup_enforce_readonly(monkeypatch)
++
++        resp = client.post(
++            "/api/ssh/execute-argv",
++            json={"session_id": "sid", "argv": ["sh", "-c", "echo x | cat"]},
++            headers=_auth_headers(),
++        )
++        assert resp.status_code == 403
++
++
++# ---------------------------------------------------------------------------
++# ExecuteRequest profile forwarding
++# ---------------------------------------------------------------------------
++
++
++class TestExecuteProfileForwarding:
++    """POST /api/ssh/execute with profile= must use that profile for policy check."""
++
++    def test_profile_overrides_global(self, client, monkeypatch):
++        """Global readonly, request with profile=testlint → testlint policy applies."""
++        _setup_test(monkeypatch)
++        monkeypatch.setattr(settings, "command_policy_mode", "enforce")
++        monkeypatch.setattr(settings, "command_policy_profile", "readonly")
++
++        mock_session = MagicMock()
++        mock_session.owner_type = "master"
++        mock_session.owner_token_fingerprint = None
++        _app_state = _setup_test(monkeypatch)
++        _app_state.manager.get_session = AsyncMock(return_value=mock_session)
++        _app_state.manager.execute = AsyncMock(
++            return_value={"stdout": "ok", "stderr": "", "exit_code": 0, "duration": 0.1}
++        )
++
++        # readonly allows 'ls -la', testlint also allows 'ls -la'
++        resp = client.post(
++            "/api/ssh/execute",
++            json={
++                "session_id": "sid",
++                "command": "ls -la",
++                "profile": "testlint",
++            },
++            headers=_auth_headers(),
++        )
++        # Should not be 403 for either profile — both allow 'ls'
++        assert resp.status_code == 200
++
++
++# ---------------------------------------------------------------------------
++# MCP client — no duplicate policy drift
++# ---------------------------------------------------------------------------
++
++
++class TestMcpNoDuplicatePolicy:
++    """gateway_client.execute_restricted must NOT call validate_readonly_command locally."""
++
++    def test_execute_restricted_no_local_policy_call(self):
++        """After C3, validate_readonly_command is not imported in gateway_client."""
++
++        # Re-import gateway_client module to check its source
++        from examples.mcp_server import gateway_client
++
++        # The module should not reference validate_readonly_command
++        # (it may still exist in command_policy.py, but not used by gateway_client)
++        source = inspect.getsource(gateway_client)
++        assert "validate_readonly_command" not in source, (
++            "gateway_client still references validate_readonly_command — "
++            "MCP-local duplicate policy must be removed"
++        )
++
++
++# ---------------------------------------------------------------------------
++# MCP testlint wiring — profile param in chatgpt_tools
++# ---------------------------------------------------------------------------
++
++
++class TestMcpTestlintWiring:
++    """_run_uv_tool must forward profile='testlint' to execute_project_command."""
++
++    def test_pytest_tool_passes_testlint_profile(self):
++        """project_run_pytest → _run_uv_tool → execute_project_command(profile='testlint')."""
++        from examples.mcp_server.chatgpt_tools import project_run_pytest
++
++        client = _new_gateway_client()
++        with patch.object(client, "execute_project_command") as mock_exec, \
++             patch.object(client, "wait_job", return_value={"exit_code": 0, "stdout": "ok"}), \
++             patch("examples.mcp_server.chatgpt_tools._resolve_project", return_value="/tmp/proj"), \
++             patch("examples.mcp_server.chatgpt_tools._build_uv_argv", return_value=["uv", "run", "pytest"]):
++            # First call: `command -v uv` (must succeed), second: actual command
++            mock_exec.side_effect = [
++                {"exit_code": 0, "stdout": "/usr/bin/uv"},
++                {"job_id": "j1", "exit_code": 0},
++            ]
++            project_run_pytest(client, "proj")
++            calls = mock_exec.call_args_list
++            assert len(calls) == 2
++            assert calls[0].kwargs.get("profile") == "testlint"
++            assert calls[1].kwargs.get("profile") == "testlint"

@@ -1730,11 +1730,13 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "endpoints_gated": [
                         "POST /api/ssh/execute — command policy checked before execution",
                         "POST /api/ssh/execute-argv — argv joined via shlex, then policy checked",
-                        "POST /api/jobs/run — policy checked before job creation",
                         "WS /api/ssh/execute/stream — policy checked in WebSocket handler",
+                        "POST /api/jobs/run — policy checked before job creation",
+                        "POST /api/bulk/execute — command policy checked per item",
+                        "POST /api/batch/execute — command policy checked per item",
                     ],
                     "interaction_with_workspace_readonly": "WORKSPACE_READONLY and COMMAND_POLICY_MODE are independent. A command can be blocked by either gate. WORKSPACE_READONLY blocks file write/edit endpoints; COMMAND_POLICY_MODE blocks SSH command execution. Both return 403 but with different codes (WORKSPACE_READONLY vs FORBIDDEN).",
-                    "mcp_notes": "MCP tools (execute_restricted, execute_argv, project_run_*) route through the same REST endpoints and are subject to the same command policy. The MCP server has an additional client-side allowlist (validate_readonly_command) for execute_restricted.",
+                    "mcp_notes": "MCP execute_restricted currently has its own MCP-local allowlist (validate_readonly_command) plus the server-side command policy. The two are checked independently. Consolidation of MCP and server-side profiles is planned for a later phase after safe server-side profile plumbing exists.",
                 },
             },
             "sections": [

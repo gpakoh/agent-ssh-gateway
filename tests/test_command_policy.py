@@ -344,3 +344,108 @@ class TestDangerousTokens:
 
     def test_clean_command_allowed(self):
         assert contains_dangerous_token("ls -la") is None
+
+
+# ---------------------------------------------------------------------------
+# Combined flag detection tests
+# ---------------------------------------------------------------------------
+
+
+class TestCombinedFlags:
+    def test_python3_uc_blocked(self):
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("python3 -uc 'import os'")
+        assert ok is True
+        assert "python3" in reason
+        assert "-uc" in reason
+
+    def test_python3_u_c_separated_blocked(self):
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("python3 -u -c 'print(1)'")
+        assert ok is True
+        assert "python3" in reason
+        assert "-c" in reason
+
+    def test_perl_0e_blocked(self):
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("perl -0e 'print <>;' file")
+        assert ok is True
+        assert "perl" in reason
+        assert "-0e" in reason
+
+    def test_perl_ne_blocked(self):
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("perl -ne 'print' file")
+        assert ok is True
+        assert "perl" in reason
+        assert "-ne" in reason
+
+    def test_ruby_we_blocked(self):
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("ruby -we 'puts 1'")
+        assert ok is True
+        assert "ruby" in reason
+        assert "-we" in reason
+
+    def test_sh_e_c_separated_blocked(self):
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("sh -e -c 'ls'")
+        assert ok is True
+        assert "sh" in reason
+
+    def test_bash_ex_separated_blocked(self):
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("bash -e -x script.sh")
+        assert ok is True
+        assert "bash" in reason
+
+    def test_python_u_only_allowed(self):
+        """-u alone is not in EXEC_FLAGS — should not be blocked by arg shape."""
+        from app.command_policy import check_argument_shape
+        ok, _reason = check_argument_shape("python3 -u script.py")
+        assert ok is False
+
+    def test_python_m_compileall_allowed(self):
+        from app.command_policy import check_argument_shape
+        ok, _reason = check_argument_shape("python3 -m compileall app/")
+        assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# Audit mode would_allow tests
+# ---------------------------------------------------------------------------
+
+
+class TestAuditModeWouldAllow:
+    def test_audit_pipe_would_allow_false(self):
+        d = evaluate_command_policy("echo x | cat", mode="audit", profile="readonly")
+        assert d.allowed is True
+        assert "would_allow=False" in d.reason
+        assert "metacharacter" in d.reason.lower()
+
+    def test_audit_python_c_would_allow_false(self):
+        d = evaluate_command_policy(
+            "python -c 'import os'", mode="audit", profile="testlint",
+        )
+        assert d.allowed is True
+        assert "would_allow=False" in d.reason
+        assert "python" in d.reason
+
+    def test_audit_clean_command_would_allow_true(self):
+        d = evaluate_command_policy("ls -la", mode="audit", profile="readonly")
+        assert d.allowed is True
+        assert "would_allow=True" in d.reason
+
+    def test_audit_python_uc_would_allow_false(self):
+        d = evaluate_command_policy(
+            "python3 -uc 'import os'", mode="audit", profile="testlint",
+        )
+        assert d.allowed is True
+        assert "would_allow=False" in d.reason
+
+    def test_audit_perl_0e_would_allow_false(self):
+        d = evaluate_command_policy(
+            "perl -0e 'print <>;'", mode="audit", profile="readonly",
+        )
+        assert d.allowed is True
+        assert "would_allow=False" in d.reason
