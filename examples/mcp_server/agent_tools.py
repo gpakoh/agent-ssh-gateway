@@ -11,6 +11,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from command_policy import CommandPolicyError
+
 TASKS_REL_DIR = ".ai-bridge/tasks"
 
 
@@ -286,7 +288,6 @@ def project_run_agent(
         }
 
     if selected in ("opencode", "mimo"):
-        from command_policy import CommandPolicyError
         raise CommandPolicyError(
             f"project_run_agent is blocked: {selected} backend is not allowed. "
             "Use dedicated project_run_opencode/project_run_mimo tools instead."

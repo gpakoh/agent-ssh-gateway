@@ -11,7 +11,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from examples.mcp_server.mimo_tools import CommandPolicyError as MimoCommandPolicyError
 from examples.mcp_server.mimo_tools import project_run_mimo
+
+CommandPolicyError = MimoCommandPolicyError
 
 TASK_ID = "2026-06-25-mimo-task-opencode"
 
@@ -30,8 +33,6 @@ class TestProjectRunMimoBlocked:
 
     def test_raises_command_policy_error(self):
         """Must raise CommandPolicyError, never execute."""
-        from command_policy import CommandPolicyError
-
         with pytest.raises(CommandPolicyError, match="blocked"):
             project_run_mimo(
                 _fake_run_cmd,
@@ -42,7 +43,6 @@ class TestProjectRunMimoBlocked:
     def test_run_cmd_never_called(self):
         """The run_cmd callable must NEVER be invoked."""
         mock_run = MagicMock(return_value={"stdout": "", "stderr": "", "exit_code": 0})
-        from command_policy import CommandPolicyError
 
         with pytest.raises(CommandPolicyError):
             project_run_mimo(
@@ -54,8 +54,6 @@ class TestProjectRunMimoBlocked:
 
     def test_no_dangerously_skip_permissions_in_any_path(self):
         """Even if someone catches the error, no command with the flag was built."""
-        from command_policy import CommandPolicyError
-
         with pytest.raises(CommandPolicyError, match="--dangerously-skip-permissions"):
             project_run_mimo(
                 _fake_run_cmd,
@@ -65,8 +63,6 @@ class TestProjectRunMimoBlocked:
 
     def test_model_override_also_blocked(self):
         """Even with a model override, the tool is blocked."""
-        from command_policy import CommandPolicyError
-
         with pytest.raises(CommandPolicyError, match="blocked"):
             project_run_mimo(
                 _fake_run_cmd,
@@ -77,8 +73,6 @@ class TestProjectRunMimoBlocked:
 
     def test_default_model_also_blocked(self):
         """Even with default model (None), the tool is blocked."""
-        from command_policy import CommandPolicyError
-
         with pytest.raises(CommandPolicyError, match="blocked"):
             project_run_mimo(
                 _fake_run_cmd,
@@ -89,8 +83,6 @@ class TestProjectRunMimoBlocked:
 
     def test_error_message_includes_safe_alternatives(self):
         """Error message suggests safe alternatives."""
-        from command_policy import CommandPolicyError
-
         with pytest.raises(CommandPolicyError, match="project_run_pytest"):
             project_run_mimo(
                 _fake_run_cmd,
@@ -100,8 +92,6 @@ class TestProjectRunMimoBlocked:
 
     def test_no_command_script_built(self):
         """No shell script with guards is constructed — block is before script build."""
-        from command_policy import CommandPolicyError
-
         mock_run = MagicMock(return_value={"stdout": "", "stderr": "", "exit_code": 0})
         with pytest.raises(CommandPolicyError):
             project_run_mimo(
@@ -131,18 +121,23 @@ class TestServerWrapperBlocked:
 
         example_dir = Path(__file__).resolve().parents[1] / "examples" / "mcp_server"
         monkeypatch.syspath_prepend(str(example_dir))
+        saved_modules = {}
+        clear_prefixes = ("server", "mimo_tools", "mcp_server", "tool_modes", "command_policy")
         for name in list(sys.modules):
-            if "mimo_tools" in name or "mcp_server" in name or "tool_modes" in name:
-                sys.modules.pop(name, None)
-        server = importlib.import_module("server")
-        tool_fn = getattr(server, "gateway_project_run_mimo", None)
-        assert tool_fn is not None
+            if any(p in name for p in clear_prefixes):
+                saved_modules[name] = sys.modules.pop(name)
+        try:
+            server = importlib.import_module("server")
+            tool_fn = getattr(server, "gateway_project_run_mimo", None)
+            assert tool_fn is not None
 
-        result = tool_fn(project="test", task_id=TASK_ID)
-        # run_tool catches CommandPolicyError → MCP error response
-        assert result.get("isError") is True
-        err_msg = result.get("structuredContent", {}).get("error", "")
-        assert "blocked" in err_msg.lower()
+            result = tool_fn(project="test", task_id=TASK_ID)
+            # run_tool catches CommandPolicyError → MCP error response
+            assert result.get("isError") is True
+            err_msg = result.get("structuredContent", {}).get("error", "")
+            assert "blocked" in err_msg.lower()
+        finally:
+            sys.modules.update(saved_modules)
 
 
 # ---------------------------------------------------------------------------
