@@ -288,6 +288,27 @@ class GatewayClient:
         )
 
     @_retry_on_session_not_found
+    def execute_raw(self, command: str) -> dict[str, Any]:
+        """Execute a command directly without cd wrapping.
+
+        Unlike execute_project_command, this does NOT prepend ``cd <root>/<project> &&``.
+        Use for commands that carry their own working-directory semantics
+        (e.g. ``uv --directory <dir>``) or commands that must not contain
+        shell metacharacters (``&&`` is blocked by the server metachar gate).
+        """
+        sid = self._require_session_id()
+        return self._post(
+            "/api/ssh/execute",
+            {
+                "session_id": sid,
+                "command": command,
+                "async_mode": True,
+                "redact_output": True,
+                "timeout": self.command_timeout,
+            },
+        )
+
+    @_retry_on_session_not_found
     def execute_argv(
         self,
         argv: list[str],

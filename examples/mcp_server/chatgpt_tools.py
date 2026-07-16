@@ -489,7 +489,7 @@ def _run_uv_tool(
         code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
         return tool_error(code=code.strip(), message=msg.strip(), tool_name=tool_name)
 
-    check_result = client.execute_project_command(str(project_dir), "command -v uv")
+    check_result = client.execute_raw("command -v uv")
     if check_result.get("exit_code", 1) != 0:
         return tool_error(
             code="DEPENDENCY_MISSING",
@@ -501,7 +501,7 @@ def _run_uv_tool(
         )
 
     command = " ".join(shlex.quote(a) for a in argv)
-    result = client.execute_project_command(str(project_dir), command)
+    result = client.execute_raw(command)
     raw = client.wait_job(result["job_id"])
     outcome, error_code = _map_uv_exit_code(tool_key, raw.get("exit_code", -1))
     if error_code:
