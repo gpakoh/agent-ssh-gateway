@@ -424,6 +424,7 @@ async def scaffold_python_class(
     req: ScaffoldRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Scaffold a Python class + test file from template."""
+    _assert_rw()
     files_created = []
     module_dir = req.module_path.rstrip("/")
 
@@ -537,6 +538,7 @@ async def render_template(
     req: TemplateRenderRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Render template and save to file."""
+    _assert_rw()
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
         raise HTTPException(status_code=404, detail=_err(404, "Context not found"))

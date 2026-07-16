@@ -90,6 +90,8 @@ ERROR_CODE_MAP: dict[tuple[int, str], str] = {
     (400, ""): "BAD_REQUEST",
     (500, ""): "INTERNAL_ERROR",
     (422, ""): "VALIDATION_ERROR",
+    (403, "workspace_readonly"): "WORKSPACE_READONLY",
+    (403, ""): "FORBIDDEN",
 }
 
 HINTS: dict[str, str] = {
@@ -111,6 +113,8 @@ HINTS: dict[str, str] = {
     "INTERNAL_ERROR": "The server encountered an internal error; retry or contact support",
     "VALIDATION_ERROR": "Check the missing or invalid fields listed in errors[]",
     "RATE_LIMIT_EXCEEDED": "Reduce request frequency and retry after the indicated wait time",
+    "WORKSPACE_READONLY": "Set WORKSPACE_READONLY=false to enable write operations",
+    "FORBIDDEN": "You do not have permission to perform this operation",
 }
 
 

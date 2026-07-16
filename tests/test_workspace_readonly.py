@@ -197,3 +197,171 @@ class TestReadonlyAllowsReads:
                 headers={"X-API-Key": settings.api_key},
             )
             assert resp.status_code == 200
+
+
+class TestReadonlyBlocksLegacyMutators:
+    """Verify workspace_readonly=true blocks scaffold/code/replace/template endpoints."""
+
+    def test_scaffold_python_class_blocked(self, client):
+        with patch.object(settings, "workspace_readonly", True):
+            resp = client.post(
+                "/api/scaffold/python-class",
+                json={
+                    "session_id": "fake",
+                    "class_name": "TestClass",
+                    "module_path": "/tmp/test",
+                },
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
+    def test_code_insert_blocked(self, client):
+        with patch.object(settings, "workspace_readonly", True):
+            resp = client.post(
+                "/api/code/insert",
+                json={
+                    "context_id": "fake",
+                    "path": "test.py",
+                    "instruction": "add a method",
+                },
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
+    def test_replace_global_blocked(self, client):
+        with patch.object(settings, "workspace_readonly", True):
+            resp = client.post(
+                "/api/replace/global",
+                json={
+                    "session_id": "fake",
+                    "path": "/tmp",
+                    "search": "old",
+                    "replace": "new",
+                    "dry_run": False,
+                },
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
+    def test_replace_global_dry_run_allowed(self, client):
+        with patch.object(settings, "workspace_readonly", True):
+            resp = client.post(
+                "/api/replace/global",
+                json={
+                    "session_id": "fake",
+                    "path": "/tmp",
+                    "search": "old",
+                    "replace": "new",
+                    "dry_run": True,
+                },
+                headers={"X-API-Key": settings.api_key},
+            )
+            # dry_run=true should NOT be blocked by readonly
+            assert resp.status_code != 403
+
+    def test_templates_render_blocked(self, client):
+        with patch.object(settings, "workspace_readonly", True):
+            resp = client.post(
+                "/api/templates/render",
+                json={
+                    "context_id": "fake",
+                    "template_id": "test",
+                    "target_path": "/tmp/test.py",
+                    "params": {},
+                },
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
+
+class TestReadonlyBlocksSnapshotOps:
+    """Verify workspace_readonly=true blocks snapshot create/restore/delete."""
+
+    def test_snapshot_create_blocked(self, client):
+        with patch.object(settings, "workspace_readonly", True):
+            resp = client.post(
+                "/api/snapshots",
+                json={"context_id": "fake", "name": "test"},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
+    def test_snapshot_restore_blocked(self, client):
+        with patch.object(settings, "workspace_readonly", True):
+            resp = client.post(
+                "/api/snapshots/restore",
+                json={"context_id": "fake", "snapshot_id": "snap-123"},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
+    def test_snapshot_delete_blocked(self, client):
+        with patch.object(settings, "workspace_readonly", True):
+            resp = client.delete(
+                "/api/snapshots/snap-123",
+                params={"context_id": "fake"},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
+
+class TestReadonlyBlocksGitOps:
+    """Verify workspace_readonly=true blocks git init/commit/backup/restore."""
+
+    def test_git_init_blocked(self, client):
+        with patch.object(settings, "workspace_readonly", True):
+            resp = client.post(
+                "/api/git/init",
+                json={"context_id": "fake"},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
+    def test_git_commit_blocked(self, client):
+        with patch.object(settings, "workspace_readonly", True):
+            resp = client.post(
+                "/api/git/commit",
+                json={"context_id": "fake", "message": "test"},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
+    def test_git_backup_blocked(self, client):
+        with patch.object(settings, "workspace_readonly", True):
+            resp = client.post(
+                "/api/git/backup",
+                params={"context_id": "fake"},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
+    def test_git_restore_blocked(self, client):
+        with patch.object(settings, "workspace_readonly", True):
+            resp = client.post(
+                "/api/git/restore",
+                params={"context_id": "fake"},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
+
+class TestReadonlyBlocksRecoveryOps:
+    """Verify workspace_readonly=true blocks recovery backup/restore."""
+
+    def test_recovery_backup_blocked(self, client):
+        with patch.object(settings, "workspace_readonly", True):
+            resp = client.post(
+                "/api/recovery/backup",
+                json={"context_id": "fake", "name": "test"},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
+    def test_recovery_restore_blocked(self, client):
+        with patch.object(settings, "workspace_readonly", True):
+            resp = client.post(
+                "/api/recovery/restore",
+                json={"context_id": "fake"},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
