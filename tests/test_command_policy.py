@@ -1,6 +1,12 @@
 """Tests for command policy engine."""
 
-from app.command_policy import evaluate_command_policy
+import pytest
+
+from app.command_policy import (
+    contains_dangerous_token,
+    contains_shell_redirection,
+    evaluate_command_policy,
+)
 
 
 def test_policy_off_allows_dangerous_command():
@@ -151,3 +157,127 @@ def test_default_mode_is_enforce():
 
     s = Settings()
     assert s.command_policy_mode == "enforce"
+
+
+# ---------------------------------------------------------------------------
+# contains_shell_redirection — unit tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        # basic (with spaces)
+        ("echo hello > /tmp/f", ">"),
+        ("echo hello >> /tmp/f", ">>"),
+        # no-space variants
+        ("echo x>file", ">"),
+        ("echo x> file", ">"),
+        ("echo x >file", ">"),
+        ("echo x>>file", ">>"),
+        ("echo x>> file", ">>"),
+        ("echo x >>file", ">>"),
+        # fd-prefixed
+        ("echo x 1> /tmp/f", "1>"),
+        ("echo x 2> /tmp/f", "2>"),
+        ("echo x &> /tmp/f", "&>"),
+        ("echo x 1>> /tmp/f", "1>>"),
+        ("echo x 2>> /tmp/f", "2>>"),
+        # clobber
+        ("echo x >| /tmp/f", ">|"),
+        # input redirection
+        ("cat < /etc/passwd", "<"),
+        ("cat <<EOF", "<<"),
+        # piped output still detected
+        ("cat f | tee /tmp/out", None),  # pipe is not a redirect
+    ],
+)
+def test_contains_shell_redirection(command, expected):
+    assert contains_shell_redirection(command) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo \"a > b\"",
+        "echo 'a > b'",
+        "echo \"a >> b\"",
+        "echo 'a >> b'",
+        "echo \"1> file\"",
+        "echo \"a < b\"",
+        "echo 'a << EOF'",
+    ],
+)
+def test_contains_shell_redirection_quoted_not_flagged(command):
+    """Quoted redirection operators must not be flagged."""
+    assert contains_shell_redirection(command) is None
+
+
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        # These should be detected even without spaces
+        ("echo x>file", ">"),
+        ("echo x>>file", ">>"),
+        # Quoted = not detected
+        ("echo \"a > b\"", None),
+    ],
+)
+def test_contains_dangerous_token_redirect(command, expected):
+    """contains_dangerous_token must also catch shell redirections."""
+    assert contains_dangerous_token(command) == expected
+
+
+# ---------------------------------------------------------------------------
+# Redirect bypass matrix — end-to-end evaluate_command_policy
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo x>file",
+        "echo x >file",
+        "echo x> file",
+        "echo x > file",
+        "echo x>>file",
+        "echo x >>file",
+        "echo x 2>/dev/null",
+        "echo x &>/dev/null",
+        "echo x >|/tmp/f",
+        "cat < /etc/passwd",
+    ],
+)
+def test_redirect_denied_in_enforce(command):
+    """All redirection variants must be denied in enforce mode."""
+    decision = evaluate_command_policy(command, mode="enforce", profile="default")
+    assert decision.allowed is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo x>file",
+        "echo x >> /tmp/f",
+        "echo x 2>/dev/null",
+    ],
+)
+def test_redirect_allowed_in_audit(command):
+    """Audit mode must allow but report the would-be denial."""
+    decision = evaluate_command_policy(command, mode="audit", profile="default")
+    assert decision.allowed is True
+    assert "AUDIT_ONLY" in decision.reason
+    assert "would_allow=False" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo \"a > b\"",
+        "echo 'append >> ok'",
+    ],
+)
+def test_quoted_redirect_allowed_in_enforce(command):
+    """Quoted redirections must NOT be denied."""
+    decision = evaluate_command_policy(command, mode="enforce", profile="default")
+    assert decision.allowed is True
