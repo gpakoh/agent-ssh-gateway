@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     workspace_readonly: bool = Field(default=True, alias="WORKSPACE_READONLY")
     command_policy_mode: str = Field(default="enforce", alias="COMMAND_POLICY_MODE")
     command_policy_profile: str = Field(default="default", alias="COMMAND_POLICY_PROFILE")
+    command_policy_key_profiles: str = Field(
+        default="{}",
+        alias="COMMAND_POLICY_KEY_PROFILES",
+        description="JSON mapping API key fingerprint → profile name (e.g. {\"abc123\": \"testlint\"})",
+    )
     command_output_redaction_enabled: bool = Field(
         default=False, alias="COMMAND_OUTPUT_REDACTION_ENABLED"
     )
