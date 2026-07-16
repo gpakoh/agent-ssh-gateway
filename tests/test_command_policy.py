@@ -484,6 +484,27 @@ class TestTestlintCommandFindSed:
         assert ok is True
         assert "-execdir" in reason
 
+    def test_find_delete_blocked(self):
+        """'find . -delete' — write action — blocked."""
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("find . -delete")
+        assert ok is True
+        assert "-delete" in reason
+
+    def test_find_fprintf_blocked(self):
+        """'find . -fprintf out.txt \"%p\\n\"' — write action — blocked."""
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape('find . -fprintf out.txt "%p\\n"')
+        assert ok is True
+        assert "-fprintf" in reason
+
+    def test_find_fls_blocked(self):
+        """'find . -fls out.txt' — write action — blocked."""
+        from app.command_policy import check_argument_shape
+        ok, reason = check_argument_shape("find . -fls out.txt")
+        assert ok is True
+        assert "-fls" in reason
+
     def test_sed_n_readonly_allowed(self):
         """'sed -n 1,5p file.py' — read-only extraction — allowed."""
         from app.command_policy import check_argument_shape
