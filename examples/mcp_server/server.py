@@ -410,7 +410,7 @@ def run_tool(
     try:
         data = fn()
     except Exception as exc:
-        if type(exc).__name__ == "CommandPolicyError" or isinstance(exc, (WritePermissionError, WriteModeError)):
+        if isinstance(exc, (CommandPolicyError, WritePermissionError, WriteModeError)):
             return error_result(tool=tool, title=title, error=str(exc))
         if isinstance(exc, GatewayClientError):
             code, retryable = _classify_gateway_error(exc)

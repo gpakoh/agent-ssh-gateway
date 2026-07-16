@@ -10,6 +10,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from command_policy import CommandPolicyError
+
 
 def project_run_opencode(
     run_cmd: Callable[[str, str], dict[str, Any]],
@@ -33,8 +35,6 @@ def project_run_opencode(
         dict with keys: task_id, status, exit_code, stdout, stderr,
         started_at, finished_at
     """
-    from command_policy import CommandPolicyError
-
     raise CommandPolicyError(
         "project_run_opencode is blocked: --dangerously-skip-permissions is not allowed. "
         "Use project_run_pytest or project_run_ruff for safe command execution."
