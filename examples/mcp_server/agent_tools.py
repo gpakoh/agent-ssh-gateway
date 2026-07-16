@@ -285,6 +285,13 @@ def project_run_agent(
             "finished_at": _now_iso(),
         }
 
+    if selected in ("opencode", "mimo"):
+        from command_policy import CommandPolicyError
+        raise CommandPolicyError(
+            f"project_run_agent is blocked: {selected} backend is not allowed. "
+            "Use dedicated project_run_opencode/project_run_mimo tools instead."
+        )
+
     if selected not in allowed:
         return {
             "task_id": task_id,

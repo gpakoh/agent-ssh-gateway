@@ -50,28 +50,36 @@ def _make_run_cmd(
 
 class TestProjectRunAgentDisabled:
     def test_auto_agent_uses_first_allowed(self):
+        """Auto agent selects opencode from allowed → should be blocked."""
+        from command_policy import CommandPolicyError
+
         rc = _make_run_cmd(task_json=_make_task_json())
-        result = project_run_agent(rc, project="test", task_id=TASK_ID)
-        assert result["status"] == "needs-review"
-        assert result["exit_code"] == 0
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_agent(rc, project="test", task_id=TASK_ID)
 
     def test_auto_agent_opencode_selected(self):
+        """Auto agent → opencode selected → should be blocked."""
+        from command_policy import CommandPolicyError
+
         rc = _make_run_cmd(task_json=_make_task_json())
-        result = project_run_agent(rc, project="test", task_id=TASK_ID)
-        # Router disabled → uses agent or first allowed → opencode
-        assert result["task_id"] == TASK_ID
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_agent(rc, project="test", task_id=TASK_ID)
 
     def test_explicit_opencode_agent_disabled(self):
+        from command_policy import CommandPolicyError
+
         rc = _make_run_cmd(task_json=_make_task_json(agent="opencode"))
-        result = project_run_agent(rc, project="test", task_id=TASK_ID)
-        assert result["status"] == "needs-review"
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_agent(rc, project="test", task_id=TASK_ID)
 
     def test_explicit_mimo_agent_disabled(self):
+        from command_policy import CommandPolicyError
+
         rc = _make_run_cmd(
             task_json=_make_task_json(agent="mimo", worktree_path="/tmp/wt"),
         )
-        result = project_run_agent(rc, project="test", task_id=TASK_ID)
-        assert result["status"] in ("needs-review", "failed")
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_agent(rc, project="test", task_id=TASK_ID)
 
     def test_no_allowed_backends(self):
         rc = _make_run_cmd(task_json=_make_task_json(allowed=[]))
@@ -84,16 +92,20 @@ class TestProjectRunAgentDisabled:
         assert result["status"] == "error"
 
     def test_mimo_without_worktree_path(self):
+        """mimo backend → blocked (before worktree check)."""
+        from command_policy import CommandPolicyError
+
         rc = _make_run_cmd(task_json=_make_task_json(agent="mimo"))
-        result = project_run_agent(rc, project="test", task_id=TASK_ID)
-        assert result["status"] == "error"
-        assert "worktree_path" in result.get("error", "")
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_agent(rc, project="test", task_id=TASK_ID)
 
     def test_opencode_without_current_plan(self):
+        """opencode backend → blocked (before plan check)."""
+        from command_policy import CommandPolicyError
+
         rc = _make_run_cmd(task_json=_make_task_json(), current_plan="")
-        result = project_run_agent(rc, project="test", task_id=TASK_ID)
-        assert result["status"] == "error"
-        assert "current-plan.md" in result.get("error", "")
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_agent(rc, project="test", task_id=TASK_ID)
 
 
 # ── project_run_agent: router enabled ───────────────────────────────────────
@@ -108,13 +120,19 @@ class TestProjectRunAgentEnabled:
         return r
 
     def test_opencode_selected_when_available(self):
+        """Router selects opencode → should be blocked."""
+        from command_policy import CommandPolicyError
+
         rc = _make_run_cmd(task_json=_make_task_json())
         r = self._router()
-        result = project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
-        assert result["status"] == "needs-review"
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
 
     def test_mimo_selected_when_opencode_cooldown(self):
+        """Router selects mimo (opencode cooldown) → should be blocked."""
         import time
+
+        from command_policy import CommandPolicyError
 
         from examples.mcp_server.agent_backend_router import BackendStatus
 
@@ -124,8 +142,8 @@ class TestProjectRunAgentEnabled:
         r = self._router()
         r._backends["opencode"].status = BackendStatus.COOLDOWN
         r._backends["opencode"].cooldown_until = time.time() + 3600
-        result = project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
-        assert result["status"] == "needs-review" or result["status"] == "failed"
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
 
     def test_blocked_when_both_unavailable(self):
         import time
@@ -142,16 +160,23 @@ class TestProjectRunAgentEnabled:
         assert result["status"] == "blocked"
 
     def test_router_disabled_uses_direct_agent(self):
+        """Router disabled → auto → opencode → blocked."""
+        from command_policy import CommandPolicyError
+
         rc = _make_run_cmd(task_json=_make_task_json())
         r = self._router(enabled=False)
-        result = project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
-        assert result["status"] == "needs-review"
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
 
-    def test_record_result_called_on_success(self):
+    def test_record_result_not_called_when_blocked(self):
+        """Blocking happens before record_result."""
+        from command_policy import CommandPolicyError
+
         rc = _make_run_cmd(task_json=_make_task_json())
         r = self._router()
-        result = project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
-        assert result["status"] == "needs-review"
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
+        # record_result should NOT have been called
         assert r._backends["opencode"].status.value == "available"
 
     def test_selected_backend_not_in_allowed(self):
@@ -159,11 +184,13 @@ class TestProjectRunAgentEnabled:
             task_json=_make_task_json(agent="auto", allowed=["mimo"]),
         )
         r = self._router()
-        # With router enabled and opencode available, router may select opencode
-        result = project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
-        if result["status"] == "error":
-            assert "selected backend" in result.get("error", "")
-        else:
+        # Router may select opencode, which is blocked
+        # Or it may select mimo, which is also blocked
+        # Either way, should raise CommandPolicyError
+        from command_policy import CommandPolicyError
+
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
             # Router selected mimo (first in allowed) or opencode
             pass
 
@@ -173,15 +200,18 @@ class TestProjectRunAgentEnabled:
 
 class TestAgentToolIntegration:
     def test_auto_agent_opencode_flow(self):
-        """Router disabled → auto → opencode path."""
+        """Router disabled → auto → opencode → blocked."""
+        from command_policy import CommandPolicyError
+
         rc = _make_run_cmd(task_json=_make_task_json())
-        result = project_run_agent(rc, project="test", task_id=TASK_ID)
-        assert result["task_id"] == TASK_ID
-        assert result["exit_code"] == 0
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_agent(rc, project="test", task_id=TASK_ID)
 
     def test_fallback_to_mimo(self):
-        """Router enabled, opencode cooldown → mimo selected."""
+        """Router enabled, opencode cooldown → mimo → blocked."""
         import time
+
+        from command_policy import CommandPolicyError
 
         from examples.mcp_server.agent_backend_router import BackendStatus
 
@@ -191,9 +221,8 @@ class TestAgentToolIntegration:
         r = AgentBackendRouter(fallback_order=["opencode", "mimo"], enabled=True)
         r._backends["opencode"].status = BackendStatus.COOLDOWN
         r._backends["opencode"].cooldown_until = time.time() + 3600
-        result = project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
-        # mimo may pass guards or fail on real worktree — but shouldn't crash
-        assert result["status"] in ("needs-review", "failed", "error")
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
 
     def test_old_tools_unchanged(self):
         """Verify project_run_opencode is hard-blocked."""
@@ -206,3 +235,54 @@ class TestAgentToolIntegration:
         )
         with pytest.raises(Exception, match="blocked"):
             project_run_opencode(rc, project="test", task_id=TASK_ID)
+
+
+# ── project_run_agent: C3 blocking ─────────────────────────────────────────
+
+
+class TestProjectRunAgentC3Blocking:
+    def test_opencode_blocked(self):
+        """project_run_agent with agent=opencode must raise CommandPolicyError."""
+        from command_policy import CommandPolicyError
+
+        rc = _make_run_cmd(task_json=_make_task_json(agent="opencode"))
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_agent(rc, project="test", task_id=TASK_ID)
+
+    def test_mimo_blocked(self):
+        """project_run_agent with agent=mimo must raise CommandPolicyError."""
+        from command_policy import CommandPolicyError
+
+        rc = _make_run_cmd(
+            task_json=_make_task_json(agent="mimo", worktree_path="/tmp/wt"),
+        )
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_agent(rc, project="test", task_id=TASK_ID)
+
+    def test_opencode_blocked_before_execution(self):
+        """Blocking must happen before script execution (after task.json read)."""
+        from command_policy import CommandPolicyError
+
+        call_count = 0
+
+        def counting_run(project, command):
+            nonlocal call_count
+            call_count += 1
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+        task_json = _make_task_json(agent="opencode")
+        rc = _make_run_cmd(task_json=task_json, exit_code=0)
+        # Override to count actual executions
+        original_side_effect = rc.side_effect
+
+        def counting_side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return original_side_effect(*args, **kwargs)
+
+        rc.side_effect = counting_side_effect
+
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_agent(rc, project="test", task_id=TASK_ID)
+        # call_count=1 means only task.json was read, no script executed
+        assert call_count == 1, f"Expected 1 call (task.json read), got {call_count}"
