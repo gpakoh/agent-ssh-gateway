@@ -5,12 +5,10 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
+import pytest
+
 from examples.mcp_server.agent_backend_router import AgentBackendRouter
-from examples.mcp_server.agent_tools import (
-    _build_mimo_script,
-    _build_opencode_script,
-    project_run_agent,
-)
+from examples.mcp_server.agent_tools import project_run_agent
 
 TASK_ID = "test-agent-001"
 TASKS_REL = ".ai-bridge/tasks"
@@ -45,48 +43,6 @@ def _make_run_cmd(
         return {"exit_code": exit_code, "stdout": stdout, "stderr": stderr}
 
     return MagicMock(side_effect=fake_run_cmd)
-
-
-# ── _build_opencode_script ──────────────────────────────────────────────────
-
-
-class TestBuildOpencodeScript:
-    def test_contains_opencode_bin(self):
-        script = _build_opencode_script(TD, TASK_ID, model=None)
-        assert "OPCODE_BIN" in script
-        assert "$OPCODE_BIN run" in script
-        assert "current-plan.md" in script
-        assert "Status: running" in script
-
-    def test_with_model_flag(self):
-        script = _build_opencode_script(TD, TASK_ID, model="gpt-4o")
-        assert "--model" in script
-        assert "gpt-4o" in script
-
-    def test_result_artifacts(self):
-        script = _build_opencode_script(TD, TASK_ID, model=None)
-        assert "implementation-diff.patch" in script
-        assert "agent-report.md" in script
-        assert "agent-status.md" in script
-
-
-# ── _build_mimo_script ──────────────────────────────────────────────────────
-
-
-class TestBuildMimoScript:
-    def test_contains_guards(self):
-        script = _build_mimo_script(TD, TASK_ID, model=None)
-        assert "worktree_path" in script
-        assert "MCP_GATEWAY_WORKTREE_ROOT" in script
-        assert "linked worktree" in script
-        assert '"$MIMO_BIN" run' in script
-
-    def test_result_artifacts(self):
-        script = _build_mimo_script(TD, TASK_ID, model=None)
-        assert "implementation-diff.patch" in script
-        assert "agent-report.md" in script
-        assert "agent-status.md" in script
-        assert "Mimo" in script or "mimo" in script
 
 
 # ── project_run_agent: router disabled ──────────────────────────────────────
@@ -240,18 +196,15 @@ class TestAgentToolIntegration:
         assert result["status"] in ("needs-review", "failed", "error")
 
     def test_old_tools_unchanged(self):
-        """Verify project_run_opencode / project_run_mimo still work directly."""
-        from examples.mcp_server.mimo_tools import _build_mimo_script as mimoscript
+        """Verify project_run_opencode / project_run_mimo are hard-blocked."""
+        from command_policy import CommandPolicyError
+
         from examples.mcp_server.opencode_tools import project_run_opencode
 
-        # opencode_tools still callable with run_cmd
+        # opencode_tools now raises CommandPolicyError (blocked)
         rc = _make_run_cmd(
             task_json=_make_task_json(),
             exit_code=0,
         )
-        result = project_run_opencode(rc, project="test", task_id=TASK_ID)
-        assert result["task_id"] == TASK_ID
-
-        # mimo script still builds correctly
-        script = mimoscript(TASK_ID, TD, model=None)
-        assert "Mimo" in script or "mimo" in script
+        with pytest.raises(CommandPolicyError, match="blocked"):
+            project_run_opencode(rc, project="test", task_id=TASK_ID)
