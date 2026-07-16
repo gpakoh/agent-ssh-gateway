@@ -17,7 +17,7 @@ from dataclasses import dataclass
 # ── Status ────────────────────────────────────────────────────────────────────
 
 
-class BackendStatus(enum.Enum):
+class BackendStatus(enum.StrEnum):
     AVAILABLE = "available"
     COOLDOWN = "cooldown"
     FAILED = "failed"
