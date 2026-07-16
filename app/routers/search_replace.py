@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_master_key
+from app.config import settings
 from app.models import (
     GlobalReplaceRequest,
     GlobalReplaceResponse,
@@ -12,8 +13,19 @@ from app.models import (
     ReplaceResultItem,
     SearchMatchItem,
 )
+from app.state import _err
 
 router = APIRouter()
+
+
+def _assert_rw() -> None:
+    """Raise 403 if workspace is in readonly mode."""
+    if settings.workspace_readonly:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=403,
+            detail=_err(403, "WORKSPACE_READONLY: write operations are disabled"),
+        )
 
 
 @router.post("/api/search/global", tags=["code"], response_model=GlobalSearchResponse)
@@ -54,6 +66,8 @@ async def global_replace(
     req: GlobalReplaceRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Replace across all project files."""
+    if not req.dry_run:
+        _assert_rw()
     results = await _state.search_replace.replace(
         session_id=req.session_id,
         path=req.path,

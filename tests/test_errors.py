@@ -21,7 +21,7 @@ from app.ssh_manager import (
 from app.ssh_manager import (
     TimeoutError as SSHTimeoutError,
 )
-from app.state import _err
+from app.state import _auto_code, _err
 
 # ---------------------------------------------------------------------------
 # _err Helper
@@ -103,6 +103,38 @@ def test_err_custom_code():
 def test_err_all_keys_present():
     result = _err(400, "bad request")
     assert set(result.keys()) == {"message", "code", "retryable", "hint", "http_status"}
+
+
+@pytest.mark.parametrize(
+    "status,message,expected_code",
+    [
+        (403, "WORKSPACE_READONLY: write operations are disabled", "WORKSPACE_READONLY"),
+        (403, "workspace_readonly: something", "WORKSPACE_READONLY"),
+    ],
+)
+def test_err_workspace_readonly_code(status, message, expected_code):
+    result = _err(status, message)
+    assert result["code"] == expected_code
+    assert result["http_status"] == 403
+    assert result["retryable"] is False
+
+
+def test_err_forbidden_fallback():
+    """Any 403 without 'workspace_readonly' keyword gets FORBIDDEN."""
+    result = _err(403, "SSH key upload is disabled")
+    assert result["code"] == "FORBIDDEN"
+    assert result["http_status"] == 403
+    assert result["retryable"] is False
+
+
+def test_auto_code_workspace_readonly():
+    code = _auto_code(403, "WORKSPACE_READONLY: write operations are disabled")
+    assert code == "WORKSPACE_READONLY"
+
+
+def test_auto_code_forbidden_fallback():
+    code = _auto_code(403, "SSH key upload is disabled")
+    assert code == "FORBIDDEN"
 
 
 # ---------------------------------------------------------------------------
