@@ -409,19 +409,21 @@ def run_tool(
     """Execute a tool call with structured error handling."""
     try:
         data = fn()
-    except (GatewayClientError, CommandPolicyError, WritePermissionError, WriteModeError) as exc:
-        if isinstance(exc, (CommandPolicyError, WritePermissionError, WriteModeError)):
+    except Exception as exc:
+        if type(exc).__name__ == "CommandPolicyError" or isinstance(exc, (WritePermissionError, WriteModeError)):
             return error_result(tool=tool, title=title, error=str(exc))
-        code, retryable = _classify_gateway_error(exc)
-        hint = "The requested file does not exist at the specified path" if code == "FILE_NOT_FOUND" else None
-        return tool_error(
-            tool=tool,
-            code=code,
-            message=str(exc),
-            retryable=retryable,
-            hint=hint,
-            source="gateway",
-        )
+        if isinstance(exc, GatewayClientError):
+            code, retryable = _classify_gateway_error(exc)
+            hint = "The requested file does not exist at the specified path" if code == "FILE_NOT_FOUND" else None
+            return tool_error(
+                tool=tool,
+                code=code,
+                message=str(exc),
+                retryable=retryable,
+                hint=hint,
+                source="gateway",
+            )
+        raise
     return text_result(tool=tool, title=title, text=success_text, data=data)
 
 

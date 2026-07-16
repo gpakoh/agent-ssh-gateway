@@ -104,8 +104,13 @@ class TestServerWrapperBlocked:
 
         example_dir = Path(__file__).resolve().parents[1] / "examples" / "mcp_server"
         monkeypatch.syspath_prepend(str(example_dir))
+        # Clear ALL modules that server.py imports so a clean reimport occurs
+        clear_prefixes = ("mcp_server", "tool_modes", "opencode_tools", "command_policy",
+                          "gateway_client", "handoff", "self_test", "write_modes",
+                          "docker_confirm", "agent_tools", "agent_tasks",
+                          "agent_backend_router", "chatgpt_tools", "mimo_tools")
         for name in list(sys.modules):
-            if "mcp_server" in name or "tool_modes" in name or "opencode_tools" in name:
+            if any(p in name for p in clear_prefixes):
                 sys.modules.pop(name, None)
         server = importlib.import_module("server")
         tool_fn = getattr(server, "project_run_opencode", None)

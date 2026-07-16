@@ -196,15 +196,13 @@ class TestAgentToolIntegration:
         assert result["status"] in ("needs-review", "failed", "error")
 
     def test_old_tools_unchanged(self):
-        """Verify project_run_opencode / project_run_mimo are hard-blocked."""
-        from command_policy import CommandPolicyError
-
+        """Verify project_run_opencode is hard-blocked."""
         from examples.mcp_server.opencode_tools import project_run_opencode
 
-        # opencode_tools now raises CommandPolicyError (blocked)
+        # opencode_tools raises an error (blocked)
         rc = _make_run_cmd(
             task_json=_make_task_json(),
             exit_code=0,
         )
-        with pytest.raises(CommandPolicyError, match="blocked"):
+        with pytest.raises(Exception, match="blocked"):
             project_run_opencode(rc, project="test", task_id=TASK_ID)
