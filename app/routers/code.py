@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_master_key
+from app.config import settings
 from app.models import (
     CodeCompleteRequest,
     CodeCompleteResponse,
@@ -23,6 +24,16 @@ from app.state import _err
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _assert_rw() -> None:
+    """Raise 403 if workspace is in readonly mode."""
+    if settings.workspace_readonly:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=403,
+            detail=_err(403, "WORKSPACE_READONLY: write operations are disabled"),
+        )
 
 
 @router.post("/api/code/search", tags=["code"], response_model=CodeSearchResponse)
@@ -58,6 +69,7 @@ async def code_insert(
     req: CodeInsertRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Intelligently insert code based on natural language instruction."""
+    _assert_rw()
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
         raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
