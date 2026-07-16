@@ -1848,6 +1848,48 @@ async def _docker_run_impl(
     )
 
 
+async def _docker_compose_up_impl(
+    project_dir: str | None = None,
+    services: list[str] | None = None,
+    detach: bool = True,
+    build: bool = False,
+    timeout: int = 120,
+) -> str:
+    return await DockerClient().compose_up(
+        project_dir=project_dir,
+        services=services,
+        detach=detach,
+        build=build,
+        timeout=timeout,
+    )
+
+
+async def _docker_compose_restart_impl(
+    project_dir: str | None = None,
+    services: list[str] | None = None,
+    timeout: int = 30,
+) -> str:
+    return await DockerClient().compose_restart(
+        project_dir=project_dir,
+        services=services,
+        timeout=timeout,
+    )
+
+
+async def _docker_compose_build_impl(
+    project_dir: str | None = None,
+    services: list[str] | None = None,
+    no_cache: bool = False,
+    timeout: int = 300,
+) -> str:
+    return await DockerClient().compose_build(
+        project_dir=project_dir,
+        services=services,
+        no_cache=no_cache,
+        timeout=timeout,
+    )
+
+
 async def _docker_rmi_impl(images: list[str]) -> RunResult:
     return await DockerClient().rmi(images)
 
@@ -1862,6 +1904,9 @@ _CONFIRM_HANDLERS: dict[str, Callable[..., Any]] = {
     "docker_restart": _docker_restart_impl,
     "docker_rm": _docker_rm_impl,
     "docker_compose_down": _docker_compose_down_impl,
+    "docker_compose_up": _docker_compose_up_impl,
+    "docker_compose_restart": _docker_compose_restart_impl,
+    "docker_compose_build": _docker_compose_build_impl,
     "docker_prune": _docker_prune_impl,
     "docker_exec": _docker_exec_impl,
     "docker_run": _docker_run_impl,
