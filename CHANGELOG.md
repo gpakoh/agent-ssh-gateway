@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.34a0] - 2026-07-17
+
+### Added
+
+- **WORKSPACE_READONLY deployment safety (C2.4/C2.5)**: app-level kill switch for all write operations. `WORKSPACE_READONLY=true` (default) blocks file write/edit/patch, git commit/push, and handoff write endpoints. Guard added to `files.py`, `context.py`, and all legacy write routes. Docker `workspace-rw` compose variant for controlled write testing. Comprehensive `/api/help` deploy notes listing all gated and non-gated endpoints. (Sessions 182–186)
+
+- **Command policy enforce mode (C3)**: full enforcement across all SSH execution paths — sync execute, async jobs, argv endpoint. Shell redirection scanner with quote-awareness blocks `> >> >| 1> 2> &> 1>> 2>> < <<`. Denylist expanded with `tee`, `dd`, `cp`, `python -c` write patterns. `sed -i` blocked via `SED_INPLACE_DENYLIST`. (Sessions 187–190)
+
+- **Server-owned command profile routing (C3.1)**: `COMMAND_POLICY_KEY_PROFILES` env var maps API key SHA-256 fingerprints to testlint/audit profiles. `profile_for_identity()` resolves profile per request. Client-controlled `body.profile` override removed. `auto_detect_profile` removed. (Session 192)
+
+- **MCP pytest/ruff/mypy safe path**: `project_run_pytest`, `project_run_ruff`, `project_run_mypy` route through `execute_raw()` (no `cd &&` shell chaining). Commands pass testlint in enforce mode: `uv run --directory ... pytest/ruff check/mypy`. (Sessions 191–192)
+
+- **Dangerous agent tools blocked**: `project_run_opencode` and `project_run_mimo` hard-blocked — `--dangerously-skip-permissions` never allowed. `project_run_agent` blocks opencode/mimo backends with structured error. No confirmation flow, no override. (Session 190)
+
+- **Docker compose confirm parity**: `docker_compose_down` and `docker_compose_kill` now require confirmation tokens matching `docker_rm`/`docker_prune` guard pattern. (Session 188)
+
+- **Find write-action denylist**: `FIND_DENYLIST` blocks `-delete`, `-fprintf`, `-fls` in command policy argument-shape checks. (Session 193)
+
+- **MCP import identity stabilization**: `CommandPolicyError` imported at module level in `agent_tools.py`, `opencode_tools.py`, `mimo_tools.py`. `type(exc).__name__` string check replaced with `isinstance()` in `server.py` `run_tool` wrapper. Test files import CPE from module-under-test to survive `sys.modules` clearing. (Session 194)
+
+### Fixed
+
+- **Historical secret disclosure correction**: documentation corrected to reflect that `AGENT_TOKEN` was never exposed in tracked history — only `API_KEY`, `JWT_SECRET` were rotated. (Session 188)
+
+- **Shell redirection blocklist**: `contains_shell_redirection()` quote-aware scanner now correctly handles single/double-quoted strings and backslash escapes. (Session 188)
+
+- **Readonly contract drift**: `WORKSPACE_READONLY` default resolved to `true` consistently across config, compose, and runtime. (Session 185)
+
+### Tests
+
+- 2064 passed, 1 skipped (host_smoke excluded).
+- Command policy: 108 tests (find/sed/command arg-shape, testlint integration).
+- MCP agent tools: 20 tests (routing, blocked backends, C3 enforcement).
+- MCP opencode/mimo: 36 tests (blocked tools, server wrapper, tool registration).
+- C3 contract: 37 tests (execute_raw, audit profile, no-escalation).
+- Scope enforcement: 36 tests.
+- Full matrix: ruff clean, mypy clean, CI green on Python 3.11 and 3.12.
+
 ## [0.1.33a0] - 2026-07-15
 
 ### Added
