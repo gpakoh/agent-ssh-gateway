@@ -186,16 +186,39 @@ BLOCKED_INTERPRETERS: set[str] = {
     "bash", "sh", "ash", "zsh", "ksh",
     "node", "deno", "bun",
 }
-
-# Shell flags that enable code execution
-EXEC_FLAGS: set[str] = {"-c", "-e", "-E", "-x", "-es", "-ex"}
+# Flags that enable code execution (single-letter, used in combined flags too)
+EXEC_FLAGS: set[str] = {
+    "-c",   # sh/bash/python: execute command string
+    "-e",   # perl/ruby: execute code; sh: exit on error
+    "-E",   # ruby: enable warnings
+    "-es",  # perl: switch + source
+    "-ex",  # sh/bash: set -ex
+    "-0",   # perl: set record separator (can slurp entire files)
+    "-n",   # perl: implicit loop (pairs with -e for code execution)
+    "-w",   # ruby: enable warnings (dangerous when combined with -e)
+}
 
 # find -exec is dangerous (arbitrary command execution)
 FIND_DENYLIST: set[str] = {"-exec", "-execdir", "-ok", "-okdir"}
 
 
+def _extract_single_flags(arg: str) -> list[str]:
+    """Extract single-letter flags from a combined flag argument.
+
+    ``-uc`` → ["-u", "-c"], ``-0e`` → ["-0", "-e"], ``--verbose`` → [].
+    """
+    if not arg.startswith("-") or arg.startswith("--") or len(arg) < 2:
+        return []
+    return ["-" + ch for ch in arg[1:]]
+
+
 def check_argument_shape(command: str) -> tuple[bool, str]:
     """Check for dangerous argument patterns.
+
+    Scans ALL arguments (not only args[1]) for:
+    - Combined flags: ``python3 -uc``, ``perl -0e``, ``ruby -we``
+    - Separated flags: ``python3 -u -c``, ``sh -e -c``
+    - find -exec patterns
 
     Returns (is_dangerous, reason).
     """
@@ -209,10 +232,21 @@ def check_argument_shape(command: str) -> tuple[bool, str]:
     if not effective:
         return False, ""
 
-    # Check language interpreters with exec flags
+    # Check language interpreters with exec flags (anywhere in args)
     if effective[0] in BLOCKED_INTERPRETERS:
-        if len(effective) > 1 and effective[1] in EXEC_FLAGS:
-            return True, f"Language interpreter '{effective[0]}' with exec flag '{effective[1]}' blocked"
+        for arg in effective[1:]:
+            # Combined: python3 -uc → "-uc" contains "-c"
+            if any(flag in EXEC_FLAGS for flag in _extract_single_flags(arg)):
+                return True, (
+                    f"Language interpreter '{effective[0]}' with exec flag "
+                    f"in '{arg}' blocked"
+                )
+            # Separated: python3 -u -c → "-c" is a standalone flag
+            if arg in EXEC_FLAGS:
+                return True, (
+                    f"Language interpreter '{effective[0]}' with exec flag "
+                    f"'{arg}' blocked"
+                )
 
     # Check find -exec
     if effective[0] == "find":
@@ -512,13 +546,57 @@ def contains_dangerous_token(command: str) -> str | None:
     return None
 
 
+def _evaluate_enforce_decision(
+    command: str,
+    profile_value: str,
+) -> tuple[bool, str, str | None]:
+    """Run the full enforce-mode decision pipeline.
+
+    Returns (allowed, reason, blocked_by) where blocked_by is the gate that
+    rejected the command (metachar / argument_shape / profile) or None.
+    """
+    root = get_command_root(command)
+
+    # Gate 1: blanket metachar denial
+    metachar = contains_metachar(command)
+    if metachar:
+        return False, f"Metacharacter '{metachar}' blocked by blanket denial", "metachar"
+
+    # Gate 2: argument-shape checks
+    is_dangerous, shape_reason = check_argument_shape(command)
+    if is_dangerous:
+        return False, shape_reason, "argument_shape"
+
+    # Gate 3: profile evaluation
+    evaluators = {
+        CommandPolicyProfile.READONLY.value: evaluate_readonly,
+        CommandPolicyProfile.TESTLINT.value: evaluate_testlint,
+        CommandPolicyProfile.PROJECT_AUTOMATION.value: evaluate_project_automation,
+        CommandPolicyProfile.OPS.value: evaluate_ops,
+        CommandPolicyProfile.DOCKER_ADMIN.value: evaluate_docker_admin,
+    }
+    evaluator = evaluators.get(profile_value, evaluate_default)
+    allowed, reason = evaluator(command, root)
+
+    if not allowed:
+        return False, reason, "profile"
+
+    return True, reason, None
+
+
 def evaluate_command_policy(
     command: str,
     *,
     mode: str,
     profile: str,
 ) -> CommandPolicyDecision:
-    """Evaluate a command against the policy engine."""
+    """Evaluate a command against the policy engine.
+
+    Enforce and audit modes run the **same** decision pipeline.  Enforce
+    returns the result directly; audit always returns ``allowed=True`` but
+    sets ``reason`` to ``"AUDIT_ONLY: would_allow=<bool>; <reason>"`` so
+    callers can observe what *would* have happened.
+    """
     mode_value = (mode or CommandPolicyMode.AUDIT.value).lower()
     profile_value = (profile or CommandPolicyProfile.DEFAULT.value).lower()
     root = get_command_root(command)
@@ -533,55 +611,26 @@ def evaluate_command_policy(
             command_root=root,
         )
 
-    # Enforce mode: blanket metachar denial
+    # Enforce mode: run the full decision pipeline
     if mode_value == CommandPolicyMode.ENFORCE.value:
-        metachar = contains_metachar(command)
-        if metachar:
-            return CommandPolicyDecision(
-                allowed=False,
-                reason=f"Metacharacter '{metachar}' blocked by blanket denial",
-                profile=profile_value,
-                mode=mode_value,
-                command_root=root,
-            )
-
-    # Enforce mode: argument-shape checks
-    if mode_value == CommandPolicyMode.ENFORCE.value:
-        is_dangerous, shape_reason = check_argument_shape(command)
-        if is_dangerous:
-            return CommandPolicyDecision(
-                allowed=False,
-                reason=shape_reason,
-                profile=profile_value,
-                mode=mode_value,
-                command_root=root,
-            )
-
-    # Profile evaluation
-    evaluators = {
-        CommandPolicyProfile.READONLY.value: evaluate_readonly,
-        CommandPolicyProfile.TESTLINT.value: evaluate_testlint,
-        CommandPolicyProfile.PROJECT_AUTOMATION.value: evaluate_project_automation,
-        CommandPolicyProfile.OPS.value: evaluate_ops,
-        CommandPolicyProfile.DOCKER_ADMIN.value: evaluate_docker_admin,
-    }
-
-    evaluator = evaluators.get(profile_value, evaluate_default)
-    allowed, reason = evaluator(command, root)
-
-    # AUDIT mode: always allow, but log
-    if mode_value == CommandPolicyMode.AUDIT.value:
+        allowed, reason, _blocked_by = _evaluate_enforce_decision(
+            command, profile_value,
+        )
         return CommandPolicyDecision(
-            allowed=True,
-            reason=f"AUDIT_ONLY: would_allow={allowed}; {reason}",
+            allowed=allowed,
+            reason=reason,
             profile=profile_value,
             mode=mode_value,
             command_root=root,
         )
 
+    # AUDIT mode: same pipeline, but always allow and report would_allow
+    allowed, reason, _blocked_by = _evaluate_enforce_decision(
+        command, profile_value,
+    )
     return CommandPolicyDecision(
-        allowed=allowed,
-        reason=reason,
+        allowed=True,
+        reason=f"AUDIT_ONLY: would_allow={allowed}; {reason}",
         profile=profile_value,
         mode=mode_value,
         command_root=root,
