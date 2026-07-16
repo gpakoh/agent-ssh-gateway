@@ -89,8 +89,8 @@ docker compose -p web-ssh-gateway -f docker/docker-compose.yml up -d --no-deps \
 
 | Token | Status | Evidence |
 |-------|--------|----------|
-| `AGENT_TOKEN` (pre-Session 146) | **ROTATED** | CHANGELOG.md:195 — "Rotated exposed API_KEY, AGENT_TOKEN, JWT_SECRET across all environments. (Session 146)". No `.env` or `docker/.env` was ever tracked in git — old values do not exist in repo history. Current `.env.example` placeholder: `change-me-generate-long-random-agent-token`. |
+| `AGENT_TOKEN` (pre-Session 146) | **ROTATED / HISTORICAL DISCLOSURE DOCUMENTED** | Commit `bbf3b84` exists and is reachable from current Gitea/GitHub master. It contained a historical hardcoded agent token value; do not print or reuse it. CHANGELOG.md:195 records that exposed `API_KEY`, `AGENT_TOKEN`, and `JWT_SECRET` were rotated across all environments in Session 146. Current `.env.example` uses only the placeholder `change-me-generate-long-random-agent-token`. |
 | `API_KEY` (pre-Session 146) | **ROTATED** | Same session. See above. |
 | `JWT_SECRET` (pre-Session 146) | **ROTATED** | Same session. See above. |
 
-**Note:** Commit `bbf3b84` does not exist in this repository's git history. The pre-Session 146 tokens were rotated in the runtime `docker/.env` (gitignored) and are not recoverable from tracked files.
+**Note:** Historical secrets in reachable git commits must be treated as disclosed even if they are no longer live. Keep the values out of reports and logs. If any environment is suspected to still trust a pre-Session 146 value, rotate that environment again and verify the old value is rejected.
