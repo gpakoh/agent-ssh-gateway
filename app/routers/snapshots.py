@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_master_key
-from app.config import settings
 from app.models import (
     CreateSnapshotRequest,
     RestoreSnapshotRequest,
@@ -12,19 +11,10 @@ from app.models import (
     SnapshotInfo,
     SnapshotListResponse,
 )
+from app.routers.workspace import assert_workspace_writable
 from app.state import _err
 
 router = APIRouter()
-
-
-def _assert_rw() -> None:
-    """Raise 403 if workspace is in readonly mode."""
-    if settings.workspace_readonly:
-        from fastapi import HTTPException
-        raise HTTPException(
-            status_code=403,
-            detail=_err(403, "WORKSPACE_READONLY: write operations are disabled"),
-        )
 
 
 @router.post("/api/snapshots", tags=["snapshots"], response_model=SnapshotActionResponse)
@@ -32,7 +22,7 @@ async def create_snapshot(
     req: CreateSnapshotRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Create a snapshot of current project state."""
-    _assert_rw()
+    assert_workspace_writable()
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
         raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
@@ -88,7 +78,7 @@ async def restore_snapshot(
     req: RestoreSnapshotRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Restore project from snapshot."""
-    _assert_rw()
+    assert_workspace_writable()
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
         raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
@@ -115,7 +105,7 @@ async def delete_snapshot(
     snapshot_id: str, context_id: str, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Delete a snapshot."""
-    _assert_rw()
+    assert_workspace_writable()
     ctx = await _state.context_manager.get_context(context_id)
     if not ctx:
         raise HTTPException(status_code=404, detail=_err(404, "Context not found"))

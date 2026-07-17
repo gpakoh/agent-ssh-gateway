@@ -168,42 +168,41 @@ jq 'select(.relative_path == "src/main.py")' audit.jsonl
 jq 'select(.timestamp > (now - 3600))' audit.jsonl
 ```
 
-### ⚠️ PLANNED — NOT IMPLEMENTED YET: `/api/admin/audit/recent` endpoint
-
-> **This endpoint does not exist in the running gateway.** Do not call it. Do not document it as available. This section is a design spec for future implementation (target: C4 after audit endpoint wiring). Current workaround: query the JSONL file on disk directly.
+### ✅ IMPLEMENTED: `/api/admin/audit/recent` endpoint
 
 **Endpoint:** `GET /api/admin/audit/recent`
 **Auth:** master API key (`X-API-Key` header)
 **Query params:**
-- `limit` (int, default 50, max 200) — number of entries to return
-- `project_id` (str, optional) — filter by project
-- `operation` (str, optional) — filter by operation type
+- `limit` (int, default 100, max 1000) — number of entries to return
+- `event_type` (str, optional) — filter by event type (e.g. `command.deny`, `workspace.readonly_block`)
+- `decision` (str, optional) — filter by decision (`allowed`, `denied`, `error`)
+- `sort` (str, default `newest`) — sort order: `newest` or `oldest`
 
 **Response:**
 ```json
 {
-  "entries": [
+  "events": [
     {
-      "receipt_id": "rcpt_a1b2c3",
-      "project_id": "my-project",
-      "relative_path": "src/main.py",
-      "operation": "write",
-      "before_hash": "sha256:e3b0c44...",
-      "after_hash": "sha256:9f86d08...",
-      "size": 38,
-      "timestamp": 1721213521.123,
-      "identity": "agent-abc",
-      "success": true,
-      "error": ""
+      "event_id": "a1b2c3d4e5f6",
+      "timestamp": "2026-07-17T15:00:00.000+00:00",
+      "event_type": "command.deny",
+      "decision": "denied",
+      "reason": "Root command 'systemctl' not in readonly allowlist",
+      "profile": "readonly",
+      "source_ip": "10.0.0.1",
+      "route": "POST /api/ssh/execute",
+      "target_type": "session",
+      "target_id": "sid",
+      "metadata": {"command_root": "systemctl"}
     }
   ],
-  "count": 1,
+  "total": 1,
   "buffer_size": 42
 }
 ```
 
 **Notes:**
-- Returns entries from the in-memory buffer only (max 500).
+- Returns events from the in-memory ring buffer only (max 500).
 - Does NOT read from the JSONL file on disk.
 - The in-memory buffer is reset on gateway restart.
 - For persistent audit queries, query the JSONL file directly.

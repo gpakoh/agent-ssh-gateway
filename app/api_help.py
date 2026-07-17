@@ -1301,20 +1301,32 @@ def build_api_help(request: Request) -> dict[str, Any]:
                 {
                     "name": "audit_log",
                     "title": "Audit logging — current state",
-                    "overview": "The gateway has two independent audit subsystems (see docs/operations/AUDIT_LOGGING.md for full reference). This section documents what exists today — a REST endpoint for querying audit entries is planned but not yet implemented.",
-                    "endpoints": [],
+                    "overview": "The gateway has two independent audit subsystems (see docs/operations/AUDIT_LOGGING.md for full reference). Structured JSONL audit events are written for command policy decisions and workspace readonly blocks. A REST endpoint exposes the in-memory ring buffer.",
+                    "endpoints": [
+                        {
+                            "method": "GET",
+                            "path": "/api/admin/audit/recent",
+                            "description": "Query recent audit events from the in-memory ring buffer. Master key required. Supports event_type and decision filters, sort order (newest/oldest), and limit (max 1000).",
+                            "scope": "master_key",
+                            "response_example": {
+                                "events": [{"event_type": "command.deny", "decision": "denied", "reason": "..."}],
+                                "total": 1,
+                                "buffer_size": 42,
+                            },
+                        },
+                    ],
                     "what_exists_today": [
                         "Security audit: logs/audit.log — plain-text lines with COMMAND, FILE, AUTH, SECURITY events (app/security.py:291)",
+                        "Structured JSONL audit: ./data/audit/events.jsonl — metadata-only records with redaction (app/audit.py)",
                         "Workspace audit: configurable JSONL file — metadata-only records for write/edit/patch/rollback (app/workspace/snapshot.py:480)",
-                        "In-memory buffer: up to 500 entries, reset on restart (no REST query endpoint yet)",
+                        "In-memory ring buffer: up to 500 entries, queryable via GET /api/admin/audit/recent",
                     ],
                     "planned": {
-                        "status": "not_implemented",
-                        "description": "GET /api/admin/audit/recent — query in-memory audit buffer. Will be implemented in C4 after audit endpoint wiring.",
-                        "spec_location": "docs/operations/AUDIT_LOGGING.md § /api/admin/audit/recent",
+                        "status": "implemented",
+                        "description": "GET /api/admin/audit/recent — implemented in C4.1. Query in-memory audit buffer with filters and sort.",
                     },
                     "notes": [
-                        "No REST endpoint exists to query audit logs today. Query JSONL files directly: jq '.' audit.jsonl",
+                        "GET /api/admin/audit/recent requires master key. Limit capped at 1000.",
                         "Security audit (logs/audit.log) is plain text — use grep/awk.",
                         "Full documentation: docs/operations/AUDIT_LOGGING.md",
                     ],

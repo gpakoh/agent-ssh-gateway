@@ -8,7 +8,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_master_key
-from app.config import settings
 from app.diff_generator import DiffGenerator
 from app.git_manager import GitStatus
 from app.models import (
@@ -43,6 +42,7 @@ from app.models import (
     ValidationReportResponse,
     ValidationStepResult,
 )
+from app.routers.workspace import assert_workspace_writable
 from app.state import _err
 from app.template_library import TemplateLibrary
 
@@ -192,20 +192,12 @@ async def context_file_read(
     return FileReadResponse(path=req.path, content=content)
 
 
-def _assert_rw() -> None:
-    if settings.workspace_readonly:
-        raise HTTPException(
-            status_code=403,
-            detail=_err(403, "WORKSPACE_READONLY: write operations are disabled"),
-        )
-
-
 @router.patch("/api/context/file/edit", response_model=FileEditWithContextResponse)
 async def context_file_edit(
     req: FileEditWithContextRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Edit a file with context awareness (auto-commit, validation)."""
-    _assert_rw()
+    assert_workspace_writable()
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
         raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
@@ -424,7 +416,7 @@ async def scaffold_python_class(
     req: ScaffoldRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Scaffold a Python class + test file from template."""
-    _assert_rw()
+    assert_workspace_writable()
     files_created = []
     module_dir = req.module_path.rstrip("/")
 
@@ -538,7 +530,7 @@ async def render_template(
     req: TemplateRenderRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Render template and save to file."""
-    _assert_rw()
+    assert_workspace_writable()
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
         raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
