@@ -43,7 +43,12 @@ async def _get_context_or_404(context_id: str):
 @router.post("/api/git/init", response_model=GitActionResponse)
 async def git_init(req: GitInitRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Initialize git repository for context."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/git/init",
+    )
     result = await _state.context_manager.init_git(req.context_id, req.remote_url)
     return GitActionResponse(**result)
 
@@ -51,7 +56,12 @@ async def git_init(req: GitInitRequest, _identity: AuthIdentity = Depends(requir
 @router.post("/api/git/commit", response_model=GitActionResponse)
 async def git_commit(req: GitCommitRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Create a git commit for context."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/git/commit",
+    )
     result = await _state.context_manager.commit_changes(req.context_id, req.message, req.files)
     return GitActionResponse(**result)
 
@@ -63,7 +73,12 @@ async def git_backup(
     backup_name: str = "auto_backup",
 ):
     """Create a git stash backup."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/git/backup",
+    )
     await _get_context_or_404(context_id)
     result = await _state.context_manager.create_backup(context_id, backup_name)
     return GitActionResponse(**result)
@@ -72,7 +87,12 @@ async def git_backup(
 @router.post("/api/git/restore", response_model=GitActionResponse)
 async def git_restore(context_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """Restore from stash."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/git/restore",
+    )
     await _get_context_or_404(context_id)
     result = await _state.context_manager.restore_backup(context_id)
     return GitActionResponse(**result)

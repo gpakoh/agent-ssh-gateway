@@ -22,7 +22,12 @@ async def create_snapshot(
     req: CreateSnapshotRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Create a snapshot of current project state."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/snapshots",
+    )
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
         raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
@@ -78,7 +83,12 @@ async def restore_snapshot(
     req: RestoreSnapshotRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Restore project from snapshot."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/snapshots/restore",
+    )
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
         raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
@@ -105,7 +115,12 @@ async def delete_snapshot(
     snapshot_id: str, context_id: str, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Delete a snapshot."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="DELETE /api/snapshots/{snapshot_id}",
+    )
     ctx = await _state.context_manager.get_context(context_id)
     if not ctx:
         raise HTTPException(status_code=404, detail=_err(404, "Context not found"))

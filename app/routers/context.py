@@ -197,7 +197,12 @@ async def context_file_edit(
     req: FileEditWithContextRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Edit a file with context awareness (auto-commit, validation)."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="PATCH /api/context/file/edit",
+    )
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
         raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
@@ -416,7 +421,12 @@ async def scaffold_python_class(
     req: ScaffoldRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Scaffold a Python class + test file from template."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/scaffold/python-class",
+    )
     files_created = []
     module_dir = req.module_path.rstrip("/")
 
@@ -530,7 +540,12 @@ async def render_template(
     req: TemplateRenderRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Render template and save to file."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/templates/render",
+    )
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
         raise HTTPException(status_code=404, detail=_err(404, "Context not found"))

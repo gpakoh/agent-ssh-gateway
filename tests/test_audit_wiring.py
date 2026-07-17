@@ -143,8 +143,71 @@ class TestWorkspaceReadonlyAudit:
                 if e.event_type == AuditEventType.WORKSPACE_READONLY_BLOCK
             ]
             assert len(readonly_events) >= 1
-            assert readonly_events[0].decision == Decision.DENIED
-            assert readonly_events[0].reason == "WORKSPACE_READONLY=true"
+            evt = readonly_events[0]
+            assert evt.decision == Decision.DENIED
+            assert evt.reason == "WORKSPACE_READONLY=true"
+            assert evt.error_code == "WORKSPACE_READONLY"
+            # Actor attribution from API key identity
+            assert evt.actor_type == "master"
+            assert evt.actor_fingerprint  # non-empty fingerprint
+            assert len(evt.actor_fingerprint) == 12  # truncated to 12 chars
+
+    def test_workspace_readonly_deny_no_raw_api_key(self, client, monkeypatch):
+        _setup_test(monkeypatch)
+        monkeypatch.setattr(settings, "workspace_readonly", True)
+
+        from app import state as _app_state
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = str(Path(tmpdir) / "audit.jsonl")
+            _app_state.event_audit_logger = AuditEventLogger(
+                log_path=log_path, recent_limit=100
+            )
+
+            resp = client.post(
+                "/api/workspace/projects/proj1/files/write",
+                json={"path": "test.txt", "content": "hello"},
+                headers=_auth_headers(),
+            )
+            assert resp.status_code == 403
+
+            events = _app_state.event_audit_logger.recent()
+            readonly_events = [
+                e for e in events
+                if e.event_type == AuditEventType.WORKSPACE_READONLY_BLOCK
+            ]
+            assert len(readonly_events) >= 1
+            evt = readonly_events[0]
+            # Fingerprint must be hash-truncated, not raw key
+            assert "-" not in evt.actor_fingerprint
+            assert settings.api_key not in evt.actor_fingerprint
+
+    def test_workspace_readonly_deny_has_route(self, client, monkeypatch):
+        _setup_test(monkeypatch)
+        monkeypatch.setattr(settings, "workspace_readonly", True)
+
+        from app import state as _app_state
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = str(Path(tmpdir) / "audit.jsonl")
+            _app_state.event_audit_logger = AuditEventLogger(
+                log_path=log_path, recent_limit=100
+            )
+
+            resp = client.post(
+                "/api/workspace/projects/proj1/files/write",
+                json={"path": "test.txt", "content": "hello"},
+                headers=_auth_headers(),
+            )
+            assert resp.status_code == 403
+
+            events = _app_state.event_audit_logger.recent()
+            readonly_events = [
+                e for e in events
+                if e.event_type == AuditEventType.WORKSPACE_READONLY_BLOCK
+            ]
+            assert len(readonly_events) >= 1
+            assert readonly_events[0].route == "POST /api/workspace/projects/*/files/write"
 
 
 # ---------------------------------------------------------------------------
