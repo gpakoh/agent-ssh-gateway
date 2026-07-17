@@ -1,5 +1,6 @@
 """Global application state — initialized in lifespan()."""
 
+from app.audit import AuditEventLogger
 from app.batch_operations import BatchOperationsManager
 from app.bulk_operations_v2 import BulkOperationsManager
 from app.circuit_breaker import CircuitBreakerRegistry
@@ -36,6 +37,7 @@ webhook_manager: WebhookManager | None = None
 analytics: ProjectAnalytics | None = None
 secret_manager: SecretManager | None = None
 audit_logger: AuditLogger | None = None
+event_audit_logger: AuditEventLogger | None = None
 redis_queue: RedisJobQueue | None = None
 circuit_breakers: CircuitBreakerRegistry | None = None
 dist_lock: DistributedLock | None = None
