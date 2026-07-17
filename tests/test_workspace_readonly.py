@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -9,6 +10,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from app.audit import AuditEventLogger, AuditEventType
 from app.config import settings
 from app.main import app
 from app.workspace.models import ProjectInfo
@@ -365,3 +367,91 @@ class TestReadonlyBlocksRecoveryOps:
                 headers={"X-API-Key": settings.api_key},
             )
             assert resp.status_code == 403
+
+
+class TestReadonlyAuditAttribution:
+    """WORKSPACE_READONLY audit events include actor identity when available."""
+
+    def test_write_deny_includes_actor_fingerprint(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "workspace_readonly", True)
+        from app import state as _app_state
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = str(Path(tmpdir) / "audit.jsonl")
+            _app_state.event_audit_logger = AuditEventLogger(
+                log_path=log_path, recent_limit=100
+            )
+
+            resp = client.post(
+                "/api/workspace/projects/web-ssh-gateway/files/write",
+                json={"path": "_test.txt", "content": "hello"},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
+            events = _app_state.event_audit_logger.recent()
+            readonly_events = [
+                e for e in events
+                if e.event_type == AuditEventType.WORKSPACE_READONLY_BLOCK
+            ]
+            assert len(readonly_events) >= 1
+            evt = readonly_events[0]
+            assert evt.actor_type == "master"
+            assert evt.actor_fingerprint  # non-empty
+            assert len(evt.actor_fingerprint) == 12
+            assert evt.route == "POST /api/workspace/projects/*/files/write"
+
+    def test_edit_deny_includes_actor_fingerprint(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "workspace_readonly", True)
+        from app import state as _app_state
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = str(Path(tmpdir) / "audit.jsonl")
+            _app_state.event_audit_logger = AuditEventLogger(
+                log_path=log_path, recent_limit=100
+            )
+
+            resp = client.post(
+                "/api/workspace/projects/web-ssh-gateway/files/edit",
+                json={"path": "README.md", "old_string": "test", "new_string": "test2"},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
+            events = _app_state.event_audit_logger.recent()
+            readonly_events = [
+                e for e in events
+                if e.event_type == AuditEventType.WORKSPACE_READONLY_BLOCK
+            ]
+            assert len(readonly_events) >= 1
+            evt = readonly_events[0]
+            assert evt.actor_type == "master"
+            assert evt.actor_fingerprint
+            assert evt.route == "POST /api/workspace/projects/*/files/edit"
+
+    def test_fingerprint_is_not_raw_key(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "workspace_readonly", True)
+        from app import state as _app_state
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = str(Path(tmpdir) / "audit.jsonl")
+            _app_state.event_audit_logger = AuditEventLogger(
+                log_path=log_path, recent_limit=100
+            )
+
+            client.post(
+                "/api/workspace/projects/web-ssh-gateway/files/write",
+                json={"path": "_test.txt", "content": "hello"},
+                headers={"X-API-Key": settings.api_key},
+            )
+
+            events = _app_state.event_audit_logger.recent()
+            readonly_events = [
+                e for e in events
+                if e.event_type == AuditEventType.WORKSPACE_READONLY_BLOCK
+            ]
+            assert len(readonly_events) >= 1
+            evt = readonly_events[0]
+            # Fingerprint must be hash-truncated, not raw API key
+            assert settings.api_key not in evt.actor_fingerprint
+            assert "-" not in evt.actor_fingerprint

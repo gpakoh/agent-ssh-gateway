@@ -374,7 +374,15 @@ def git_diff(
 # ---------------------------------------------------------------------------
 
 
-def assert_workspace_writable() -> None:
+def assert_workspace_writable(
+    *,
+    actor_type: str | None = None,
+    actor_name: str | None = None,
+    actor_fingerprint: str | None = None,
+    route: str | None = None,
+    action: str | None = None,
+    source_ip: str | None = None,
+) -> None:
     """Raise 403 if workspace is in readonly mode. Emits structured audit event."""
     if settings.workspace_readonly:
         from app import state as _state
@@ -383,8 +391,12 @@ def assert_workspace_writable() -> None:
         if _state.event_audit_logger:
             _state.event_audit_logger.append(AuditEvent(
                 event_type=AuditEventType.WORKSPACE_READONLY_BLOCK,
-                actor_type="system",
-                action="workspace write blocked by WORKSPACE_READONLY",
+                actor_type=actor_type or "system",
+                actor_name=actor_name or "",
+                actor_fingerprint=actor_fingerprint or "",
+                source_ip=source_ip or "",
+                route=route or "",
+                action=action or "workspace write blocked by WORKSPACE_READONLY",
                 decision=Decision.DENIED,
                 reason="WORKSPACE_READONLY=true",
                 error_code="WORKSPACE_READONLY",
@@ -404,7 +416,12 @@ def write_file(
     _identity: AuthIdentity = Depends(require_scope("project:write")),
 ) -> dict[str, Any]:
     """Write (create or overwrite) a UTF-8 text file."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/workspace/projects/*/files/write",
+    )
     fp = _identity.fingerprint[:12]
     logger.info("write_file project=%s path=%s by=%s type=%s fp=%s safe=%s",
                 project_id, path, _identity.name, _identity.token_type, fp, safe)
@@ -427,7 +444,12 @@ def edit_file(
     _identity: AuthIdentity = Depends(require_scope("project:write")),
 ) -> dict[str, Any]:
     """Edit a file by replacing the first occurrence of old_string."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/workspace/projects/*/files/edit",
+    )
     fp = _identity.fingerprint[:12]
     logger.info("edit_file project=%s path=%s by=%s type=%s fp=%s safe=%s",
                 project_id, path, _identity.name, _identity.token_type, fp, safe)
@@ -449,7 +471,12 @@ def patch_file(
     _identity: AuthIdentity = Depends(require_scope("project:write")),
 ) -> dict[str, Any]:
     """Apply a unified diff patch to a file."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/workspace/projects/*/files/patch",
+    )
     fp = _identity.fingerprint[:12]
     logger.info("patch_file project=%s path=%s by=%s type=%s fp=%s safe=%s",
                 project_id, path, _identity.name, _identity.token_type, fp, safe)

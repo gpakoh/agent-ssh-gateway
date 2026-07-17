@@ -56,7 +56,12 @@ async def global_replace(
 ):
     """Replace across all project files."""
     if not req.dry_run:
-        assert_workspace_writable()
+        assert_workspace_writable(
+            actor_type=_identity.token_type,
+            actor_name=_identity.name or "",
+            actor_fingerprint=_identity.fingerprint[:12],
+            route="POST /api/replace/global",
+        )
     results = await _state.search_replace.replace(
         session_id=req.session_id,
         path=req.path,
