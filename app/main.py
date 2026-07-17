@@ -131,6 +131,13 @@ async def lifespan(app: FastAPI):
         )
     state.audit_logger = AuditLogger()
 
+    # Initialize structured audit event logger (JSONL + ring buffer)
+    from app.audit import AuditEventLogger as _AuditEventLogger
+    state.event_audit_logger = _AuditEventLogger(
+        log_path=settings.audit_log_path,
+        recent_limit=settings.audit_recent_limit,
+    )
+
     # Initialize Swarm Components
     state.redis_queue = RedisJobQueue(settings.redis_url)
     state.circuit_breakers = CircuitBreakerRegistry()

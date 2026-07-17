@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_scope
-from app.command_policy import evaluate_command_policy
+from app.command_policy import evaluate_command_policy, parse_key_profiles, profile_for_identity
 from app.config import settings
 from app.exceptions import JobNotFoundError, PermissionDeniedError
 from app.models import (
@@ -46,11 +46,17 @@ async def jobs_run(
             status_code=404, detail=_err(404, f"Session {req.session_id} not found")
         )
 
-    # Command Policy Evaluation
+    # Command Policy Evaluation — server-owned profile resolution
+    key_profiles = parse_key_profiles(settings.command_policy_key_profiles)
+    effective_profile = profile_for_identity(
+        _identity.fingerprint[:12] if _identity else None,
+        key_profiles=key_profiles,
+        default_profile=settings.command_policy_profile,
+    )
     decision = evaluate_command_policy(
         req.command,
         mode=settings.command_policy_mode,
-        profile=settings.command_policy_profile,
+        profile=effective_profile,
     )
     source_ip = request.client.host if request.client else "unknown"
     _state.audit_logger.log_security_event(
@@ -61,6 +67,22 @@ async def jobs_run(
         f"command_root={decision.command_root}",
         source_ip,
     )
+
+    # Structured audit event
+    from app.audit import emit_command_policy_decision as _emit_jobs
+    _emit_jobs(
+        event_logger=_state.event_audit_logger,
+        command=req.command,
+        session_id=req.session_id,
+        effective_profile=effective_profile,
+        decision_allowed=decision.allowed,
+        decision_reason=decision.reason,
+        command_root=decision.command_root,
+        source_ip=source_ip,
+        route="POST /api/jobs/run",
+        actor_fingerprint=_identity.fingerprint[:12] if _identity else "",
+    )
+
     if not decision.allowed:
         raise HTTPException(
             status_code=403,
@@ -134,11 +156,17 @@ async def bulk_execute(
     """Execute multiple commands concurrently."""
     # Command Policy Evaluation — check all commands before execution
     source_ip = request.client.host if request.client else "unknown"
+    key_profiles = parse_key_profiles(settings.command_policy_key_profiles)
+    effective_profile = profile_for_identity(
+        _identity.fingerprint[:12] if _identity else None,
+        key_profiles=key_profiles,
+        default_profile=settings.command_policy_profile,
+    )
     for cmd in req.commands:
         decision = evaluate_command_policy(
             cmd,
             mode=settings.command_policy_mode,
-            profile=settings.command_policy_profile,
+            profile=effective_profile,
         )
         _state.audit_logger.log_security_event(
             "COMMAND_POLICY_DECISION",

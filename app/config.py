@@ -97,6 +97,10 @@ class Settings(BaseSettings):
     database_url: str = Field(default="", alias="DATABASE_URL")
     persistent_sessions_enabled: bool = Field(default=False, alias="PERSISTENT_SESSIONS_ENABLED")
 
+    # Audit trail
+    audit_log_path: str = Field(default="./data/audit/events.jsonl", alias="AUDIT_LOG_PATH")
+    audit_recent_limit: int = Field(default=500, alias="AUDIT_RECENT_LIMIT")
+
     event_hooks_enabled: bool = Field(default=False, alias="EVENT_HOOKS_ENABLED")
     event_hooks_max: int = Field(default=50, alias="EVENT_HOOKS_MAX")
     event_hooks_timeout_connect: float = Field(default=5.0, alias="EVENT_HOOKS_TIMEOUT_CONNECT")

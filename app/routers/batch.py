@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_master_key
-from app.command_policy import evaluate_command_policy
+from app.command_policy import evaluate_command_policy, parse_key_profiles, profile_for_identity
 from app.config import settings
 from app.models import (
     BatchExecuteRequest,
@@ -28,12 +28,18 @@ async def batch_execute(
 
     # Command Policy Evaluation — check execute-type operations before execution
     source_ip = request.client.host if request.client else "unknown"
+    key_profiles = parse_key_profiles(settings.command_policy_key_profiles)
+    effective_profile = profile_for_identity(
+        _identity.fingerprint[:12] if _identity else None,
+        key_profiles=key_profiles,
+        default_profile=settings.command_policy_profile,
+    )
     for op in req.operations:
         if op.type == "execute" and op.command:
             decision = evaluate_command_policy(
                 op.command,
                 mode=settings.command_policy_mode,
-                profile=settings.command_policy_profile,
+                profile=effective_profile,
             )
             _state.audit_logger.log_security_event(
                 "COMMAND_POLICY_DECISION",
@@ -43,6 +49,22 @@ async def batch_execute(
                 f"command_root={decision.command_root}",
                 source_ip,
             )
+
+            # Structured audit event
+            from app.audit import emit_command_policy_decision as _emit_batch
+            _emit_batch(
+                event_logger=_state.event_audit_logger,
+                command=op.command,
+                session_id=getattr(req, "context_id", ""),
+                effective_profile=effective_profile,
+                decision_allowed=decision.allowed,
+                decision_reason=decision.reason,
+                command_root=decision.command_root,
+                source_ip=source_ip,
+                route="POST /api/batch/execute",
+                actor_fingerprint=_identity.fingerprint[:12] if _identity else "",
+            )
+
             if not decision.allowed:
                 raise HTTPException(
                     status_code=403,

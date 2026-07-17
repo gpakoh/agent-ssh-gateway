@@ -1298,6 +1298,27 @@ def build_api_help(request: Request) -> dict[str, Any]:
                         },
                     ],
                 },
+                {
+                    "name": "audit_log",
+                    "title": "Audit logging — current state",
+                    "overview": "The gateway has two independent audit subsystems (see docs/operations/AUDIT_LOGGING.md for full reference). This section documents what exists today — a REST endpoint for querying audit entries is planned but not yet implemented.",
+                    "endpoints": [],
+                    "what_exists_today": [
+                        "Security audit: logs/audit.log — plain-text lines with COMMAND, FILE, AUTH, SECURITY events (app/security.py:291)",
+                        "Workspace audit: configurable JSONL file — metadata-only records for write/edit/patch/rollback (app/workspace/snapshot.py:480)",
+                        "In-memory buffer: up to 500 entries, reset on restart (no REST query endpoint yet)",
+                    ],
+                    "planned": {
+                        "status": "not_implemented",
+                        "description": "GET /api/admin/audit/recent — query in-memory audit buffer. Will be implemented in C4 after audit endpoint wiring.",
+                        "spec_location": "docs/operations/AUDIT_LOGGING.md § /api/admin/audit/recent",
+                    },
+                    "notes": [
+                        "No REST endpoint exists to query audit logs today. Query JSONL files directly: jq '.' audit.jsonl",
+                        "Security audit (logs/audit.log) is plain text — use grep/awk.",
+                        "Full documentation: docs/operations/AUDIT_LOGGING.md",
+                    ],
+                },
             ],
             "examples": [
                 {

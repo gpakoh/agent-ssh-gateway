@@ -308,6 +308,21 @@ async def ssh_execute(
         request.client.host if request.client else "unknown",
     )
 
+    # Structured audit event
+    from app.audit import emit_command_policy_decision as _emit_policy
+    _emit_policy(
+        event_logger=_state.event_audit_logger,
+        command=req.command,
+        session_id=req.session_id,
+        effective_profile=effective_profile,
+        decision_allowed=decision.allowed,
+        decision_reason=decision.reason,
+        command_root=decision.command_root,
+        source_ip=request.client.host if request.client else "unknown",
+        route="POST /api/ssh/execute",
+        actor_fingerprint=_identity.fingerprint[:12] if _identity else "",
+    )
+
     if not decision.allowed:
         raise HTTPException(
             status_code=403,
@@ -390,6 +405,21 @@ async def ssh_execute_argv(
             f"command_root={decision.command_root}"
         ),
         request.client.host if request.client else "unknown",
+    )
+
+    # Structured audit event
+    from app.audit import emit_command_policy_decision as _emit_argv
+    _emit_argv(
+        event_logger=_state.event_audit_logger,
+        command=command_str,
+        session_id=req.session_id,
+        effective_profile=effective_profile,
+        decision_allowed=decision.allowed,
+        decision_reason=decision.reason,
+        command_root=decision.command_root,
+        source_ip=request.client.host if request.client else "unknown",
+        route="POST /api/ssh/execute-argv",
+        actor_fingerprint=_identity.fingerprint[:12] if _identity else "",
     )
 
     if not decision.allowed:
@@ -598,6 +628,21 @@ async def ssh_execute_stream(websocket: WebSocket):
             f"reason={decision.reason}; profile={decision.profile}; mode={decision.mode}; "
             f"command_root={decision.command_root}",
             websocket.client.host if websocket.client else "unknown",
+        )
+
+        # Structured audit event
+        from app.audit import emit_command_policy_decision as _emit_ws
+        _emit_ws(
+            event_logger=_state.event_audit_logger,
+            command=command,
+            session_id=session_id,
+            effective_profile=effective_profile,
+            decision_allowed=decision.allowed,
+            decision_reason=decision.reason,
+            command_root=decision.command_root,
+            source_ip=websocket.client.host if websocket.client else "unknown",
+            route="WS /api/ssh/execute/stream",
+            actor_fingerprint=identity.fingerprint[:12] if identity else "",
         )
 
         if not decision.allowed:
