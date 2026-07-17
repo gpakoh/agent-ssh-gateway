@@ -207,6 +207,34 @@ jq 'select(.timestamp > (now - 3600))' audit.jsonl
 - The in-memory buffer is reset on gateway restart.
 - For persistent audit queries, query the JSONL file directly.
 
+**Query examples:**
+```bash
+# Last 10 denied commands
+curl -s -H "X-API-Key: $API_KEY" \
+  "http://localhost:8085/api/admin/audit/recent?limit=10&decision=denied" | jq .
+
+# All workspace readonly blocks
+curl -s -H "X-API-Key: $API_KEY" \
+  "http://localhost:8085/api/admin/audit/recent?event_type=workspace.readonly_block" | jq .
+
+# Oldest 50 events (chronological)
+curl -s -H "X-API-Key: $API_KEY" \
+  "http://localhost:8085/api/admin/audit/recent?limit=50&sort=oldest" | jq .
+
+# Count denied events in buffer
+curl -s -H "X-API-Key: $API_KEY" \
+  "http://localhost:8085/api/admin/audit/recent?decision=denied&limit=1000" | jq '.total'
+```
+
+**Note:** The endpoint returns at most 1000 events per call. The ring buffer holds 500 events by default (`AUDIT_RECENT_LIMIT`). For full history, query the JSONL file:
+```bash
+# All denied commands from persistent JSONL
+jq 'select(.decision == "denied")' data/audit/events.jsonl
+
+# Events in the last hour
+jq 'select(.timestamp > (now - 3600 | todate))' data/audit/events.jsonl
+```
+
 ---
 
 ## Rotating / deleting audit logs safely
