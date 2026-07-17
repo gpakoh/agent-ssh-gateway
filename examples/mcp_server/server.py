@@ -411,6 +411,11 @@ def run_tool(
         data = fn()
     except Exception as exc:
         if isinstance(exc, (CommandPolicyError, WritePermissionError, WriteModeError)):
+            # Emit MCP tool blocked audit event
+            import logging
+            logging.getLogger("mcp.audit").warning(
+                "MCP_TOOL_BLOCKED | tool=%s | error=%s", tool, str(exc)
+            )
             return error_result(tool=tool, title=title, error=str(exc))
         if isinstance(exc, GatewayClientError):
             code, retryable = _classify_gateway_error(exc)

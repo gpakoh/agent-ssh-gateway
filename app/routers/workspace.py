@@ -58,6 +58,18 @@ router = APIRouter(tags=["workspace"])
 def _require_writable() -> None:
     """Raise 403 if workspace is in readonly mode."""
     if settings.workspace_readonly:
+        from app import state as _state
+        from app.audit import AuditEvent, AuditEventType, Decision
+
+        if _state.event_audit_logger:
+            _state.event_audit_logger.append(AuditEvent(
+                event_type=AuditEventType.WORKSPACE_READONLY_BLOCK,
+                actor_type="system",
+                action="workspace write blocked by WORKSPACE_READONLY",
+                decision=Decision.DENIED,
+                reason="WORKSPACE_READONLY=true",
+                error_code="WORKSPACE_READONLY",
+            ))
         raise HTTPException(
             status_code=403,
             detail={
@@ -364,6 +376,18 @@ def git_diff(
 
 def _assert_rw() -> None:
     if settings.workspace_readonly:
+        from app import state as _state
+        from app.audit import AuditEvent, AuditEventType, Decision
+
+        if _state.event_audit_logger:
+            _state.event_audit_logger.append(AuditEvent(
+                event_type=AuditEventType.WORKSPACE_READONLY_BLOCK,
+                actor_type="system",
+                action="workspace write blocked by WORKSPACE_READONLY",
+                decision=Decision.DENIED,
+                reason="WORKSPACE_READONLY=true",
+                error_code="WORKSPACE_READONLY",
+            ))
         raise HTTPException(
             status_code=403,
             detail=_err(403, "WORKSPACE_READONLY: write operations are disabled"),
