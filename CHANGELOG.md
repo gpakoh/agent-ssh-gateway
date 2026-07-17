@@ -18,7 +18,7 @@ This project follows semantic versioning where practical, but the public API is 
 
 - **Dangerous agent tools blocked**: `project_run_opencode` and `project_run_mimo` hard-blocked — `--dangerously-skip-permissions` never allowed. `project_run_agent` blocks opencode/mimo backends with structured error. No confirmation flow, no override. (Session 190)
 
-- **Docker compose confirm parity**: `docker_compose_down` and `docker_compose_kill` now require confirmation tokens matching `docker_rm`/`docker_prune` guard pattern. (Session 188)
+- **Docker compose confirm parity**: `docker_compose_up`, `docker_compose_restart`, and `docker_compose_build` now require confirmation tokens. (Session 188)
 
 - **Find write-action denylist**: `FIND_DENYLIST` blocks `-delete`, `-fprintf`, `-fls` in command policy argument-shape checks. (Session 193)
 
@@ -26,7 +26,7 @@ This project follows semantic versioning where practical, but the public API is 
 
 ### Fixed
 
-- **Historical secret disclosure correction**: documentation corrected to reflect that `AGENT_TOKEN` was never exposed in tracked history — only `API_KEY`, `JWT_SECRET` were rotated. (Session 188)
+- **Historical secret disclosure correction**: documentation corrected — pre-Session 146 `AGENT_TOKEN` exposure in reachable history is documented; affected secrets are treated as rotated/dead and must not be reused. (Session 188)
 
 - **Shell redirection blocklist**: `contains_shell_redirection()` quote-aware scanner now correctly handles single/double-quoted strings and backslash escapes. (Session 188)
 
