@@ -127,3 +127,100 @@ class TestAuditRecentEmptyLog:
             data = resp.json()
             assert data["events"] == []
             assert data["total"] == 0
+
+
+class TestAuditRecentSort:
+    def _make_events(self, n: int) -> list[AuditEvent]:
+        """Create n events with incrementing timestamps."""
+        return [
+            AuditEvent(
+                event_type="command.execute",
+                decision=Decision.ALLOWED,
+                action=f"cmd_{i}",
+                timestamp=float(i),
+            )
+            for i in range(n)
+        ]
+
+    def test_default_returns_newest_first(self, client):
+        events = self._make_events(5)
+        with patch("app.state.event_audit_logger") as mock_logger:
+            mock_logger.recent.return_value = events  # oldest-first
+            mock_logger.recent_count = 5
+
+            resp = client.get(
+                "/api/admin/audit/recent",
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            actions = [e["action"] for e in data["events"]]
+            assert actions == ["cmd_4", "cmd_3", "cmd_2", "cmd_1", "cmd_0"]
+
+    def test_sort_newest_returns_newest_first(self, client):
+        events = self._make_events(5)
+        with patch("app.state.event_audit_logger") as mock_logger:
+            mock_logger.recent.return_value = events
+            mock_logger.recent_count = 5
+
+            resp = client.get(
+                "/api/admin/audit/recent",
+                params={"sort": "newest"},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 200
+            actions = [e["action"] for e in resp.json()["events"]]
+            assert actions == ["cmd_4", "cmd_3", "cmd_2", "cmd_1", "cmd_0"]
+
+    def test_sort_oldest_returns_oldest_first(self, client):
+        events = self._make_events(5)
+        with patch("app.state.event_audit_logger") as mock_logger:
+            mock_logger.recent.return_value = events
+            mock_logger.recent_count = 5
+
+            resp = client.get(
+                "/api/admin/audit/recent",
+                params={"sort": "oldest"},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 200
+            actions = [e["action"] for e in resp.json()["events"]]
+            assert actions == ["cmd_0", "cmd_1", "cmd_2", "cmd_3", "cmd_4"]
+
+    def test_limit_applied_after_sort(self, client):
+        events = self._make_events(5)
+        with patch("app.state.event_audit_logger") as mock_logger:
+            mock_logger.recent.return_value = events
+            mock_logger.recent_count = 5
+
+            resp = client.get(
+                "/api/admin/audit/recent",
+                params={"sort": "newest", "limit": 3},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert len(data["events"]) == 3
+            actions = [e["action"] for e in data["events"]]
+            assert actions == ["cmd_4", "cmd_3", "cmd_2"]
+
+    def test_filter_then_sort(self, client):
+        events = [
+            AuditEvent(event_type="command.execute", decision=Decision.ALLOWED, action="exec_0", timestamp=0.0),
+            AuditEvent(event_type="command.deny", decision=Decision.DENIED, action="deny_1", timestamp=1.0),
+            AuditEvent(event_type="command.execute", decision=Decision.ALLOWED, action="exec_2", timestamp=2.0),
+            AuditEvent(event_type="command.deny", decision=Decision.DENIED, action="deny_3", timestamp=3.0),
+        ]
+        with patch("app.state.event_audit_logger") as mock_logger:
+            mock_logger.recent.return_value = events
+            mock_logger.recent_count = 4
+
+            resp = client.get(
+                "/api/admin/audit/recent",
+                params={"event_type": "command.deny", "sort": "newest", "limit": 1},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert len(data["events"]) == 1
+            assert data["events"][0]["action"] == "deny_3"
