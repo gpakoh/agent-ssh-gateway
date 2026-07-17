@@ -45,8 +45,8 @@ async def audit_recent(
     if decision:
         events = [e for e in events if e.decision == decision]
 
-    # Sort
-    if sort == "oldest":
+    # Sort: deque is oldest-first naturally
+    if sort == "newest":
         events = list(reversed(events))
 
     # Apply limit
