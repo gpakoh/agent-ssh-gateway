@@ -61,6 +61,7 @@ from app.patch_apply import (
     PatchValidationError,
     RollbackFailedError,
 )
+from app.routers.workspace import assert_workspace_writable
 from app.security import rate_limit_mutation, validate_path
 from app.state import _err
 
@@ -115,14 +116,6 @@ async def file_read(
     return FileReadResponse(path=validated, content=content)
 
 
-def _assert_rw() -> None:
-    if settings.workspace_readonly:
-        raise HTTPException(
-            status_code=403,
-            detail=_err(403, "WORKSPACE_READONLY: write operations are disabled"),
-        )
-
-
 @router.patch("/api/file/edit", response_model=FileEditResponse)
 @rate_limit_mutation(30, "minute")
 async def file_edit(
@@ -131,7 +124,7 @@ async def file_edit(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Edit a remote file using patch operations."""
-    _assert_rw()
+    assert_workspace_writable()
     await _check_session_ownership(req.session_id, request)
 
     try:
@@ -161,7 +154,7 @@ async def file_patch(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Apply a unified diff patch."""
-    _assert_rw()
+    assert_workspace_writable()
     await _check_session_ownership(req.session_id, request)
 
     result = await _state.file_editor.apply_patch(
@@ -180,7 +173,7 @@ async def project_apply_patch(
     _identity: AuthIdentity = Depends(require_scope("project:patch")),
 ):
     """Apply a unified diff patch to project files with hash verification and rollback."""
-    _assert_rw()
+    assert_workspace_writable()
     # Session ownership
     session = await _state.manager.get_session(req.session_id)
     if session is None:
@@ -497,7 +490,7 @@ async def file_upload(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Upload file to remote server (base64 encoded via query params)."""
-    _assert_rw()
+    assert_workspace_writable()
     await _check_session_ownership(session_id, request)
 
     import base64
@@ -521,7 +514,7 @@ async def file_upload_json(
 
     Preferred for large files (>2KB) where query params may fail.
     """
-    _assert_rw()
+    assert_workspace_writable()
     await _check_session_ownership(req.session_id, request)
 
     import base64
@@ -575,7 +568,7 @@ async def file_write(
     Use for Python code with quotes, special chars, or large content.
     Mode: 'write' (overwrite) or 'append' (append to end).
     """
-    _assert_rw()
+    assert_workspace_writable()
     await _check_session_ownership(req.session_id, request)
 
     try:
@@ -608,7 +601,7 @@ async def ast_rename(
 
     Supports single file ('path') or multiple files ('files' array).
     """
-    _assert_rw()
+    assert_workspace_writable()
     await _check_session_ownership(req.session_id, request)
 
     # Validate All Paths First
@@ -704,7 +697,7 @@ async def refactor_rename(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Alias for /api/ast/rename — AST-aware symbol renaming."""
-    _assert_rw()
+    assert_workspace_writable()
     return await ast_rename(req, request)
 
 
@@ -715,7 +708,7 @@ async def ast_extract(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Extract a block of code into a new function."""
-    _assert_rw()
+    assert_workspace_writable()
     await _check_session_ownership(req.session_id, request)
 
     try:
@@ -944,7 +937,7 @@ async def batch_edit(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Edit multiple files in a single request."""
-    _assert_rw()
+    assert_workspace_writable()
     await _check_session_ownership(req.session_id, request)
 
     results = []
@@ -1052,7 +1045,7 @@ async def bulk_edit_files(
             ]
         }
     """
-    _assert_rw()
+    assert_workspace_writable()
     await _check_session_ownership(req.session_id, request)
 
     results = []

@@ -921,6 +921,7 @@ async def validation_exception_handler(request, exc: RequestValidationError):
 # Router Registration — Route Handlers Live In App/routers/
 # ---------------------------------------------------------------------------
 
+from app.routers.audit import router as audit_router  # noqa: E402
 from app.routers.batch import router as batch_router  # noqa: E402
 from app.routers.code import router as code_router  # noqa: E402
 from app.routers.context import router as context_router  # noqa: E402
@@ -962,6 +963,7 @@ app.include_router(event_hooks_router)
 app.include_router(auth_router)
 app.include_router(auth_identity_router)
 app.include_router(workspace_router)
+app.include_router(audit_router)
 
 # Static Files Mount (after All Router Includes So Static Routes Take Precedence)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
