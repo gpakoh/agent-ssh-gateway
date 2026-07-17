@@ -374,7 +374,8 @@ def git_diff(
 # ---------------------------------------------------------------------------
 
 
-def _assert_rw() -> None:
+def assert_workspace_writable() -> None:
+    """Raise 403 if workspace is in readonly mode. Emits structured audit event."""
     if settings.workspace_readonly:
         from app import state as _state
         from app.audit import AuditEvent, AuditEventType, Decision
@@ -403,7 +404,7 @@ def write_file(
     _identity: AuthIdentity = Depends(require_scope("project:write")),
 ) -> dict[str, Any]:
     """Write (create or overwrite) a UTF-8 text file."""
-    _assert_rw()
+    assert_workspace_writable()
     fp = _identity.fingerprint[:12]
     logger.info("write_file project=%s path=%s by=%s type=%s fp=%s safe=%s",
                 project_id, path, _identity.name, _identity.token_type, fp, safe)
@@ -426,7 +427,7 @@ def edit_file(
     _identity: AuthIdentity = Depends(require_scope("project:write")),
 ) -> dict[str, Any]:
     """Edit a file by replacing the first occurrence of old_string."""
-    _assert_rw()
+    assert_workspace_writable()
     fp = _identity.fingerprint[:12]
     logger.info("edit_file project=%s path=%s by=%s type=%s fp=%s safe=%s",
                 project_id, path, _identity.name, _identity.token_type, fp, safe)
@@ -448,7 +449,7 @@ def patch_file(
     _identity: AuthIdentity = Depends(require_scope("project:write")),
 ) -> dict[str, Any]:
     """Apply a unified diff patch to a file."""
-    _assert_rw()
+    assert_workspace_writable()
     fp = _identity.fingerprint[:12]
     logger.info("patch_file project=%s path=%s by=%s type=%s fp=%s safe=%s",
                 project_id, path, _identity.name, _identity.token_type, fp, safe)

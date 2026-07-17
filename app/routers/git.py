@@ -7,7 +7,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_master_key
-from app.config import settings
 from app.models import (
     BackupInfo,
     CreateBackupRequest,
@@ -22,19 +21,10 @@ from app.models import (
     RecoveryActionResponse,
     RestoreBackupRequest,
 )
+from app.routers.workspace import assert_workspace_writable
 from app.state import _err
 
 router = APIRouter(tags=["git"])
-
-
-def _assert_rw() -> None:
-    """Raise 403 if workspace is in readonly mode."""
-    if settings.workspace_readonly:
-        from fastapi import HTTPException
-        raise HTTPException(
-            status_code=403,
-            detail=_err(403, "WORKSPACE_READONLY: write operations are disabled"),
-        )
 
 
 async def _get_context_or_404(context_id: str):
@@ -53,7 +43,7 @@ async def _get_context_or_404(context_id: str):
 @router.post("/api/git/init", response_model=GitActionResponse)
 async def git_init(req: GitInitRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Initialize git repository for context."""
-    _assert_rw()
+    assert_workspace_writable()
     result = await _state.context_manager.init_git(req.context_id, req.remote_url)
     return GitActionResponse(**result)
 
@@ -61,7 +51,7 @@ async def git_init(req: GitInitRequest, _identity: AuthIdentity = Depends(requir
 @router.post("/api/git/commit", response_model=GitActionResponse)
 async def git_commit(req: GitCommitRequest, _identity: AuthIdentity = Depends(require_master_key)):
     """Create a git commit for context."""
-    _assert_rw()
+    assert_workspace_writable()
     result = await _state.context_manager.commit_changes(req.context_id, req.message, req.files)
     return GitActionResponse(**result)
 
@@ -73,7 +63,7 @@ async def git_backup(
     backup_name: str = "auto_backup",
 ):
     """Create a git stash backup."""
-    _assert_rw()
+    assert_workspace_writable()
     await _get_context_or_404(context_id)
     result = await _state.context_manager.create_backup(context_id, backup_name)
     return GitActionResponse(**result)
@@ -82,7 +72,7 @@ async def git_backup(
 @router.post("/api/git/restore", response_model=GitActionResponse)
 async def git_restore(context_id: str, _identity: AuthIdentity = Depends(require_master_key)):
     """Restore from stash."""
-    _assert_rw()
+    assert_workspace_writable()
     await _get_context_or_404(context_id)
     result = await _state.context_manager.restore_backup(context_id)
     return GitActionResponse(**result)
@@ -192,7 +182,7 @@ async def recovery_backup(
     req: CreateBackupRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Create a backup before making changes."""
-    _assert_rw()
+    assert_workspace_writable()
     await _get_context_or_404(req.context_id)
 
     result = await _state.context_manager.create_backup(req.context_id, req.name)
@@ -209,7 +199,7 @@ async def recovery_restore(
     req: RestoreBackupRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Restore from backup."""
-    _assert_rw()
+    assert_workspace_writable()
     await _get_context_or_404(req.context_id)
 
     result = await _state.context_manager.restore_backup(req.context_id)
