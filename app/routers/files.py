@@ -124,7 +124,12 @@ async def file_edit(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Edit a remote file using patch operations."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="PATCH /api/file/edit",
+    )
     await _check_session_ownership(req.session_id, request)
 
     try:
@@ -154,7 +159,12 @@ async def file_patch(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Apply a unified diff patch."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/file/patch",
+    )
     await _check_session_ownership(req.session_id, request)
 
     result = await _state.file_editor.apply_patch(
@@ -173,7 +183,12 @@ async def project_apply_patch(
     _identity: AuthIdentity = Depends(require_scope("project:patch")),
 ):
     """Apply a unified diff patch to project files with hash verification and rollback."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/projects/*/apply-patch",
+    )
     # Session ownership
     session = await _state.manager.get_session(req.session_id)
     if session is None:
@@ -490,7 +505,12 @@ async def file_upload(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Upload file to remote server (base64 encoded via query params)."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/file/upload",
+    )
     await _check_session_ownership(session_id, request)
 
     import base64
@@ -514,7 +534,12 @@ async def file_upload_json(
 
     Preferred for large files (>2KB) where query params may fail.
     """
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/file/upload/json",
+    )
     await _check_session_ownership(req.session_id, request)
 
     import base64
@@ -568,7 +593,12 @@ async def file_write(
     Use for Python code with quotes, special chars, or large content.
     Mode: 'write' (overwrite) or 'append' (append to end).
     """
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/file/write",
+    )
     await _check_session_ownership(req.session_id, request)
 
     try:
@@ -601,7 +631,12 @@ async def ast_rename(
 
     Supports single file ('path') or multiple files ('files' array).
     """
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/ast/rename",
+    )
     await _check_session_ownership(req.session_id, request)
 
     # Validate All Paths First
@@ -697,7 +732,12 @@ async def refactor_rename(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Alias for /api/ast/rename — AST-aware symbol renaming."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/refactor/rename",
+    )
     return await ast_rename(req, request)
 
 
@@ -708,7 +748,12 @@ async def ast_extract(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Extract a block of code into a new function."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/ast/extract",
+    )
     await _check_session_ownership(req.session_id, request)
 
     try:
@@ -937,7 +982,12 @@ async def batch_edit(
     _identity: AuthIdentity = Depends(require_scope("ssh:files")),
 ):
     """Edit multiple files in a single request."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="PATCH /api/batch/edit",
+    )
     await _check_session_ownership(req.session_id, request)
 
     results = []
@@ -1045,7 +1095,12 @@ async def bulk_edit_files(
             ]
         }
     """
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/bulk/edit",
+    )
     await _check_session_ownership(req.session_id, request)
 
     results = []

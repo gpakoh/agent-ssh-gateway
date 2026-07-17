@@ -59,7 +59,12 @@ async def code_insert(
     req: CodeInsertRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Intelligently insert code based on natural language instruction."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/code/insert",
+    )
     ctx = await _state.context_manager.get_context(req.context_id)
     if not ctx:
         raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
