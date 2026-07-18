@@ -838,6 +838,27 @@ async def security_headers_middleware(request, call_next):
 
 
 @app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """Generate or accept request_id for correlation across audit events."""
+    import re
+    import uuid
+
+    # Accept inbound X-Request-ID if safe (max 64 chars, alphanumeric + hyphens)
+    inbound = request.headers.get("X-Request-ID", "")
+    if inbound and len(inbound) <= 64 and re.match(r"^[a-zA-Z0-9\-]+$", inbound):
+        request_id = inbound
+    else:
+        request_id = uuid.uuid4().hex
+
+    # Store in request state for handlers
+    request.state.request_id = request_id
+
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
+@app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     exc = await auth_check(request, settings, state.agent_token_store)
     if exc is not None:

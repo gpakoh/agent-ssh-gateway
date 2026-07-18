@@ -61,10 +61,9 @@ async def jobs_run(
     source_ip = request.client.host if request.client else "unknown"
     _state.audit_logger.log_security_event(
         "COMMAND_POLICY_DECISION",
-        f"session_id={req.session_id}; command={req.command}; "
+        f"session_id={req.session_id}; command_root={decision.command_root}; "
         f"allowed={decision.allowed}; reason={decision.reason}; "
-        f"profile={decision.profile}; mode={decision.mode}; "
-        f"command_root={decision.command_root}",
+        f"profile={decision.profile}; mode={decision.mode}",
         source_ip,
     )
 
@@ -170,10 +169,9 @@ async def bulk_execute(
         )
         _state.audit_logger.log_security_event(
             "COMMAND_POLICY_DECISION",
-            f"bulk_execute; command={cmd}; "
+            f"bulk_execute; command_root={decision.command_root}; "
             f"allowed={decision.allowed}; reason={decision.reason}; "
-            f"profile={decision.profile}; mode={decision.mode}; "
-            f"command_root={decision.command_root}",
+            f"profile={decision.profile}; mode={decision.mode}",
             source_ip,
         )
         if not decision.allowed:

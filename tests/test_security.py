@@ -356,3 +356,136 @@ def test_redact_secrets_masks_nested_dict_values_by_key():
     assert redacted["stdout"] == "ok"
     assert redacted["meta"]["api_key"] == "[REDACTED]"
     assert redacted["meta"]["nested"]["password"] == "[REDACTED]"
+
+
+# ---------------------------------------------------------------------------
+# C5: sshpass redaction in security.redact_secrets
+# ---------------------------------------------------------------------------
+
+
+def test_redact_secrets_masks_sshpass_password():
+    text = "sshpass -p mySecretPass ssh user@host"
+    redacted = redact_secrets(text)
+    assert "mySecretPass" not in redacted
+    assert "[REDACTED]" in redacted
+    assert "sshpass" in redacted
+
+
+def test_redact_secrets_masks_sshpass_single_quotes():
+    text = "sshpass -p 'p@ssw0rd' ssh root@10.0.0.1"
+    redacted = redact_secrets(text)
+    assert "p@ssw0rd" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_secrets_preserves_non_secret_command():
+    text = "ls -la /tmp"
+    assert redact_secrets(text) == text
+
+
+# ---------------------------------------------------------------------------
+# C5: AuditLogger.log_command — metadata only, no full command
+# ---------------------------------------------------------------------------
+
+
+class TestAuditLoggerCommandMetadata:
+    """AuditLogger.log_command must log command_root, not full command text."""
+
+    def test_log_command_records_root_only(self, tmp_path):
+        from app.security import AuditLogger
+
+        log_file = str(tmp_path / "audit.log")
+        al = AuditLogger(log_file)
+        al.log_command("sess1", "cat /etc/passwd", "10.0.0.1")
+
+        import pathlib
+        content = pathlib.Path(log_file).read_text()
+        assert "cat" in content
+        assert "/etc/passwd" not in content
+
+    def test_log_command_sudo_shows_inner_root(self, tmp_path):
+        from app.security import AuditLogger
+
+        log_file = str(tmp_path / "audit.log")
+        al = AuditLogger(log_file)
+        al.log_command("sess2", "sudo systemctl restart nginx", "10.0.0.1")
+
+        import pathlib
+        content = pathlib.Path(log_file).read_text()
+        assert "systemctl" in content
+        assert "restart nginx" not in content
+
+    def test_log_command_no_stdout_stderr(self, tmp_path):
+        from app.security import AuditLogger
+
+        log_file = str(tmp_path / "audit.log")
+        al = AuditLogger(log_file)
+        al.log_command("sess3", "echo hello", "10.0.0.1")
+
+        import pathlib
+        content = pathlib.Path(log_file).read_text()
+        assert "hello" not in content
+
+    def test_log_command_format_parseable(self, tmp_path):
+        from app.security import AuditLogger
+
+        log_file = str(tmp_path / "audit.log")
+        al = AuditLogger(log_file)
+        al.log_command("sess4", "python -c 'print(1)'", "10.0.0.1")
+
+        import pathlib
+        content = pathlib.Path(log_file).read_text()
+        line = content.strip()
+        # Format: TIMESTAMP | LEVEL | COMMAND | session=X | ip=Y | command_root=Z
+        assert "session=sess4" in line
+        assert "ip=10.0.0.1" in line
+        assert "command_root=python" in line
+        assert "COMMAND" in line
+
+
+# ---------------------------------------------------------------------------
+# C5: COMMAND_POLICY_DECISION — no full command in legacy log
+# ---------------------------------------------------------------------------
+
+
+class TestCommandPolicyDecisionNoFullCommand:
+    """COMMAND_POLICY_DECISION log entries must not contain full command text."""
+
+    def test_policy_decision_no_full_command(self, tmp_path):
+        from app.security import AuditLogger
+
+        log_file = str(tmp_path / "audit.log")
+        al = AuditLogger(log_file)
+        al.log_security_event(
+            "COMMAND_POLICY_DECISION",
+            "session_id=s1; command_root=rm; allowed=False; reason=denied; "
+            "profile=readonly; mode=enforce",
+            "10.0.0.1",
+        )
+
+        import pathlib
+        content = pathlib.Path(log_file).read_text()
+        assert "command_root=rm" in content
+        # Full command text like "rm -rf /" must NOT appear
+        assert "rm -rf" not in content
+
+    def test_policy_decision_format_parseable(self, tmp_path):
+        from app.security import AuditLogger
+
+        log_file = str(tmp_path / "audit.log")
+        al = AuditLogger(log_file)
+        al.log_security_event(
+            "COMMAND_POLICY_DECISION",
+            "session_id=s2; command_root=ls; allowed=True; reason=ok; "
+            "profile=default; mode=enforce",
+            "10.0.0.1",
+        )
+
+        import pathlib
+        content = pathlib.Path(log_file).read_text()
+        line = content.strip()
+        assert "COMMAND_POLICY_DECISION" in line
+        assert "session_id=s2" in line
+        assert "command_root=ls" in line
+        assert "allowed=True" in line
+        assert "profile=default" in line
