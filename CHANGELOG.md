@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.35a0] - 2026-07-18
+
+### Added
+
+- **Persistent structured audit events (C4)**: `AuditEvent` frozen dataclass + `AuditEventLogger` with JSONL append and bounded in-memory ring buffer. Events are metadata-only — no command output, no file content, no secrets. Secrets redacted defensively before storage. (Sessions 195–197)
+
+- **GET /api/admin/audit/recent endpoint (C4.1)**: master-key-only REST endpoint exposing the in-memory ring buffer. Supports `event_type`, `decision` filters, `sort` (newest/oldest), `limit` (max 1000). Returns newest-first by default. (Session 198)
+
+- **Structured audit wiring**: command-policy decisions (`command.execute`/`command.deny`) and `WORKSPACE_READONLY` denies (`workspace.readonly_block`) emit structured `AuditEvent` records with profile, decision, reason, error_code, source_ip, route, and actor fingerprint. (Sessions 195–197)
+
+- **Operations docs for audit logging**: `docs/operations/AUDIT_LOGGING.md` — JSONL format, ring buffer, query patterns, log rotation, security model. `docs/operations/HOST_SMOKE_AUTOMATION.md` — optional host-level smoke-test plan. (Sessions 196–198)
+
+### Fixed
+
+- **Audit recent sort**: `GET /api/admin/audit/recent` default `sort=newest` now correctly reverses the ring buffer before applying limit. Previously returned oldest events due to missing reverse. (Session 199)
+
+- **WORKSPACE_READONLY audit attribution**: `assert_workspace_writable()` now accepts optional `actor_type`, `actor_name`, `actor_fingerprint`, `route`, `action`, `source_ip` kwargs. All 27 call sites across 7 routers pass identity info from `AuthIdentity`. Audit events now include caller fingerprint, token type, and route instead of generic `actor_type=system`. (Session 200)
+
+- **Readonly guard deduplicated**: `assert_workspace_writable()` in `workspace.py` is the single source of truth. Per-router `_assert_rw()` copies removed from `files.py`, `code.py`, `context.py`, `git.py`, `search_replace.py`, `snapshots.py`. (Session 198)
+
+### Changed
+
+- **api_help observability docs**: `app/api_help.py` audit_log section updated to reflect implemented endpoint with query_params, response_fields, what_is_logged, and what_is_NOT_logged. (Session 198)
+
+### Tests
+
+- 2122+ passed (host_smoke excluded).
+- Audit core: 39 tests (JSONL, ring buffer, secrets redaction, write errors, thread safety).
+- Audit wiring: 16 tests (emit helper, workspace readonly, actor attribution, no raw key leakage).
+- Audit recent: 17 tests (auth, limit, filter, sort newest/oldest, secrets, empty, composed).
+- Full matrix: ruff clean, mypy clean, CI green on Python 3.11 and 3.12.
+
 ## [0.1.34a0] - 2026-07-17
 
 ### Added
