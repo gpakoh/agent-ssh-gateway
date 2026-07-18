@@ -100,17 +100,34 @@ For the workspace audit logger, set `log_path` to a path outside any project roo
 
 ---
 
+## Retention knobs
+
+Three independent audit systems, each with its own configuration.
+
+| System | Env var | Default | Controls |
+|--------|---------|---------|----------|
+| Structured audit (JSONL + ring buffer) | `AUDIT_LOG_PATH` | `./data/audit/events.jsonl` | JSONL file path on disk |
+| Structured audit (ring buffer) | `AUDIT_RECENT_LIMIT` | `500` | In-memory ring buffer size (`/api/admin/audit/recent` reads this) |
+| Security audit (plain text) | *(hardcoded)* | `logs/audit.log` | No env var — path set in `app/security.py:294` |
+| Workspace audit (JSONL) | *(per-call)* | `None` (in-memory only) | `log_path` passed to `WorkspaceAuditLogger()` constructor |
+
+**Not implemented yet** (proposed for future):
+- `AUDIT_MAX_BYTES` — max size of `events.jsonl` before auto-rotation
+- `AUDIT_BACKUP_COUNT` — number of rotated JSONL backups to keep
+
+These would replace manual logrotate. Until implemented, use external rotation (see below).
+
+---
+
 ## Retention and limits
 
 | System | Limit | Behavior when exceeded |
 |--------|-------|----------------------|
-| Security Audit Logger | No built-in cap | Grows unbounded — use logrotate or external retention |
-| Workspace Audit Logger (file) | No built-in cap | Grows unbounded — rotate externally |
-| Workspace Audit Logger (in-memory, `log_path=None`) | 500 entries | Oldest entries are dropped (FIFO) |
-
-**Recommended retention:**
-- `logs/audit.log`: use `logrotate` or equivalent. Daily rotation, 30-day retention is typical.
-- `audit.jsonl`: rotate with `logrotate` or `jq`-based compaction. The file is append-only and line-oriented, so standard log rotation tools work.
+| Structured audit JSONL | No built-in cap | Grows unbounded — rotate externally |
+| Structured audit ring buffer | `AUDIT_RECENT_LIMIT` (default 500) | Oldest events dropped (FIFO) |
+| Security audit (`logs/audit.log`) | No built-in cap | Grows unbounded — use logrotate |
+| Workspace audit JSONL | No built-in cap | Grows unbounded — rotate externally |
+| Workspace audit in-memory | 500 entries | Oldest entries dropped (FIFO) |
 
 ---
 
@@ -239,11 +256,54 @@ jq 'select(.timestamp > (now - 3600 | todate))' data/audit/events.jsonl
 
 ## Rotating / deleting audit logs safely
 
+### What is safe to delete
+
+| File | Safe to delete? | Condition |
+|------|----------------|-----------|
+| `logs/audit.log` | ✅ Yes | After rotation/backup. Gateway recreates on next event. |
+| `data/audit/events.jsonl` | ✅ Yes | After rotation/backup. Gateway recreates on next event. |
+| `data/audit/events.jsonl.*` (rotated) | ✅ Yes | After confirming backup is valid. |
+| In-memory ring buffer | ✅ Yes | Automatic on restart. No manual action needed. |
+
+### What must be preserved for incident response
+
+- **Last 7 days** of `events.jsonl` — contains command policy decisions, denied commands, workspace readonly blocks. Critical for investigating "who ran what when."
+- **Last 30 days** of `logs/audit.log` — contains COMMAND, BLOCKED_COMMAND, COMMAND_POLICY_DECISION, AUTH events. Required for security audit trails.
+- **Any event with `decision=denied`** — these are the security-relevant events. Preserve at least 90 days if possible.
+- **Rotated files during active incidents** — do not delete rotated logs while an incident is open.
+
+### Structured audit (`data/audit/events.jsonl`)
+
+```bash
+# logrotate config — create /etc/logrotate.d/audit-events:
+/data/audit/events.jsonl {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    dateext
+    dateformat -%Y%m%d
+}
+
+# Manual rotation (safe — copytruncate pattern)
+cp data/audit/events.jsonl data/audit/events.jsonl.$(date +%Y%m%d)
+> data/audit/events.jsonl   # truncate in place — no handle restart needed
+gzip data/audit/events.jsonl.$(date +%Y%m%d)
+
+# jq-based compaction (merge old rotated files into summary)
+jq -s 'group_by(.event_type) | map({type: .[0].event_type, count: length, denied: map(select(.decision == "denied")) | length})' \
+  data/audit/events.jsonl.20260717.gz | gunzip | jq . > audit_summary.json
+```
+
+**Important:** Use `copytruncate` — the `AuditEventLogger` holds an open file handle. Do NOT `mv` without truncating, or the logger keeps writing to the old file.
+
 ### Security audit (`logs/audit.log`)
 
 ```bash
-# Standard logrotate (recommended)
-# Create /etc/logrotate.d/web-ssh-gateway:
+# logrotate config — create /etc/logrotate.d/web-ssh-gateway:
 /logs/web-ssh-gateway/logs/audit.log {
     daily
     rotate 30
@@ -255,29 +315,36 @@ jq 'select(.timestamp > (now - 3600 | todate))' data/audit/events.jsonl
 }
 
 # Manual rotation
-mv logs/audit.log logs/audit.log.$(date +%Y%m%d)
-kill -USR1 $(pgrep -f "uvicorn app.main")  # Reopen log file (if using Python logging FileHandler)
+cp logs/audit.log logs/audit.log.$(date +%Y%m%d)
+> logs/audit.log
+gzip logs/audit.log.$(date +%Y%m%d)
 ```
 
-**Important:** The `AuditLogger` holds a `FileHandler` open. After renaming the file, the handler continues writing to the old (renamed) file. Use `copytruncate` with logrotate, or restart the gateway after rotation.
+Same `copytruncate` requirement — `AuditLogger` holds a `FileHandler` open.
 
-### Workspace audit (`audit.jsonl`)
+### Workspace audit (configurable JSONL)
 
 ```bash
-# Rotate safely — the file is append-only and line-oriented
-mv audit.jsonl audit.jsonl.$(date +%Y%m%d)
-
-# Or compact with jq (merge old entries into a summary)
-jq -s 'group_by(.project_id) | map({project: .[0].project_id, count: length})' \
-  audit.jsonl.20260717 > audit_summary.json
-rm audit.jsonl.20260717
+# Only exists if WorkspaceAuditLogger was initialized with a log_path.
+# Same pattern as structured audit:
+cp audit.jsonl audit.jsonl.$(date +%Y%m%d)
+> audit.jsonl
 ```
 
-**Do NOT** delete the JSONL file while the gateway is running — the `WorkspaceAuditLogger` holds an open file handle. Rotate by renaming, then the logger will create a new file on the next write.
+### In-memory buffers
 
-### In-memory buffer
+Both ring buffers (structured audit `AUDIT_RECENT_LIMIT` and workspace audit 500 entries) are reset on gateway restart. No manual cleanup needed. No API to flush without restart — this is by design.
 
-The in-memory buffer (500 entries max) is reset on gateway restart. No manual cleanup needed. To force a flush without restarting, there is currently no API — this is by design (the buffer is a safety net, not a primary store).
+---
+
+## ⚠️ PLANNED: Built-in rotation
+
+Built-in JSONL rotation (`AUDIT_MAX_BYTES`, `AUDIT_BACKUP_COUNT`) is **not implemented yet**. Until then:
+
+- Use `logrotate` with `copytruncate` for all JSONL files.
+- Use `logrotate` with `copytruncate` for `logs/audit.log`.
+- Do NOT rely on `mv` + signal — the loggers hold open file handles.
+- Monitor disk usage: `du -sh data/audit/ logs/`.
 
 ---
 
@@ -286,7 +353,12 @@ The in-memory buffer (500 entries max) is reset on gateway restart. No manual cl
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `logs/audit.log` not created | No audit events yet, or permission denied | Check `logs/` directory exists and is writable |
+| `events.jsonl` not created | `AUDIT_LOG_PATH` directory doesn't exist | Gateway creates parent dirs automatically — check permissions |
+| `/api/admin/audit/recent` returns 503 | `event_audit_logger` not initialized | Check `AUDIT_LOG_PATH` is set and writable |
+| Ring buffer empty after restart | In-memory buffer is volatile | By design. Query JSONL file for persistent history. |
 | `audit.jsonl` missing | `WorkspaceAuditLogger` not initialized or `log_path=None` | Set `log_path` in the logger constructor |
-| In-memory buffer shows stale entries | Gateway not restarted | Buffer is capped at 500; oldest entries are dropped automatically |
+| In-memory buffer shows stale entries | Gateway not restarted | Buffer is capped; oldest entries are dropped automatically |
 | Duplicate log lines | Multiple `AuditLogger` instances | The constructor deduplicates `FileHandler` instances — check if multiple modules create `AuditLogger()` |
 | Secrets visible in logs | `redact_secrets()` not matching the pattern | Report as a security issue — secrets should always be redacted |
+| Log file growing unbounded | No rotation configured | Set up logrotate with `copytruncate` (see Rotating section) |
+| Disk full from audit logs | Rotation not running or `rotate` count too high | Check `logrotate -d /etc/logrotate.d/audit-events` for debug |

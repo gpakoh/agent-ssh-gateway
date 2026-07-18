@@ -298,12 +298,11 @@ async def ssh_execute(
         "COMMAND_POLICY_DECISION",
         (
             f"session_id={req.session_id}; "
-            f"command={req.command}; "
+            f"command_root={decision.command_root}; "
             f"allowed={decision.allowed}; "
             f"reason={decision.reason}; "
             f"profile={decision.profile}; "
-            f"mode={decision.mode}; "
-            f"command_root={decision.command_root}"
+            f"mode={decision.mode}"
         ),
         request.client.host if request.client else "unknown",
     )
@@ -321,6 +320,7 @@ async def ssh_execute(
         source_ip=request.client.host if request.client else "unknown",
         route="POST /api/ssh/execute",
         actor_fingerprint=_identity.fingerprint[:12] if _identity else "",
+        request_id=getattr(request.state, "request_id", ""),
     )
 
     if not decision.allowed:
@@ -397,12 +397,11 @@ async def ssh_execute_argv(
         "COMMAND_POLICY_DECISION",
         (
             f"session_id={req.session_id}; "
-            f"command={command_str}; "
+            f"command_root={decision.command_root}; "
             f"allowed={decision.allowed}; "
             f"reason={decision.reason}; "
             f"profile={decision.profile}; "
-            f"mode={decision.mode}; "
-            f"command_root={decision.command_root}"
+            f"mode={decision.mode}"
         ),
         request.client.host if request.client else "unknown",
     )
@@ -420,6 +419,7 @@ async def ssh_execute_argv(
         source_ip=request.client.host if request.client else "unknown",
         route="POST /api/ssh/execute-argv",
         actor_fingerprint=_identity.fingerprint[:12] if _identity else "",
+        request_id=getattr(request.state, "request_id", ""),
     )
 
     if not decision.allowed:
@@ -624,13 +624,15 @@ async def ssh_execute_stream(websocket: WebSocket):
 
         _state.audit_logger.log_security_event(
             "COMMAND_POLICY_DECISION",
-            f"session_id={session_id}; command={command}; allowed={decision.allowed}; "
-            f"reason={decision.reason}; profile={decision.profile}; mode={decision.mode}; "
-            f"command_root={decision.command_root}",
+            f"session_id={session_id}; command_root={decision.command_root}; "
+            f"allowed={decision.allowed}; reason={decision.reason}; "
+            f"profile={decision.profile}; mode={decision.mode}",
             websocket.client.host if websocket.client else "unknown",
         )
 
         # Structured audit event
+        import uuid as _uuid
+
         from app.audit import emit_command_policy_decision as _emit_ws
         _emit_ws(
             event_logger=_state.event_audit_logger,
@@ -643,6 +645,7 @@ async def ssh_execute_stream(websocket: WebSocket):
             source_ip=websocket.client.host if websocket.client else "unknown",
             route="WS /api/ssh/execute/stream",
             actor_fingerprint=identity.fingerprint[:12] if identity else "",
+            request_id=_uuid.uuid4().hex,
         )
 
         if not decision.allowed:

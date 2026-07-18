@@ -43,10 +43,9 @@ async def batch_execute(
             )
             _state.audit_logger.log_security_event(
                 "COMMAND_POLICY_DECISION",
-                f"batch_execute; command={op.command}; "
+                f"batch_execute; command_root={decision.command_root}; "
                 f"allowed={decision.allowed}; reason={decision.reason}; "
-                f"profile={decision.profile}; mode={decision.mode}; "
-                f"command_root={decision.command_root}",
+                f"profile={decision.profile}; mode={decision.mode}",
                 source_ip,
             )
 
