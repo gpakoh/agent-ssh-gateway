@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from app.auth_middleware import AuthIdentity, require_master_key, require_scope
 from app.config import settings
@@ -55,11 +55,15 @@ router = APIRouter(tags=["workspace"])
 # ---------------------------------------------------------------------------
 
 
-def _require_writable() -> None:
+def _require_writable(request=None) -> None:
     """Raise 403 if workspace is in readonly mode."""
     if settings.workspace_readonly:
+        import uuid as _uuid
+
         from app import state as _state
         from app.audit import AuditEvent, AuditEventType, Decision
+
+        request_id = getattr(request.state, "request_id", "") if request else _uuid.uuid4().hex
 
         if _state.event_audit_logger:
             _state.event_audit_logger.append(AuditEvent(
@@ -69,6 +73,7 @@ def _require_writable() -> None:
                 decision=Decision.DENIED,
                 reason="WORKSPACE_READONLY=true",
                 error_code="WORKSPACE_READONLY",
+                request_id=request_id,
             ))
         raise HTTPException(
             status_code=403,
@@ -382,6 +387,7 @@ def assert_workspace_writable(
     route: str | None = None,
     action: str | None = None,
     source_ip: str | None = None,
+    request_id: str | None = None,
 ) -> None:
     """Raise 403 if workspace is in readonly mode. Emits structured audit event."""
     if settings.workspace_readonly:
@@ -400,6 +406,7 @@ def assert_workspace_writable(
                 decision=Decision.DENIED,
                 reason="WORKSPACE_READONLY=true",
                 error_code="WORKSPACE_READONLY",
+                request_id=request_id or "",
             ))
         raise HTTPException(
             status_code=403,
@@ -414,6 +421,7 @@ def write_file(
     content: str = Body(...),
     safe: bool = Body(False),
     _identity: AuthIdentity = Depends(require_scope("project:write")),
+    request: Request = ...,
 ) -> dict[str, Any]:
     """Write (create or overwrite) a UTF-8 text file."""
     assert_workspace_writable(
@@ -421,6 +429,7 @@ def write_file(
         actor_name=_identity.name or "",
         actor_fingerprint=_identity.fingerprint[:12],
         route="POST /api/workspace/projects/*/files/write",
+        request_id=getattr(request.state, "request_id", ""),
     )
     fp = _identity.fingerprint[:12]
     logger.info("write_file project=%s path=%s by=%s type=%s fp=%s safe=%s",
@@ -442,6 +451,7 @@ def edit_file(
     new_string: str = Body(...),
     safe: bool = Body(False),
     _identity: AuthIdentity = Depends(require_scope("project:write")),
+    request: Request = ...,
 ) -> dict[str, Any]:
     """Edit a file by replacing the first occurrence of old_string."""
     assert_workspace_writable(
@@ -449,6 +459,7 @@ def edit_file(
         actor_name=_identity.name or "",
         actor_fingerprint=_identity.fingerprint[:12],
         route="POST /api/workspace/projects/*/files/edit",
+        request_id=getattr(request.state, "request_id", ""),
     )
     fp = _identity.fingerprint[:12]
     logger.info("edit_file project=%s path=%s by=%s type=%s fp=%s safe=%s",
@@ -469,6 +480,7 @@ def patch_file(
     patch: str = Body(...),
     safe: bool = Body(False),
     _identity: AuthIdentity = Depends(require_scope("project:write")),
+    request: Request = ...,
 ) -> dict[str, Any]:
     """Apply a unified diff patch to a file."""
     assert_workspace_writable(
@@ -476,6 +488,7 @@ def patch_file(
         actor_name=_identity.name or "",
         actor_fingerprint=_identity.fingerprint[:12],
         route="POST /api/workspace/projects/*/files/patch",
+        request_id=getattr(request.state, "request_id", ""),
     )
     fp = _identity.fingerprint[:12]
     logger.info("patch_file project=%s path=%s by=%s type=%s fp=%s safe=%s",

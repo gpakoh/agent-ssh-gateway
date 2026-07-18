@@ -231,6 +231,11 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         SECRET_REDACTION_PLACEHOLDER,
     ),
+    # sshpass -p <password> — CLI password for SSH
+    (
+        re.compile(r"(?i)(sshpass\s+-p\s+)([^\s]+)"),
+        r"\1" + SECRET_REDACTION_PLACEHOLDER,
+    ),
     # Generic KEY=value / KEY: value (runs last)
     # authorization/bearer omitted here — covered by specific patterns above.
     (
@@ -308,9 +313,25 @@ class AuditLogger:
         self.logger.setLevel(logging.INFO)
 
     def log_command(self, session_id: str, command: str, source_ip: str):
-        """Log command execution."""
+        """Log command execution — metadata only (command_root, not full command).
+
+        Full command text may contain passwords, tokens, or other secrets.
+        Use log_security_event() for structured policy decisions with profile/mode.
+        """
+        import shlex
+
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            parts = command.split()
+        root = parts[0].strip() if parts else "?"
+        if root == "sudo" and len(parts) > 1:
+            root = parts[1].strip()
         self.logger.info(
-            "COMMAND | session=%s | ip=%s | cmd=%s", session_id, source_ip, redact_secrets(command)
+            "COMMAND | session=%s | ip=%s | command_root=%s",
+            session_id,
+            source_ip,
+            root,
         )
 
     def log_file_access(self, session_id: str, path: str, operation: str, source_ip: str):
