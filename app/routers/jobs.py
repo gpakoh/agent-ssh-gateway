@@ -80,6 +80,7 @@ async def jobs_run(
         source_ip=source_ip,
         route="POST /api/jobs/run",
         actor_fingerprint=_identity.fingerprint[:12] if _identity else "",
+        request_id=getattr(request.state, "request_id", ""),
     )
 
     if not decision.allowed:
