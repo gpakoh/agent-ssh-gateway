@@ -35,6 +35,21 @@ def project_run_opencode(
         dict with keys: task_id, status, exit_code, stdout, stderr,
         started_at, finished_at
     """
+    # Emit audit event at raise site for traceability
+    try:
+        from examples.mcp_server.mcp_audit import McpAuditEvent, get_audit_logger
+
+        get_audit_logger().append(McpAuditEvent(
+            event_type="mcp.tool_blocked",
+            tool="project_run_opencode",
+            action="execute_task",
+            decision="block",
+            reason="--dangerously-skip-permissions is not allowed",
+            error_code="OPENCODE_BLOCKED",
+        ))
+    except Exception:
+        pass  # audit failure must not change tool behavior
+
     raise CommandPolicyError(
         "project_run_opencode is blocked: --dangerously-skip-permissions is not allowed. "
         "Use project_run_pytest or project_run_ruff for safe command execution."
