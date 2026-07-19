@@ -98,6 +98,7 @@ from examples.chatgpt_remote_mcp.fleet.postgres_client import PostgresClient
 
 # OAuth provider and settings
 from examples.mcp_server.latency_metrics import get_tracker
+from examples.mcp_server.mcp_audit import McpAuditEvent, get_audit_logger
 from examples.mcp_server.oauth_provider import (
     DEFAULT_SCOPES,
     SUPPORTED_SCOPES,
@@ -411,11 +412,38 @@ def run_tool(
         data = fn()
     except Exception as exc:
         if isinstance(exc, (CommandPolicyError, WritePermissionError, WriteModeError)):
-            # Emit MCP tool blocked audit event
-            import logging
-            logging.getLogger("mcp.audit").warning(
-                "MCP_TOOL_BLOCKED | tool=%s | error=%s", tool, str(exc)
-            )
+            # Classify the error code
+            if isinstance(exc, CommandPolicyError):
+                msg = str(exc).lower()
+                if "blocked" in msg and "agent backend" in msg:
+                    error_code = "AGENT_BACKEND_BLOCKED"
+                elif "blocked" in msg and "opencode" in msg:
+                    error_code = "OPENCODE_BLOCKED"
+                elif "blocked" in msg and "mimo" in msg:
+                    error_code = "MIMO_BLOCKED"
+                elif "readonly" in msg or "allowlist" in msg or "denied" in msg:
+                    error_code = "READONLY_COMMAND"
+                else:
+                    error_code = "POLICY_VIOLATION"
+            elif isinstance(exc, WritePermissionError):
+                error_code = "WRITE_PERMISSION_DENIED"
+            else:
+                error_code = "WRITE_MODE_ERROR"
+
+            # Emit structured audit event
+            try:
+                audit_logger = get_audit_logger()
+                audit_logger.append(McpAuditEvent(
+                    event_type="mcp.tool_blocked",
+                    tool=tool,
+                    action=title,
+                    decision="block",
+                    reason=str(exc),
+                    error_code=error_code,
+                ))
+            except Exception:
+                pass  # audit failure must not change tool behavior
+
             return error_result(tool=tool, title=title, error=str(exc))
         if isinstance(exc, GatewayClientError):
             code, retryable = _classify_gateway_error(exc)
@@ -464,6 +492,19 @@ def _run_gateway(
         if isinstance(exc, (CommandPolicyError, WritePermissionError, WriteModeError)):
             code = "POLICY_VIOLATION"
             retryable = False
+            # Emit structured audit event
+            try:
+                audit_logger = get_audit_logger()
+                audit_logger.append(McpAuditEvent(
+                    event_type="mcp.command_denied",
+                    tool=tool,
+                    action="gateway_call",
+                    decision="deny",
+                    reason=str(exc),
+                    error_code=code,
+                ))
+            except Exception:
+                pass  # audit failure must not change tool behavior
         else:
             code, retryable = _classify_gateway_error(exc)
         hint = None
@@ -1967,6 +2008,19 @@ async def docker_compose_down(
     if volumes:
         scopes = _get_token_scopes()
         if "mcp:docker:admin" not in scopes:
+            # Emit structured audit event
+            try:
+                audit_logger = get_audit_logger()
+                audit_logger.append(McpAuditEvent(
+                    event_type="mcp.tool_denied",
+                    tool="docker_compose_down",
+                    action="validate_scope",
+                    decision="deny",
+                    reason="volumes=true requires mcp:docker:admin scope.",
+                    error_code="DOCKER_ADMIN_SCOPE_REQUIRED",
+                ))
+            except Exception:
+                pass  # audit failure must not change tool behavior
             return tool_error(
                 tool="docker_compose_down",
                 code="DOCKER_ADMIN_SCOPE_REQUIRED",
@@ -2011,6 +2065,20 @@ async def docker_prune(type: str = "container") -> dict[str, Any]:
     try:
         DockerClient()._validate_prune_type(type, admin_scope=has_admin)
     except ValueError as e:
+        # Emit structured audit event
+        try:
+            audit_logger = get_audit_logger()
+            audit_logger.append(McpAuditEvent(
+                event_type="mcp.tool_denied",
+                tool="docker_prune",
+                action="validate_prune_type",
+                decision="deny",
+                reason=str(e),
+                error_code="INVALID_INPUT",
+                metadata={"command_root": type},
+            ))
+        except Exception:
+            pass  # audit failure must not change tool behavior
         return tool_error(
             tool="docker_prune",
             code="INVALID_INPUT",
@@ -2051,6 +2119,20 @@ async def docker_exec(
     try:
         dc._validate_exec_argv(command)
     except ValueError as e:
+        # Emit structured audit event
+        try:
+            audit_logger = get_audit_logger()
+            audit_logger.append(McpAuditEvent(
+                event_type="mcp.tool_denied",
+                tool="docker_exec",
+                action="validate_exec_command",
+                decision="deny",
+                reason=str(e),
+                error_code="DOCKER_EXEC_COMMAND_BLOCKED",
+                metadata={"command_root": command[0] if command else ""},
+            ))
+        except Exception:
+            pass  # audit failure must not change tool behavior
         return tool_error(
             tool="docker_exec",
             code="DOCKER_EXEC_COMMAND_BLOCKED",
@@ -2102,6 +2184,20 @@ async def docker_run(
             source="docker",
         )
     if image not in allowed_images:
+        # Emit structured audit event
+        try:
+            audit_logger = get_audit_logger()
+            audit_logger.append(McpAuditEvent(
+                event_type="mcp.tool_denied",
+                tool="docker_run",
+                action="validate_image",
+                decision="deny",
+                reason=f"Image '{image}' is not in the configured allowlist.",
+                error_code="DOCKER_RUN_IMAGE_NOT_ALLOWED",
+                metadata={"command_root": image},
+            ))
+        except Exception:
+            pass  # audit failure must not change tool behavior
         return tool_error(
             tool="docker_run",
             code="DOCKER_RUN_IMAGE_NOT_ALLOWED",
@@ -2122,6 +2218,20 @@ async def docker_run(
     try:
         dc._validate_exec_argv(command)
     except ValueError as e:
+        # Emit structured audit event
+        try:
+            audit_logger = get_audit_logger()
+            audit_logger.append(McpAuditEvent(
+                event_type="mcp.tool_denied",
+                tool="docker_run",
+                action="validate_exec_command",
+                decision="deny",
+                reason=str(e),
+                error_code="DOCKER_EXEC_COMMAND_BLOCKED",
+                metadata={"command_root": command[0] if command else ""},
+            ))
+        except Exception:
+            pass  # audit failure must not change tool behavior
         return tool_error(
             tool="docker_run",
             code="DOCKER_EXEC_COMMAND_BLOCKED",
@@ -2161,6 +2271,20 @@ async def docker_rmi(images: list[str]) -> dict[str, Any]:
         try:
             dc._validate_image_ref(img)
         except ValueError as e:
+            # Emit structured audit event
+            try:
+                audit_logger = get_audit_logger()
+                audit_logger.append(McpAuditEvent(
+                    event_type="mcp.tool_denied",
+                    tool="docker_rmi",
+                    action="validate_image_ref",
+                    decision="deny",
+                    reason=str(e),
+                    error_code="DOCKER_RMI_INVALID_REFERENCE",
+                    metadata={"command_root": img},
+                ))
+            except Exception:
+                pass  # audit failure must not change tool behavior
             return tool_error(
                 tool="docker_rmi",
                 code="DOCKER_RMI_INVALID_REFERENCE",
@@ -2187,6 +2311,20 @@ async def docker_volume_rm(volumes: list[str]) -> dict[str, Any]:
         try:
             dc._validate_volume_name(vol)
         except ValueError as e:
+            # Emit structured audit event
+            try:
+                audit_logger = get_audit_logger()
+                audit_logger.append(McpAuditEvent(
+                    event_type="mcp.tool_denied",
+                    tool="docker_volume_rm",
+                    action="validate_volume_name",
+                    decision="deny",
+                    reason=str(e),
+                    error_code="DOCKER_VOLUME_RM_INVALID_NAME",
+                    metadata={"command_root": vol},
+                ))
+            except Exception:
+                pass  # audit failure must not change tool behavior
             return tool_error(
                 tool="docker_volume_rm",
                 code="DOCKER_VOLUME_RM_INVALID_NAME",
@@ -2213,6 +2351,21 @@ async def confirm_operation(token: str) -> dict[str, Any]:
             ConfirmStatus.EXPIRED: "Confirmation token expired (TTL 60s)",
             ConfirmStatus.CONSUMED: "Confirmation token already used",
         }.get(status, "Unknown error")
+
+        # Emit structured audit event
+        try:
+            audit_logger = get_audit_logger()
+            audit_logger.append(McpAuditEvent(
+                event_type="mcp.tool_blocked",
+                tool="confirm_operation",
+                action="confirm_docker_operation",
+                decision="deny",
+                reason=msg,
+                error_code=code,
+            ))
+        except Exception:
+            pass  # audit failure must not change tool behavior
+
         return tool_error(
             tool="confirm_operation",
             code=code,
