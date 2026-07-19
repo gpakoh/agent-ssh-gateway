@@ -1340,6 +1340,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                         "This endpoint reads the in-memory ring buffer (max 500 entries, reset on restart).",
                         "For full persistent history, query the JSONL file on disk: jq '.' data/audit/events.jsonl",
                         "Security audit (logs/audit.log) is a separate plain-text log — use grep/awk.",
+                        "MCP-local blocks are audited to MCP_AUDIT_LOG_PATH (separate JSONL). Not visible through /api/admin/audit/recent — query the MCP audit file directly.",
                         "Full documentation: docs/operations/AUDIT_LOGGING.md",
                     ],
                 },
