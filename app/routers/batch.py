@@ -62,6 +62,7 @@ async def batch_execute(
                 source_ip=source_ip,
                 route="POST /api/batch/execute",
                 actor_fingerprint=_identity.fingerprint[:12] if _identity else "",
+                request_id=getattr(request.state, "request_id", ""),
             )
 
             if not decision.allowed:

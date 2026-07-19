@@ -62,10 +62,24 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["ssh"])
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_REQUEST_ID_RE = re.compile(r"^[a-zA-Z0-9\-]+$")
+_REQUEST_ID_MAX_LEN = 64
+
+
+def _extract_ws_request_id(websocket: WebSocket) -> str:
+    """Extract and validate X-Request-ID from websocket upgrade headers.
+
+    Returns the inbound value if valid (<=64 chars, alphanumeric + hyphens),
+    otherwise generates a new UUID hex.
+    """
+    inbound = websocket.headers.get("x-request-id", "")
+    if inbound and len(inbound) <= _REQUEST_ID_MAX_LEN and _REQUEST_ID_RE.match(inbound):
+        return inbound
+    return uuid.uuid4().hex
 
 
 def time_to_iso(timestamp: float) -> str:
@@ -631,8 +645,6 @@ async def ssh_execute_stream(websocket: WebSocket):
         )
 
         # Structured audit event
-        import uuid as _uuid
-
         from app.audit import emit_command_policy_decision as _emit_ws
         _emit_ws(
             event_logger=_state.event_audit_logger,
@@ -645,7 +657,7 @@ async def ssh_execute_stream(websocket: WebSocket):
             source_ip=websocket.client.host if websocket.client else "unknown",
             route="WS /api/ssh/execute/stream",
             actor_fingerprint=identity.fingerprint[:12] if identity else "",
-            request_id=_uuid.uuid4().hex,
+            request_id=_extract_ws_request_id(websocket),
         )
 
         if not decision.allowed:
