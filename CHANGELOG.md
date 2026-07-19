@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.36a0] - 2026-07-19
+
+### Added
+
+- **Request/correlation ID middleware**: HTTP middleware generates or accepts inbound `X-Request-ID` (≤64 chars, alphanumeric + hyphens). Stored in `request.state` and returned in response headers for end-to-end audit correlation. (C5)
+
+- **Structured audit request_id coverage**: REST command-policy, jobs, batch, and websocket execute-stream paths now propagate `request_id` into structured `AuditEvent` records. (C5)
+
+- **MCP-local audit design note**: `docs/architecture/C5-mcp-local-audit-design.md` — documents the deferred structured logging gap for MCP-side decision paths (execute_restricted, docker confirm/deny, opencode/mimo blocks, _run_gateway). Recommends MCP-side JSONL for near-term. (C5)
+
+### Fixed
+
+- **Legacy AuditLogger sshpass redaction**: `app/security.py` `_SECRET_PATTERNS` now includes `sshpass -p` pattern. Passwords are redacted in legacy plain-text audit logs. (C5)
+
+- **Legacy command audit logs command_root only**: `log_command()` emits `command_root` (e.g. `cat`, `systemctl`) instead of full command text. Prevents command output and sensitive arguments from appearing in plain-text audit. (C5)
+
+- **jobs/batch command-policy audit includes request_id**: `emit_command_policy_decision()` callers in `jobs.py` and `batch.py` now pass `request_id` from `request.state`. (C5)
+
+- **Websocket execute-stream uses inbound X-Request-ID**: New `_extract_ws_request_id()` helper validates `x-request-id` from websocket upgrade headers. Falls back to UUID when absent or invalid. (C5)
+
+### Changed
+
+- **Audit docs updated**: `docs/operations/AUDIT_LOGGING.md` and `.env.example` clarify retention/rotation policy and planned MCP-local audit logging. (C5)
+
+### Tests
+
+- 2126+ passed (host_smoke excluded).
+- New `tests/test_request_id.py`: 17 tests — middleware generation, inbound preservation, invalid replacement, WS header extraction, audit event request_id propagation.
+- Legacy audit hygiene: sshpass redaction, command_root-only logging, parseable format.
+- Full matrix: ruff clean, mypy clean, CI green on Python 3.11 and 3.12.
+
 ## [0.1.35a0] - 2026-07-18
 
 ### Added
