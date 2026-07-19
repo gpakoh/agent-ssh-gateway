@@ -337,6 +337,42 @@ Both ring buffers (structured audit `AUDIT_RECENT_LIMIT` and workspace audit 500
 
 ---
 
+## MCP-Local Audit
+
+The MCP server has its **own separate audit logger** — not shared with the gateway. It uses `McpAuditLogger` in `examples/mcp_server/mcp_audit.py`.
+
+**Log path:** `MCP_AUDIT_LOG_PATH` (default: `logs/mcp_audit.jsonl`)
+**Buffer size:** `MCP_AUDIT_RECENT_LIMIT` (default: `500`)
+**Format:** JSONL (one JSON object per line), append-only
+
+**Key properties:**
+- Metadata-only (command root, decision, reason)
+- Redacted — no secrets, no command output, no full prompts
+- NOT visible through `/api/admin/audit/recent` (gateway endpoint)
+- Query the MCP audit file directly or via MCP server
+
+**Event types:**
+
+| Event Type | Description |
+|-----------|-------------|
+| `mcp.tool_blocked` | Tool invocation blocked by policy |
+| `mcp.command_denied` | Command denied by policy (readonly, etc.) |
+| `mcp.tool_denied` | Tool denied by model-specific rules |
+
+**Query examples:**
+```bash
+# Recent MCP blocks
+tail -20 logs/mcp_audit.jsonl | jq .
+
+# All command denials
+jq 'select(.event_type == "mcp.command_denied")' logs/mcp_audit.jsonl
+
+# Blocks in the last hour
+jq 'select(.timestamp > (now - 3600 | todate))' logs/mcp_audit.jsonl
+```
+
+---
+
 ## ⚠️ PLANNED: Built-in rotation
 
 Built-in JSONL rotation (`AUDIT_MAX_BYTES`, `AUDIT_BACKUP_COUNT`) is **not implemented yet**. Until then:
