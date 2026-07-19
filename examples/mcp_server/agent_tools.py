@@ -288,8 +288,24 @@ def project_run_agent(
         }
 
     if selected in ("opencode", "mimo"):
+        # Emit audit event at raise site for traceability
+        try:
+            from examples.mcp_server.mcp_audit import McpAuditEvent, get_audit_logger
+
+            get_audit_logger().append(McpAuditEvent(
+                event_type="mcp.tool_blocked",
+                tool="project_run_agent",
+                action="select_backend",
+                decision="block",
+                reason=f"{selected} agent backend is not allowed",
+                error_code="AGENT_BACKEND_BLOCKED",
+                metadata={"command_root": selected},
+            ))
+        except Exception:
+            pass  # audit failure must not change tool behavior
+
         raise CommandPolicyError(
-            f"project_run_agent is blocked: {selected} backend is not allowed. "
+            f"project_run_agent is blocked: {selected} agent backend is not allowed. "
             "Use dedicated project_run_opencode/project_run_mimo tools instead."
         )
 

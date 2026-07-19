@@ -124,3 +124,18 @@ class McpAuditLogger:
         """Return recent events from ring buffer."""
         n = limit or self._recent_limit
         return list(self._buffer[-n:])
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton (created once, importable by other modules)
+# ---------------------------------------------------------------------------
+
+_audit_logger: McpAuditLogger | None = None
+
+
+def get_audit_logger() -> McpAuditLogger:
+    """Return the module-level singleton McpAuditLogger."""
+    global _audit_logger
+    if _audit_logger is None:
+        _audit_logger = McpAuditLogger()
+    return _audit_logger
