@@ -8,6 +8,22 @@ from app.version import APP_VERSION
 
 logger = logging.getLogger(__name__)
 
+# Bounded allowlist for command_root label — anything else maps to "other".
+_COMMAND_ROOT_ALLOWLIST: frozenset[str] = frozenset({
+    "git", "docker", "pytest", "ruff", "mypy", "uv", "python", "pip",
+    "ls", "cat", "grep", "find", "echo", "pwd", "whoami", "ssh",
+    "curl", "wget", "systemctl", "journalctl", "make", "cargo", "node",
+    "npm", "pnpm", "yarn", "go", "java", "mvn", "gradle",
+})
+
+
+def _normalize_command_root(raw: str | None) -> str:
+    """Normalize command_root to a bounded label value."""
+    if not raw:
+        return "other"
+    root = raw.split("/")[-1].lower()  # handle /usr/bin/git → git
+    return root if root in _COMMAND_ROOT_ALLOWLIST else "other"
+
 
 class MetricsCollector:
     """Prometheus metrics collector.
@@ -42,7 +58,9 @@ class MetricsCollector:
         )
 
         self.ssh_commands = Counter(
-            "ssh_gateway_ssh_commands_total", "Total SSH commands executed", ["status"]
+            "ssh_gateway_ssh_commands_total",
+            "Total SSH commands executed",
+            ["status", "profile", "command_root"],
         )
 
         # Job metrics
@@ -66,7 +84,7 @@ class MetricsCollector:
         self.circuit_breaker_state = Gauge(
             "ssh_gateway_circuit_breaker_state",
             "Circuit breaker state (0=closed, 1=half-open, 2=open)",
-            ["host"],
+            ["target"],
         )
 
         # Lock metrics
@@ -106,9 +124,21 @@ class MetricsCollector:
         self.request_count.labels(method=method, endpoint=endpoint, status=str(status)).inc()
         self.request_duration.labels(method=method, endpoint=endpoint).observe(duration)
 
-    def record_ssh_command(self, status: str = "success"):
-        """Record SSH command execution."""
-        self.ssh_commands.labels(status=status).inc()
+    def record_ssh_command(
+        self,
+        status: str = "allowed",
+        profile: str = "default",
+        command_root: str | None = None,
+    ):
+        """Record SSH command execution.
+
+        Args:
+            status: One of 'allowed', 'denied', 'error'.
+            profile: Command policy profile name (bounded set).
+            command_root: Normalized root command (bounded allowlist, else 'other').
+        """
+        root = _normalize_command_root(command_root)
+        self.ssh_commands.labels(status=status, profile=profile, command_root=root).inc()
 
     def record_job_enqueued(self, priority: int = 0):
         """Record job enqueue."""
@@ -125,10 +155,10 @@ class MetricsCollector:
         self.queue_depth.labels(queue="processing").set(processing)
         self.queue_depth.labels(queue="dead").set(dead)
 
-    def update_circuit_breaker(self, host: str, state: str):
+    def update_circuit_breaker(self, target: str, state: str):
         """Update circuit breaker state metric."""
         state_value = {"closed": 0, "half_open": 1, "open": 2}.get(state, 0)
-        self.circuit_breaker_state.labels(host=host).set(state_value)
+        self.circuit_breaker_state.labels(target=target).set(state_value)
 
     def update_active_locks(self, count: int):
         """Update active locks metric."""
