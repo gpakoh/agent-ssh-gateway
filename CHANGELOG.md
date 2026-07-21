@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.37a0] - 2026-07-21
+
+### Added
+
+- **MCP-local structured audit logger (C6)**: MCP-side block decisions now write metadata-only JSONL audit events via `examples/mcp_server/mcp_audit.py`. Events include tool, error code, decision, reason, source, and request context without command output, file content, or secrets.
+
+- **MCP block audit wiring (C6)**: structured audit events are emitted for opencode/mimo/agent hard blocks and related MCP-local denial paths. Adversarial tests verify blocked inputs do not leak raw secrets or unsafe payloads into audit records.
+
+- **Gateway request metrics (Phase 6A)**: Prometheus request counters and duration histograms are now recorded through HTTP middleware. Endpoint labels use FastAPI route templates and never include raw query strings, tokens, IPs, or project identifiers.
+
+- **SSH command metrics (Phase 6A)**: command execution paths record bounded metadata-only metrics for allowed and denied commands. Labels include status, effective command-policy profile, and normalized command root; full command text and arguments are never emitted.
+
+- **Queue depth metrics (Phase 6A)**: Redis job queue depth is recorded for pending, processing, and dead-letter queues after enqueue/dequeue/complete/retry transitions and when queue stats are queried.
+
+- **Metrics operations docs**: `docs/operations/METRICS.md` documents the live Prometheus surface, safe label policy, bounded-cardinality constraints, and deferred metric categories.
+
+### Fixed
+
+- **Health readiness truthfulness**: `/health` now reports `ready=false` when Redis is degraded or persistent sessions/PostgreSQL are enabled but unavailable. The endpoint no longer reports `ready=true` for degraded dependency state.
+
+- **Circuit breaker metric cardinality**: `ssh_gateway_circuit_breaker_state` uses bounded `target` labels (`ssh`, `redis`, `postgres`) instead of raw host/IP labels.
+
+- **Environment example contract**: MCP audit environment examples are documented as MCP-side settings instead of active gateway `Settings` aliases, keeping `.env.example` aligned with gateway config validation.
+
+- **Runtime log hygiene**: `logs/` is ignored so local audit and MCP audit runtime files are not accidentally committed.
+
+- **CI compatibility**: UP038 `isinstance()` syntax was normalized for the active CI Ruff matrix, and request-metrics tests no longer depend on host-specific `projects.yaml` contents.
+
+### Tests
+
+- 2277+ passed locally (host_smoke excluded) before release packaging.
+- New/updated coverage for MCP audit security, MCP block audit wiring, health readiness, request metrics middleware, SSH command metrics, queue depth metrics, and CI-stable request metrics.
+- CI green on Python 3.11 and 3.12 for the Phase 6A gate commit.
+
 ## [0.1.36a0] - 2026-07-19
 
 ### Added
