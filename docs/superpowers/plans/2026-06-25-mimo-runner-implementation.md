@@ -602,7 +602,7 @@ cd /media/1TB/Python/web_ssh/web-ssh-gateway && git push gitea master
 - [ ] **Step 2: Check CI status**
 
 ```bash
-sleep 180 && curl --noproxy '*' -s "http://10.0.1.103:3005/api/v1/repos/gpakoh/agent-ssh-gateway/actions/runs?limit=1" -H "Authorization: token GITEA_TOKEN"
+sleep 180 && curl --noproxy '*' -s "http://gitea.example.internal:3005/api/v1/repos/gpakoh/agent-ssh-gateway/actions/runs?limit=1" -H "Authorization: token GITEA_TOKEN"
 ```
 Expected: success (all tests pass or known skips).
 

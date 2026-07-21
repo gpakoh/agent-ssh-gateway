@@ -1048,7 +1048,7 @@ if MCP_AUTH_MODE in ("mixed", "oauth"):
         from pydantic import AnyHttpUrl
 
         _auth_settings = AuthSettings(
-            issuer_url=AnyHttpUrl(os.environ.get("MCP_ISSUER_URL", "https://ssh.xloud.ru")),
+            issuer_url=AnyHttpUrl(os.environ.get("MCP_ISSUER_URL", "https://ssh-gateway.example.com")),
             service_documentation_url=AnyHttpUrl("https://github.com/gpakoh/agent-ssh-gateway"),
             client_registration_options=ClientRegistrationOptions(
                 enabled=True,
@@ -1151,7 +1151,7 @@ Add to both `examples/mcp_server/.env.example` and `examples/chatgpt_remote_mcp/
 MCP_AUTH_MODE=token
 
 # OAuth issuer URL (used in discovery endpoints)
-MCP_ISSUER_URL=https://ssh.xloud.ru
+MCP_ISSUER_URL=https://ssh-gateway.example.com
 
 # Static token fallback (required for token/mixed mode)
 MCP_PUBLIC_TOKEN=

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Expose opencode's local Context7 MCP server (`@upstash/context7-mcp`) to ChatGPT as a remote MCP endpoint behind `ssh.xloud.ru/mcp/context7`.
+**Goal:** Expose opencode's local Context7 MCP server (`@upstash/context7-mcp`) to ChatGPT as a remote MCP endpoint behind `ssh-gateway.example.com/mcp/context7`.
 
 **Architecture:** Python FastMCP adapter that spawns `@upstash/context7-mcp` via `npx`, bridges stdio to Streamable HTTP using `mcp.client.stdio.StdioClientSession`, with TokenAuthMiddleware. Context7 is safe for raw proxy (2 tools, documentation-only, no system access). Systemd service behind nginx reverse proxy.
 
@@ -382,11 +382,11 @@ git commit -m "fleet: Context7 adapter ready for deploy"
 
 - [ ] **Step 1: Add to nginx config**
 
-Edit nginx config on VPS (above Authelia auth location, inside `server { server_name ssh.xloud.ru; ... }`):
+Edit nginx config on VPS (above Authelia auth location, inside `server { server_name ssh-gateway.example.com; ... }`):
 
 ```nginx
 location /mcp/context7 {
-    proxy_pass http://10.0.0.3:8790/mcp;
+    proxy_pass http://10.0.0.10:8790/mcp;
     proxy_http_version 1.1;
     proxy_buffering off;
     proxy_read_timeout 3600s;
@@ -419,11 +419,11 @@ netfilter-persistent save
 
 ```bash
 MCP_TOKEN=<generated-token>
-SID=$(curl -s -D - -o /dev/null 'https://ssh.xloud.ru/mcp/context7?mcp_token='$MCP_TOKEN \
+SID=$(curl -s -D - -o /dev/null 'https://ssh-gateway.example.com/mcp/context7?mcp_token='$MCP_TOKEN \
   -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}' | grep -i mcp-session-id | awk '{print $2}' | tr -d '\r')
 
-curl -s 'https://ssh.xloud.ru/mcp/context7?mcp_token='$MCP_TOKEN \
+curl -s 'https://ssh-gateway.example.com/mcp/context7?mcp_token='$MCP_TOKEN \
   -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
   -H "mcp-session-id: $SID" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
@@ -434,7 +434,7 @@ Expected: HTTP 200, 2 tools.
 - [ ] **Step 2: Test resolve-library-id**
 
 ```
-curl -s 'https://ssh.xloud.ru/mcp/context7?mcp_token='$MCP_TOKEN \
+curl -s 'https://ssh-gateway.example.com/mcp/context7?mcp_token='$MCP_TOKEN \
   -H 'Content-Type: application/json' -H 'mcp-session-id: <SID>' \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"resolve_library_id","arguments":{"query":"how to create middleware","libraryName":"FastAPI"}}}'
 ```
@@ -443,7 +443,7 @@ Expected: returns library IDs for FastAPI.
 
 - [ ] **Step 3: Create ChatGPT App**
 
-- URL: `https://ssh.xloud.ru/mcp/context7?mcp_token=<generated-token>`
+- URL: `https://ssh-gateway.example.com/mcp/context7?mcp_token=<generated-token>`
 - Auth: None
 - Verify in ChatGPT: tools appear as Context7 namespace
 

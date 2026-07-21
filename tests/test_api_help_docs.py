@@ -11,6 +11,7 @@ import ast
 from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[1] / "app" / "api_help.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +55,32 @@ REQUIRED_ENDPOINTS = [
     "POST /api/bulk/execute",
     "POST /api/batch/execute",
 ]
+
+PUBLIC_TEXT_GLOBS = (
+    "CHANGELOG.md",
+    "README.md",
+    "deploy.example.md",
+    "docs/**/*.md",
+    "examples/**/README.md",
+)
+
+FORBIDDEN_PUBLIC_MARKERS = (
+    "xloud.ru",
+    "git.xloud",
+    "nodsync.org",
+    "171.25.251.242",
+    "4821fc5084744fac025a2dbf42ef656d",
+    "192.168.1.",
+    "10.0.1.103",
+    "10.0.0.145",
+    "10.0.0.127",
+    "proxmox_macvlan",
+    "rag_vectordb",
+    "kojo_db",
+    "immich",
+    "n8n",
+    "LXC 100",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -134,3 +161,21 @@ class TestCommandPolicyDocs:
         """Consolidation must not be described as current/implemented."""
         full_text = f"{MCP_NOTES} {INTERACTION_NOTE}".lower()
         assert "consolidated" not in full_text or "planned" in full_text
+
+
+class TestPublicRepoHygiene:
+    """Public docs must not expose this deployment's real infrastructure markers."""
+
+    def test_public_docs_do_not_expose_real_infra_markers(self):
+        files: set[Path] = set()
+        for pattern in PUBLIC_TEXT_GLOBS:
+            files.update(REPO_ROOT.glob(pattern))
+
+        failures: list[str] = []
+        for path in sorted(p for p in files if p.is_file()):
+            text = path.read_text(encoding="utf-8")
+            for marker in FORBIDDEN_PUBLIC_MARKERS:
+                if marker in text:
+                    failures.append(f"{path.relative_to(REPO_ROOT)} contains {marker!r}")
+
+        assert failures == []

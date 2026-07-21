@@ -1,6 +1,6 @@
 # MCP Operator Runbook
 
-Practical day-to-day operations for the MCP fleet at `ssh.xloud.ru`.
+Practical day-to-day operations for the MCP fleet at `ssh-gateway.example.com`.
 
 **See also**: [`MCP_FLEET_RUNBOOK.md`](./MCP_FLEET_RUNBOOK.md) — adapter reference,
 service management, nginx, iptables.
@@ -114,7 +114,7 @@ The ChatGPT Developer Mode MCP endpoint uses Streamable HTTP.
 ### Endpoint
 
 ```
-URL:  https://ssh.xloud.ru/mcp
+URL:  https://ssh-gateway.example.com/mcp
 Type: streamable-http
 Auth: Bearer token — paste raw token from `mcp-token create`
 ```
@@ -124,7 +124,7 @@ Auth: Bearer token — paste raw token from `mcp-token create`
 1. `mcp-token create "chatgpt-remote" --profile full`
 2. Copy raw token from stdout
 3. In ChatGPT → Developer Mode → Add MCP endpoint:
-   - URL: `https://ssh.xloud.ru/mcp`
+   - URL: `https://ssh-gateway.example.com/mcp`
    - Auth: Bearer → paste token
    - Type: Streamable HTTP
 4. Save → ChatGPT will call `initialize` → `tools/list`

@@ -35,7 +35,7 @@ All use the same `TokenAuthMiddleware` from `fleet/shared.py` (line 13):
 
 ### 1.3 Nginx Routing
 
-All MCP routes on `ssh.xloud.ru`:
+All MCP routes on `ssh-gateway.example.com`:
 ```
 /mcp           → 127.0.0.1:8788  (Gateway)
 /mcp/context7  → 127.0.0.1:8790
@@ -151,11 +151,11 @@ class GatewayOAuthProvider(OAuthAuthorizationServerProvider[Client, User, AuthCo
 Returns RFC 8414 metadata:
 ```json
 {
-  "issuer": "https://ssh.xloud.ru",
-  "authorization_endpoint": "https://ssh.xloud.ru/oauth/authorize",
-  "token_endpoint": "https://ssh.xloud.ru/oauth/token",
-  "registration_endpoint": "https://ssh.xloud.ru/oauth/register",
-  "revocation_endpoint": "https://ssh.xloud.ru/oauth/revoke",
+  "issuer": "https://ssh-gateway.example.com",
+  "authorization_endpoint": "https://ssh-gateway.example.com/oauth/authorize",
+  "token_endpoint": "https://ssh-gateway.example.com/oauth/token",
+  "registration_endpoint": "https://ssh-gateway.example.com/oauth/register",
+  "revocation_endpoint": "https://ssh-gateway.example.com/oauth/revoke",
   "scopes_supported": [
     "mcp:read", "mcp:project", "mcp:handoff",
     "mcp:agent-run", "mcp:docker", "mcp:postgres", "mcp:repo"
@@ -259,7 +259,7 @@ ClientRegistrationOptions(
 ### 5.1 Authorization Code + PKCE Flow
 
 ```
-Client (ChatGPT)                     Server (ssh.xloud.ru)
+Client (ChatGPT)                     Server (ssh-gateway.example.com)
      │                                     │
      │  1. Generate code_verifier           │
      │     code_challenge = SHA256(verifier) │
@@ -520,9 +520,9 @@ OAuth endpoints are served by FastMCP on the same `/mcp` route:
 
 **The `/oauth/authorize` endpoint requires end-user authentication.**
 Options for user auth:
-1. **Authelia SSO integration** — redirect to `auth.xloud.ru` for login, return to `/oauth/authorize`
+1. **Authelia SSO integration** — redirect to `auth.example.com` for login, return to `/oauth/authorize`
 2. **Simple session cookie** — basic auth form on the same server
-3. **Separate auth subdomain** — `auth.ssh.xloud.ru` with its own nginx block
+3. **Separate auth subdomain** — `auth.ssh-gateway.example.com` with its own nginx block
 
 **Decision for MVP:** Use simple session cookie (no external SSO dependency for `/oauth`). Can be upgraded to Authelia in Phase 3.
 

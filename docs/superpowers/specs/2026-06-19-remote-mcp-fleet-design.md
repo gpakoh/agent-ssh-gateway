@@ -2,13 +2,13 @@
 
 ## Goal
 
-Expose opencode's local MCP servers (browsermcp, context7, docker, github, postgres) to ChatGPT as separate remote MCP endpoints behind `ssh.xloud.ru`, each with its own token, auth middleware, and nginx path.
+Expose opencode's local MCP servers (browsermcp, context7, docker, github, postgres) to ChatGPT as separate remote MCP endpoints behind `ssh-gateway.example.com`, each with its own token, auth middleware, and nginx path.
 
 ## Non-Goals
 
 - MCP Aggregator (one endpoint routing to many backends) — deferred until individual endpoints are stable.
 - Write/modify access for docker and postgres — read-only MVP only.
-- Exposing production database — current postgres target is `rag_vectordb`.
+- Exposing production database — current postgres target is `example_vectordb`.
 - Browser MCP with arbitrary navigation — requires explicit user confirmation per action.
 
 ## Architecture
@@ -16,7 +16,7 @@ Expose opencode's local MCP servers (browsermcp, context7, docker, github, postg
 Each MCP server follows the same pattern as the existing `agent-ssh-gateway-mcp`:
 
 ```
-ChatGPT App → nginx (ssh.xloud.ru) → Auth middleware (token in ?mcp_token=) 
+ChatGPT App → nginx (ssh-gateway.example.com) → Auth middleware (token in ?mcp_token=)
   → HTTP MCP adapter → local stdio MCP server
 ```
 
@@ -33,11 +33,11 @@ ChatGPT App → nginx (ssh.xloud.ru) → Auth middleware (token in ?mcp_token=)
 
 All paths reside under `/mcp/` to inherit existing nginx location blocks (SSO bypass, WebSocket support, proxy buffering off).
 
-**proxy_pass path rule:** Each fleet adapter listens on its internal port with path `/mcp` (e.g. `http://127.0.0.1:8790/mcp`). The nginx `location /mcp/context7` must proxy to `http://10.0.0.3:8790/mcp` (not `/mcp/context7`), otherwise the path mismatch doubles. Example:
+**proxy_pass path rule:** Each fleet adapter listens on its internal port with path `/mcp` (e.g. `http://127.0.0.1:8790/mcp`). The nginx `location /mcp/context7` must proxy to `http://10.0.0.10:8790/mcp` (not `/mcp/context7`), otherwise the path mismatch doubles. Example:
 
 ```nginx
 location /mcp/context7 {
-    proxy_pass http://10.0.0.3:8790/mcp;
+    proxy_pass http://10.0.0.10:8790/mcp;
     proxy_buffering off;
     proxy_read_timeout 3600s;
 }
@@ -117,7 +117,7 @@ This is the same proven pattern as `chatgpt_remote_mcp/server.py` but with `mcp.
 - Enforced by registering only wrapper tools in the adapter, not by trusting the upstream MCP server's config.
 
 ### Postgres (read-only only)
-- New DB user with `SELECT` only on `rag_vectordb`
+- New DB user with `SELECT` only on `example_vectordb`
 - `default_transaction_read_only = on`
 - Query timeout 30s, max rows 1000
 - No `gateway_postgres_write` tool registered
@@ -135,7 +135,7 @@ This is the same proven pattern as `chatgpt_remote_mcp/server.py` but with `mcp.
 
 ### nginx (VPS)
 - Add `/mcp/context7`, `/mcp/github`, `/mcp/docker`, `/mcp/postgres`, `/mcp/browser` location blocks above Authelia auth
-- Each: `proxy_pass http://10.0.0.3:<port>/mcp` (not `/mcp/<name>` — see path rule above)
+- Each: `proxy_pass http://10.0.0.10:<port>/mcp` (not `/mcp/<name>` — see path rule above)
 - `proxy_buffering off`, `proxy_read_timeout 3600s`
 
 ### iptables (VPS)
@@ -152,7 +152,7 @@ This is the same proven pattern as `chatgpt_remote_mcp/server.py` but with `mcp.
 - `tools/list` returns expected tools for that MCP server
 - Read-only tools work and return data
 - Write tools (if any) are not registered or return policy error
-- Wrong/missing token rejects with 401/403, never returns 302 redirect to auth.xloud.ru
+- Wrong/missing token rejects with 401/403, never returns 302 redirect to auth.example.com
 
 ### Integration
 - Each ChatGPT App can independently connect and use its MCP server

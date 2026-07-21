@@ -41,7 +41,7 @@ node scripts/tunnel.mjs quick \
 # Ngrok
 node scripts/tunnel.mjs ngrok \
   --local http://127.0.0.1:8788 \
-  --hostname ssh.xloud.ru
+  --hostname ssh-gateway.example.com
 ```
 
 ## Stdout
@@ -49,7 +49,7 @@ node scripts/tunnel.mjs ngrok \
 Only the public MCP URL is printed to **stdout** as the last line:
 
 ```
-https://mcp.nodsync.org/healthz
+https://mcp.example.com/healthz
 ```
 
 All progress messages go to **stderr**. This makes it safe to pipe:
@@ -142,7 +142,7 @@ The VPS nginx relay replaced Cloudflare Tunnel because:
 - VPS uses the same ISP as home — no clean egress
 
 Production setup:
-- `mcp.nodsync.org` A record → `171.25.251.242` (Cloudflare orange cloud)
+- `mcp.example.com` A record → `203.0.113.10` (Cloudflare orange cloud)
 - VPS nginx terminates TLS, proxies to `127.0.0.1:18788`
 - autossh reverse tunnel carries traffic home to port 8788
 - `scripts/tunnel.mjs` kept as emergency fallback via localtunnel mode

@@ -12,7 +12,7 @@ connect through **Create App**.
 The public ChatGPT URL uses `mcp_token`, not the real gateway API key:
 
 ```
-https://ssh.xloud.ru/mcp?mcp_token=...
+https://ssh-gateway.example.com/mcp?mcp_token=...
 ```
 
 The real gateway scoped token stays server-side in `GATEWAY_API_KEY`.
@@ -40,7 +40,7 @@ python server.py
 | Field | Value |
 |-------|-------|
 | Connection | Server URL |
-| Server URL | `https://ssh.xloud.ru/mcp?mcp_token=<MCP_PUBLIC_TOKEN>` |
+| Server URL | `https://ssh-gateway.example.com/mcp?mcp_token=<MCP_PUBLIC_TOKEN>` |
 | Authentication | None |
 
 ## Tools
@@ -56,7 +56,7 @@ Tool visibility is controlled by `MCP_GATEWAY_TOOL_MODE`:
 
 ## Reverse proxy (nginx)
 
-Add to the existing nginx config for `ssh.xloud.ru`:
+Add to the existing nginx config for `ssh-gateway.example.com`:
 
 ```nginx
 location /mcp {
@@ -68,7 +68,7 @@ location /mcp {
 }
 ```
 
-**Important:** This path must bypass `auth.xloud.ru` SSO because ChatGPT cannot complete
+**Important:** This path must bypass `auth.example.com` SSO because ChatGPT cannot complete
 that SSO flow for MCP tool calls. Add an `access_bypass` or `satisfy any; allow all;`
 rule.
 
@@ -77,9 +77,9 @@ rule.
 ```
 ChatGPT (Create App)
      │
-     │  POST https://ssh.xloud.ru/mcp?mcp_token=...
+     │  POST https://ssh-gateway.example.com/mcp?mcp_token=...
      ▼
-nginx (ssh.xloud.ru)
+nginx (ssh-gateway.example.com)
      │  proxy_pass to 127.0.0.1:8788
      ▼
 chatgpt_remote_mcp/server.py

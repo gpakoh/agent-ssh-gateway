@@ -314,7 +314,7 @@ This project follows semantic versioning where practical, but the public API is 
 ### Added
 
 - **Standalone tunnel manager**: `scripts/tunnel.mjs` for managing SSH tunnels with tunnel runbook. (Session 140)
-- **MCP public endpoint runbook**: documents VPS nginx/autossh relay setup for `mcp.nodsync.org`. (Session 140)
+- **MCP public endpoint runbook**: documents VPS nginx/autossh relay setup for `mcp.example.com`. (Session 140)
 - **SSH session auto-reconnect on SESSION_NOT_FOUND**: `_reconnect_session()` + `_retry_on_session_not_found` decorator. 5 SSH-bound tools recover automatically after stale session loss. Thread-safe via `threading.Lock` with skip-if-changed check. (Session 150)
 
 ### Changed
@@ -487,7 +487,7 @@ This project follows semantic versioning where practical, but the public API is 
 ### Added
 
 - **Mimo local execution bootstrap** — default model switched to local Ollama (`ollama-gen/gemma4:26b`), configurable via `MIMO_DEFAULT_MODEL` env var. (Session 109.5)
-- **NO_PROXY/no_proxy bypass** — `MIMO_EXTRA_NO_PROXY` env var adds local targets (`10.0.1.103`, `10.0.0.x`, etc.) to `NO_PROXY`/`no_proxy` before `mimo run`, preventing proxy-blocked connections. (Session 109.5)
+- **NO_PROXY/no_proxy bypass** — `MIMO_EXTRA_NO_PROXY` env var adds local targets (`gitea.example.internal`, `10.0.0.x`, etc.) to `NO_PROXY`/`no_proxy` before `mimo run`, preventing proxy-blocked connections. (Session 109.5)
 - **Mimo 403/proxy blocker resolved** — Xiaomi free-tier endpoint (`api.xiaomimimo.com`) reverted to `Illegal access` from all infra IPs; local Ollama path unblocked via NO_PROXY. No interactive login, no paid keys, no secrets in repo. (Session 109.5)
 - **Mimo real execution smoke** — 11/11 guards + full task lifecycle validated end-to-end via Mimo in linked worktree. `agent-status.md`, `agent-report.md`, `implementation-diff.patch` all produced correctly. Exit 0. (Session 110)
 
@@ -566,7 +566,7 @@ This project follows semantic versioning where practical, but the public API is 
 ### Added
 
 - **Docker read-only MCP adapter** (`fleet/docker_server.py`): 7 safe tools (ps, images, inspect, logs, stats, compose_ps, compose_services). Read-only subprocess wrapper, shell=False.
-- **Postgres read-only MCP adapter** (`fleet/postgres_server.py`): 6 tools (health, list_schemas, list_tables, describe_table, select, vector_status) for rag_vectordb. SQL guardrails: multi-statement ban, DDL/DML block, LIMIT 1000 wrapping, system schema block.
+- **Postgres read-only MCP adapter** (`fleet/postgres_server.py`): 6 tools (health, list_schemas, list_tables, describe_table, select, vector_status) for example_vectordb. SQL guardrails: multi-statement ban, DDL/DML block, LIMIT 1000 wrapping, system schema block.
 - **mcp_readonly DB user**: nosuperuser, read-only, statement_timeout=30s.
 - **Public endpoints**: /mcp/docker, /mcp/postgres.
 
@@ -630,7 +630,7 @@ This project follows semantic versioning where practical, but the public API is 
 
 - The RLM auditor root-agent now uses `gateway_execute_restricted()` with allowlist validation instead of raw `gateway_execute()`.
 - WebSocket stream timeout raised from 30s to 600s for long-running interactive sessions.
-- Docker Compose networks changed to `external: true`; gateway container now attaches to `proxmox_macvlan` with static IP `10.0.0.145` for direct LXC→container routing behind nginx.
+- Docker Compose networks changed to `external: true`; gateway container now attaches to `example_macvlan` with static IP `10.0.0.10` for direct LXC→container routing behind nginx.
 - `docs/RLM_ADAPTER_EXPERIMENT.md` updated with the v0–v3 implementation milestone table.
 
 ### Docs

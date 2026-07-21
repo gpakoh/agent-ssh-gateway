@@ -726,7 +726,7 @@ Expected: `mcp-docker-confirm-test`
 - [ ] **Step 4: Call `docker_rm` via MCP tools/call**
 
 ```bash
-RESP=$(curl -s -X POST https://ssh.xloud.ru/mcp \
+RESP=$(curl -s -X POST https://ssh-gateway.example.com/mcp \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $MCP_PUBLIC_TOKEN" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"docker_rm","arguments":{"container":"mcp-docker-confirm-test"}}}')
@@ -739,7 +739,7 @@ Expected: `confirmation_required` response with `action_id`, `confirm_token`, `e
 
 ```bash
 TOKEN=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['result']['confirm_token'])")
-CONFIRM_RESP=$(curl -s -X POST https://ssh.xloud.ru/mcp \
+CONFIRM_RESP=$(curl -s -X POST https://ssh-gateway.example.com/mcp \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $MCP_PUBLIC_TOKEN" \
   -d "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"docker_confirm\",\"arguments\":{\"token\":\"$TOKEN\"}}}")
@@ -759,7 +759,7 @@ Expected: no output (container removed)
 - [ ] **Step 7: Try same token again (should fail)**
 
 ```bash
-CONFIRM_RESP2=$(curl -s -X POST https://ssh.xloud.ru/mcp \
+CONFIRM_RESP2=$(curl -s -X POST https://ssh-gateway.example.com/mcp \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $MCP_PUBLIC_TOKEN" \
   -d "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"docker_confirm\",\"arguments\":{\"token\":\"$TOKEN\"}}}")
@@ -771,7 +771,7 @@ Expected: `"ok": false`, `"code": "CONFIRM_TOKEN_CONSUMED"`
 - [ ] **Step 8: Check pending actions**
 
 ```bash
-curl -s -X POST https://ssh.xloud.ru/mcp \
+curl -s -X POST https://ssh-gateway.example.com/mcp \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $MCP_PUBLIC_TOKEN" \
   -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"docker_pending_actions","arguments":{}}}' | python3 -m json.tool

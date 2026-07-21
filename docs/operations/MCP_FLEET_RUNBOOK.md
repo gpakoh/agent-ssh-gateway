@@ -1,6 +1,6 @@
 # MCP Fleet Runbook
 
-Six adapters deployed behind nginx on `ssh.xloud.ru` via Streamable HTTP/SSE.
+Six adapters deployed behind nginx on `ssh-gateway.example.com` via Streamable HTTP/SSE.
 
 ## Quick healthcheck
 
@@ -31,14 +31,14 @@ python scripts/mcp_fleet_healthcheck.py --verbose
 
 | Adapter | Systemd service | Internal | Public | Env file | Tools |
 |---------|----------------|----------|--------|----------|-------|
-| Gateway | `agent-ssh-gateway-mcp` | `10.0.0.3:8788` | `/mcp` | `/etc/agent-ssh-gateway-mcp.env` | 62 |
-| Context7 | `agent-mcp-context7` | `10.0.0.3:8790` | `/mcp/context7` | `/etc/agent-mcp-context7.env` | 2 |
-| GitHub | `agent-mcp-github` | `10.0.0.3:8791` | `/mcp/github` | `/etc/agent-mcp-github.env` | 8 |
-| Gitea | `agent-mcp-gitea` | `10.0.0.3:8792` | `/mcp/gitea` | `/etc/agent-mcp-gitea.env` | 12 |
-| Docker | `agent-mcp-docker` | `10.0.0.3:8793` | `/mcp/docker` | `/etc/agent-mcp-docker.env` | 7 |
-| Postgres | `agent-mcp-postgres` | `10.0.0.3:8794` | `/mcp/postgres` | `/etc/agent-mcp-postgres.env` | 6 |
+| Gateway | `agent-ssh-gateway-mcp` | `10.0.0.10:8788` | `/mcp` | `/etc/agent-ssh-gateway-mcp.env` | 62 |
+| Context7 | `agent-mcp-context7` | `10.0.0.10:8790` | `/mcp/context7` | `/etc/agent-mcp-context7.env` | 2 |
+| GitHub | `agent-mcp-github` | `10.0.0.10:8791` | `/mcp/github` | `/etc/agent-mcp-github.env` | 8 |
+| Gitea | `agent-mcp-gitea` | `10.0.0.10:8792` | `/mcp/gitea` | `/etc/agent-mcp-gitea.env` | 12 |
+| Docker | `agent-mcp-docker` | `10.0.0.10:8793` | `/mcp/docker` | `/etc/agent-mcp-docker.env` | 7 |
+| Postgres | `agent-mcp-postgres` | `10.0.0.10:8794` | `/mcp/postgres` | `/etc/agent-mcp-postgres.env` | 6 |
 
-All public endpoints: `https://ssh.xloud.ru/<path>?mcp_token=<token>`
+All public endpoints: `https://ssh-gateway.example.com/<path>?mcp_token=<token>`
 
 ## Per-adapter public tokens
 
@@ -67,11 +67,11 @@ journalctl -u agent-mcp-gitea.service -n 30 --no-pager
 
 ## Nginx
 
-All routes are in `/etc/nginx/sites-available/ssh.xloud.ru` on VPS `192.0.2.10`.
+All routes are in `/etc/nginx/sites-available/ssh-gateway.example.com` on VPS `192.0.2.10`.
 
 ```bash
 ssh root@192.0.2.10
-grep -n 'location ^~ /mcp' /etc/nginx/sites-available/ssh.xloud.ru
+grep -n 'location ^~ /mcp' /etc/nginx/sites-available/ssh-gateway.example.com
 nginx -t && systemctl reload nginx
 ```
 
