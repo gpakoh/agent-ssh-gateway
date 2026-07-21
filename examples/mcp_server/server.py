@@ -411,7 +411,7 @@ def run_tool(
     try:
         data = fn()
     except Exception as exc:
-        if isinstance(exc, (CommandPolicyError, WritePermissionError, WriteModeError)):
+        if isinstance(exc, CommandPolicyError | WritePermissionError | WriteModeError):
             # Classify the error code
             if isinstance(exc, CommandPolicyError):
                 msg = str(exc).lower()
@@ -489,7 +489,7 @@ def _run_gateway(
     try:
         data = fn()
     except (GatewayClientError, CommandPolicyError, WritePermissionError, WriteModeError) as exc:
-        if isinstance(exc, (CommandPolicyError, WritePermissionError, WriteModeError)):
+        if isinstance(exc, CommandPolicyError | WritePermissionError | WriteModeError):
             code = "POLICY_VIOLATION"
             retryable = False
             # Emit structured audit event
