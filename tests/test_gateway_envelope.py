@@ -56,7 +56,7 @@ class TestGatewaySuccessEnvelope:
             assert result["meta"]["tool"] == tool_name
             assert isinstance(result["meta"]["request_id"], str)
             assert len(result["meta"]["request_id"]) > 0
-            assert isinstance(result["meta"]["duration_ms"], (int, float))
+            assert isinstance(result["meta"]["duration_ms"], int | float)
             assert isinstance(result["meta"]["truncated"], bool)
             assert isinstance(result["meta"]["warnings"], list)
 
@@ -209,7 +209,7 @@ class TestGatewayErrorEnvelope:
             assert result["meta"]["contract_version"] == CONTRACT_VERSION
             assert result["meta"]["tool"] == tool_name
             assert isinstance(result["meta"]["request_id"], str)
-            assert isinstance(result["meta"]["duration_ms"], (int, float))
+            assert isinstance(result["meta"]["duration_ms"], int | float)
             assert isinstance(result["meta"]["truncated"], bool)
             assert isinstance(result["meta"]["warnings"], list)
 
@@ -231,7 +231,7 @@ class TestGatewayResultFieldErrorHandling:
             WritePermissionError,
             WriteModeError,
         ) as exc:
-            if isinstance(exc, (CommandPolicyError, WritePermissionError, WriteModeError)):
+            if isinstance(exc, CommandPolicyError | WritePermissionError | WriteModeError):
                 code = "POLICY_VIOLATION"
             else:
                 code = "INTERNAL_ERROR"

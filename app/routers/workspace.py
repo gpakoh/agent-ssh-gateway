@@ -136,7 +136,7 @@ def _map_workspace_error(exc: Exception) -> HTTPException:
         return HTTPException(500, detail=_err(500, msg, code="WRITE_FAILED"))
 
     # Not found → 404
-    if isinstance(exc, (KeyError, WorkspacePolicyError)):
+    if isinstance(exc, KeyError | WorkspacePolicyError):
         if "unknown" in lower or "not found" in lower:
             return HTTPException(
                 404, detail=_err(404, msg, code=type(exc).__name__.upper())

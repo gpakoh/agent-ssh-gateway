@@ -22,10 +22,7 @@ class TestMetricsMiddleware:
     def test_request_recorded(self, client):
         """Request count and duration are recorded."""
         with patch("app.metrics.metrics") as mock_metrics:
-            resp = client.get(
-                "/api/workspace/projects/web-ssh-gateway/tree",
-                headers={"X-API-Key": settings.api_key},
-            )
+            resp = client.get("/health")
             assert resp.status_code == 200
             mock_metrics.record_request.assert_called_once()
             call_args = mock_metrics.record_request.call_args
@@ -48,14 +45,14 @@ class TestMetricsMiddleware:
         """Query tokens/params don't leak into metric labels."""
         with patch("app.metrics.metrics") as mock_metrics:
             client.get(
-                "/api/workspace/projects/web-ssh-gateway/tree",
-                headers={"X-API-Key": settings.api_key},
+                "/health?token=secret-token&api_key=secret-key",
             )
             call_args = mock_metrics.record_request.call_args
             endpoint = call_args[1]["endpoint"]
             # No query params in endpoint label
             assert "?" not in endpoint
-            assert "X-API-Key" not in endpoint
+            assert "secret-token" not in endpoint
+            assert "secret-key" not in endpoint
 
     def test_4xx_status_recorded(self, client):
         """4xx status codes are recorded."""
@@ -71,7 +68,9 @@ class TestMetricsMiddleware:
         """Non-2xx status codes are recorded."""
         with patch("app.metrics.metrics") as mock_metrics:
             # Hit an endpoint that returns non-2xx
-            client.get("/api/workspace/projects/nonexistent/tree",
-                headers={"X-API-Key": settings.api_key})
+            client.get(
+                "/api/workspace/projects/nonexistent/tree",
+                headers={"X-API-Key": settings.api_key},
+            )
             # Metrics should have been recorded
             assert mock_metrics.record_request.called

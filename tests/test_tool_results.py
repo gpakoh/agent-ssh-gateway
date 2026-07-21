@@ -66,7 +66,7 @@ class TestToolSuccess:
     def test_success_meta_has_duration_ms_default(self):
         result = tool_success("tool")
         assert result["meta"]["duration_ms"] == 0
-        assert isinstance(result["meta"]["duration_ms"], (int, float))
+        assert isinstance(result["meta"]["duration_ms"], int | float)
 
     def test_success_meta_has_truncated_default(self):
         result = tool_success("tool")
