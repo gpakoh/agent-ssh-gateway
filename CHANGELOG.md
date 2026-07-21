@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.38a0] - 2026-07-21
+
+### Fixed
+
+- **Circuit breaker wiring**: SSH connect path now real-protects through circuit breaker state transitions. Circuit breaker metric uses bounded aggregate label `ssh_gateway_circuit_breakers_count{state}` instead of unbounded per-host labels.
+
 ## [0.1.37a0] - 2026-07-21
 
 ### Added
