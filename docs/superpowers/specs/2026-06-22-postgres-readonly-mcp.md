@@ -2,13 +2,13 @@
 
 ## Goal
 
-Expose `example_vectordb` (PostgreSQL 15 + pgvector) as a read-only MCP adapter for ChatGPT AI agents behind `gateway.example.com/mcp/postgres`.
+Expose `example_vectordb` (PostgreSQL 15 + pgvector) as a read-only MCP adapter for ChatGPT AI agents behind `ssh-gateway.example.com/mcp/postgres`.
 
 Only `SELECT` queries on the `public` schema, with mandatory row limits, timeouts, and strict SQL guardrails. No write, no DDL, no system tables.
 
 ## Non-Goals
 
-- Connecting to `example_db`, `gitea`, `example_service_b`, `example_service_a`, `quart`, `astro`, or any other Postgres instance — only `example_vectordb`.
+- Connecting to any other production Postgres instance — only `example_vectordb`.
 - Write access (`INSERT`/`UPDATE`/`DELETE`/`COPY`).
 - DDL (`CREATE`/`ALTER`/`DROP`/`TRUNCATE`).
 - Admin operations (`VACUUM`/`ANALYZE`/`REFRESH MATERIALIZED VIEW`/`SET`/`GRANT`/`REVOKE`/`CALL`/`DO`).
@@ -22,7 +22,7 @@ Only `SELECT` queries on the `public` schema, with mandatory row limits, timeout
 | Container | `rag-db` |
 | Image | `pgvector/pgvector:pg15-bookworm` |
 | DB name | `example_vectordb` |
-| Network | `10.255.255.127` (`docker_macvlan_example` + `internal_net`) |
+| Network | `10.0.0.20` (`example_macvlan` + `internal_net`) |
 | Port | 5433 (host mapping) |
 | Current state | Empty (no user tables, pgvector extension not enabled) |
 | Current user | `raguser` (SUPERUSER — DO NOT USE for MCP) |
@@ -126,12 +126,12 @@ Returns: { installed: bool, version: string | null }
 ## Deployment Layout
 
 ```
-Host: LXC EXAMPLE (10.0.0.3)
+Host: internal host (10.0.0.10)
 Service: agent-mcp-postgres.service
 Internal port: 8784 (unauthenticated, loopback only)
 Public port: 8794 (auth proxy, bound to 0.0.0.0)
 Env file: /etc/agent-mcp-postgres.env (chmod 600)
-Nginx path: /mcp/postgres → http://10.0.0.3:8794/mcp?mcp_token=TOKEN
+Nginx path: /mcp/postgres → http://10.0.0.10:8794/mcp?mcp_token=TOKEN
 Tech: psycopg2 (sync, via concurrent.futures) + FastMCP streamable-http
 ```
 
@@ -146,7 +146,7 @@ MCP_PUBLIC_TOKEN=<generated>
 MCP_HOST=0.0.0.0
 MCP_PORT=8794
 MCP_INTERNAL_PORT=8784
-PGHOST=10.255.255.127
+PGHOST=10.0.0.20
 PGPORT=5432
 PGDATABASE=example_vectordb
 PGUSER=mcp_readonly
@@ -185,7 +185,7 @@ PGTARGET_SESSION_ATTRS=read-only
 ```bash
 # Init + tools/list + each tool via /mcp/postgres
 curl -s -D /tmp/pg_headers.txt -X POST \
-  "https://gateway.example.com/mcp/postgres?mcp_token=TOKEN" \
+  "https://ssh-gateway.example.com/mcp/postgres?mcp_token=TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{}}'
 ```
@@ -193,7 +193,7 @@ curl -s -D /tmp/pg_headers.txt -X POST \
 ## Rollback
 
 1. `systemctl stop agent-mcp-postgres.service`
-2. Remove nginx location block from `/etc/nginx/sites-available/gateway.example.com`
+2. Remove nginx location block from `/etc/nginx/sites-available/ssh-gateway.example.com`
 3. `systemctl reload nginx`
 4. `iptables -D INPUT -p tcp -s 10.0.0.0/24 --dport 8794 -j ACCEPT`
 5. Delete `/etc/agent-mcp-postgres.env`

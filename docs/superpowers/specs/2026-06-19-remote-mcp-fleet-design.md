@@ -2,7 +2,7 @@
 
 ## Goal
 
-Expose opencode's local MCP servers (browsermcp, context7, docker, github, postgres) to ChatGPT as separate remote MCP endpoints behind `gateway.example.com`, each with its own token, auth middleware, and nginx path.
+Expose opencode's local MCP servers (browsermcp, context7, docker, github, postgres) to ChatGPT as separate remote MCP endpoints behind `ssh-gateway.example.com`, each with its own token, auth middleware, and nginx path.
 
 ## Non-Goals
 
@@ -16,7 +16,7 @@ Expose opencode's local MCP servers (browsermcp, context7, docker, github, postg
 Each MCP server follows the same pattern as the existing `agent-ssh-gateway-mcp`:
 
 ```
-ChatGPT App → nginx (gateway.example.com) → Auth middleware (token in ?mcp_token=) 
+ChatGPT App → nginx (ssh-gateway.example.com) → Auth middleware (token in ?mcp_token=)
   → HTTP MCP adapter → local stdio MCP server
 ```
 
@@ -33,11 +33,11 @@ ChatGPT App → nginx (gateway.example.com) → Auth middleware (token in ?mcp_t
 
 All paths reside under `/mcp/` to inherit existing nginx location blocks (SSO bypass, WebSocket support, proxy buffering off).
 
-**proxy_pass path rule:** Each fleet adapter listens on its internal port with path `/mcp` (e.g. `http://127.0.0.1:8790/mcp`). The nginx `location /mcp/context7` must proxy to `http://10.0.0.3:8790/mcp` (not `/mcp/context7`), otherwise the path mismatch doubles. Example:
+**proxy_pass path rule:** Each fleet adapter listens on its internal port with path `/mcp` (e.g. `http://127.0.0.1:8790/mcp`). The nginx `location /mcp/context7` must proxy to `http://10.0.0.10:8790/mcp` (not `/mcp/context7`), otherwise the path mismatch doubles. Example:
 
 ```nginx
 location /mcp/context7 {
-    proxy_pass http://10.0.0.3:8790/mcp;
+    proxy_pass http://10.0.0.10:8790/mcp;
     proxy_buffering off;
     proxy_read_timeout 3600s;
 }
@@ -135,7 +135,7 @@ This is the same proven pattern as `chatgpt_remote_mcp/server.py` but with `mcp.
 
 ### nginx (VPS)
 - Add `/mcp/context7`, `/mcp/github`, `/mcp/docker`, `/mcp/postgres`, `/mcp/browser` location blocks above Authelia auth
-- Each: `proxy_pass http://10.0.0.3:<port>/mcp` (not `/mcp/<name>` — see path rule above)
+- Each: `proxy_pass http://10.0.0.10:<port>/mcp` (not `/mcp/<name>` — see path rule above)
 - `proxy_buffering off`, `proxy_read_timeout 3600s`
 
 ### iptables (VPS)

@@ -6,7 +6,7 @@ Production deployment: **VPS nginx relay** with Cloudflare DNS proxy (orange clo
 
 ```text
 ChatGPT / Agent
-  → https://gateway.example.com/mcp
+  → https://mcp.example.com/mcp
   → VPS nginx (:443 TLS, :80 plain)
   → proxy_pass http://127.0.0.1:18788
   → autossh reverse tunnel (VPS:18788 ↔ home:8788)
@@ -17,7 +17,7 @@ ChatGPT / Agent
 
 | Field | Value |
 |-------|-------|
-| URL | `https://gateway.example.com/mcp` |
+| URL | `https://mcp.example.com/mcp` |
 | Fallback | localtunnel URL (unchanged, emergency only) |
 | Auth | `Authorization: Bearer <token>` |
 | Protocol | Streamable HTTP / SSE |
@@ -28,11 +28,11 @@ ChatGPT / Agent
 
 ```bash
 # 401 without auth
-curl -s -o /dev/null -w "%{http_code}" https://gateway.example.com/mcp
+curl -s -o /dev/null -w "%{http_code}" https://mcp.example.com/mcp
 # → 401
 
 # 200 with auth + tools/list
-curl -s https://gateway.example.com/mcp \
+curl -s https://mcp.example.com/mcp \
   -H "Authorization: Bearer $MCP_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
@@ -64,18 +64,18 @@ python scripts/mcp_fleet_healthcheck.py --verbose
 ### VPS (nginx, port 80 + 443)
 
 - **Host**: `192.0.2.10` (Debian, same ISP as home)
-- **SSL**: Let's Encrypt (auto-renew), `/etc/letsencrypt/live/gateway.example.com/`
-- **Nginx config**: `/etc/nginx/sites-available/gateway.example.com` → symlink in `sites-enabled/`
+- **SSL**: Let's Encrypt (auto-renew), `/etc/letsencrypt/live/mcp.example.com/`
+- **Nginx config**: `/etc/nginx/sites-available/mcp.example.com` → symlink in `sites-enabled/`
 - **Upstream**: `http://127.0.0.1:18788` (SSH relay local listener)
 - **SSE settings**: `proxy_buffering off; proxy_cache off;` — required for Streamable HTTP transport
 - **http2**: Intentionally OFF — shares SSL listen socket with `AI-Docker.conf` (which has http2 disabled globally)
-- **Edit**: SSH → `cat /etc/nginx/sites-available/gateway.example.com` → edit → `nginx -t && systemctl reload nginx`
+- **Edit**: SSH → `cat /etc/nginx/sites-available/mcp.example.com` → edit → `nginx -t && systemctl reload nginx`
 
 ### Cloudflare DNS
 
-- **Record**: `gateway.example.com` A → `203.0.113.10`
+- **Record**: `mcp.example.com` A → `203.0.113.10`
 - **Proxy**: DNS only (grey cloud) — VPS serves Let's Encrypt TLS directly, no Cloudflare termination
-- **Zone**: `example.com` (zone ID: `deadbeefdeadbeefdeadbeefdeadbeef`)
+- **Zone**: `example.com` (zone ID: `<cloudflare-zone-id>`)
 
 ## Known Issues
 
@@ -113,7 +113,7 @@ Switch ChatGPT / agent MCP endpoint back to localtunnel:
 
 ```bash
 # localtunnel URL (emergency fallback, unchanged)
-https://xloud-gpt-mcp-bridge-7f4c2a.loca.lt/mcp
+https://example-mcp-bridge.loca.lt/mcp
 ```
 
 Change the endpoint URL in ChatGPT Developer Mode → MCP → edit URL.

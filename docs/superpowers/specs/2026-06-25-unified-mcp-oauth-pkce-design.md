@@ -35,7 +35,7 @@ All use the same `TokenAuthMiddleware` from `fleet/shared.py` (line 13):
 
 ### 1.3 Nginx Routing
 
-All MCP routes on `gateway.example.com`:
+All MCP routes on `ssh-gateway.example.com`:
 ```
 /mcp           → 127.0.0.1:8788  (Gateway)
 /mcp/context7  → 127.0.0.1:8790
@@ -151,11 +151,11 @@ class GatewayOAuthProvider(OAuthAuthorizationServerProvider[Client, User, AuthCo
 Returns RFC 8414 metadata:
 ```json
 {
-  "issuer": "https://gateway.example.com",
-  "authorization_endpoint": "https://gateway.example.com/oauth/authorize",
-  "token_endpoint": "https://gateway.example.com/oauth/token",
-  "registration_endpoint": "https://gateway.example.com/oauth/register",
-  "revocation_endpoint": "https://gateway.example.com/oauth/revoke",
+  "issuer": "https://ssh-gateway.example.com",
+  "authorization_endpoint": "https://ssh-gateway.example.com/oauth/authorize",
+  "token_endpoint": "https://ssh-gateway.example.com/oauth/token",
+  "registration_endpoint": "https://ssh-gateway.example.com/oauth/register",
+  "revocation_endpoint": "https://ssh-gateway.example.com/oauth/revoke",
   "scopes_supported": [
     "mcp:read", "mcp:project", "mcp:handoff",
     "mcp:agent-run", "mcp:docker", "mcp:postgres", "mcp:repo"
@@ -259,7 +259,7 @@ ClientRegistrationOptions(
 ### 5.1 Authorization Code + PKCE Flow
 
 ```
-Client (ChatGPT)                     Server (gateway.example.com)
+Client (ChatGPT)                     Server (ssh-gateway.example.com)
      │                                     │
      │  1. Generate code_verifier           │
      │     code_challenge = SHA256(verifier) │
@@ -522,7 +522,7 @@ OAuth endpoints are served by FastMCP on the same `/mcp` route:
 Options for user auth:
 1. **Authelia SSO integration** — redirect to `auth.example.com` for login, return to `/oauth/authorize`
 2. **Simple session cookie** — basic auth form on the same server
-3. **Separate auth subdomain** — `auth.gateway.example.com` with its own nginx block
+3. **Separate auth subdomain** — `auth.ssh-gateway.example.com` with its own nginx block
 
 **Decision for MVP:** Use simple session cookie (no external SSO dependency for `/oauth`). Can be upgraded to Authelia in Phase 3.
 
