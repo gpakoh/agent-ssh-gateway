@@ -142,3 +142,17 @@ class CircuitBreakerRegistry:
                 self._access_order.remove(host)
                 return True
             return False
+
+    async def count_by_state(self) -> dict[str, int]:
+        """Count breakers currently in each state.
+
+        Bounded, fixed-cardinality aggregate (3 possible states) — safe to
+        expose as a Prometheus label, unlike per-host breaker identity which
+        is unbounded (arbitrary SSH targets).
+        """
+        async with self._lock:
+            breakers = list(self._breakers.values())
+        counts = {state.value: 0 for state in CircuitState}
+        for breaker in breakers:
+            counts[breaker.state.value] += 1
+        return counts

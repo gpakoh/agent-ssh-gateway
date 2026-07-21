@@ -80,11 +80,13 @@ class MetricsCollector:
 
         self.queue_depth = Gauge("ssh_gateway_queue_depth", "Current queue depth", ["queue"])
 
-        # Circuit breaker metrics
-        self.circuit_breaker_state = Gauge(
-            "ssh_gateway_circuit_breaker_state",
-            "Circuit breaker state (0=closed, 1=half-open, 2=open)",
-            ["target"],
+        # Circuit breaker metrics — aggregate count by state, not per-host.
+        # Per-host labels would be unbounded cardinality (arbitrary SSH
+        # targets); per-host detail is available via /api/circuit-breaker/stats.
+        self.circuit_breaker_count = Gauge(
+            "ssh_gateway_circuit_breakers_count",
+            "Number of circuit breakers currently in each state",
+            ["state"],
         )
 
         # Lock metrics
@@ -155,10 +157,14 @@ class MetricsCollector:
         self.queue_depth.labels(queue="processing").set(processing)
         self.queue_depth.labels(queue="dead").set(dead)
 
-    def update_circuit_breaker(self, target: str, state: str):
-        """Update circuit breaker state metric."""
-        state_value = {"closed": 0, "half_open": 1, "open": 2}.get(state, 0)
-        self.circuit_breaker_state.labels(target=target).set(state_value)
+    def set_circuit_breaker_counts(self, counts: dict[str, int]) -> None:
+        """Set circuit breaker gauges from a state -> count mapping.
+
+        Overwrites all three known states each call so a state that drops to
+        zero breakers is reflected (not left stale from a prior scrape).
+        """
+        for state in ("closed", "half_open", "open"):
+            self.circuit_breaker_count.labels(state=state).set(counts.get(state, 0))
 
     def update_active_locks(self, count: int):
         """Update active locks metric."""

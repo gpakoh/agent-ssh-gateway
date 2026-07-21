@@ -121,6 +121,9 @@ async def api_help(request: Request, _identity: AuthIdentity = Depends(require_a
 @router.get("/metrics", tags=["system"], response_class=PlainTextResponse)
 async def prometheus_metrics(_identity: AuthIdentity = Depends(require_master_key)):
     """Prometheus metrics endpoint."""
+    if _state.circuit_breakers is not None:
+        counts = await _state.circuit_breakers.count_by_state()
+        metrics.set_circuit_breaker_counts(counts)
     return Response(content=metrics.get_metrics(), media_type="text/plain")
 
 

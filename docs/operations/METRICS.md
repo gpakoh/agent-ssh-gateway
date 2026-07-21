@@ -46,12 +46,24 @@ Labels:
 
 ## Circuit Breaker Metrics
 
+Circuit breakers are tracked per SSH target host, which is unbounded
+cardinality (arbitrary hostnames/IPs). To avoid an unbounded Prometheus
+label, the gauge below is an aggregate count by state, refreshed at
+scrape time — not a per-host series.
+
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `ssh_gateway_circuit_breaker_state` | Gauge | `target` | State: 0=closed, 1=half-open, 2=open |
+| `ssh_gateway_circuit_breakers_count` | Gauge | `state` | Number of breakers currently in each state (`closed`, `half_open`, `open`) |
 
-Labels:
-- `target`: bounded to `ssh`, `redis`, `postgres` (no raw host/IP)
+Per-host detail (which specific host has an open breaker, failure counts,
+etc.) is available via `GET /api/circuit-breaker/stats` (JSON, master key
+required) — deliberately not exposed as Prometheus labels.
+
+Wiring: `SSHSessionManager.create_session()` checks `can_execute()` before
+attempting a connection and records success/failure per host. Authentication
+failures (bad credentials) do not count as circuit-breaker failures — the
+host is reachable, so only connection-level failures (timeout, refused,
+network error) open the breaker.
 
 ## Lock Metrics
 
