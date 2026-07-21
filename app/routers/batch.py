@@ -8,6 +8,7 @@ from app import state as _state
 from app.auth_middleware import AuthIdentity, require_master_key
 from app.command_policy import evaluate_command_policy, parse_key_profiles, profile_for_identity
 from app.config import settings
+from app.metrics import metrics
 from app.models import (
     BatchExecuteRequest,
     BatchExecuteResponse,
@@ -66,6 +67,11 @@ async def batch_execute(
             )
 
             if not decision.allowed:
+                metrics.record_ssh_command(
+                    status="denied",
+                    profile=decision.profile,
+                    command_root=decision.command_root,
+                )
                 raise HTTPException(
                     status_code=403,
                     detail=_err(403, f"Command denied by policy: {decision.reason}"),
@@ -103,6 +109,15 @@ async def batch_execute(
         run_validation=req.run_validation,
         transaction_id=str(uuid.uuid4())[:8],
     )
+
+    # Record metrics for execute-type operations that passed policy
+    for op in req.operations:
+        if op.type == "execute" and op.command:
+            metrics.record_ssh_command(
+                status="allowed",
+                profile=effective_profile,
+                command_root=None,
+            )
 
     return BatchExecuteResponse(
         transaction_id=result.transaction_id,

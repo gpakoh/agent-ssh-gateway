@@ -8,6 +8,7 @@ import uuid
 
 import redis.asyncio as redis
 
+from .metrics import metrics
 from .redis_compat import close_redis_client
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,18 @@ class RedisJobQueue:
         self._dead_letter_key = "ssh_gateway:jobs:dead"
         self._job_prefix = "ssh_gateway:job:"
         self._lease_prefix = "ssh_gateway:lease:"
+
+    async def _update_queue_depth_metrics(self):
+        """Update Prometheus queue depth gauge from current Redis state."""
+        if not self._redis:
+            return
+        try:
+            pending = await self._redis.zcard(self._queue_key)
+            processing = await self._redis.zcard(self._processing_key)
+            dead = await self._redis.zcard(self._dead_letter_key)
+            metrics.update_queue_depth(pending=pending, processing=processing, dead=dead)
+        except Exception:
+            pass  # metrics update is best-effort
 
     async def connect(self):
         """Connect to Redis."""
@@ -101,6 +114,7 @@ class RedisJobQueue:
             await pipe.execute()
 
         logger.info("Job %s enqueued (priority=%d, session=%s)", job_id, priority, session_id)
+        await self._update_queue_depth_metrics()
         return job_id
 
     async def dequeue(self, lease_ttl: int = 120) -> dict | None:
@@ -141,6 +155,8 @@ class RedisJobQueue:
                 )
                 await pipe.execute()
 
+        if job_data:
+            await self._update_queue_depth_metrics()
         return job_data
 
     async def heartbeat(self, job_id: str, lease_ttl: int = 120) -> bool:
@@ -192,6 +208,7 @@ class RedisJobQueue:
         await self._redis.zadd(self._completed_key, {job_id: time.time()})
 
         logger.info("Job %s completed (exit_code=%d)", job_id, exit_code)
+        await self._update_queue_depth_metrics()
 
     async def retry_job(self, job_id: str, error: str) -> bool:
         """Retry failed job.
@@ -222,6 +239,7 @@ class RedisJobQueue:
                 job_id,
                 job_data["retry_count"],
             )
+            await self._update_queue_depth_metrics()
             return False
 
         # Requeue With Exponential Backoff
@@ -246,6 +264,7 @@ class RedisJobQueue:
             job_data["max_retries"],
             backoff,
         )
+        await self._update_queue_depth_metrics()
         return True
 
     async def get_job(self, job_id: str) -> dict | None:

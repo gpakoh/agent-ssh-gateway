@@ -32,6 +32,7 @@ class TestHealthReadiness:
             mock_state.redis_queue = mock_redis
             mock_state.session_store = mock_session_store
             mock_settings.redis_url = "redis://localhost:6379"
+            mock_settings.persistent_sessions_enabled = False
 
             with TestClient(app) as client:
                 resp = client.get("/health")
@@ -51,6 +52,7 @@ class TestHealthReadiness:
             mock_state.redis_queue = mock_redis
             mock_state.session_store = None
             mock_settings.redis_url = "redis://localhost:6379"
+            mock_settings.persistent_sessions_enabled = False
 
             with TestClient(app) as client:
                 resp = client.get("/health")
@@ -68,12 +70,34 @@ class TestHealthReadiness:
             mock_state.redis_queue._redis = None
             mock_state.session_store = None
             mock_settings.redis_url = ""  # no redis configured
+            mock_settings.persistent_sessions_enabled = False
 
             with TestClient(app) as client:
                 resp = client.get("/health")
             data = resp.json()
             assert data["status"] == "ok"
             assert data["ready"] is True
+
+    def test_ready_false_when_persistent_sessions_enabled_but_store_none(self):
+        """ready=false when persistent_sessions_enabled but session_store is None."""
+        mock_redis = MagicMock()
+        mock_redis._redis = MagicMock()  # redis is fine
+
+        with (
+            patch("app.routers.system._state") as mock_state,
+            patch("app.routers.system.settings") as mock_settings,
+        ):
+            mock_state.redis_queue = mock_redis
+            mock_state.session_store = None  # postgres/session store missing
+            mock_settings.redis_url = "redis://localhost:6379"
+            mock_settings.persistent_sessions_enabled = True
+
+            with TestClient(app) as client:
+                resp = client.get("/health")
+            data = resp.json()
+            assert data["status"] == "degraded"
+            assert data["ready"] is False
+            assert data["persistent_sessions"] is False
 
 
 class TestCircuitBreakerMetricCardinality:
