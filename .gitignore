@@ -21,6 +21,9 @@ mypy.ini
 # Generated SSH keys
 ssh_keys/
 
+# Runtime log files
+logs/
+
 # Archives
 *.zip
 *.tar.gz
