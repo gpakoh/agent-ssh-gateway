@@ -1359,7 +1359,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "title": "View Prometheus metrics",
                     "description": "Returns all gateway metrics in Prometheus text format. Key metrics: HTTP requests total, request latency histogram, active SSH connections, job queue depth, circuit breaker states.",
                     "request": "GET /metrics",
-                    "response_preview": 'ssh_gateway_requests_total{method="POST",endpoint="/api/ssh/connect",status="200"} 42\nssh_gateway_ssh_connections_active 3.0\nssh_gateway_queue_depth{queue="pending"} 0\nssh_gateway_circuit_breaker_state{target="ssh"} 0',
+                    "response_preview": 'ssh_gateway_requests_total{method="POST",endpoint="/api/ssh/connect",status="200"} 42\nssh_gateway_ssh_connections_active 3.0\nssh_gateway_queue_depth{queue="pending"} 0\nssh_gateway_circuit_breakers_count{state="open"} 0',
                     "notes": "Formatter: Prometheus exposition. Parse with promtool or any Prometheus client library. The /api/circuit-breaker/stats endpoint gives a friendlier JSON view of circuit breaker states.",
                 },
                 {

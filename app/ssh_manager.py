@@ -17,6 +17,7 @@ from paramiko.ssh_exception import (
     SSHException,
 )
 
+from app.circuit_breaker import CircuitBreakerRegistry
 from app.config import settings
 from app.known_hosts import HostKeyStore, KnownHostsPolicy, NullHostKeyStore
 from app.security import SecretManager
@@ -153,6 +154,7 @@ class SSHSessionManager:
         session_timeout: int = 300,
         cleanup_interval: int = 60,
         host_key_store: HostKeyStore | None = None,
+        circuit_breakers: CircuitBreakerRegistry | None = None,
     ) -> None:
         self._sessions: dict[str, SessionRecord] = {}
         self._lock = asyncio.Lock()
@@ -161,6 +163,7 @@ class SSHSessionManager:
         self._cleanup_task: asyncio.Task | None = None
         self._strict_host_key = settings.ssh_strict_host_key_checking
         self._host_key_store = host_key_store or NullHostKeyStore()
+        self._circuit_breakers = circuit_breakers
         try:
             self._secret_manager = (
                 SecretManager(settings.encryption_key) if settings.encryption_key else None
@@ -272,6 +275,15 @@ class SSHSessionManager:
         owner_token_fingerprint: str | None = None,
     ) -> str:
         """Create a new SSH session and return its session ID."""
+        breaker = None
+        if self._circuit_breakers is not None:
+            breaker = await self._circuit_breakers.get_breaker(host)
+            if not await breaker.can_execute():
+                raise ConnectionError(
+                    f"Circuit breaker open for {host} — too many recent connection "
+                    "failures, refusing to attempt connection"
+                )
+
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(self._get_host_key_policy(port=port))
 
@@ -296,13 +308,21 @@ class SSHSessionManager:
                 ),
             )
         except AuthenticationException as exc:
+            # Host is reachable, credentials are wrong — not a circuit-breaker
+            # failure signal (would otherwise let repeated bad passwords
+            # deny service to legitimate connections against a healthy host).
             client.close()
             raise AuthenticationError(
                 f"Authentication failed for {username}@{host}: {exc}"
             ) from exc
         except (NoValidConnectionsError, SSHException, OSError) as exc:
+            if breaker is not None:
+                await breaker.record_failure()
             client.close()
             raise ConnectionError(f"Could not connect to {host}:{port}: {exc}") from exc
+
+        if breaker is not None:
+            await breaker.record_success()
 
         # Увеличить размер окна ssh для потоковой передачи
         transport = client.get_transport()

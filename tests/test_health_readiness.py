@@ -2,8 +2,10 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from starlette.testclient import TestClient
 
+from app.config import settings
 from app.main import app
 
 
@@ -101,20 +103,44 @@ class TestHealthReadiness:
 
 
 class TestCircuitBreakerMetricCardinality:
-    """circuit_breaker_state must use bounded 'target' label, not raw 'host'."""
+    """circuit_breaker metric must be a bounded state-count aggregate, never per-host."""
 
-    def test_gauge_uses_target_label(self):
+    def test_counts_by_state_bounded_labels(self):
         from app.metrics import metrics
 
-        metrics.update_circuit_breaker(target="ssh", state="closed")
-        metrics.update_circuit_breaker(target="redis", state="open")
-        metrics.update_circuit_breaker(target="postgres", state="half_open")
+        metrics.set_circuit_breaker_counts({"closed": 2, "half_open": 1, "open": 3})
 
         output = metrics.get_metrics().decode()
-        assert 'target="ssh"' in output
-        assert 'target="redis"' in output
-        assert 'target="postgres"' in output
-        # Must NOT contain raw host label in circuit_breaker lines
+        assert 'ssh_gateway_circuit_breakers_count{state="closed"} 2.0' in output
+        assert 'ssh_gateway_circuit_breakers_count{state="half_open"} 1.0' in output
+        assert 'ssh_gateway_circuit_breakers_count{state="open"} 3.0' in output
+        # Must never carry a raw host/target label — only the 3 fixed states.
         for line in output.splitlines():
-            if "ssh_gateway_circuit_breaker_state" in line and "ssh_gateway_circuit_breaker_state_total" not in line:
-                assert "host=" not in line, f"Unbounded host label found: {line}"
+            if line.startswith("ssh_gateway_circuit_breakers_count{"):
+                assert "host=" not in line
+                assert "target=" not in line
+
+    @pytest.mark.asyncio
+    async def test_metrics_endpoint_reflects_live_registry(self):
+        """GET /metrics refreshes the aggregate from the real registry, not stale values."""
+        from app.circuit_breaker import CircuitBreakerRegistry
+
+        reg = CircuitBreakerRegistry()
+        cb_open = await reg.get_breaker("arbitrary-customer-host.example.com", failure_threshold=1)
+        await cb_open.record_failure()
+        await reg.get_breaker("another-host")
+
+        with (
+            patch("app.routers.system._state") as mock_state,
+            patch("app.auth_middleware.get_client_ip", return_value="127.0.0.1"),
+        ):
+            mock_state.circuit_breakers = reg
+            with TestClient(app) as client:
+                resp = client.get("/metrics", headers={"X-API-Key": settings.api_key})
+
+        body = resp.text
+        assert 'ssh_gateway_circuit_breakers_count{state="open"} 1.0' in body
+        assert 'ssh_gateway_circuit_breakers_count{state="closed"} 1.0' in body
+        # The arbitrary hostnames used to build these breakers must never
+        # leak into the metric output as label values.
+        assert "arbitrary-customer-host.example.com" not in body
