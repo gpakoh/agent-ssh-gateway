@@ -859,6 +859,33 @@ async def request_id_middleware(request: Request, call_next):
 
 
 @app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    """Record request count, duration, and status for Prometheus metrics."""
+    import time
+
+    from app.metrics import metrics
+
+    method = request.method
+    # Use route template if available, else fallback to "unknown"
+    endpoint = "unknown"
+    if request.scope.get("route"):
+        endpoint = request.scope["route"].path
+
+    start = time.monotonic()
+    response = await call_next(request)
+    duration = time.monotonic() - start
+
+    metrics.record_request(
+        method=method,
+        endpoint=endpoint,
+        status=response.status_code,
+        duration=duration,
+    )
+
+    return response
+
+
+@app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     exc = await auth_check(request, settings, state.agent_token_store)
     if exc is not None:

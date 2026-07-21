@@ -13,6 +13,7 @@ from app.auth_middleware import AuthIdentity, require_scope
 from app.command_policy import evaluate_command_policy, parse_key_profiles, profile_for_identity
 from app.config import settings
 from app.exceptions import JobNotFoundError, PermissionDeniedError
+from app.metrics import metrics
 from app.models import (
     BulkExecuteRequest,
     BulkExecuteResponse,
@@ -84,6 +85,11 @@ async def jobs_run(
     )
 
     if not decision.allowed:
+        metrics.record_ssh_command(
+            status="denied",
+            profile=decision.profile,
+            command_root=decision.command_root,
+        )
         raise HTTPException(
             status_code=403,
             detail=_err(403, f"Command denied by policy: {decision.reason}"),
@@ -92,6 +98,11 @@ async def jobs_run(
     job_id = await _state.job_manager.create_job(
         session_id=req.session_id,
         command=req.command,
+    )
+    metrics.record_ssh_command(
+        status="allowed",
+        profile=decision.profile,
+        command_root=decision.command_root,
     )
     return JobRunResponse(job_id=job_id)
 
@@ -131,6 +142,11 @@ async def jobs_queue_stats(_identity: AuthIdentity = Depends(require_scope("jobs
         return {"error": "Redis not available"}
 
     stats = await _state.redis_queue.get_queue_stats()
+    metrics.update_queue_depth(
+        pending=stats.get("pending", 0),
+        processing=stats.get("processing", 0),
+        dead=stats.get("dead_letter", 0),
+    )
     return stats
 
 
@@ -176,6 +192,11 @@ async def bulk_execute(
             source_ip,
         )
         if not decision.allowed:
+            metrics.record_ssh_command(
+                status="denied",
+                profile=decision.profile,
+                command_root=decision.command_root,
+            )
             raise HTTPException(
                 status_code=403,
                 detail=_err(403, f"Command denied by policy: {decision.reason}"),
@@ -188,6 +209,12 @@ async def bulk_execute(
         _state.manager,
         max_concurrency=10,
     )
+    for _cmd in req.commands:
+        metrics.record_ssh_command(
+            status="allowed",
+            profile=effective_profile,
+            command_root=None,
+        )
 
     # Convert To Response Format
     response_results = []

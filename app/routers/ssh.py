@@ -33,6 +33,7 @@ from app.auth_middleware import (
 )
 from app.command_policy import evaluate_command_policy, parse_key_profiles, profile_for_identity
 from app.config import settings
+from app.metrics import metrics
 from app.models import (
     AgentTokenRefreshRequest,
     AgentTokenRefreshResponse,
@@ -338,6 +339,11 @@ async def ssh_execute(
     )
 
     if not decision.allowed:
+        metrics.record_ssh_command(
+            status="denied",
+            profile=decision.profile,
+            command_root=decision.command_root,
+        )
         raise HTTPException(
             status_code=403,
             detail=_err(403, f"Command denied by policy: {decision.reason}"),
@@ -367,6 +373,11 @@ async def ssh_execute(
         session_id=req.session_id,
         command=sanitized,
         timeout=req.timeout,
+    )
+    metrics.record_ssh_command(
+        status="allowed",
+        profile=decision.profile,
+        command_root=decision.command_root,
     )
     stdout = result["stdout"]
     stderr = result["stderr"]
@@ -437,6 +448,11 @@ async def ssh_execute_argv(
     )
 
     if not decision.allowed:
+        metrics.record_ssh_command(
+            status="denied",
+            profile=decision.profile,
+            command_root=decision.command_root,
+        )
         raise HTTPException(
             status_code=403,
             detail=_err(403, f"Command denied by policy: {decision.reason}"),
@@ -456,6 +472,11 @@ async def ssh_execute_argv(
         command_str=command_str,
         stdin_data=stdin_bytes,
         timeout=req.timeout_s,
+    )
+    metrics.record_ssh_command(
+        status="allowed",
+        profile=decision.profile,
+        command_root=decision.command_root,
     )
 
     max_output = 10 * 1024 * 1024
@@ -661,6 +682,11 @@ async def ssh_execute_stream(websocket: WebSocket):
         )
 
         if not decision.allowed:
+            metrics.record_ssh_command(
+                status="denied",
+                profile=decision.profile,
+                command_root=decision.command_root,
+            )
             await websocket.send_json(
                 {
                     "type": "error",
@@ -692,6 +718,12 @@ async def ssh_execute_stream(websocket: WebSocket):
 
         async for msg_type, msg_data in _state.manager.execute_stream(session_id, command):
             await websocket.send_json({"type": msg_type, "data": msg_data})
+
+        metrics.record_ssh_command(
+            status="allowed",
+            profile=decision.profile,
+            command_root=decision.command_root,
+        )
 
     except WebSocketDisconnect:
         logger.info("Websocket Client Disconnected")

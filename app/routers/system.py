@@ -42,7 +42,9 @@ async def health_check():
     redis_ok = _state.redis_queue is not None and _state.redis_queue._redis is not None
     persistent_sessions_ok = _state.session_store is not None
     meta = build_info.get_build_metadata()
-    status = "ok" if redis_ok or not settings.redis_url else "degraded"
+    redis_degraded = not redis_ok and settings.redis_url
+    sessions_degraded = settings.persistent_sessions_enabled and not persistent_sessions_ok
+    status = "degraded" if redis_degraded or sessions_degraded else "ok"
     return HealthResponse(
         status=status,
         redis=redis_ok,
