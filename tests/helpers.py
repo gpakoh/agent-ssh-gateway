@@ -83,7 +83,7 @@ def assert_tool_envelope(
         )
         assert len(meta["request_id"]) > 0, "request_id must not be empty"
         assert "duration_ms" in meta, "meta missing 'duration_ms'"
-        assert isinstance(meta["duration_ms"], (int, float)), (
+        assert isinstance(meta["duration_ms"], int | float), (
             f"duration_ms must be numeric, got {type(meta['duration_ms']).__name__}"
         )
         assert meta["duration_ms"] >= 0, f"duration_ms must be >= 0, got {meta['duration_ms']}"
