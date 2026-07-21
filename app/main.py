@@ -76,10 +76,12 @@ async def lifespan(app: FastAPI):
     if not isinstance(state.host_key_store, NullHostKeyStore):
         logger.info("Host key store initialized: %s", type(state.host_key_store).__name__)
 
+    state.circuit_breakers = CircuitBreakerRegistry()
     state.manager = SSHSessionManager(
         session_timeout=settings.session_timeout,
         cleanup_interval=settings.cleanup_interval,
         host_key_store=state.host_key_store,
+        circuit_breakers=state.circuit_breakers,
     )
     await state.manager.start_cleanup_task()
 
@@ -140,7 +142,6 @@ async def lifespan(app: FastAPI):
 
     # Initialize Swarm Components
     state.redis_queue = RedisJobQueue(settings.redis_url)
-    state.circuit_breakers = CircuitBreakerRegistry()
     state.dist_lock = DistributedLock(settings.redis_url)
     state.bulk_ops = BulkOperationsManager(max_concurrency=50)
 
