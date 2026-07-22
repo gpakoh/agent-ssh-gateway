@@ -78,3 +78,65 @@ def format_audit_event(event: Mapping[str, Any]) -> str | None:
         lines.append(f"reason: <code>{reason}</code>")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Status rendering for Telegram
+# ---------------------------------------------------------------------------
+
+_STATUS_ICONS = {
+    "ok": "✅",
+    "degraded": "⚠️",
+    "error": "❌",
+    "true": "🟢",
+    "false": "🔴",
+}
+
+
+def _status_icon(value: Any) -> str:
+    """Map a boolean/string status to an emoji icon."""
+    text = str(value).lower()
+    return _STATUS_ICONS.get(text, "⚪")
+
+
+def render_health_status(health: dict[str, Any]) -> str:
+    """Render a health dict into Telegram-safe status text.
+
+    Safe: no host/IP/secrets/raw env values.
+    Only includes: version, status, ready, redis, postgres,
+    persistent_sessions, readonly, mode.
+    """
+    lines = ["<b>Gateway Status</b>", ""]
+
+    version = str(health.get("version", "unknown"))
+    lines.append(f"version: <code>{version}</code>")
+
+    status = str(health.get("status", "unknown"))
+    icon = _STATUS_ICONS.get(status, "⚪")
+    lines.append(f"status: {icon} <code>{status}</code>")
+
+    ready = health.get("ready")
+    if ready is not None:
+        lines.append(f"ready: {_status_icon(ready)} <code>{ready}</code>")
+
+    redis = health.get("redis")
+    if redis is not None:
+        lines.append(f"redis: {_status_icon(redis)} <code>{redis}</code>")
+
+    postgres = health.get("postgres")
+    if postgres is not None:
+        lines.append(f"postgres: {_status_icon(postgres)} <code>{postgres}</code>")
+
+    persistent = health.get("persistent_sessions")
+    if persistent is not None:
+        lines.append(f"persistent_sessions: {_status_icon(persistent)} <code>{persistent}</code>")
+
+    readonly = health.get("readonly")
+    if readonly is not None:
+        lines.append(f"readonly: {_status_icon(readonly)} <code>{readonly}</code>")
+
+    mode = health.get("mode")
+    if mode:
+        lines.append(f"mode: <code>{mode}</code>")
+
+    return "\n".join(lines)
