@@ -138,3 +138,49 @@ def test_public_hygiene_scan_has_no_public_repo_topology_hints() -> None:
     assert result.returncode == 0, (
         f"check_public_hygiene.py failed:\n{result.stdout}\n{result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Live overlay contract tests
+# ---------------------------------------------------------------------------
+
+
+def _is_gitignored(path: Path) -> bool:
+    result = subprocess.run(
+        ["git", "check-ignore", str(path.relative_to(ROOT))],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    return result.returncode == 0
+
+
+def test_live_overlay_is_gitignored() -> None:
+    live = ROOT / "docker" / "docker-compose.live.yml"
+    assert _is_gitignored(live), (
+        "docker-compose.live.yml must be gitignored (contains private network topology)"
+    )
+
+
+def test_docker_env_is_gitignored() -> None:
+    env = ROOT / "docker" / ".env"
+    assert _is_gitignored(env), (
+        "docker/.env must be gitignored (contains secrets)"
+    )
+
+
+def test_live_example_is_tracked() -> None:
+    example = ROOT / "docker" / "docker-compose.live.example.yml"
+    assert not _is_gitignored(example), (
+        "docker-compose.live.example.yml should be tracked (public template)"
+    )
+
+
+def test_main_compose_has_no_hardcoded_private_values() -> None:
+    compose = ROOT / "docker" / "docker-compose.yml"
+    content = compose.read_text(encoding="utf-8")
+    forbidden = ["10.10.10.", "192.168.", "/media/1TB/", "proxmox_macvlan"]
+    found = [p for p in forbidden if p in content]
+    assert not found, (
+        f"docker-compose.yml contains hardcoded private values: {found}"
+    )
