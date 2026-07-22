@@ -103,11 +103,11 @@ def test_compose_absolute_path_inside_allowed_root():
     """Absolute file_path within MCP_GATEWAY_PROJECT_ROOT is allowed."""
     c = _client()
     result = c._resolve_compose_file_path(
-        "/media/1TB/Python/web_ssh/web-ssh-gateway/docker/docker-compose.yml",
+        "<repo-root>/docker/docker-compose.yml",
         project_dir=None,
-        allowed_roots={"/media/1TB/Python/web_ssh"},
+        allowed_roots={"<workspace-root>/web_ssh"},
     )
-    assert result == "/media/1TB/Python/web_ssh/web-ssh-gateway/docker/docker-compose.yml"
+    assert result == "<repo-root>/docker/docker-compose.yml"
 
 
 def test_compose_absolute_path_outside_allowed_root():
@@ -117,7 +117,7 @@ def test_compose_absolute_path_outside_allowed_root():
         c._resolve_compose_file_path(
             "/etc/passwd",
             project_dir=None,
-            allowed_roots={"/media/1TB/Python/web_ssh"},
+            allowed_roots={"<workspace-root>/web_ssh"},
         )
 
 
@@ -208,7 +208,7 @@ def test_compose_up_no_detach():
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m pytest tests/test_docker_client.py -v 2>&1 | head -40`
+Run: `cd <repo-root> && python -m pytest tests/test_docker_client.py -v 2>&1 | head -40`
 Expected: ModuleNotFoundError or AttributeError — methods not yet implemented
 
 - [ ] **Step 3: Add `COMPOSE_PATH_RE` and `_resolve_compose_file_path` to `docker_client.py`**
@@ -243,7 +243,7 @@ Implementation logic:
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m pytest tests/test_docker_client.py::test_compose_relative_path_resolved_under_project_dir tests/test_docker_client.py::test_compose_absolute_path_inside_allowed_root tests/test_docker_client.py::test_compose_path_traversal_blocked -v`
+Run: `cd <repo-root> && python -m pytest tests/test_docker_client.py::test_compose_relative_path_resolved_under_project_dir tests/test_docker_client.py::test_compose_absolute_path_inside_allowed_root tests/test_docker_client.py::test_compose_path_traversal_blocked -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -283,13 +283,13 @@ async def restart(self, container: str, timeout: int = 10) -> str:
 
 - [ ] **Step 2: Run unit tests for validation**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m pytest tests/test_docker_client.py::test_start_invalid_container_raises tests/test_docker_client.py::test_stop_invalid_container_raises tests/test_docker_client.py::test_restart_invalid_container_raises tests/test_docker_client.py::test_restart_timeout_out_of_range -v`
+Run: `cd <repo-root> && python -m pytest tests/test_docker_client.py::test_start_invalid_container_raises tests/test_docker_client.py::test_stop_invalid_container_raises tests/test_docker_client.py::test_restart_invalid_container_raises tests/test_docker_client.py::test_restart_timeout_out_of_range -v`
 Expected: PASS
 
 - [ ] **Step 3: Run live smoke test on sshd container**
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway
+cd <repo-root>
 # Get test-sshd container name
 docker ps --filter name=ssh --format '{{.Names}}'
 # Test restart (stop then start via the agent)
@@ -417,7 +417,7 @@ async def compose_logs(
 
 - [ ] **Step 2: Run unit tests for compose validation**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m pytest tests/test_docker_client.py::test_compose_up_invalid_file_raises tests/test_docker_client.py::test_compose_up_invalid_service_raises tests/test_docker_client.py::test_compose_up_detach_default_true tests/test_docker_client.py::test_compose_up_no_detach -v`
+Run: `cd <repo-root> && python -m pytest tests/test_docker_client.py::test_compose_up_invalid_file_raises tests/test_docker_client.py::test_compose_up_invalid_service_raises tests/test_docker_client.py::test_compose_up_detach_default_true tests/test_docker_client.py::test_compose_up_no_detach -v`
 Expected: PASS
 
 - [ ] **Step 3: Commit**
@@ -545,12 +545,12 @@ async def docker_compose_logs(
 
 - [ ] **Step 4: Run syntax check**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m py_compile examples/mcp_server/server.py examples/mcp_server/tool_scopes.py examples/mcp_server/tool_modes.py`
+Run: `cd <repo-root> && python -m py_compile examples/mcp_server/server.py examples/mcp_server/tool_scopes.py examples/mcp_server/tool_modes.py`
 Expected: no output (clean compile)
 
 - [ ] **Step 5: Run existing tests to ensure no regressions**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m pytest tests/test_docker_output_redaction.py tests/test_docker_client.py -v`
+Run: `cd <repo-root> && python -m pytest tests/test_docker_output_redaction.py tests/test_docker_client.py -v`
 Expected: all pass
 
 - [ ] **Step 6: Commit**
@@ -619,7 +619,7 @@ git commit -m "docs: add Docker operations section to runbook"
 - [ ] **Step 1: Run full test suite**
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway
+cd <repo-root>
 python -m pytest tests/test_docker_output_redaction.py tests/test_docker_client.py -v
 ```
 

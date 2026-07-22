@@ -347,7 +347,7 @@ This project follows semantic versioning where practical, but the public API is 
 
 - `gateway_project_run_agent` MCP tool registered and visible through public endpoint. Router wired to `agent_tools.py` — reads `task.json` with `agent: "auto"`, delegates via `AgentBackendRouter`. (Session 133a)
 - `scripts/mcp_fleet_healthcheck.py` expected tool count updated 85→86. (Session 133a.1)
-- Production env `/etc/agent-ssh-gateway-mcp.env`: `MCP_AGENT_BACKEND_ROUTER_ENABLED=true`. (Session 133b)
+- Production env `<mcp-env-file>`: `MCP_AGENT_BACKEND_ROUTER_ENABLED=true`. (Session 133b)
 
 ### Verified
 
@@ -479,7 +479,7 @@ This project follows semantic versioning where practical, but the public API is 
 
 - `proxy.py`: `mcp_token` query → Bearer header injection now routes through `GatewayOAuthProvider.verify_access_token()` in mixed mode; no token → 401. (Session 113)
 - `server.py`: auth config block reorganized — `MCP_AUTH_MODE` switch selects between token (default, no auth), oauth (FastMCP-native), and mixed (proxy auth + provider pre-loaded). (Session 113)
-- `/etc/agent-ssh-gateway-mcp.env`: `MCP_AUTH_MODE=mixed` (was: token-only, no MCP_AUTH_MODE set). (Session 113)
+- `<mcp-env-file>`: `MCP_AUTH_MODE=mixed` (was: token-only, no MCP_AUTH_MODE set). (Session 113)
 - Healthcheck: 6/6 adapters healthy, 85 Gateway tools available. (Session 113)
 
 ## [0.1.15-alpha] - 2026-06-25
@@ -630,7 +630,7 @@ This project follows semantic versioning where practical, but the public API is 
 
 - The RLM auditor root-agent now uses `gateway_execute_restricted()` with allowlist validation instead of raw `gateway_execute()`.
 - WebSocket stream timeout raised from 30s to 600s for long-running interactive sessions.
-- Docker Compose networks changed to `external: true`; gateway container now attaches to `example_macvlan` with static IP `10.0.0.10` for direct LXC→container routing behind nginx.
+- Docker Compose networks changed to `external: true`; gateway container now attaches to `example_macvlan` with static IP `<ip-address>` for direct LXC→container routing behind nginx.
 - `docs/RLM_ADAPTER_EXPERIMENT.md` updated with the v0–v3 implementation milestone table.
 
 ### Docs

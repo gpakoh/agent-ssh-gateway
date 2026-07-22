@@ -6,7 +6,7 @@
 
 ## Overview
 
-Phase B turns the Phase A workspace registry into a safe read-only IDE surface for agents. It adds file inspection, file discovery, text search, and git inspection for projects under `/media/1TB/Python`, always scoped by `project_id` and guarded by `WorkspacePolicy`.
+Phase B turns the Phase A workspace registry into a safe read-only IDE surface for agents. It adds file inspection, file discovery, text search, and git inspection for projects under `<workspace-root>`, always scoped by `project_id` and guarded by `WorkspacePolicy`.
 
 Phase B is still read-only. It does not add file write/edit, command execution, test runners, docker operations, service restarts, database operations, or arbitrary shell access.
 
@@ -269,7 +269,7 @@ Wrappers do parameter mapping and error mapping only. They must not reimplement 
 - `test_git_log_limit_capped`
 - `test_shims_still_import`
 
-Unit tests use temp projects and temp git repos. They must not depend on `/media/1TB/Python`.
+Unit tests use temp projects and temp git repos. They must not depend on `<workspace-root>`.
 
 ### Real smoke
 

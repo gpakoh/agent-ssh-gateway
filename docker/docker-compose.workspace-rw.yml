@@ -4,7 +4,7 @@
 #   docker compose -f docker/docker-compose.yml -f docker/docker-compose.workspace-rw.yml up -d
 #
 # Scope: only the repo directory is switched to :rw.
-# Base /media/1TB/Python:ro stays.  projects.yaml, ssh_keys, read_only unchanged.
+# Base workspace mount stays read-only. projects.yaml, ssh_keys, read_only unchanged.
 
 name: web-ssh-gateway
 
@@ -13,4 +13,4 @@ services:
     environment:
       - WORKSPACE_READONLY=false
     volumes:
-      - /media/1TB/Python/web_ssh/web-ssh-gateway:/media/1TB/Python/web_ssh/web-ssh-gateway:rw
+      - ${WORKSPACE_RW_HOST_PATH:-..}:${WORKSPACE_RW_CONTAINER_PATH:-/workspace}:rw

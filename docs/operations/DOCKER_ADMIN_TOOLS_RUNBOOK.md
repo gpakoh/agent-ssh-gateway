@@ -85,7 +85,7 @@ Checked **before** confirmation token creation. The following are blocked:
 | Environment dump | `env`, `printenv` | `DOCKER_EXEC_COMMAND_BLOCKED` |
 | Shadow files | `cat /etc/shadow`, `cat /etc/gshadow` | `DOCKER_EXEC_COMMAND_BLOCKED` |
 | Process environ | `cat /proc/*/environ` | `DOCKER_EXEC_COMMAND_BLOCKED` |
-| SSH keys | `cat /root/.ssh/authorized_keys`, `ls /.ssh/` | `DOCKER_EXEC_COMMAND_BLOCKED` |
+| SSH keys | `cat <ssh-key-path>`, `ls /.ssh/` | `DOCKER_EXEC_COMMAND_BLOCKED` |
 | Shell launcher | `sh -c "whoami"`, `bash -c "ls"`, `ash -c "id"` | `DOCKER_EXEC_COMMAND_BLOCKED` |
 | Empty argv | `[]` | `INVALID_INPUT` |
 | Non-printable chars | binary/control characters in argv | `INVALID_INPUT` |

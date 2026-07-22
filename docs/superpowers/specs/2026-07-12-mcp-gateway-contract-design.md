@@ -176,10 +176,10 @@ Phase 2 may add a dynamic registry; Phase 1 uses a static allowlist only:
 ```python
 # config
 projects = {
-    "web-ssh-gateway": "/media/1TB/Python/web_ssh/web-ssh-gateway",
-    "quart-ollama_bot": "/media/1TB/Python/quart-ollama_bot",
+    "web-ssh-gateway": "<repo-root>",
+    "quart-ollama_bot": "<workspace-root>/quart-ollama_bot",
 }
-allowed_roots = ["/media/1TB/Python/", "/var/www/"]
+allowed_roots = ["<workspace-root>/", "/var/www/"]
 ```
 
 ### Preflight checks

@@ -592,15 +592,15 @@ Clients can opt-in to OAuth by registering and using Bearer token.
 
 ```bash
 # 1. Set MCP_AUTH_MODE=token (disables Bearer, restores mcp_token-only)
-ssh root@192.0.2.10
-sed -i 's/MCP_AUTH_MODE=mixed/MCP_AUTH_MODE=token/' /etc/agent-ssh-gateway-mcp.env
+ssh root@<ip-address>
+sed -i 's/MCP_AUTH_MODE=mixed/MCP_AUTH_MODE=token/' <mcp-env-file>
 systemctl restart agent-ssh-gateway-mcp.service
 
 # 2. Verify
 python scripts/mcp_fleet_healthcheck.py --verbose
 
 # 3. If needed, revert code changes
-cd /media/1TB/Python/web_ssh/web-ssh-gateway
+cd <repo-root>
 git revert <oauth-commit>
 git push origin master
 ```

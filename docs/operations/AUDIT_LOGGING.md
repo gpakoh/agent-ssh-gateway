@@ -18,17 +18,17 @@ The gateway has **two independent audit subsystems**. They serve different purpo
 
 **Line format:**
 ```
-2026-07-17 14:32:01,123 | INFO | COMMAND | session=sess_abc123 | ip=10.10.10.5 | cmd=ls -la /app
+2026-07-17 14:32:01,123 | INFO | COMMAND | session=sess_abc123 | ip=<ip-address> | cmd=ls -la /app
 ```
 
 **Event types:**
 
 | Event | Level | Triggered by | Example detail |
 |-------|-------|-------------|----------------|
-| `COMMAND` | INFO | Successful command execution (`ssh.py:318`, `ssh.py:401`) | `session=sess_abc123 \| ip=10.10.10.5 \| cmd=ls -la` |
-| `FILE` | INFO | File read (`files.py:102`) | `session=sess_abc123 \| ip=10.10.10.5 \| op=READ \| path=src/main.py` |
-| `AUTH` | INFO | Authentication attempt (if wired) | `user=admin \| ip=10.10.10.5 \| success=True` |
-| `SECURITY` | WARNING | Security events — blocked host, blocked command, policy decision, async job blocked | `type=BLOCKED_COMMAND \| ip=10.10.10.5 \| ...` |
+| `COMMAND` | INFO | Successful command execution (`ssh.py:318`, `ssh.py:401`) | `session=sess_abc123 \| ip=<ip-address> \| cmd=ls -la` |
+| `FILE` | INFO | File read (`files.py:102`) | `session=sess_abc123 \| ip=<ip-address> \| op=READ \| path=src/main.py` |
+| `AUTH` | INFO | Authentication attempt (if wired) | `user=admin \| ip=<ip-address> \| success=True` |
+| `SECURITY` | WARNING | Security events — blocked host, blocked command, policy decision, async job blocked | `type=BLOCKED_COMMAND \| ip=<ip-address> \| ...` |
 
 **SECURITY sub-types** (all at WARNING level):
 
@@ -135,7 +135,7 @@ These would replace manual logrotate. Until implemented, use external rotation (
 
 ### Security audit (plain text)
 ```
-2026-07-17 14:32:01,123 | WARNING | SECURITY | type=COMMAND_POLICY_DECISION | ip=10.10.10.5 | session_id=sess_abc123; command=rm -rf /tmp/test; allowed=False; reason=blocked_by_profile; profile=readonly; identity_type=api_key; identity_name=agent-1
+2026-07-17 14:32:01,123 | WARNING | SECURITY | type=COMMAND_POLICY_DECISION | ip=<ip-address> | session_id=sess_abc123; command=rm -rf /tmp/test; allowed=False; reason=blocked_by_profile; profile=readonly; identity_type=api_key; identity_name=agent-1
 ```
 
 ### Workspace audit (JSONL)
@@ -160,7 +160,7 @@ grep "BLOCKED_COMMAND" logs/audit.log
 grep "COMMAND_POLICY_DECISION" logs/audit.log
 
 # Events from a specific IP
-grep "ip=10.10.10.5" logs/audit.log
+grep "ip=<ip-address>" logs/audit.log
 
 # Events in the last hour
 awk -F'|' '/2026-07-17 14:/' logs/audit.log
@@ -206,7 +206,7 @@ jq 'select(.timestamp > (now - 3600))' audit.jsonl
       "decision": "denied",
       "reason": "Root command 'systemctl' not in readonly allowlist",
       "profile": "readonly",
-      "source_ip": "10.0.0.1",
+      "source_ip": "<ip-address>",
       "route": "POST /api/ssh/execute",
       "target_type": "session",
       "target_id": "sid",

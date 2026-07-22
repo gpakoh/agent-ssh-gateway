@@ -31,21 +31,21 @@ python scripts/mcp_fleet_healthcheck.py --verbose
 
 | Adapter | Systemd service | Internal | Public | Env file | Tools |
 |---------|----------------|----------|--------|----------|-------|
-| Gateway | `agent-ssh-gateway-mcp` | `10.0.0.10:8788` | `/mcp` | `/etc/agent-ssh-gateway-mcp.env` | 62 |
-| Context7 | `agent-mcp-context7` | `10.0.0.10:8790` | `/mcp/context7` | `/etc/agent-mcp-context7.env` | 2 |
-| GitHub | `agent-mcp-github` | `10.0.0.10:8791` | `/mcp/github` | `/etc/agent-mcp-github.env` | 8 |
-| Gitea | `agent-mcp-gitea` | `10.0.0.10:8792` | `/mcp/gitea` | `/etc/agent-mcp-gitea.env` | 12 |
-| Docker | `agent-mcp-docker` | `10.0.0.10:8793` | `/mcp/docker` | `/etc/agent-mcp-docker.env` | 7 |
-| Postgres | `agent-mcp-postgres` | `10.0.0.10:8794` | `/mcp/postgres` | `/etc/agent-mcp-postgres.env` | 6 |
+| Gateway | `agent-ssh-gateway-mcp` | `<ip-address>:8788` | `/mcp` | `<mcp-env-file>` | 62 |
+| Context7 | `agent-mcp-context7` | `<ip-address>:8790` | `/mcp/context7` | `<mcp-env-file>` | 2 |
+| GitHub | `agent-mcp-github` | `<ip-address>:8791` | `/mcp/github` | `<mcp-env-file>` | 8 |
+| Gitea | `agent-mcp-gitea` | `<ip-address>:8792` | `/mcp/gitea` | `<mcp-env-file>` | 12 |
+| Docker | `agent-mcp-docker` | `<ip-address>:8793` | `/mcp/docker` | `<mcp-env-file>` | 7 |
+| Postgres | `agent-mcp-postgres` | `<ip-address>:8794` | `/mcp/postgres` | `<mcp-env-file>` | 6 |
 
 All public endpoints: `https://ssh-gateway.example.com/<path>?mcp_token=<token>`
 
 ## Per-adapter public tokens
 
-Tokens are stored in `/etc/agent-mcp-<name>.env` (chmod 600).
+Tokens are stored in `<mcp-env-file>` (chmod 600).
 
 ```bash
-grep MCP_PUBLIC_TOKEN /etc/agent-mcp-<name>.env | cut -d= -f2
+grep MCP_PUBLIC_TOKEN <mcp-env-file> | cut -d= -f2
 ```
 
 Exception: Gitea token is hardcoded in AGENTS.md table. Gateway token is shared between `docker/.env` and the env file.
@@ -67,17 +67,17 @@ journalctl -u agent-mcp-gitea.service -n 30 --no-pager
 
 ## Nginx
 
-All routes are in `/etc/nginx/sites-available/ssh-gateway.example.com` on VPS `192.0.2.10`.
+All routes are in `/etc/nginx/sites-available/ssh-gateway.example.com` on VPS `<ip-address>`.
 
 ```bash
-ssh root@192.0.2.10
+ssh root@<ip-address>
 grep -n 'location ^~ /mcp' /etc/nginx/sites-available/ssh-gateway.example.com
 nginx -t && systemctl reload nginx
 ```
 
 ## Iptables
 
-Each adapter's public port is opened for `10.0.0.0/24`:
+Each adapter's public port is opened for `<ip-address>`:
 
 ```bash
 iptables -L INPUT -n | grep 879
@@ -101,7 +101,7 @@ Common causes:
 
 ```bash
 # Check nginx error log
-ssh root@192.0.2.10 "tail -10 /var/log/nginx/error.log"
+ssh root@<ip-address> "tail -10 /var/log/nginx/error.log"
 ```
 
 Common causes:

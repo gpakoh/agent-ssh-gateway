@@ -328,24 +328,24 @@ Find the end of `recovery_workflow` (before `"public_endpoints"`). Insert new se
                     "endpoint": "GET /api/known-hosts/check",
                     "title": "Preflight: check if a host is trusted",
                     "description": "Before connecting, check if the host:port has a stored key. This is the 'Check Trust' action.",
-                    "request": "GET /api/known-hosts/check?host=192.0.2.10&port=22",
-                    "response": '{"status":"known","host":"192.0.2.10","port":22}',
+                    "request": "GET /api/known-hosts/check?host=<ip-address>&port=22",
+                    "response": '{"status":"known","host":"<ip-address>","port":22}',
                     "notes": "Returns 'known' if the (host,port) pair exists in the store, 'unknown' if not. Never returns 'changed'.",
                 },
                 {
                     "endpoint": "GET /api/known-hosts/{host}",
                     "title": "Lookup a specific host entry by host:port",
                     "description": "Get full details of a stored host key. Returns 404 if not found.",
-                    "request": "GET /api/known-hosts/192.0.2.10?port=22",
-                    "response": '{"host":"192.0.2.10","port":22,"key_type":"ssh-ed25519","fingerprint":"SHA256:abc123..."}',
+                    "request": "GET /api/known-hosts/<ip-address>?port=22",
+                    "response": '{"host":"<ip-address>","port":22,"key_type":"ssh-ed25519","fingerprint":"SHA256:abc123..."}',
                     "notes": "Lookup is by (host,port) pair. Port defaults to 22. Use exact port your connection uses.",
                 },
                 {
                     "endpoint": "DELETE /api/known-hosts/{host}",
                     "title": "Delete a specific host entry",
                     "description": "Remove a host:port entry. Use this after a legitimate host key rotation.",
-                    "request": "DELETE /api/known-hosts/192.0.2.10?port=22",
-                    "response": '{"deleted":1,"host":"192.0.2.10","port":22}',
+                    "request": "DELETE /api/known-hosts/<ip-address>?port=22",
+                    "response": '{"deleted":1,"host":"<ip-address>","port":22}',
                     "notes": "Deletes by (host,port) pair. If you have entries for the same host on different ports, only the matching one is removed.",
                 },
                 {
@@ -364,7 +364,7 @@ Find the end of `recovery_workflow` (before `"public_endpoints"`). Insert new se
                     {
                         "step": 1,
                         "action": "Preflight: check trust before connecting",
-                        "endpoint": "GET /api/known-hosts/check?host=10.0.0.5&port=2222",
+                        "endpoint": "GET /api/known-hosts/check?host=<ip-address>&port=2222",
                         "expected": '{"status":"unknown"}',
                         "notes": "Host is unknown. This is expected for first connection. Verify fingerprint out-of-band if this is a production server.",
                     },
@@ -372,14 +372,14 @@ Find the end of `recovery_workflow` (before `"public_endpoints"`). Insert new se
                         "step": 2,
                         "action": "Connect — first time, key is stored",
                         "endpoint": "POST /api/ssh/connect",
-                        "body": '{"host":"10.0.0.5","port":2222,"username":"deploy","password":"***"}',
+                        "body": '{"host":"<ip-address>","port":2222,"username":"deploy","password":"***"}',
                         "expected": "Connection successful. Host key is automatically stored in the store.",
                         "notes": "On success, the gateway stores the host key via store(). Next check will return 'known'.",
                     },
                     {
                         "step": 3,
                         "action": "Preflight: confirm host is now trusted",
-                        "endpoint": "GET /api/known-hosts/check?host=10.0.0.5&port=2222",
+                        "endpoint": "GET /api/known-hosts/check?host=<ip-address>&port=2222",
                         "expected": '{"status":"known"}',
                         "notes": "Host is now trusted. The UI shows green indicator.",
                     },
@@ -387,7 +387,7 @@ Find the end of `recovery_workflow` (before `"public_endpoints"`). Insert new se
                         "step": 4,
                         "action": "Connect fails — key changed",
                         "endpoint": "POST /api/ssh/connect",
-                        "body": '{"host":"10.0.0.5","port":2222,"username":"deploy","password":"***"}',
+                        "body": '{"host":"<ip-address>","port":2222,"username":"deploy","password":"***"}',
                         "expected": "Connection fails with 'Host key changed — possible MITM attack'.",
                         "notes": "The gateway's KnownHostsPolicy detected a key mismatch. The connection is rejected with SSHException.",
                     },
@@ -401,14 +401,14 @@ Find the end of `recovery_workflow` (before `"public_endpoints"`). Insert new se
                     {
                         "step": 6,
                         "action": "User investigates — view the stored key fingerprint",
-                        "endpoint": "GET /api/known-hosts/10.0.0.5?port=2222",
-                        "expected": '{"host":"10.0.0.5","port":2222,"key_type":"ssh-ed25519","fingerprint":"SHA256:old_fingerprint..."}',
+                        "endpoint": "GET /api/known-hosts/<ip-address>?port=2222",
+                        "expected": '{"host":"<ip-address>","port":2222,"key_type":"ssh-ed25519","fingerprint":"SHA256:old_fingerprint..."}',
                         "notes": "The stored fingerprint does not match what the server is now presenting. Admin should verify the new fingerprint out-of-band.",
                     },
                     {
                         "step": 7,
                         "action": "Admin confirms the key change is legitimate — deletes stale entry",
-                        "endpoint": "DELETE /api/known-hosts/10.0.0.5?port=2222",
+                        "endpoint": "DELETE /api/known-hosts/<ip-address>?port=2222",
                         "expected": '{"deleted":1}',
                         "notes": "Entry removed. Next connection attempt will treat the host as 'unknown' and store the new key.",
                     },
@@ -416,7 +416,7 @@ Find the end of `recovery_workflow` (before `"public_endpoints"`). Insert new se
                         "step": 8,
                         "action": "Reconnect — new key is stored",
                         "endpoint": "POST /api/ssh/connect",
-                        "body": '{"host":"10.0.0.5","port":2222,"username":"deploy","password":"***"}',
+                        "body": '{"host":"<ip-address>","port":2222,"username":"deploy","password":"***"}',
                         "expected": "Connection successful. New key is stored. Trust restored.",
                         "notes": "The cycle is complete: unknown → connect → trust → changed → delete → reconnect → trust.",
                     },
@@ -984,8 +984,8 @@ async def test_delete_host_by_port():
 @pytest.mark.asyncio
 async def test_classify_ssh_trust_error():
     from app.known_hosts import classify_ssh_trust_error
-    assert classify_ssh_trust_error("Unknown host 10.0.0.1:22") == "unknown"
-    assert classify_ssh_trust_error("Host key for 10.0.0.1:22 changed — possible MITM") == "changed"
+    assert classify_ssh_trust_error("Unknown host <ip-address>:22") == "unknown"
+    assert classify_ssh_trust_error("Host key for <ip-address>:22 changed — possible MITM") == "changed"
     assert classify_ssh_trust_error("Connection refused") is None
 ```
 

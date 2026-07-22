@@ -304,7 +304,7 @@ def test_validate_exec_argv_blocked_shell_launcher():
 def test_validate_exec_argv_blocked_ssh():
     c = _client()
     with pytest.raises(ValueError, match="blocked pattern"):
-        c._validate_exec_argv(["cat", "/root/.ssh/authorized_keys"])
+        c._validate_exec_argv(["cat", "<ssh-key-path>"])
 
 
 def test_prune_type_admin_accepts():
