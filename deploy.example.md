@@ -12,7 +12,7 @@ Deploy Web SSH Gateway behind an Nginx reverse proxy with optional SSO/mTLS.
 ```
 [Client] → Nginx (:443, SSL)
     → Authelia / SSO auth check (optional)
-        → Proxy Pass → 10.0.0.10:8085 (Docker host)
+        → Proxy Pass → <ip-address>:8085 (Docker host)
             → FastAPI + Paramiko → SSH Target Server
 ```
 
@@ -23,7 +23,7 @@ Deploy Web SSH Gateway behind an Nginx reverse proxy with optional SSO/mTLS.
 ```bash
 # Create required Docker networks
 docker network create --driver macvlan \
-  --subnet=10.0.0.0/24 --gateway=10.0.0.1 \
+  --subnet=<ip-address> --gateway=<ip-address> \
   -o parent=eth0 proxy_net
 docker network create internal_net
 ```

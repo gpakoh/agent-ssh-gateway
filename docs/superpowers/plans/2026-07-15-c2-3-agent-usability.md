@@ -287,7 +287,7 @@ Add to the `class quick` block (after existing `quick.run` and `quick.read`):
 - [ ] **Step 1: Add the test file to tracking and run it**
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m pytest tests/test_sdk_workspace.py -v
+cd <repo-root> && python -m pytest tests/test_sdk_workspace.py -v
 ```
 
 Expected: 12 passed
@@ -370,7 +370,7 @@ Tests:
 ### Task B6: Run full test matrix and commit Stage B
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m pytest tests/test_sdk_workspace.py tests/test_mcp_workspace_tools.py -v
+cd <repo-root> && python -m pytest tests/test_sdk_workspace.py tests/test_mcp_workspace_tools.py -v
 ruff check examples/mcp_server/ app/
 mypy app/
 ```

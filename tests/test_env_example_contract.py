@@ -126,3 +126,15 @@ def test_no_hardcoded_secrets_in_tracked_configs() -> None:
     assert result.returncode == 0, (
         f"check_no_hardcoded_secrets.py failed:\n{result.stdout}\n{result.stderr}"
     )
+
+
+def test_public_hygiene_scan_has_no_public_repo_topology_hints() -> None:
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "check_public_hygiene.py")],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, (
+        f"check_public_hygiene.py failed:\n{result.stdout}\n{result.stderr}"
+    )

@@ -33,11 +33,11 @@ ChatGPT App → nginx (ssh-gateway.example.com) → Auth middleware (token in ?m
 
 All paths reside under `/mcp/` to inherit existing nginx location blocks (SSO bypass, WebSocket support, proxy buffering off).
 
-**proxy_pass path rule:** Each fleet adapter listens on its internal port with path `/mcp` (e.g. `http://127.0.0.1:8790/mcp`). The nginx `location /mcp/context7` must proxy to `http://10.0.0.10:8790/mcp` (not `/mcp/context7`), otherwise the path mismatch doubles. Example:
+**proxy_pass path rule:** Each fleet adapter listens on its internal port with path `/mcp` (e.g. `http://127.0.0.1:8790/mcp`). The nginx `location /mcp/context7` must proxy to `http://gateway.example.com:8790/mcp` (not `/mcp/context7`), otherwise the path mismatch doubles. Example:
 
 ```nginx
 location /mcp/context7 {
-    proxy_pass http://10.0.0.10:8790/mcp;
+    proxy_pass http://gateway.example.com:8790/mcp;
     proxy_buffering off;
     proxy_read_timeout 3600s;
 }
@@ -135,15 +135,15 @@ This is the same proven pattern as `chatgpt_remote_mcp/server.py` but with `mcp.
 
 ### nginx (VPS)
 - Add `/mcp/context7`, `/mcp/github`, `/mcp/docker`, `/mcp/postgres`, `/mcp/browser` location blocks above Authelia auth
-- Each: `proxy_pass http://10.0.0.10:<port>/mcp` (not `/mcp/<name>` — see path rule above)
+- Each: `proxy_pass http://gateway.example.com<port>/mcp` (not `/mcp/<name>` — see path rule above)
 - `proxy_buffering off`, `proxy_read_timeout 3600s`
 
 ### iptables (VPS)
-- ACCEPT rules for each new port (8790-8794) from `10.0.0.0/24`
+- ACCEPT rules for each new port (8790-8794) from `<ip-address>`
 
 ### Systemd
 - One service per adapter: `agent-mcp-context7.service`, `agent-mcp-github.service`, etc.
-- Each with its own env file (`/etc/agent-mcp-context7.env`, 600 permissions)
+- Each with its own env file (`<mcp-env-file>`, 600 permissions)
 - Env file contains only: `MCP_PUBLIC_TOKEN`, `MCP_HOST`, `MCP_PORT`, and service-specific credentials (e.g. `GITHUB_TOKEN`, `POSTGRES_URL`, `DOCKER_HOST`). No gateway keys, no shared secrets.
 
 ## Testing
@@ -162,7 +162,7 @@ This is the same proven pattern as `chatgpt_remote_mcp/server.py` but with `mcp.
 ## Files
 
 ```
-/media/1TB/Python/web_ssh/web-ssh-gateway/examples/chatgpt_remote_mcp/
+<repo-root>/examples/chatgpt_remote_mcp/
   server.py                    existing gateway adapter (unchanged)
   fleet/
     __init__.py

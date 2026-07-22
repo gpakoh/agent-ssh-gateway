@@ -22,7 +22,7 @@ Only `SELECT` queries on the `public` schema, with mandatory row limits, timeout
 | Container | `rag-db` |
 | Image | `pgvector/pgvector:pg15-bookworm` |
 | DB name | `example_vectordb` |
-| Network | `10.0.0.20` (`example_macvlan` + `internal_net`) |
+| Network | `<ip-address>` (`example_macvlan` + `internal_net`) |
 | Port | 5433 (host mapping) |
 | Current state | Empty (no user tables, pgvector extension not enabled) |
 | Current user | `raguser` (SUPERUSER — DO NOT USE for MCP) |
@@ -126,12 +126,12 @@ Returns: { installed: bool, version: string | null }
 ## Deployment Layout
 
 ```
-Host: internal host (10.0.0.10)
+Host: internal host (<ip-address>)
 Service: agent-mcp-postgres.service
 Internal port: 8784 (unauthenticated, loopback only)
 Public port: 8794 (auth proxy, bound to 0.0.0.0)
-Env file: /etc/agent-mcp-postgres.env (chmod 600)
-Nginx path: /mcp/postgres → http://10.0.0.10:8794/mcp?mcp_token=TOKEN
+Env file: <mcp-env-file> (chmod 600)
+Nginx path: /mcp/postgres → http://gateway.example.com:8794/mcp?mcp_token=TOKEN
 Tech: psycopg2 (sync, via concurrent.futures) + FastMCP streamable-http
 ```
 
@@ -146,7 +146,7 @@ MCP_PUBLIC_TOKEN=<generated>
 MCP_HOST=0.0.0.0
 MCP_PORT=8794
 MCP_INTERNAL_PORT=8784
-PGHOST=10.0.0.20
+PGHOST=<ip-address>
 PGPORT=5432
 PGDATABASE=example_vectordb
 PGUSER=mcp_readonly
@@ -195,8 +195,8 @@ curl -s -D /tmp/pg_headers.txt -X POST \
 1. `systemctl stop agent-mcp-postgres.service`
 2. Remove nginx location block from `/etc/nginx/sites-available/ssh-gateway.example.com`
 3. `systemctl reload nginx`
-4. `iptables -D INPUT -p tcp -s 10.0.0.0/24 --dport 8794 -j ACCEPT`
-5. Delete `/etc/agent-mcp-postgres.env`
+4. `iptables -D INPUT -p tcp -s <ip-address> --dport 8794 -j ACCEPT`
+5. Delete `<mcp-env-file>`
 6. Delete `fleet/postgres_client.py` and `fleet/postgres_server.py`
 
 No data is ever modified, so rollback is clean.

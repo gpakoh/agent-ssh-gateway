@@ -188,7 +188,7 @@ class TestGatewaySessionLifecycle:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m pytest tests/test_sdk_session.py -v 2>&1 | head -30`
+Run: `cd <repo-root> && python -m pytest tests/test_sdk_session.py -v 2>&1 | head -30`
 Expected: FAIL — `ModuleNotFoundError: No module named 'sdk.session'`
 
 - [ ] **Step 3: Create `sdk/__init__.py` (empty for now)**
@@ -239,7 +239,7 @@ class GatewaySession:
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m pytest tests/test_sdk_session.py::TestGatewaySessionLifecycle -v`
+Run: `cd <repo-root> && python -m pytest tests/test_sdk_session.py::TestGatewaySessionLifecycle -v`
 Expected: 6 passed
 
 - [ ] **Step 6: Commit**
@@ -388,7 +388,7 @@ class TestGatewaySessionHealth:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m pytest tests/test_sdk_session.py -v 2>&1 | tail -20`
+Run: `cd <repo-root> && python -m pytest tests/test_sdk_session.py -v 2>&1 | tail -20`
 Expected: FAIL — `AttributeError: 'GatewaySession' object has no attribute 'run'`
 
 - [ ] **Step 3: Implement operational methods in `sdk/session.py`**
@@ -423,7 +423,7 @@ Add to `GatewaySession` class in `sdk/session.py` (after `_disconnect_best_effor
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m pytest tests/test_sdk_session.py -v`
+Run: `cd <repo-root> && python -m pytest tests/test_sdk_session.py -v`
 Expected: all tests pass (6 lifecycle + 4 run + 2 read + 2 write + 1 health = 15)
 
 - [ ] **Step 5: Commit**
@@ -596,7 +596,7 @@ class TestAsyncGatewaySessionMethods:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m pytest tests/test_sdk_session.py::TestAsyncGatewaySessionLifecycle -v 2>&1 | tail -10`
+Run: `cd <repo-root> && python -m pytest tests/test_sdk_session.py::TestAsyncGatewaySessionLifecycle -v 2>&1 | tail -10`
 Expected: FAIL — `ImportError: cannot import name 'AsyncGatewaySession'`
 
 - [ ] **Step 3: Implement AsyncGatewaySession in `sdk/session.py`**
@@ -658,7 +658,7 @@ class AsyncGatewaySession:
 
 - [ ] **Step 4: Run all tests to verify they pass**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m pytest tests/test_sdk_session.py -v`
+Run: `cd <repo-root> && python -m pytest tests/test_sdk_session.py -v`
 Expected: all tests pass (15 sync + 10 async = 25 total)
 
 - [ ] **Step 5: Commit**
@@ -694,27 +694,27 @@ __all__ = ["AsyncGatewaySession", "GatewaySession"]
 
 - [ ] **Step 2: Verify imports work**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -c "from sdk import GatewaySession, AsyncGatewaySession; print('OK')"`
+Run: `cd <repo-root> && python -c "from sdk import GatewaySession, AsyncGatewaySession; print('OK')"`
 Expected: `OK`
 
 - [ ] **Step 3: Run ruff lint**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m ruff check sdk/session.py sdk/__init__.py tests/test_sdk_session.py`
+Run: `cd <repo-root> && python -m ruff check sdk/session.py sdk/__init__.py tests/test_sdk_session.py`
 Expected: no errors (exit code 0)
 
 - [ ] **Step 4: Run ruff format check**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m ruff format --check sdk/session.py sdk/__init__.py tests/test_sdk_session.py`
+Run: `cd <repo-root> && python -m ruff format --check sdk/session.py sdk/__init__.py tests/test_sdk_session.py`
 Expected: all files already formatted
 
 - [ ] **Step 5: Run mypy**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m mypy sdk/session.py sdk/__init__.py --ignore-missing-imports`
+Run: `cd <repo-root> && python -m mypy sdk/session.py sdk/__init__.py --ignore-missing-imports`
 Expected: no errors
 
 - [ ] **Step 6: Run full test suite (regression check)**
 
-Run: `cd /media/1TB/Python/web_ssh/web-ssh-gateway && python -m pytest tests/test_sdk_session.py -v`
+Run: `cd <repo-root> && python -m pytest tests/test_sdk_session.py -v`
 Expected: 25 passed
 
 - [ ] **Step 7: Commit**

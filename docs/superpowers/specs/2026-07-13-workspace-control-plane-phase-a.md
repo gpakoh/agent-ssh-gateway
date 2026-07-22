@@ -36,7 +36,7 @@ Transform web-ssh-gateway from a single-project SSH gateway into a multi-project
 
 ```yaml
 version: 1
-registry_root: /media/1TB/Python
+registry_root: <workspace-root>
 
 default_ignores:
   - __pycache__

@@ -399,15 +399,15 @@ from mcp_server.project_registry import ProjectRegistry
 def registry():
     return ProjectRegistry(
         projects={
-            "web-ssh-gateway": "/media/1TB/Python/web_ssh/web-ssh-gateway",
+            "web-ssh-gateway": "<repo-root>",
         },
-        allowed_roots=["/media/1TB/Python/"],
+        allowed_roots=["<workspace-root>/"],
     )
 
 
 def test_resolve_known_project(registry):
     path = registry.resolve("web-ssh-gateway")
-    assert path == Path("/media/1TB/Python/web_ssh/web-ssh-gateway")
+    assert path == Path("<repo-root>")
 
 
 def test_resolve_unknown_project(registry):
@@ -507,12 +507,12 @@ Add to `examples/mcp_server/config.py`:
 ```python
 # Project registry
 PROJECT_MAP: dict[str, str] = {
-    "web-ssh-gateway": "/media/1TB/Python/web_ssh/web-ssh-gateway",
-    "quart-ollama_bot": "/media/1TB/Python/quart-ollama_bot",
-    "NOD_gateway": "/media/1TB/Python/NOD_gateway",
+    "web-ssh-gateway": "<repo-root>",
+    "quart-ollama_bot": "<workspace-root>/quart-ollama_bot",
+    "NOD_gateway": "<workspace-root>/NOD_gateway",
 }
 ALLOWED_PROJECT_ROOTS: list[str] = [
-    "/media/1TB/Python/",
+    "<workspace-root>/",
     "/var/www/",
 ]
 ```

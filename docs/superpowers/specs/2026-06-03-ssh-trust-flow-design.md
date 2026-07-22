@@ -70,13 +70,13 @@ Inline block inside the Recovery section:
 
 ```
 ├─ Known Hosts (2)              [Clear All]
-│  ├─ 192.0.2.10:22 (ssh-ed25519)   [View] [Del]
-│  └─ 10.0.0.5:2222 (ssh-rsa)          [View] [Del]
+│  ├─ <ip-address>:22 (ssh-ed25519)   [View] [Del]
+│  └─ <ip-address>:2222 (ssh-rsa)          [View] [Del]
 ```
 
 - **Clear All**: confirm dialog → `DELETE /api/known-hosts` → refresh list.
 - **View**: `GET /api/known-hosts/{host}?port=Y` → show fingerprint in terminal output.
-- **Delete**: confirm "Delete 192.0.2.10:22?" → `DELETE /api/known-hosts/{host}?port=Y` → refresh list.
+- **Delete**: confirm "Delete <ip-address>:22?" → `DELETE /api/known-hosts/{host}?port=Y` → refresh list.
 - Empty state: "No known hosts yet."
 
 ### Implementation order

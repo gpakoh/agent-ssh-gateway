@@ -22,7 +22,7 @@ From `~/.config/opencode/opencode.json`:
 - SSO bypass on nginx for `/mcp/context7` — no Authelia redirect.
 - Wrong/missing token returns 401/403, never 302.
 - `proxy_pass` to internal `/mcp` path (not `/mcp/context7`).
-- Env file at `/etc/agent-mcp-context7.env`, 600 permissions, no gateway keys.
+- Env file at `<mcp-env-file>`, 600 permissions, no gateway keys.
 - `MCP_PUBLIC_TOKEN` generated via `secrets.token_urlsafe(64)`.
 - Port 8790 internal.
 - Context7 can use raw proxy style (no wrapper tools needed) because it has no system/DB/docker access.
@@ -265,7 +265,7 @@ EOF
 - [ ] **Step 2: Start adapter in background**
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway
+cd <repo-root>
 set -a; source /tmp/test-context7.env; set +a
 examples/chatgpt_remote_mcp/.venv/bin/python -m examples.chatgpt_remote_mcp.fleet.context7_server &
 PID=$!
@@ -323,16 +323,16 @@ python3 -c "import secrets; print(secrets.token_urlsafe(64))"
 
 Save output for env file.
 
-- [ ] **Step 2: Create env file at `/etc/agent-mcp-context7.env`**
+- [ ] **Step 2: Create env file at `<mcp-env-file>`**
 
 ```bash
-cat > /etc/agent-mcp-context7.env << 'EOF'
+cat > <mcp-env-file> << 'EOF'
 MCP_PUBLIC_TOKEN=<generated-token>
 MCP_HOST=0.0.0.0
 MCP_PORT=8790
 CONTEXT7_MCP_URL=https://mcp.context7.com/mcp
 EOF
-chmod 600 /etc/agent-mcp-context7.env
+chmod 600 <mcp-env-file>
 ```
 
 - [ ] **Step 3: Create systemd service at `/etc/systemd/system/agent-mcp-context7.service`**
@@ -346,10 +346,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-EnvironmentFile=/etc/agent-mcp-context7.env
-ExecStart=/media/1TB/Python/web_ssh/web-ssh-gateway/examples/chatgpt_remote_mcp/.venv/bin/python \
+EnvironmentFile=<mcp-env-file>
+ExecStart=<repo-root>/examples/chatgpt_remote_mcp/.venv/bin/python \
   -m examples.chatgpt_remote_mcp.fleet.context7_server
-WorkingDirectory=/media/1TB/Python/web_ssh/web-ssh-gateway
+WorkingDirectory=<repo-root>
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
@@ -386,7 +386,7 @@ Edit nginx config on VPS (above Authelia auth location, inside `server { server_
 
 ```nginx
 location /mcp/context7 {
-    proxy_pass http://10.0.0.10:8790/mcp;
+    proxy_pass http://gateway.example.com:8790/mcp;
     proxy_http_version 1.1;
     proxy_buffering off;
     proxy_read_timeout 3600s;
@@ -405,7 +405,7 @@ nginx -t && systemctl reload nginx
 - [ ] **Step 2: Add iptables rule**
 
 ```bash
-iptables -A INPUT -s 10.0.0.0/24 -p tcp --dport 8790 -j ACCEPT
+iptables -A INPUT -s <ip-address> -p tcp --dport 8790 -j ACCEPT
 netfilter-persistent save
 ```
 

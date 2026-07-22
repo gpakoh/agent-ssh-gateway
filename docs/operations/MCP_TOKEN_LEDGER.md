@@ -51,7 +51,7 @@ mcp-token rotate <token_id> --name "rotated-token"
    - Contains only `sha256:` hash — no raw token
    - `id` field starts with `mcp_tok_` prefix (reference ID, not a bearer token)
 4. **In-memory**: provider stores hash only, never raw token
-5. **Environment variables** (`/etc/agent-ssh-gateway-mcp.env`):
+5. **Environment variables** (`<mcp-env-file>`):
    - `MCP_PUBLIC_TOKEN` — legacy, pre-dates TokenStore
    - `MCP_TOKEN_STORE_FILE` — path to TokenStore (default: `/var/lib/agent-ssh-gateway/mcp_tokens.json`)
 
