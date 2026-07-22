@@ -295,3 +295,40 @@ def emit_command_policy_decision(
         reason=decision_reason,
         metadata={"command_root": command_root} if command_root else {},
     ))
+
+
+def emit_session_lifecycle_event(
+    *,
+    event_logger: AuditEventLogger | None,
+    connected: bool,
+    session_id: str,
+    actor_type: str = "",
+    actor_name: str = "",
+    actor_fingerprint: str = "",
+    source_ip: str = "",
+    route: str = "",
+    request_id: str = "",
+    reason: str = "",
+) -> None:
+    """Emit a metadata-only session connect/disconnect audit event."""
+    if not event_logger:
+        return
+
+    event_logger.append(AuditEvent(
+        event_type=(
+            AuditEventType.SESSION_CONNECT
+            if connected
+            else AuditEventType.SESSION_DISCONNECT
+        ),
+        actor_type=actor_type,
+        actor_name=actor_name,
+        actor_fingerprint=actor_fingerprint,
+        request_id=request_id,
+        source_ip=source_ip,
+        route=route,
+        action="session connected" if connected else "session disconnected",
+        target_type="session",
+        target_id=session_id,
+        decision=Decision.ALLOWED,
+        reason=reason,
+    ))

@@ -263,6 +263,20 @@ async def ssh_connect(
         owner_token_fingerprint=_identity.fingerprint,
     )
 
+    from app.audit import emit_session_lifecycle_event as _emit_session
+
+    _emit_session(
+        event_logger=_state.event_audit_logger,
+        connected=True,
+        session_id=session_id,
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        source_ip=request.client.host if request.client else "unknown",
+        route="POST /api/ssh/connect",
+        request_id=getattr(request.state, "request_id", ""),
+    )
+
     if _state.session_store:
         try:
             await _state.session_store.save_session(
@@ -503,6 +517,21 @@ async def ssh_disconnect(
         raise HTTPException(status_code=404, detail=_err(404, "Session not found"))
     ensure_session_owner(session, _identity)
     await _state.manager.disconnect(req.session_id)
+
+    from app.audit import emit_session_lifecycle_event as _emit_session
+
+    _emit_session(
+        event_logger=_state.event_audit_logger,
+        connected=False,
+        session_id=req.session_id,
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        source_ip=request.client.host if request.client else "unknown",
+        route="POST /api/ssh/disconnect",
+        request_id=getattr(request.state, "request_id", ""),
+        reason="manual",
+    )
 
     if _state.session_store:
         try:
