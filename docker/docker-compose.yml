@@ -80,7 +80,6 @@ services:
     container_name: web-ssh-gateway
     hostname: web-ssh-gateway
     networks:
-      public_net: {}
       internal_net: {}
     ports:
       - "8085:8085"
