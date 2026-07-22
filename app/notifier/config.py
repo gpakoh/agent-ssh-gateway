@@ -44,6 +44,7 @@ class NotifierSettings:
     telegram_chat_ids: tuple[str, ...] = ()
     poll_interval_seconds: float = 5.0
     timeout_seconds: float = 10.0
+    proxy: str = ""
     event_types: tuple[str, ...] = (
         "command.deny",
         "workspace.readonly_block",
@@ -66,6 +67,7 @@ class NotifierSettings:
                 os.getenv("GATEWAY_NOTIFIER_POLL_INTERVAL_SECONDS"), default=5.0
             ),
             timeout_seconds=_parse_float(os.getenv("GATEWAY_NOTIFIER_TIMEOUT_SECONDS"), default=10.0),
+            proxy=os.getenv("GATEWAY_NOTIFIER_PROXY", ""),
             event_types=_parse_csv(os.getenv("GATEWAY_NOTIFIER_EVENT_TYPES"))
             or cls.event_types,
         )

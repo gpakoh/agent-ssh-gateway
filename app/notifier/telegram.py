@@ -34,6 +34,7 @@ class TelegramClient:
         dry_run: bool = True,
         timeout_seconds: float = 10.0,
         api_base: str = "https://api.telegram.org",
+        proxy: str | None = None,
         session: aiohttp.ClientSession | None = None,
     ) -> None:
         self._token = token
@@ -41,6 +42,7 @@ class TelegramClient:
         self._dry_run = dry_run
         self._timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         self._api_base = api_base.rstrip("/")
+        self._proxy = proxy
         self._session = session
         self._owns_session = session is None
 
@@ -73,7 +75,7 @@ class TelegramClient:
                 "disable_web_page_preview": True,
             }
             try:
-                async with self._session.post(url, json=payload) as response:
+                async with self._session.post(url, json=payload, proxy=self._proxy) as response:
                     ok = 200 <= response.status < 300
                     results.append(TelegramSendResult(chat_id=chat_id, ok=ok, status=response.status))
             except Exception as exc:
