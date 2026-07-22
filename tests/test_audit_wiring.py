@@ -17,6 +17,7 @@ from app.audit import (
     AuditEventType,
     Decision,
     emit_command_policy_decision,
+    emit_session_lifecycle_event,
 )
 from app.config import settings
 from app.main import app
@@ -416,3 +417,133 @@ class TestAuditJsonlWrite:
             data = json.loads(lines[0])
             assert data["event_type"] == "command.deny"
             assert data["decision"] == "denied"
+
+
+
+# ---------------------------------------------------------------------------
+# Session lifecycle ? structured audit event
+# ---------------------------------------------------------------------------
+
+
+class TestEmitSessionLifecycleEvent:
+    """emit_session_lifecycle_event creates metadata-only session events."""
+
+    def test_emit_session_connect(self):
+        logger = MagicMock(spec=AuditEventLogger)
+        emit_session_lifecycle_event(
+            event_logger=logger,
+            connected=True,
+            session_id="s-new",
+            actor_type="master",
+            actor_name="api-key",
+            actor_fingerprint="abc123",
+            source_ip="127.0.0.1",
+            route="POST /api/ssh/connect",
+            request_id="req-connect",
+        )
+
+        logger.append.assert_called_once()
+        event = logger.append.call_args[0][0]
+        assert event.event_type == AuditEventType.SESSION_CONNECT
+        assert event.decision == Decision.ALLOWED
+        assert event.target_type == "session"
+        assert event.target_id == "s-new"
+        assert event.actor_type == "master"
+        assert event.actor_fingerprint == "abc123"
+        assert event.request_id == "req-connect"
+        assert event.route == "POST /api/ssh/connect"
+        assert event.metadata == {}
+
+    def test_emit_session_disconnect(self):
+        logger = MagicMock(spec=AuditEventLogger)
+        emit_session_lifecycle_event(
+            event_logger=logger,
+            connected=False,
+            session_id="s-old",
+            actor_type="agent",
+            actor_fingerprint="def456",
+            route="POST /api/ssh/disconnect",
+            reason="manual",
+        )
+
+        event = logger.append.call_args[0][0]
+        assert event.event_type == AuditEventType.SESSION_DISCONNECT
+        assert event.action == "session disconnected"
+        assert event.reason == "manual"
+
+    def test_noop_when_logger_none(self):
+        emit_session_lifecycle_event(
+            event_logger=None,
+            connected=True,
+            session_id="s1",
+        )
+
+
+class TestSessionLifecycleAuditRoutes:
+    """SSH connect/disconnect routes emit lifecycle audit events."""
+
+    def test_ssh_connect_emits_session_connect_event(self, client, monkeypatch):
+        _setup_test(monkeypatch)
+        from app import state as _app_state
+
+        _app_state.manager.create_session = AsyncMock(return_value="s-new")
+        _app_state.session_store = None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _app_state.event_audit_logger = AuditEventLogger(
+                log_path=str(Path(tmpdir) / "audit.jsonl"), recent_limit=100
+            )
+
+            resp = client.post(
+                "/api/ssh/connect",
+                json={"host": "10.0.0.10", "username": "root", "password": "pw", "port": 22},
+                headers={**_auth_headers(), "X-Request-ID": "req-connect-1"},
+            )
+
+            assert resp.status_code == 200
+            events = _app_state.event_audit_logger.recent()
+            lifecycle = [e for e in events if e.event_type == AuditEventType.SESSION_CONNECT]
+            assert len(lifecycle) == 1
+            event = lifecycle[0]
+            assert event.target_id == "s-new"
+            assert event.actor_type == "master"
+            assert event.actor_fingerprint
+            assert settings.api_key not in event.actor_fingerprint
+            assert event.request_id == "req-connect-1"
+            assert event.route == "POST /api/ssh/connect"
+            assert "10.0.0.10" not in event.to_dict().get("action", "")
+            assert event.metadata == {}
+
+    def test_ssh_disconnect_emits_session_disconnect_event(self, client, monkeypatch):
+        _setup_test(monkeypatch)
+        from app import state as _app_state
+
+        session = MagicMock()
+        session.owner_type = "master"
+        session.owner_token_fingerprint = None
+        _app_state.manager.get_session = AsyncMock(return_value=session)
+        _app_state.manager.disconnect = AsyncMock()
+        _app_state.session_store = None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _app_state.event_audit_logger = AuditEventLogger(
+                log_path=str(Path(tmpdir) / "audit.jsonl"), recent_limit=100
+            )
+
+            resp = client.post(
+                "/api/ssh/disconnect",
+                json={"session_id": "s-old"},
+                headers={**_auth_headers(), "X-Request-ID": "req-disconnect-1"},
+            )
+
+            assert resp.status_code == 200
+            events = _app_state.event_audit_logger.recent()
+            lifecycle = [e for e in events if e.event_type == AuditEventType.SESSION_DISCONNECT]
+            assert len(lifecycle) == 1
+            event = lifecycle[0]
+            assert event.target_id == "s-old"
+            assert event.actor_type == "master"
+            assert event.request_id == "req-disconnect-1"
+            assert event.route == "POST /api/ssh/disconnect"
+            assert event.reason == "manual"
+            assert event.metadata == {}
