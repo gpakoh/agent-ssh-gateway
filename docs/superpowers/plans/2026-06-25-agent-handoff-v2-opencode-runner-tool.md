@@ -342,7 +342,7 @@ git commit -m "feat: register gateway_project_run_opencode MCP tool
 - [ ] **Step 15: Run make check**
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway && make check 2>&1
+cd <repo-root> && make check 2>&1
 ```
 
 Expected: ruff clean, compileall OK, all tests pass (existing 84 + new 6 = 90)
@@ -350,7 +350,7 @@ Expected: ruff clean, compileall OK, all tests pass (existing 84 + new 6 = 90)
 - [ ] **Step 16: Push to GitHub + Gitea**
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway
+cd <repo-root>
 git push origin master
 git push gitea master
 ```

@@ -39,7 +39,7 @@ services:
     networks:
       internal_net: {}
     volumes:
-      - /media/1TB/Python:/media/1TB/Python:ro
+      - ${WORKSPACE_HOST_PATH:-..}:${WORKSPACE_CONTAINER_PATH:-/workspace}:ro
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -80,8 +80,7 @@ services:
     container_name: web-ssh-gateway
     hostname: web-ssh-gateway
     networks:
-      proxmox_macvlan:
-        ipv4_address: 10.10.10.145
+      public_net: {}
       internal_net: {}
     ports:
       - "8085:8085"
@@ -103,7 +102,7 @@ services:
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:?set ENCRYPTION_KEY}
     volumes:
       - ../projects.yaml:/app/projects.yaml:ro
-      - /media/1TB/Python:/media/1TB/Python:ro
+      - ${WORKSPACE_HOST_PATH:-..}:${WORKSPACE_CONTAINER_PATH:-/workspace}:ro
       - ssh_keys:/app/ssh_keys:ro
       - gateway_logs:/app/logs
       - known_hosts:/app/data
@@ -136,8 +135,9 @@ services:
         condition: service_healthy
 
 networks:
-  proxmox_macvlan:
+  public_net:
     external: true
+    name: ${GATEWAY_PUBLIC_NETWORK:-public_net}
   internal_net:
     external: true
 

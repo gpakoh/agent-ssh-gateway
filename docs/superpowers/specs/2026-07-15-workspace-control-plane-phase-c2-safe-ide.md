@@ -152,7 +152,7 @@ The table below tracks what exists today. Everything outside the **Designed** co
 2. **REST/MCP wiring** — zero C2 endpoints are reachable over HTTP or MCP.
 3. **Auth scopes** — `project:rollback` and `workspace:snapshot` are not registered in policy.
 4. **Receipt correctness** — `ChangeReceipt` must be metadata-only (no `rollback_content`), include `receipt_id` and `snapshot_id`. Rollback content lives in `SnapshotStore`.
-5. **CI separation** — workspace tools tests are not portable. Host-level smoke tests (real `/media/1TB/Python` filesystem, mTLS, auth boundary) **cannot** run in GitHub CI — they require Gitea/self-hosted runner or manual execution. GitHub CI covers only portable tests (temp registry, no external SSH).
+5. **CI separation** — workspace tools tests are not portable. Host-level smoke tests (real `<workspace-root>` filesystem, mTLS, auth boundary) **cannot** run in GitHub CI — they require Gitea/self-hosted runner or manual execution. GitHub CI covers only portable tests (temp registry, no external SSH).
 
 ---
 

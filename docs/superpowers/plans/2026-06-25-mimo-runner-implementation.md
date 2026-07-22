@@ -87,7 +87,7 @@ class TestModelValidation:
 - [ ] **Step 2: Run model validation tests — expect failures**
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway && python3 -m pytest tests/test_mcp_mimo.py::TestModelValidation -v 2>&1
+cd <repo-root> && python3 -m pytest tests/test_mcp_mimo.py::TestModelValidation -v 2>&1
 ```
 Expected: ImportError / NameError — `mimo_tools.py` does not exist yet.
 
@@ -303,7 +303,7 @@ def project_run_mimo(
 - [ ] **Step 4: Run model validation tests — expect green**
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway && python3 -m pytest tests/test_mcp_mimo.py::TestModelValidation -v 2>&1
+cd <repo-root> && python3 -m pytest tests/test_mcp_mimo.py::TestModelValidation -v 2>&1
 ```
 Expected: 6/6 passed.
 
@@ -394,7 +394,7 @@ class TestCommandConstruction:
 - [ ] **Step 6: Run command construction tests — expect green**
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway && python3 -m pytest tests/test_mcp_mimo.py::TestCommandConstruction -v 2>&1
+cd <repo-root> && python3 -m pytest tests/test_mcp_mimo.py::TestCommandConstruction -v 2>&1
 ```
 Expected: 14/14 passed.
 
@@ -444,14 +444,14 @@ class TestProjectRunMimo:
 - [ ] **Step 8: Run all unit tests**
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway && python3 -m pytest tests/test_mcp_mimo.py -v 2>&1
+cd <repo-root> && python3 -m pytest tests/test_mcp_mimo.py -v 2>&1
 ```
 Expected: All unit tests pass (no binary required).
 
 - [ ] **Step 9: Commit**
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway
+cd <repo-root>
 git add examples/mcp_server/mimo_tools.py tests/test_mcp_mimo.py
 git commit -m "feat: add mimo_tools.py with project_run_mimo() and 11 pre-flight guards"
 ```
@@ -571,20 +571,20 @@ class TestServerTool:
 - [ ] **Step 5: Run registration + server tests**
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway && python3 -m pytest tests/test_mcp_mimo.py -v 2>&1
+cd <repo-root> && python3 -m pytest tests/test_mcp_mimo.py -v 2>&1
 ```
 Expected: All tests pass.
 
 - [ ] **Step 6: Run full lint and check**
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway && python3 -m ruff check examples/mcp_server/ tests/ && python3 -m mypy examples/mcp_server/mimo_tools.py 2>&1 | tail -10
+cd <repo-root> && python3 -m ruff check examples/mcp_server/ tests/ && python3 -m mypy examples/mcp_server/mimo_tools.py 2>&1 | tail -10
 ```
 
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway
+cd <repo-root>
 git add examples/mcp_server/server.py examples/mcp_server/tool_modes.py tests/test_mcp_mimo.py
 git commit -m "feat: register gateway_project_run_mimo MCP tool (chatgpt mode only)"
 ```
@@ -596,7 +596,7 @@ git commit -m "feat: register gateway_project_run_mimo MCP tool (chatgpt mode on
 - [ ] **Step 1: Push to Gitea**
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway && git push gitea master
+cd <repo-root> && git push gitea master
 ```
 
 - [ ] **Step 2: Check CI status**
@@ -613,6 +613,6 @@ Expected: success (all tests pass or known skips).
 - [ ] **Step 1: Push to GitHub master**
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway
+cd <repo-root>
 git push https://github.com/gpakoh/agent-ssh-gateway.git master
 ```

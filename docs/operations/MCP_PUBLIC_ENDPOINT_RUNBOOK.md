@@ -39,7 +39,7 @@ curl -s https://mcp.example.com/mcp \
 # → 88 tools, contains gateway_project_run_agent
 
 # Fleet healthcheck (home)
-cd /media/1TB/Python/web_ssh/web-ssh-gateway
+cd <repo-root>
 python scripts/mcp_fleet_healthcheck.py --verbose
 # → 6/6 adapters healthy
 ```
@@ -49,7 +49,7 @@ python scripts/mcp_fleet_healthcheck.py --verbose
 ### Home (origin)
 
 - **Service**: `agent-ssh-gateway-mcp.service` (port 8788)
-- **Env**: `/etc/agent-ssh-gateway-mcp.env` (chmod 600)
+- **Env**: `<mcp-env-file>` (chmod 600)
 - **Token**: `MCP_PUBLIC_TOKEN` in env file
 - **Auto-reconnect**: GatewayClient auto-creates a new SSH session on `SESSION_NOT_FOUND` (session expired after gateway/SSHD/Redis restart). Requires `GATEWAY_SSH_HOST`, `GATEWAY_SSH_USER` (or `USERNAME`), and `GATEWAY_SSH_PRIVATE_KEY` (inline) or `GATEWAY_SSH_KEY_PATH` (file path). See `.env.example`. Retries once; lock prevents concurrent reconnects.
 
@@ -57,13 +57,13 @@ python scripts/mcp_fleet_healthcheck.py --verbose
 
 - **Service**: `autossh-mcp-relay.service` (home, enabled on boot)
 - **Tunnel**: `VPS:127.0.0.1:18788 → home:127.0.0.1:8788`
-- **Connection**: `autossh -R 127.0.0.1:18788:127.0.0.1:8788 root@192.0.2.10`
+- **Connection**: `autossh -R 127.0.0.1:18788:127.0.0.1:8788 root@<ip-address>`
 - **Resilience**: autossh auto-reconnects on failure; `ExitOnForwardFailure=yes`
 - **Key**: home `id_ed25519` added to VPS `authorized_keys` (passwordless)
 
 ### VPS (nginx, port 80 + 443)
 
-- **Host**: `192.0.2.10` (Debian, same ISP as home)
+- **Host**: `<ip-address>` (Debian, same ISP as home)
 - **SSL**: Let's Encrypt (auto-renew), `/etc/letsencrypt/live/mcp.example.com/`
 - **Nginx config**: `/etc/nginx/sites-available/mcp.example.com` → symlink in `sites-enabled/`
 - **Upstream**: `http://127.0.0.1:18788` (SSH relay local listener)
@@ -73,7 +73,7 @@ python scripts/mcp_fleet_healthcheck.py --verbose
 
 ### Cloudflare DNS
 
-- **Record**: `mcp.example.com` A → `203.0.113.10`
+- **Record**: `mcp.example.com` A → `<ip-address>`
 - **Proxy**: DNS only (grey cloud) — VPS serves Let's Encrypt TLS directly, no Cloudflare termination
 - **Zone**: `example.com` (zone ID: `<cloudflare-zone-id>`)
 
@@ -101,7 +101,7 @@ If a fleet MCP server returns HTTP 406 (Not Acceptable), ensure the healthcheck'
 | Date | Record type | Target | Reason |
 |------|-------------|--------|--------|
 | session 139 | CNAME | `<tunnel-id>.cfargotunnel.com` | Cloudflare Tunnel (abandoned) |
-| session 139 | A | `203.0.113.10` | Direct VPS IP + Cloudflare proxy (current) |
+| session 139 | A | `<ip-address>` | Direct VPS IP + Cloudflare proxy (current) |
 
 Cloudflare Tunnel abandoned because:
 1. ISP-level QUIC filtering blocks `cloudflared tunnel` from home

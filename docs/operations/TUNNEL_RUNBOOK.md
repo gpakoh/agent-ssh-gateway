@@ -142,7 +142,7 @@ The VPS nginx relay replaced Cloudflare Tunnel because:
 - VPS uses the same ISP as home — no clean egress
 
 Production setup:
-- `mcp.example.com` A record → `203.0.113.10` (Cloudflare orange cloud)
+- `mcp.example.com` A record → `<ip-address>` (Cloudflare orange cloud)
 - VPS nginx terminates TLS, proxies to `127.0.0.1:18788`
 - autossh reverse tunnel carries traffic home to port 8788
 - `scripts/tunnel.mjs` kept as emergency fallback via localtunnel mode

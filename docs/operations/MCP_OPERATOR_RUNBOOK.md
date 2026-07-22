@@ -62,7 +62,7 @@ All operations via `mcp-token` CLI (run from project root with `PYTHONPATH=.`).
 ### Create a full token (ChatGPT remote)
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway
+cd <repo-root>
 PYTHONPATH=. python scripts/mcp_token_cli.py create "my-token-name" --profile full
 ```
 
@@ -194,7 +194,7 @@ tests each profile against allowed/denied tools. A denial for `viewer` on
 
 If oauth mode is broken and tools need to come back immediately:
 
-1. Set `MCP_AUTH_MODE=token` in `/etc/agent-ssh-gateway-mcp.env`
+1. Set `MCP_AUTH_MODE=token` in `<mcp-env-file>`
 2. Ensure `MCP_PUBLIC_TOKEN` is set (it already is in the env file)
 3. Restart:
 
@@ -220,7 +220,7 @@ In token mode:
 3. **TokenStore chmod 600** — owner root only. Check: `stat -c '%a' /var/lib/agent-ssh-gateway/mcp_tokens.json`
 4. **No raw tokens in shell history** — use `HISTCONTROL=ignorespace` and prepend space to commands with tokens
 5. **Rotate on suspicion** — if a token might be leaked, `revoke` it and `create` a new one
-6. **Service env files chmod 600** — all `/etc/agent-*-mcp-*.env` files must be 600.
+6. **Service env files chmod 600** — all `<mcp-env-file>` files must be 600.
    Fleet healthcheck verifies this automatically
 
 ---
