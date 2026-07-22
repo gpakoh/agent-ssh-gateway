@@ -5,6 +5,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_PATH = ROOT / "docker" / "docker-compose.notifier.yml"
 MAIN_COMPOSE_PATH = ROOT / "docker" / "docker-compose.yml"
+RUNBOOK_PATH = ROOT / "docs" / "operations" / "NOTIFIER.md"
 
 
 def _load_compose():
@@ -65,3 +66,21 @@ def test_overlay_defaults_are_safe():
             env_map[key] = value
     assert env_map.get("GATEWAY_NOTIFIER_ENABLED") == "${GATEWAY_NOTIFIER_ENABLED:-false}"
     assert env_map.get("GATEWAY_NOTIFIER_DRY_RUN") == "${GATEWAY_NOTIFIER_DRY_RUN:-true}"
+
+
+def test_runbook_dry_run_smoke_requires_private_api_key():
+    text = RUNBOOK_PATH.read_text(encoding="utf-8")
+    assert "GATEWAY_NOTIFIER_API_KEY=<gateway-api-key>" in text
+    assert "Telegram is forced to `dry_run`" in text
+
+
+def test_runbook_real_send_uses_ignored_env_file():
+    text = RUNBOOK_PATH.read_text(encoding="utf-8")
+    assert ".env.notifier.real-send" in text
+    assert "docker compose --env-file .env.notifier.real-send" in text
+    assert "do not commit" in text.lower()
+
+
+def test_runbook_has_no_invalid_compose_env_flag():
+    text = RUNBOOK_PATH.read_text(encoding="utf-8")
+    assert "-e GATEWAY_NOTIFIER_ENABLED" not in text
