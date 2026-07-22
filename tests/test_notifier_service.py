@@ -65,6 +65,70 @@ async def test_poll_once_notifies_matching_events_once():
     assert "rm" in telegram.messages[0]
 
 
+async def test_poll_once_alert_matrix_uses_safe_formatter():
+    gateway = FakeGateway(
+        events=[
+            {
+                "event_id": "5",
+                "event_type": "system.error",
+                "reason": "token=raw-secret-value",
+                "target_id": "raw-system-target",
+            },
+            {
+                "event_id": "4",
+                "event_type": "session.disconnect",
+                "target_id": "raw-disconnect-session",
+                "metadata": {"host": "raw-disconnect-host"},
+            },
+            {
+                "event_id": "3",
+                "event_type": "session.connect",
+                "target_id": "raw-connect-session",
+                "metadata": {"host": "raw-connect-host"},
+            },
+            {
+                "event_id": "2",
+                "event_type": "workspace.readonly_block",
+                "route": "POST /api/workspace/projects/*/files/write",
+                "error_code": "WORKSPACE_READONLY",
+                "target_id": "/raw/private/path",
+            },
+            {
+                "event_id": "1",
+                "event_type": "command.deny",
+                "metadata": {
+                    "command_root": "tee",
+                    "command": "cat private-file | tee output-file",
+                },
+            },
+        ]
+    )
+    telegram = FakeTelegram()
+    service = GatewayNotifierService(
+        settings=NotifierSettings(enabled=True, gateway_api_key="key"),
+        gateway=gateway,  # type: ignore[arg-type]
+        telegram=telegram,  # type: ignore[arg-type]
+    )
+
+    assert await service.poll_once() == 5
+    combined = "\n".join(telegram.messages)
+
+    assert "Command blocked" in combined
+    assert "Workspace write blocked" in combined
+    assert "SSH session connected" in combined
+    assert "SSH session disconnected" in combined
+    assert "Gateway system error" in combined
+    assert "tee" in combined
+    assert "[REDACTED]" in combined
+    assert "raw-secret-value" not in combined
+    assert "cat private-file" not in combined
+    assert "raw-connect-session" not in combined
+    assert "raw-disconnect-session" not in combined
+    assert "raw-connect-host" not in combined
+    assert "raw-disconnect-host" not in combined
+    assert "/raw/private/path" not in combined
+
+
 async def test_poll_once_disabled_is_noop():
     gateway = FakeGateway(events=[{"event_id": "1", "event_type": "command.deny"}])
     telegram = FakeTelegram()

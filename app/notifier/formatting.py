@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from app.audit import redact_secrets
+
 _ALERT_TITLES = {
     "command.deny": "Command blocked",
     "workspace.readonly_block": "Workspace write blocked",
@@ -18,7 +20,7 @@ _MAX_FIELD_LEN = 180
 
 
 def _clip(value: Any, *, limit: int = _MAX_FIELD_LEN) -> str:
-    text = str(value or "").replace("\n", " ").strip()
+    text = str(redact_secrets(value) or "").replace("\n", " ").strip()
     if len(text) <= limit:
         return text
     return text[: limit - 3] + "..."
