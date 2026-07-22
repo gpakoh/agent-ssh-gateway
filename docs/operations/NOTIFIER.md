@@ -18,13 +18,15 @@ The notifier is a **separate container** that runs alongside the gateway. It is 
 ### 1. Dry-run smoke (safe, no Telegram sends)
 
 ```bash
-cd /media/1TB/Python/web_ssh/web-ssh-gateway
+cd <repo-root>
 
-# Run dry-run smoke locally (no Docker required)
-python3 scripts/notifier_dry_run_smoke.py
+# Run dry-run smoke locally (no Docker required, no Telegram send)
+# Use a local/admin gateway API key from your private env; never commit it.
+GATEWAY_NOTIFIER_API_KEY=<gateway-api-key> \
+  python3 scripts/notifier_dry_run_smoke.py --base http://localhost:8085
 ```
 
-This reads gateway `/health` + audit recent. Telegram always dry_run.
+This reads gateway `/health` + `/api/admin/audit/recent`. Telegram is forced to `dry_run` by the script, so no real message is sent.
 
 ### 2. Enable via overlay
 
@@ -38,20 +40,25 @@ docker logs -f gateway-notifier
 
 ### 3. Enable real Telegram sends
 
-Set these env vars before starting:
+Create a local env file that is ignored by git (`.env.*` is ignored):
 
 ```bash
-export GATEWAY_NOTIFIER_ENABLED=true
-export GATEWAY_NOTIFIER_DRY_RUN=false          # ⚠️ sends real messages
-export GATEWAY_NOTIFIER_API_KEY=<your-api-key>
-export GATEWAY_NOTIFIER_TELEGRAM_TOKEN=<bot-token>
-export GATEWAY_NOTIFIER_CHAT_IDS=<chat-id>
+cat > .env.notifier.real-send <<'EOF'
+GATEWAY_NOTIFIER_ENABLED=true
+GATEWAY_NOTIFIER_DRY_RUN=false
+GATEWAY_NOTIFIER_API_KEY=<gateway-api-key>
+GATEWAY_NOTIFIER_TELEGRAM_TOKEN=<bot-token>
+GATEWAY_NOTIFIER_CHAT_IDS=<chat-id>
+EOF
 ```
 
-Then restart:
+Then start the overlay with the private env file:
 
 ```bash
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.notifier.yml up -d gateway-notifier
+docker compose --env-file .env.notifier.real-send \
+  -f docker/docker-compose.yml \
+  -f docker/docker-compose.notifier.yml \
+  up -d gateway-notifier
 ```
 
 ## Environment Variables
@@ -72,8 +79,8 @@ docker compose -f docker/docker-compose.yml -f docker/docker-compose.notifier.ym
 
 The notifier tracks gateway health state transitions:
 
-- **ok → degraded/recovered**: sends `health.degraded` alert
-- **degraded/recovered → ok**: sends `health.recovered` alert
+- **ok → non-ok**: sends `health.degraded` alert
+- **non-ok → ok**: sends `health.recovered` alert
 - **non-ok → non-ok** (e.g. unreachable → degraded): no notification (avoids alert spam)
 
 First poll records baseline — no notification sent.
@@ -93,22 +100,22 @@ docker compose -f docker/docker-compose.yml -f docker/docker-compose.notifier.ym
 # Remove notifier completely
 docker compose -f docker/docker-compose.yml -f docker/docker-compose.notifier.yml rm gateway-notifier
 
-# Or just disable via env (container stays, no alerts sent)
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.notifier.yml \
-  -e GATEWAY_NOTIFIER_ENABLED=false up -d gateway-notifier
+# Or set GATEWAY_NOTIFIER_ENABLED=false in your private env file and recreate
+# the notifier container with the same --env-file command used to start it.
 ```
 
 ## First Real Telegram Send (Manual Gate)
 
 Before enabling real Telegram delivery:
 
-1. Run dry-run smoke: `python3 scripts/notifier_dry_run_smoke.py`
+1. Run dry-run smoke with a private API key: `GATEWAY_NOTIFIER_API_KEY=<gateway-api-key> python3 scripts/notifier_dry_run_smoke.py --base http://localhost:8085`
 2. Verify gateway health: `curl http://localhost:8085/health`
-3. Set `GATEWAY_NOTIFIER_DRY_RUN=false` with real token + chat ID
-4. Start overlay: `docker compose ... up -d gateway-notifier`
-5. Trigger a test event (e.g. `command.deny`)
-6. Verify Telegram message arrives
-7. If issues: set `GATEWAY_NOTIFIER_DRY_RUN=true` or stop the container
+3. Create `.env.notifier.real-send` locally; do not commit it
+4. Set `GATEWAY_NOTIFIER_DRY_RUN=false` with real token + chat ID inside that local env file
+5. Start overlay with `docker compose --env-file .env.notifier.real-send ... up -d gateway-notifier`
+6. Trigger one controlled test event (e.g. `command.deny`)
+7. Verify Telegram message arrives and contains no raw command, host, IP, path, token, or file content
+8. If issues: set `GATEWAY_NOTIFIER_DRY_RUN=true` in the local env file and recreate, or stop the container
 
 **No auto-deploy for first real send.** This is a manual gate.
 
