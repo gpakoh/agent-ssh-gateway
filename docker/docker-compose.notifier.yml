@@ -19,6 +19,7 @@ services:
       - GATEWAY_NOTIFIER_CHAT_IDS=${GATEWAY_NOTIFIER_CHAT_IDS:-}
       - GATEWAY_NOTIFIER_POLL_INTERVAL_SECONDS=${GATEWAY_NOTIFIER_POLL_INTERVAL_SECONDS:-5}
       - GATEWAY_NOTIFIER_TIMEOUT_SECONDS=${GATEWAY_NOTIFIER_TIMEOUT_SECONDS:-10}
+      - GATEWAY_NOTIFIER_PROXY=${GATEWAY_NOTIFIER_PROXY:-}
       - GATEWAY_NOTIFIER_EVENT_TYPES=${GATEWAY_NOTIFIER_EVENT_TYPES:-command.deny,workspace.readonly_block,session.connect,session.disconnect,system.error}
     restart: unless-stopped
     security_opt:
@@ -36,6 +37,12 @@ services:
         reservations:
           cpus: '0.05'
           memory: 32M
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'app.notifier' >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     depends_on:
       web-ssh-gateway:
         condition: service_healthy

@@ -30,6 +30,7 @@ async def _main() -> None:
         chat_ids=settings.telegram_chat_ids,
         dry_run=settings.dry_run,
         timeout_seconds=settings.timeout_seconds,
+        proxy=settings.proxy or None,
     )
     service = GatewayNotifierService(settings=settings, gateway=gateway, telegram=telegram)
     await service.run_forever()
