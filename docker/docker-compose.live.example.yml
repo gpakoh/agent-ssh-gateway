@@ -1,0 +1,24 @@
+# Live overlay example — copy to docker-compose.live.yml and fill in real values.
+# This file is tracked as a template. The real docker-compose.live.yml is gitignored.
+#
+# Usage:
+#   cp docker/docker-compose.live.example.yml docker/docker-compose.live.yml
+#   # Edit docker-compose.live.yml with real IPs/paths
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.live.yml up -d
+
+name: web-ssh-gateway
+
+services:
+  web-ssh-gateway:
+    networks:
+      <YOUR_MACVLAN_NETWORK>:
+        ipv4_address: <YOUR_GATEWAY_IP>
+      internal_net: {}
+    volumes:
+      - <YOUR_HOST_WORKSPACE_PATH>:<YOUR_CONTAINER_WORKSPACE_PATH>:ro
+
+networks:
+  <YOUR_MACVLAN_NETWORK>:
+    external: true
+  internal_net:
+    external: true
