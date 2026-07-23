@@ -38,7 +38,7 @@ services:
           cpus: '0.05'
           memory: 32M
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f 'app.notifier' >/dev/null 2>&1 || exit 1"]
+      test: ["CMD", "python", "-c", "import pathlib, sys; sys.exit(0 if b'app.notifier' in pathlib.Path('/proc/1/cmdline').read_bytes() else 1)"]
       interval: 30s
       timeout: 5s
       start_period: 10s
