@@ -1,6 +1,6 @@
 [project]
 name = "agent-ssh-gateway"
-version = "0.1.42a0"
+version = "0.1.43a0"
 description = "A self-hosted SSH gateway API for agents, automation, and CI/CD workflows."
 readme = "README.md"
 requires-python = ">=3.11"
