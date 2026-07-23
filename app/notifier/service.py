@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from typing import Any
 
+from app.notifier.actions import create_action
 from app.notifier.config import NotifierSettings
 from app.notifier.formatting import format_audit_event, format_digest_summary
 from app.notifier.gateway import GatewayAuditClient, GatewayHealthError
@@ -190,7 +191,22 @@ class GatewayNotifierService:
             text = format_audit_event(event)
             if not text:
                 continue
-            await self._telegram.send_message(text)
+
+            reply_markup = None
+            event_type = str(event.get("event_type") or "")
+            if (
+                event_type in self._settings.action_event_types
+                and event.get("actor_fingerprint")
+                and event.get("source_ip")
+            ):
+                reply_markup = _build_action_keyboard(
+                    event_type=event_type,
+                    actor_fingerprint=str(event["actor_fingerprint"]),
+                    source_ip=str(event["source_ip"]),
+                    request_id=str(event.get("event_id", "")),
+                )
+
+            await self._telegram.send_message(text, reply_markup=reply_markup)
             count += 1
         return count
 
@@ -231,6 +247,38 @@ class GatewayNotifierService:
             self._seen_set.discard(old)
         self._seen.append(event_id)
         self._seen_set.add(event_id)
+
+
+def _build_action_keyboard(
+    *,
+    event_type: str,
+    actor_fingerprint: str,
+    source_ip: str,
+    request_id: str,
+) -> dict[str, Any]:
+    """Create inline keyboard with Allow + Deny buttons for operator action."""
+    allow_token = create_action(
+        action_type="allow_actor",
+        actor_fingerprint=actor_fingerprint,
+        source_ip=source_ip,
+        event_type=event_type,
+        request_id=request_id,
+    )
+    deny_token = create_action(
+        action_type="deny_actor",
+        actor_fingerprint=actor_fingerprint,
+        source_ip=source_ip,
+        event_type=event_type,
+        request_id=request_id,
+    )
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Allow", "callback_data": allow_token},
+                {"text": "Deny", "callback_data": deny_token},
+            ],
+        ],
+    }
 
 
 def _now_iso() -> str:

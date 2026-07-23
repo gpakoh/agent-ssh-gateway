@@ -23,10 +23,13 @@ from fastapi import (
 )
 
 from app import state as _state
+from app.access_control import AccessDeniedError, AccessPendingApprovalError
 from app.auth_middleware import (
     VALID_AGENT_SCOPES,
     AuthIdentity,
     ensure_session_owner,
+    get_client_ip,
+    parse_cidrs,
     require_master_key,
     require_scope,
     ws_auth_check,
@@ -233,6 +236,22 @@ async def ssh_connect(
     _identity: AuthIdentity = Depends(require_scope("ssh:connect")),
 ):
     """Create a new SSH session."""
+    # Access control gate
+    if settings.access_control_enabled and _state.access_control_store is not None:
+        source_ip = get_client_ip(request, parse_cidrs(settings.trusted_proxy_cidrs))
+        try:
+            _state.access_control_store.resolve_access_policy(
+                actor_fingerprint=_identity.fingerprint,
+                token_type=_identity.token_type,
+                source_ip=source_ip,
+                requested_profile=settings.command_policy_profile,
+                enforce_master=settings.access_control_enforce_master,
+            )
+        except AccessDeniedError:
+            raise HTTPException(status_code=403, detail=_err(403, "ACCESS_DENIED")) from None
+        except AccessPendingApprovalError:
+            pass  # pending: allow connect, just track
+
     try:
         validate_target_host(
             req.host,
@@ -303,6 +322,24 @@ async def ssh_execute(
     _identity: AuthIdentity = Depends(require_scope("ssh:execute")),
 ):
     """Execute a command on an existing SSH session."""
+    # Access control gate
+    access_effective_profile = None
+    if settings.access_control_enabled and _state.access_control_store is not None:
+        source_ip = get_client_ip(request, parse_cidrs(settings.trusted_proxy_cidrs))
+        try:
+            access = _state.access_control_store.resolve_access_policy(
+                actor_fingerprint=_identity.fingerprint,
+                token_type=_identity.token_type,
+                source_ip=source_ip,
+                requested_profile=settings.command_policy_profile,
+                enforce_master=settings.access_control_enforce_master,
+            )
+            access_effective_profile = access.effective_profile
+        except AccessDeniedError:
+            raise HTTPException(status_code=403, detail=_err(403, "ACCESS_DENIED")) from None
+        except AccessPendingApprovalError:
+            pass
+
     # Sanitize Command
     try:
         sanitized = sanitize_command(req.command)
@@ -312,10 +349,14 @@ async def ssh_execute(
 
     # Command Policy Evaluation — server-owned profile resolution
     key_profiles = parse_key_profiles(settings.command_policy_key_profiles)
-    effective_profile = profile_for_identity(
-        _identity.fingerprint[:12] if _identity else None,
-        key_profiles=key_profiles,
-        default_profile=settings.command_policy_profile,
+    effective_profile = (
+        access_effective_profile
+        if access_effective_profile is not None
+        else profile_for_identity(
+            _identity.fingerprint[:12] if _identity else None,
+            key_profiles=key_profiles,
+            default_profile=settings.command_policy_profile,
+        )
     )
     decision = evaluate_command_policy(
         req.command,
@@ -419,12 +460,34 @@ async def ssh_execute_argv(
     """
     command_str = shlex.join(req.argv)
 
+    # Access control gate
+    access_effective_profile = None
+    if settings.access_control_enabled and _state.access_control_store is not None:
+        source_ip = get_client_ip(request, parse_cidrs(settings.trusted_proxy_cidrs))
+        try:
+            access = _state.access_control_store.resolve_access_policy(
+                actor_fingerprint=_identity.fingerprint,
+                token_type=_identity.token_type,
+                source_ip=source_ip,
+                requested_profile=settings.command_policy_profile,
+                enforce_master=settings.access_control_enforce_master,
+            )
+            access_effective_profile = access.effective_profile
+        except AccessDeniedError:
+            raise HTTPException(status_code=403, detail=_err(403, "ACCESS_DENIED")) from None
+        except AccessPendingApprovalError:
+            pass
+
     # Server-owned profile resolution
     key_profiles = parse_key_profiles(settings.command_policy_key_profiles)
-    effective_profile = profile_for_identity(
-        _identity.fingerprint[:12] if _identity else None,
-        key_profiles=key_profiles,
-        default_profile=settings.command_policy_profile,
+    effective_profile = (
+        access_effective_profile
+        if access_effective_profile is not None
+        else profile_for_identity(
+            _identity.fingerprint[:12] if _identity else None,
+            key_profiles=key_profiles,
+            default_profile=settings.command_policy_profile,
+        )
     )
     decision = evaluate_command_policy(
         command_str,

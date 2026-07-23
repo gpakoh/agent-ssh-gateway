@@ -122,6 +122,7 @@ class SessionRecord:
     owner_type: str = "master"
     owner_name: str | None = None
     owner_token_fingerprint: str | None = None
+    source_ip: str | None = None
 
     def touch(self) -> None:
         """Update last activity timestamp."""
@@ -766,3 +767,28 @@ class SSHSessionManager:
         """Return list of active session records."""
         async with self._lock:
             return list(self._sessions.values())
+
+
+# ---------------------------------------------------------------------------
+# Standalone Helpers
+# ---------------------------------------------------------------------------
+
+
+async def disconnect_sessions_for_actor_source(
+    manager: SSHSessionManager,
+    actor_fingerprint: str,
+    source_ip: str,
+) -> int:
+    """Disconnect all sessions matching actor+IP. Returns count."""
+    count = 0
+    for sid, record in list(manager._sessions.items()):
+        if (
+            record.owner_token_fingerprint == actor_fingerprint
+            and record.source_ip == source_ip
+        ):
+            try:
+                await manager.disconnect(sid)
+                count += 1
+            except Exception:
+                pass
+    return count

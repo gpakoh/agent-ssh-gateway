@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from app.notifier.callbacks import handle_callback_query
 from app.notifier.config import NotifierSettings
 from app.notifier.gateway import GatewayAuditClient
+from app.notifier.get_updates import CallbackPoller
 from app.notifier.service import GatewayNotifierService
 from app.notifier.telegram import TelegramClient
 
@@ -33,7 +35,21 @@ async def _main() -> None:
         proxy=settings.proxy or None,
     )
     service = GatewayNotifierService(settings=settings, gateway=gateway, telegram=telegram)
-    await service.run_forever()
+
+    if settings.can_send_telegram:
+        poller = CallbackPoller(
+            token=settings.telegram_token,
+            proxy=settings.proxy or None,
+            handle_callback_fn=lambda cb: handle_callback_query(
+                cb,
+                gateway_url=settings.gateway_url,
+                gateway_api_key=settings.gateway_api_key,
+                telegram_client=telegram,
+            ),
+        )
+        await asyncio.gather(service.run_forever(), poller.run_forever())
+    else:
+        await service.run_forever()
 
 
 def main() -> None:
