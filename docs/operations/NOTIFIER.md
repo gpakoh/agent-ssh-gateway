@@ -49,6 +49,8 @@ GATEWAY_NOTIFIER_DRY_RUN=false
 GATEWAY_NOTIFIER_API_KEY=<gateway-api-key>
 GATEWAY_NOTIFIER_TELEGRAM_TOKEN=<bot-token>
 GATEWAY_NOTIFIER_CHAT_IDS=<chat-id>
+# Optional if the notifier container has no direct Internet egress:
+GATEWAY_NOTIFIER_PROXY=<http-proxy-url>
 EOF
 ```
 
@@ -73,6 +75,7 @@ docker compose --env-file .env.notifier.real-send \
 | `GATEWAY_NOTIFIER_CHAT_IDS` | (empty) | Comma-separated Telegram chat IDs |
 | `GATEWAY_NOTIFIER_POLL_INTERVAL_SECONDS` | `5` | Polling interval |
 | `GATEWAY_NOTIFIER_TIMEOUT_SECONDS` | `10` | HTTP timeout |
+| `GATEWAY_NOTIFIER_PROXY` | (empty) | Optional outbound HTTP proxy for Telegram API delivery |
 | `GATEWAY_NOTIFIER_EVENT_TYPES` | `command.deny,workspace.readonly_block,session.connect,session.disconnect,system.error` | Events to notify |
 
 ## Health Transitions
@@ -131,6 +134,7 @@ Before enabling real Telegram delivery:
 |---------|-------|-----|
 | Notifier exits immediately | `GATEWAY_NOTIFIER_ENABLED=false` | Set `GATEWAY_NOTIFIER_ENABLED=true` |
 | No Telegram messages | `DRY_RUN=true` | Set `DRY_RUN=false` + provide token/chat IDs |
+| Telegram send timeout | Container has no Internet egress | Set `GATEWAY_NOTIFIER_PROXY` in the private env file |
 | `gateway_notifier_not_ready` | Missing API key or gateway URL | Set `GATEWAY_NOTIFIER_API_KEY` and `GATEWAY_NOTIFIER_GATEWAY_URL` |
 | `health.degraded` alert | Gateway health non-ok | Check gateway: `curl http://localhost:8085/health` |
 | No health alerts | First poll (baseline) | Wait for next poll cycle |
