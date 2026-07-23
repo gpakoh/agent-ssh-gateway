@@ -182,8 +182,8 @@ class GatewayNotifierService:
             dedup_key = build_dedup_key(event)
             now = self._clock()
             if dedup_key:
-                last_sent = self._last_sent.get(dedup_key, 0)
-                if now - last_sent < self._dedup_window:
+                last_sent = self._last_sent.get(dedup_key)
+                if last_sent is not None and now - last_sent < self._dedup_window:
                     self._events_suppressed_total += 1
                     continue
                 self._last_sent[dedup_key] = now
