@@ -236,9 +236,10 @@ async def ssh_connect(
     _identity: AuthIdentity = Depends(require_scope("ssh:connect")),
 ):
     """Create a new SSH session."""
+    source_ip = get_client_ip(request, parse_cidrs(settings.trusted_proxy_cidrs))
+
     # Access control gate
     if settings.access_control_enabled and _state.access_control_store is not None:
-        source_ip = get_client_ip(request, parse_cidrs(settings.trusted_proxy_cidrs))
         try:
             _state.access_control_store.resolve_access_policy(
                 actor_fingerprint=_identity.fingerprint,
@@ -280,6 +281,7 @@ async def ssh_connect(
         owner_type=_identity.token_type,
         owner_name=_identity.name,
         owner_token_fingerprint=_identity.fingerprint,
+        source_ip=source_ip,
     )
 
     from app.audit import emit_session_lifecycle_event as _emit_session
@@ -743,6 +745,25 @@ async def ssh_execute_stream(websocket: WebSocket):
             default_profile=settings.command_policy_profile,
         )
 
+        # Access control gate (WebSocket)
+        if settings.access_control_enabled and _state.access_control_store is not None:
+            ws_source_ip = websocket.client.host if websocket.client else "unknown"
+            try:
+                ws_access = _state.access_control_store.resolve_access_policy(
+                    actor_fingerprint=identity.fingerprint,
+                    token_type=identity.token_type,
+                    source_ip=ws_source_ip,
+                    requested_profile=effective_profile,
+                    enforce_master=settings.access_control_enforce_master,
+                )
+                effective_profile = ws_access.effective_profile
+            except AccessDeniedError:
+                await websocket.send_json(
+                    {"type": "error", "code": "ACCESS_DENIED", "message": "Actor denied by access control"}
+                )
+                await websocket.close()
+                return
+
         decision = evaluate_command_policy(
             command,
             mode=settings.command_policy_mode,
@@ -850,6 +871,24 @@ async def pty_stream(websocket: WebSocket, session_id: str):
     except HTTPException:
         await websocket.close(code=4403, reason="Agent token cannot access this session")
         return
+
+    # Access control gate (PTY)
+    if settings.access_control_enabled and _state.access_control_store is not None:
+        pty_source_ip = websocket.client.host if websocket.client else "unknown"
+        try:
+            _state.access_control_store.resolve_access_policy(
+                actor_fingerprint=identity.fingerprint,
+                token_type=identity.token_type,
+                source_ip=pty_source_ip,
+                requested_profile=settings.command_policy_profile,
+                enforce_master=settings.access_control_enforce_master,
+            )
+        except AccessDeniedError:
+            await websocket.close(code=4403, reason="ACCESS_DENIED")
+            return
+        except AccessPendingApprovalError:
+            await websocket.close(code=4403, reason="ACCESS_PENDING_APPROVAL")
+            return
 
     await websocket.accept()
     _state.active_websockets.add(websocket)
