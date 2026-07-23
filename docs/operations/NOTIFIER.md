@@ -9,6 +9,7 @@ gateway-notifier (sidecar)
   → polls GET /health + /api/admin/audit/recent
   → sends Telegram alerts (dry_run=true by default)
   → tracks health transitions (ok ↔ degraded/recovered)
+  → batches session.connect/disconnect into periodic digests
 ```
 
 The notifier is a **separate container** that runs alongside the gateway. It is NOT included in the main `docker-compose.yml`. It is deployed via the overlay `docker-compose.notifier.yml`.
@@ -77,22 +78,72 @@ docker compose --env-file .env.notifier.real-send \
 | `GATEWAY_NOTIFIER_TIMEOUT_SECONDS` | `10` | HTTP timeout |
 | `GATEWAY_NOTIFIER_PROXY` | (empty) | Optional outbound HTTP proxy for Telegram API delivery |
 | `GATEWAY_NOTIFIER_EVENT_TYPES` | `command.deny,workspace.readonly_block,session.connect,session.disconnect,system.error` | Events to notify |
+| `GATEWAY_NOTIFIER_DEDUP_WINDOW_SECONDS` | `300` | Dedup window for identical realtime alerts |
+| `GATEWAY_NOTIFIER_MAX_ALERTS_PER_POLL` | `20` | Max Telegram messages per poll cycle |
+| `GATEWAY_NOTIFIER_REALTIME_EVENT_TYPES` | `command.deny,workspace.readonly_block,system.error` | Sent immediately |
+| `GATEWAY_NOTIFIER_DIGEST_EVENT_TYPES` | `session.connect,session.disconnect` | Batched into periodic digest |
+| `GATEWAY_NOTIFIER_DIGEST_INTERVAL_SECONDS` | `300` | How often digest is flushed (5 min) |
 
-## Health Transitions
+## Alert Delivery Policy
 
-The notifier tracks gateway health state transitions:
+Events are classified into three delivery modes:
 
-- **ok → non-ok**: sends `health.degraded` alert
-- **non-ok → ok**: sends `health.recovered` alert
-- **non-ok → non-ok** (e.g. unreachable → degraded): no notification (avoids alert spam)
+### Realtime
 
-First poll records baseline — no notification sent.
+Sent immediately as individual Telegram messages. Applies to:
+
+- `command.deny` — command blocked by policy
+- `workspace.readonly_block` — workspace write denied
+- `system.error` — gateway internal error
+- `health.degraded` / `health.recovered` — health state transitions
+
+### Digest
+
+Batched into a periodic summary. Applies to:
+
+- `session.connect` — SSH session opened
+- `session.disconnect` — SSH session closed
+
+Digest rules:
+- First digest event starts the buffer; no immediate Telegram send
+- When `digest_interval_seconds` elapses and counts > 0, one digest message is sent
+- Counts reset after each successful flush
+- If no events, no digest is sent
+- Digest contains **counts only** — no host, IP, username, session_id, target_id, or path
+
+Example digest message:
+```
+[INFO] <b>Session activity digest</b>
+session.connect: <code>3</code>
+session.disconnect: <code>2</code>
+```
+
+### Skip
+
+Unknown event types not in `realtime_event_types` or `digest_event_types` are silently ignored.
+
+**There is no opt-in for realtime session alerts.** Session connect/disconnect events are always digested. To receive individual session alerts, add `session.connect` to `GATEWAY_NOTIFIER_REALTIME_EVENT_TYPES` — but this is not recommended for production (alert spam).
+
+## Dedup Window
+
+Identical realtime alerts (same command_root, profile, route, error_code, decision) are suppressed within the dedup window:
+
+- Default window: 300 seconds
+- After the window, the same alert can fire again
+- Dedup key never contains raw command, path, IP, host, token, target_id, request_id, or event_id
+- Digest events are not affected by the dedup window
+
+## Max Alerts Per Poll
+
+Hard cap on Telegram messages per poll cycle (default: 20). Prevents notification storms when gateway produces many events at once. Health transitions and digest flush are counted toward this cap.
 
 ## Alert Safety
 
 - All alert fields go through `redact_secrets()` before sending
 - No hostnames, IPs, raw commands, paths, or secrets in alert text
+- Digest messages contain counts only — no PII or topology
 - Event types are a bounded set (5 types by default)
+- Dedup keys use only safe bounded fields
 
 ## Rollback / Off-Switch
 
