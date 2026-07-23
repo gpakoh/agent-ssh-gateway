@@ -117,6 +117,18 @@ class Settings(BaseSettings):
         default=30, alias="EVENT_HOOKS_RETENTION_DEAD_DAYS"
     )
 
+    # Access Control Gate (Phase 12B)
+    access_control_enabled: bool = Field(default=True, alias="ACCESS_CONTROL_ENABLED")
+    access_control_enforce_master: bool = Field(
+        default=False, alias="ACCESS_CONTROL_ENFORCE_MASTER"
+    )
+    access_control_pending_ttl: int = Field(default=900, alias="ACCESS_CONTROL_PENDING_TTL")
+    access_control_allow_ttl: int = Field(default=86400, alias="ACCESS_CONTROL_ALLOW_TTL")
+    access_control_deny_ttl: int = Field(default=86400, alias="ACCESS_CONTROL_DENY_TTL")
+    access_control_redis_url: str | None = Field(
+        default=None, alias="ACCESS_CONTROL_REDIS_URL"
+    )
+
     model_config = SettingsConfigDict(
         env_file=".env",
         populate_by_name=True,

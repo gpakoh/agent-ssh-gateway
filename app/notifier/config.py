@@ -48,6 +48,10 @@ class NotifierSettings:
     dedup_window_seconds: float = 300.0
     max_alerts_per_poll: int = 20
     digest_interval_seconds: float = 300.0
+    action_event_types: tuple[str, ...] = (
+        "command.deny",
+        "workspace.readonly_block",
+    )
     realtime_event_types: tuple[str, ...] = (
         "command.deny",
         "workspace.readonly_block",
@@ -91,6 +95,8 @@ class NotifierSettings:
             digest_interval_seconds=_parse_float(
                 os.getenv("GATEWAY_NOTIFIER_DIGEST_INTERVAL_SECONDS"), default=300.0
             ),
+            action_event_types=_parse_csv(os.getenv("GATEWAY_NOTIFIER_ACTION_EVENT_TYPES"))
+            or cls.action_event_types,
             digest_types=_parse_csv(os.getenv("GATEWAY_NOTIFIER_DIGEST_EVENT_TYPES"))
             or cls.digest_types,
             realtime_event_types=_parse_csv(os.getenv("GATEWAY_NOTIFIER_REALTIME_EVENT_TYPES"))
