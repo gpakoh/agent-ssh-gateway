@@ -5,7 +5,8 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import state as _state
-from app.auth_middleware import AuthIdentity, require_master_key
+from app.access_control import AccessDeniedError, AccessPendingApprovalError
+from app.auth_middleware import AuthIdentity, get_client_ip, parse_cidrs, require_master_key
 from app.command_policy import evaluate_command_policy, parse_key_profiles, profile_for_identity
 from app.config import settings
 from app.metrics import metrics
@@ -27,13 +28,35 @@ async def batch_execute(
 ):
     """Execute multiple file operations in a single transaction."""
 
+    # Access control gate
+    access_effective_profile = None
+    if settings.access_control_enabled and _state.access_control_store is not None:
+        source_ip = get_client_ip(request, parse_cidrs(settings.trusted_proxy_cidrs))
+        try:
+            access = _state.access_control_store.resolve_access_policy(
+                actor_fingerprint=_identity.fingerprint,
+                token_type=_identity.token_type,
+                source_ip=source_ip,
+                requested_profile=settings.command_policy_profile,
+                enforce_master=settings.access_control_enforce_master,
+            )
+            access_effective_profile = access.effective_profile
+        except AccessDeniedError:
+            raise HTTPException(status_code=403, detail=_err(403, "ACCESS_DENIED")) from None
+        except AccessPendingApprovalError:
+            pass
+
     # Command Policy Evaluation — check execute-type operations before execution
     source_ip = request.client.host if request.client else "unknown"
     key_profiles = parse_key_profiles(settings.command_policy_key_profiles)
-    effective_profile = profile_for_identity(
-        _identity.fingerprint[:12] if _identity else None,
-        key_profiles=key_profiles,
-        default_profile=settings.command_policy_profile,
+    effective_profile = (
+        access_effective_profile
+        if access_effective_profile is not None
+        else profile_for_identity(
+            _identity.fingerprint[:12] if _identity else None,
+            key_profiles=key_profiles,
+            default_profile=settings.command_policy_profile,
+        )
     )
     for op in req.operations:
         if op.type == "execute" and op.command:

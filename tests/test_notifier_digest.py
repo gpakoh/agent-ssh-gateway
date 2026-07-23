@@ -37,7 +37,7 @@ class FakeTelegram:
         self.messages: list[str] = []
         self.closed = False
 
-    async def send_message(self, text: str):
+    async def send_message(self, text: str, *, reply_markup=None):
         self.messages.append(text)
         return []
 

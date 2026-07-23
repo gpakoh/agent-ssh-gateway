@@ -27,7 +27,8 @@ def test_format_command_deny_uses_safe_metadata_only():
     assert "command_root" in text
     assert "tee" in text
     assert "cat secret" not in text
-    assert "203.0.113" not in text
+    assert "203.0.113.11" in text
+    assert "source_ip" in text
     assert "session-secret" not in text
 
 
@@ -48,6 +49,55 @@ def test_format_workspace_readonly_includes_route_and_error_code():
 
 def test_unknown_event_returns_none():
     assert format_audit_event({"event_type": "file.read"}) is None
+
+
+def test_session_connect_includes_source_ip():
+    text = format_audit_event(
+        {
+            "event_type": "session.connect",
+            "source_ip": "10.0.0.5",
+        }
+    )
+    assert text is not None
+    assert "source_ip" in text
+    assert "10.0.0.5" in text
+
+
+def test_command_deny_includes_source_ip():
+    text = format_audit_event(
+        {
+            "event_type": "command.deny",
+            "decision": "denied",
+            "source_ip": "192.168.1.42",
+        }
+    )
+    assert text is not None
+    assert "source_ip" in text
+    assert "192.168.1.42" in text
+
+
+def test_source_ip_clipped_at_80_chars():
+    long_ip = "A" * 100
+    text = format_audit_event(
+        {
+            "event_type": "session.connect",
+            "source_ip": long_ip,
+        }
+    )
+    assert text is not None
+    assert len(text) < 200
+    assert "..." in text
+    assert long_ip not in text
+
+
+def test_source_ip_omitted_when_absent():
+    text = format_audit_event(
+        {
+            "event_type": "session.connect",
+        }
+    )
+    assert text is not None
+    assert "source_ip" not in text
 
 
 def test_formatter_clips_long_reason():
@@ -110,6 +160,6 @@ def test_alert_matrix_formats_supported_events_safely(event_type: str, title: st
     assert "cat private-file" not in text
     assert "raw-host-value" not in text
     assert "/raw/private/path" not in text
-    assert "raw-source-ip" not in text
+    assert "raw-source-ip" in text
     assert "raw-session-id" not in text
     assert "raw-actor-name" not in text

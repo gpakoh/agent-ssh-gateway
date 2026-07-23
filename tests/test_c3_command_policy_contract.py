@@ -798,6 +798,7 @@ class TestServerOwnedProfileRouting:
         monkeypatch.setattr(settings, "api_key", "secret-c3")
         monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
         monkeypatch.setattr(settings, "command_policy_mode", "enforce")
+        monkeypatch.setattr(settings, "access_control_enabled", False)
         # Server default is readonly — but key mapping overrides to testlint
         monkeypatch.setattr(settings, "command_policy_profile", "readonly")
         monkeypatch.setattr(

@@ -240,6 +240,23 @@ async def lifespan(app: FastAPI):
     logger.info("Security Components Initialized")
     logger.info("Swarm Mode Ready (redis Job Queue, Circuit Breaker, Distributed Locks)")
 
+    # Initialize Access Control Store (Phase 12B)
+    if settings.access_control_enabled:
+        from app.access_control import AccessControlStore
+
+        ac_redis_url = settings.access_control_redis_url or settings.redis_url
+        state.access_control_store = AccessControlStore(
+            pending_ttl=settings.access_control_pending_ttl,
+            allow_ttl=settings.access_control_allow_ttl,
+            deny_ttl=settings.access_control_deny_ttl,
+            redis_url=ac_redis_url,
+        )
+        loaded = await state.access_control_store.load_from_redis()
+        if loaded:
+            logger.info("Access control: loaded %d decisions from Redis", loaded)
+        await state.access_control_store.start_cleanup_task()
+        logger.info("Access control gate initialized")
+
     logger.info("agent-ssh-gateway started on %s:%d", settings.uvicorn_host, settings.uvicorn_port)
     yield
 
@@ -257,6 +274,8 @@ async def lifespan(app: FastAPI):
     await state.context_manager.stop_cleanup_task()
     await state.job_manager.stop_cleanup_task()
     await state.manager.stop_cleanup_task()
+    if state.access_control_store:
+        await state.access_control_store.stop_cleanup_task()
 
     sessions = await state.manager.list_sessions()
     if sessions:
@@ -970,6 +989,7 @@ async def validation_exception_handler(request, exc: RequestValidationError):
 # Router Registration — Route Handlers Live In App/routers/
 # ---------------------------------------------------------------------------
 
+from app.routers.admin_access import router as admin_access_router  # noqa: E402
 from app.routers.audit import router as audit_router  # noqa: E402
 from app.routers.batch import router as batch_router  # noqa: E402
 from app.routers.code import router as code_router  # noqa: E402
@@ -1013,6 +1033,7 @@ app.include_router(auth_router)
 app.include_router(auth_identity_router)
 app.include_router(workspace_router)
 app.include_router(audit_router)
+app.include_router(admin_access_router)
 
 # Static Files Mount (after All Router Includes So Static Routes Take Precedence)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")

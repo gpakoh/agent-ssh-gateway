@@ -18,12 +18,20 @@ _ALERT_TITLES = {
 
 _ALLOWED_METADATA_KEYS = {"command_root"}
 _MAX_FIELD_LEN = 180
+_IP_CLIP_LEN = 80
 
 _SEVERITY_PREFIX = {
     "critical": "[CRITICAL]",
     "warning": "[WARNING]",
     "info": "[INFO]",
 }
+
+
+def _clip_ip(value: Any) -> str:
+    text = str(redact_secrets(value) or "").replace("\n", " ").strip()
+    if len(text) <= _IP_CLIP_LEN:
+        return text
+    return text[: _IP_CLIP_LEN - 3] + "..."
 
 
 def _clip(value: Any, *, limit: int = _MAX_FIELD_LEN) -> str:
@@ -62,6 +70,10 @@ def format_audit_event(
     prefix = _SEVERITY_PREFIX.get(severity, "[INFO]")
 
     lines = [f"{prefix} [ALERT] <b>{title}</b>", f"type: <code>{event_type}</code>"]
+
+    source_ip = _clip_ip(event.get("source_ip"))
+    if source_ip:
+        lines.append(f"source_ip: <code>{source_ip}</code>")
 
     decision = _clip(event.get("decision"))
     if decision:

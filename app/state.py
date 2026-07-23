@@ -1,5 +1,9 @@
 """Global application state — initialized in lifespan()."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from app.audit import AuditEventLogger
 from app.batch_operations import BatchOperationsManager
 from app.bulk_operations_v2 import BulkOperationsManager
@@ -22,6 +26,9 @@ from app.session_store import SessionStore
 from app.snapshot_manager import SnapshotManager
 from app.ssh_manager import SSHSessionManager
 from app.webhook_manager import WebhookManager
+
+if TYPE_CHECKING:
+    from app.access_control import AccessControlStore
 
 manager: SSHSessionManager | None = None
 job_manager: JobManager | None = None
@@ -46,6 +53,7 @@ host_key_store: HostKeyStore | None = None
 bulk_ops: BulkOperationsManager | None = None
 event_hook_store: EventHookStore | None = None
 delivery_service: DeliveryService | None = None
+access_control_store: AccessControlStore | None = None
 from fastapi import WebSocket  # noqa: E402
 
 from app.agent_token_store import AgentTokenStore  # noqa: E402
