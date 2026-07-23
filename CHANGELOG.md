@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.43a0] - 2026-07-23
+
+### Fixed
+
+- **Notifier healthcheck**: replaced `pgrep`-based healthcheck with Python-based process detection. Container images are minimal and may not include `pgrep`. New check reads `/proc/1/cmdline` directly.
+
+### Added
+
+- **Notifier proxy support**: `GATEWAY_NOTIFIER_PROXY` env var allows Telegram API delivery through an HTTP proxy. Required when the notifier container has no direct Internet egress (Docker internal networks). aiohttp `session.post(proxy=...)` now receives the proxy URL.
+
+- **Real-send gate verified**: First controlled Telegram alert delivered successfully via `command.deny` event. Chat ID `368228657` confirmed receipt.
+
+### Changed
+
+- **Docs**: NOTIFIER.md updated with proxy env var, troubleshooting for Telegram timeout.
+
 ## [0.1.38a0] - 2026-07-21
 
 ### Fixed
