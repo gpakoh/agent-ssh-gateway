@@ -35,3 +35,11 @@ def test_settings_real_send_requires_all_switches():
         telegram_chat_ids=("chat",),
     )
     assert settings.can_send_telegram is True
+
+
+def test_settings_loads_optional_proxy_from_env(monkeypatch):
+    monkeypatch.setenv("GATEWAY_NOTIFIER_PROXY", "http://proxy.example.invalid:3128")
+
+    settings = NotifierSettings.from_env()
+
+    assert settings.proxy == "http://proxy.example.invalid:3128"
