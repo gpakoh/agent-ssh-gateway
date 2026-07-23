@@ -371,6 +371,28 @@ async def test_dedup_window_allows_resend():
     assert len(telegram.messages) == 1
 
 
+async def test_fresh_clock_does_not_suppress_first_event():
+    """First event is sent even when clock < dedup_window (CI VM scenario)."""
+    gateway = FakeGateway(
+        events=[
+            {"event_id": "e1", "event_type": "command.deny", "route": "/api/ssh/execute"},
+        ]
+    )
+    telegram = FakeTelegram()
+    clock_val = [10.0]
+    service = GatewayNotifierService(
+        settings=NotifierSettings(enabled=True, gateway_api_key="key", dedup_window_seconds=300),
+        gateway=gateway,  # type: ignore[arg-type]
+        telegram=telegram,  # type: ignore[arg-type]
+        clock=lambda: clock_val[0],
+    )
+
+    # clock=10 < dedup_window=300 — must NOT suppress first event
+    count = await service.poll_once()
+    assert count == 1
+    assert len(telegram.messages) == 1
+
+
 async def test_different_command_root_sends_separately():
     """Different command_root produces different dedup keys → both sent."""
     gateway = FakeGateway(
