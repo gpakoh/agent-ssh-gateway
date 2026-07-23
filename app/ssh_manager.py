@@ -274,6 +274,7 @@ class SSHSessionManager:
         owner_type: str = "master",
         owner_name: str | None = None,
         owner_token_fingerprint: str | None = None,
+        source_ip: str | None = None,
     ) -> str:
         """Create a new SSH session and return its session ID."""
         breaker = None
@@ -342,6 +343,7 @@ class SSHSessionManager:
             owner_type=owner_type,
             owner_name=owner_name,
             owner_token_fingerprint=owner_token_fingerprint,
+            source_ip=source_ip,
         )
 
         async with self._lock:

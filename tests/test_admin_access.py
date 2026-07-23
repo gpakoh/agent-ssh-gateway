@@ -133,7 +133,7 @@ class TestAdminEndpointAuth:
             assert body["expires_at"] > 0
             entry = _state.access_control_store.get("fp_ttl", "10.0.0.1")
             assert entry is not None
-            assert entry.decision == "allow"
+            assert entry.decision == "allowed"
 
     def test_decision_persists_in_store(self, monkeypatch):
         _patch_auth(monkeypatch)
@@ -149,7 +149,7 @@ class TestAdminEndpointAuth:
             )
             entry = _state.access_control_store.get("fp_persist", "10.0.0.1")
             assert entry is not None
-            assert entry.decision == "allow"
+            assert entry.decision == "allowed"
             assert entry.decided_by == "operator"
 
     def test_deny_kills_matching_sessions(self, monkeypatch):
@@ -220,6 +220,37 @@ class TestAdminEndpointAuth:
             assert resp.status_code == 200
             assert "sess-other" in manager._sessions
 
+    def test_deny_stores_internal_denied_and_blocks(self, monkeypatch):
+        """POST deny stores 'denied' internally; subsequent access check blocks."""
+        from app.access_control import AccessDeniedError
+
+        _patch_auth(monkeypatch)
+        with TestClient(_get_app(), raise_server_exceptions=False) as c:
+            resp = c.post(
+                "/api/admin/access-control/decision",
+                json={
+                    "actor_fingerprint": "fp_block",
+                    "source_ip": "10.0.0.77",
+                    "decision": "deny",
+                    "reason": "regression test",
+                },
+                headers=_headers(),
+            )
+            assert resp.status_code == 200
+            assert resp.json()["decision"] == "deny"
+
+        entry = _state.access_control_store.get("fp_block", "10.0.0.77")
+        assert entry is not None
+        assert entry.decision == "denied"
+
+        with pytest.raises(AccessDeniedError):
+            _state.access_control_store.resolve_access_policy(
+                actor_fingerprint="fp_block",
+                token_type="agent",
+                source_ip="10.0.0.77",
+                requested_profile="default",
+            )
+
 
 # ---------------------------------------------------------------------------
 # Unit test for disconnect_sessions_for_actor_source
@@ -269,6 +300,73 @@ async def test_disconnect_sessions_for_actor_source_direct():
         assert count == 1
         assert "match-1" not in manager._sessions
         assert "no-match" in manager._sessions
+        mock_client.close.assert_called_once()
+    finally:
+        await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_create_session_stores_source_ip():
+    """create_session propagates source_ip to SessionRecord."""
+    manager = SSHSessionManager(cleanup_interval=3600)
+    try:
+        mock_client = MagicMock()
+        mock_transport = MagicMock()
+        mock_client.get_transport.return_value = mock_transport
+
+        import paramiko
+
+        original_connect = paramiko.SSHClient.connect
+
+        def fake_connect(self, *a, **kw):
+            pass
+
+        paramiko.SSHClient.connect = fake_connect
+        try:
+            session_id = await manager.create_session(
+                host="10.0.0.5",
+                port=22,
+                username="root",
+                owner_type="agent",
+                owner_token_fingerprint="fp_src_test",
+                source_ip="192.168.1.99",
+            )
+            record = manager._sessions[session_id]
+            assert record.source_ip == "192.168.1.99"
+            assert record.owner_token_fingerprint == "fp_src_test"
+        finally:
+            paramiko.SSHClient.connect = original_connect
+    finally:
+        await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_sessions_for_actor_source_with_real_source_ip():
+    """deny kills sessions created via create_session with source_ip."""
+    from app.ssh_manager import disconnect_sessions_for_actor_source
+
+    manager = SSHSessionManager(cleanup_interval=3600)
+    try:
+        mock_client = MagicMock()
+        manager._sessions["real-sess"] = MagicMock(
+            session_id="real-sess",
+            client=mock_client,
+            host="10.0.0.5",
+            port=22,
+            username="root",
+            owner_token_fingerprint="fp_real",
+            source_ip="10.0.0.99",
+            owner_type="agent",
+            owner_name=None,
+            connected_at=0,
+            last_activity=0,
+            reconnect_count=0,
+            last_reconnect_reason=None,
+        )
+
+        count = await disconnect_sessions_for_actor_source(manager, "fp_real", "10.0.0.99")
+        assert count == 1
+        assert "real-sess" not in manager._sessions
         mock_client.close.assert_called_once()
     finally:
         await manager.close_all()

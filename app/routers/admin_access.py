@@ -44,6 +44,9 @@ async def set_access_decision(
 
     store = _state.access_control_store
 
+    # Normalize: API accepts "allow"/"deny", store uses "allowed"/"denied"
+    internal_decision = "allowed" if req.decision == "allow" else "denied"
+
     if req.decision == "allow":
         ttl: int = int(req.ttl_seconds or settings.access_control_allow_ttl)
     else:
@@ -52,7 +55,7 @@ async def set_access_decision(
     entry = store.set(
         req.actor_fingerprint,
         req.source_ip,
-        req.decision,
+        internal_decision,
         reason=req.reason,
         decided_by="operator",
         ttl_seconds=ttl,

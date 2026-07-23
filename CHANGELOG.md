@@ -10,15 +10,15 @@ This project follows semantic versioning where practical, but the public API is 
 
 - **Actor source approval gate**: gateway-owned `access_control.py` stores approved/denied/pending actor fingerprints with source_ip. Operator approves or denies via Telegram inline buttons (Allow/Deny).
 
-- **Admin decision endpoint**: `POST /api/admin/access-control/decisions` — set or update actor approval status (allow/deny/clear). Master-key auth required.
+- **Admin decision endpoint**: `POST /api/admin/access-control/decision` — set actor approval status (allow/deny). Master-key auth required. Deny immediately disconnects matching sessions.
 
-- **Denied actor blocks**: denied `actor_fingerprint` is rejected at connect, execute, execute-argv, jobs, and batch endpoints with a clear error message.
+- **Denied actor blocks**: denied `actor_fingerprint` is rejected at connect, execute, execute-argv, websocket execute, jobs, and batch endpoints with a clear error message.
 
 - **Pending profile cap**: pending actors are restricted to readonly/testlint profiles — no ops/docker-admin until approved.
 
-- **PTY blocked for pending**: pending actors cannot open PTY sessions.
+- **PTY blocked for pending/denied**: pending actors get `ACCESS_PENDING_APPROVAL`, denied actors get `ACCESS_DENIED` on PTY WebSocket connections.
 
-- **Notifier action buttons**: `command.deny` and `workspace.readonly_block` alerts include inline Allow/Deny buttons. Callbacks write decisions back to the gateway access-control store via `POST /api/admin/access-control/decisions`.
+- **Notifier action buttons**: `command.deny` and `workspace.readonly_block` alerts include inline Allow/Deny buttons. Callbacks write decisions back to the gateway access-control store via `POST /api/admin/access-control/decision`.
 
 - **Notifier actions module**: `app/notifier/actions.py` — opaque action tokens with TTL for inline button callbacks.
 
@@ -26,7 +26,7 @@ This project follows semantic versioning where practical, but the public API is 
 
 - **Notifier get_updates polling**: `app/notifier/get_updates.py` — long-poll Telegram `getUpdates` with callback query routing.
 
-- **Admin access router**: `app/routers/admin_access.py` — `GET /api/admin/access-control/recent` returns recent decisions from the access-control store.
+- **Admin access router**: `app/routers/admin_access.py` — `POST /api/admin/access-control/decision` for operator decisions.
 
 ### Changed
 
@@ -34,7 +34,11 @@ This project follows semantic versioning where practical, but the public API is 
 
 - **Redis backing non-fatal**: access-control store degrades gracefully if Redis is unavailable — reads fall back to in-memory dict, writes are best-effort with warning logs.
 
+- **Session source_ip propagation**: `create_session()` now stores source_ip in `SessionRecord`. `disconnect_sessions_for_actor_source()` kills real sessions created through `ssh_connect`.
+
 ### Fixed
+
+- **Decision normalization**: admin endpoint stored raw "deny" but `resolve_access_policy` checked "denied" — never matched. Now normalizes "allow"→"allowed", "deny"→"denied" in the store.
 
 - **Dedup fresh-clock regression**: notifier dedup window used `0` as "never sent" sentinel. On fresh CI runners where `time.monotonic() < dedup_window_seconds`, ALL first events were suppressed. Fixed by using `None` as sentinel — only check window when key was previously sent.
 
