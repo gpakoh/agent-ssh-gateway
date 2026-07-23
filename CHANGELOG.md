@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.45a0] - 2026-07-23
+
+### Added
+
+- **Actor source approval gate**: gateway-owned `access_control.py` stores approved/denied/pending actor fingerprints with source_ip. Operator approves or denies via Telegram inline buttons (Allow/Deny).
+
+- **Admin decision endpoint**: `POST /api/admin/access-control/decisions` — set or update actor approval status (allow/deny/clear). Master-key auth required.
+
+- **Denied actor blocks**: denied `actor_fingerprint` is rejected at connect, execute, execute-argv, jobs, and batch endpoints with a clear error message.
+
+- **Pending profile cap**: pending actors are restricted to readonly/testlint profiles — no ops/docker-admin until approved.
+
+- **PTY blocked for pending**: pending actors cannot open PTY sessions.
+
+- **Notifier action buttons**: `command.deny` and `workspace.readonly_block` alerts include inline Allow/Deny buttons. Callbacks write decisions back to the gateway access-control store via `POST /api/admin/access-control/decisions`.
+
+- **Notifier actions module**: `app/notifier/actions.py` — opaque action tokens with TTL for inline button callbacks.
+
+- **Notifier callbacks module**: `app/notifier/callbacks.py` — `handle_callback_query()` parses callback data, validates token expiry, dispatches to gateway.
+
+- **Notifier get_updates polling**: `app/notifier/get_updates.py` — long-poll Telegram `getUpdates` with callback query routing.
+
+- **Admin access router**: `app/routers/admin_access.py` — `GET /api/admin/access-control/recent` returns recent decisions from the access-control store.
+
+### Changed
+
+- **Callback token is not auth**: Telegram callback tokens are opaque action tokens, not authentication credentials. No master-key or agent-token check on callback paths.
+
+- **Redis backing non-fatal**: access-control store degrades gracefully if Redis is unavailable — reads fall back to in-memory dict, writes are best-effort with warning logs.
+
+### Fixed
+
+- **Dedup fresh-clock regression**: notifier dedup window used `0` as "never sent" sentinel. On fresh CI runners where `time.monotonic() < dedup_window_seconds`, ALL first events were suppressed. Fixed by using `None` as sentinel — only check window when key was previously sent.
+
 ## [0.1.44a0] - 2026-07-23
 
 ### Added
