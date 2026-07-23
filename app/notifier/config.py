@@ -45,6 +45,18 @@ class NotifierSettings:
     poll_interval_seconds: float = 5.0
     timeout_seconds: float = 10.0
     proxy: str = ""
+    dedup_window_seconds: float = 300.0
+    max_alerts_per_poll: int = 20
+    digest_interval_seconds: float = 300.0
+    realtime_event_types: tuple[str, ...] = (
+        "command.deny",
+        "workspace.readonly_block",
+        "system.error",
+    )
+    digest_types: tuple[str, ...] = (
+        "session.connect",
+        "session.disconnect",
+    )
     event_types: tuple[str, ...] = (
         "command.deny",
         "workspace.readonly_block",
@@ -68,8 +80,21 @@ class NotifierSettings:
             ),
             timeout_seconds=_parse_float(os.getenv("GATEWAY_NOTIFIER_TIMEOUT_SECONDS"), default=10.0),
             proxy=os.getenv("GATEWAY_NOTIFIER_PROXY", ""),
+            dedup_window_seconds=_parse_float(
+                os.getenv("GATEWAY_NOTIFIER_DEDUP_WINDOW_SECONDS"), default=300.0
+            ),
+            max_alerts_per_poll=int(
+                _parse_float(os.getenv("GATEWAY_NOTIFIER_MAX_ALERTS_PER_POLL"), default=20.0)
+            ),
             event_types=_parse_csv(os.getenv("GATEWAY_NOTIFIER_EVENT_TYPES"))
             or cls.event_types,
+            digest_interval_seconds=_parse_float(
+                os.getenv("GATEWAY_NOTIFIER_DIGEST_INTERVAL_SECONDS"), default=300.0
+            ),
+            digest_types=_parse_csv(os.getenv("GATEWAY_NOTIFIER_DIGEST_EVENT_TYPES"))
+            or cls.digest_types,
+            realtime_event_types=_parse_csv(os.getenv("GATEWAY_NOTIFIER_REALTIME_EVENT_TYPES"))
+            or cls.realtime_event_types,
         )
 
     @property

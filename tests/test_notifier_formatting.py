@@ -23,6 +23,7 @@ def test_format_command_deny_uses_safe_metadata_only():
     )
 
     assert text is not None
+    assert "[WARNING]" in text
     assert "command_root" in text
     assert "tee" in text
     assert "cat secret" not in text
@@ -63,16 +64,16 @@ def test_formatter_clips_long_reason():
 
 
 @pytest.mark.parametrize(
-    ("event_type", "title"),
+    ("event_type", "title", "severity"),
     [
-        ("command.deny", "Command blocked"),
-        ("workspace.readonly_block", "Workspace write blocked"),
-        ("session.connect", "SSH session connected"),
-        ("session.disconnect", "SSH session disconnected"),
-        ("system.error", "Gateway system error"),
+        ("command.deny", "Command blocked", "[WARNING]"),
+        ("workspace.readonly_block", "Workspace write blocked", "[WARNING]"),
+        ("session.connect", "SSH session connected", "[INFO]"),
+        ("session.disconnect", "SSH session disconnected", "[INFO]"),
+        ("system.error", "Gateway system error", "[CRITICAL]"),
     ],
 )
-def test_alert_matrix_formats_supported_events_safely(event_type: str, title: str):
+def test_alert_matrix_formats_supported_events_safely(event_type: str, title: str, severity: str):
     text = format_audit_event(
         {
             "event_type": event_type,
@@ -98,6 +99,7 @@ def test_alert_matrix_formats_supported_events_safely(event_type: str, title: st
     assert text is not None
     assert title in text
     assert event_type in text
+    assert severity in text
     assert "req-safe-1" in text
     assert "abc123def456" in text
     assert "command_root" in text

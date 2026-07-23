@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.44a0] - 2026-07-23
+
+### Added
+
+- **Alert severity levels**: every alert now carries `[CRITICAL]`, `[WARNING]`, or `[INFO]` prefix. Severity derived from event type via `severity_for_event()`.
+
+- **Dedup window**: `GATEWAY_NOTIFIER_DEDUP_WINDOW_SECONDS` (default 300). Identical events within the window are suppressed. Dedup key uses safe bounded fields only (event_type, route, error_code, profile, decision, command_root).
+
+- **Max alerts per poll**: `GATEWAY_NOTIFIER_MAX_ALERTS_PER_POLL` (default 20) caps alert volume per poll cycle.
+
+- **Realtime vs digest delivery**: `GATEWAY_NOTIFIER_REALTIME_EVENT_TYPES` (command.deny, workspace.readonly_block, system.error) sent immediately. `GATEWAY_NOTIFIER_DIGEST_EVENT_TYPES` (session.connect, session.disconnect) batched.
+
+- **Policy module**: `app/notifier/policy.py` — severity mapping, dedup key builder, delivery classifier.
+
+### Changed
+
+- **Formatter**: `format_audit_event()` now accepts optional `severity` kwarg and prepends severity prefix. Existing redaction unchanged.
+
+- **Session events demoted**: session.connect/disconnect moved from realtime to digest — no more chat spam on routine SSH connections.
+
 ## [0.1.43a0] - 2026-07-23
 
 ### Fixed

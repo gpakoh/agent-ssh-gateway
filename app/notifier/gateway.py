@@ -59,14 +59,33 @@ class GatewayAuditClient:
                 raise GatewayHealthError(response.status, response.reason or "Unknown")
             return await response.json()
 
-    async def recent_events(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        """Fetch recent audit events newest-first from the gateway."""
+    async def recent_events(
+        self,
+        *,
+        limit: int = 100,
+        event_type: str | None = None,
+        decision: str | None = None,
+        sort: str = "newest",
+    ) -> list[dict[str, Any]]:
+        """Fetch recent audit events from the gateway.
+
+        Args:
+            limit: Max events to return (default 100).
+            event_type: Filter by event type (e.g. "command.deny").
+            decision: Filter by decision ("allowed", "denied", "error").
+            sort: "newest" or "oldest".
+        """
         if not self._api_key:
             raise RuntimeError("GATEWAY_NOTIFIER_API_KEY is required to poll audit events")
         if self._session is None:
             self._session = aiohttp.ClientSession(timeout=self._timeout)
 
-        params = {"limit": str(limit), "sort": "newest"}
+        params: dict[str, str] = {"limit": str(limit), "sort": sort}
+        if event_type:
+            params["event_type"] = event_type
+        if decision:
+            params["decision"] = decision
+
         headers = {"X-API-Key": self._api_key}
         async with self._session.get(
             f"{self._base_url}/api/admin/audit/recent",
