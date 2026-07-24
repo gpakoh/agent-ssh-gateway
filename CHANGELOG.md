@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.51a0] - 2026-07-25
+
+### Added
+
+- **First ChatGPT attach rehearsal result**: `docs/operations/CHATGPT_ATTACH_FIRST_RUN.md` — records first controlled MCP attach against live gateway. Documents that no real ChatGPT/Codex UI connector was available; validation used gateway API + Python tool-mode introspection. Safe tools (84) and blocked tools (30) confirmed with no overlap. Not a full end-to-end ChatGPT attach.
+
 ## [0.1.50a0] - 2026-07-24
 
 ### Added
