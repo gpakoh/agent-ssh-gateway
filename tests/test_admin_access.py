@@ -459,7 +459,10 @@ class TestAdminRecent:
                 headers=_headers(),
             )
         body = resp.json()
-        assert body["decisions"][0]["actor_fingerprint"] == "fp_first"
+        fps = [d["actor_fingerprint"] for d in body["decisions"]]
+        assert "fp_first" in fps
+        assert "fp_second" in fps
+        assert fps.index("fp_first") < fps.index("fp_second")
 
 
 # ---------------------------------------------------------------------------
