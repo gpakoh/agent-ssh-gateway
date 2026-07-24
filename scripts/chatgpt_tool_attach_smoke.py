@@ -17,7 +17,12 @@ import os
 import sys
 import urllib.request
 
-from tool_modes import CHATGPT_BLOCKED_TOOLS, get_chatgpt_safe_tools
+# Allow running from repo root without package installation
+_MCP_DIR = os.path.join(os.path.dirname(__file__), "..", "examples", "mcp_server")
+if _MCP_DIR not in sys.path:
+    sys.path.insert(0, _MCP_DIR)
+
+from tool_modes import CHATGPT_BLOCKED_TOOLS, get_chatgpt_safe_tools  # noqa: E402
 
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8085").rstrip("/")
 AGENT_TOKEN = os.getenv("GATEWAY_AGENT_TOKEN", "")
