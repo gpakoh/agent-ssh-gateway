@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.49a0] - 2026-07-24
+
+### Added
+
+- **ChatGPT runtime preflight script**: `scripts/mcp_chatgpt_runtime_preflight.py` — verifies safe MCP config, gateway health (warning-only), never prints token.
+
+- **Private env template**: `examples/mcp_server/chatgpt.safe.env.example` — copy-to-ignored pattern for ChatGPT safe attach credentials.
+
+- **Gitignore protection**: `chatgpt.safe.env` excluded from tracked files.
+
+- **Docs update**: `docs/operations/CHATGPT_TOOL_ATTACH.md` — added quick-start with copy-template → private env → preflight → start MCP.
+
+- Safe config validation: `MCP_GATEWAY_TOOL_MODE=chatgpt` + `MCP_CHATGPT_SAFE_MODE=true` enforced by preflight script.
+
 ## [0.1.48a0] - 2026-07-24
 
 ### Added
