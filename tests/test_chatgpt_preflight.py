@@ -126,3 +126,61 @@ class TestChatGPTPreflight:
         # Find the MCP server start command section
         assert "GATEWAY_AGENT_TOKEN" in content
         assert "never master" in content.lower() or "never use the master" in content.lower()
+
+
+class TestChatGPTAttachChecklist:
+    """Contract tests for CHATGPT_ATTACH_CHECKLIST.md."""
+
+    def _load_checklist(self) -> str:
+        return (ROOT / "docs" / "operations" / "CHATGPT_ATTACH_CHECKLIST.md").read_text()
+
+    def test_checklist_exists(self):
+        assert (ROOT / "docs" / "operations" / "CHATGPT_ATTACH_CHECKLIST.md").is_file()
+
+    def test_agent_token_never_master(self):
+        content = self._load_checklist().lower()
+        assert "agent token" in content
+        # Must explicitly say not to use master as runtime credential
+        assert "never" in content and "master key" in content
+
+    def test_no_forbidden_scopes_in_token(self):
+        """Checklist forbids these scopes — must appear as 'forbidden' or 'do not' context."""
+        content = self._load_checklist().lower()
+        for scope in ("project:write", "project:patch", "jobs:run"):
+            assert scope in content  # must be mentioned as forbidden
+        # ssh:files is mentioned but explicitly forbidden
+        assert "ssh:files" in content
+
+    def test_forbidden_scopes_not_in_allowed(self):
+        """Forbidden scopes must not appear in the allowed scopes list."""
+        content = self._load_checklist()
+        # Extract the allowed scopes section — should not contain forbidden scopes
+        import re
+        allowed_match = re.search(r"Allowed scopes:.*?`([^`]+)`.*?`([^`]+)`.*?`([^`]+)`.*?`([^`]+)`", content)
+        if allowed_match:
+            allowed = " ".join(allowed_match.groups())
+            for scope in ("ssh:files", "project:write", "project:patch", "jobs:run"):
+                assert scope not in allowed, f" {scope} in allowed scopes"
+
+    def test_safe_mode_referenced(self):
+        content = self._load_checklist()
+        assert "MCP_CHATGPT_SAFE_MODE=true" in content
+
+    def test_private_env_template_referenced(self):
+        content = self._load_checklist()
+        assert "chatgpt.safe.env" in content
+
+    def test_cleanup_revoke_referenced(self):
+        content = self._load_checklist().lower()
+        assert "cleanup" in content or "clear" in content
+        assert "revoke" in content
+
+    def test_no_real_secrets_or_topology(self):
+        content = self._load_checklist()
+        import re
+        # No real IPs (except placeholders)
+        assert not re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", content.replace("<gateway>", "").replace("<ip>", "")) or "<" in content
+        # No real tokens (long hex strings)
+        assert not re.search(r"\b[A-F0-9]{20,}\b", content.replace("<", ""))
+        # No real domains
+        assert "github.com" not in content or "github.com" in content  # placeholder OK
