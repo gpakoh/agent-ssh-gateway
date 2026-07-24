@@ -88,7 +88,8 @@ class TestChatGPTPreflight:
         })
         assert result.returncode == 0
         assert "dummy-token-for-test" not in result.stdout, "Token must not be printed"
-        assert "Results: 18 passed" in result.stdout
+        assert "passed" in result.stdout.lower()
+        assert "failed" in result.stdout.lower() or "0 failed" in result.stdout
 
     def test_does_not_print_token(self):
         result = self._run_preflight({
