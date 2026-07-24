@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.52a0] - 2026-07-25
+
+### Added
+
+- **Local MCP stdio safe attach smoke**: `scripts/mcp_stdio_safe_smoke.py` — starts MCP server as subprocess, connects via MCP stdio protocol, verifies safe manifest (84 tools, 0 blocked), calls health + tools_manifest.
+
+### Fixed
+
+- **FastMCP zero-arg tool signature**: `@instrumented` decorator now uses `functools.wraps` to preserve original function signature. Without it, FastMCP generated pydantic schema with required `args`/`kwargs` fields, causing zero-arg tools (e.g. `health`) to fail when called via MCP stdio.
+- **Safe env template**: `chatgpt.safe.env.example` now includes `GATEWAY_API_KEY` (required by `GatewayClient`) alongside `GATEWAY_AGENT_TOKEN`.
+
 ## [0.1.51a0] - 2026-07-25
 
 ### Added
