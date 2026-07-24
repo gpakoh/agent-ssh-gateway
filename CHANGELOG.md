@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.50a0] - 2026-07-24
+
+### Added
+
+- **ChatGPT attach operator checklist**: `docs/operations/CHATGPT_ATTACH_CHECKLIST.md` — 10-step checklist with placeholders for safe MCP runtime attach.
+
+- **Checklist contract tests**: 8 tests verify checklist contains agent token (never master), forbidden scopes excluded, safe mode referenced, cleanup/revoke flow, no secrets/topology.
+
+- Safe attach sequence documented: restricted agent token → private env → preflight → manifest verification → first tool calls → cleanup.
+
 ## [0.1.49a0] - 2026-07-24
 
 ### Added
