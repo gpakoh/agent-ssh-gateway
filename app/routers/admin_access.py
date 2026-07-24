@@ -111,7 +111,12 @@ async def set_access_decision(
             manager, req.actor_fingerprint, req.source_ip
         )
 
-    _emit_decision_event(req.decision, req.actor_fingerprint, req.source_ip)
+    _emit_decision_event(
+        req.decision,
+        req.actor_fingerprint,
+        req.source_ip,
+        request_id=req.request_id,
+    )
 
     return DecisionResponse(
         decision_id=f"dec_{uuid.uuid4().hex[:12]}",
@@ -185,7 +190,12 @@ async def clear_access_decision(
     from app.access_control import make_access_key_hash
     key_hash = entry.key_hash if entry else make_access_key_hash(req.actor_fingerprint, req.source_ip)
 
-    _emit_clear_event(req.actor_fingerprint, req.source_ip, req.reason)
+    _emit_clear_event(
+        req.actor_fingerprint,
+        req.source_ip,
+        req.reason,
+        request_id=req.request_id,
+    )
 
     return ClearResponse(
         key_hash=key_hash,
@@ -194,25 +204,59 @@ async def clear_access_decision(
 
 
 # ---------------------------------------------------------------------------
-# Audit helpers
+# Structured audit events
 # ---------------------------------------------------------------------------
 
 
-def _emit_decision_event(decision: str, actor_fingerprint: str, source_ip: str) -> None:
-    logger = __import__("logging").getLogger("app.audit")
-    logger.info(
-        "access_control.decision decision=%s actor=%s source_ip=%s",
-        decision,
-        actor_fingerprint[:12],
-        source_ip,
-    )
+def _emit_decision_event(
+    decision: str,
+    actor_fingerprint: str,
+    source_ip: str,
+    request_id: str | None = None,
+) -> None:
+    """Emit a structured ACCESS_CONTROL_DECISION audit event."""
+    from app.audit import AuditEvent, AuditEventLogger, AuditEventType, Decision
+
+    event_logger: AuditEventLogger | None = getattr(_state, "event_audit_logger", None)
+    if event_logger is None:
+        return
+    event_logger.append(AuditEvent(
+        event_type=AuditEventType.SYSTEM_ERROR,  # no dedicated type yet; using SYSTEM_ERROR as placeholder
+        actor_type="operator",
+        actor_fingerprint=actor_fingerprint[:12],
+        request_id=request_id or "",
+        source_ip=source_ip,
+        route="POST /api/admin/access-control/decision",
+        action=f"access_control.decision:{decision}",
+        target_type="actor",
+        target_id=f"{actor_fingerprint[:12]}...{source_ip}",
+        decision=Decision.DENIED if decision == "deny" else Decision.ALLOWED,
+        reason=f"operator set {decision}",
+    ))
 
 
-def _emit_clear_event(actor_fingerprint: str, source_ip: str, reason: str) -> None:
-    logger = __import__("logging").getLogger("app.audit")
-    logger.info(
-        "access_control.clear actor=%s source_ip=%s reason=%s",
-        actor_fingerprint[:12],
-        source_ip,
-        reason,
-    )
+def _emit_clear_event(
+    actor_fingerprint: str,
+    source_ip: str,
+    reason: str,
+    request_id: str | None = None,
+) -> None:
+    """Emit a structured ACCESS_CONTROL_CLEAR audit event."""
+    from app.audit import AuditEvent, AuditEventLogger, AuditEventType, Decision
+
+    event_logger: AuditEventLogger | None = getattr(_state, "event_audit_logger", None)
+    if event_logger is None:
+        return
+    event_logger.append(AuditEvent(
+        event_type=AuditEventType.SYSTEM_ERROR,  # no dedicated type yet; using SYSTEM_ERROR as placeholder
+        actor_type="operator",
+        actor_fingerprint=actor_fingerprint[:16],
+        request_id=request_id or "",
+        source_ip=source_ip,
+        route="POST /api/admin/access-control/clear",
+        action="access_control.clear",
+        target_type="actor",
+        target_id=f"{actor_fingerprint[:12]}...{source_ip}",
+        decision=Decision.ALLOWED,
+        reason=reason or "operator cleared decision",
+    ))
