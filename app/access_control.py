@@ -164,6 +164,55 @@ class AccessControlStore:
         key_hash = make_access_key_hash(actor_fingerprint, source_ip)
         self._store.pop(key_hash, None)
 
+    # -- Read-only views --
+
+    def recent(
+        self,
+        *,
+        limit: int = 100,
+        decision: str | None = None,
+        sort: str = "newest",
+    ) -> list[AccessDecision]:
+        """Return recent decisions from memory, sorted newest-first by default.
+
+        Filters by decision if provided. Capped at the current store size.
+        """
+        self.cleanup_expired()
+        entries = list(self._store.values())
+        if decision is not None:
+            entries = [e for e in entries if e.decision == decision]
+        reverse = sort != "oldest"
+        entries.sort(key=lambda e: e.created_at, reverse=reverse)
+        return entries[:min(limit, 1000)]
+
+    def clear(
+        self,
+        actor_fingerprint: str,
+        source_ip: str,
+        reason: str = "",
+        decided_by: str = "operator",
+    ) -> AccessDecision | None:
+        """Delete a decision from memory and Redis (best-effort).
+
+        Returns the deleted entry if it existed, else None.
+        After clear, the tuple returns to pending semantics on next access.
+        """
+        key_hash = make_access_key_hash(actor_fingerprint, source_ip)
+        entry = self._store.pop(key_hash, None)
+        if entry is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._delete_from_redis(key_hash))
+            except RuntimeError:
+                pass
+        return entry
+
+    @staticmethod
+    def ttl_remaining(entry: AccessDecision) -> float:
+        """Seconds remaining before entry expires. 0 if expired."""
+        remaining = entry.expires_at - time.time()
+        return max(0.0, remaining)
+
     # -- Cleanup --
 
     def cleanup_expired(self) -> int:
@@ -274,6 +323,16 @@ class AccessControlStore:
             await r.expire(key, ttl)
         except Exception as exc:
             logger.warning("access_control.redis_save_failed: %s", exc)
+
+    async def _delete_from_redis(self, key_hash: str) -> None:
+        if not self._redis_url:
+            return
+        try:
+            r = await self._get_redis()
+            if r is not None:
+                await r.delete(f"ac:{key_hash}")
+        except Exception as exc:
+            logger.warning("access_control.redis_delete_failed: %s", exc)
 
     # -- Policy Resolution --
 

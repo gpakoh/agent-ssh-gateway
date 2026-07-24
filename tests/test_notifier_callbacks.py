@@ -165,7 +165,11 @@ def test_handle_callback_calls_answer_and_edit():
 
     assert "cb-ae" in tg.answered
     assert len(tg.edited) == 1
-    assert tg.edited[0] == ("99", 7, "<b>Allowed</b> by @op")
+    follow_up = tg.edited[0][2]
+    assert "✅ Allowed" in follow_up
+    assert "@op" in follow_up
+    assert "fp-ae" in follow_up
+    assert "10.0.0.3" in follow_up
 
 
 # ---------------------------------------------------------------------------

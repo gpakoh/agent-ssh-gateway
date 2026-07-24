@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app import state as _state
@@ -12,6 +13,11 @@ from app.auth_middleware import AuthIdentity, require_master_key
 from app.config import settings
 
 router = APIRouter(tags=["admin-access"])
+
+
+# ---------------------------------------------------------------------------
+# Request / Response models
+# ---------------------------------------------------------------------------
 
 
 class DecisionRequest(BaseModel):
@@ -29,6 +35,41 @@ class DecisionResponse(BaseModel):
     decision: str
     expires_at: float
     effective_now: bool = True
+
+
+class DecisionEntry(BaseModel):
+    key_hash: str
+    decision: str
+    actor_fingerprint: str
+    source_ip: str
+    reason: str
+    decided_by: str
+    created_at: float
+    expires_at: float
+    ttl_seconds_remaining: float
+
+
+class RecentResponse(BaseModel):
+    decisions: list[DecisionEntry]
+    total: int
+
+
+class ClearRequest(BaseModel):
+    actor_fingerprint: str
+    source_ip: str
+    reason: str = ""
+    request_id: str | None = None
+
+
+class ClearResponse(BaseModel):
+    key_hash: str
+    cleared: bool
+    effective_now: bool = True
+
+
+# ---------------------------------------------------------------------------
+# POST /api/admin/access-control/decision
+# ---------------------------------------------------------------------------
 
 
 @router.post(
@@ -70,10 +111,108 @@ async def set_access_decision(
             manager, req.actor_fingerprint, req.source_ip
         )
 
+    _emit_decision_event(req.decision, req.actor_fingerprint, req.source_ip)
+
     return DecisionResponse(
         decision_id=f"dec_{uuid.uuid4().hex[:12]}",
         key_hash=entry.key_hash,
         decision=req.decision,
         expires_at=entry.expires_at,
         effective_now=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/admin/access-control/recent
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/api/admin/access-control/recent",
+    response_model=RecentResponse,
+)
+async def list_recent_decisions(
+    limit: int = Query(100, ge=1, le=1000),
+    decision: str | None = Query(None, description="Filter: allowed|denied|pending"),
+    sort: str = Query("newest", description="newest or oldest"),
+    _identity: AuthIdentity = Depends(require_master_key),
+) -> RecentResponse:
+    store = _state.access_control_store
+    entries = store.recent(limit=limit, decision=decision, sort=sort)
+    now = time.time()
+    return RecentResponse(
+        decisions=[
+            DecisionEntry(
+                key_hash=e.key_hash,
+                decision=e.decision,
+                actor_fingerprint=e.actor_fingerprint,
+                source_ip=e.source_ip,
+                reason=e.reason,
+                decided_by=e.decided_by,
+                created_at=e.created_at,
+                expires_at=e.expires_at,
+                ttl_seconds_remaining=round(max(0.0, e.expires_at - now), 1),
+            )
+            for e in entries
+        ],
+        total=len(entries),
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/admin/access-control/clear
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/api/admin/access-control/clear",
+    response_model=ClearResponse,
+)
+async def clear_access_decision(
+    req: ClearRequest,
+    _identity: AuthIdentity = Depends(require_master_key),
+) -> ClearResponse:
+    store = _state.access_control_store
+    entry = store.clear(
+        req.actor_fingerprint,
+        req.source_ip,
+        reason=req.reason,
+        decided_by="operator",
+    )
+
+    key_hash = entry.key_hash if entry else store.make_key_hash(req.actor_fingerprint, req.source_ip) if hasattr(store, "make_key_hash") else ""
+
+    from app.access_control import make_access_key_hash
+    key_hash = entry.key_hash if entry else make_access_key_hash(req.actor_fingerprint, req.source_ip)
+
+    _emit_clear_event(req.actor_fingerprint, req.source_ip, req.reason)
+
+    return ClearResponse(
+        key_hash=key_hash,
+        cleared=entry is not None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Audit helpers
+# ---------------------------------------------------------------------------
+
+
+def _emit_decision_event(decision: str, actor_fingerprint: str, source_ip: str) -> None:
+    logger = __import__("logging").getLogger("app.audit")
+    logger.info(
+        "access_control.decision decision=%s actor=%s source_ip=%s",
+        decision,
+        actor_fingerprint[:12],
+        source_ip,
+    )
+
+
+def _emit_clear_event(actor_fingerprint: str, source_ip: str, reason: str) -> None:
+    logger = __import__("logging").getLogger("app.audit")
+    logger.info(
+        "access_control.clear actor=%s source_ip=%s reason=%s",
+        actor_fingerprint[:12],
+        source_ip,
+        reason,
     )

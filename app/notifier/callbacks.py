@@ -74,13 +74,26 @@ async def handle_callback_query(
     if telegram_client is not None:
         await telegram_client.answer_callback_query(callback_query.get("id", ""))
 
-        # Edit message to remove buttons
+        # Edit message to remove buttons and show decision details
         message = callback_query.get("message", {})
         chat_id = message.get("chat", {}).get("id", "")
         message_id = message.get("message_id")
         if chat_id and message_id is not None:
-            label = "Allowed" if decision == "allow" else "Denied"
-            follow_up = f"<b>{label}</b> by @{username}"
+            label = "✅ Allowed" if decision == "allow" else "❌ Denied"
+            fp_short = payload.actor_fingerprint[:12]
+            gw_result = result.get("gateway_post", "")
+            ttl_line = ""
+            if isinstance(gw_result, dict) and "expires_at" in gw_result:
+                import time
+                ttl_remaining = round(max(0.0, gw_result["expires_at"] - time.time()))
+                ttl_line = f"\n⏱ TTL: {ttl_remaining}s"
+            elif isinstance(gw_result, str) and gw_result != "ok":
+                gw_status = gw_result
+                follow_up = f"{label} by @{username}\n⚠ Gateway: {gw_status}\n🔐 {fp_short}… | {payload.source_ip}"
+                await telegram_client.edit_message_text(str(chat_id), int(message_id), follow_up)
+                return result
+
+            follow_up = f"{label} by @{username}\n🔐 {fp_short}… | {payload.source_ip}{ttl_line}"
             await telegram_client.edit_message_text(str(chat_id), int(message_id), follow_up)
 
     return result

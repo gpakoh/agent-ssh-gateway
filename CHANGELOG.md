@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.46a0] - 2026-07-24
+
+### Added
+
+- **Admin access-control recent endpoint**: `GET /api/admin/access-control/recent` — list access-control decisions from in-memory store with filtering (decision type) and sorting (newest/oldest). Response includes `ttl_seconds_remaining`.
+
+- **Admin access-control clear endpoint**: `POST /api/admin/access-control/clear` — delete a decision from memory and Redis (best-effort). After clear, the actor+IP tuple returns to pending semantics.
+
+- **AccessControlStore.recent()**: returns filtered/sorted decisions with TTL remaining.
+
+- **AccessControlStore.clear()**: deletes decision from memory + Redis, returns deleted entry.
+
+- **AccessControlStore.ttl_remaining()**: static helper for seconds until expiry.
+
+- **Notifier callback follow-up**: edited Telegram message now shows decision label, actor fingerprint prefix, source_ip, and TTL when available. Gateway error is displayed safely.
+
+- **Smoke script**: `scripts/access_control_smoke.py` — validates health → deny → recent → clear cycle via admin API. Uses env/placeholders only.
+
 ## [0.1.45a0] - 2026-07-23
 
 ### Added

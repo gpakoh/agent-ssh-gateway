@@ -370,3 +370,175 @@ async def test_disconnect_sessions_for_actor_source_with_real_source_ip():
         mock_client.close.assert_called_once()
     finally:
         await manager.close_all()
+
+
+# ---------------------------------------------------------------------------
+# GET /api/admin/access-control/recent
+# ---------------------------------------------------------------------------
+
+
+class TestAdminRecent:
+    def test_recent_requires_master(self, monkeypatch):
+        with _client(monkeypatch) as c:
+            resp = c.get("/api/admin/access-control/recent")
+        assert resp.status_code == 401
+
+    def test_recent_returns_decisions(self, monkeypatch):
+        _patch_auth(monkeypatch)
+        with TestClient(_get_app(), raise_server_exceptions=False) as c:
+            # Seed a decision
+            c.post(
+                "/api/admin/access-control/decision",
+                json={
+                    "actor_fingerprint": "fp_recent",
+                    "source_ip": "10.0.0.88",
+                    "decision": "deny",
+                    "reason": "recent test",
+                },
+                headers=_headers(),
+            )
+            resp = c.get(
+                "/api/admin/access-control/recent",
+                headers=_headers(),
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] >= 1
+        decisions = body["decisions"]
+        assert any(d["actor_fingerprint"] == "fp_recent" for d in decisions)
+        first = decisions[0]
+        assert first["decision"] == "denied"
+        assert first["ttl_seconds_remaining"] > 0
+        assert first["source_ip"] == "10.0.0.88"
+
+    def test_recent_limit_cap(self, monkeypatch):
+        _patch_auth(monkeypatch)
+        with TestClient(_get_app(), raise_server_exceptions=False) as c:
+            resp = c.get(
+                "/api/admin/access-control/recent",
+                params={"limit": 1},
+                headers=_headers(),
+            )
+        assert resp.status_code == 200
+        assert len(resp.json()["decisions"]) <= 1
+
+    def test_recent_decision_filter(self, monkeypatch):
+        _patch_auth(monkeypatch)
+        with TestClient(_get_app(), raise_server_exceptions=False) as c:
+            c.post(
+                "/api/admin/access-control/decision",
+                json={"actor_fingerprint": "fp_allow", "source_ip": "10.0.0.1", "decision": "allow"},
+                headers=_headers(),
+            )
+            resp = c.get(
+                "/api/admin/access-control/recent",
+                params={"decision": "denied"},
+                headers=_headers(),
+            )
+        body = resp.json()
+        assert not any(d["actor_fingerprint"] == "fp_allow" for d in body["decisions"])
+
+    def test_recent_sort_oldest(self, monkeypatch):
+        _patch_auth(monkeypatch)
+        with TestClient(_get_app(), raise_server_exceptions=False) as c:
+            c.post(
+                "/api/admin/access-control/decision",
+                json={"actor_fingerprint": "fp_first", "source_ip": "10.0.0.1", "decision": "deny"},
+                headers=_headers(),
+            )
+            import time as _time
+            _time.sleep(0.01)
+            c.post(
+                "/api/admin/access-control/decision",
+                json={"actor_fingerprint": "fp_second", "source_ip": "10.0.0.2", "decision": "deny"},
+                headers=_headers(),
+            )
+            resp = c.get(
+                "/api/admin/access-control/recent",
+                params={"sort": "oldest"},
+                headers=_headers(),
+            )
+        body = resp.json()
+        assert body["decisions"][0]["actor_fingerprint"] == "fp_first"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/admin/access-control/clear
+# ---------------------------------------------------------------------------
+
+
+class TestAdminClear:
+    def test_clear_requires_master(self, monkeypatch):
+        with _client(monkeypatch) as c:
+            resp = c.post(
+                "/api/admin/access-control/clear",
+                json={"actor_fingerprint": "fp", "source_ip": "10.0.0.1"},
+            )
+        assert resp.status_code == 401
+
+    def test_clear_removes_decision(self, monkeypatch):
+        _patch_auth(monkeypatch)
+        with TestClient(_get_app(), raise_server_exceptions=False) as c:
+            # Set deny first
+            c.post(
+                "/api/admin/access-control/decision",
+                json={"actor_fingerprint": "fp_clear", "source_ip": "10.0.0.77", "decision": "deny"},
+                headers=_headers(),
+            )
+            # Clear it
+            resp = c.post(
+                "/api/admin/access-control/clear",
+                json={"actor_fingerprint": "fp_clear", "source_ip": "10.0.0.77", "reason": "smoke"},
+                headers=_headers(),
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["cleared"] is True
+
+            # Verify gone from recent
+            resp2 = c.get(
+                "/api/admin/access-control/recent",
+                params={"decision": "denied"},
+                headers=_headers(),
+            )
+            found = any(
+                d["actor_fingerprint"] == "fp_clear"
+                for d in resp2.json().get("decisions", [])
+            )
+            assert not found
+
+    def test_clear_returns_false_when_missing(self, monkeypatch):
+        _patch_auth(monkeypatch)
+        with TestClient(_get_app(), raise_server_exceptions=False) as c:
+            resp = c.post(
+                "/api/admin/access-control/clear",
+                json={"actor_fingerprint": "fp_never", "source_ip": "10.0.0.1"},
+                headers=_headers(),
+            )
+            assert resp.status_code == 200
+            assert resp.json()["cleared"] is False
+
+    def test_clear_tuple_returns_pending(self, monkeypatch):
+        _patch_auth(monkeypatch)
+        with TestClient(_get_app(), raise_server_exceptions=False) as c:
+            # Deny, then clear
+            c.post(
+                "/api/admin/access-control/decision",
+                json={"actor_fingerprint": "fp_pend", "source_ip": "10.0.0.55", "decision": "deny"},
+                headers=_headers(),
+            )
+            c.post(
+                "/api/admin/access-control/clear",
+                json={"actor_fingerprint": "fp_pend", "source_ip": "10.0.0.55"},
+                headers=_headers(),
+            )
+        # Verify pending semantics
+        entry = _state.access_control_store.get("fp_pend", "10.0.0.55")
+        assert entry is None
+        result = _state.access_control_store.resolve_access_policy(
+            actor_fingerprint="fp_pend",
+            token_type="agent",
+            source_ip="10.0.0.55",
+            requested_profile="ops",
+        )
+        assert result.state == "pending"
