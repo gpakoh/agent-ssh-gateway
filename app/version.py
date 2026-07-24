@@ -14,7 +14,7 @@ import os
 from importlib.metadata import PackageNotFoundError, version
 
 PACKAGE_NAME = "agent-ssh-gateway"
-FALLBACK_VERSION = "0.1.45a0"
+FALLBACK_VERSION = "0.1.46a0"
 
 _VERSION_SOURCE: str | None = None
 
