@@ -1,0 +1,23 @@
+{
+  "mode": "chatgpt",
+  "safe_mode": true,
+  "expected_safe_count": 84,
+  "expected_blocked_count": 30,
+  "expected_chatgpt_full_count": 111,
+  "must_include": [
+    "health",
+    "project_info",
+    "repo_status",
+    "tools_manifest"
+  ],
+  "must_exclude": [
+    "docker_compose_up",
+    "docker_exec",
+    "project_apply_patch",
+    "project_run_agent",
+    "project_run_mimo",
+    "project_run_opencode",
+    "workspace_apply_patch",
+    "workspace_file_write"
+  ]
+}
