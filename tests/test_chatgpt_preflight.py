@@ -184,3 +184,47 @@ class TestChatGPTAttachChecklist:
         assert not re.search(r"\b[A-F0-9]{20,}\b", content.replace("<", ""))
         # No real domains
         assert "github.com" not in content or "github.com" in content  # placeholder OK
+
+
+class TestMcpStdioSmoke:
+    """Contract tests for scripts/mcp_stdio_safe_smoke.py."""
+
+    def _load_script(self) -> str:
+        return (ROOT / "scripts" / "mcp_stdio_safe_smoke.py").read_text()
+
+    def test_script_exists(self):
+        assert (ROOT / "scripts" / "mcp_stdio_safe_smoke.py").is_file()
+
+    def test_script_has_blocked_tools_set(self):
+        content = self._load_script()
+        for tool in ("project_run_opencode", "project_run_mimo", "project_run_agent",
+                      "docker_exec", "docker_compose_up", "workspace_file_write",
+                      "workspace_apply_patch", "project_apply_patch"):
+            assert tool in content, f"Blocked tool {tool} missing from BLOCKED_TOOLS"
+
+    def test_script_has_required_tools(self):
+        content = self._load_script()
+        assert '"health"' in content
+        assert '"tools_manifest"' in content
+
+    def test_script_no_token_print(self):
+        content = self._load_script()
+        assert "GATEWAY_AGENT_TOKEN=<REDACTED>" in content
+        assert "print(token" not in content
+        assert "print(os.environ[\"GATEWAY_AGENT_TOKEN\"])" not in content
+
+    def test_script_exits_nonzero_on_unsafe(self):
+        content = self._load_script()
+        assert "return 1" in content
+        assert "UNSAFE MANIFEST" in content
+
+    def test_script_safe_mode_flags(self):
+        content = self._load_script()
+        assert "MCP_CHATGPT_SAFE_MODE" in content
+        assert '"chatgpt"' in content or "'chatgpt'" in content
+
+    def test_no_real_secrets_in_script(self):
+        content = self._load_script()
+        import re
+        assert not re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", content)
+        assert not re.search(r"\b[A-F0-9]{40,}\b", content)
