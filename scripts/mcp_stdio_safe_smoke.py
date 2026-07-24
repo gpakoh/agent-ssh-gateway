@@ -43,6 +43,7 @@ def _build_env() -> dict[str, str] | None:
 
     env: dict[str, str] = {
         "GATEWAY_URL": os.environ["GATEWAY_URL"],
+        "GATEWAY_API_KEY": os.environ["GATEWAY_AGENT_TOKEN"],
         "GATEWAY_AGENT_TOKEN": os.environ["GATEWAY_AGENT_TOKEN"],
         "MCP_GATEWAY_TOOL_MODE": "chatgpt",
         "MCP_CHATGPT_SAFE_MODE": "true",

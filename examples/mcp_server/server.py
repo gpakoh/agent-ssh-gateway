@@ -346,6 +346,8 @@ def instrumented(tool_name: str):
                         result["meta"]["duration_ms"] = int(recs[-1])
                 return result
 
+            from functools import wraps
+            wraps(func)(async_wrapper)
             return async_wrapper
         else:
 
@@ -359,6 +361,8 @@ def instrumented(tool_name: str):
                         result["meta"]["duration_ms"] = int(recs[-1])
                 return result
 
+            from functools import wraps
+            wraps(func)(sync_wrapper)
             return sync_wrapper
 
     return decorator
