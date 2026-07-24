@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.54a0] - 2026-07-25
+
+### Added
+
+- **OpenAI connector readiness audit**: `docs/operations/OPENAI_CONNECTOR_READINESS.md` — gap matrix (transport, auth, TLS, OAuth, schema, rate limits, audit, approval flow), 3 options (stdio-only=complete, HTTP private=recommended next, public=deferred), non-goals. Current MCP transport is stdio-only. Public ChatGPT/OpenAI connector is not live.
+
 ## [0.1.53a0] - 2026-07-25
 
 ### Added
