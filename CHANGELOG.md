@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.48a0] - 2026-07-24
+
+### Added
+
+- **ChatGPT attach rehearsal runbook**: `docs/operations/CHATGPT_ATTACH_REHEARSAL.md` — step-by-step guide for the first safe attach using restricted agent token.
+
+- First attach uses agent token (never master key). Recommended scopes: `ssh:connect`, `ssh:execute`, `jobs:read`, `diagnostics:read`.
+
+- Safe mode manifest verified: 84 safe tools, 30 blocked tools. Blocked include opencode/mimo/agent launch, all docker tools, workspace write/patch, handoff writes.
+
+- Access-control pending/deny/clear rehearsal flow documented with cleanup steps.
+
 ## [0.1.47a0] - 2026-07-24
 
 ### Added
