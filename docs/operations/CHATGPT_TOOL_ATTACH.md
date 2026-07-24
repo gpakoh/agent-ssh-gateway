@@ -29,7 +29,7 @@ curl -s -X POST http://localhost:8085/api/agent/token \
   -H "X-API-Key: <master-key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "scopes": ["ssh:connect", "ssh:execute", "ssh:files"],
+    "scopes": ["ssh:connect", "ssh:execute"],
     "ttl": 0
   }'
 ```
@@ -47,7 +47,6 @@ When `MCP_CHATGPT_SAFE_MODE=true`, only these tools are exposed:
 - `working_directory`, `git_status`, `recent_commits`, `git_diff_stat`, `show_changes`
 - `project_*` read-only tools (info, read_file, search_text, find_files, list_files, tree, git status/diff/commits/branches)
 - `gitea_*`, `github_*` read-only tools
-- `postgres_*` read-only tools (health, list, describe, select)
 - `resolve_library_id`, `query_docs`
 - `read_handoff`, `show_handoff_status`
 
