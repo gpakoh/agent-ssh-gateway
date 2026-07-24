@@ -542,3 +542,53 @@ class TestAdminClear:
             requested_profile="ops",
         )
         assert result.state == "pending"
+
+
+# ---------------------------------------------------------------------------
+# Structured audit event types
+# ---------------------------------------------------------------------------
+
+
+class TestAuditEventTypes:
+    def test_decision_event_type(self, monkeypatch):
+        from unittest.mock import MagicMock as _MagicMock
+        _patch_auth(monkeypatch)
+        event_logger = _MagicMock()
+        with TestClient(_get_app(), raise_server_exceptions=False) as c:
+            import app.state as __state
+            original = getattr(__state, "event_audit_logger", None)
+            __state.event_audit_logger = event_logger
+            try:
+                c.post(
+                    "/api/admin/access-control/decision",
+                    json={"actor_fingerprint": "fp_audit", "source_ip": "10.0.0.99", "decision": "allow"},
+                    headers=_headers(),
+                )
+            finally:
+                __state.event_audit_logger = original
+        event_logger.append.assert_called_once()
+        event = event_logger.append.call_args[0][0]
+        assert event.event_type == "access_control.decision"
+        assert event.event_type != "system.error"
+        assert event.decision == "allowed"
+
+    def test_clear_event_type(self, monkeypatch):
+        from unittest.mock import MagicMock as _MagicMock
+        _patch_auth(monkeypatch)
+        event_logger = _MagicMock()
+        with TestClient(_get_app(), raise_server_exceptions=False) as c:
+            import app.state as __state
+            original = getattr(__state, "event_audit_logger", None)
+            __state.event_audit_logger = event_logger
+            try:
+                c.post(
+                    "/api/admin/access-control/clear",
+                    json={"actor_fingerprint": "fp_clear_audit", "source_ip": "10.0.0.77", "reason": "test"},
+                    headers=_headers(),
+                )
+            finally:
+                __state.event_audit_logger = original
+        event_logger.append.assert_called_once()
+        event = event_logger.append.call_args[0][0]
+        assert event.event_type == "access_control.clear"
+        assert event.event_type != "system.error"

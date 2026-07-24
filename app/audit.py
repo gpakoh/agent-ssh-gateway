@@ -112,6 +112,8 @@ class AuditEventType(StrEnum):
     MCP_TOOL = "mcp.tool"
     SYSTEM_STARTUP = "system.startup"
     SYSTEM_ERROR = "system.error"
+    ACCESS_CONTROL_DECISION = "access_control.decision"
+    ACCESS_CONTROL_CLEAR = "access_control.clear"
 
 
 class Decision(StrEnum):
