@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.53a0] - 2026-07-25
+
+### Added
+
+- **ChatGPT connector handoff package**: `docs/operations/CHATGPT_CONNECTOR_HANDOFF.md` — what to give operator, what NOT to give, env/token checklists, manifest counts, first tool calls, approval flow, rollback/stop. Agent token only, never master key. Forbidden scopes/tools documented as forbidden.
+- **Expected manifest JSON**: `examples/mcp_server/chatgpt.safe.manifest.expected.json` — machine-readable manifest check (84 safe, 30 blocked, must_include/must_exclude).
+- **Manifest contract tests**: 5 tests verify manifest counts match code, must_include tools in safe set, must_exclude tools in blocked set.
+
 ## [0.1.52a0] - 2026-07-25
 
 ### Added
