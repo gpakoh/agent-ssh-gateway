@@ -5,10 +5,13 @@ from __future__ import annotations
 import pytest
 
 from examples.mcp_server.tool_modes import (
+    CHATGPT_BLOCKED_TOOLS,
     DEFAULT_TOOL_MODE,
     TOOL_NAMES_BY_MODE,
     ToolModeError,
+    get_chatgpt_safe_tools,
     get_tool_mode,
+    is_chatgpt_safe_mode,
     should_register_tool,
     tools_for_mode,
 )
@@ -110,3 +113,61 @@ class TestToolsForMode:
     def test_tools_for_none_uses_default(self):
         mode = tools_for_mode()
         assert mode == TOOL_NAMES_BY_MODE[DEFAULT_TOOL_MODE]
+
+
+# ---------------------------------------------------------------------------
+# ChatGPT safe mode
+# ---------------------------------------------------------------------------
+
+
+class TestChatGPTSafeMode:
+    def test_safe_mode_default_off(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("MCP_CHATGPT_SAFE_MODE", raising=False)
+        assert not is_chatgpt_safe_mode()
+
+    def test_safe_mode_enabled(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("MCP_CHATGPT_SAFE_MODE", "true")
+        assert is_chatgpt_safe_mode()
+
+    def test_blocked_tools_excludes_agent_launch(self):
+        assert "project_run_opencode" in CHATGPT_BLOCKED_TOOLS
+        assert "project_run_mimo" in CHATGPT_BLOCKED_TOOLS
+        assert "project_run_agent" in CHATGPT_BLOCKED_TOOLS
+
+    def test_blocked_tools_excludes_docker(self):
+        for name in ("docker_exec", "docker_compose_up", "docker_compose_down", "docker_prune"):
+            assert name in CHATGPT_BLOCKED_TOOLS
+
+    def test_blocked_tools_excludes_write_mutations(self):
+        for name in ("workspace_file_write", "workspace_file_edit", "workspace_apply_patch",
+                       "project_apply_patch"):
+            assert name in CHATGPT_BLOCKED_TOOLS
+
+    def test_safe_tools_include_readonly(self):
+        safe = get_chatgpt_safe_tools()
+        for name in ("health", "tools_manifest", "job_status", "read_file", "repo_status"):
+            assert name in safe
+
+    def test_safe_tools_include_testlint(self):
+        safe = get_chatgpt_safe_tools()
+        for name in ("run_tests", "run_lint", "project_run_pytest", "project_run_ruff"):
+            assert name in safe
+
+    def test_safe_tools_exclude_blocked(self):
+        safe = get_chatgpt_safe_tools()
+        assert len(safe & CHATGPT_BLOCKED_TOOLS) == 0
+
+    def test_safe_mode_filters_registration(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+        monkeypatch.setenv("MCP_CHATGPT_SAFE_MODE", "true")
+        assert should_register_tool("health")
+        assert should_register_tool("read_file")
+        assert not should_register_tool("project_run_opencode")
+        assert not should_register_tool("docker_exec")
+        assert not should_register_tool("workspace_file_write")
+
+    def test_safe_mode_off_allows_all_chatgpt(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+        monkeypatch.delenv("MCP_CHATGPT_SAFE_MODE", raising=False)
+        assert should_register_tool("project_run_opencode")
+        assert should_register_tool("docker_exec")
