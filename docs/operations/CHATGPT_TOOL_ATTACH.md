@@ -1,5 +1,22 @@
 # ChatGPT Tool Attach — Safe First Connection
 
+## Quick start
+
+```bash
+# 1. Copy template to private env (already gitignored)
+cp examples/mcp_server/chatgpt.safe.env.example examples/mcp_server/chatgpt.safe.env
+
+# 2. Edit chatgpt.safe.env with your values
+#    NEVER commit this file
+
+# 3. Run preflight
+python3 scripts/mcp_chatgpt_runtime_preflight.py
+
+# 4. Start MCP server
+set -a && source examples/mcp_server/chatgpt.safe.env && set +a
+python3 examples/mcp_server/server.py
+```
+
 ## Architecture
 
 ```
