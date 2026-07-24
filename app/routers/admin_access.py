@@ -221,7 +221,7 @@ def _emit_decision_event(
     if event_logger is None:
         return
     event_logger.append(AuditEvent(
-        event_type=AuditEventType.SYSTEM_ERROR,  # no dedicated type yet; using SYSTEM_ERROR as placeholder
+        event_type=AuditEventType.ACCESS_CONTROL_DECISION,
         actor_type="operator",
         actor_fingerprint=actor_fingerprint[:12],
         request_id=request_id or "",
@@ -248,7 +248,7 @@ def _emit_clear_event(
     if event_logger is None:
         return
     event_logger.append(AuditEvent(
-        event_type=AuditEventType.SYSTEM_ERROR,  # no dedicated type yet; using SYSTEM_ERROR as placeholder
+        event_type=AuditEventType.ACCESS_CONTROL_CLEAR,
         actor_type="operator",
         actor_fingerprint=actor_fingerprint[:16],
         request_id=request_id or "",
