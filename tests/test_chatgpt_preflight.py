@@ -228,3 +228,78 @@ class TestMcpStdioSmoke:
         import re
         assert not re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", content)
         assert not re.search(r"\b[A-F0-9]{40,}\b", content)
+
+
+class TestChatGPTConnectorHandoff:
+    """Contract tests for CHATGPT_CONNECTOR_HANDOFF.md."""
+
+    def _load_handoff(self) -> str:
+        return (ROOT / "docs" / "operations" / "CHATGPT_CONNECTOR_HANDOFF.md").read_text()
+
+    def test_handoff_doc_exists(self):
+        assert (ROOT / "docs" / "operations" / "CHATGPT_CONNECTOR_HANDOFF.md").is_file()
+
+    def test_agent_token_never_master(self):
+        content = self._load_handoff().lower()
+        assert "agent token" in content
+        assert "never" in content and "master" in content
+
+    def test_stop_conditions_present(self):
+        content = self._load_handoff().lower()
+        assert "stop condition" in content or "stop" in content
+        assert "rollback" in content or "revoke" in content
+
+    def test_forbidden_scopes_not_listed_as_allowed(self):
+        content = self._load_handoff()
+        assert "ssh:files" in content
+        assert "project:write" in content
+        assert "Forbidden" in content or "forbidden" in content
+        assert "NEVER" in content or "never" in content
+
+    def test_no_real_secrets_or_topology(self):
+        content = self._load_handoff()
+        import re
+        assert not re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", content)
+        assert not re.search(r"\b[A-F0-9]{40,}\b", content)
+
+
+class TestChatGPTExpectedManifest:
+    """Contract tests for chatgpt.safe.manifest.expected.json."""
+
+    def _load_manifest(self) -> dict:
+        import json
+        return json.loads((ROOT / "examples" / "mcp_server" / "chatgpt.safe.manifest.expected.json").read_text())
+
+    def test_manifest_exists(self):
+        assert (ROOT / "examples" / "mcp_server" / "chatgpt.safe.manifest.expected.json").is_file()
+
+    def test_manifest_mode_and_safe_flag(self):
+        m = self._load_manifest()
+        assert m["mode"] == "chatgpt"
+        assert m["safe_mode"] is True
+
+    def test_manifest_counts_match_code(self):
+        import sys
+        sys.path.insert(0, str(ROOT / "examples" / "mcp_server"))
+        from tool_modes import CHATGPT_BLOCKED_TOOLS, get_chatgpt_safe_tools
+        m = self._load_manifest()
+        assert m["expected_safe_count"] == len(get_chatgpt_safe_tools())
+        assert m["expected_blocked_count"] == len(CHATGPT_BLOCKED_TOOLS)
+
+    def test_manifest_must_include_present_in_safe(self):
+        import sys
+        sys.path.insert(0, str(ROOT / "examples" / "mcp_server"))
+        from tool_modes import get_chatgpt_safe_tools
+        m = self._load_manifest()
+        safe = get_chatgpt_safe_tools()
+        for tool in m["must_include"]:
+            assert tool in safe, f"must_include tool {tool} not in safe set"
+
+    def test_manifest_must_exclude_absent_from_safe(self):
+        import sys
+        sys.path.insert(0, str(ROOT / "examples" / "mcp_server"))
+        from tool_modes import get_chatgpt_safe_tools
+        m = self._load_manifest()
+        safe = get_chatgpt_safe_tools()
+        for tool in m["must_exclude"]:
+            assert tool not in safe, f"must_exclude tool {tool} found in safe set"
