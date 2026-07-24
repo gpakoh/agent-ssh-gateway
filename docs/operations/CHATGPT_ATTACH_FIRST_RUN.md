@@ -97,8 +97,8 @@ Script: `scripts/mcp_stdio_safe_smoke.py`
 |------|--------|
 | MCP initialize | protocolVersion=2025-11-25 |
 | list_tools | 84 tools registered |
-| tools_manifest | OK (31991 chars), active_mode=chatgpt |
-| health | Server error (pydantic args validation on @instrumented decorator — non-fatal, not a security issue) |
+| tools_manifest | OK (32055 chars), active_mode=chatgpt |
+| health | OK (507 chars) — gateway version, build metadata, toolset hash |
 
 ### Manifest verification
 
@@ -109,8 +109,7 @@ Script: `scripts/mcp_stdio_safe_smoke.py`
 
 ### Known issues
 
-- `health` tool returns pydantic validation error (`args`/`kwargs` fields required) when called via MCP stdio — this is a server-side decorator issue (`@instrumented` wraps function with `*args, **kwargs` but MCP protocol passes `{}`), not a security concern
-- `tools_manifest` call succeeds fully and returns correct safe-mode manifest
+- None
 
 ### Conclusion
 
