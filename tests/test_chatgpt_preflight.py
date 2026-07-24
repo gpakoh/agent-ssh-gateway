@@ -345,3 +345,45 @@ class TestOpenAIConnectorReadiness:
     def test_no_master_key_runtime(self):
         content = self._load_doc().lower()
         assert "master key" not in content or "never" in content or "not" in content or "non-goal" in content
+
+
+class TestPrivateHTTPMCPTransportSpec:
+    """Contract tests for private HTTP MCP transport design spec."""
+
+    def _load_spec(self) -> str:
+        return (ROOT / "docs" / "superpowers" / "specs" / "2026-07-25-private-http-mcp-transport.md").read_text()
+
+    def test_spec_exists(self):
+        assert (ROOT / "docs" / "superpowers" / "specs" / "2026-07-25-private-http-mcp-transport.md").is_file()
+
+    def test_stdio_current_http_not_wired(self):
+        content = self._load_spec().lower()
+        assert "stdio" in content
+        assert "not wired" in content or "not implemented" in content or "not yet" in content
+
+    def test_private_bind_default(self):
+        content = self._load_spec()
+        assert "127.0.0.1" in content or "localhost" in content
+
+    def test_no_public_exposure(self):
+        content = self._load_spec().lower()
+        assert "no public" in content or "not public" in content or "private" in content
+
+    def test_agent_token_never_master(self):
+        content = self._load_spec().lower()
+        assert "agent token" in content
+        assert "master key" in content and ("never" in content or "not" in content or "non-goal" in content)
+
+    def test_safe_mode_mandatory(self):
+        content = self._load_spec()
+        assert "MCP_CHATGPT_SAFE_MODE=true" in content or "MCP_CHATGPT_SAFE_MODE" in content
+
+    def test_public_connector_deferred(self):
+        content = self._load_spec().lower()
+        assert "deferred" in content or "not live" in content or "non-goal" in content
+
+    def test_no_real_secrets_or_topology(self):
+        import re
+        content = self._load_spec()
+        assert not re.search(r"\b(?:10\.|192\.168\.|172\.)\d{1,3}\.\d{1,3}\.\d{1,3}\b", content)
+        assert not re.search(r"\b[A-F0-9]{40,}\b", content)
