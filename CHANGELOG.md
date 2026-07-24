@@ -22,6 +22,8 @@ This project follows semantic versioning where practical, but the public API is 
 
 - **Smoke script**: `scripts/access_control_smoke.py` — validates health → deny → recent → clear cycle via admin API. Uses env/placeholders only.
 
+- **Dedicated audit event types**: `access_control.decision` and `access_control.clear` use their own `AuditEventType` values instead of `system.error`, so operator decisions do not trigger false critical system-error alerts.
+
 ## [0.1.45a0] - 2026-07-23
 
 ### Added
