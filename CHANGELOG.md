@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.47a0] - 2026-07-24
+
+### Added
+
+- **ChatGPT safe MCP tool mode**: `MCP_CHATGPT_SAFE_MODE=true` strips dangerous tools from chatgpt mode. Safe mode excludes agent launch (opencode/mimo/agent), docker tools, write/patch mutations, and handoff writes.
+
+- **CHATGPT_BLOCKED_TOOLS**: 30 tools permanently blocked in safe mode — no PTY, no docker admin, no agent launch, no workspace mutations.
+
+- **chatgpt_safe access profile**: restricted scopes (mcp:read, mcp:project, mcp:repo, mcp:docs) — no write/admin/docker scopes.
+
+- **ChatGPT safe smoke script**: `scripts/chatgpt_tool_attach_smoke.py` — validates safe/blocked tool separation from repo root.
+
+- **ChatGPT tool attach docs**: `docs/operations/CHATGPT_TOOL_ATTACH.md` — architecture, env vars, agent token creation (never master key), safe tool list, operator approval flow, rollback. Intentionally excludes `ssh:files` (protects write/edit/patch).
+
 ## [0.1.46a0] - 2026-07-24
 
 ### Added
