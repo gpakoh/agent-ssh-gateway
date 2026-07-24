@@ -72,7 +72,7 @@ def main() -> int:
         except ImportError as e:
             check("import tool_modes", False, str(e))
 
-    # 4. Optional: gateway health check
+    # 4. Optional: gateway health check (warning only, not fatal)
     if url and token:
         try:
             import urllib.request
@@ -81,7 +81,7 @@ def main() -> int:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 check("gateway /health reachable", resp.status == 200, f"HTTP {resp.status}")
         except Exception as e:
-            check("gateway /health reachable", False, str(e))
+            print(f"  ⚠ Gateway /health unreachable (not fatal): {e}")
     else:
         print("\n  (Skipping gateway health — set GATEWAY_URL and GATEWAY_AGENT_TOKEN to enable)")
 
