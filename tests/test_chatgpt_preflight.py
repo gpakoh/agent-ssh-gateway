@@ -303,3 +303,45 @@ class TestChatGPTExpectedManifest:
         safe = get_chatgpt_safe_tools()
         for tool in m["must_exclude"]:
             assert tool not in safe, f"must_exclude tool {tool} found in safe set"
+
+
+class TestOpenAIConnectorReadiness:
+    """Contract tests for OPENAI_CONNECTOR_READINESS.md."""
+
+    def _load_doc(self) -> str:
+        return (ROOT / "docs" / "operations" / "OPENAI_CONNECTOR_READINESS.md").read_text()
+
+    def test_doc_exists(self):
+        assert (ROOT / "docs" / "operations" / "OPENAI_CONNECTOR_READINESS.md").is_file()
+
+    def test_stdio_smoke_ready(self):
+        content = self._load_doc().lower()
+        assert "stdio" in content
+        assert "ready" in content or "complete" in content or "done" in content
+
+    def test_public_connector_not_live(self):
+        content = self._load_doc().lower()
+        assert "not live" in content or "not ready" in content or "deferred" in content or "non-goal" in content
+
+    def test_mentions_missing_transport(self):
+        content = self._load_doc().lower()
+        assert "http" in content or "sse" in content or "streamable" in content
+        assert "transport" in content
+
+    def test_mentions_auth_or_oauth(self):
+        content = self._load_doc().lower()
+        assert "auth" in content or "oauth" in content or "token" in content
+
+    def test_mentions_tls(self):
+        content = self._load_doc().lower()
+        assert "tls" in content
+
+    def test_no_real_secrets_or_topology(self):
+        import re
+        content = self._load_doc()
+        assert not re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", content)
+        assert not re.search(r"\b[A-F0-9]{40,}\b", content)
+
+    def test_no_master_key_runtime(self):
+        content = self._load_doc().lower()
+        assert "master key" not in content or "never" in content or "not" in content or "non-goal" in content
