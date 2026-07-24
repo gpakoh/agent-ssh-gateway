@@ -182,4 +182,93 @@ class TestResolveAccessPolicy:
             enforce_master=True,
         )
         assert result.state == "pending"
+
+
+# ---------------------------------------------------------------------------
+# Store recent / clear / ttl
+# ---------------------------------------------------------------------------
+
+
+class TestStoreRecent:
+    def test_recent_newest_default(self):
+        store = AccessControlStore(pending_ttl=900, allow_ttl=86400, deny_ttl=86400)
+        store.set("fp1", "1.1.1.1", "allowed", "first", "operator", ttl_seconds=100)
+        time.sleep(0.01)
+        store.set("fp2", "2.2.2.2", "denied", "second", "operator", ttl_seconds=200)
+        recent = store.recent()
+        assert len(recent) == 2
+        assert recent[0].actor_fingerprint == "fp2"
+        assert recent[1].actor_fingerprint == "fp1"
+
+    def test_recent_oldest_sort(self):
+        store = AccessControlStore(pending_ttl=900, allow_ttl=86400, deny_ttl=86400)
+        store.set("fp1", "1.1.1.1", "allowed", "first", "operator")
+        time.sleep(0.01)
+        store.set("fp2", "2.2.2.2", "denied", "second", "operator")
+        recent = store.recent(sort="oldest")
+        assert recent[0].actor_fingerprint == "fp1"
+        assert recent[1].actor_fingerprint == "fp2"
+
+    def test_recent_limit(self):
+        store = AccessControlStore(pending_ttl=900, allow_ttl=86400, deny_ttl=86400)
+        for i in range(5):
+            store.set(f"fp{i}", f"1.0.0.{i}", "allowed", "t", "operator")
+        recent = store.recent(limit=2)
+        assert len(recent) == 2
+
+    def test_recent_decision_filter(self):
+        store = AccessControlStore(pending_ttl=900, allow_ttl=86400, deny_ttl=86400)
+        store.set("fp1", "1.1.1.1", "allowed", "a", "operator")
+        store.set("fp2", "2.2.2.2", "denied", "d", "operator")
+        recent = store.recent(decision="denied")
+        assert len(recent) == 1
+        assert recent[0].decision == "denied"
+
+    def test_recent_excludes_expired(self):
+        store = AccessControlStore(pending_ttl=1, allow_ttl=1, deny_ttl=86400)
+        store.set("fp1", "1.1.1.1", "allowed", "a", "operator")
+        time.sleep(1.1)
+        recent = store.recent()
+        assert len(recent) == 0
+
+    def test_ttl_remaining_positive(self):
+        store = AccessControlStore(pending_ttl=900, allow_ttl=86400, deny_ttl=86400)
+        entry = store.set("fp1", "1.1.1.1", "allowed", "a", "operator", ttl_seconds=600)
+        remaining = AccessControlStore.ttl_remaining(entry)
+        assert 599 <= remaining <= 600
+
+    def test_ttl_remaining_zero_when_expired(self):
+        store = AccessControlStore(pending_ttl=900, allow_ttl=1, deny_ttl=86400)
+        entry = store.set("fp1", "1.1.1.1", "allowed", "a", "operator")
+        time.sleep(1.1)
+        remaining = AccessControlStore.ttl_remaining(entry)
+        assert remaining == 0.0
+
+
+class TestStoreClear:
+    def test_clear_removes_from_memory(self):
+        store = AccessControlStore(pending_ttl=900, allow_ttl=86400, deny_ttl=86400)
+        store.set("fp1", "1.1.1.1", "denied", "bad", "operator")
+        entry = store.clear("fp1", "1.1.1.1", reason="test clear")
+        assert entry is not None
+        assert entry.decision == "denied"
+        assert store.get("fp1", "1.1.1.1") is None
+
+    def test_clear_returns_none_when_missing(self):
+        store = AccessControlStore(pending_ttl=900, allow_ttl=86400, deny_ttl=86400)
+        entry = store.clear("fp1", "1.1.1.1")
+        assert entry is None
+
+    def test_clear_tuple_returns_pending(self):
+        store = AccessControlStore(pending_ttl=900, allow_ttl=86400, deny_ttl=86400)
+        store.set("fp1", "1.1.1.1", "denied", "bad", "operator")
+        store.clear("fp1", "1.1.1.1")
+        result = store.resolve_access_policy(
+            actor_fingerprint="fp1",
+            token_type="agent",
+            source_ip="1.1.1.1",
+            requested_profile="ops",
+        )
+        assert result.state == "pending"
+        assert result.effective_profile == "readonly"
         assert result.effective_profile == "readonly"
