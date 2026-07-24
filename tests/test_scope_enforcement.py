@@ -19,7 +19,7 @@ from examples.mcp_server.tool_scopes import (
 
 class TestScopeDataIntegrity:
     def test_all_profiles_defined(self):
-        expected = {"viewer", "operator", "agent-runner", "infra", "full"}
+        expected = {"viewer", "operator", "agent-runner", "infra", "full", "chatgpt_safe"}
         assert set(ACCESS_PROFILES) == expected
 
     def test_all_profiles_have_scopes(self):

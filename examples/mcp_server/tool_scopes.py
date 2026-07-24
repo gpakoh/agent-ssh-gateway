@@ -34,6 +34,12 @@ ACCESS_PROFILES: dict[str, list[str]] = {
         "mcp:postgres",
         "mcp:repo",
     ],
+    "chatgpt_safe": [
+        "mcp:read",
+        "mcp:project",
+        "mcp:repo",
+        "mcp:docs",
+    ],
     "full": [
         "mcp:read",
         "mcp:project",

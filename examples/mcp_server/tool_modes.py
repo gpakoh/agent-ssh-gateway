@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Literal, cast
+from typing import Literal
 
 ToolMode = Literal["minimal", "standard", "full", "chatgpt"]
 
@@ -183,27 +183,86 @@ class ToolModeError(ValueError):
     """Raised when the MCP tool mode is invalid."""
 
 
+# Tools that are NEVER exposed to ChatGPT in safe mode.
+# These allow mutation, agent launch, or privileged operations.
+CHATGPT_BLOCKED_TOOLS: frozenset[str] = frozenset({
+    # Agent launch — never safe for first attach
+    "project_run_opencode",
+    "project_run_mimo",
+    "project_run_agent",
+    # Write/patch mutations
+    "project_apply_patch",
+    "workspace_file_write",
+    "workspace_file_edit",
+    "workspace_apply_patch",
+    "workspace_preview_write",
+    "workspace_preview_edit",
+    "workspace_preview_patch",
+    "workspace_verify",
+    # Handoff write (mutates plan files)
+    "write_handoff_plan",
+    "project_write_handoff_plan",
+    # Docker write/admin — dangerous
+    "docker_start",
+    "docker_stop",
+    "docker_restart",
+    "docker_compose_up",
+    "docker_compose_restart",
+    "docker_compose_build",
+    "docker_rm",
+    "docker_compose_down",
+    "docker_prune",
+    "docker_confirm",
+    "docker_pending_actions",
+    "docker_exec",
+    "docker_run",
+    "docker_rmi",
+    "docker_volume_rm",
+    # Agent task write
+    "project_write_agent_task",
+    "project_archive_agent_task",
+})
+
+
+def is_chatgpt_safe_mode() -> bool:
+    """Return True when MCP_CHATGPT_SAFE_MODE is enabled."""
+    return os.environ.get("MCP_CHATGPT_SAFE_MODE", "false").strip().lower() in {"1", "true", "yes"}
+
+
+def get_chatgpt_safe_tools() -> frozenset[str]:
+    """Return the set of tools allowed in ChatGPT safe mode.
+
+    Starts from the full chatgpt mode set, removes blocked tools.
+    """
+    return frozenset(TOOL_NAMES_BY_MODE["chatgpt"] - CHATGPT_BLOCKED_TOOLS)
+
+
 def get_tool_mode() -> ToolMode:
     """Return configured MCP tool mode."""
     raw = os.environ.get("MCP_GATEWAY_TOOL_MODE", DEFAULT_TOOL_MODE).strip().lower()
     if raw not in TOOL_NAMES_BY_MODE:
         allowed = ", ".join(sorted(TOOL_NAMES_BY_MODE))
         raise ToolModeError(f"Invalid MCP_GATEWAY_TOOL_MODE={raw!r}; expected one of: {allowed}")
-    return cast(ToolMode, raw)
+    return raw
 
 
 def should_register_tool(tool_name: str, mode: ToolMode | None = None) -> bool:
-    """Return whether a tool should be registered for the selected mode."""
+    """Return whether a tool should be registered for the selected mode.
+
+    When MCP_CHATGPT_SAFE_MODE=true and mode is chatgpt, only safe tools are registered.
+    """
     selected_mode = mode or get_tool_mode()
     if selected_mode not in TOOL_NAMES_BY_MODE:
         allowed = ", ".join(sorted(TOOL_NAMES_BY_MODE))
         raise ToolModeError(
             f"Invalid MCP_GATEWAY_TOOL_MODE={selected_mode!r}; expected one of: {allowed}"
         )
+    if selected_mode == "chatgpt" and is_chatgpt_safe_mode():
+        return tool_name in get_chatgpt_safe_tools()
     return tool_name in TOOL_NAMES_BY_MODE[selected_mode]
 
 
-def tools_for_mode(mode: ToolMode | None = None) -> set[str]:
+def tools_for_mode(mode: ToolMode | None = None) -> frozenset[str]:
     """Return tool names for the selected mode."""
     selected_mode = mode or get_tool_mode()
-    return set(TOOL_NAMES_BY_MODE[selected_mode])
+    return frozenset(TOOL_NAMES_BY_MODE[selected_mode])
