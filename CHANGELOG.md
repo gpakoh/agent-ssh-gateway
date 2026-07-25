@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.56a0] - 2026-07-25
+
+### Added
+
+- **Private SSE MCP transport entrypoint**: `scripts/mcp_sse_serve.py` — serves the existing `examples/mcp_server` chatgpt-safe-mode tool set over SSE, bound to `127.0.0.1:8086` by default (env `MCP_HTTP_HOST`/`MCP_HTTP_PORT`). Local/private rehearsal only — not deployed as a persistent service, no TLS, no reverse proxy, no OAuth wired for this path. Routes are `/sse` and `/messages`.
+- **SSE runtime smoke**: `scripts/mcp_sse_safe_smoke.py` — starts the entrypoint as a real subprocess and validates both the auth boundary and the MCP protocol: `/sse`/`/messages` reject missing/wrong bearer tokens (401), the correct token opens the stream and completes MCP `initialize`/`list_tools`/`tools_manifest`, 84 safe tools present, 30 blocked tools absent. Verified end-to-end (11/11 checks).
+- **Docs/env sync for the private SSE entrypoint**: `docs/operations/OPENAI_CONNECTOR_READINESS.md` and `docs/operations/CHATGPT_TOOL_ATTACH.md` updated, new `examples/mcp_server/chatgpt.sse.env.example` placeholder template.
+
+### Fixed
+
+- **MCP auth-bypass regression in the SSE entrypoint**: the default `MCP_AUTH_MODE=oauth` was wiring FastMCP's own OAuth auth into the shared tool set, which rejected the SSE entrypoint's independent bearer token with its own error response one layer below `BearerAuthMiddleware` — meaning the bearer check could be silently bypassed by FastMCP's inner auth machinery. `scripts/mcp_sse_serve.py` now unconditionally forces FastMCP's own auth off for this entrypoint, so `BearerAuthMiddleware` is the sole HTTP auth layer. Regression-tested.
+- **Private-IP regex in doc/contract tests**: the `192.168.*` branch of the real-topology-leak pattern required one octet too many and could never match a real `192.168.x.y` address; corrected across all three occurrences and re-verified against real docs plus an injected leak string.
+
+### Notes
+
+- MCP safe mode (`MCP_CHATGPT_SAFE_MODE=true`, `MCP_GATEWAY_TOOL_MODE=chatgpt`) remains mandatory for this entrypoint — enforced fail-fast before startup.
+- stdio remains the default, stable, supported MCP transport (`examples/mcp_server/server.py` unchanged).
+- Public ChatGPT/OpenAI connector is still NOT live — this release adds a private/local rehearsal entrypoint only, no public URL, TLS, reverse proxy, or OAuth app registration.
+- No tag or deploy in this release.
+
 ## [0.1.55a0] - 2026-07-25
 
 ### Added
