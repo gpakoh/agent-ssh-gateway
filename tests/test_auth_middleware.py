@@ -444,18 +444,25 @@ class TestSdkAuth:
 # ---------------------------------------------------------------------------
 
 
-def test_settings_env_agent_token_gets_startup_expiry():
+def test_settings_env_agent_token_gets_startup_expiry(monkeypatch):
+    # conftest.py sets AGENT_TOKEN via os.environ for the whole test session.
+    # Settings has alias="AGENT_TOKEN" + populate_by_name=True, so passing the
+    # field name kwarg while the alias env var is also set makes pydantic-settings
+    # see two conflicting keys for the same field and raise extra_forbidden.
+    monkeypatch.delenv("AGENT_TOKEN", raising=False)
     cfg = Settings(agent_token="boot-agent", agent_token_ttl=60)
     assert cfg.agent_token_expires_at is not None
     assert cfg.agent_token_expires_at > datetime.now(UTC)
 
 
-def test_settings_agent_token_ttl_zero_no_expiry():
+def test_settings_agent_token_ttl_zero_no_expiry(monkeypatch):
+    monkeypatch.delenv("AGENT_TOKEN", raising=False)
     cfg = Settings(agent_token="static-agent", agent_token_ttl=0)
     assert cfg.agent_token_expires_at is None
 
 
-def test_settings_agent_token_ttl_negative_no_expiry():
+def test_settings_agent_token_ttl_negative_no_expiry(monkeypatch):
+    monkeypatch.delenv("AGENT_TOKEN", raising=False)
     cfg = Settings(agent_token="static-agent", agent_token_ttl=-1)
     assert cfg.agent_token_expires_at is None
 
