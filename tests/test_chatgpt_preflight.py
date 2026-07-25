@@ -547,3 +547,247 @@ class TestOpenAIConnectorReadinessPrivateSSEUpdate:
         content = self._load_doc()
         assert not re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", content.replace("127.0.0.1", ""))
         assert not re.search(r"\b[A-F0-9]{40,}\b", content)
+
+
+class TestMcpPrivateSSERunbook:
+    """Contract tests for docs/operations/MCP_PRIVATE_SSE_RUNBOOK.md.
+    Phase 16C.
+    """
+
+    def _load(self) -> str:
+        return (ROOT / "docs" / "operations" / "MCP_PRIVATE_SSE_RUNBOOK.md").read_text()
+
+    def test_runbook_exists(self):
+        assert (ROOT / "docs" / "operations" / "MCP_PRIVATE_SSE_RUNBOOK.md").is_file()
+
+    def test_has_start_stop_smoke_rollback_sections(self):
+        content = self._load().lower()
+        assert "start manually" in content
+        assert "stop the process" in content
+        assert "smoke" in content
+        assert "rollback" in content
+
+    def test_has_what_not_to_do_section(self):
+        content = self._load()
+        assert "## What not to do" in content
+
+    def test_public_connector_not_live(self):
+        content = self._load().lower()
+        assert "not a public" in content or "not live" in content
+
+    def test_no_compose_auto_start(self):
+        content = self._load().lower()
+        assert "docker-compose" in content or "compose" in content
+        assert "not" in content and ("compose" in content)
+        # explicit sentence forbidding compose wiring
+        assert "do not add this entrypoint to any" in content or "not wired into any docker compose" in content.replace("Docker Compose", "docker compose")
+
+    def test_default_bind_loopback(self):
+        content = self._load()
+        assert "127.0.0.1" in content
+
+    def test_bearer_token_required(self):
+        content = self._load()
+        assert "MCP_HTTP_BEARER_TOKEN" in content
+        assert "bearer" in content.lower()
+
+    def test_safe_mode_required(self):
+        content = self._load()
+        assert "MCP_CHATGPT_SAFE_MODE=true" in content
+        assert "mandatory" in content.lower()
+
+    def test_warns_against_non_loopback_override(self):
+        content = self._load()
+        assert "MCP_HTTP_ALLOW_NON_LOOPBACK" in content
+        lowered = content.lower()
+        assert "forbidden" in lowered
+
+    def test_no_master_key_as_runtime(self):
+        content = self._load().lower()
+        assert "master key" in content
+        assert "do not use the master key" in content or "never" in content
+
+    def test_agent_token_only(self):
+        content = self._load()
+        assert "agent token" in content.lower()
+
+    def test_references_sse_and_messages_routes(self):
+        content = self._load()
+        assert "/sse" in content
+        assert "/messages" in content
+
+    def test_references_smoke_script(self):
+        content = self._load()
+        assert "mcp_sse_safe_smoke.py" in content
+
+    def test_references_env_check_helper(self):
+        content = self._load()
+        assert "mcp_sse_env_check.py" in content
+
+    def test_no_forbidden_scopes_mentioned(self):
+        content = self._load().lower()
+        for scope in ("ssh:files", "project:write", "jobs:run"):
+            assert scope not in content
+
+    def test_no_real_secrets_or_topology(self):
+        import re
+
+        content = self._load()
+        sanitized = content.replace("127.0.0.1", "").replace("0.0.0.0", "")
+        assert not re.search(
+            r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b",
+            sanitized,
+        )
+        assert not re.search(r"\b[A-F0-9]{20,}\b", content)
+
+
+class TestMcpSseEnvCheckScript:
+    """Tests for scripts/mcp_sse_env_check.py. Phase 16C.
+
+    All cases run against temp files — never the real repo template or
+    a real operator env file — and never start any server.
+    """
+
+    def _run(self, env_path) -> subprocess.CompletedProcess:
+        script = ROOT / "scripts" / "mcp_sse_env_check.py"
+        return subprocess.run(
+            [sys.executable, str(script), str(env_path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    def _write_env(self, tmp_path, content: str):
+        path = tmp_path / "test.env"
+        path.write_text(content)
+        return path
+
+    def test_script_exists(self):
+        assert (ROOT / "scripts" / "mcp_sse_env_check.py").is_file()
+
+    def test_passes_on_fully_valid_env(self, tmp_path):
+        env = self._write_env(
+            tmp_path,
+            "MCP_GATEWAY_TOOL_MODE=chatgpt\n"
+            "MCP_CHATGPT_SAFE_MODE=true\n"
+            "MCP_HTTP_HOST=127.0.0.1\n"
+            "MCP_HTTP_BEARER_TOKEN=real-bearer-token-value\n"
+            "GATEWAY_AGENT_TOKEN=real-agent-token-value\n",
+        )
+        result = self._run(env)
+        assert result.returncode == 0
+        assert "6 passed, 0 failed" in result.stdout
+
+    def test_fails_on_template_placeholders(self):
+        # The shipped .example template itself must fail — placeholders
+        # were never meant to be used as-is.
+        template = ROOT / "examples" / "mcp_server" / "chatgpt.sse.env.example"
+        result = self._run(template)
+        assert result.returncode == 1
+        assert "template placeholder" in result.stdout
+
+    def test_fails_on_wrong_tool_mode(self, tmp_path):
+        env = self._write_env(
+            tmp_path,
+            "MCP_GATEWAY_TOOL_MODE=standard\n"
+            "MCP_CHATGPT_SAFE_MODE=true\n"
+            "MCP_HTTP_HOST=127.0.0.1\n"
+            "MCP_HTTP_BEARER_TOKEN=real-bearer-token-value\n"
+            "GATEWAY_AGENT_TOKEN=real-agent-token-value\n",
+        )
+        result = self._run(env)
+        assert result.returncode == 1
+        assert "MCP_GATEWAY_TOOL_MODE" in result.stdout
+
+    def test_fails_on_safe_mode_false(self, tmp_path):
+        env = self._write_env(
+            tmp_path,
+            "MCP_GATEWAY_TOOL_MODE=chatgpt\n"
+            "MCP_CHATGPT_SAFE_MODE=false\n"
+            "MCP_HTTP_HOST=127.0.0.1\n"
+            "MCP_HTTP_BEARER_TOKEN=real-bearer-token-value\n"
+            "GATEWAY_AGENT_TOKEN=real-agent-token-value\n",
+        )
+        result = self._run(env)
+        assert result.returncode == 1
+        assert "MCP_CHATGPT_SAFE_MODE" in result.stdout
+
+    def test_fails_on_non_loopback_host(self, tmp_path):
+        env = self._write_env(
+            tmp_path,
+            "MCP_GATEWAY_TOOL_MODE=chatgpt\n"
+            "MCP_CHATGPT_SAFE_MODE=true\n"
+            "MCP_HTTP_HOST=0.0.0.0\n"
+            "MCP_HTTP_BEARER_TOKEN=real-bearer-token-value\n"
+            "GATEWAY_AGENT_TOKEN=real-agent-token-value\n",
+        )
+        result = self._run(env)
+        assert result.returncode == 1
+        assert "loopback" in result.stdout.lower()
+
+    def test_fails_loudly_when_allow_non_loopback_enabled(self, tmp_path):
+        env = self._write_env(
+            tmp_path,
+            "MCP_GATEWAY_TOOL_MODE=chatgpt\n"
+            "MCP_CHATGPT_SAFE_MODE=true\n"
+            "MCP_HTTP_HOST=127.0.0.1\n"
+            "MCP_HTTP_ALLOW_NON_LOOPBACK=true\n"
+            "MCP_HTTP_BEARER_TOKEN=real-bearer-token-value\n"
+            "GATEWAY_AGENT_TOKEN=real-agent-token-value\n",
+        )
+        result = self._run(env)
+        assert result.returncode == 1
+        assert "DANGER" in result.stdout
+
+    def test_fails_on_missing_bearer_token(self, tmp_path):
+        env = self._write_env(
+            tmp_path,
+            "MCP_GATEWAY_TOOL_MODE=chatgpt\n"
+            "MCP_CHATGPT_SAFE_MODE=true\n"
+            "MCP_HTTP_HOST=127.0.0.1\n"
+            "GATEWAY_AGENT_TOKEN=real-agent-token-value\n",
+        )
+        result = self._run(env)
+        assert result.returncode == 1
+        assert "MCP_HTTP_BEARER_TOKEN" in result.stdout
+
+    def test_fails_on_missing_file(self, tmp_path):
+        result = self._run(tmp_path / "does-not-exist.env")
+        assert result.returncode == 1
+
+    def test_never_prints_token_values(self, tmp_path):
+        env = self._write_env(
+            tmp_path,
+            "MCP_GATEWAY_TOOL_MODE=chatgpt\n"
+            "MCP_CHATGPT_SAFE_MODE=true\n"
+            "MCP_HTTP_HOST=127.0.0.1\n"
+            "MCP_HTTP_BEARER_TOKEN=super-secret-bearer-value-xyz\n"
+            "GATEWAY_AGENT_TOKEN=super-secret-agent-value-abc\n",
+        )
+        result = self._run(env)
+        assert "super-secret-bearer-value-xyz" not in result.stdout
+        assert "super-secret-agent-value-abc" not in result.stdout
+        assert "super-secret-bearer-value-xyz" not in result.stderr
+        assert "super-secret-agent-value-abc" not in result.stderr
+
+    def test_does_not_start_a_server(self, tmp_path):
+        """The script must be pure static validation — confirm no
+        listening socket appears on the default SSE port while/after
+        running it against a fully valid env.
+        """
+        import socket
+
+        env = self._write_env(
+            tmp_path,
+            "MCP_GATEWAY_TOOL_MODE=chatgpt\n"
+            "MCP_CHATGPT_SAFE_MODE=true\n"
+            "MCP_HTTP_HOST=127.0.0.1\n"
+            "MCP_HTTP_PORT=8086\n"
+            "MCP_HTTP_BEARER_TOKEN=real-bearer-token-value\n"
+            "GATEWAY_AGENT_TOKEN=real-agent-token-value\n",
+        )
+        self._run(env)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            still_listening = s.connect_ex(("127.0.0.1", 8086)) == 0
+        assert not still_listening
