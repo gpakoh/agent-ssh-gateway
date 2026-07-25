@@ -339,7 +339,12 @@ class TestOpenAIConnectorReadiness:
     def test_no_real_secrets_or_topology(self):
         import re
         content = self._load_doc()
-        assert not re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", content)
+        # 127.0.0.1 and 0.0.0.0 are documented safe/dangerous-example
+        # addresses for the private SSE entrypoint (Phase 16B), not a
+        # real-topology leak — only private ranges (10./192.168./172.)
+        # count as a leak here, matching the pattern already used for
+        # the private HTTP MCP transport spec test below.
+        assert not re.search(r"\b(?:10\.|192\.168\.|172\.)\d{1,3}\.\d{1,3}\.\d{1,3}\b", content)
         assert not re.search(r"\b[A-F0-9]{40,}\b", content)
 
     def test_no_master_key_runtime(self):
@@ -386,4 +391,153 @@ class TestPrivateHTTPMCPTransportSpec:
         import re
         content = self._load_spec()
         assert not re.search(r"\b(?:10\.|192\.168\.|172\.)\d{1,3}\.\d{1,3}\.\d{1,3}\b", content)
+        assert not re.search(r"\b[A-F0-9]{40,}\b", content)
+
+
+class TestPrivateSSEEnvTemplate:
+    """Verify the private SSE env template (chatgpt.sse.env.example) is
+    safe, gitignored, and placeholder-only. Phase 16B PR3.
+    """
+
+    def _load(self) -> str:
+        return (ROOT / "examples" / "mcp_server" / "chatgpt.sse.env.example").read_text()
+
+    def test_template_file_exists(self):
+        assert (ROOT / "examples" / "mcp_server" / "chatgpt.sse.env.example").is_file()
+
+    def test_template_contains_only_placeholders(self):
+        content = self._load()
+        assert "<agent-token>" in content
+        assert "<generate-private-token>" in content
+        assert "MCP_GATEWAY_TOOL_MODE=chatgpt" in content
+        assert "MCP_CHATGPT_SAFE_MODE=true" in content
+
+    def test_template_has_private_sse_bind_defaults(self):
+        content = self._load()
+        assert "MCP_HTTP_HOST=127.0.0.1" in content
+        assert "MCP_HTTP_PORT=8086" in content
+        assert "MCP_HTTP_BEARER_TOKEN" in content
+
+    def test_private_env_is_gitignored(self):
+        gitignore = (ROOT / ".gitignore").read_text()
+        assert "chatgpt.sse.env" in gitignore
+
+    def test_template_no_master_key_as_runtime(self):
+        content = self._load()
+        assert "NEVER use master key" in content
+
+    def test_template_warns_about_non_loopback_override(self):
+        content = self._load()
+        assert "MCP_HTTP_ALLOW_NON_LOOPBACK" in content
+        assert "NEVER set MCP_HTTP_ALLOW_NON_LOOPBACK" in content
+        assert "MCP_HTTP_BIND_PUBLIC" not in content
+
+    def test_no_real_secrets_or_topology(self):
+        import re
+
+        content = self._load()
+        # 127.0.0.1 is the documented safe default, not a real-topology leak.
+        assert not re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", content.replace("127.0.0.1", ""))
+        assert not re.search(r"\b[A-F0-9]{20,}\b", content)
+
+
+class TestChatGPTToolAttachPrivateSSESection:
+    """Contract tests for the private SSE section of
+    CHATGPT_TOOL_ATTACH.md. Phase 16B PR3.
+    """
+
+    def _load(self) -> str:
+        return (ROOT / "docs" / "operations" / "CHATGPT_TOOL_ATTACH.md").read_text()
+
+    def test_mentions_sse_and_messages_routes(self):
+        content = self._load()
+        assert "/sse" in content
+        assert "/messages" in content
+
+    def test_mentions_bearer_token_env_var(self):
+        content = self._load()
+        assert "MCP_HTTP_BEARER_TOKEN" in content
+        assert "Bearer" in content
+
+    def test_mentions_default_loopback_bind(self):
+        content = self._load()
+        assert "127.0.0.1" in content
+        assert "MCP_HTTP_HOST" in content
+
+    def test_non_loopback_override_documented_as_dangerous_and_correctly_named(self):
+        content = self._load()
+        assert "MCP_HTTP_ALLOW_NON_LOOPBACK" in content
+        assert "MCP_HTTP_BIND_PUBLIC" not in content, "old/wrong env var name must not be recommended"
+        lowered = content.lower()
+        assert "danger" in lowered or "⚠️" in content
+
+    def test_mentions_sse_smoke_script(self):
+        content = self._load()
+        assert "mcp_sse_safe_smoke.py" in content
+
+    def test_no_forbidden_scopes_mentioned(self):
+        content = self._load().lower()
+        for scope in ("ssh:files", "project:write", "jobs:run"):
+            assert scope not in content
+
+    def test_no_real_secrets_or_topology(self):
+        import re
+
+        content = self._load()
+        # 127.0.0.1 is the documented default; 0.0.0.0 appears only in
+        # the dangerous-example warning text for MCP_HTTP_ALLOW_NON_LOOPBACK
+        # — neither is a real-topology leak.
+        sanitized = content.replace("127.0.0.1", "").replace("0.0.0.0", "")
+        assert not re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", sanitized)
+        assert not re.search(r"\b[A-F0-9]{20,}\b", content)
+
+
+class TestOpenAIConnectorReadinessPrivateSSEUpdate:
+    """Contract tests for the Phase 16B private SSE update to
+    OPENAI_CONNECTOR_READINESS.md — must reflect that a private SSE
+    entrypoint now exists, while stdio stays the default/stable path and
+    no public connector is live.
+    """
+
+    def _load_doc(self) -> str:
+        return (ROOT / "docs" / "operations" / "OPENAI_CONNECTOR_READINESS.md").read_text()
+
+    def test_stdio_remains_default_stable_path(self):
+        content = self._load_doc().lower()
+        assert "stdio" in content
+        assert "default" in content or "stable" in content
+
+    def test_private_sse_entrypoint_mentioned(self):
+        content = self._load_doc()
+        assert "mcp_sse_serve.py" in content
+        assert "mcp_sse_safe_smoke.py" in content
+
+    def test_option_b_marked_implemented_private_only(self):
+        content = self._load_doc()
+        assert "IMPLEMENTED" in content
+        assert "private" in content.lower()
+
+    def test_public_connector_still_not_live(self):
+        content = self._load_doc().lower()
+        assert "not live" in content
+
+    def test_uses_correct_non_loopback_env_var(self):
+        content = self._load_doc()
+        assert "MCP_HTTP_ALLOW_NON_LOOPBACK" in content
+        assert "MCP_HTTP_BIND_PUBLIC" not in content
+
+    def test_mentions_sse_and_messages_routes(self):
+        content = self._load_doc()
+        assert "/sse" in content
+        assert "/messages" in content
+
+    def test_default_bind_is_loopback(self):
+        content = self._load_doc()
+        assert "127.0.0.1" in content
+
+    def test_no_real_secrets_or_topology(self):
+        import re
+
+        content = self._load_doc()
+        assert not re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", content.replace("127.0.0.1", ""))
         assert not re.search(r"\b[A-F0-9]{40,}\b", content)

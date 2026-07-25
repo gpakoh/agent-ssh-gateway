@@ -110,3 +110,76 @@ The script:
 1. Revoke the ChatGPT agent token via `DELETE /api/agent/token/<token_id>` (master key required).
 2. If actor was denied, use `POST /api/admin/access-control/clear` to reset.
 3. No gateway restart needed — token revocation is immediate.
+
+## Private SSE entrypoint (local/private rehearsal)
+
+`scripts/mcp_sse_serve.py` serves the same chatgpt-safe-mode tool set over
+HTTP/SSE, bound to `127.0.0.1` by default — for local/private rehearsal
+only. This is **not** a public ChatGPT/OpenAI connector: no TLS, reverse
+proxy, or OAuth is wired for this path, and it is not deployed as a
+persistent service.
+
+### Routes
+
+- `GET /sse` — SSE stream (MCP protocol)
+- `POST /messages/` — MCP message channel (mounted sub-app)
+
+Both routes require a bearer token (see Auth below).
+
+### Env template
+
+```bash
+cp examples/mcp_server/chatgpt.sse.env.example examples/mcp_server/chatgpt.sse.env
+# Edit chatgpt.sse.env with your values
+#    NEVER commit this file
+```
+
+### Start
+
+```bash
+set -a && source examples/mcp_server/chatgpt.sse.env && set +a
+python3 scripts/mcp_sse_serve.py
+```
+
+### Auth
+
+Every request to `/sse` and `/messages/` requires
+`Authorization: Bearer <MCP_HTTP_BEARER_TOKEN>`. This is enforced by a
+dedicated `BearerAuthMiddleware`, independent of `MCP_AUTH_MODE` — missing
+or wrong token returns `401`.
+
+```bash
+curl -H "Authorization: Bearer <your-MCP_HTTP_BEARER_TOKEN>" http://127.0.0.1:8086/sse
+```
+
+Generate a private token — do not reuse an existing gateway/agent token:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+### Bind
+
+Default bind is `127.0.0.1:8086` (env `MCP_HTTP_HOST` / `MCP_HTTP_PORT`).
+The server refuses to bind to any non-loopback address unless
+`MCP_HTTP_ALLOW_NON_LOOPBACK=true` is set explicitly.
+
+**⚠️ Danger — do not set this outside a reviewed private-network
+deployment:** `MCP_HTTP_ALLOW_NON_LOOPBACK=true` relaxes the loopback-only
+guard and lets the server bind to `0.0.0.0` or any other host. There is no
+TLS, no reverse proxy, and no OAuth on this path — enabling this on a host
+with any network exposure would expose the SSH gateway's chatgpt-safe
+tool set without transport-level encryption or a proven auth boundary
+beyond the single bearer token. Leave unset for local/private rehearsal.
+
+### Smoke test
+
+```bash
+python3 scripts/mcp_sse_safe_smoke.py
+```
+
+Starts the entrypoint as a subprocess on `127.0.0.1` + a free local port,
+and verifies: `/sse` and `/messages/` reject missing/wrong tokens (401),
+the correct token opens the stream and completes MCP
+initialize/list_tools/tools_manifest, 84 safe tools are present, 30
+blocked tools are absent, and the bearer token is never printed.
