@@ -13,9 +13,9 @@
 During planning, host inspection found a **separate, already-live, publicly-tunneled** MCP stack, unrelated in codebase to `examples/mcp_server`:
 
 - `examples/chatgpt_remote_mcp/server.py` — different file, different git history (back to v0.1.23-alpha), running as `agent-ssh-gateway-mcp.service` (active since 2026-06-19), bound `MCP_HOST=0.0.0.0:8788`.
-- `agent-ssh-gateway-mcp-tunnel.service` (active since 2026-07-04) — `lt --port 8788 --subdomain xloud-gpt-mcp-bridge-7f4c2a`, described as "Public tunnel ... ChatGPT connector".
+- `agent-ssh-gateway-mcp-tunnel.service` (active since 2026-07-04) — `lt --port 8788 --subdomain <redacted-subdomain>`, described as "Public tunnel ... ChatGPT connector".
 - Fleet adapters (`agent-mcp-context7/docker/gitea/github/postgres.service`) also active, most bound `0.0.0.0`.
-- Config: `MCP_AUTH_MODE=oauth`, `MCP_DEFAULT_ACCESS_PROFILE=full`, `MCP_SCOPE_ENFORCEMENT=audit` (non-blocking per `MCP_OPERATOR_RUNBOOK.md`), `MCP_GATEWAY_WRITE_MODE=handoff`, `MCP_PUBLIC_URL=https://gateway.example.com`. No `MCP_CHATGPT_SAFE_MODE` set.
+- Config: `MCP_AUTH_MODE=oauth`, `MCP_DEFAULT_ACCESS_PROFILE=full`, `MCP_SCOPE_ENFORCEMENT=audit` (non-blocking per `MCP_OPERATOR_RUNBOOK.md`), `MCP_GATEWAY_WRITE_MODE=handoff`, `MCP_PUBLIC_URL=https://<redacted-domain>`. No `MCP_CHATGPT_SAFE_MODE` set.
 - Has its own runbooks: `MCP_PUBLIC_ENDPOINT_RUNBOOK.md`, `TUNNEL_RUNBOOK.md`, `MCP_FLEET_RUNBOOK.md`, `MCP_TOKEN_LEDGER.md`, `MCP_OPERATOR_RUNBOOK.md`.
 
 This system is **mature, documented, and operated** — not treated here as an incident. It is called out because it materially contradicts the "Public ChatGPT/OpenAI connector is NOT live" framing used across `OPENAI_CONNECTOR_READINESS.md` and the Phase 16 design spec, which is accurate only for the `examples/mcp_server` codebase. Reconciling the two tracks (deprecate/replace vs. intentionally parallel; whether `MCP_SCOPE_ENFORCEMENT` should move from `audit` to `enforce` on the public one) is an operator/architect decision, out of scope for this plan. This plan proceeds strictly within `examples/mcp_server`, private-bind-only, as originally scoped.
@@ -145,7 +145,7 @@ This system is **mature, documented, and operated** — not treated here as an i
 - Docs-only — no pytest changes expected beyond what PR1/PR2 already added.
 - `python3 scripts/check_public_hygiene.py` — must stay green (no real IPs/domains beyond placeholders in the new runbook).
 - `python3 scripts/check_no_hardcoded_secrets.py` — must stay green.
-- Manual read-through: confirm the new runbook and env example contain zero references to `gateway.example.com`, the `xloud-gpt-mcp-bridge-*` tunnel subdomain, or any other real value from the existing live system.
+- Manual read-through: confirm the new runbook and env example contain zero references to the real domain/subdomain of the existing live system, or any other real value from it.
 
 **Security invariants:**
 - No real topology/IPs/domains/tokens in any new doc.
