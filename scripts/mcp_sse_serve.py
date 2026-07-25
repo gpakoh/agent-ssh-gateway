@@ -5,10 +5,19 @@ Serves the existing examples/mcp_server FastMCP tool set over SSE,
 bound to loopback by default, with a bearer-token layer enforced
 independently of the still-unproven MCP_AUTH_MODE=token wiring.
 
-Does not modify examples/mcp_server/server.py's stdio path. Does not
-add Docker Compose / systemd wiring. Does not enable public bind by
-default — MCP_HTTP_ALLOW_NON_LOOPBACK=true is required to relax the
-loopback-only guard, and this script does not set it.
+Does not modify examples/mcp_server/server.py's stdio path (the module
+is imported, not edited — see _force_fastmcp_auth_unwired() for the one
+env var this process forces before that import). Does not add Docker
+Compose / systemd wiring. Does not enable public bind by default —
+MCP_HTTP_ALLOW_NON_LOOPBACK=true is required to relax the loopback-only
+guard, and this script does not set it.
+
+This process always forces MCP_AUTH_MODE=token in its own environment
+before importing examples.mcp_server.server, regardless of what the
+caller passed in. Without this, the default MCP_AUTH_MODE=oauth wires a
+real FastMCP-native auth layer that rejects MCP_HTTP_BEARER_TOKEN with
+its own error response — found via a real subprocess+curl reproduction
+while building the Phase 16B PR2 smoke script.
 
 Env vars:
   MCP_HTTP_HOST                default 127.0.0.1
@@ -154,15 +163,57 @@ def discover_routes(app: Any) -> list[tuple[str, str | None]]:
     return [(type(r).__name__, getattr(r, "path", None)) for r in app.routes]
 
 
+def _force_fastmcp_auth_unwired() -> None:
+    """Force examples.mcp_server.server's MCP_AUTH_MODE to "token" before
+    it is imported, so FastMCP's own auth stays unwired (mcp.settings.auth
+    stays None — see the Phase 16A plan's finding #2).
+
+    Without this, the default MCP_AUTH_MODE=oauth wires a real
+    GatewayOAuthProvider + AuthSettings into FastMCP, which then rejects
+    our MCP_HTTP_BEARER_TOKEN with its own RequireAuthMiddleware (it only
+    recognizes tokens issued through its own OAuth/DCR flow) — discovered
+    via a real subprocess+curl reproduction while building the PR2 smoke
+    script, where "correct token" still returned 401 with an
+    `invalid_token` body that did not come from BearerAuthMiddleware.
+
+    MCP_PUBLIC_TOKEN here is a throwaway value only used to satisfy
+    server.py's non-empty check for the (currently dead-for-HTTP, per
+    finding #2) token-mode branch — it is NOT the credential that
+    protects this entrypoint. MCP_HTTP_BEARER_TOKEN is.
+
+    This is an unconditional override, not setdefault: this entrypoint's
+    entire safety model depends on FastMCP's own auth never being wired,
+    regardless of whatever MCP_AUTH_MODE a caller's environment happens
+    to already contain (e.g. copied from the stdio setup, which uses
+    oauth by default).
+    """
+    os.environ["MCP_AUTH_MODE"] = "token"
+    os.environ.setdefault("MCP_PUBLIC_TOKEN", "unused-fastmcp-token-mode-placeholder")
+
+
 def build_inner_app() -> Any:
-    """Build the bare (unauthenticated) SSE Starlette app from the
-    existing examples/mcp_server FastMCP instance. Caller is responsible
-    for wrapping it with BearerAuthMiddleware before serving.
+    """Build the bare (unauthenticated-at-our-layer) SSE Starlette app
+    from the existing examples/mcp_server FastMCP instance. Caller is
+    responsible for wrapping it with BearerAuthMiddleware before serving.
+
+    Always (re)imports examples.mcp_server.server fresh after forcing
+    MCP_AUTH_MODE=token, rather than trusting a prior import/cache — a
+    module already imported under MCP_AUTH_MODE=oauth (the default) would
+    otherwise keep FastMCP's own OAuth auth wired despite this function's
+    env override, since Python does not re-run module-level code on a
+    plain `import` of an already-imported module.
     """
     _ensure_import_paths()
-    from examples.mcp_server.server import mcp  # noqa: PLC0415
+    _force_fastmcp_auth_unwired()
 
-    return mcp.sse_app()
+    import importlib
+
+    module_name = "examples.mcp_server.server"
+    if module_name in sys.modules:
+        module = importlib.reload(sys.modules[module_name])
+    else:
+        module = importlib.import_module(module_name)
+    return module.mcp.sse_app()
 
 
 def build_app() -> tuple[Any, str, int]:
