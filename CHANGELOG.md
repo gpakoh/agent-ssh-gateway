@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.55a0] - 2026-07-25
+
+### Added
+
+- **Private HTTP/SSE MCP transport design spec**: `docs/superpowers/specs/2026-07-25-private-http-mcp-transport.md` — recommended transport: SSE via `FastMCP.sse_app()` + uvicorn on `127.0.0.1:8086`. Default bind is private-only. Current MCP runtime remains stdio-only. HTTP/SSE designed but not implemented. Safe mode mandatory. Public connector/OAuth/TLS deferred.
+
 ## [0.1.54a0] - 2026-07-25
 
 ### Added
