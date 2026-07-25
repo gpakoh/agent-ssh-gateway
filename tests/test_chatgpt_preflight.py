@@ -344,7 +344,10 @@ class TestOpenAIConnectorReadiness:
         # real-topology leak — only private ranges (10./192.168./172.)
         # count as a leak here, matching the pattern already used for
         # the private HTTP MCP transport spec test below.
-        assert not re.search(r"\b(?:10\.|192\.168\.|172\.)\d{1,3}\.\d{1,3}\.\d{1,3}\b", content)
+        assert not re.search(
+            r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b",
+            content,
+        )
         assert not re.search(r"\b[A-F0-9]{40,}\b", content)
 
     def test_no_master_key_runtime(self):
@@ -390,7 +393,10 @@ class TestPrivateHTTPMCPTransportSpec:
     def test_no_real_secrets_or_topology(self):
         import re
         content = self._load_spec()
-        assert not re.search(r"\b(?:10\.|192\.168\.|172\.)\d{1,3}\.\d{1,3}\.\d{1,3}\b", content)
+        assert not re.search(
+            r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b",
+            content,
+        )
         assert not re.search(r"\b[A-F0-9]{40,}\b", content)
 
 
