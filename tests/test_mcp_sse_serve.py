@@ -244,6 +244,40 @@ class TestBuildAppIntegration:
 
             assert len(srv.mcp._tool_manager._tools) == 84
 
+    def test_fastmcp_own_auth_is_unwired(self):
+        """Regression guard for a real bug found while building the PR2
+        SSE smoke script: with MCP_AUTH_MODE unset, the default "oauth"
+        wires a real GatewayOAuthProvider + AuthSettings into FastMCP,
+        which then rejects MCP_HTTP_BEARER_TOKEN with its own
+        RequireAuthMiddleware (a real subprocess+curl reproduction
+        showed a 401 with an `invalid_token` body that did not come
+        from BearerAuthMiddleware at all — the request passed our
+        check and was rejected one layer further in). build_inner_app()
+        must force MCP_AUTH_MODE=token so mcp.settings.auth stays None
+        and BearerAuthMiddleware is the sole enforcement layer.
+        """
+        env = dict(SAFE_MODE_ENV)
+        with patch.dict(os.environ, env, clear=False):
+            os.environ.pop("MCP_AUTH_MODE", None)
+            build_inner_app()
+            import examples.mcp_server.server as srv
+
+            assert srv.mcp.settings.auth is None
+
+    def test_forces_token_mode_even_if_caller_set_oauth(self):
+        """The override is unconditional (not setdefault): even if the
+        caller's environment explicitly sets MCP_AUTH_MODE=oauth (e.g.
+        copied from the stdio setup), this entrypoint must still force
+        token mode so FastMCP's own auth never gets wired.
+        """
+        env = {**SAFE_MODE_ENV, "MCP_AUTH_MODE": "oauth"}
+        with patch.dict(os.environ, env):
+            build_inner_app()
+            import examples.mcp_server.server as srv
+
+            assert srv.mcp.settings.auth is None
+            assert os.environ["MCP_AUTH_MODE"] == "token"
+
     def test_defaults_are_loopback(self):
         _app, host, _port = self._build()
         assert host == "127.0.0.1"
