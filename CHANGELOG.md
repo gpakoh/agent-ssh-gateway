@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.57a0] - 2026-07-25
+
+### Added
+
+- **Private SSE operator runbook**: `docs/operations/MCP_PRIVATE_SSE_RUNBOOK.md` — manual-run package for `scripts/mcp_sse_serve.py`: prerequisites, generate a private bearer token, create the gitignored env file, validate it, start on `127.0.0.1`, run the smoke test, stop the process, rollback (nothing to roll back at the infra level — it's a plain process), and an explicit "What not to do" section.
+- **Env checker**: `scripts/mcp_sse_env_check.py` — static validation of a private SSE env file before starting the entrypoint. Validates safe mode (`MCP_CHATGPT_SAFE_MODE=true`, `MCP_GATEWAY_TOOL_MODE=chatgpt`), loopback bind (`MCP_HTTP_HOST`), that `MCP_HTTP_BEARER_TOKEN` and the agent/gateway token are set with their template placeholders actually replaced, and that `MCP_HTTP_ALLOW_NON_LOOPBACK` is not enabled. The checker does not start a server, does not open any network connection, and never prints token values.
+
+### Notes
+
+- No Docker Compose or systemd wiring was added for the private SSE entrypoint or the checker — both remain manual, operator-run tools, not autostarted services.
+- Public ChatGPT/OpenAI connector is still NOT live — this release adds operator documentation and a validation helper only.
+- No tag or deploy in this release.
+
 ## [0.1.56a0] - 2026-07-25
 
 ### Added
