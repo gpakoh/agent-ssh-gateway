@@ -933,3 +933,86 @@ class TestOpenAIMcpAttachPathAudit:
         )
         assert not re.search(r"\b[A-F0-9]{20,}\b", content)
         assert "MCP_HTTP_BIND_PUBLIC" not in content
+
+
+class TestPrivateStreamableHttpTransportDesign:
+    """Contract tests for
+    docs/superpowers/specs/2026-07-26-private-streamable-http-mcp-transport.md.
+    Phase 18A — design/audit only, no runtime code.
+    """
+
+    DOC_PATH = (
+        ROOT
+        / "docs"
+        / "superpowers"
+        / "specs"
+        / "2026-07-26-private-streamable-http-mcp-transport.md"
+    )
+
+    def _load(self) -> str:
+        return self.DOC_PATH.read_text()
+
+    def test_doc_exists(self):
+        assert self.DOC_PATH.is_file()
+
+    def test_sse_marked_deprecated(self):
+        content = self._load().lower()
+        assert "deprecated" in content
+        assert "sse" in content
+
+    def test_stdio_remains_default(self):
+        content = self._load().lower()
+        assert "stdio" in content
+        assert "default" in content
+
+    def test_private_sse_remains_available(self):
+        content = self._load().lower()
+        assert "private sse" in content
+        assert "available" in content
+
+    def test_public_connector_not_live(self):
+        content = self._load().lower()
+        assert "not live" in content
+
+    def test_loopback_default_bind(self):
+        content = self._load()
+        assert "127.0.0.1" in content
+        assert "loopback" in content.lower()
+
+    def test_bearer_auth_and_origin_validation_required(self):
+        content = self._load().lower()
+        assert "bearer" in content
+        assert "origin" in content
+        assert "required" in content
+
+    def test_safe_mode_mandatory(self):
+        content = self._load()
+        assert "MCP_CHATGPT_SAFE_MODE=true" in content
+        assert "mandatory" in content.lower()
+
+    def test_no_compose_systemd_autostart(self):
+        content = self._load().lower()
+        assert "no docker compose" in content or "not added to" in content
+        assert "systemd" in content
+        assert "autostart" in content
+
+    def test_no_master_key(self):
+        content = self._load().lower()
+        assert "master key" in content
+        assert "never" in content
+
+    def test_routes_must_be_empirically_discovered(self):
+        content = self._load().lower()
+        assert "empirically" in content
+
+    def test_no_real_secrets_or_topology(self):
+        import re
+
+        content = self._load()
+        sanitized = content.replace("127.0.0.1", "").replace("0.0.0.0", "")
+        assert not re.search(
+            r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b",
+            sanitized,
+        )
+        assert not re.search(r"\b[A-F0-9]{20,}\b", content)
+        assert "xloud" not in content.lower()
