@@ -24,10 +24,24 @@ Env vars:
   MCP_HTTP_PORT                default 8086
   MCP_HTTP_ALLOW_NON_LOOPBACK  must be exactly "true" to bind non-loopback
   MCP_HTTP_BEARER_TOKEN        required — protects the SSE + message endpoints
+  MCP_HTTP_ALLOWED_ORIGINS     optional comma-separated extra Origin allowlist
   MCP_CHATGPT_SAFE_MODE        must be "true"
   MCP_GATEWAY_TOOL_MODE        must be "chatgpt"
 
 MCP_HTTP_BEARER_TOKEN is never logged or echoed back in responses.
+
+Origin validation (Phase 17B): per the MCP transport spec's DNS-rebinding
+guard ("Servers MUST validate the Origin header on all incoming
+connections"), every request to /sse and /messages is also checked
+against an Origin allowlist, ahead of the bearer check. A missing
+Origin header is allowed (CLI/curl/local MCP clients routinely omit
+it). Loopback Origins (http(s)://127.0.0.1:*, http(s)://localhost:*,
+http(s)://[::1]:*) are allowed by default. MCP_HTTP_ALLOWED_ORIGINS can
+add exact extra origins (e.g. a specific local dev tool's origin) —
+it is not a path to public exposure; non-loopback origins not in that
+explicit list are rejected with 403 regardless of bearer token
+validity. Only the sanitized Origin *host* is ever logged on rejection,
+never the full header value.
 """
 
 from __future__ import annotations
@@ -37,6 +51,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 MCP_SERVER_DIR = ROOT / "examples" / "mcp_server"
@@ -121,6 +136,80 @@ def require_bearer_token() -> str:
     return token
 
 
+def parse_allowed_origins() -> frozenset[str]:
+    """Extra exact-match Origin allowlist from MCP_HTTP_ALLOWED_ORIGINS
+    (comma-separated). Empty by default — loopback origins are already
+    allowed unconditionally by is_origin_allowed() below, so this is only
+    for adding specific non-default-loopback origins, not a general
+    public-exposure mechanism.
+    """
+    raw = os.environ.get("MCP_HTTP_ALLOWED_ORIGINS", "")
+    return frozenset(o.strip() for o in raw.split(",") if o.strip())
+
+
+def _origin_host(origin: str) -> str | None:
+    try:
+        return urlparse(origin).hostname
+    except ValueError:
+        return None
+
+
+def is_origin_allowed(origin: str | None, extra_allowed: frozenset[str]) -> bool:
+    """Per the MCP transport spec's DNS-rebinding guard: validate Origin.
+
+    - No Origin header at all -> allowed (CLI/curl/local MCP clients
+      routinely omit it; this is not a browser request).
+    - Origin present and loopback (127.0.0.1 / localhost / ::1, any
+      scheme, any port) -> allowed by default.
+    - Origin present and exactly matches an entry in extra_allowed
+      (MCP_HTTP_ALLOWED_ORIGINS) -> allowed.
+    - Anything else -> rejected.
+    """
+    if not origin:
+        return True
+    if origin in extra_allowed:
+        return True
+    host = _origin_host(origin)
+    return host is not None and host.lower() in LOOPBACK_HOSTS
+
+
+class OriginValidationMiddleware:
+    """Validates the Origin header before any other processing, including
+    the bearer check. Wraps the whole app, same pattern as
+    BearerAuthMiddleware, so /sse and /messages are both covered by one
+    check. Never logs the full Origin value on rejection — only the
+    parsed host, which is what matters for the DNS-rebinding threat model.
+    """
+
+    def __init__(self, app: Any, extra_allowed_origins: frozenset[str]) -> None:
+        self.app = app
+        self._extra_allowed = extra_allowed_origins
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers") or [])
+        raw_origin = headers.get(b"origin")
+        origin = raw_origin.decode("latin-1") if raw_origin is not None else None
+
+        if not is_origin_allowed(origin, self._extra_allowed):
+            sanitized_host = _origin_host(origin) if origin else None
+            print(
+                f"mcp_sse_serve: rejected request — Origin not allowed "
+                f"(host={sanitized_host!r})",
+                file=sys.stderr,
+            )
+            from starlette.responses import JSONResponse  # noqa: PLC0415
+
+            response = JSONResponse({"error": "origin_not_allowed"}, status_code=403)
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
+
+
 class BearerAuthMiddleware:
     """Minimal ASGI middleware requiring `Authorization: Bearer <token>`.
 
@@ -191,7 +280,31 @@ def _force_fastmcp_auth_unwired() -> None:
     os.environ.setdefault("MCP_PUBLIC_TOKEN", "unused-fastmcp-token-mode-placeholder")
 
 
-def build_inner_app() -> Any:
+def _extend_sdk_transport_security(mcp_instance: Any, extra_origins: frozenset[str]) -> None:
+    """Extend the mcp SDK's own built-in Origin/Host allowlist
+    (mcp.server.transport_security.TransportSecuritySettings) with
+    MCP_HTTP_ALLOWED_ORIGINS entries.
+
+    FastMCP already ships a DNS-rebinding guard by default — confirmed by
+    inspection: FastMCP(...).settings.transport_security defaults to
+    enable_dns_rebinding_protection=True with allowed_origins already
+    restricted to loopback wildcards (http://127.0.0.1:*,
+    http://localhost:*, http://[::1]:*). This is a second, independent
+    layer from this script's own OriginValidationMiddleware — both must
+    agree, or a custom origin allowed by one gets rejected by the other
+    (found via direct testing: an origin added only to
+    OriginValidationMiddleware's allowlist was still rejected deeper in
+    mcp.server.sse.connect_sse() with "Invalid Origin header").
+
+    Only appends — never removes the SDK's own sane loopback defaults.
+    """
+    if not extra_origins:
+        return
+    settings = mcp_instance.settings.transport_security
+    settings.allowed_origins = list(settings.allowed_origins) + list(extra_origins)
+
+
+def build_inner_app(extra_allowed_origins: frozenset[str] = frozenset()) -> Any:
     """Build the bare (unauthenticated-at-our-layer) SSE Starlette app
     from the existing examples/mcp_server FastMCP instance. Caller is
     responsible for wrapping it with BearerAuthMiddleware before serving.
@@ -213,6 +326,7 @@ def build_inner_app() -> Any:
         module = importlib.reload(sys.modules[module_name])
     else:
         module = importlib.import_module(module_name)
+    _extend_sdk_transport_security(module.mcp, extra_allowed_origins)
     return module.mcp.sse_app()
 
 
@@ -222,15 +336,24 @@ def build_app() -> tuple[Any, str, int]:
     Order matters: safe mode and token checks happen before the
     (heavier) tool-set import, so a misconfigured environment fails
     fast without ever constructing gateway clients or tool registrations.
+
+    Middleware order matters too: OriginValidationMiddleware wraps
+    BearerAuthMiddleware (not the other way around), so an invalid
+    Origin is rejected with 403 before the bearer token is even
+    inspected — matching the MCP transport spec's framing of Origin
+    validation as a connection-level guard, separate from application
+    auth.
     """
     require_safe_mode()
     token = require_bearer_token()
     host = resolve_host()
     port = resolve_port()
     validate_bind_host(host, is_non_loopback_allowed())
+    extra_allowed_origins = parse_allowed_origins()
 
-    inner_app = build_inner_app()
-    app = BearerAuthMiddleware(inner_app, token)
+    inner_app = build_inner_app(extra_allowed_origins)
+    app: Any = BearerAuthMiddleware(inner_app, token)
+    app = OriginValidationMiddleware(app, extra_allowed_origins)
     return app, host, port
 
 

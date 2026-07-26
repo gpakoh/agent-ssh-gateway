@@ -158,6 +158,23 @@ Generate a private token — do not reuse an existing gateway/agent token:
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
+### Origin validation
+
+Every request to `/sse` and `/messages/` is also checked against the
+`Origin` header, per the MCP spec's DNS-rebinding-protection requirement:
+
+- No `Origin` header at all (CLI/curl/local MCP clients) — allowed.
+- Loopback origins (`http(s)://127.0.0.1:*`, `http(s)://localhost:*`,
+  `http(s)://[::1]:*`) — allowed by default.
+- Any other origin — rejected with `403`, unless explicitly added to
+  `MCP_HTTP_ALLOWED_ORIGINS` (comma-separated).
+
+`MCP_HTTP_ALLOWED_ORIGINS` is for additional **local** origins only.
+**Never add a public origin to this variable** — doing so does not turn
+this entrypoint into a public connector; it only widens a private
+allowlist, and a public/OpenAI connector remains a separate, explicitly
+approved design outside the scope of this rehearsal entrypoint.
+
 ### Bind
 
 Default bind is `127.0.0.1:8086` (env `MCP_HTTP_HOST` / `MCP_HTTP_PORT`).
