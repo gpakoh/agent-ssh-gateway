@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.59a0] - 2026-07-26
+
+### Added
+
+- **Private SSE Origin validation**: `scripts/mcp_sse_serve.py` now validates the `Origin` header on `/sse` and `/messages`, per the MCP spec's DNS-rebinding-protection requirement (identified in the Phase 17A attach-path audit). A missing `Origin` header is allowed (CLI/curl/local MCP clients routinely omit it); loopback origins (`http(s)://127.0.0.1:*`, `http(s)://localhost:*`, `http(s)://[::1]:*`) are allowed by default; additional local origins can be explicitly permitted via the new `MCP_HTTP_ALLOWED_ORIGINS` env var (comma-separated); any other, non-loopback origin is rejected with `403`. Bearer-token auth remains required independently of the Origin check — both checks must pass. Docs (`docs/operations/CHATGPT_TOOL_ATTACH.md`, `docs/operations/MCP_PRIVATE_SSE_RUNBOOK.md`) and the env template (`examples/mcp_server/chatgpt.sse.env.example`) updated accordingly.
+
+### Notes
+
+- `stdio` transport is unaffected by this change — Origin validation only applies to the private SSE/HTTP entrypoint.
+- Public ChatGPT/OpenAI connector is still NOT live — `MCP_HTTP_ALLOWED_ORIGINS` is for additional private/local origins only; a public connector remains a separate, explicitly approved design.
+- No tag or deploy in this release.
+
 ## [0.1.58a0] - 2026-07-26
 
 ### Added
