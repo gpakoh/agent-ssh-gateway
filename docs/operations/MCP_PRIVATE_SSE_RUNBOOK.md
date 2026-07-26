@@ -6,6 +6,9 @@ a persistent service, and not wired into any Docker Compose stack. It is
 started by an operator, on demand, on a single loopback port, and stopped
 when the rehearsal is done.
 
+See `docs/operations/MCP_PRIVATE_SSE_REHEARSAL.md` for the record of the
+first end-to-end rehearsal of these steps.
+
 ## Prerequisites
 
 - [ ] Gateway running, `/health` returns `status: ok`, `ready: true`

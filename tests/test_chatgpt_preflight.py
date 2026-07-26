@@ -791,3 +791,72 @@ class TestMcpSseEnvCheckScript:
             s.settimeout(1)
             still_listening = s.connect_ex(("127.0.0.1", 8086)) == 0
         assert not still_listening
+
+
+class TestMcpPrivateSSERehearsalRecord:
+    """Contract tests for docs/operations/MCP_PRIVATE_SSE_REHEARSAL.md.
+    Phase 16E.
+    """
+
+    def _load(self) -> str:
+        return (ROOT / "docs" / "operations" / "MCP_PRIVATE_SSE_REHEARSAL.md").read_text()
+
+    def test_doc_exists(self):
+        assert (ROOT / "docs" / "operations" / "MCP_PRIVATE_SSE_REHEARSAL.md").is_file()
+
+    def test_says_manual_local_only(self):
+        content = self._load().lower()
+        assert "manual" in content
+        assert "local" in content
+
+    def test_public_connector_not_live(self):
+        content = self._load().lower()
+        assert "not live" in content
+
+    def test_says_loopback_only(self):
+        content = self._load()
+        assert "127.0.0.1" in content
+        assert "loopback" in content.lower()
+
+    def test_no_compose_systemd_autostart(self):
+        content = self._load().lower()
+        assert "compose" in content
+        assert "systemd" in content
+        assert "autostart" in content or "auto-start" in content or "automatic" in content
+
+    def test_says_env_deleted(self):
+        content = self._load().lower()
+        assert "deleted" in content
+
+    def test_says_no_or_wrong_token_401(self):
+        content = self._load()
+        assert "401" in content
+        lowered = content.lower()
+        assert "no token" in lowered
+        assert "wrong token" in lowered
+
+    def test_says_correct_token_works(self):
+        content = self._load().lower()
+        assert "correct token" in content
+        assert "non-401" in content or "success" in content or "opened" in content
+
+    def test_says_84_safe_tools(self):
+        content = self._load()
+        assert "84" in content
+
+    def test_says_blocked_tools_absent(self):
+        content = self._load().lower()
+        assert "blocked" in content
+        assert "none of the 30" in content or "absent" in content or "not present" in content or "not " in content
+
+    def test_no_real_secrets_or_topology(self):
+        import re
+
+        content = self._load()
+        sanitized = content.replace("127.0.0.1", "").replace("0.0.0.0", "")
+        assert not re.search(
+            r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b",
+            sanitized,
+        )
+        assert not re.search(r"\b[A-F0-9]{20,}\b", content)
+        assert "MCP_HTTP_BIND_PUBLIC" not in content
