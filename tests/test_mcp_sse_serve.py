@@ -13,6 +13,7 @@ import os
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -32,10 +33,13 @@ from scripts.mcp_sse_serve import (  # noqa: E402
     DEFAULT_PORT,
     BearerAuthMiddleware,
     ConfigError,
+    OriginValidationMiddleware,
     build_app,
     build_inner_app,
     discover_routes,
     is_non_loopback_allowed,
+    is_origin_allowed,
+    parse_allowed_origins,
     require_bearer_token,
     require_safe_mode,
     resolve_host,
@@ -368,3 +372,177 @@ class TestNoTokenInOutput:
         assert called["host"] == "127.0.0.1"
         assert "must-not-leak-either" not in out.getvalue()
         assert "must-not-leak-either" not in err.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Origin validation (Phase 17B)
+# ---------------------------------------------------------------------------
+
+
+class TestParseAllowedOrigins:
+    def test_empty_by_default(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MCP_HTTP_ALLOWED_ORIGINS", None)
+            assert parse_allowed_origins() == frozenset()
+
+    def test_parses_comma_separated(self):
+        with patch.dict(os.environ, {"MCP_HTTP_ALLOWED_ORIGINS": "http://a.local, http://b.local"}):
+            assert parse_allowed_origins() == frozenset({"http://a.local", "http://b.local"})
+
+
+class TestIsOriginAllowed:
+    def test_missing_origin_allowed(self):
+        assert is_origin_allowed(None, frozenset()) is True
+        assert is_origin_allowed("", frozenset()) is True
+
+    @pytest.mark.parametrize(
+        "origin",
+        [
+            "http://127.0.0.1:9999",
+            "http://localhost:9999",
+            "http://[::1]:9999",
+            "http://127.0.0.1",
+        ],
+    )
+    def test_loopback_origin_allowed_by_default(self, origin):
+        assert is_origin_allowed(origin, frozenset()) is True
+
+    def test_non_loopback_rejected_by_default(self):
+        assert is_origin_allowed("http://evil.example.com", frozenset()) is False
+
+    def test_explicit_extra_origin_allowed(self):
+        extra = frozenset({"http://custom.local:1234"})
+        assert is_origin_allowed("http://custom.local:1234", extra) is True
+
+    def test_extra_origin_does_not_allow_others(self):
+        extra = frozenset({"http://custom.local:1234"})
+        assert is_origin_allowed("http://still-not-allowed.local", extra) is False
+
+
+class TestOriginValidationMiddleware:
+    def _client(self, extra_allowed: frozenset[str] = frozenset()) -> TestClient:
+        app = OriginValidationMiddleware(_trivial_app(), extra_allowed)
+        return TestClient(app)
+
+    def test_no_origin_passes(self):
+        client = self._client()
+        resp = client.get("/probe")
+        assert resp.status_code == 200
+
+    def test_loopback_origin_passes(self):
+        client = self._client()
+        resp = client.get("/probe", headers={"Origin": "http://127.0.0.1:9999"})
+        assert resp.status_code == 200
+
+    def test_non_loopback_origin_rejected(self):
+        client = self._client()
+        resp = client.get("/probe", headers={"Origin": "http://evil.example.com"})
+        assert resp.status_code == 403
+
+    def test_extra_allowed_origin_passes(self):
+        client = self._client(frozenset({"http://custom.local:1234"}))
+        resp = client.get("/probe", headers={"Origin": "http://custom.local:1234"})
+        assert resp.status_code == 200
+
+    def test_rejection_does_not_echo_full_origin_in_body(self):
+        client = self._client()
+        resp = client.get("/probe", headers={"Origin": "http://evil-looking-value.example.com"})
+        assert resp.status_code == 403
+        assert "evil-looking-value.example.com" not in resp.text
+
+
+class TestStackedMiddlewareSuccessPaths:
+    """Proves OriginValidationMiddleware + BearerAuthMiddleware, stacked
+    exactly as build_app() stacks them, let a well-formed request through
+    to the wrapped app.
+
+    Uses a trivial inner app rather than the real 84-tool SSE app:
+    Starlette's TestClient cannot fully drive a real SSE connect (the
+    mcp SDK's own SseServerTransport validates the HTTP Host header
+    deep inside connect_sse(), and TestClient's synthetic "testserver"
+    Host does not match any loopback pattern — a TestClient limitation
+    already known from Phase 16B PR1, not a bug in this middleware).
+    The equivalent real, end-to-end success path (real subprocess, real
+    socket, real Host header) is exercised by
+    scripts/mcp_sse_safe_smoke.py and was additionally verified manually
+    against a real subprocess for all three cases below while building
+    this test file.
+    """
+
+    def _client(self, token: str, extra_allowed: frozenset[str] = frozenset()) -> TestClient:
+        app: Any = BearerAuthMiddleware(_trivial_app(), token)
+        app = OriginValidationMiddleware(app, extra_allowed)
+        return TestClient(app)
+
+    def test_no_origin_correct_bearer_passes(self):
+        client = self._client("tok-a")
+        resp = client.get("/probe", headers={"Authorization": "Bearer tok-a"})
+        assert resp.status_code == 200
+
+    def test_loopback_origin_correct_bearer_passes(self):
+        client = self._client("tok-b")
+        resp = client.get(
+            "/probe",
+            headers={"Authorization": "Bearer tok-b", "Origin": "http://127.0.0.1:5555"},
+        )
+        assert resp.status_code == 200
+
+    def test_allowed_custom_origin_from_env_passes(self):
+        client = self._client("tok-c", frozenset({"http://custom.local:1234"}))
+        resp = client.get(
+            "/probe",
+            headers={"Authorization": "Bearer tok-c", "Origin": "http://custom.local:1234"},
+        )
+        assert resp.status_code == 200
+
+
+class TestBuildAppOriginIntegration:
+    """End-to-end rejection paths against the real 84-tool app: these
+    are rejected by OriginValidationMiddleware/BearerAuthMiddleware
+    before ever reaching the mcp SDK's deeper connect_sse() Host check,
+    so TestClient handles them fine (unlike the success paths above).
+    """
+
+    def _build(self, token: str = "origin-integration-token", allowed_origins: str = ""):
+        env = dict(SAFE_MODE_ENV)
+        env["MCP_HTTP_BEARER_TOKEN"] = token
+        if allowed_origins:
+            env["MCP_HTTP_ALLOWED_ORIGINS"] = allowed_origins
+        with patch.dict(os.environ, env):
+            _reload_gateway_server()
+            app, host, port = build_app()
+        return app, host, port
+
+    def test_non_loopback_origin_rejected_with_403_regardless_of_bearer(self):
+        app, _host, _port = self._build(token="tok-d")
+        client = TestClient(app)
+        resp_correct_token = client.get(
+            "/sse",
+            headers={"Authorization": "Bearer tok-d", "Origin": "http://evil.example.com"},
+        )
+        assert resp_correct_token.status_code == 403
+
+        resp_wrong_token = client.get(
+            "/sse",
+            headers={"Authorization": "Bearer wrong", "Origin": "http://evil.example.com"},
+        )
+        assert resp_wrong_token.status_code == 403
+
+    def test_wrong_bearer_with_loopback_origin_still_401(self):
+        app, _host, _port = self._build(token="tok-e")
+        client = TestClient(app)
+        resp = client.get(
+            "/sse",
+            headers={"Authorization": "Bearer wrong", "Origin": "http://localhost:5555"},
+        )
+        assert resp.status_code == 401
+
+    def test_messages_endpoint_protected_by_origin_too(self):
+        app, _host, _port = self._build(token="tok-f")
+        client = TestClient(app)
+        resp = client.post(
+            "/messages/",
+            json={},
+            headers={"Origin": "http://evil.example.com"},
+        )
+        assert resp.status_code == 403

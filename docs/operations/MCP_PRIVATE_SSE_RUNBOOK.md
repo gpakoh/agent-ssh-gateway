@@ -46,6 +46,10 @@ Edit `examples/mcp_server/chatgpt.sse.env` with your values:
 - Leave `MCP_GATEWAY_TOOL_MODE=chatgpt`, `MCP_CHATGPT_SAFE_MODE=true`,
   `MCP_HTTP_HOST=127.0.0.1`, `MCP_HTTP_PORT=8086` as shipped in the
   template — do not change these for a rehearsal run
+- `MCP_HTTP_ALLOWED_ORIGINS` (optional) — leave unset unless you have a
+  specific additional local Origin to allow; loopback origins and
+  requests with no `Origin` header are already permitted by default (see
+  "Origin validation" below). Never add a public origin here.
 
 `examples/mcp_server/chatgpt.sse.env` is gitignored. **Never commit it.**
 
