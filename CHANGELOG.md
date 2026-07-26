@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.58a0] - 2026-07-26
+
+### Added
+
+- **Private SSE manual rehearsal result recorded**: `docs/operations/MCP_PRIVATE_SSE_REHEARSAL.md` — record of the first end-to-end operator rehearsal of `scripts/mcp_sse_serve.py` following the runbook. Loopback-only bind (`127.0.0.1`) verified directly against the listening socket. Bearer auth verified: missing/wrong token → `401`, correct token → non-401, SSE stream opens. MCP protocol verified over the authenticated session: `initialize`, `list_tools`, `tools_manifest` all succeeded. Tool set verified: 84 safe tools present, exact match to `tool_modes.get_chatgpt_safe_tools()`, all 30 blocked tools absent. The temporary env file (fresh bearer token, restricted agent token — never master key) was deleted after the rehearsal; no persistent service, Docker Compose entry, or systemd unit was created.
+
+### Notes
+
+- Public ChatGPT/OpenAI connector is still NOT live — this rehearsal is manual/local-only and changes nothing about that status.
+- No tag or deploy in this release.
+
 ## [0.1.57a0] - 2026-07-25
 
 ### Added
