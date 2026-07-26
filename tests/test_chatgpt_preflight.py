@@ -860,3 +860,76 @@ class TestMcpPrivateSSERehearsalRecord:
         )
         assert not re.search(r"\b[A-F0-9]{20,}\b", content)
         assert "MCP_HTTP_BIND_PUBLIC" not in content
+
+
+class TestOpenAIMcpAttachPathAudit:
+    """Contract tests for docs/operations/OPENAI_MCP_ATTACH_PATH_AUDIT.md.
+    Phase 17A.
+    """
+
+    def _load(self) -> str:
+        return (ROOT / "docs" / "operations" / "OPENAI_MCP_ATTACH_PATH_AUDIT.md").read_text()
+
+    def test_doc_exists(self):
+        assert (ROOT / "docs" / "operations" / "OPENAI_MCP_ATTACH_PATH_AUDIT.md").is_file()
+
+    def test_public_connector_not_live(self):
+        content = self._load().lower()
+        assert "not live" in content
+
+    def test_private_sse_not_equal_public_attach(self):
+        content = self._load().lower()
+        assert "private" in content
+        assert "public" in content
+        # Must distinguish the two, not conflate them
+        assert "loopback-only" in content or "loopback" in content
+
+    def test_official_requirements_source_attributed(self):
+        content = self._load()
+        assert "modelcontextprotocol.io" in content
+        assert "developers.openai.com" in content or "help.openai.com" in content
+        assert "Sources used" in content or "official only" in content.lower()
+
+    def test_states_tls_public_endpoint_or_auth_requirements(self):
+        content = self._load().lower()
+        assert "tls" in content
+        assert "oauth" in content
+
+    def test_agent_token_never_master(self):
+        content = self._load().lower()
+        assert "master key" in content
+        assert "never" in content
+
+    def test_safe_mode_mandatory(self):
+        content = self._load()
+        assert "MCP_CHATGPT_SAFE_MODE=true" in content
+        assert "mandatory" in content.lower()
+
+    def test_no_dangerous_tools(self):
+        content = self._load().lower()
+        assert "write" in content
+        assert "docker" in content
+        assert "chatgpt_blocked_tools" in content or "blocked_tools" in content
+
+    def test_ambiguity_flagged_not_guessed(self):
+        content = self._load().lower()
+        # Must explicitly acknowledge ambiguity/unverified sources rather
+        # than presenting every claim as settled fact.
+        assert "ambiguous" in content or "unverified" in content
+
+    def test_no_forbidden_scopes_mentioned(self):
+        content = self._load().lower()
+        for scope in ("ssh:files", "project:write", "jobs:run"):
+            assert scope not in content
+
+    def test_no_real_secrets_or_topology(self):
+        import re
+
+        content = self._load()
+        sanitized = content.replace("127.0.0.1", "").replace("0.0.0.0", "")
+        assert not re.search(
+            r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b",
+            sanitized,
+        )
+        assert not re.search(r"\b[A-F0-9]{20,}\b", content)
+        assert "MCP_HTTP_BIND_PUBLIC" not in content
