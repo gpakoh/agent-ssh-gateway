@@ -9,6 +9,13 @@ when the rehearsal is done.
 See `docs/operations/MCP_PRIVATE_SSE_REHEARSAL.md` for the record of the
 first end-to-end rehearsal of these steps.
 
+SSE is the MCP spec's **deprecated** transport (2024-11-05); it remains
+fully supported here. If you want the spec's current transport
+instead, see the "Private Streamable HTTP entrypoint" section of
+`docs/operations/CHATGPT_TOOL_ATTACH.md`
+(`scripts/mcp_streamable_http_serve.py`, route `/mcp`, default
+`127.0.0.1:8087`) — a sibling of this entrypoint, not a replacement.
+
 ## Prerequisites
 
 - [ ] Gateway running, `/health` returns `status: ok`, `ready: true`

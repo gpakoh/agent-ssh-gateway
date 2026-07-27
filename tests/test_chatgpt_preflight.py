@@ -1016,3 +1016,127 @@ class TestPrivateStreamableHttpTransportDesign:
         )
         assert not re.search(r"\b[A-F0-9]{20,}\b", content)
         assert "xloud" not in content.lower()
+
+
+class TestStreamableHttpDocsEnvSync:
+    """Contract tests for the Phase 18C docs/env sync: docs must
+    honestly describe both private HTTP entrypoints (SSE and
+    Streamable HTTP) side by side, stdio as default, and the public
+    connector as still not live.
+    """
+
+    def _tool_attach(self) -> str:
+        return (ROOT / "docs" / "operations" / "CHATGPT_TOOL_ATTACH.md").read_text()
+
+    def _readiness(self) -> str:
+        return (ROOT / "docs" / "operations" / "OPENAI_CONNECTOR_READINESS.md").read_text()
+
+    def _sse_runbook(self) -> str:
+        return (ROOT / "docs" / "operations" / "MCP_PRIVATE_SSE_RUNBOOK.md").read_text()
+
+    def _env_example(self) -> str:
+        return (
+            ROOT / "examples" / "mcp_server" / "chatgpt.streamable-http.env.example"
+        ).read_text()
+
+    def test_tool_attach_mentions_mcp_route_and_port(self):
+        content = self._tool_attach()
+        assert "/mcp" in content
+        assert "8087" in content
+
+    def test_tool_attach_mentions_bearer_and_origin_env_vars(self):
+        content = self._tool_attach()
+        assert "MCP_STREAMABLE_HTTP_BEARER_TOKEN" in content
+        assert "MCP_STREAMABLE_HTTP_ALLOWED_ORIGINS" in content
+
+    def test_tool_attach_says_stdio_default_sse_available_streamable_available(self):
+        content = self._tool_attach().lower()
+        assert "stdio" in content and "default" in content
+        assert "sse" in content and "available" in content
+        assert "streamable http" in content
+
+    def test_tool_attach_public_connector_not_live(self):
+        content = self._tool_attach().lower()
+        assert "not a public" in content or "not live" in content
+
+    def test_tool_attach_no_compose_systemd_autostart(self):
+        content = self._tool_attach().lower()
+        assert "not deployed as a persistent service" in content or "persistent service" in content
+
+    def test_tool_attach_mentions_streamable_http_smoke_script(self):
+        content = self._tool_attach()
+        assert "mcp_streamable_http_safe_smoke.py" in content
+
+    def test_tool_attach_sse_deprecated_but_kept(self):
+        content = self._tool_attach().lower()
+        assert "deprecated" in content
+        assert "sse remains fully supported" in content or "remains fully supported" in content
+
+    def test_readiness_mentions_streamable_http_route_and_port(self):
+        content = self._readiness()
+        assert "/mcp" in content
+        assert "8087" in content
+
+    def test_readiness_mentions_bearer_and_origin_env_vars(self):
+        content = self._readiness()
+        assert "MCP_STREAMABLE_HTTP_BEARER_TOKEN" in content
+        assert "MCP_STREAMABLE_HTTP_ALLOWED_ORIGINS" in content
+
+    def test_readiness_stdio_default_both_transports_available(self):
+        content = self._readiness().lower()
+        assert "stdio" in content and "default" in content
+        assert "sse" in content
+        assert "streamable http" in content
+
+    def test_readiness_public_connector_not_live(self):
+        content = self._readiness().lower()
+        assert "not live" in content
+
+    def test_readiness_no_compose_systemd_autostart(self):
+        content = self._readiness().lower()
+        assert "compose" in content and "systemd" in content and "autostart" in content
+
+    def test_sse_runbook_cross_references_streamable_http(self):
+        content = self._sse_runbook()
+        assert "mcp_streamable_http_serve.py" in content
+        assert "deprecated" in content.lower()
+
+    def test_env_example_placeholders_only(self):
+        content = self._env_example()
+        assert "<gateway-url>" in content
+        assert "<agent-token>" in content
+        assert "<generate-private-token>" in content
+        assert "MCP_GATEWAY_TOOL_MODE=chatgpt" in content
+        assert "MCP_CHATGPT_SAFE_MODE=true" in content
+        assert "MCP_STREAMABLE_HTTP_HOST=127.0.0.1" in content
+        assert "MCP_STREAMABLE_HTTP_PORT=8087" in content
+        assert "MCP_STREAMABLE_HTTP_BEARER_TOKEN=<generate-private-token>" in content
+        assert (
+            "MCP_STREAMABLE_HTTP_ALLOWED_ORIGINS=<optional-comma-separated-loopback-origins>"
+            in content
+        )
+
+    def test_env_example_is_gitignored(self):
+        gitignore = (ROOT / ".gitignore").read_text()
+        assert "chatgpt.streamable-http.env" in gitignore
+
+    def test_env_example_no_master_key_as_runtime(self):
+        content = self._env_example()
+        assert "NEVER use master key" in content
+
+    def test_no_forbidden_scopes_in_docs(self):
+        for content in (self._tool_attach().lower(), self._readiness().lower()):
+            for scope in ("ssh:files", "project:write", "jobs:run"):
+                assert scope not in content
+
+    def test_no_real_topology_in_docs_and_env_example(self):
+        import re
+
+        for content in (self._tool_attach(), self._readiness(), self._env_example()):
+            sanitized = content.replace("127.0.0.1", "").replace("0.0.0.0", "")
+            assert not re.search(
+                r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b",
+                sanitized,
+            )
+            assert not re.search(r"\b[A-F0-9]{20,}\b", content)
+            assert "xloud" not in content.lower()
