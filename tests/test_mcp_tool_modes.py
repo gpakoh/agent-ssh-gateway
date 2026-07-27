@@ -171,3 +171,13 @@ class TestChatGPTSafeMode:
         monkeypatch.delenv("MCP_CHATGPT_SAFE_MODE", raising=False)
         assert should_register_tool("project_run_opencode")
         assert should_register_tool("docker_exec")
+        assert should_register_tool("workspace_file_write")
+        assert should_register_tool("workspace_file_edit")
+        assert should_register_tool("workspace_apply_patch")
+
+    def test_safe_mode_on_blocks_workspace_write(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+        monkeypatch.setenv("MCP_CHATGPT_SAFE_MODE", "true")
+        assert not should_register_tool("workspace_file_write")
+        assert not should_register_tool("workspace_file_edit")
+        assert not should_register_tool("workspace_apply_patch")
