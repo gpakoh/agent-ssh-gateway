@@ -594,6 +594,33 @@ def gateway_health() -> dict[str, Any]:
 
     mcp_build_sha = os.environ.get("BUILD_SHA", "").strip() or "unknown"
     mcp_build_time = os.environ.get("BUILD_TIME", "").strip()
+
+    # Fallback: read git HEAD from source tree (MCP server runs on host, not in Docker)
+    if mcp_build_sha == "unknown" or not mcp_build_time:
+        try:
+            import subprocess as _sp
+
+            _git_dir = Path(__file__).resolve().parents[2]
+            if mcp_build_sha == "unknown":
+                _sha = _sp.check_output(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    cwd=str(_git_dir),
+                    stderr=_sp.DEVNULL,
+                    timeout=2,
+                ).decode().strip()
+                if _sha:
+                    mcp_build_sha = _sha
+            if not mcp_build_time:
+                _ts = _sp.check_output(
+                    ["git", "log", "-1", "--format=%ci"],
+                    cwd=str(_git_dir),
+                    stderr=_sp.DEVNULL,
+                    timeout=2,
+                ).decode().strip()
+                if _ts:
+                    mcp_build_time = _ts
+        except Exception:
+            pass
     mcp_started_at = ""
     if _mcp_started_at:
         mcp_started_at = datetime.fromtimestamp(

@@ -1,9 +1,10 @@
 FROM alpine:3.19
 
-RUN apk add --no-cache openssh-server git && \
+RUN apk add --no-cache openssh-server git curl && \
     adduser -D mcpuser && \
     mkdir -p /home/mcpuser/.ssh && \
-    chmod 700 /home/mcpuser/.ssh
+    chmod 700 /home/mcpuser/.ssh && \
+    curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
 COPY authorized_keys /home/mcpuser/.ssh/authorized_keys
 

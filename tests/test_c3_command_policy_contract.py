@@ -350,8 +350,8 @@ class TestMcpProjectRunPytest:
 
         # Two calls to execute_raw: (1) uv check, (2) pytest run
         mock_responses = [
-            {"exit_code": 0, "stdout": "", "stderr": ""},  # uv check
-            {"job_id": "pytest-job-1", "status": "running"},  # pytest run
+            {"job_id": "uv-check-1"},  # uv check
+            {"job_id": "pytest-job-1"},  # pytest run
         ]
 
         with patch(

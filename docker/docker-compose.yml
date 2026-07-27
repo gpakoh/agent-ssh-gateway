@@ -77,6 +77,9 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      args:
+        BUILD_SHA: ${BUILD_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
     container_name: web-ssh-gateway
     hostname: web-ssh-gateway
     networks:

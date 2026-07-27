@@ -183,12 +183,14 @@ async def project_apply_patch(
     _identity: AuthIdentity = Depends(require_scope("project:patch")),
 ):
     """Apply a unified diff patch to project files with hash verification and rollback."""
-    assert_workspace_writable(
-        actor_type=_identity.token_type,
-        actor_name=_identity.name or "",
-        actor_fingerprint=_identity.fingerprint[:12],
-        route="POST /api/projects/*/apply-patch",
-    )
+    # dry_run is read-only — skip writable gate (same rationale as workspace_preview_edit)
+    if not req.dry_run:
+        assert_workspace_writable(
+            actor_type=_identity.token_type,
+            actor_name=_identity.name or "",
+            actor_fingerprint=_identity.fingerprint[:12],
+            route="POST /api/projects/*/apply-patch",
+        )
     # Session ownership
     session = await _state.manager.get_session(req.session_id)
     if session is None:
@@ -213,15 +215,15 @@ async def project_apply_patch(
         # Validate forbidden ops
         applier._validate_no_forbidden_ops(files)
 
-        # Resolve project path via registry
-        from examples.mcp_server.project_registry import get_project_registry
+        # Resolve project path via workspace registry
+        from app.workspace.registry import get_registry
 
-        registry = get_project_registry()
         try:
-            project_root = registry.resolve(project)
-        except ValueError as exc:
+            registry = get_registry()
+            project_root = registry._policy._resolve_project_root(project)
+        except Exception as exc:
             raise HTTPException(
-                status_code=404, detail=_err(404, str(exc))
+                status_code=404, detail=_err(404, f"Project not found: {project}")
             ) from exc
 
         file_results: list[ProjectPatchFileResult] = []

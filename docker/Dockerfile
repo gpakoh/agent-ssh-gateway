@@ -2,6 +2,12 @@
 FROM python:3.12-slim
 LABEL description="agent-ssh-gateway — SSH control plane"
 
+ARG BUILD_SHA
+ARG BUILD_TIME
+
+ENV BUILD_SHA=${BUILD_SHA}
+ENV BUILD_TIME=${BUILD_TIME}
+
 # Security: Install only necessary packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
