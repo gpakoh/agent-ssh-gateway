@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.61a0] - 2026-07-27
+
+### Added
+
+- **Public MCP connector risk review** (Phase 19A): `docs/operations/PUBLIC_MCP_CONNECTOR_RISK_REVIEW.md` audits what stands between the current private-only posture and any real public exposure of the SSE/Streamable HTTP entrypoints. States plainly that a **static bearer token is not acceptable as a final public connector** — adequate only for private, operator-controlled rehearsal. Lists as explicit prerequisites before any public exposure: TLS termination, a deliberate reverse-proxy/public-DNS design, an explicit OAuth 2.1/DCR/PKCE wiring decision (reusing the existing `GatewayOAuthProvider` rather than a new stack), OAuth 2.0 Protected Resource Metadata + Authorization Server Metadata endpoints, a verified token storage/rotation/revocation lifecycle, rate limiting/abuse throttling, structured audit events for connector auth failures, a written and rehearsed incident rollback plan, and an MCP-connection-scoped operator approval gate. Defines the narrow, red-lined conditions under which a lab-only, short-TTL, strictly-allowlisted tunnel session would be acceptable to test — explicitly not a production milestone. Current recommendation: remain private-only (Option A) for now; a public OAuth connector (Option C) remains a separate, multi-phase project, not scheduled.
+
+### Notes
+
+- Public ChatGPT/OpenAI connector is still **NOT live** — this release adds a risk-analysis document only; no auth, transport, or exposure code changed.
+- `stdio` remains the default MCP transport; both private entrypoints (SSE, Streamable HTTP) remain available, loopback-only, unaffected by this release.
+- No Docker Compose, systemd, or reverse-proxy wiring was added in this release.
+- No tag or deploy in this release.
+
 ## [0.1.60a0] - 2026-07-27
 
 ### Added
