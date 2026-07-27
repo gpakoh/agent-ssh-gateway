@@ -1,5 +1,7 @@
 """System and meta routes: health, capabilities, config, help, metrics, SDK, circuit-breaker, UI."""
 
+import os
+import socket
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -35,22 +37,42 @@ router = APIRouter()
 
 @router.get("/health", tags=["system"], response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint.
+
+    Reports readiness based on all critical subsystems: Redis,
+    PostgreSQL, API key configuration, and SSH server reachability.
+    """
     from app import build_info
     from app.version import APP_VERSION
 
     redis_ok = _state.redis_queue is not None and _state.redis_queue._redis is not None
     persistent_sessions_ok = _state.session_store is not None
     meta = build_info.get_build_metadata()
+
+    api_key_ok = bool(settings.api_key)
+
+    ssh_host = os.environ.get("GATEWAY_SSH_HOST", "sshd")
+    ssh_port = int(os.environ.get("GATEWAY_SSH_PORT", "22"))
+    ssh_ok = False
+    try:
+        with socket.create_connection((ssh_host, ssh_port), timeout=2):
+            ssh_ok = True
+    except (OSError, TimeoutError):
+        pass
+
     redis_degraded = not redis_ok and settings.redis_url
     sessions_degraded = settings.persistent_sessions_enabled and not persistent_sessions_ok
-    status = "degraded" if redis_degraded or sessions_degraded else "ok"
+    auth_degraded = settings.api_auth_enabled and not api_key_ok
+    ssh_degraded = not ssh_ok
+    status = "degraded" if (redis_degraded or sessions_degraded or auth_degraded or ssh_degraded) else "ok"
     return HealthResponse(
         status=status,
         redis=redis_ok,
         persistent_sessions=persistent_sessions_ok,
         postgres=persistent_sessions_ok,
         ready=status == "ok",
+        api_key_configured=api_key_ok,
+        ssh_server_reachable=ssh_ok,
         build_sha=meta["build_sha"],
         build_time=meta["build_time"],
         started_at=meta["started_at"],

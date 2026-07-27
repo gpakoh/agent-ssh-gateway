@@ -252,6 +252,8 @@ class HealthResponse(BaseModel):
     persistent_sessions: bool = False
     postgres: bool = False  # deprecated — use persistent_sessions
     ready: bool = False
+    api_key_configured: bool = False
+    ssh_server_reachable: bool = False
     build_sha: str = ""
     build_time: str = ""
     started_at: str = ""

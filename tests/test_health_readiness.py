@@ -43,36 +43,48 @@ class TestHealthReadiness:
             assert data["ready"] is False
 
     def test_ready_true_when_redis_ok(self):
-        """ready=true when Redis is connected."""
+        """ready=true when Redis is connected, API key set, SSH reachable."""
         mock_redis = MagicMock()
         mock_redis._redis = MagicMock()  # simulate connected redis
 
         with (
             patch("app.routers.system._state") as mock_state,
             patch("app.routers.system.settings") as mock_settings,
+            patch("app.routers.system.socket") as mock_socket,
         ):
             mock_state.redis_queue = mock_redis
             mock_state.session_store = None
             mock_settings.redis_url = "redis://localhost:6379"
             mock_settings.persistent_sessions_enabled = False
+            mock_settings.api_auth_enabled = True
+            mock_settings.api_key = "test-key"
+            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
+            mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
 
             with TestClient(app) as client:
                 resp = client.get("/health")
             data = resp.json()
             assert data["status"] == "ok"
             assert data["ready"] is True
+            assert data["api_key_configured"] is True
+            assert data["ssh_server_reachable"] is True
 
     def test_ready_true_when_no_redis_configured(self):
-        """ready=true when redis_url is not set (degraded logic irrelevant)."""
+        """ready=true when redis_url is not set and API key + SSH are fine."""
         with (
             patch("app.routers.system._state") as mock_state,
             patch("app.routers.system.settings") as mock_settings,
+            patch("app.routers.system.socket") as mock_socket,
         ):
             mock_state.redis_queue = MagicMock()
             mock_state.redis_queue._redis = None
             mock_state.session_store = None
             mock_settings.redis_url = ""  # no redis configured
             mock_settings.persistent_sessions_enabled = False
+            mock_settings.api_auth_enabled = True
+            mock_settings.api_key = "test-key"
+            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
+            mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
 
             with TestClient(app) as client:
                 resp = client.get("/health")
@@ -88,11 +100,15 @@ class TestHealthReadiness:
         with (
             patch("app.routers.system._state") as mock_state,
             patch("app.routers.system.settings") as mock_settings,
+            patch("app.routers.system.socket") as mock_socket,
         ):
             mock_state.redis_queue = mock_redis
             mock_state.session_store = None  # postgres/session store missing
             mock_settings.redis_url = "redis://localhost:6379"
             mock_settings.persistent_sessions_enabled = True
+            mock_settings.api_auth_enabled = False
+            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
+            mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
 
             with TestClient(app) as client:
                 resp = client.get("/health")
@@ -100,6 +116,83 @@ class TestHealthReadiness:
             assert data["status"] == "degraded"
             assert data["ready"] is False
             assert data["persistent_sessions"] is False
+
+    def test_ready_false_when_api_key_missing(self):
+        """ready=false when auth is enabled but no API key is configured."""
+        mock_redis = MagicMock()
+        mock_redis._redis = MagicMock()
+
+        with (
+            patch("app.routers.system._state") as mock_state,
+            patch("app.routers.system.settings") as mock_settings,
+            patch("app.routers.system.socket") as mock_socket,
+        ):
+            mock_state.redis_queue = mock_redis
+            mock_state.session_store = None
+            mock_settings.redis_url = "redis://localhost:6379"
+            mock_settings.persistent_sessions_enabled = False
+            mock_settings.api_auth_enabled = True
+            mock_settings.api_key = ""
+            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
+            mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
+
+            with TestClient(app) as client:
+                resp = client.get("/health")
+            data = resp.json()
+            assert data["status"] == "degraded"
+            assert data["ready"] is False
+            assert data["api_key_configured"] is False
+
+    def test_ready_false_when_ssh_unreachable(self):
+        """ready=false when SSH server cannot be reached."""
+        mock_redis = MagicMock()
+        mock_redis._redis = MagicMock()
+
+        with (
+            patch("app.routers.system._state") as mock_state,
+            patch("app.routers.system.settings") as mock_settings,
+            patch("app.routers.system.socket") as mock_socket,
+        ):
+            mock_state.redis_queue = mock_redis
+            mock_state.session_store = None
+            mock_settings.redis_url = "redis://localhost:6379"
+            mock_settings.persistent_sessions_enabled = False
+            mock_settings.api_auth_enabled = True
+            mock_settings.api_key = "test-key"
+            mock_socket.create_connection.side_effect = OSError("Connection refused")
+
+            with TestClient(app) as client:
+                resp = client.get("/health")
+            data = resp.json()
+            assert data["status"] == "degraded"
+            assert data["ready"] is False
+            assert data["ssh_server_reachable"] is False
+
+    def test_auth_disabled_skips_api_key_check(self):
+        """ready=true when auth disabled (api_key not required)."""
+        mock_redis = MagicMock()
+        mock_redis._redis = MagicMock()
+
+        with (
+            patch("app.routers.system._state") as mock_state,
+            patch("app.routers.system.settings") as mock_settings,
+            patch("app.routers.system.socket") as mock_socket,
+        ):
+            mock_state.redis_queue = mock_redis
+            mock_state.session_store = None
+            mock_settings.redis_url = "redis://localhost:6379"
+            mock_settings.persistent_sessions_enabled = False
+            mock_settings.api_auth_enabled = False
+            mock_settings.api_key = ""
+            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
+            mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
+
+            with TestClient(app) as client:
+                resp = client.get("/health")
+            data = resp.json()
+            assert data["status"] == "ok"
+            assert data["ready"] is True
+            assert data["api_key_configured"] is False
 
 
 class TestCircuitBreakerMetricCardinality:

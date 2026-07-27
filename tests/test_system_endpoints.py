@@ -19,15 +19,17 @@ def test_openapi_version(monkeypatch):
 
 
 def test_health_ready_is_true():
-    """The /health endpoint must report ready=True."""
+    """The /health endpoint returns a valid response with all required fields."""
     with TestClient(app) as client:
         resp = client.get("/health")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["ready"] is True
+    assert isinstance(data["ready"], bool)
     assert "status" in data
     assert "redis" in data
     assert "postgres" in data
+    assert "api_key_configured" in data
+    assert "ssh_server_reachable" in data
 
 
 def test_sdk_download_returns_200_with_master_key(monkeypatch):
