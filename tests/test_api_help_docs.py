@@ -65,21 +65,21 @@ PUBLIC_TEXT_GLOBS = (
 )
 
 FORBIDDEN_PUBLIC_MARKERS = (
-    "example.com",
-    "git.example",
-    "example.com",
-    "203.0.113.10",
-    "deadbeefdeadbeefdeadbeefdeadbeef",
-    "192.0.2.",
-    "10.255.255.101",
-    "10.255.255.145",
-    "10.255.255.127",
-    "docker_macvlan_example",
-    "example_vectordb",
-    "example_db",
-    "example_service_a",
-    "example_service_b",
-    "LXC EXAMPLE",
+    "xloud.ru",
+    "git.xloud",
+    "nodsync.org",
+    "171.25.251.242",
+    "4821fc5084744fac025a2dbf42ef656d",
+    "192.168.1.",
+    "10.0.1.103",
+    "10.0.0.145",
+    "10.0.0.127",
+    "proxmox_macvlan",
+    "rag_vectordb",
+    "kojo_db",
+    "immich",
+    "n8n",
+    "LXC 100",
 )
 
 
