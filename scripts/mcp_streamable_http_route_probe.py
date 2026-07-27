@@ -41,7 +41,9 @@ the evidence artifact for PR2/PR3 to build against, not an assumption.
 from __future__ import annotations
 
 import importlib
+import io
 import json
+import logging
 import re
 import socket
 import sys
@@ -66,9 +68,26 @@ from scripts.mcp_sse_serve import (  # noqa: E402
 
 _SECRET_LIKE = re.compile(r"[A-Za-z0-9_\-]{20,}")
 
+# The original 10s startup deadline was found too tight on the shared
+# Gitea runner pool under concurrent job load (consistently fine on
+# GitHub's isolated VM and locally — timing out only there). 30s gives
+# real headroom without masking a genuinely dead server, which is
+# still detected immediately via thread liveness, not by waiting out
+# the full deadline.
+DEFAULT_STARTUP_TIMEOUT_SECONDS = 30.0
+
 
 def _redact(s: str) -> str:
     return _SECRET_LIKE.sub("<REDACTED>", s)
+
+
+class _ThreadResult:
+    """Captures an exception raised inside the server's background
+    thread, since a plain `threading.Thread` swallows it otherwise.
+    """
+
+    def __init__(self) -> None:
+        self.exception: BaseException | None = None
 
 
 def find_free_port() -> int:
@@ -117,25 +136,86 @@ def discover_methods(app: Any) -> list[dict[str, Any]]:
     return found
 
 
-def run_ephemeral_server(app: Any, host: str, port: int) -> tuple[Any, threading.Thread]:
+def _wait_for_started(
+    server: Any,
+    thread: threading.Thread,
+    result: _ThreadResult,
+    log_buffer: io.StringIO,
+    timeout: float,
+) -> None:
+    """Poll `server.started` with exponential backoff (not a tight
+    busy-loop) until it goes True, the thread dies, or `timeout`
+    elapses.
+
+    A dead thread raises immediately — there is no reason to wait out
+    the rest of the deadline once the server process is gone. Both
+    failure messages include the captured startup exception (if any)
+    and any warning/error-level uvicorn log output, redacted, so a CI
+    failure is diagnosable without a second run.
+    """
+    deadline = time.monotonic() + timeout
+    delay = 0.02
+    max_delay = 0.5
+    while time.monotonic() < deadline:
+        if server.started:
+            return
+        if not thread.is_alive():
+            raise RuntimeError(
+                "ephemeral Streamable HTTP server thread exited before starting"
+                f" — captured exception: {_redact(repr(result.exception))};"
+                f" log output: {_redact(log_buffer.getvalue())}"
+            )
+        time.sleep(delay)
+        delay = min(delay * 1.5, max_delay)
+
+    raise RuntimeError(
+        f"ephemeral Streamable HTTP server did not start within {timeout}s"
+        f" — thread alive: {thread.is_alive()};"
+        f" log output: {_redact(log_buffer.getvalue())}"
+    )
+
+
+def run_ephemeral_server(
+    app: Any,
+    host: str,
+    port: int,
+    *,
+    startup_timeout: float = DEFAULT_STARTUP_TIMEOUT_SECONDS,
+) -> tuple[Any, threading.Thread]:
     """Start uvicorn in a background thread for the probe's duration
     only. Caller must call stop_ephemeral_server() before exit.
+
+    `startup_timeout` is a keyword-only parameter (not hardcoded)
+    specifically so a slower CI runner can be given more headroom, and
+    so tests can exercise the failure path without waiting out the
+    real default.
     """
     import uvicorn
 
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
 
-    thread = threading.Thread(target=server.run, daemon=True)
+    log_buffer = io.StringIO()
+    log_handler = logging.StreamHandler(log_buffer)
+    log_handler.setLevel(logging.WARNING)
+    uvicorn_logger = logging.getLogger("uvicorn.error")
+    uvicorn_logger.addHandler(log_handler)
+
+    result = _ThreadResult()
+
+    def _run() -> None:
+        try:
+            server.run()
+        except BaseException as exc:  # noqa: BLE001 - must capture, thread swallows otherwise
+            result.exception = exc
+
+    thread = threading.Thread(target=_run, daemon=True)
     thread.start()
 
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        if server.started:
-            break
-        time.sleep(0.05)
-    else:
-        raise RuntimeError("ephemeral Streamable HTTP server did not start in time")
+    try:
+        _wait_for_started(server, thread, result, log_buffer, startup_timeout)
+    finally:
+        uvicorn_logger.removeHandler(log_handler)
 
     return server, thread
 
@@ -191,7 +271,7 @@ def probe(base_url: str) -> dict[str, Any]:
     return results
 
 
-def run_probe() -> dict[str, Any]:
+def run_probe(*, startup_timeout: float = DEFAULT_STARTUP_TIMEOUT_SECONDS) -> dict[str, Any]:
     """Build the app, discover routes/methods, run the ephemeral
     server, fire the probes, tear the server down. Returns a single
     evidence dict — used both by __main__ and by the contract test.
@@ -203,7 +283,7 @@ def run_probe() -> dict[str, Any]:
 
     host = "127.0.0.1"
     port = find_free_port()
-    server, thread = run_ephemeral_server(app, host, port)
+    server, thread = run_ephemeral_server(app, host, port, startup_timeout=startup_timeout)
     try:
         probe_results = probe(f"http://{host}:{port}")
     finally:

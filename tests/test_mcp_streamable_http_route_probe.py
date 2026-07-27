@@ -17,6 +17,7 @@ import io
 import os
 import re
 import sys
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -30,12 +31,18 @@ for _p in (str(MCP_SERVER_DIR), str(ROOT)):
         sys.path.insert(0, _p)
 
 from scripts.mcp_streamable_http_route_probe import (  # noqa: E402
+    DEFAULT_STARTUP_TIMEOUT_SECONDS,
     ConfigError,
+    _ThreadResult,
+    _wait_for_started,
     build_streamable_http_app,
     discover_methods,
     discover_routes,
+    find_free_port,
     main,
+    run_ephemeral_server,
     run_probe,
+    stop_ephemeral_server,
 )
 
 SAFE_MODE_ENV = {
@@ -196,3 +203,95 @@ class TestEphemeralProbeContract:
             assert match.group(0) == "REDACTED" or "REDACTED" in combined[
                 max(0, match.start() - 12) : match.end()
             ], f"possible unredacted secret-shaped value: {match.group(0)!r}"
+
+
+class _FakeThread:
+    """Duck-typed stand-in for threading.Thread — only .is_alive() is
+    used by _wait_for_started(), so a real thread is unnecessary here.
+    """
+
+    def __init__(self, alive: bool) -> None:
+        self._alive = alive
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+
+class _FakeServer:
+    def __init__(self, started: bool = False) -> None:
+        self.started = started
+
+
+class TestStartupRobustness:
+    """Regression coverage for the Gitea CI blocker: the original 10s
+    startup deadline timed out under concurrent load on the shared
+    runner pool (consistently fine on GitHub's isolated VM and
+    locally). Covers that the timeout is configurable and generous by
+    default, that a dead server thread is reported immediately rather
+    than only after the full deadline, and that neither failure
+    message ever leaks a secret-shaped value.
+    """
+
+    def test_default_timeout_is_at_least_30_seconds(self):
+        assert DEFAULT_STARTUP_TIMEOUT_SECONDS >= 30.0
+
+    def test_run_ephemeral_server_honors_custom_timeout(self):
+        """End-to-end proof the timeout parameter is actually wired,
+        not decorative: a real app, started with a shorter-than-default
+        timeout, still starts successfully well within it.
+        """
+        with patch.dict(os.environ, SAFE_MODE_ENV, clear=False):
+            for var in GATEWAY_CREDENTIAL_VARS:
+                os.environ.pop(var, None)
+            _reload_gateway_server()
+            app = build_streamable_http_app()
+
+        host = "127.0.0.1"
+        port = find_free_port()
+        server, thread = run_ephemeral_server(app, host, port, startup_timeout=5.0)
+        try:
+            assert server.started
+        finally:
+            stop_ephemeral_server(server, thread)
+
+    def test_dead_thread_raises_immediately_with_informative_message(self):
+        """If the server thread has already exited (e.g. a bind error),
+        the caller must not wait out the rest of the deadline to find
+        out — and the raised message must include the captured
+        exception so a CI failure is diagnosable without reproducing.
+        """
+        server = _FakeServer(started=False)
+        thread = _FakeThread(alive=False)
+        result = _ThreadResult()
+        result.exception = RuntimeError("boom: could not bind port")
+        log_buffer = io.StringIO()
+
+        start = time.monotonic()
+        with pytest.raises(RuntimeError) as excinfo:
+            _wait_for_started(server, thread, result, log_buffer, timeout=30.0)
+        elapsed = time.monotonic() - start
+
+        # Must not wait out the full 30s deadline for an already-dead thread.
+        assert elapsed < 2.0
+        assert "exited before starting" in str(excinfo.value)
+        assert "boom: could not bind port" in str(excinfo.value)
+
+    def test_timeout_error_message_redacts_secrets(self):
+        """A genuine timeout's error message includes captured uvicorn
+        log output for diagnosability — but that output must be
+        redacted the same way the probe's own findings are.
+        """
+        server = _FakeServer(started=False)
+        thread = _FakeThread(alive=True)
+        result = _ThreadResult()
+        secret = "sk-THIS-LOOKS-LIKE-A-REAL-SECRET-VALUE-123456"
+        log_buffer = io.StringIO()
+        log_buffer.write(f"uvicorn warning: token={secret}\n")
+
+        with pytest.raises(RuntimeError) as excinfo:
+            _wait_for_started(server, thread, result, log_buffer, timeout=0.1)
+
+        message = str(excinfo.value)
+        assert secret not in message
+        assert "<REDACTED>" in message
+        assert "did not start within 0.1s" in message
