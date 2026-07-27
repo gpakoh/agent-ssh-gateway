@@ -545,11 +545,15 @@ async def ssh_execute_argv(
         raise HTTPException(status_code=404, detail=_err(404, "Session not found"))
     ensure_session_owner(session, _identity)
 
+    final_command = command_str
+    if req.cwd:
+        final_command = f"cd {shlex.quote(req.cwd)} && {command_str}"
+
     stdin_bytes = req.stdin.encode("utf-8") if req.stdin else b""
 
     result = await _state.manager.execute_argv(
         session_id=req.session_id,
-        command_str=command_str,
+        command_str=final_command,
         stdin_data=stdin_bytes,
         timeout=req.timeout_s,
     )

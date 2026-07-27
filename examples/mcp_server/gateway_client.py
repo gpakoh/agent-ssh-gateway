@@ -275,15 +275,16 @@ class GatewayClient:
         sid = self._require_session_id()
         root = _project_root()
         proj = _safe_project(project)
-        full_command = f"cd {root}/{proj} && {command}"
+        cwd = f"{root}/{proj}"
+        import shlex as _shlex
+        argv = _shlex.split(command)
         return self._post(
-            "/api/ssh/execute",
+            "/api/ssh/execute-argv",
             {
                 "session_id": sid,
-                "command": full_command,
-                "async_mode": True,
-                "redact_output": True,
-                "timeout": self.command_timeout,
+                "argv": argv,
+                "cwd": cwd,
+                "timeout_s": self.command_timeout,
             },
         )
 

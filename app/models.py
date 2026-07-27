@@ -84,6 +84,7 @@ class ExecuteArgvRequest(BaseModel):
     argv: list[str] = Field(..., min_length=1)
     stdin: str = Field(default="", max_length=1_048_576)
     timeout_s: int = Field(default=30, ge=1, le=3600)
+    cwd: str | None = Field(default=None, max_length=1024)
 
     @field_validator("argv")
     @classmethod

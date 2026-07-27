@@ -628,15 +628,14 @@ def run_project_command(
     project: str,
     command: str,
 ) -> dict[str, Any]:
-    job = client.execute_project_command(project, command)
-    raw = client.wait_job(job["job_id"])
+    result = client.execute_project_command(project, command)
     return build_command_result(
-        outcome="passed" if raw.get("exit_code", 1) == 0 else "failed",
-        exit_code=raw.get("exit_code", -1),
-        stdout=raw.get("stdout") or raw.get("output", ""),
-        stderr=raw.get("stderr", ""),
-        execution_duration_ms=raw.get("execution_duration_ms"),
-        job_id=job.get("job_id"),
+        outcome="passed" if result.get("exit_code", 1) == 0 else "failed",
+        exit_code=result.get("exit_code", -1),
+        stdout=result.get("stdout") or result.get("output", ""),
+        stderr=result.get("stderr", ""),
+        execution_duration_ms=result.get("execution_duration_ms") or result.get("duration"),
+        job_id=result.get("job_id"),
     )
 
 
