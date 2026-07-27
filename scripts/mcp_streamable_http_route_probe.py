@@ -62,6 +62,7 @@ for _p in (str(MCP_SERVER_DIR), str(ROOT)):
 
 from scripts.mcp_sse_serve import (  # noqa: E402
     ConfigError,
+    _extend_sdk_transport_security,
     _force_fastmcp_auth_unwired,
     discover_routes,
     require_safe_mode,
@@ -97,10 +98,11 @@ def find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def build_streamable_http_app() -> Any:
+def build_streamable_http_app(extra_allowed_origins: frozenset[str] = frozenset()) -> Any:
     """Build a bare Streamable HTTP Starlette app — no auth, no Origin
-    validation. Mirrors mcp_sse_serve.py's build_inner_app() import/
-    reload pattern, swapping .sse_app() for .streamable_http_app().
+    validation middleware of this script's own. Mirrors
+    mcp_sse_serve.py's build_inner_app() import/reload pattern,
+    swapping .sse_app() for .streamable_http_app().
 
     Always (re)imports examples.mcp_server.server fresh after forcing
     MCP_AUTH_MODE=token, for the same reason build_inner_app() does:
@@ -108,6 +110,13 @@ def build_streamable_http_app() -> Any:
     would keep FastMCP's own OAuth auth wired despite this function's
     env override, since a plain `import` does not re-run module-level
     code for an already-imported module.
+
+    `extra_allowed_origins` (added for PR2 reuse — scripts/
+    mcp_streamable_http_serve.py) extends the mcp SDK's own
+    transport_security allowlist exactly as mcp_sse_serve.py's
+    build_inner_app() already does for SSE. Empty by default, so
+    PR1's own route-discovery use (no auth/Origin wiring at all) is
+    completely unaffected.
     """
     require_safe_mode()
     _force_fastmcp_auth_unwired()
@@ -117,6 +126,7 @@ def build_streamable_http_app() -> Any:
         module = importlib.reload(sys.modules[module_name])
     else:
         module = importlib.import_module(module_name)
+    _extend_sdk_transport_security(module.mcp, extra_allowed_origins)
     return module.mcp.streamable_http_app()
 
 
