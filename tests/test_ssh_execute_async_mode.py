@@ -126,7 +126,7 @@ class TestExecuteAsyncMode:
         assert data["status"] == "running"
         assert "message" in data
         _app_state.job_manager.create_job.assert_awaited_once_with(
-            session_id="s-1", command="sleep 60"
+            session_id="s-1", command="sleep 60", owner_id=token_fingerprint("secret-42")
         )
         _app_state.manager.execute.assert_not_called()
 
@@ -254,7 +254,7 @@ class TestExecuteAsyncMode:
 
             # Step 4: verify mocks
             _app_state.job_manager.create_job.assert_awaited_once_with(
-                session_id="s-1", command="docker compose build"
+                session_id="s-1", command="docker compose build", owner_id=token_fingerprint("secret-42")
             )
             _app_state.manager.execute.assert_not_called()
             _app_state.job_manager.get_job_status.assert_awaited_once_with("mock-job-id")
