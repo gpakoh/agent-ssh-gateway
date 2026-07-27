@@ -2,3 +2,4 @@ mcp
 httpx
 uvicorn
 starlette
+PyYAML>=6.0.1

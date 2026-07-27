@@ -58,7 +58,7 @@ class TestConfirmationRequiredEnvelope:
 
 
 class TestConfirmSuccessEnvelope:
-    """`docker_confirm` success (exit_code == 0) produces this envelope."""
+    """`confirm_operation` success (exit_code == 0) produces this envelope."""
 
     def test_flat_result_with_stdout(self):
         result = tool_success(
@@ -90,7 +90,7 @@ class TestConfirmSuccessEnvelope:
 
 
 class TestConfirmFailureEnvelope:
-    """`docker_confirm` failure (exit_code != 0) produces this envelope."""
+    """`confirm_operation` failure (exit_code != 0) produces this envelope."""
 
     def test_command_failure_with_output(self):
         result = tool_error(
@@ -167,11 +167,11 @@ class TestPendingActionsEnvelope:
 
 
 class TestConfirmTokenErrorEnvelope:
-    """`docker_confirm` token errors produce this envelope."""
+    """`confirm_operation` token errors produce this envelope."""
 
     def test_invalid_token(self):
         result = tool_error(
-            tool="docker_confirm",
+            tool="confirm_operation",
             code="CONFIRM_TOKEN_INVALID",
             message="Invalid confirmation token",
             hint="Call the dangerous tool again to get a new token.",
@@ -179,30 +179,30 @@ class TestConfirmTokenErrorEnvelope:
             source="docker",
         )
         assert_docker_envelope(
-            result, ok=False, tool="docker_confirm", has_error=True, has_result=True
+            result, ok=False, tool="confirm_operation", has_error=True, has_result=True
         )
 
     def test_expired_token(self):
         result = tool_error(
-            tool="docker_confirm",
+            tool="confirm_operation",
             code="CONFIRM_TOKEN_EXPIRED",
             message="Confirmation token expired (TTL 60s)",
             hint="Call the dangerous tool again to get a new token.",
             retryable=False,
             source="docker",
         )
-        assert_docker_envelope(result, ok=False, tool="docker_confirm", has_error=True)
+        assert_docker_envelope(result, ok=False, tool="confirm_operation", has_error=True)
 
     def test_consumed_token(self):
         result = tool_error(
-            tool="docker_confirm",
+            tool="confirm_operation",
             code="CONFIRM_TOKEN_CONSUMED",
             message="Confirmation token already used",
             hint="Call the dangerous tool again to get a new token.",
             retryable=False,
             source="docker",
         )
-        assert_docker_envelope(result, ok=False, tool="docker_confirm", has_error=True)
+        assert_docker_envelope(result, ok=False, tool="confirm_operation", has_error=True)
 
 
 class TestDockerRmEnvelope:

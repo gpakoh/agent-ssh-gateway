@@ -1,2 +1,3 @@
 mcp
 httpx
+PyYAML>=6.0.1

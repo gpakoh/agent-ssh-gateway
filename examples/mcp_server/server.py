@@ -464,13 +464,55 @@ def run_tool(
     return text_result(tool=tool, title=title, text=success_text, data=data)
 
 
+# Maps the gateway's own error `code` values (from its structured
+# {"detail": {"code": ..., "retryable": ...}} error body) onto this MCP
+# tool layer's own ERROR_CODES vocabulary. Unmapped gateway codes still
+# get their `retryable` flag honored (see _classify_gateway_error) —
+# this map only controls the reported `code`, never `retryable`.
+_GATEWAY_ERROR_CODE_MAP: dict[str, str] = {
+    "INVALID_API_KEY": "AUTH_ERROR",
+    "MASTER_KEY_REQUIRED": "AUTH_ERROR",
+    "SESSION_NOT_FOUND": "SESSION_NOT_FOUND",
+    "FORBIDDEN": "PERMISSION_DENIED",
+}
+
+
 def _classify_gateway_error(exc: GatewayClientError) -> tuple[str, bool]:
-    """Classify a GatewayClientError into (error_code, retryable)."""
+    """Classify a GatewayClientError into (error_code, retryable).
+
+    Prefers the gateway's own structured error body — the gateway
+    already computes `code`/`retryable` correctly server-side (e.g.
+    INVALID_API_KEY is always retryable=false) — over guessing from the
+    bare HTTP status code alone. Falls back to status-code heuristics
+    only when the body is missing or not the expected shape (e.g. a
+    non-JSON error page from an intermediate proxy).
+    """
     status = exc.status_code
     msg = str(exc).lower()
 
+    detail: dict[str, Any] | None = None
+    if isinstance(exc.body, dict):
+        maybe_detail = exc.body.get("detail")
+        if isinstance(maybe_detail, dict):
+            detail = maybe_detail
+
+    if detail is not None and isinstance(detail.get("retryable"), bool):
+        gateway_retryable: bool = detail["retryable"]
+        gateway_code = detail.get("code")
+        mapped_code = _GATEWAY_ERROR_CODE_MAP.get(gateway_code) if gateway_code else None
+        if mapped_code is not None:
+            return mapped_code, gateway_retryable
+        if status == 404 and ("file not found" in msg or "cannot read" in msg):
+            return "FILE_NOT_FOUND", gateway_retryable
+        return "INTERNAL_ERROR", gateway_retryable
+
     if status == 404 and ("file not found" in msg or "cannot read" in msg):
         return "FILE_NOT_FOUND", False
+
+    if status == 401:
+        return "AUTH_ERROR", False
+    if status == 403:
+        return "PERMISSION_DENIED", False
 
     if status is not None and status >= 500:
         return "INTERNAL_ERROR", True
@@ -1986,7 +2028,7 @@ def _confirmation_response(action: ConfirmAction) -> dict[str, Any]:
 
 @register_tool("docker_rm")
 async def docker_rm(container: str, force: bool = False) -> dict[str, Any]:
-    """Remove a container. DANGEROUS: requires confirmation via docker_confirm(token)."""
+    """Remove a container. DANGEROUS: requires confirmation via confirm_operation(token)."""
     DockerClient()._validate_container_name(container)
     summary = f"Remove container {container}"
     action = _confirm_store.create_action(

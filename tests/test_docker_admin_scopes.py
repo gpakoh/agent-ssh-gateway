@@ -58,7 +58,7 @@ def test_non_admin_tools_do_not_require_admin():
         "docker_rm",
         "docker_compose_down",
         "docker_prune",
-        "docker_confirm",
+        "confirm_operation",
         "docker_pending_actions",
     ]
     for tool in non_admin:
