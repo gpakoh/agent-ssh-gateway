@@ -14,6 +14,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 _mcp_started_at = _time.time()
 
 from agent_tasks import (
