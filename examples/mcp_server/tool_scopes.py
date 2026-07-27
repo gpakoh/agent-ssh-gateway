@@ -159,7 +159,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "docker_rm": ["mcp:docker"],
     "docker_compose_down": ["mcp:docker"],
     "docker_prune": ["mcp:docker"],
-    "docker_confirm": ["mcp:docker"],
+    "confirm_operation": ["mcp:docker"],
     "docker_pending_actions": ["mcp:docker"],
     # docker admin operations (Session 165) — mcp:docker:admin
     "docker_exec": ["mcp:docker:admin"],
