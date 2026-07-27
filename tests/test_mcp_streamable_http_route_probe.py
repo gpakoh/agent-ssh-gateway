@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import time
+import warnings
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -33,6 +34,7 @@ for _p in (str(MCP_SERVER_DIR), str(ROOT)):
 from scripts.mcp_streamable_http_route_probe import (  # noqa: E402
     DEFAULT_STARTUP_TIMEOUT_SECONDS,
     ConfigError,
+    _run_server_suppressing_deprecation_warnings,
     _ThreadResult,
     _wait_for_started,
     build_streamable_http_app,
@@ -295,3 +297,44 @@ class TestStartupRobustness:
         assert secret not in message
         assert "<REDACTED>" in message
         assert "did not start within 0.1s" in message
+
+    def test_deprecation_warning_during_server_run_does_not_propagate(self):
+        """Regression test for the second Gitea CI blocker: a real-world
+        DeprecationWarning ("websockets.legacy is deprecated...") raised
+        from inside server.run() on the shared runner's installed
+        uvicorn/websockets versions, promoted to a fatal exception by
+        this repo's own filterwarnings=["error"] pytest config — not
+        reproducible with the versions pinned in this dev environment,
+        so this test reproduces the *mechanism* directly rather than
+        depending on a specific third-party package version.
+        """
+
+        class _FakeServerThatWarns:
+            def run(self) -> None:
+                warnings.warn(
+                    "websockets.legacy is deprecated; see "
+                    "https://websockets.readthedocs.io/en/stable/howto/upgrade.html",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+
+        with warnings.catch_warnings():
+            # Mirror this repo's own pytest filterwarnings=["error"] so
+            # the test proves the fix works under the exact ambient
+            # condition that caused the CI failure, not just in a
+            # permissive default.
+            warnings.simplefilter("error")
+            _run_server_suppressing_deprecation_warnings(_FakeServerThatWarns())
+
+    def test_non_deprecation_exception_during_server_run_still_propagates(self):
+        """The suppression must be narrow: a genuine startup failure
+        (anything other than DeprecationWarning) must still propagate,
+        so _wait_for_started()'s dead-thread detection keeps working.
+        """
+
+        class _FakeServerThatFails:
+            def run(self) -> None:
+                raise OSError("address already in use")
+
+        with pytest.raises(OSError, match="address already in use"):
+            _run_server_suppressing_deprecation_warnings(_FakeServerThatFails())
