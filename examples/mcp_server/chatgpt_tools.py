@@ -436,6 +436,16 @@ def project_tree(
 # ── Project git diff tools ──────────────────────────────────────
 
 
+def _truncate_stdout(result: dict[str, Any], max_lines: int = 500) -> dict[str, Any]:
+    if "stdout" in result:
+        lines = result["stdout"].splitlines(keepends=True)
+        if len(lines) > max_lines:
+            result["stdout"] = "".join(lines[:max_lines])
+            result["stdout_truncated"] = True
+            result["total_lines"] = len(lines)
+    return result
+
+
 def project_git_diff(
     client: GatewayClient,
     project: str,
@@ -444,8 +454,7 @@ def project_git_diff(
     cmd = "git diff --no-color"
     if path:
         cmd += f" -- {_safe_relpath(path)}"
-    cmd += " | head -500"
-    return run_project_command(client, project, cmd)
+    return _truncate_stdout(run_project_command(client, project, cmd))
 
 
 def project_git_diff_cached(
@@ -456,8 +465,7 @@ def project_git_diff_cached(
     cmd = "git diff --cached --no-color"
     if path:
         cmd += f" -- {_safe_relpath(path)}"
-    cmd += " | head -500"
-    return run_project_command(client, project, cmd)
+    return _truncate_stdout(run_project_command(client, project, cmd))
 
 
 def project_show_file_diff(
@@ -466,8 +474,8 @@ def project_show_file_diff(
     path: str,
 ) -> dict[str, Any]:
     safe = _safe_relpath(path)
-    cmd = f"git diff --no-color -- {safe} | head -500"
-    return run_project_command(client, project, cmd)
+    cmd = f"git diff --no-color -- {safe}"
+    return _truncate_stdout(run_project_command(client, project, cmd))
 
 
 # ── Project test target tools ───────────────────────────────────
