@@ -49,6 +49,7 @@ import socket
 import sys
 import threading
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -175,6 +176,33 @@ def _wait_for_started(
     )
 
 
+def _run_server_suppressing_deprecation_warnings(server: Any) -> None:
+    """Run `server.run()` with DeprecationWarning promotion to a fatal
+    exception scoped out, for the duration of this call only.
+
+    Root cause (Phase 18B PR1 Gitea CI blocker): some installed
+    uvicorn[standard]/websockets version combinations emit a
+    DeprecationWarning (e.g. "websockets.legacy is deprecated") purely
+    from uvicorn's optional websocket protocol support initializing —
+    even for a plain-HTTP app that never opens a websocket connection.
+    Under a strict ambient warning filter (this repo's own pytest
+    config uses `filterwarnings=["error"]`), that warning is promoted
+    to a real exception at the exact point it's raised, which — before
+    this fix — was indistinguishable from a genuine startup crash to
+    the caller. Not reproducible with the locally pinned
+    uvicorn/websockets versions; observed only on the shared Gitea CI
+    runner, which is why this is a code-level fix rather than a
+    version pin.
+
+    `warnings.catch_warnings()` is not thread-safe against *other*
+    threads concurrently mutating the global filter list, but nothing
+    else in this script's own code does so during a probe run.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        server.run()
+
+
 def run_ephemeral_server(
     app: Any,
     host: str,
@@ -205,7 +233,7 @@ def run_ephemeral_server(
 
     def _run() -> None:
         try:
-            server.run()
+            _run_server_suppressing_deprecation_warnings(server)
         except BaseException as exc:  # noqa: BLE001 - must capture, thread swallows otherwise
             result.exception = exc
 

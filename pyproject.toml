@@ -88,6 +88,15 @@ filterwarnings = [
   "ignore::ResourceWarning:aiosqlite.core",
   # Event loop ResourceWarning from asyncio GC — test teardown artifact.
   "ignore::ResourceWarning:asyncio",
+  # uvicorn[standard]'s websockets protocol support imports
+  # websockets.legacy internally on some installed websockets versions
+  # (observed on the shared Gitea CI runner, not reproducible with the
+  # locally pinned version) — third-party transitional-API notice, not
+  # our code. Without this, filterwarnings=["error"] above promotes it
+  # to a real exception inside any background thread running
+  # uvicorn.Server.run() for a plain-HTTP app that never opens a
+  # websocket connection at all (Phase 18B PR1 CI blocker).
+  "ignore::DeprecationWarning:websockets.legacy",
 ]
 
 [tool.ruff]
