@@ -1,5 +1,13 @@
 # ChatGPT Tool Attach — Safe First Connection
 
+`stdio` (below) remains the **default** attach path for local MCP
+clients (Claude Code, Codex, etc.). SSE is available as a private,
+loopback-only rehearsal transport, and Streamable HTTP is available as
+a second, additive private rehearsal transport (documented further
+down). The public ChatGPT/OpenAI connector is still not live — neither
+private transport is a public connector; that remains a separate,
+not-yet-started, explicitly approved design.
+
 ## Quick start
 
 ```bash
@@ -201,10 +209,108 @@ the correct token opens the stream and completes MCP
 initialize/list_tools/tools_manifest, 84 safe tools are present, 30
 blocked tools are absent, and the bearer token is never printed.
 
-A sibling private entrypoint, `scripts/mcp_streamable_http_serve.py`,
-serves the same tool set over the MCP spec's current Streamable HTTP
-transport (route `/mcp`, default `127.0.0.1:8087`) instead of the
-deprecated SSE one — SSE remains fully supported, this is additive.
-Smoke: `python3 scripts/mcp_streamable_http_safe_smoke.py`. Still no
-public/OpenAI connector — both entrypoints are private, loopback-only
-rehearsal tools.
+## Private Streamable HTTP entrypoint (local/private rehearsal)
+
+`scripts/mcp_streamable_http_serve.py` serves the same chatgpt-safe-mode
+tool set over the MCP spec's **current** transport, Streamable HTTP
+(protocol version 2025-06-18), bound to `127.0.0.1` by default — a
+sibling of the private SSE entrypoint above, not a replacement for it.
+SSE is deprecated at the MCP spec level (superseded by Streamable HTTP)
+but remains fully supported in this repo — both entrypoints can run at
+once. This is **not** a public ChatGPT/OpenAI connector: no TLS,
+reverse proxy, or OAuth is wired for this path, and it is not deployed
+as a persistent service.
+
+### Routes
+
+- `POST /mcp` — send JSON-RPC requests/notifications (MCP protocol)
+- `GET /mcp` — optional server-initiated SSE stream
+- `DELETE /mcp` — explicit session termination
+
+A single endpoint handles all three methods, per the Streamable HTTP
+spec — confirmed empirically (Phase 18B PR1), not assumed from the
+spec's prose. All three require a bearer token (see Auth below).
+
+### Env template
+
+```bash
+cp examples/mcp_server/chatgpt.streamable-http.env.example examples/mcp_server/chatgpt.streamable-http.env
+# Edit chatgpt.streamable-http.env with your values
+#    NEVER commit this file
+```
+
+### Start
+
+```bash
+set -a && source examples/mcp_server/chatgpt.streamable-http.env && set +a
+python3 scripts/mcp_streamable_http_serve.py
+```
+
+### Auth
+
+Every request to `/mcp` requires
+`Authorization: Bearer <MCP_STREAMABLE_HTTP_BEARER_TOKEN>`. This is
+enforced by the same `BearerAuthMiddleware` reused from
+`mcp_sse_serve.py`, independent of `MCP_AUTH_MODE` — missing or wrong
+token returns `401`.
+
+```bash
+curl -X POST -H "Authorization: Bearer <your-MCP_STREAMABLE_HTTP_BEARER_TOKEN>" http://127.0.0.1:8087/mcp
+```
+
+Generate a private token — do not reuse an existing gateway/agent token,
+and do not reuse the SSE entrypoint's `MCP_HTTP_BEARER_TOKEN` either:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+### Origin validation
+
+Every request to `/mcp` is also checked against the `Origin` header,
+per the MCP spec's DNS-rebinding-protection requirement — the same
+`OriginValidationMiddleware` reused from `mcp_sse_serve.py`:
+
+- No `Origin` header at all (CLI/curl/local MCP clients) — allowed.
+- Loopback origins (`http(s)://127.0.0.1:*`, `http(s)://localhost:*`,
+  `http(s)://[::1]:*`) — allowed by default.
+- Any other origin — rejected with `403`, unless explicitly added to
+  `MCP_STREAMABLE_HTTP_ALLOWED_ORIGINS` (comma-separated).
+
+`MCP_STREAMABLE_HTTP_ALLOWED_ORIGINS` is for additional **local**
+origins only. **Never add a public origin to this variable** — doing
+so does not turn this entrypoint into a public connector; it only
+widens a private allowlist, and a public/OpenAI connector remains a
+separate, explicitly approved design outside the scope of this
+rehearsal entrypoint.
+
+### Bind
+
+Default bind is `127.0.0.1:8087` (env `MCP_STREAMABLE_HTTP_HOST` /
+`MCP_STREAMABLE_HTTP_PORT`) — a different default port from the SSE
+entrypoint's `8086`, so both can run at once. The server refuses to
+bind to any non-loopback address unless
+`MCP_STREAMABLE_HTTP_ALLOW_NON_LOOPBACK=true` is set explicitly.
+
+**⚠️ Danger — do not set this outside a reviewed private-network
+deployment:** `MCP_STREAMABLE_HTTP_ALLOW_NON_LOOPBACK=true` relaxes the
+loopback-only guard and lets the server bind to `0.0.0.0` or any other
+host. There is no TLS, no reverse proxy, and no OAuth on this path —
+enabling this on a host with any network exposure would expose the SSH
+gateway's chatgpt-safe tool set without transport-level encryption or
+a proven auth boundary beyond the single bearer token. Leave unset for
+local/private rehearsal.
+
+### Smoke test
+
+```bash
+python3 scripts/mcp_streamable_http_safe_smoke.py
+```
+
+Starts the entrypoint as a subprocess on `127.0.0.1` + a free local
+port, and verifies: `/mcp` rejects missing/wrong tokens (401) and a
+non-loopback Origin (403), the correct token (no Origin) completes MCP
+initialize/list_tools/tools_manifest, 84 safe tools are present, 30
+blocked tools are absent, whether a `Mcp-Session-Id` was assigned is
+reported as present/absent only (never the value), and the bearer
+token is never printed.
