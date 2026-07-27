@@ -17,6 +17,7 @@ sys.path.insert(0, str(EXAMPLES_DIR.parent))
 @pytest.fixture(autouse=True)
 def _set_auth_mode():
     with patch.dict(os.environ, {"MCP_AUTH_MODE": "oauth"}, clear=False):
+        os.environ.pop("MCP_GATEWAY_TOOL_MODE", None)
         yield
 
 

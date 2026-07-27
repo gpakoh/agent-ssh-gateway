@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from examples.mcp_server.tool_modes import (
@@ -15,6 +17,13 @@ from examples.mcp_server.tool_modes import (
     should_register_tool,
     tools_for_mode,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clean_tool_mode_env():
+    """Remove MCP_GATEWAY_TOOL_MODE before each test so the default is used."""
+    os.environ.pop("MCP_GATEWAY_TOOL_MODE", None)
+    yield
 
 
 class TestToolModeDefaults:

@@ -24,6 +24,16 @@ def test_rate_limit_mutation_import():
 
 
 @pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    """Clear shared rate-limit storage before each test to avoid cross-test leaks."""
+    from app.security import limiter
+
+    limiter._storage.reset()
+    yield
+    limiter._storage.reset()
+
+
+@pytest.fixture(autouse=True)
 def _setup_globals():
     """Mock module-level globals that are normally initialized in lifespan()."""
     state_module.manager = AsyncMock()
