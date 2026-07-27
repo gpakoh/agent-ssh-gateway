@@ -80,22 +80,8 @@ def no_expiry_entry():
 # ── Bug reproduction tests (xfail until PR2 fix) ───────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: register_hashed_token() sets expires_at=inf, ignoring persisted value; "
-    "fixed in Phase 20B PR2",
-)
 def test_expired_token_rejected_after_reload(store_path, expired_entry):
-    """Persisted token with past expires_at must be rejected after reload.
-
-    This test REPRODUCES THE BUG: load_tokens() currently sets
-    expires_at=float("inf") for every loaded token, ignoring the
-    persisted value. An expired token will therefore be accepted
-    after restart when it should be rejected.
-
-    Expected: xfail(strict=True) until register_hashed_token()
-    accepts and applies the persisted expires_at.
-    """
+    """Persisted token with past expires_at must be rejected after reload."""
     entry, raw_token = expired_entry
     store = TokenStore(store_path)
     store.add(entry)
@@ -112,26 +98,10 @@ def test_expired_token_rejected_after_reload(store_path, expired_entry):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: persisted expires_at ignored on reload; "
-    "fixed in Phase 20B PR2",
-)
 def test_not_expired_token_rejected_after_its_persisted_expiry(
     store_path, expired_entry, valid_entry
 ):
-    """Token with future expires_at must be rejected once that time passes.
-
-    Simulates: persist a valid token, restart, advance time past its
-    expiry (by persisting a different expired entry to the store and
-    reloading), and verify the previously-valid token is now rejected.
-
-    With the current bug, load_tokens() ignores expires_at entirely,
-    so the expired entry would be loaded as infinity-valid — the
-    assertion that it is rejected will fail.
-
-    Expected: xfail(strict=True) until fix.
-    """
+    """Token with future expires_at must be rejected once that time passes."""
     expired, _ = expired_entry
     store = TokenStore(store_path)
     store.add(expired)
