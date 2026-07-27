@@ -55,18 +55,23 @@ REDACTED = "<redacted>"
 
 _SECRET_ENV_KEY_RE = re.compile(
     r"(?i)^\s*("
-    r"\w*(?:PASSWORD|SECRET|TOKEN)"
-    r"|API[_-]?KEY|JWT|BEARER|AUTH|COOKIE|SESSION"
-    r"|PRIVATE[_-]?KEY|CREDENTIAL|ACCESS[_-]?KEY"
+    r"\w*(?:PASSWORD|PASS|SECRET|TOKEN|KEY|CREDENTIAL)"
+    r"|JWT|BEARER|AUTH|COOKIE|SESSION"
     r"|REFRESH[_-]?TOKEN|CLIENT[_-]?SECRET|WEBHOOK[_-]?SECRET"
+    r"|DSN|CONNECTION[_-]?STRING|\w*(?:_URL|_URI|_DSN)"
     r")\s*="
 )
 
 _SECRET_DICT_KEY_RE = re.compile(
-    r"(?i)(TOKEN|SECRET|PASSWORD|PASS|API[_-]?KEY|JWT|BEARER|AUTH|COOKIE|SESSION|"
-    r"PRIVATE[_-]?KEY|CREDENTIAL|ACCESS[_-]?KEY|REFRESH[_-]?TOKEN|CLIENT[_-]?SECRET|"
-    r"WEBHOOK[_-]?SECRET|AUTHORIZATION)"
+    r"(?i)(TOKEN|SECRET|PASSWORD|PASS|KEY|JWT|BEARER|AUTH|COOKIE|SESSION|"
+    r"CREDENTIAL|REFRESH[_-]?TOKEN|CLIENT[_-]?SECRET|"
+    r"WEBHOOK[_-]?SECRET|AUTHORIZATION|DSN|CONNECTION[_-]?STRING|_URL$|_URI$)"
 )
+
+# Matches a DSN-style embedded credential (scheme://user:PASSWORD@host) so the
+# password is redacted even when it appears inside a value whose own key name
+# doesn't look secret-ish (e.g. DATABASE_URL, REDIS_URL).
+_DSN_CREDENTIAL_RE = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^:/\s@]+:)([^@\s]+)(@)")
 
 
 class DockerClient:
@@ -306,13 +311,18 @@ class DockerClient:
 
     def _sanitize_string(self, s: str) -> str:
         """Redact secret-like values in a string.
-        Handles 'KEY=value' env format.
+
+        Handles 'KEY=value' env format (whole value redacted when the key
+        name looks secret-ish), and separately redacts any DSN-style
+        embedded credential (scheme://user:PASSWORD@host) regardless of
+        whether the surrounding key name matched — e.g. a DATABASE_URL or
+        REDIS_URL value that embeds a real password.
         """
         m = _SECRET_ENV_KEY_RE.match(s)
         if m:
             key_part = s[: m.end() - 1]
             return f"{key_part}={REDACTED}"
-        return s
+        return _DSN_CREDENTIAL_RE.sub(rf"\1{REDACTED}\3", s)
 
     @staticmethod
     def _is_sensitive_key(key: str) -> bool:
