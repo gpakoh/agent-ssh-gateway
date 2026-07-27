@@ -126,12 +126,17 @@ def test_chatgpt_mode_includes_preview_tools():
         assert tm.should_register_tool(name, "chatgpt"), f"{name!r} missing from chatgpt"
 
 
-def test_chatgpt_mode_excludes_write_tools():
-    """chatgpt mode must NOT include write tools (read-only safe mode)."""
+def test_chatgpt_mode_includes_write_tools():
+    """chatgpt mode includes write tools when MCP_CHATGPT_SAFE_MODE is off.
+
+    They remain in CHATGPT_BLOCKED_TOOLS, so enabling safe mode still
+    filters them out — see test_safe_mode_on_blocks_workspace_write in
+    test_mcp_tool_modes.py.
+    """
     import examples.mcp_server.tool_modes as tm
     importlib.reload(tm)
     for name in ALL_WRITE_TOOLS:
-        assert not tm.should_register_tool(name, "chatgpt"), f"{name!r} in chatgpt but shouldn't be"
+        assert tm.should_register_tool(name, "chatgpt"), f"{name!r} missing from chatgpt"
 
 
 def test_standard_mode_includes_all_workspace():
@@ -211,10 +216,8 @@ def test_source_parse_finds_all_modes():
     for mode in ("standard", "full"):
         for name in ALL_WORKSPACE_TOOLS:
             assert name in parsed[mode], f"{name!r} missing from {mode} in source"
-    for name in ALL_PREVIEW_TOOLS:
+    for name in ALL_WORKSPACE_TOOLS:
         assert name in parsed["chatgpt"], f"{name!r} missing from chatgpt in source"
-    for name in ALL_WRITE_TOOLS:
-        assert name not in parsed["chatgpt"], f"{name!r} in chatgpt source but shouldn't be"
     for name in ALL_WORKSPACE_TOOLS:
         assert name not in parsed["minimal"], f"{name!r} in minimal source but shouldn't be"
 
