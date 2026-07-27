@@ -99,6 +99,8 @@ services:
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@mcp-postgres:5432/gateway
       - WORKSPACE_READONLY=${WORKSPACE_READONLY:-true}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:?set ENCRYPTION_KEY}
+      - GATEWAY_SSH_HOST=sshd
+      - GATEWAY_SSH_PORT=2222
     volumes:
       - ../projects.yaml:/app/projects.yaml:ro
       - ${WORKSPACE_HOST_PATH:-..}:${WORKSPACE_CONTAINER_PATH:-/workspace}:ro
