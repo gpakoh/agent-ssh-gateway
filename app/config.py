@@ -132,6 +132,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         populate_by_name=True,
+        extra="ignore",
     )
 
     def model_post_init(self, __context) -> None:
