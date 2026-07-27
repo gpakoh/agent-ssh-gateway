@@ -19,15 +19,25 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-import httpx
-import uvicorn
-from starlette.applications import Starlette
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
-
 EXAMPLES_DIR = Path(__file__).resolve().parents[1]
 MCP_SERVER_DIR = EXAMPLES_DIR / "mcp_server"
+
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv(MCP_SERVER_DIR / ".env", override=False)
+
+import httpx  # noqa: E402
+import uvicorn  # noqa: E402
+from starlette.applications import Starlette  # noqa: E402
+from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
+from starlette.requests import Request  # noqa: E402
+from starlette.responses import (  # noqa: E402
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 
 sys.path.insert(0, str(MCP_SERVER_DIR))
 sys.path.insert(0, str(EXAMPLES_DIR.parent))

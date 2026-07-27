@@ -419,6 +419,7 @@ async def ssh_execute(
         job_id = await _state.job_manager.create_job(
             session_id=req.session_id,
             command=sanitized,
+            owner_id=_identity.fingerprint,
         )
         return JobRunResponse(
             job_id=job_id,

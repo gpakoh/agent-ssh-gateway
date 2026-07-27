@@ -121,6 +121,7 @@ async def jobs_run(
     job_id = await _state.job_manager.create_job(
         session_id=req.session_id,
         command=req.command,
+        owner_id=_identity.fingerprint,
     )
     metrics.record_ssh_command(
         status="allowed",
