@@ -316,20 +316,24 @@ class GatewayClient:
         stdin: str = "",
         timeout_s: int = 30,
         session_id: str | None = None,
+        cwd: str | None = None,
     ) -> dict[str, Any]:
         """Execute explicit argv via /api/ssh/execute-argv.
 
         Uses shlex.join on the Gateway side — no bash -c wrapping.
         """
         sid = session_id or self._require_session_id()
+        payload: dict[str, Any] = {
+            "session_id": sid,
+            "argv": argv,
+            "stdin": stdin,
+            "timeout_s": timeout_s,
+        }
+        if cwd:
+            payload["cwd"] = cwd
         return self._post(
             "/api/ssh/execute-argv",
-            {
-                "session_id": sid,
-                "argv": argv,
-                "stdin": stdin,
-                "timeout_s": timeout_s,
-            },
+            payload,
         )
 
     @_retry_on_session_not_found

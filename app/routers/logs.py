@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_master_key
-from app.security import sanitize_command
+from app.security import redact_secrets, sanitize_command
 from app.state import _err
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,11 @@ async def journal_logs(
         raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
 
     result = await _state.manager.execute(session_id=session_id, command=command, timeout=30)
+    if isinstance(result, dict):
+        if "stdout" in result:
+            result["stdout"] = redact_secrets(result["stdout"])
+        if "stderr" in result:
+            result["stderr"] = redact_secrets(result["stderr"])
     return result
 
 
@@ -77,4 +82,9 @@ async def docker_logs(
         raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
 
     result = await _state.manager.execute(session_id=session_id, command=command, timeout=30)
+    if isinstance(result, dict):
+        if "stdout" in result:
+            result["stdout"] = redact_secrets(result["stdout"])
+        if "stderr" in result:
+            result["stderr"] = redact_secrets(result["stderr"])
     return result

@@ -30,7 +30,7 @@ def _read_task_json(
     project: str,
     task_id: str,
 ) -> dict[str, Any]:
-    cmd = f"cat {TASKS_REL_DIR}/{task_id}/task.json 2>/dev/null || echo '{{}}'"
+    cmd = f"cat {TASKS_REL_DIR}/{task_id}/task.json"
     result = run_cmd(project, cmd)
     raw = result.get("stdout", "")
     if not raw.strip():
@@ -46,7 +46,7 @@ def _read_current_plan(
     import shlex
 
     td = f"{TASKS_REL_DIR}/{task_id}"
-    cmd = f"cat {shlex.quote(td)}/current-plan.md 2>/dev/null || true"
+    cmd = f"cat {shlex.quote(td)}/current-plan.md"
     result = run_cmd(project, cmd)
     return result.get("stdout", "").strip() or None
 
