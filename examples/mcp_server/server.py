@@ -2038,6 +2038,23 @@ async def docker_rm(container: str, force: bool = False) -> dict[str, Any]:
 
 
 def _get_token_scopes() -> list[str]:
+    """Return the current request's granted scopes.
+
+    Reads the authenticated access token from FastMCP's per-request
+    contextvar (set by AuthContextMiddleware whenever auth is enabled).
+    Falls back to MCP_TOKEN_SCOPES for contexts with no request (unit
+    tests, manual scripts) since that env var is never set by the
+    running service itself.
+    """
+    try:
+        from mcp.server.auth.middleware.auth_context import get_access_token
+
+        access_token = get_access_token()
+        if access_token is not None:
+            return list(access_token.scopes)
+    except Exception:
+        pass
+
     raw = os.environ.get("MCP_TOKEN_SCOPES", "")
     return [s.strip() for s in raw.split(",") if s.strip()]
 
