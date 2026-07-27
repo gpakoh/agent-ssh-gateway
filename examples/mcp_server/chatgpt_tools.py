@@ -555,7 +555,22 @@ def project_remotes(
     client: GatewayClient,
     project: str,
 ) -> dict[str, Any]:
-    return run_project_command(client, project, "git remote -v")
+    result = run_project_command(client, project, "git remote -v")
+    if "stdout" in result:
+        import re
+        output = result["stdout"]
+        output = re.sub(
+            r"(https?://)[^@/]+:[^@/]+@",
+            r"\1***:***@",
+            output,
+        )
+        output = re.sub(
+            r"(https?://)[A-Za-z0-9_]+@",
+            r"\1***@",
+            output,
+        )
+        result["stdout"] = output
+    return result
 
 
 def project_current_branch(
