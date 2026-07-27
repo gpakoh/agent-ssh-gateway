@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning where practical, but the public API is not considered stable before v1.0.0.
 
+## [0.1.60a0] - 2026-07-27
+
+### Added
+
+- **Private Streamable HTTP MCP transport entrypoint** (Phase 18B): `scripts/mcp_streamable_http_serve.py` serves the same chatgpt-safe-mode tool set as the private SSE entrypoint, but over the MCP spec's current transport, Streamable HTTP (protocol version 2025-06-18), bound to `127.0.0.1:8087` by default — additive alongside SSE, not a replacement. The route (`/mcp`, handling GET/POST/DELETE) was empirically discovered by a dedicated route-discovery probe, `scripts/mcp_streamable_http_route_probe.py`, rather than assumed from the spec's prose. Bearer-token auth (`MCP_STREAMABLE_HTTP_BEARER_TOKEN`) and Origin validation (`MCP_STREAMABLE_HTTP_ALLOWED_ORIGINS`) are enforced by the exact same `BearerAuthMiddleware`/`OriginValidationMiddleware` classes already used by the private SSE entrypoint, reused unchanged rather than reimplemented.
+- **Streamable HTTP runtime smoke**: `scripts/mcp_streamable_http_safe_smoke.py` — starts the entrypoint as a real subprocess and validates both the auth boundary and the MCP protocol: `/mcp` rejects missing/wrong bearer tokens (`401`) and a non-loopback Origin (`403`), the correct token (no Origin) completes MCP `initialize`/`list_tools`/`tools_manifest`, 84 safe tools present, 30 blocked tools absent, and whether a `Mcp-Session-Id` was assigned is reported as present/absent only — never the value itself. Verified end-to-end (11/11 checks).
+- **Docs/env sync for the private Streamable HTTP entrypoint** (Phase 18C): `docs/operations/CHATGPT_TOOL_ATTACH.md` gets a full "Private Streamable HTTP entrypoint" section mirroring the existing SSE one; `docs/operations/OPENAI_CONNECTOR_READINESS.md`'s Option B is split into B1 (SSE) / B2 (Streamable HTTP); `docs/operations/MCP_PRIVATE_SSE_RUNBOOK.md` gets a short cross-reference; new placeholder-only template `examples/mcp_server/chatgpt.streamable-http.env.example`.
+
+### Notes
+
+- `stdio` remains the **default** MCP transport, unaffected by this release. The private SSE entrypoint (`scripts/mcp_sse_serve.py`) **remains available** — SSE is deprecated at the MCP spec level but not removed from this repo; both private entrypoints can run at once (distinct default ports, `8086` for SSE, `8087` for Streamable HTTP).
+- Public ChatGPT/OpenAI connector is still **NOT live** — both private entrypoints are loopback-only, operator-run rehearsal tools with no TLS, reverse proxy, or OAuth wired; a public connector remains a separate, explicitly approved design.
+- No Docker Compose or systemd wiring was added for either private entrypoint — both remain manual, operator-run tools, not autostarted services.
+- No tag or deploy in this release.
+
 ## [0.1.59a0] - 2026-07-26
 
 ### Added
