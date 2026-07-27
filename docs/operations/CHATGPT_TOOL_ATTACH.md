@@ -200,3 +200,11 @@ and verifies: `/sse` and `/messages/` reject missing/wrong tokens (401),
 the correct token opens the stream and completes MCP
 initialize/list_tools/tools_manifest, 84 safe tools are present, 30
 blocked tools are absent, and the bearer token is never printed.
+
+A sibling private entrypoint, `scripts/mcp_streamable_http_serve.py`,
+serves the same tool set over the MCP spec's current Streamable HTTP
+transport (route `/mcp`, default `127.0.0.1:8087`) instead of the
+deprecated SSE one — SSE remains fully supported, this is additive.
+Smoke: `python3 scripts/mcp_streamable_http_safe_smoke.py`. Still no
+public/OpenAI connector — both entrypoints are private, loopback-only
+rehearsal tools.
