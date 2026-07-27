@@ -111,6 +111,25 @@ def _parse_scopes(scope_str: str | None) -> list[str]:
     return scopes
 
 
+def _parse_persisted_expiry(expires_at: str | None) -> float | None:
+    """Convert a persisted ISO-8601 expires_at string to epoch seconds.
+
+    Returns ``None`` when *expires_at* is ``None`` (no expiry), a
+    ``float`` epoch timestamp when the string is valid, or ``0.0``
+    (already expired) when the string cannot be parsed — failing
+    closed rather than silently granting infinite validity.
+    """
+    if expires_at is None:
+        return None
+    try:
+        from datetime import datetime
+
+        dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        return dt.timestamp()
+    except (ValueError, OSError):
+        return 0.0
+
+
 class GatewayOAuthProvider:
     """In-memory OAuth 2.1 + PKCE provider for the MCP Gateway.
 
@@ -144,10 +163,12 @@ class GatewayOAuthProvider:
         for entry in entries:
             if entry.revoked_at is not None:
                 continue
+            expires = _parse_persisted_expiry(entry.expires_at)
             self.register_hashed_token(
                 token_hash=entry.token_hash,
                 profile=entry.profile,
                 scopes=list(entry.scopes),
+                expires_at=expires,
             )
             count += 1
         return count
@@ -184,10 +205,13 @@ class GatewayOAuthProvider:
         profile: str = "operator",
         name: str = "hashed",
         client_id: str = "mcp_static",
+        expires_at: float | None = None,
     ) -> None:
         """Register a pre-hashed token (from persistent store).
 
         Validates the 'sha256:' prefix and stores directly.
+        When *expires_at* is ``None`` (default), the token is treated
+        as having no expiry (``float("inf")``).
         """
         if not token_hash.startswith("sha256:"):
             raise ValueError(f"token_hash must start with 'sha256:', got {token_hash[:20]}...")
@@ -195,7 +219,7 @@ class GatewayOAuthProvider:
             token=token_hash,
             client_id=client_id,
             scopes=list(scopes),
-            expires_at=float("inf"),
+            expires_at=expires_at if expires_at is not None else float("inf"),
             type="access",
         )
 

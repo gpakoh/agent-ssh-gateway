@@ -1,7 +1,7 @@
 # OAuth Persisted Token Expiry — Bugfix Plan
 
-**Status:** Plan only — no runtime code in this document or the phase
-that produced it. Implements the fix for the gap identified in
+**Status:** PR1 (tests) landed `7b687c8`. PR2 (fix) landed — bug is
+fixed. PR3 (docs/changelog/release) pending.
 `docs/superpowers/specs/2026-07-27-public-mcp-oauth-decision.md` §3
 ("Persisted token expiry is not enforced on load"). Each PR below is a
 separate, independently gated slice — none is authorized to run by
