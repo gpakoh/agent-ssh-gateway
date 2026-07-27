@@ -210,6 +210,7 @@ def project_run_agent(
     task_id: str,
     model: str | None = None,
     router: Any | None = None,
+    run_script: Callable[[str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Execute a handoff task via the agent backend router.
 
@@ -223,6 +224,7 @@ def project_run_agent(
         task_id: validated ``.ai-bridge`` task ID
         model: optional model override
         router: optional ``AgentBackendRouter`` instance
+        run_script: callable(project, script) for multi-line bash scripts
 
     Returns:
         dict with keys: task_id, status, exit_code, stdout, stderr,
@@ -361,7 +363,7 @@ def project_run_agent(
             "finished_at": _now_iso(),
         }
 
-    result = run_cmd(project, cmd)
+    result = (run_script or run_cmd)(project, cmd)
     exit_code = result.get("exit_code")
 
     if router is not None and selected:

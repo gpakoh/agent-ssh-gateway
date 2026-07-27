@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import threading
 import uuid
 from collections import deque
@@ -29,65 +28,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Secret redaction (defensive, standalone — mirrors security.redact_secrets)
+# Secret redaction — delegates to security module (single source of truth)
 # ---------------------------------------------------------------------------
 
-SECRET_REDACTION_PLACEHOLDER = "[REDACTED]"
-
-_SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (
-        re.compile(r"(?i)(password|passwd|pwd)\s*[:=]\s*\S+"),
-        r"\1=" + SECRET_REDACTION_PLACEHOLDER,
-    ),
-    (
-        re.compile(r"(?i)(token|secret|api[_-]?key)\s*[:=]\s*\S+"),
-        r"\1=" + SECRET_REDACTION_PLACEHOLDER,
-    ),
-    (
-        re.compile(r"(?i)(authorization:\s*Bearer\s+)\S+"),
-        r"\1" + SECRET_REDACTION_PLACEHOLDER,
-    ),
-    (
-        re.compile(r"(?i)(sshpass\s+-p\s+)\S+"),
-        r"\1" + SECRET_REDACTION_PLACEHOLDER,
-    ),
-]
-
-
-def redact_secrets(value: Any) -> Any:
-    """Redact obvious secrets from strings, dicts, and lists.
-
-    This is a safety net for audit records. It is not a full DLP system.
-    """
-    if value is None:
-        return None
-
-    if isinstance(value, str):
-        redacted = value
-        for pattern, replacement in _SECRET_PATTERNS:
-            redacted = pattern.sub(replacement, redacted)
-        return redacted
-
-    if isinstance(value, dict):
-        result: dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            if re.search(
-                r"(?i)(api[_-]?key|token|secret|password|passwd|pwd|authorization|private[_-]?key)",
-                key_text,
-            ):
-                result[key] = SECRET_REDACTION_PLACEHOLDER
-            else:
-                result[key] = redact_secrets(item)
-        return result
-
-    if isinstance(value, list):
-        return [redact_secrets(item) for item in value]
-
-    if isinstance(value, tuple):
-        return tuple(redact_secrets(item) for item in value)
-
-    return value
+from app.security import redact_secrets  # noqa: E402, I001, F401 — re-export for backward compat
 
 
 # ---------------------------------------------------------------------------
