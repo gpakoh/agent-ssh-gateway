@@ -83,6 +83,20 @@ class TestBuildStreamableHttpApp:
         assert app is not None
         assert hasattr(app, "routes")
 
+    def test_extra_allowed_origins_param_defaults_to_empty_noop(self):
+        """Regression guard for PR2 reuse: build_streamable_http_app()
+        gained an extra_allowed_origins parameter so
+        scripts/mcp_streamable_http_serve.py can reuse it directly
+        instead of duplicating the import/reload dance — this must not
+        change PR1's own zero-arg call behavior.
+        """
+        with patch.dict(os.environ, SAFE_MODE_ENV):
+            _reload_gateway_server()
+            app_default = build_streamable_http_app()
+            app_explicit_empty = build_streamable_http_app(frozenset())
+
+        assert discover_routes(app_default) == discover_routes(app_explicit_empty)
+
     def test_fastmcp_own_auth_stays_unwired(self):
         """Same precondition PR2 will depend on for SSE-parity bearer
         auth to work: FastMCP's own RequireAuthMiddleware must not be

@@ -77,35 +77,50 @@ def _ensure_import_paths() -> None:
             sys.path.insert(0, p)
 
 
-def resolve_host() -> str:
-    return os.environ.get("MCP_HTTP_HOST", DEFAULT_HOST).strip() or DEFAULT_HOST
+def resolve_host(env_var: str = "MCP_HTTP_HOST") -> str:
+    return os.environ.get(env_var, DEFAULT_HOST).strip() or DEFAULT_HOST
 
 
-def resolve_port() -> int:
-    raw = os.environ.get("MCP_HTTP_PORT", "").strip()
+def resolve_port(env_var: str = "MCP_HTTP_PORT", default: int = DEFAULT_PORT) -> int:
+    """`env_var`/`default` let a sibling entrypoint (e.g. Streamable
+    HTTP) reuse this function with its own env var name and default
+    port, without touching SSE's own default call (env_var/default
+    keep SSE's exact existing behavior when omitted).
+    """
+    raw = os.environ.get(env_var, "").strip()
     if not raw:
-        return DEFAULT_PORT
+        return default
     try:
         return int(raw)
     except ValueError as exc:
-        raise ConfigError(f"MCP_HTTP_PORT must be an integer, got {raw!r}") from exc
+        raise ConfigError(f"{env_var} must be an integer, got {raw!r}") from exc
 
 
-def validate_bind_host(host: str, allow_non_loopback: bool) -> None:
-    """Fail fast unless host is loopback or the override is explicitly set."""
+def validate_bind_host(
+    host: str,
+    allow_non_loopback: bool,
+    *,
+    override_env_var: str = "MCP_HTTP_ALLOW_NON_LOOPBACK",
+    transport_label: str = "MCP SSE",
+) -> None:
+    """Fail fast unless host is loopback or the override is explicitly
+    set. `override_env_var`/`transport_label` let a sibling entrypoint
+    reuse this with its own env var name in the error message, without
+    changing SSE's own default call.
+    """
     if host in LOOPBACK_HOSTS:
         return
     if allow_non_loopback:
         return
     raise ConfigError(
-        f"Refusing to bind MCP SSE server to non-loopback host {host!r}. "
-        "Set MCP_HTTP_ALLOW_NON_LOOPBACK=true to override explicitly "
+        f"Refusing to bind {transport_label} server to non-loopback host {host!r}. "
+        f"Set {override_env_var}=true to override explicitly "
         "(not recommended outside a reviewed private-network deployment)."
     )
 
 
-def is_non_loopback_allowed() -> bool:
-    return os.environ.get("MCP_HTTP_ALLOW_NON_LOOPBACK", "").strip().lower() == "true"
+def is_non_loopback_allowed(env_var: str = "MCP_HTTP_ALLOW_NON_LOOPBACK") -> bool:
+    return os.environ.get(env_var, "").strip().lower() == "true"
 
 
 def require_safe_mode() -> None:
@@ -129,21 +144,21 @@ def require_safe_mode() -> None:
         )
 
 
-def require_bearer_token() -> str:
-    token = os.environ.get("MCP_HTTP_BEARER_TOKEN", "")
+def require_bearer_token(env_var: str = "MCP_HTTP_BEARER_TOKEN") -> str:
+    token = os.environ.get(env_var, "")
     if not token:
-        raise ConfigError("MCP_HTTP_BEARER_TOKEN is required to start the SSE entrypoint.")
+        raise ConfigError(f"{env_var} is required to start this entrypoint.")
     return token
 
 
-def parse_allowed_origins() -> frozenset[str]:
-    """Extra exact-match Origin allowlist from MCP_HTTP_ALLOWED_ORIGINS
-    (comma-separated). Empty by default — loopback origins are already
-    allowed unconditionally by is_origin_allowed() below, so this is only
-    for adding specific non-default-loopback origins, not a general
-    public-exposure mechanism.
+def parse_allowed_origins(env_var: str = "MCP_HTTP_ALLOWED_ORIGINS") -> frozenset[str]:
+    """Extra exact-match Origin allowlist from `env_var` (comma-
+    separated). Empty by default — loopback origins are already
+    allowed unconditionally by is_origin_allowed() below, so this is
+    only for adding specific non-default-loopback origins, not a
+    general public-exposure mechanism.
     """
-    raw = os.environ.get("MCP_HTTP_ALLOWED_ORIGINS", "")
+    raw = os.environ.get(env_var, "")
     return frozenset(o.strip() for o in raw.split(",") if o.strip())
 
 
