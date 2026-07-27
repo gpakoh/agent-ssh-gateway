@@ -29,6 +29,7 @@ bcrypt>=4.2.1
 PyJWT>=2.10.1
 unidiff>=0.7.5
 PyYAML>=6.0.1
+python-dotenv>=1.0.0
 # docker-deploy: Alembic sync engine (psycopg2 for synchronous migrations)
 psycopg2-binary>=2.9.9
 # docker-deploy: runtime validation/template paths

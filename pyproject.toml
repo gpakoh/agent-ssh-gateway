@@ -46,6 +46,7 @@ dependencies = [
   "websockets",
   "unidiff",
   "pyyaml",
+  "python-dotenv>=1.0.0",
 ]
 
 [project.optional-dependencies]
