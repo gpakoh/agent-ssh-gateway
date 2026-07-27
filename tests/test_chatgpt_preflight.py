@@ -1140,3 +1140,91 @@ class TestStreamableHttpDocsEnvSync:
             )
             assert not re.search(r"\b[A-F0-9]{20,}\b", content)
             assert "xloud" not in content.lower()
+
+
+class TestPublicMcpConnectorRiskReview:
+    """Contract tests for docs/operations/PUBLIC_MCP_CONNECTOR_RISK_REVIEW.md.
+    Phase 19A — audit/design only, no runtime code.
+    """
+
+    DOC_PATH = ROOT / "docs" / "operations" / "PUBLIC_MCP_CONNECTOR_RISK_REVIEW.md"
+
+    def _load(self) -> str:
+        return self.DOC_PATH.read_text()
+
+    def test_doc_exists(self):
+        assert self.DOC_PATH.is_file()
+
+    def test_public_connector_not_live(self):
+        content = self._load().lower()
+        assert "not live" in content
+
+    def test_static_bearer_not_acceptable_as_final_public_connector(self):
+        content = self._load()
+        assert "no — not as the final" in content.lower() or "not as the final" in content.lower()
+        assert "static bearer" in content.lower()
+
+    def test_tls_required_before_public_exposure(self):
+        content = self._load().lower()
+        assert "tls" in content
+        assert "required" in content
+
+    def test_oauth_dcr_pkce_decision_required(self):
+        content = self._load()
+        assert "OAuth 2.1" in content
+        assert "DCR" in content
+        assert "PKCE" in content
+        assert "decision" in content.lower()
+
+    def test_safe_mode_mandatory(self):
+        content = self._load()
+        assert "MCP_CHATGPT_SAFE_MODE=true" in content
+        assert "mandatory" in content.lower()
+
+    def test_no_write_docker_agent_tools(self):
+        content = self._load().lower()
+        assert "write" in content
+        assert "docker" in content
+        assert "agent-launch" in content or "agent launch" in content
+
+    def test_rollback_plan_required(self):
+        content = self._load().lower()
+        assert "rollback" in content
+        assert "required" in content or "must" in content
+
+    def test_operator_approval_required(self):
+        content = self._load().lower()
+        assert "operator" in content
+        assert "approval" in content
+
+    def test_lists_required_pre_exposure_items(self):
+        content = self._load().lower()
+        assert "reverse-proxy" in content or "reverse proxy" in content
+        assert "protected resource metadata" in content
+        assert "authorization server metadata" in content
+        assert "rate limiting" in content
+        assert "audit event" in content
+
+    def test_gives_three_options_with_recommendation(self):
+        content = self._load()
+        assert "Option A" in content
+        assert "Option B" in content
+        assert "Option C" in content
+        assert "Recommendation" in content
+
+    def test_lab_only_option_has_ttl_and_allowlist(self):
+        content = self._load().lower()
+        assert "ttl" in content
+        assert "allowlist" in content
+
+    def test_no_real_secrets_or_topology(self):
+        import re
+
+        content = self._load()
+        sanitized = content.replace("127.0.0.1", "").replace("0.0.0.0", "")
+        assert not re.search(
+            r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b",
+            sanitized,
+        )
+        assert not re.search(r"\b[A-F0-9]{20,}\b", content)
+        assert "xloud" not in content.lower()
