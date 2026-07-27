@@ -1228,3 +1228,82 @@ class TestPublicMcpConnectorRiskReview:
         )
         assert not re.search(r"\b[A-F0-9]{20,}\b", content)
         assert "xloud" not in content.lower()
+
+
+class TestPublicMcpOAuthDecision:
+    """Contract tests for
+    docs/superpowers/specs/2026-07-27-public-mcp-oauth-decision.md.
+    Phase 20A — architecture decision only, no runtime code.
+    """
+
+    DOC_PATH = (
+        ROOT
+        / "docs"
+        / "superpowers"
+        / "specs"
+        / "2026-07-27-public-mcp-oauth-decision.md"
+    )
+
+    def _load(self) -> str:
+        return self.DOC_PATH.read_text()
+
+    def test_doc_exists(self):
+        assert self.DOC_PATH.is_file()
+
+    def test_public_connector_not_live(self):
+        content = self._load().lower()
+        assert "not live" in content
+
+    def test_static_bearer_not_final(self):
+        content = self._load().lower()
+        assert "static bearer" in content
+        assert "not" in content
+
+    def test_safe_mode_mandatory(self):
+        content = self._load()
+        assert "MCP_CHATGPT_SAFE_MODE" in content
+        assert "precondition" in content.lower() or "mandatory" in content.lower()
+
+    def test_no_write_docker_agent_tools(self):
+        content = self._load().lower()
+        assert "chatgpt-safe" in content or "safe tool set" in content or "safe mode" in content
+
+    def test_oauth_gaps_listed(self):
+        content = self._load().lower()
+        assert "not implemented" in content or "not enforced" in content or "gap" in content
+        assert "rate limiting" in content
+        assert "expiry" in content
+
+    def test_audit_events_required(self):
+        content = self._load().lower()
+        assert "audit event" in content
+
+    def test_rollback_kill_switch_required(self):
+        content = self._load().lower()
+        assert "rollback" in content
+        assert "kill switch" in content or "kill-switch" in content
+
+    def test_access_control_integration_required(self):
+        content = self._load().lower()
+        assert "access-control" in content or "access control" in content
+        assert "approval" in content
+
+    def test_gives_four_options_with_recommendation(self):
+        content = self._load()
+        assert "Option A" in content
+        assert "Option B" in content
+        assert "Option C" in content
+        assert "Option D" in content
+        assert "Recommendation" in content
+
+    def test_no_real_secrets_or_topology(self):
+        import re
+
+        content = self._load()
+        sanitized = content.replace("127.0.0.1", "").replace("0.0.0.0", "")
+        assert not re.search(
+            r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b",
+            sanitized,
+        )
+        assert not re.search(r"\b[A-F0-9]{20,}\b", content)
+        assert "xloud" not in content.lower()
