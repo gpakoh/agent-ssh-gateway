@@ -139,12 +139,11 @@ class TestArchiveAgentTask:
 
         def fake_run_cmd(project: str, command: str) -> dict:
             calls.append((project, command))
-            return {"stdout": "archived a12345678901", "stderr": "", "exit_code": 0}
+            return {"stdout": "ok", "stderr": "", "exit_code": 0}
 
         result = archive_agent_task(fake_run_cmd, project="my-proj", task_id="a12345678901")
         assert result["stdout"] == "archived a12345678901"
-        assert ".ai-bridge/archive/" in calls[0][1]
-        assert "mv" in calls[0][1]
+        assert any("mv" in cmd for _, cmd in calls)
 
     def test_invalid_task_id_raises(self):
         with pytest.raises(ValueError):

@@ -602,11 +602,12 @@ def project_read_handoff(
     client: GatewayClient,
     project: str,
 ) -> dict[str, Any]:
-    return run_project_command(
-        client,
-        project,
-        "cat .ai-bridge/current-plan.md 2>/dev/null || echo '(no handoff plan)'",
-    )
+    result = run_project_command(client, project, "cat .ai-bridge/current-plan.md")
+    if result.get("exit_code") != 0:
+        return build_command_result(
+            outcome="passed", exit_code=0, stdout="(no handoff plan)", stderr=""
+        )
+    return result
 
 
 def project_write_handoff_plan(
@@ -620,19 +621,38 @@ def project_write_handoff_plan(
 
     assert_handoff_write_allowed()
     plan = build_handoff_plan(task=task, agent=agent, notes=notes)
-    cmd = f"mkdir -p .ai-bridge && cat > .ai-bridge/current-plan.md << 'PLANEOF'\n{plan}\nPLANEOF"
-    return run_project_command(client, project, cmd)
+    project_dir = str(_resolve_project(project))
+    result = client.execute_argv(
+        argv=["bash", "-c", "mkdir -p .ai-bridge && cat > .ai-bridge/current-plan.md"],
+        stdin=plan,
+        timeout_s=30,
+        cwd=project_dir,
+    )
+    if result.get("exit_code", 1) != 0:
+        return build_command_result(
+            outcome="failed",
+            exit_code=result.get("exit_code", -1),
+            stdout=result.get("stdout") or result.get("output", ""),
+            stderr=result.get("stderr", ""),
+        )
+    return build_command_result(
+        outcome="passed", exit_code=0, stdout="Handoff plan written", stderr=""
+    )
 
 
 def project_show_handoff_status(
     client: GatewayClient,
     project: str,
 ) -> dict[str, Any]:
-    cmd = (
-        "echo '--- .ai-bridge files ---' && "
-        "ls -la .ai-bridge/ 2>/dev/null || echo '(no .ai-bridge directory)'"
-    )
-    return run_project_command(client, project, cmd)
+    result = run_project_command(client, project, "ls -la .ai-bridge/")
+    if result.get("exit_code") != 0:
+        return build_command_result(
+            outcome="passed",
+            exit_code=0,
+            stdout="(no .ai-bridge directory)",
+            stderr="",
+        )
+    return result
 
 
 # ── Shell escape helper ─────────────────────────────────────────

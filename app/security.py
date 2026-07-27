@@ -248,6 +248,32 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         r"\1=" + SECRET_REDACTION_PLACEHOLDER,
     ),
+    # KEY=value where keyword is embedded in compound name (BOT_TOKEN, SENDGRID_API_KEY)
+    (
+        re.compile(
+            r"(?i)_("
+            r"api[_-]?key|token|access[_-]?token|refresh[_-]?token|"
+            r"secret|password|passwd|pwd|"
+            r"private[_-]?key|client[_-]?secret|webhook[_-]?secret"
+            r")\b\s*[:=]\s*([^\s\"']+)"
+        ),
+        r"_" + r"\1=" + SECRET_REDACTION_PLACEHOLDER,
+    ),
+    # URLs with embedded credentials: scheme://user:pass@host
+    # Also handles scheme://:pass@host (empty user)
+    (
+        re.compile(
+            r"((?:https?|[a-z]+)://)([^@\s/]*):([^@\s]+)@"
+        ),
+        r"\1" + SECRET_REDACTION_PLACEHOLDER + ":" + SECRET_REDACTION_PLACEHOLDER + "@",
+    ),
+    # URLs with embedded token: scheme://token@host
+    (
+        re.compile(
+            r"((?:https?|[a-z]+)://)([A-Za-z0-9_\-]+)@"
+        ),
+        r"\1" + SECRET_REDACTION_PLACEHOLDER + "@",
+    ),
 ]
 
 

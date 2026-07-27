@@ -115,8 +115,12 @@ def build_current_plan(
 
 def list_agent_tasks(run_cmd, *, project: str) -> dict[str, Any]:
     """List task directories under .ai-bridge/tasks/."""
-    cmd = f"echo '## Tasks' && ls -1 {TASKS_REL_DIR}/ 2>/dev/null | head -50 || echo '(no tasks)'"
-    return run_cmd(project, cmd)
+    result = run_cmd(project, f"ls -1 {TASKS_REL_DIR}/")
+    if result.get("exit_code") != 0:
+        return {"stdout": "(no tasks)", "stderr": "", "exit_code": 0}
+    lines = result.get("stdout", "").splitlines()[:50]
+    result["stdout"] = "\n".join(lines)
+    return result
 
 
 def archive_agent_task(run_cmd, *, project: str, task_id: str) -> dict[str, Any]:
@@ -125,12 +129,15 @@ def archive_agent_task(run_cmd, *, project: str, task_id: str) -> dict[str, Any]
     Move, not delete — physical deletion is never performed by this tool.
     """
     validate_task_id(task_id)
-    cmd = (
-        f"mkdir -p {ARCHIVE_REL_DIR} && "
-        f"mv {_task_dir(task_id)} {_archive_dir(task_id)} 2>/dev/null "
-        f"&& echo 'archived {task_id}' || echo 'task {task_id} not found'"
-    )
-    return run_cmd(project, cmd)
+    src = _task_dir(task_id)
+    dst = _archive_dir(task_id)
+    result = run_cmd(project, f"mkdir -p {ARCHIVE_REL_DIR}")
+    if result.get("exit_code") != 0:
+        return result
+    result = run_cmd(project, f"mv {src} {dst}")
+    if result.get("exit_code") != 0:
+        return {"stdout": f"task {task_id} not found", "stderr": result.get("stderr", ""), "exit_code": 1}
+    return {"stdout": f"archived {task_id}", "stderr": "", "exit_code": 0}
 
 
 def read_agent_task_file(run_cmd, *, project: str, task_id: str, filename: str) -> dict[str, Any]:
@@ -140,8 +147,10 @@ def read_agent_task_file(run_cmd, *, project: str, task_id: str, filename: str) 
     and returns dict with at least {'stdout': str, 'stderr': str, 'exit_code': int}.
     """
     validate_task_id(task_id)
-    cmd = f"cat {_task_dir(task_id)}/{filename} 2>/dev/null || echo '(not found)'"
-    return run_cmd(project, cmd)
+    result = run_cmd(project, f"cat {_task_dir(task_id)}/{filename}")
+    if result.get("exit_code") != 0:
+        return {"stdout": "(not found)", "stderr": "", "exit_code": 0}
+    return result
 
 
 def write_agent_task(
