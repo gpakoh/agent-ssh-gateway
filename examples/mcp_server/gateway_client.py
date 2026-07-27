@@ -273,12 +273,13 @@ class GatewayClient:
     @_retry_on_session_not_found
     def execute_project_command(self, project: str, command: str) -> dict[str, Any]:
         sid = self._require_session_id()
-        from project_registry import get_project_registry
-
-        registry = get_project_registry()
+        cwd: str | None = None
         try:
+            from project_registry import get_project_registry
+
+            registry = get_project_registry()
             cwd = str(registry.resolve(project))
-        except ValueError:
+        except (ValueError, Exception):
             root = _project_root()
             proj = _safe_project(project)
             cwd = f"{root}/{proj}"
@@ -361,12 +362,13 @@ class GatewayClient:
         """
         import uuid as _uuid
 
-        from project_registry import get_project_registry
-
-        registry = get_project_registry()
+        cwd: str | None = None
         try:
+            from project_registry import get_project_registry
+
+            registry = get_project_registry()
             cwd = str(registry.resolve(project))
-        except ValueError:
+        except (ValueError, Exception):
             root = _project_root()
             proj = _safe_project(project)
             cwd = f"{root}/{proj}"
