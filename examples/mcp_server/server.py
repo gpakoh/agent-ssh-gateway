@@ -2792,6 +2792,7 @@ def gateway_project_run_agent(
             task_id=task_id,
             model=model,
             router=_agent_router,
+            run_script=lambda p, s: client.execute_project_script(p, s),
         ),
         success_text="Submitted agent task via router.",
     )

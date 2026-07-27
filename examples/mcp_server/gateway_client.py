@@ -273,9 +273,15 @@ class GatewayClient:
     @_retry_on_session_not_found
     def execute_project_command(self, project: str, command: str) -> dict[str, Any]:
         sid = self._require_session_id()
-        root = _project_root()
-        proj = _safe_project(project)
-        cwd = f"{root}/{proj}"
+        from project_registry import get_project_registry
+
+        registry = get_project_registry()
+        try:
+            cwd = str(registry.resolve(project))
+        except ValueError:
+            root = _project_root()
+            proj = _safe_project(project)
+            cwd = f"{root}/{proj}"
         import shlex as _shlex
         argv = _shlex.split(command)
         return self._post(
@@ -335,6 +341,59 @@ class GatewayClient:
             "/api/ssh/execute-argv",
             payload,
         )
+
+    @_retry_on_session_not_found
+    def execute_project_script(
+        self,
+        project: str,
+        script: str,
+        timeout_s: int | None = None,
+    ) -> dict[str, Any]:
+        """Write a bash script to a temp file on the host, then execute it via SSH.
+
+        Multi-line scripts with shell syntax (if/then, $(), heredocs, &&, ||)
+        cannot survive shlex.split() → shlex.join(). This method writes the
+        script to a temp file on the HOST filesystem (shared with the sshd
+        container via volume mount), then executes ``bash <path>`` as a single
+        argv command via SSH.
+
+        The temp file is cleaned up after execution.
+        """
+        import uuid as _uuid
+
+        from project_registry import get_project_registry
+
+        registry = get_project_registry()
+        try:
+            cwd = str(registry.resolve(project))
+        except ValueError:
+            root = _project_root()
+            proj = _safe_project(project)
+            cwd = f"{root}/{proj}"
+
+        tmp_dir = os.path.join(cwd, ".ai-bridge", "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        script_name = f"mcp_script_{_uuid.uuid4().hex[:12]}.sh"
+        host_path = os.path.join(tmp_dir, script_name)
+
+        with open(host_path, "w") as f:
+            f.write(script)
+            f.write("\n")
+
+        try:
+            result = self.execute_argv(
+                ["bash", host_path],
+                timeout_s=timeout_s or self.command_timeout,
+                cwd=cwd,
+            )
+        finally:
+            try:
+                os.unlink(host_path)
+            except OSError:
+                pass
+
+        return result
 
     @_retry_on_session_not_found
     def apply_patch(
