@@ -1,666 +1,280 @@
 # agent-ssh-gateway
 
-**AI engineering control plane — SSH gateway with MCP Fleet for agents, CI/CD and self-hosted automation.**
+**A self-hosted control plane for policy-controlled access from AI agents and automation to remote infrastructure over SSH.**
 
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![status](https://img.shields.io/badge/status-alpha-orange)
-![tests](https://img.shields.io/badge/tests-571%20passed-brightgreen)
-[![MCP](https://img.shields.io/badge/MCP-Fleet-7B2FF7?logo=modelcontextprotocol)](https://modelcontextprotocol.io)
+[![MCP](https://img.shields.io/badge/interface-MCP-7B2FF7?logo=modelcontextprotocol)](https://modelcontextprotocol.io)
 
-> **Do not expose this service directly to the public Internet.** Read [SECURITY.md](SECURITY.md) before deploying.
+`agent-ssh-gateway` exposes SSH operations through structured HTTP/OpenAPI and
+Model Context Protocol (MCP) interfaces. Instead of giving every agent, CI job,
+or internal tool raw SSH credentials and an unrestricted shell, the gateway
+centralizes sessions, permissions, policies, execution, and audit data.
 
-### Why not just SSH?
+It supports remote operations, project-scoped engineering workflows, background
+jobs, repository and infrastructure integrations, and coordinated agent
+handoffs.
 
-- Agents need structured APIs, not interactive terminals.
-- Long-running commands need jobs, status and output streams.
-- File operations should be separate from shell commands.
-- Access must be scoped, audited and redactable.
+> [!WARNING]
+> This project is an alpha release for private and internal environments. Do not
+> expose it directly to the public Internet. Read [SECURITY.md](SECURITY.md)
+> before deployment.
 
-### How is this different?
+## Why use a gateway?
 
-Similar tools are often terminal-first or MCP-only.
-agent-ssh-gateway is OpenAPI-first and can be used by agents, CI/CD, dashboards and internal automation.
+Direct SSH works well for humans, but becomes difficult to control across
+agents and automation:
 
-### Gateway MCP Fleet
+- credentials are copied between clients;
+- long-running commands lack a shared job lifecycle;
+- file, Git, test, and infrastructure actions are hidden inside shell scripts;
+- access policies and audit trails are inconsistent;
+- a generic shell grants more authority than most tasks require.
 
-The project now ships a **multi-adapter MCP Fleet** that exposes the gateway and its ecosystem through the Model Context Protocol:
+The gateway provides one controlled boundary between clients and remote
+systems. Clients receive task-oriented capabilities; operators retain control
+over credentials, targets, scopes, and execution policy.
 
-| Adapter | Tools | Access |
-|---------|-------|--------|
-| **Gateway** | 77 | SSH commands, project-safe code tools, job management, handoff, GitHub, Gitea, Docker, Postgres, Context7 |
-| **GitHub** | 8 | Read-only: repo info, commits, branches, search, PRs, issues |
-| **Gitea** | 12 | Read-only + CI/CD: repos, branches, PRs, Actions runs, jobs |
-| **Context7** | 2 | Documentation lookup for AI coding agents |
-| **Docker** | 7 | Read-only: ps, images, inspect, logs, stats, compose_ps, services |
-| **Postgres** | 6 | Read-only: health, list_schemas, list_tables, describe_table, select (guardrailed), vector_status |
+## Capabilities
 
-All adapters are deployed behind an nginx reverse proxy and use **Streamable HTTP/SSE** transport with per-adapter API token auth.
+| Area | What the gateway provides |
+|---|---|
+| Remote operations | Persistent SSH sessions, structured command execution, argv-safe execution, WebSocket terminal, file transfer, and server profiles |
+| Jobs and observability | Background jobs, status and result retrieval, output streaming, health checks, metrics, audit events, and event hooks |
+| Project workflows | Scoped file read/search/write, Git inspection, diffs, tests, linting, type checks, preview, hash verification, and patch application |
+| MCP integrations | Gateway tools plus GitHub, Gitea, Docker, PostgreSQL, and Context7 adapters |
+| Agent coordination | Structured task handoff, isolated worktrees, agent status/report artifacts, and controlled runner workflows |
+| Access control | Master and short-lived agent tokens, scopes, access profiles, session ownership, target allowlists, command policies, and confirmation flows |
+
+Tool visibility depends on the selected MCP mode and access profile. The project
+ships minimal, standard, full, and ChatGPT-oriented modes, including a safe mode
+that removes mutation, privileged Docker, and agent-launch tools.
+
+## Architecture
 
 ```text
-ChatGPT / AI agents
-    ↓
-Gateway MCP Fleet
-    ├── Gateway (SSH + project tools)
-    ├── GitHub (read-only)
-    ├── Gitea (read-only + CI/CD)
-    ├── Docker (read-only fleet ops)
-    ├── Postgres (read-only SQL guardrails)
-    └── Context7 (docs)
+AI agents / CI/CD / internal tools
+                |
+          HTTP/OpenAPI or MCP
+                |
+        agent-ssh-gateway
+        |       |        |
+   policies   jobs     audit
+        |
+   approved SSH targets
 ```
 
-### Fleet healthcheck
+Optional MCP adapters expose repository providers, Docker, PostgreSQL, and
+documentation lookup through the same control-plane model.
 
-```bash
-python scripts/mcp_fleet_healthcheck.py
-```
+## Security boundaries
 
-Output:
+The gateway is designed to reduce authority, not to make unrestricted remote
+execution inherently safe.
 
-```
-  OK    Gateway  [77/77 tools]
-  OK   Context7  [2/2 tools]
-  OK     GitHub  [8/8 tools]
-  OK      Gitea  [12/12 tools]
-  OK     Docker  [7/7 tools]
-  OK   Postgres  [6/6 tools]
-  ─────────────────────────────
-  All 6/6 adapters healthy
-```
+- SSH targets can be restricted with allow and deny CIDRs.
+- Commands can be evaluated against `readonly`, `testlint`,
+  `project-automation`, `ops`, or other policy profiles.
+- Agent tokens are scoped, short-lived, and isolated by session ownership.
+- Project tools resolve paths under registered roots and reject traversal.
+- Dangerous Docker operations require an explicit confirmation flow.
+- Secret redaction can be enabled for returned command and job output.
+- Workspace mutation is disabled by default.
 
----
+The gateway is not a replacement for Teleport, an enterprise zero-trust
+platform, a hardened multi-tenant sandbox, or a browser-based SSH client.
 
-## Project status
-
-Early self-hosted MVP / alpha release. Intended for private/internal automation environments. The public API may change before v1.0.0.
-
----
+See [SECURITY.md](SECURITY.md) for the threat model and deployment checklist.
 
 ## Quickstart
+
+Requirements:
+
+- Python 3.11 or newer;
+- access to an SSH target;
+- Redis and PostgreSQL only when their optional persistence features are used.
+
+Clone and install:
 
 ```bash
 git clone https://github.com/gpakoh/agent-ssh-gateway.git
 cd agent-ssh-gateway
-cp .env.example .env
+
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+
+cp .env.example .env
 ```
 
-Generate API keys and add them to `.env`:
+Generate strong values for `API_KEY`, `AGENT_TOKEN`, and `JWT_SECRET`:
 
 ```bash
-python -c "
-import secrets
-with open('.env', 'a') as f:
-    f.write(f'API_KEY={secrets.token_urlsafe(48)}\n')
-    f.write(f'AGENT_TOKEN={secrets.token_urlsafe(48)}\n')
-"
+python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-Start the server:
+Generate `ENCRYPTION_KEY`:
 
 ```bash
-uvicorn app.main:app --reload
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-On Windows PowerShell:
-
-```powershell
-python -c "import secrets; open('.env', 'a').write('API_KEY=' + secrets.token_urlsafe(48) + '\n' + 'AGENT_TOKEN=' + secrets.token_urlsafe(48) + '\n')"
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
-uvicorn app.main:app --reload
-```
-
-Verify it is running:
+Add the generated values to `.env`, review the allowed target networks, and
+start the API:
 
 ```bash
-curl http://127.0.0.1:8000/health
-
-curl http://127.0.0.1:8000/api/capabilities
+uvicorn app.main:app --host 127.0.0.1 --port 8085
 ```
 
-OpenAPI UI:
+Verify the service:
+
+```bash
+curl http://127.0.0.1:8085/health
+```
+
+The authenticated OpenAPI UI is available at:
 
 ```text
-http://127.0.0.1:8000/docs
+http://127.0.0.1:8085/docs
 ```
 
----
+For Docker Compose and private deployment overlays, see
+[Deployment overlays](docs/operations/DEPLOYMENT_OVERLAYS.md).
 
-## MCP Fleet usage
+## Minimal REST workflow
 
-The Fleet exposes a **Streamable HTTP/SSE** endpoint per adapter. Each requires initialization via the MCP protocol:
-
-```text
-POST /mcp?mcp_token=<token>  →  initialize → Mcp-Session-Id → tools/list → tools/call
-```
-
-### Gateway (project-safe tools)
-
-Execute commands and use project-scoped tools through the gateway MCP adapter:
-
-```python
-# Initialize session
-POST /mcp?mcp_token=<token>
-{"jsonrpc":"2.0","id":"1","method":"initialize",...}
-
-# List 77 tools
-POST /mcp?mcp_token=<token>
-{"jsonrpc":"2.0","id":"2","method":"tools/list"}
-```
-
-The gateway adapter includes project-safe tools — read file, search text, find files, tree, git diff, pytest, ruff, mypy, remotes, branch info, and handoff read/write/status. These are scoped to the project root and block path traversal, shell injection, and unauthorized writes.
-
-### GitHub (read-only)
-
-8 read-only tools for repository inspection: repo info, commit log, branch list, file contents, code search, PR list, issues, user info.
-
-### Gitea (read-only + CI/CD)
-
-12 tools covering repository info, branches, file tree, file read, issues, PRs, CI/CD runs, job status, workflow details, and commit search.
-
----
-
-## Minimal SSH flow
-
-Set a master API key (required by the auth middleware):
+Set the master API key:
 
 ```bash
-export API_KEY=change-me-generate-long-random-api-key
+export API_KEY="<your-api-key>"
 ```
 
-1. Create an SSH session:
+Create an SSH session:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/ssh/connect \
+curl -X POST http://127.0.0.1:8085/api/ssh/connect \
   -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "host": "your-server",
-    "username": "root",
+    "username": "automation-user",
     "password": "your-password"
   }'
 ```
 
-Save the returned `session_id`.
-
-2. Execute a command (sync):
+Use the returned `session_id` to execute a command:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/ssh/execute \
+curl -X POST http://127.0.0.1:8085/api/ssh/execute \
   -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "session_id": "<session_id>",
+    "session_id": "<session-id>",
     "command": "uname -a"
   }'
 ```
 
-   For long-running commands, use `async_mode=true` to run as a background job:
+For long-running work, pass `"async_mode": true` and use the job status, result,
+wait, or stream endpoints.
 
-```bash
-curl -X POST http://127.0.0.1:8000/api/ssh/execute \
-  -H "X-API-Key: $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "session_id": "<session_id>",
-    "command": "docker compose build",
-    "async_mode": true
-  }'
-```
+For agent clients, create a scoped agent token instead of sharing the master
+key.
 
-   When command output may contain tokens or secrets, add `redact_output=true`:
+## MCP
 
-```bash
-curl -X POST http://127.0.0.1:8000/api/ssh/execute \
-  -H "X-API-Key: $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "session_id": "<session_id>",
-    "command": "kubectl get secrets -o yaml",
-    "redact_output": true
-  }'
-```
+The MCP server turns gateway operations into task-oriented tools for compatible
+AI clients. Tool modes control visibility; token scopes and command policies
+control authority.
 
-3. Disconnect:
+Typical MCP workflows include:
 
-```bash
-curl -X POST http://127.0.0.1:8000/api/ssh/disconnect \
-  -H "X-API-Key: $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "session_id": "<session_id>"
-  }'
-```
+- inspecting projects and Git state;
+- reading, searching, previewing, and verifying files;
+- running tests, Ruff, and mypy;
+- inspecting GitHub or Gitea repositories;
+- querying Docker and PostgreSQL through guarded tools;
+- coordinating structured agent tasks and reviewing their results.
 
-For AI agent use, request a scoped agent token instead of using the master key directly.
+Start with:
 
----
+- [MCP server guide](examples/mcp_server/README.md)
+- [Remote MCP adapter](examples/chatgpt_remote_mcp/README.md)
+- [MCP operator runbook](docs/operations/MCP_OPERATOR_RUNBOOK.md)
+- [ChatGPT attachment guide](docs/operations/CHATGPT_TOOL_ATTACH.md)
 
-## Why this project exists
+## Agent handoff
 
-Traditional SSH access works well for humans, but it is often awkward and risky for automation:
-
-* agents need SSH credentials directly;
-* commands are hard to audit consistently;
-* CI jobs often duplicate SSH logic;
-* long-running sessions are difficult to manage;
-* access policies are usually hidden inside scripts;
-* file transfer, command execution and logs are scattered across tools.
-
-`agent-ssh-gateway` solves this by exposing SSH operations through a controlled API.
-
-Instead of giving every automation component direct SSH access, you can place one gateway in front of your infrastructure and control how SSH is used.
-
----
-
-## What it does
-
-The gateway MCP adapter includes a **parallel agent orchestration system** built on the Agent Handoff v2 protocol. It lets ChatGPT coordinate multiple agents (OpenCode, Mimo) on independent tasks through a structured lifecycle — write task → execute → read results → archive. Write access is controlled by `MCP_GATEWAY_WRITE_MODE`.
-
-`agent-ssh-gateway` allows clients to:
-
-* work through an **MCP Fleet** with per-adapter tool sets and Streamable HTTP/SSE transport;
-* create SSH sessions through an HTTP API;
-* execute commands on remote machines;
-* stream terminal sessions through WebSocket;
-* run background jobs;
-* transfer files;
-* inspect basic system information;
-* use short-lived agent tokens;
-* log and audit SSH activity;
-* integrate with CI/CD pipelines and internal automation;
-* expose a structured OpenAPI contract for SDKs and agents.
-
----
-
-## Agent Handoff v2 — parallel agent orchestration
-
-Orchestrate multiple AI agents (OpenCode, Mimo) through a structured task lifecycle, all coordinated by ChatGPT.
-
-### Task lifecycle
-
-```
-ChatGPT / Gateway
-  ├─ write_agent_task → .ai-bridge/tasks/<id>/task.json + current-plan.md
-  ├─ project_run_opencode → executes via OpenCode CLI (main project scope)
-  ├─ project_run_mimo → executes via Mimo CLI (disposable git worktree)
-  ├─ read_agent_status → agent-status.md (running → needs-review / failed)
-  ├─ read_agent_report → agent-report.md (summary)
-  ├─ read_agent_diff → implementation-diff.patch (git diff from worktree)
-  └─ archive_agent_task → .ai-bridge/archive/ (never delete)
-```
-
-### Two execution modes
-
-| Agent | Scope | Isolation | Safety |
-|-------|-------|-----------|--------|
-| **OpenCode** | Main project directory | No worktree guard | `--never-ask`, binary discovery |
-| **Mimo** | Disposable git worktree | 11 pre-flight guards (linked worktree check, path isolation, `MCP_GATEWAY_WORKTREE_ROOT` enforcement) | `--dangerously-skip-permissions`, binary discovery via `$MIMO_BIN` |
-
-### Key features
-
-- **Independent tasks** — each task has its own `task_id`, `allowed_files`, `forbidden_files`, agent assignment.
-- **No cross-contamination** — OpenCode works in the main checkout; Mimo works in an isolated git worktree under `MCP_GATEWAY_WORKTREE_ROOT`.
-- **No auto-commit/push** — both agents enforce `commit_allowed` and `push_allowed` from `task.json`.
-- **Structured results** — each task produces `agent-status.md`, `agent-report.md`, `implementation-diff.patch`.
-- **Safety-first** — Mimo guards verify worktree is linked (not main checkout), canonical paths match, and worktree is under the designated root before any execution.
-
-### Mimo runner guards (11 checks)
-
-All guards execute as shell script on the SSH target — no Python runtime dependency:
-
-1. `task.json` exists
-2. `task.json` agent is `"mimo"`
-3. `worktree_path` set in `task.json`
-4. `MCP_GATEWAY_WORKTREE_ROOT` environment variable set
-5. `worktree_path` exists as a directory
-6. Canonical realpath for project, worktree, and WORKTREE_ROOT
-7. Worktree != project root
-8. Worktree under `MCP_GATEWAY_WORKTREE_ROOT`
-9. Valid git worktree (`rev-parse --is-inside-work-tree`)
-10. Worktree top-level matches (`rev-parse --show-toplevel`)
-11. Linked worktree, not main checkout (`git-dir != git-common-dir`)
-
-### Example: parallel two-agent task
-
-```bash
-# Set up
-export MCP_GATEWAY_WORKTREE_ROOT=/var/mimo-worktrees
-export MIMO_BIN=/usr/local/bin/mimo
-
-# Write two tasks
-TASK_A="2026-06-25-mytask-opencode"
-TASK_B="2026-06-25-mytask-mimo"
-
-# ChatGPT writes task.json + current-plan.md for both
-# creates git worktree for Mimo
-git worktree add "$MCP_GATEWAY_WORKTREE_ROOT/$TASK_B" -b "mimo/$TASK_B"
-
-# Execute (via MCP tools)
-# 1. gateway_project_run_opencode — runs OpenCode in main project
-# 2. gateway_project_run_mimo — runs Mimo in worktree (11 guards)
-# 3. Read results, clean up
-git worktree remove "$MCP_GATEWAY_WORKTREE_ROOT/$TASK_B" --force
-git branch -D "mimo/$TASK_B"
-```
-
-## Main use cases
-
-### AI agents
-
-Give AI agents a controlled way to execute infrastructure tasks without handing them raw SSH access.
-
-Examples: inspect a remote service, read logs, restart a container, check disk usage, run deployment commands, collect diagnostics.
-
-### CI/CD pipelines
-
-Use the gateway as a central SSH execution layer for build and deployment jobs.
-
-Examples: deploy to a remote host, run migrations, upload release artifacts, restart services, collect post-deploy status.
-
-### Internal infrastructure tools
-
-Build dashboards, admin panels and automation services on top of a single SSH API.
-
-Examples: one-click maintenance actions, controlled server operations, internal support tools, repeatable operational playbooks.
-
-### Self-hosted environments
-
-Useful for homelabs, small infrastructure clusters, internal DevOps setups and private automation platforms.
-
----
-
-## Key features
-
-* **MCP Fleet** — multi-adapter Model Context Protocol deployment: SSH gateway, GitHub read-only, Gitea + CI/CD, Context7 docs.
-* **Project-safe tools** — 16 scoped tools for file read, text search, diff, test run, lint, and handoff (path traversal and injection blocked).
-* **API-first design** — SSH operations are exposed through a documented HTTP API.
-* **OpenAPI contract** — usable by agents, SDKs and generated clients.
-* **Persistent SSH sessions** — create, reuse and close sessions through API calls.
-* **Command execution** — run commands remotely and capture structured results.
-* **WebSocket terminal** — optional interactive terminal access.
-* **Background jobs** — run longer tasks without blocking the initial API request.
-* **File operations** — upload, download and manage files over SSH.
-* **Agent tokens** — short-lived tokens for automation instead of long-lived master credentials.
-* **Session ownership** — each session is bound to the token that created it.
-* **Audit logging** — track who connected, where, when and what was executed.
-* **Event hooks** — send structured events to external systems.
-* **Security-focused deployment model** — designed to run behind SSO, reverse proxy, mTLS, API keys and network policies.
-
----
-
-## What this project is not
-
-Not a replacement for Teleport, Apache Guacamole, or enterprise zero-trust platforms. Not a browser SSH terminal.
-
-The goal: a lightweight, self-hosted control plane for AI agents, CI/CD and internal automation — built on an SSH gateway and extended through an MCP Fleet of project-safe, read-only and documentation adapters.
-
-If you only need a browser-based SSH client, this may be more than you need.
-
----
-
-## Configuration
-
-Create an `.env` file from the example:
-
-```bash
-cp .env.example .env
-```
-
-All env vars are documented in `.env.example`. Key settings:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `API_KEY` | `change-me-...` | Master API key for authentication |
-| `AGENT_TOKEN` | `change-me-...` | Agent token for scoped access |
-| `ALLOWED_TARGET_CIDRS` | `10.0.0.0/8,...` | SSH targets the gateway may connect to |
-| `DENIED_TARGET_CIDRS` | `127.0.0.0/8,...` | SSH targets always denied |
-| `SSH_KEY_UPLOAD_ENABLED` | `false` | Private key upload via API |
-| `COMMAND_POLICY_MODE` | `audit` | Command policy mode |
-| `COMMAND_OUTPUT_REDACTION_ENABLED` | `false` | Redact secrets (tokens, passwords, keys) from command responses |
-| `PERSISTENT_SESSIONS_ENABLED` | `false` | Persist sessions across restarts |
-| `ENCRYPTION_KEY` | `change-me-...` | Fernet key for credential encryption |
-
-Never commit real `.env` files.
-
----
-
-## Running with Docker Compose
-
-```bash
-docker compose up -d
-```
-
-Health check:
-
-```bash
-curl http://localhost:8085/health
-```
-
-OpenAPI:
+Agent Handoff provides a file-based lifecycle for delegating independent tasks
+to coding agents:
 
 ```text
-http://localhost:8085/docs
+create task -> run agent -> inspect status/report/diff -> review -> archive
 ```
 
----
+Each task records its agent, allowed and forbidden files, worktree, and
+commit/push permissions. Runner tools are excluded from ChatGPT safe mode and
+must be enabled deliberately.
+
+See the [Agent Handoff runbook](docs/operations/AGENT_HANDOFF_RUNBOOK.md).
+
+## Core configuration
+
+Copy `.env.example` and review every security-sensitive value.
+
+| Variable | Purpose |
+|---|---|
+| `API_KEY` | Master API credential |
+| `AGENT_TOKEN` / `AGENT_TOKEN_SCOPES` | Restricted automation credential and scopes |
+| `ALLOWED_TARGET_CIDRS` / `DENIED_TARGET_CIDRS` | Networks available as SSH targets |
+| `COMMAND_POLICY_MODE` | `off`, `audit`, or `enforce` |
+| `COMMAND_POLICY_PROFILE` | Command capability profile |
+| `WORKSPACE_READONLY` | Global gate for workspace mutation |
+| `COMMAND_OUTPUT_REDACTION_ENABLED` | Best-effort response redaction |
+| `SSH_STRICT_HOST_KEY_CHECKING` | SSH host identity verification |
+| `ENCRYPTION_KEY` | Encryption of persisted session credentials |
+
+`.env.example` is the canonical configuration reference. Never commit real
+tokens, private keys, infrastructure addresses, or deployment overlays.
 
 ## Development
 
 ```bash
 source .venv/bin/activate
 pip install -e ".[dev]"
-pytest -q                       # 570+ tests
-ruff check app tests            # linting
-mypy app                     # type checking
-uvicorn app.main:app --reload   # run locally
+
+pytest -q
+ruff check .
+mypy app
+python -m compileall app examples
 ```
 
----
-
-## Command policy
-
-```env
-COMMAND_POLICY_MODE=audit
-COMMAND_POLICY_PROFILE=default
-```
-
-Modes: `off` (disabled), `audit` (log, do not block), `enforce` (block).
-
-Profiles: `default` (blocks dangerous root commands), `readonly` (inspection only), `ops` (read-only + limited systemctl/service/docker).
-
-Recommended rollout: start with `audit`, review logs, then move to `enforce` on selected environments.
-
----
-
-## Output redaction
-
-```env
-COMMAND_OUTPUT_REDACTION_ENABLED=true
-```
-
-Optional redaction of secrets (API keys, tokens, passwords, private key material) from command stdout/stderr responses. Disabled by default — set to `true` or pass `redact_output=true` per-request to enable.
-
-When enabled, secrets are replaced with `[REDACTED]` on the response/stream side. **Raw job output is never mutated** — redaction applies only to the response or SSE stream data.
-
-Covered endpoints:
-- `POST /api/ssh/execute` — field `redact_output` in request body
-- `GET /api/jobs/{job_id}/result` — query param `?redact_output=true`
-- `GET /api/jobs/{job_id}/stream` and `/events` — query param `?redact_output=true`
-
-Redaction is a best-effort regex-based pass, not a full DLP solution. It catches common patterns (`api_key=...`, `token=...`, `password=...`, `Authorization: Bearer ...`) but will not catch every possible secret format. Use as a safety net, not a security boundary.
-
----
-
-## Web UI authentication
-
-```env
-JWT_SECRET=...
-AUTH_DB_PATH=/app/data/auth.sqlite3
-JWT_EXPIRES_MINUTES=1440
-```
-
-The web UI uses a single-admin bootstrap flow powered by JWT:
-
-1. On first start, open `http://localhost:8085` and the UI shows a registration form.
-2. Create the first admin account — this is the only user the system will ever have.
-3. After registration, public registration is automatically disabled. Subsequent visits show a login form.
-4. The JWT token is stored in browser `localStorage` and sent as `Authorization: Bearer <token>` on every API request.
-
-Generate a `JWT_SECRET`:
+Host-dependent smoke tests are marked separately and are not run in portable
+CI:
 
 ```bash
-python -c "import secrets; print(secrets.token_urlsafe(48))"
+pytest -m host_smoke -v
 ```
 
-The auth database file lives at `AUTH_DB_PATH` (default `/app/data/auth.sqlite3`). In Docker, this path is inside the `known_hosts` volume mounted at `/app/data`.
+## Documentation
 
-Behind the scenes:
-- Passwords are hashed with **bcrypt**.
-- Credential validation uses **bcrypt.checkpw** — no timing side channels.
-- Registration is guarded by an `asyncio.Lock` to prevent race conditions on first-user creation.
-- If `JWT_SECRET` is empty, the gateway refuses to start with a `RuntimeError`.
-- The `verify_jwt` function enforces `type: "web-ui"` in the token payload to prevent cross-context token reuse.
-- The global auth middleware falls back to JWT verification when no `X-API-Key` header is present.
-
----
-
-## Target allowlist
-
-Production deployments should restrict which hosts the gateway can reach:
-
-```env
-ALLOWED_TARGET_CIDRS=10.0.0.0/8,192.168.0.0/16,172.16.0.0/12
-DENIED_TARGET_CIDRS=127.0.0.0/8,::1/128,169.254.0.0/16,0.0.0.0/8,224.0.0.0/4
-```
-
-This prevents the gateway from becoming an internal port scanner or SSRF-style pivot.
-
----
-
-## Security model
-
-SSH gateways are sensitive infrastructure components.
-
-Do not expose this service directly to the Internet without proper protection.
-
-### Current hardening status
-
-- Target allowlist/denylist: enabled
-- Command policy: audit by default, enforce available
-- Route auth contract: enabled
-- Agent token scopes: enabled
-- Session ownership: enabled
-- Secret redaction: enabled
-- Private key upload: disabled by default
-- Full mypy: 0 errors
-- Test suite: 571 passed, 1 skipped
-
-### Recommended deployment topology
-
-```text
-Internet
-   ↓
-Reverse Proxy (TLS termination)
-   ↓
-SSO / Authelia / OAuth2 Proxy
-   ↓
-mTLS / API Key / Agent Token
-   ↓
-agent-ssh-gateway
-   ↓
-Allowed SSH Targets
-```
-
-### Recommended protections
-
-* run behind a reverse proxy;
-* require SSO for human access;
-* require API keys or short-lived agent tokens for automation;
-* use mTLS where possible;
-* restrict client IP ranges;
-* restrict allowed SSH target networks;
-* deny loopback, link-local and metadata service ranges;
-* use least-privilege SSH users;
-* avoid storing private SSH keys in the gateway;
-* rotate all secrets regularly;
-* enable audit logs;
-* redact sensitive command output;
-* never expose raw production secrets in logs, hooks or events.
-
----
-
-## Suggested production checklist
-
-Before using this in production:
-
-* [ ] Change all default secrets.
-* [ ] Put the service behind a reverse proxy.
-* [ ] Enable SSO for browser access.
-* [ ] Use API keys or short-lived tokens for automation.
-* [ ] Configure allowed client networks.
-* [x] Configure allowed target networks (`ALLOWED_TARGET_CIDRS` / `DENIED_TARGET_CIDRS`).
-* [x] Deny loopback, link-local and metadata IP ranges (built into default `DENIED_TARGET_CIDRS`).
-* [ ] Use dedicated low-privilege SSH users.
-* [x] Private key upload disabled by default (`SSH_KEY_UPLOAD_ENABLED=false`).
-* [ ] Enable audit logging.
-* [x] Enable output redaction for secrets (`COMMAND_OUTPUT_REDACTION_ENABLED=true`).
-* [x] Command policy engine with `readonly`/`ops`/`default` profiles (`COMMAND_POLICY_MODE=enforce`).
-* [ ] Rotate tokens regularly.
-* [ ] Review event hooks before enabling command output forwarding.
-* [ ] Keep deployment-specific files out of the public repository.
-
----
-
-## Public repository hygiene
-
-This repository should contain only generic example configuration.
-
-Do not commit: real `.env` files, private SSH keys, API keys, agent tokens, webhook secrets, production IP addresses, internal domains, real reverse proxy configs, customer data, or deployment files containing private infrastructure details.
-
-Keep real deployment configuration in a private repository or secret manager.
-
----
-
-## Repository structure
-
-```text
-app/                  Core SSH gateway application
-  routers/            API routers (see [docs/ROUTERS.md](docs/ROUTERS.md))
-  services/           SSH, jobs, audit and integration services
-  models/             Data models and schemas
-  security.py         Authentication, validation and security helpers
-  config.py           Application configuration
-
-examples/             MCP Fleet adapters for AI agents
-  mcp_server/         Gateway MCP adapter (77 tools, unified fleet, SSH)
-  chatgpt_remote_mcp/ ChatGPT remote MCP deployment
-    fleet/            GitHub, Gitea, Context7 remote adapters
-
-docker/
-  docker-compose.yml
-  Dockerfile
-
-tests/
-  Unit and integration tests
-
-docs/
-  Deployment and security documentation
-```
-
----
-
-## Project documents
-
-- [Security model](SECURITY.md)
+- [Security policy and threat model](SECURITY.md)
+- [Practical REST API guide](SSH_GATEWAY_GUIDE.md)
+- [MCP server](examples/mcp_server/README.md)
+- [Deployment overlays](docs/operations/DEPLOYMENT_OVERLAYS.md)
+- [Audit logging](docs/operations/AUDIT_LOGGING.md)
+- [Access control](docs/operations/ACCESS_CONTROL.md)
+- [Notifier](docs/operations/NOTIFIER.md)
+- [Maintainer workflows](docs/OSS_MAINTAINER_WORKFLOWS.md)
+- [Architecture decisions](docs/architecture/)
 - [Changelog](CHANGELOG.md)
 - [Roadmap](docs/roadmap.md)
 
----
+## Project status
+
+`agent-ssh-gateway` is under active development and its public interfaces may
+change before version 1.0. Production use requires an independent security
+review and environment-specific hardening.
 
 ## License
 
