@@ -160,3 +160,51 @@ def test_is_sensitive_key():
     assert not c._is_sensitive_key("MY_VAR")
     assert not c._is_sensitive_key("HOSTNAME")
     assert not c._is_sensitive_key("PATH")
+
+
+def test_redacts_encryption_key_env():
+    """Regression test: ENCRYPTION_KEY previously leaked unredacted because
+    the key-name regex only matched API_KEY/PRIVATE_KEY/ACCESS_KEY
+    explicitly, not a bare '...KEY' suffix.
+    """
+    payload = {"Env": ["ENCRYPTION_KEY=cGxhaW50ZXh0LWZlcm5ldC1rZXk="]}
+    sanitized = _client()._sanitize_inspect_output(json.dumps(payload))
+    data = json.loads(sanitized)
+    assert data["Env"][0] == "ENCRYPTION_KEY=<redacted>"
+    assert "cGxhaW50ZXh0LWZlcm5ldC1rZXk=" not in sanitized
+
+
+def test_redacts_password_in_database_url_env():
+    """Regression test: a DATABASE_URL/REDIS_URL-style connection string
+    previously leaked its embedded password because the variable's own
+    name doesn't contain PASSWORD/SECRET/TOKEN.
+    """
+    payload = {
+        "Env": [
+            "DATABASE_URL=postgresql://dbuser:hunter2@dbhost:5432/appdb",
+            "REDIS_URL=redis://:hunter2@redishost:6379/0",
+        ]
+    }
+    sanitized = _client()._sanitize_inspect_output(json.dumps(payload))
+    data = json.loads(sanitized)
+    assert "hunter2" not in sanitized
+    # Whole value redacted since the key name itself is URL-shaped.
+    assert data["Env"][0] == "DATABASE_URL=<redacted>"
+    assert data["Env"][1] == "REDIS_URL=<redacted>"
+
+
+def test_redacts_dsn_credential_embedded_in_non_url_named_value():
+    """A DSN-style credential embedded in a value whose key name is not
+    itself URL/secret-shaped must still have its password redacted,
+    while the rest of the connection string stays visible.
+    """
+    c = _client()
+    result = c._sanitize_string("postgresql://dbuser:hunter2@dbhost:5432/appdb")
+    assert "hunter2" not in result
+    assert result == "postgresql://dbuser:<redacted>@dbhost:5432/appdb"
+
+
+def test_dsn_redaction_does_not_touch_urls_without_credentials():
+    c = _client()
+    result = c._sanitize_string("http://example.com/path")
+    assert result == "http://example.com/path"
