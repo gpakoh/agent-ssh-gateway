@@ -440,10 +440,10 @@ class GatewayClient:
         output: dict[str, Any] = {}
         for name, command in commands.items():
             if project:
-                job = self.execute_project_command(project, command)
+                result = self.execute_project_command(project, command)
             else:
                 job = self.execute_restricted(command, session_id=session_id)
-            result = self.wait_job(job["job_id"])
+                result = self.wait_job(job["job_id"])
             if name == "tags" and isinstance(result, dict):
                 stdout = result.get("stdout") or result.get("output") or ""
                 lines = stdout.strip().split("\n")[:10]
