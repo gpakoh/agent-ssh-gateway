@@ -414,6 +414,7 @@ class GatewayClient:
             f"/api/projects/{proj}/apply-patch",
             {
                 "session_id": sid,
+                "project": proj,
                 "patch": patch,
                 "expected_hashes": expected_hashes,
                 "strip": strip,

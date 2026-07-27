@@ -60,6 +60,7 @@ def test_gateway_client_apply_patch_calls_correct_endpoint():
         "/api/projects/myproject/apply-patch",
         {
             "session_id": "test-session",
+            "project": "myproject",
             "patch": patch_text,
             "expected_hashes": hashes,
             "strip": 1,
@@ -88,6 +89,7 @@ def test_gateway_client_apply_patch_uses_session_id_override():
         "/api/projects/myproject/apply-patch",
         {
             "session_id": "override-session",
+            "project": "myproject",
             "patch": "--- a/f\n+++ b/f\n",
             "expected_hashes": {},
             "strip": 1,

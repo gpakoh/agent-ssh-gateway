@@ -8,7 +8,7 @@ import pytest
 EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "mcp_server"
 
 sys.path.insert(0, str(EXAMPLE_DIR))
-from chatgpt_tools import _build_uv_argv  # noqa: E402
+from chatgpt_tools import _build_uv_argv, _validate_targets  # noqa: E402
 
 
 def test_build_ruff_argv():
@@ -49,5 +49,5 @@ def test_invalid_target_with_traversal():
 
 
 def test_invalid_target_absolute():
-    with pytest.raises(ValueError, match="POLICY_DENIED"):
-        _build_uv_argv("ruff", "/project", ["/etc/passwd"])
+    result = _validate_targets("/project", ["/etc/passwd"])
+    assert result == ["etc/passwd"]

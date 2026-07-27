@@ -129,6 +129,23 @@ class TestReadonlyBlocksFileWrites:
             )
             assert resp.status_code == 403
 
+    def test_project_apply_patch_dry_run_bypasses_readonly(self, client):
+        """dry_run is read-only — must not be blocked by WORKSPACE_READONLY."""
+        with patch.object(settings, "workspace_readonly", True):
+            resp = client.post(
+                "/api/projects/web-ssh-gateway/apply-patch",
+                json={
+                    "session_id": "fake-session-id",
+                    "project": "web-ssh-gateway",
+                    "patch": "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n",
+                    "dry_run": True,
+                },
+                headers={"X-API-Key": settings.api_key},
+            )
+            # Must NOT be 403 (WORKSPACE_READONLY) — may be 404 (session not found)
+            # which proves the readonly gate was bypassed
+            assert resp.status_code != 403
+
     def test_ast_rename_blocked(self, client):
         with patch.object(settings, "workspace_readonly", True):
             resp = client.post(

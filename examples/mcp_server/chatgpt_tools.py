@@ -90,7 +90,12 @@ def _validate_targets(project_dir: str, targets: list[str]) -> list[str]:
     for t in targets:
         p = Path(t)
         if p.is_absolute():
-            raise ValueError(f"POLICY_DENIED: absolute target not allowed: {t}")
+            parts = p.parts
+            if parts == ("/",) or parts[0] == "/":
+                t = str(Path(*parts[1:])) if len(parts) > 1 else "."
+                p = Path(t)
+            else:
+                raise ValueError(f"POLICY_DENIED: absolute target not allowed: {t}")
         if ".." in p.parts:
             raise ValueError(f"POLICY_DENIED: path traversal in target: {t}")
         resolved = (root / p).resolve()
@@ -498,7 +503,8 @@ def _run_uv_tool(
         return tool_error(code=code.strip(), message=msg.strip(), tool_name=tool_name)
 
     check_result = client.execute_raw("command -v uv")
-    if check_result.get("exit_code", 1) != 0:
+    check_job = client.wait_job(check_result["job_id"])
+    if check_job.get("exit_code", 1) != 0:
         return tool_error(
             code="DEPENDENCY_MISSING",
             message="Required executable 'uv' was not found",
@@ -720,11 +726,11 @@ def project_show_changes(client: GatewayClient, project: str) -> dict[str, Any]:
 
 
 def project_run_tests(client: GatewayClient, project: str) -> dict[str, Any]:
-    return run_project_command(client, project, "pytest -q")
+    return _run_uv_tool(client, project, "pytest", "project_run_tests", ["."])
 
 
 def project_run_lint(client: GatewayClient, project: str) -> dict[str, Any]:
-    return run_project_command(client, project, "ruff check app tests examples")
+    return _run_uv_tool(client, project, "ruff", "project_run_lint", ["app", "tests", "examples"])
 
 
 def project_run_compileall(
