@@ -397,7 +397,6 @@ class SSHSessionManager:
             paramiko.Ed25519Key,
             paramiko.RSAKey,
             paramiko.ECDSAKey,
-            paramiko.DSSKey,
         ):
             key_file.seek(0)
             try:
