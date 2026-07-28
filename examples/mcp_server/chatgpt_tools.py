@@ -497,6 +497,63 @@ def project_show_file_diff(
 # ── Project test target tools ───────────────────────────────────
 
 
+def _build_readonly_fallback_script(
+    tool_key: str,
+    project_dir: str,
+    targets: list[str],
+) -> str:
+    """Build a script that sets up a writable temp project for read-only mounts.
+
+    Reuses a cached venv in /tmp/.mcp-test/<name>/ if it already exists and
+    pyproject.toml hasn't changed (by comparing a stamp file).  Only runs
+    ``uv sync`` on first call or when deps change.
+    """
+    tmp_root = f"/tmp/.mcp-test/{Path(project_dir).name}"
+    abs_targets = []
+    for t in targets:
+        p = Path(t)
+        if p.is_absolute():
+            abs_targets.append(str(p))
+        else:
+            abs_targets.append(str(Path(project_dir) / t))
+    target_args = " ".join(shlex.quote(t) for t in abs_targets)
+
+    lines = [
+        "set -eu",
+        f"mkdir -p {tmp_root}",
+        f"cp {project_dir}/pyproject.toml {tmp_root}/pyproject.toml.new",
+        f"echo 3.12 > {tmp_root}/.python-version",
+        f"STAMP={tmp_root}/.uv_sync_stamp",
+        f"NEED_SYNC=0",
+        f"if [ ! -f $STAMP ]; then NEED_SYNC=1; fi",
+        f"if ! diff -q {tmp_root}/pyproject.toml.new {tmp_root}/pyproject.toml >/dev/null 2>&1; then NEED_SYNC=1; fi",
+        f"if [ $NEED_SYNC -eq 1 ]; then",
+        f"  cp {tmp_root}/pyproject.toml.new {tmp_root}/pyproject.toml",
+        f"  test -f {project_dir}/setup.cfg && cp {project_dir}/setup.cfg {tmp_root}/ || true",
+        f"  cd {tmp_root}",
+        f"  uv sync --extra dev 2>&1",
+        f"  touch $STAMP",
+        f"fi",
+        f"rm -f {tmp_root}/pyproject.toml.new",
+    ]
+
+    for entry in ("app", "tests"):
+        src = f"{project_dir}/{entry}"
+        dst = f"{tmp_root}/{entry}"
+        lines.append(f"if [ -e {src} ] && [ ! -e {dst} ]; then ln -sf {src} {dst}; fi")
+
+    lines.append(f"cd {tmp_root}")
+
+    if tool_key == "pytest":
+        lines.append(f"uv run pytest -o cache_dir=/tmp/.mcp-pytest-cache {target_args} 2>&1")
+    elif tool_key == "ruff":
+        lines.append(f"RUFF_CACHE_DIR=/tmp/.mcp-ruff-cache uv run ruff check {target_args} 2>&1")
+    elif tool_key == "mypy":
+        lines.append(f"uv run mypy {target_args} 2>&1")
+
+    return "\n".join(lines)
+
+
 def _run_uv_tool(
     client: GatewayClient,
     project: str,
@@ -536,21 +593,19 @@ def _run_uv_tool(
     )
 
     if is_readonly_fail:
-        try:
-            uvx_argv = _build_uvx_argv(tool_key, targets)
-        except ValueError:
-            uvx_argv = None
-        if uvx_argv:
-            r2 = client.execute_argv(
-                ["env", "RUFF_CACHE_DIR=/tmp/.mcp-ruff-cache"] + uvx_argv,
-                cwd=str(project_dir),
-            )
+        if tool_key in ("pytest", "mypy"):
+            script = _build_readonly_fallback_script(tool_key, str(project_dir), targets)
+            r2 = client.execute_project_script(project, script, timeout_s=300)
             outcome2, error_code2 = _map_uv_exit_code(tool_key, r2.get("exit_code", -1))
             if error_code2:
                 return tool_error(
                     code=error_code2,
                     message=f"{tool_key} failed with exit code {r2.get('exit_code')}",
-                    details={"exit_code": r2.get("exit_code"), "stderr": r2.get("stderr", "")},
+                    details={
+                        "exit_code": r2.get("exit_code"),
+                        "stderr": r2.get("stderr", ""),
+                        "hint": "Read-only workspace: uv synced deps into /tmp fallback venv",
+                    },
                     tool_name=tool_name,
                 )
             return tool_success(
@@ -564,6 +619,35 @@ def _run_uv_tool(
                 ),
                 tool_name=tool_name,
             )
+        else:
+            try:
+                uvx_argv = _build_uvx_argv(tool_key, targets)
+            except ValueError:
+                uvx_argv = None
+            if uvx_argv:
+                r2 = client.execute_argv(
+                    ["env", "RUFF_CACHE_DIR=/tmp/.mcp-ruff-cache"] + uvx_argv,
+                    cwd=str(project_dir),
+                )
+                outcome2, error_code2 = _map_uv_exit_code(tool_key, r2.get("exit_code", -1))
+                if error_code2:
+                    return tool_error(
+                        code=error_code2,
+                        message=f"{tool_key} failed with exit code {r2.get('exit_code')}",
+                        details={"exit_code": r2.get("exit_code"), "stderr": r2.get("stderr", "")},
+                        tool_name=tool_name,
+                    )
+                return tool_success(
+                    build_command_result(
+                        outcome=outcome2,
+                        exit_code=r2.get("exit_code", 0),
+                        stdout=r2.get("stdout") or r2.get("output", ""),
+                        stderr=r2.get("stderr", ""),
+                        execution_duration_ms=r2.get("execution_duration_ms"),
+                        job_id=r2.get("job_id"),
+                    ),
+                    tool_name=tool_name,
+                )
 
     outcome, error_code = _map_uv_exit_code(tool_key, raw.get("exit_code", -1))
     if error_code:

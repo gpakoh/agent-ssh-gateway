@@ -99,6 +99,7 @@ class GatewayClient:
         self.session_id = session_id or os.environ.get("GATEWAY_SESSION_ID", "")
         self.command_timeout = int(os.environ.get("MCP_GATEWAY_COMMAND_TIMEOUT", "120"))
         self.job_timeout = int(os.environ.get("MCP_GATEWAY_JOB_TIMEOUT", "180"))
+        self._http_timeout = int(os.environ.get("MCP_GATEWAY_HTTP_TIMEOUT", "120"))
 
         self._reconnect_lock = threading.Lock()
         self._ssh_host = os.environ.get("GATEWAY_SSH_HOST", "")
@@ -224,7 +225,7 @@ class GatewayClient:
             f"{self.base_url}{path}",
             json=payload,
             headers=self._headers(),
-            timeout=30,
+            timeout=self._http_timeout,
         )
         if response.status_code >= 400:
             body: dict[str, Any] | None = None
@@ -385,7 +386,7 @@ class GatewayClient:
 
         try:
             result = self.execute_argv(
-                ["bash", host_path],
+                ["sh", host_path],
                 timeout_s=timeout_s or self.command_timeout,
                 cwd=cwd,
             )
