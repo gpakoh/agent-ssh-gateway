@@ -95,3 +95,249 @@ class TestReadOnlyFallbackNoPathTraversal:
         assert result["ok"] is True
         assert "etc/passwd" in str(call_log)
         assert "/etc/passwd" not in str(call_log)
+
+
+class _MockJobClient:
+    """Mock gateway client that returns canned job responses.
+    
+    First execute_raw must be 'command -v uv' → exit 0 (uv present).
+    Second execute_raw is the tool command → uses tool_exit_code.
+    """
+
+    def __init__(self, tool_exit_code: int, stdout: str = "", stderr: str = ""):
+        self._calls: list[str] = []
+        self._tool_exit = tool_exit_code
+        self._stdout = stdout
+        self._stderr = stderr
+
+    def execute_raw(self, cmd: str, **kw) -> dict:
+        self._calls.append(cmd)
+        if cmd == "command -v uv":
+            return {"job_id": "j0"}
+        return {"job_id": "j1"}
+
+    def wait_job(self, job_id: str, **kw) -> dict:
+        if job_id == "j0":
+            return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+        return {
+            "exit_code": self._tool_exit,
+            "stdout": self._stdout,
+            "stderr": self._stderr,
+            "execution_duration_ms": 123,
+            "job_id": "j1",
+        }
+
+    @property
+    def calls(self) -> list[str]:
+        return self._calls
+
+
+class TestRunUvToolContract:
+    """Regression tests for the _run_uv_tool response contract.
+    
+    exit_code=0 → tool_success(ok=True, result={outcome, exit_code, ...})
+    exit_code=1 → tool_error(ok=False, result={outcome, exit_code, ...})
+    """
+
+    def _make_mock(self, exit_code=0, stdout="", stderr="", with_fallback=False):
+        """Create a mock client with controlled tool exit_code.
+        
+        First execute_raw('command -v uv') → uv found.
+        Second execute_raw(tool) → controlled exit_code + output.
+        When with_fallback=True, also has execute_project_script.
+        """
+        class _Mock:
+            def __init__(self):
+                self._phase = 0
+            def execute_raw(self, cmd, **kw):
+                self._phase += 1
+                return {"job_id": f"j{self._phase}"}
+            def wait_job(self, job_id, **kw):
+                if "j0" in job_id:
+                    return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+                return {
+                    "exit_code": exit_code,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "execution_duration_ms": 123,
+                    "job_id": job_id,
+                }
+            def execute_project_script(self, proj, script, timeout_s=300):
+                return {
+                    "exit_code": exit_code,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "execution_duration_ms": 456,
+                    "job_id": "j-fallback",
+                }
+        return _Mock()
+
+    def test_pytest_success(self, monkeypatch):
+        from mcp_client_tools import _run_uv_tool
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        client = self._make_mock(exit_code=0, stdout="OK", stderr="")
+        result = _run_uv_tool(client, "proj", "pytest", "project_run_pytest", target=["."])
+        assert result["ok"] is True
+        assert result["result"]["outcome"] == "passed"
+        assert result["result"]["exit_code"] == 0
+        assert result["result"]["stdout"] == "OK"
+        assert result["error"] is None
+
+    def test_pytest_failure(self, monkeypatch):
+        from mcp_client_tools import _run_uv_tool
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        client = self._make_mock(exit_code=1, stdout="FAILED_TEST", stderr="1 failed")
+        result = _run_uv_tool(client, "proj", "pytest", "project_run_pytest", target=["."])
+        assert result["ok"] is False
+        assert result["result"]["outcome"] == "failed"
+        assert result["result"]["exit_code"] == 1
+        assert result["result"]["stdout"] == "FAILED_TEST"
+        assert result["result"]["stderr"] == "1 failed"
+        assert result["error"]["code"] == "CHECK_FAILED"
+
+    def test_mypy_success(self, monkeypatch):
+        from mcp_client_tools import _run_uv_tool
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        client = self._make_mock(exit_code=0, stdout="Success: no issues")
+        result = _run_uv_tool(client, "proj", "mypy", "project_run_mypy", target=["."])
+        assert result["ok"] is True
+        assert result["result"]["outcome"] == "passed"
+        assert result["result"]["exit_code"] == 0
+
+    def test_mypy_failure(self, monkeypatch):
+        from mcp_client_tools import _run_uv_tool
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        client = self._make_mock(exit_code=1, stdout="", stderr="found 3 errors")
+        result = _run_uv_tool(client, "proj", "mypy", "project_run_mypy", target=["."])
+        assert result["ok"] is False
+        assert result["result"]["outcome"] == "failed"
+        assert result["result"]["exit_code"] == 1
+        assert result["result"]["stderr"] == "found 3 errors"
+        assert result["error"]["code"] == "CHECK_FAILED"
+
+    def test_validation_error_still_returns_ok_false(self, monkeypatch):
+        """Validation errors (invalid target) must use tool_error, not break run_tool."""
+        from mcp_client_tools import _run_uv_tool
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        client = self._make_mock()
+        result = _run_uv_tool(client, "proj", "pytest", "project_run_pytest", target=["../escape"])
+        assert result["ok"] is False
+        assert result["error"]["code"] == "POLICY_DENIED"
+
+    def test_fallback_success_structure(self, monkeypatch):
+        """Read-only fallback returns tool_success with same shape as normal path."""
+        from mcp_client_tools import _run_uv_tool
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        monkeypatch.setattr(
+            "mcp_client_tools._build_readonly_fallback_script",
+            lambda *a: "echo ok",
+        )
+        class _FB:
+            def __init__(self):
+                self._n = 0
+            def execute_raw(self, cmd, **kw):
+                self._n += 1
+                return {"job_id": f"j{self._n}"}
+            def wait_job(self, job_id, **kw):
+                if job_id in ("j0", "j1"):
+                    return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+                return {"exit_code": 1, "stdout": "", "stderr": "read-only file system"}
+            def execute_project_script(self, proj, script, timeout_s=300):
+                return {"exit_code": 0, "stdout": "fallback OK", "stderr": "", "execution_duration_ms": 456, "job_id": "j-fb"}
+
+        result = _run_uv_tool(_FB(), "proj", "pytest", "project_run_pytest", target=["."])
+        assert result["ok"] is True
+        assert result["result"]["outcome"] == "passed"
+        assert result["result"]["exit_code"] == 0
+        assert result["result"]["stdout"] == "fallback OK"
+
+    def test_fallback_failure_structure(self, monkeypatch):
+        """Read-only fallback failure returns tool_error with exit_code and outcome."""
+        from mcp_client_tools import _run_uv_tool
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        monkeypatch.setattr(
+            "mcp_client_tools._build_readonly_fallback_script",
+            lambda *a: "echo fail",
+        )
+        class _FB:
+            def __init__(self):
+                self._n = 0
+            def execute_raw(self, cmd, **kw):
+                self._n += 1
+                return {"job_id": f"j{self._n}"}
+            def wait_job(self, job_id, **kw):
+                if job_id in ("j0", "j1"):
+                    return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+                return {"exit_code": 1, "stdout": "", "stderr": "read-only file system"}
+            def execute_project_script(self, proj, script, timeout_s=300):
+                return {"exit_code": 1, "stdout": "", "stderr": "2 failed", "execution_duration_ms": 456, "job_id": "j-fb"}
+
+        result = _run_uv_tool(_FB(), "proj", "pytest", "project_run_pytest", target=["."])
+        assert result["ok"] is False
+        assert result["result"]["outcome"] == "failed"
+        assert result["result"]["exit_code"] == 1
+        assert result["result"]["stderr"] == "2 failed"
+        assert result["error"]["code"] == "CHECK_FAILED"
+
+    def test_run_tool_wraps_uv_failure_as_error_result(self, monkeypatch):
+        """run_tool wrapper must set isError for tool_error from _run_uv_tool."""
+        from examples.mcp_server.server import run_tool
+        from mcp_client_tools import _run_uv_tool
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        client = self._make_mock(exit_code=1, stdout="", stderr="2 failed")
+        fn = lambda: _run_uv_tool(client, "proj", "pytest", "project_run_pytest", target=["."])
+        result = run_tool(tool="project_run_pytest", title="Test", fn=fn, success_text="Done")
+        assert result.get("isError") is True
+        assert result["structuredContent"]["ok"] is False
+        assert result["structuredContent"]["result"]["exit_code"] == 1
+
+
+class TestMapUvExitCodeContract:
+    """Direct unit tests for _map_uv_exit_code edge cases."""
+
+    def test_pytest_no_tests_exit_code_5(self):
+        from mcp_client_tools import _map_uv_exit_code
+        outcome, error = _map_uv_exit_code("pytest", 5)
+        assert outcome == "failed"
+        assert error is None
+
+    def test_pytest_unknown_exit_code_returns_error(self):
+        from mcp_client_tools import _map_uv_exit_code
+        outcome, error = _map_uv_exit_code("pytest", 3)
+        assert outcome is None
+        assert error == "TOOL_EXECUTION_FAILED"
+
+    def test_ruff_failure_exit_code_1(self):
+        from mcp_client_tools import _map_uv_exit_code
+        outcome, error = _map_uv_exit_code("ruff", 1)
+        assert outcome == "failed"
+        assert error is None
+
+    def test_ruff_unknown_exit_code_returns_error(self):
+        from mcp_client_tools import _map_uv_exit_code
+        outcome, error = _map_uv_exit_code("ruff", 2)
+        assert outcome is None
+        assert error == "TOOL_EXECUTION_FAILED"
+
+    def test_pytest_success_exit_code_0(self):
+        from mcp_client_tools import _map_uv_exit_code
+        outcome, error = _map_uv_exit_code("pytest", 0)
+        assert outcome == "passed"
+        assert error is None
+
+    def test_ruff_success_exit_code_0(self):
+        from mcp_client_tools import _map_uv_exit_code
+        outcome, error = _map_uv_exit_code("ruff", 0)
+        assert outcome == "passed"
+        assert error is None
+
+
+class TestReadOnlyFallbackTraversal:
+    """_build_readonly_fallback_script relies on callers (_validate_targets) for path traversal
+    protection. This documents that the function itself does NOT block '..' — the guarantee lives
+    at the _run_uv_tool → _validate_targets layer."""
+
+    def test_readonly_fallback_does_not_self_validate_traversal(self):
+        from mcp_client_tools import _build_readonly_fallback_script
+        script = _build_readonly_fallback_script("pytest", "/project", ["../outside"])
+        assert "../outside" in script or "/project/../outside" in script
