@@ -14,6 +14,7 @@ the OAuth authorization flow.
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
 import sys
 from collections.abc import Callable
@@ -36,6 +37,7 @@ from starlette.responses import (  # noqa: E402
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
+    Response,
     StreamingResponse,
 )
 
@@ -63,6 +65,8 @@ if prov is not None and MCP_PUBLIC_URL:
 MCP_INTERNAL_HOST = os.environ.get("MCP_INTERNAL_HOST", "127.0.0.1")
 MCP_INTERNAL_PORT = int(os.environ.get("MCP_INTERNAL_PORT", "8789"))
 MCP_INTERNAL_URL = f"http://{MCP_INTERNAL_HOST}:{MCP_INTERNAL_PORT}"
+
+logger = logging.getLogger("chatgpt_remote_mcp")
 
 MCP_AUTH_MODE = os.environ.get("MCP_AUTH_MODE", "oauth").strip().lower()
 if MCP_AUTH_MODE not in ("token", "oauth"):
@@ -116,14 +120,18 @@ class OAuthProxyMiddleware(BaseHTTPMiddleware):
 
         if MCP_AUTH_MODE == "oauth":
             if has_bearer:
+                token_preview = auth_header[7:19] + "..."
+                logger.info(f"AUTH OK path={path} token={token_preview}")
                 request.state.auth_token = auth_header.removeprefix("Bearer ")
                 return await call_next(request)
             if has_mcp_token:
+                logger.warning(f"AUTH REJECT mcp_token path={path}")
                 return JSONResponse(
                     {"error": "mcp_token is not accepted in oauth mode"},
                     status_code=401,
                     headers={"WWW-Authenticate": f'Bearer realm="mcp", resource="{MCP_PUBLIC_URL}/"'},
                 )
+            logger.warning(f"AUTH REJECT no_bearer path={path} method={request.method}")
             return JSONResponse(
                 {"error": "Missing Authorization: Bearer header"},
                 status_code=401,
@@ -225,7 +233,7 @@ async def _check_tool_scope(request: Request, path: str, body: bytes) -> JSONRes
     return None
 
 
-async def proxy_request(request: Request) -> StreamingResponse | JSONResponse:
+async def proxy_request(request: Request) -> StreamingResponse | JSONResponse | Response:
     """Proxy an HTTP request to the internal MCP server."""
     target_path = request.url.path
     if target_path == "/":
@@ -256,6 +264,11 @@ async def proxy_request(request: Request) -> StreamingResponse | JSONResponse:
                 content=body,
                 headers=headers,
             )
+            logger.info(f"PROXY {request.method} {request.url.path} -> {url} -> {resp.status_code}")
+            if resp.status_code == 401:
+                resp_body = await resp.aread()
+                logger.warning(f"PROXY 401 body={resp_body[:500]!r}")
+                return Response(content=resp_body, status_code=resp.status_code, headers=dict(resp.headers))
             return StreamingResponse(
                 content=resp.aiter_bytes(),
                 status_code=resp.status_code,
@@ -410,20 +423,12 @@ async def openid_configuration(request: Request) -> JSONResponse:
         "authorization_endpoint": f"{base}/authorize",
         "token_endpoint": f"{base}/token",
         "registration_endpoint": f"{base}/register",
-        "jwks_uri": f"{base}/.well-known/jwks",
         "scopes_supported": scopes,
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic", "none"],
         "code_challenge_methods_supported": ["S256"],
-        "subject_types_supported": ["public"],
-        "id_token_signing_alg_values_supported": ["RS256"],
     })
-
-
-async def jwks(request: Request) -> JSONResponse:
-    """Return empty JWKS (no ID token signing support)."""
-    return JSONResponse({"keys": []})
 
 
 def create_proxy_app() -> Starlette:
@@ -432,7 +437,6 @@ def create_proxy_app() -> Starlette:
     proxy.add_middleware(OAuthProxyMiddleware)
     proxy.add_route("/oauth/consent", consent_handler, methods=["GET", "POST"])
     proxy.add_route("/.well-known/openid-configuration", openid_configuration, methods=["GET"])
-    proxy.add_route("/.well-known/jwks", jwks, methods=["GET"])
     proxy.add_route("/", proxy_request, methods=["GET", "POST", "DELETE"])
     proxy.add_route("/{path:path}", proxy_request, methods=["GET", "POST", "DELETE"])
     return proxy
