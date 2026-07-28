@@ -12,6 +12,8 @@ MAX_FILE_SIZE = 256 * 1024
 REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 API_BASE = os.environ.get("GITEA_API_BASE", "https://git.example.com/api/v1")
+GITEA_FORWARDED_HOST = os.environ.get("GITEA_FORWARDED_HOST", "")
+GITEA_FORWARDED_PROTO = os.environ.get("GITEA_FORWARDED_PROTO", "https")
 
 ALLOWED_ENDPOINTS = frozenset(
     {
@@ -37,14 +39,19 @@ class GiteaClient:
     def __init__(self, token: str) -> None:
         if not token:
             raise ValueError("GITEA_TOKEN is required")
+        headers: dict[str, str] = {
+            "Authorization": f"token {token}",
+            "Accept": "application/json",
+            "User-Agent": "agent-ssh-gateway-mcp/1.0",
+        }
+        if GITEA_FORWARDED_HOST:
+            headers["X-Forwarded-Host"] = GITEA_FORWARDED_HOST
+            headers["X-Forwarded-Proto"] = GITEA_FORWARDED_PROTO
+            headers["Host"] = GITEA_FORWARDED_HOST
         self._client = httpx.AsyncClient(
             base_url=API_BASE,
             proxy=None,
-            headers={
-                "Authorization": f"token {token}",
-                "Accept": "application/json",
-                "User-Agent": "agent-ssh-gateway-mcp/1.0",
-            },
+            headers=headers,
             timeout=REQUEST_TIMEOUT,
         )
 
