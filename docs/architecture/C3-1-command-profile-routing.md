@@ -99,7 +99,7 @@ The MCP server knows which tool it's invoking. The profile is determined by the
 Concrete flow:
 
 ```
-chatgpt_tools.project_run_pytest(client, project)
+mcp_client_tools.project_run_pytest(client, project)
   → _run_uv_tool(client, project, tool_key="pytest", ...)
     → client.execute_project_command(project, command)
       → POST /api/ssh/execute  {session_id, command, async_mode}

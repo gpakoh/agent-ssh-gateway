@@ -43,8 +43,8 @@ Over the authenticated SSE session:
 - `initialize` completed successfully
 - `list_tools` returned exactly the expected **84** safe tools
 - The returned tool set exactly matched
-  `tool_modes.get_chatgpt_safe_tools()` — no drift
-- None of the 30 `CHATGPT_BLOCKED_TOOLS` were present in the returned
+  `tool_modes.get_mcp_client_safe_tools()` — no drift
+- None of the 30 `MCP_CLIENT_BLOCKED_TOOLS` were present in the returned
   tool set
 - `tools_manifest` was called and returned without error
 

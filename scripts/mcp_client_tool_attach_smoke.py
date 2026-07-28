@@ -22,7 +22,7 @@ _MCP_DIR = os.path.join(os.path.dirname(__file__), "..", "examples", "mcp_server
 if _MCP_DIR not in sys.path:
     sys.path.insert(0, _MCP_DIR)
 
-from tool_modes import CHATGPT_BLOCKED_TOOLS, get_chatgpt_safe_tools  # noqa: E402
+from tool_modes import MCP_CLIENT_BLOCKED_TOOLS, get_mcp_client_safe_tools  # noqa: E402
 
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8085").rstrip("/")
 AGENT_TOKEN = os.getenv("GATEWAY_AGENT_TOKEN", "")
@@ -64,8 +64,8 @@ def main() -> int:
     check("capabilities", "version" in caps)
 
     # 3. Safe mode tool set validation
-    safe_tools = get_chatgpt_safe_tools()
-    blocked = CHATGPT_BLOCKED_TOOLS
+    safe_tools = get_mcp_client_safe_tools()
+    blocked = MCP_CLIENT_BLOCKED_TOOLS
 
     check("safe set is non-empty", len(safe_tools) > 0, f"{len(safe_tools)} tools")
     check("blocked set is non-empty", len(blocked) > 0, f"{len(blocked)} tools")

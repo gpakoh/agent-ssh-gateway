@@ -16,7 +16,7 @@
 - No `scripts/mimo_runner_wrapper.py` — only MCP tool
 - All paths to `.ai-bridge/tasks/` use `$PROJECT_REAL` (absolute), not `$td` alone
 - `git diff` is captured from worktree path, not project root
-- Tool name: `gateway_project_run_mimo`, visibility: chatgpt mode only
+- Tool name: `gateway_project_run_mimo`, visibility: mcp_client mode only
 - `MCP_GATEWAY_WORKTREE_ROOT` env var required for runtime guards
 - Write mode guard: `assert_handoff_write_allowed()` required
 
@@ -466,7 +466,7 @@ git commit -m "feat: add mimo_tools.py with project_run_mimo() and 11 pre-flight
 
 **Interfaces:**
 - Consumes: `project_run_mimo` from `mimo_tools.py` (Task 1), `should_register_tool` from `tool_modes.py`
-- Produces: Registered MCP tool `gateway_project_run_mimo` (visible only in chatgpt mode)
+- Produces: Registered MCP tool `gateway_project_run_mimo` (visible only in mcp_client mode)
 
 - [ ] **Step 1: Import `project_run_mimo` in server.py**
 
@@ -507,7 +507,7 @@ def gateway_project_run_mimo(
     )
 ```
 
-- [ ] **Step 3: Add `gateway_project_run_mimo` to chatgpt tool set in tool_modes.py**
+- [ ] **Step 3: Add `gateway_project_run_mimo` to mcp_client tool set in tool_modes.py**
 
 After `"project_run_opencode"` (line 130), add a comma and:
 
@@ -525,7 +525,7 @@ MIMO_BIN = os.getenv("MIMO_BIN") or shutil.which("mimo") or "/root/.mimocode/bin
 
 class TestToolRegistration:
     def test_registered_in_chatgpt_mode(self, monkeypatch):
-        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
         import importlib
         import sys
         example_dir = EXAMPLE_DIR
@@ -535,7 +535,7 @@ class TestToolRegistration:
         assert tm.should_register_tool("gateway_project_run_mimo") is True
 
     def test_visible_in_tools_for_chatgpt(self, monkeypatch):
-        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
         import importlib
         import sys
         example_dir = EXAMPLE_DIR
@@ -552,7 +552,7 @@ class TestServerTool:
         reason="mcp package not installed; only available with optional dependencies",
     )
     def test_tool_function_can_be_imported(self, monkeypatch):
-        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
         import importlib
         import sys
         example_dir = EXAMPLE_DIR
@@ -586,7 +586,7 @@ cd <repo-root> && python3 -m ruff check examples/mcp_server/ tests/ && python3 -
 ```bash
 cd <repo-root>
 git add examples/mcp_server/server.py examples/mcp_server/tool_modes.py tests/test_mcp_mimo.py
-git commit -m "feat: register gateway_project_run_mimo MCP tool (chatgpt mode only)"
+git commit -m "feat: register gateway_project_run_mimo MCP tool (mcp_client mode only)"
 ```
 
 ---

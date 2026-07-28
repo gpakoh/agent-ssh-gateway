@@ -22,14 +22,14 @@
 - `pending_actions` list masks full token, shows prefix only
 - argv-only, no `shell=True`
 - All new tools scoped `["mcp:docker"]`
-- All new tools registered in `chatgpt` mode, not in `minimal`/`standard`/`full`
+- All new tools registered in `mcp_client` mode, not in `minimal`/`standard`/`full`
 
 ---
 
 ### Task 1: DockerClient — RunResult + _run_with_result
 
 **Files:**
-- Modify: `examples/chatgpt_remote_mcp/fleet/docker_client.py`
+- Modify: `examples/mcp_client_remote/fleet/docker_client.py`
 
 **Interfaces:**
 - Produces: `RunResult(stdout: str, stderr: str, exit_code: int)` dataclass, `async _run_with_result(argv, timeout) -> RunResult`
@@ -84,13 +84,13 @@ async def _run_with_result(
 
 - [ ] **Step 3: Verify the file parses**
 
-Run: `python -c "import ast; ast.parse(open('examples/chatgpt_remote_mcp/fleet/docker_client.py').read()); print('OK')"`
+Run: `python -c "import ast; ast.parse(open('examples/mcp_client_remote/fleet/docker_client.py').read()); print('OK')"`
 Expected: OK
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add examples/chatgpt_remote_mcp/fleet/docker_client.py
+git add examples/mcp_client_remote/fleet/docker_client.py
 git commit -m "feat(docker): add RunResult and _run_with_result"
 ```
 
@@ -99,7 +99,7 @@ git commit -m "feat(docker): add RunResult and _run_with_result"
 ### Task 2: DockerClient — rm, compose_down, prune, _validate_prune_type
 
 **Files:**
-- Modify: `examples/chatgpt_remote_mcp/fleet/docker_client.py`
+- Modify: `examples/mcp_client_remote/fleet/docker_client.py`
 
 **Interfaces:**
 - Consumes: `RunResult`, `_run_with_result` (from Task 1)
@@ -166,13 +166,13 @@ async def prune(self, type: str = "container") -> RunResult:
 
 - [ ] **Step 6: Quick parse check**
 
-Run: `python -c "import ast; ast.parse(open('examples/chatgpt_remote_mcp/fleet/docker_client.py').read()); print('OK')"`
+Run: `python -c "import ast; ast.parse(open('examples/mcp_client_remote/fleet/docker_client.py').read()); print('OK')"`
 Expected: OK
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add examples/chatgpt_remote_mcp/fleet/docker_client.py
+git add examples/mcp_client_remote/fleet/docker_client.py
 git commit -m "feat(docker): add rm, compose_down, prune methods"
 ```
 
@@ -634,7 +634,7 @@ Add after line 149 (after `"docker_compose_logs": ["mcp:docker"],`):
     "docker_pending_actions": ["mcp:docker"],
 ```
 
-- [ ] **Step 7: Add 5 tools to `tool_modes.py` chatgpt set**
+- [ ] **Step 7: Add 5 tools to `tool_modes.py` mcp_client set**
 
 Add after line 129 (after `"docker_compose_logs",`):
 

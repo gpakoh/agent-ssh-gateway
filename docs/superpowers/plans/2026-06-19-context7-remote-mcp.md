@@ -32,8 +32,8 @@ From `~/.config/opencode/opencode.json`:
 ### Task 1: shared.py — Fleet shared utilities
 
 **Files:**
-- Create: `examples/chatgpt_remote_mcp/fleet/__init__.py`
-- Create: `examples/chatgpt_remote_mcp/fleet/shared.py`
+- Create: `examples/mcp_client_remote/fleet/__init__.py`
+- Create: `examples/mcp_client_remote/fleet/shared.py`
 
 **Interfaces:**
 - Produces: `get_bearer_token(request) -> str | None` — extracts `mcp_token` from query params
@@ -95,7 +95,7 @@ def get_fleet_env() -> dict[str, str]:
 - [ ] **Step 3: Commit**
 
 ```bash
-git add examples/chatgpt_remote_mcp/fleet/__init__.py examples/chatgpt_remote_mcp/fleet/shared.py
+git add examples/mcp_client_remote/fleet/__init__.py examples/mcp_client_remote/fleet/shared.py
 git commit -m "fleet: add shared.py with TokenAuthMiddleware"
 ```
 
@@ -104,14 +104,14 @@ git commit -m "fleet: add shared.py with TokenAuthMiddleware"
 ### Task 2: context7_server.py — Stdio-to-HTTP MCP bridge
 
 **Files:**
-- Create: `examples/chatgpt_remote_mcp/fleet/context7_server.py`
+- Create: `examples/mcp_client_remote/fleet/context7_server.py`
 
 **Interfaces:**
 - Consumes: `TokenAuthMiddleware` from `shared.py`, `get_fleet_env()` from `shared.py`
 - Produces: FastMCP server on `<MCP_HOST>:<MCP_PORT>/mcp` with Context7 tools proxied over Streamable HTTP
-- Command: `python -m examples.chatgpt_remote_mcp.fleet.context7_server`
+- Command: `python -m examples.mcp_client_remote.fleet.context7_server`
 
-- [ ] **Step 1: Write `context7_server.py` — follows the same pattern as `chatgpt_remote_mcp/server.py` (two-thread: internal FastMCP streamable-http + external auth proxy)**
+- [ ] **Step 1: Write `context7_server.py` — follows the same pattern as `mcp_client_remote/server.py` (two-thread: internal FastMCP streamable-http + external auth proxy)**
 
 ```python
 """Context7 MCP adapter — stdio-to-HTTP bridge for ChatGPT remote access."""
@@ -243,7 +243,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Commit**
 
 ```bash
-git add examples/chatgpt_remote_mcp/fleet/context7_server.py
+git add examples/mcp_client_remote/fleet/context7_server.py
 git commit -m "fleet: add Context7 MCP adapter (stdio bridge)"
 ```
 
@@ -267,7 +267,7 @@ EOF
 ```bash
 cd <repo-root>
 set -a; source /tmp/test-context7.env; set +a
-examples/chatgpt_remote_mcp/.venv/bin/python -m examples.chatgpt_remote_mcp.fleet.context7_server &
+examples/mcp_client_remote/.venv/bin/python -m examples.mcp_client_remote.fleet.context7_server &
 PID=$!
 sleep 5
 echo "Server PID: $PID"
@@ -347,8 +347,8 @@ Wants=network-online.target
 Type=simple
 User=root
 EnvironmentFile=<mcp-env-file>
-ExecStart=<repo-root>/examples/chatgpt_remote_mcp/.venv/bin/python \
-  -m examples.chatgpt_remote_mcp.fleet.context7_server
+ExecStart=<repo-root>/examples/mcp_client_remote/.venv/bin/python \
+  -m examples.mcp_client_remote.fleet.context7_server
 WorkingDirectory=<repo-root>
 Restart=always
 RestartSec=5
@@ -372,7 +372,7 @@ Expected: `active`.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add examples/chatgpt_remote_mcp/fleet/context7_server.py
+git add examples/mcp_client_remote/fleet/context7_server.py
 git commit -m "fleet: Context7 adapter ready for deploy"
 ```
 

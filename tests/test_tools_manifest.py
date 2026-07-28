@@ -43,11 +43,11 @@ def sample_tools() -> list[FakeTool]:
 
 class TestBuildManifest:
     def test_returns_dict(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, scope_enforcement="audit", mode_override="chatgpt")
+        result = build_manifest(sample_tools, scope_enforcement="audit", mode_override="mcp_client")
         assert isinstance(result, dict)
 
     def test_contains_required_top_fields(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, scope_enforcement="enforce", mode_override="chatgpt")
+        result = build_manifest(sample_tools, scope_enforcement="enforce", mode_override="mcp_client")
         for field in (
             "active_mode",
             "scope_enforcement",
@@ -59,114 +59,114 @@ class TestBuildManifest:
             assert field in result, f"Missing field: {field}"
 
     def test_active_mode_is_string(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         assert isinstance(result["active_mode"], str)
-        assert result["active_mode"] in ("minimal", "standard", "full", "chatgpt")
+        assert result["active_mode"] in ("minimal", "standard", "full", "mcp_client")
 
     def test_scope_enforcement_defaults_to_audit(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         assert result["scope_enforcement"] == "audit"
 
     def test_scope_enforcement_respected(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, scope_enforcement="enforce", mode_override="chatgpt")
+        result = build_manifest(sample_tools, scope_enforcement="enforce", mode_override="mcp_client")
         assert result["scope_enforcement"] == "enforce"
 
     def test_tool_count_matches(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         assert result["tool_count"] == len(sample_tools)
 
     def test_every_tool_has_name(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         for tool in result["tools"]:
             assert "name" in tool
             assert isinstance(tool["name"], str)
             assert tool["name"]
 
     def test_no_duplicate_tool_names(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         names = [t["name"] for t in result["tools"]]
         assert len(names) == len(set(names)), f"Duplicates: {names}"
 
     def test_tools_have_scopes_field(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         for tool in result["tools"]:
             assert "scopes" in tool
             assert isinstance(tool["scopes"], list)
             assert all(isinstance(s, str) for s in tool["scopes"])
 
     def test_tools_have_enabled_field(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         for tool in result["tools"]:
             assert tool.get("enabled") is True
 
     def test_tools_have_description(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         for tool in result["tools"]:
             assert "description" in tool
 
     def test_known_tool_search_text_present(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         names = [t["name"] for t in result["tools"]]
         assert "project_search_text" in names
 
     def test_known_tool_run_agent_present(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         names = [t["name"] for t in result["tools"]]
         assert "project_run_agent" in names
 
     def test_known_tool_docker_restart_present(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         names = [t["name"] for t in result["tools"]]
         assert "docker_restart" in names
 
     def test_known_tool_docker_compose_up_present(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         names = [t["name"] for t in result["tools"]]
         assert "docker_compose_up" in names
 
     def test_manifest_tool_itself_present(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         names = [t["name"] for t in result["tools"]]
         assert "tools_manifest" in names
 
     def test_scopes_for_known_tool(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         by_name = {t["name"]: t for t in result["tools"]}
         assert "mcp:project" in by_name["project_search_text"]["scopes"]
 
     def test_modes_present(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         assert isinstance(result["modes"], dict)
-        for mode in ("minimal", "standard", "full", "chatgpt"):
+        for mode in ("minimal", "standard", "full", "mcp_client"):
             assert mode in result["modes"], f"Missing mode: {mode}"
 
     def test_mode_has_tool_count(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         for _mode_name, mode_info in result["modes"].items():
             assert "tool_count" in mode_info
             assert isinstance(mode_info["tool_count"], int)
 
     def test_mode_has_tools_list(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         for _mode_name, mode_info in result["modes"].items():
             assert "tools" in mode_info
             assert isinstance(mode_info["tools"], list)
 
     def test_access_profiles_present(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         assert isinstance(result["access_profiles"], dict)
         for profile in ("viewer", "operator", "agent-runner", "infra", "full"):
             assert profile in result["access_profiles"], f"Missing profile: {profile}"
 
     def test_access_profiles_are_scope_lists(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         for _profile_name, scopes in result["access_profiles"].items():
             assert isinstance(scopes, list)
             assert all(isinstance(s, str) for s in scopes)
 
     def test_no_secret_values_in_manifest(self, sample_tools: list[FakeTool]) -> None:
         """Verify no token-like or password-like values leak into the manifest."""
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         serialized = str(result)
         suspicious = ("token", "secret", "password", "key=", "Bearer ")
         for _s in suspicious:
@@ -180,7 +180,7 @@ class TestBuildManifest:
         )
 
     def test_manifest_does_not_contain_env_dump(self, sample_tools: list[FakeTool]) -> None:
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         suspicious_keys = ("GITHUB_TOKEN", "GITEA_TOKEN", "API_KEY", "MCP_PUBLIC_TOKEN")
         serialized = str(result)
         for key in suspicious_keys:
@@ -188,7 +188,7 @@ class TestBuildManifest:
 
     def test_tool_has_modes_field(self, sample_tools: list[FakeTool]) -> None:
         """Each tool should list which modes it belongs to."""
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         for tool in result["tools"]:
             assert "modes" in tool
             assert isinstance(tool["modes"], list)
@@ -196,7 +196,7 @@ class TestBuildManifest:
 
     def test_tool_has_mode_field(self, sample_tools: list[FakeTool]) -> None:
         """Each tool should show its active mode."""
-        result = build_manifest(sample_tools, mode_override="chatgpt")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
         for tool in result["tools"]:
             assert "mode" in tool
             assert isinstance(tool["mode"], str)

@@ -55,9 +55,9 @@ class TestBuildEnv:
 
     def test_safe_mode_env_present(self):
         env = build_env("127.0.0.1", 12345, "tok")
-        assert env["MCP_GATEWAY_TOOL_MODE"] == "chatgpt"
-        assert env["MCP_CHATGPT_SAFE_MODE"] == "true"
-        assert env["MCP_ACCESS_PROFILE"] == "chatgpt_safe"
+        assert env["MCP_GATEWAY_TOOL_MODE"] == "mcp_client"
+        assert env["MCP_CLIENT_SAFE_MODE"] == "true"
+        assert env["MCP_ACCESS_PROFILE"] == "mcp_client_safe"
 
     def test_gateway_env_passthrough_only_when_present(self):
         with patch.dict(os.environ, {}, clear=False):

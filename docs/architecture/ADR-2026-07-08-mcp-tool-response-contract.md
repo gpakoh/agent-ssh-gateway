@@ -11,7 +11,7 @@ MCP tools across the gateway return responses in at least five distinct formats:
 1. **Structured content via `text_result()`/`error_result()`** — all `gateway_*`, `gitea_*`, and `github_*` tools return a `dict[str, Any]` containing `text`, `structuredContent`, and `_meta` keys. This is the most evolved pattern and includes metadata.
 2. **Raw string** — all `docker_*` tools (14 tools) and `postgres_*` tools (6 tools) return `str` directly. The MCP layer wraps it as `content[0].text`, but no `structuredContent` or `_meta` is provided.
 3. **Arbitrary `dict`** — `Context7` tools return `str` extracted from upstream MCP content blocks. The upstream response is opaque.
-4. **Job result dict** — `chatgpt_tools.py` utility functions return raw GatewayClient job result dicts with varying schemas (e.g. `{"stdout", "stdout_full", "stderr", "exit_code", "timed_out", "cancelled"}`).
+4. **Job result dict** — `mcp_client_tools.py` utility functions return raw GatewayClient job result dicts with varying schemas (e.g. `{"stdout", "stdout_full", "stderr", "exit_code", "timed_out", "cancelled"}`).
 5. **Error text with `isError`** — `error_result()` sets `isError: True` in the content block but returns a plain error string. There is no structured error envelope.
 
 This inconsistency creates problems:

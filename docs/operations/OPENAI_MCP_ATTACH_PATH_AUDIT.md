@@ -145,7 +145,7 @@ describes the mode itself as "powerful but dangerous," recommending
 operators test carefully and confirm write actions — this is guidance/risk
 framing, not a protocol-level restriction. No source states that ChatGPT
 *requires* write tools to be excluded; it is this project's own,
-independently-adopted policy (`CHATGPT_BLOCKED_TOOLS`) to exclude them,
+independently-adopted policy (`MCP_CLIENT_BLOCKED_TOOLS`) to exclude them,
 which remains a valid and recommended posture regardless.
 
 ### 1.9 Transport-level security requirements (source #1, direct quote)
@@ -171,8 +171,8 @@ which remains a valid and recommended posture regardless.
 | DCR (RFC 7591) | Existing `GatewayOAuthProvider` (used for the stdio/oauth path) already implements DCR + PKCE S256 — **not wired to any HTTP transport** (see Phase 16A finding: default oauth mode wires into FastMCP for stdio only; the private SSE entrypoint deliberately disables it and uses its own bearer layer instead) |
 | PKCE | Present in `GatewayOAuthProvider`, unused by the current HTTP entrypoint (PKCE is a client-side requirement in any case — relevant only once a real OAuth flow is wired) |
 | Public HTTPS reachability | **Not implemented.** No TLS termination, no reverse proxy, no public bind |
-| Safe tool mode (`chatgpt` + `MCP_CHATGPT_SAFE_MODE=true`) | Implemented, mandatory, fail-fast enforced |
-| Write/docker/agent-launch tools excluded from safe mode | Implemented (`CHATGPT_BLOCKED_TOOLS`, 30 tools) |
+| Safe tool mode (`mcp_client` + `MCP_CLIENT_SAFE_MODE=true`) | Implemented, mandatory, fail-fast enforced |
+| Write/docker/agent-launch tools excluded from safe mode | Implemented (`MCP_CLIENT_BLOCKED_TOOLS`, 30 tools) |
 | Manual rehearsal evidence | Recorded (`docs/operations/MCP_PRIVATE_SSE_REHEARSAL.md`) |
 
 ## 3. Gap matrix
@@ -214,8 +214,8 @@ go from "private rehearsal" to "a real, officially-compliant attach point,"
 4. Public reachability (TLS termination, reverse proxy or tunnel, real
    domain) is a separate, later decision — explicitly deferred, requiring
    its own dedicated design/approval pass, not bundled into steps 1–3.
-5. At every step, `MCP_CHATGPT_SAFE_MODE=true` / `MCP_GATEWAY_TOOL_MODE=chatgpt`
-   remain mandatory and fail-fast, and `CHATGPT_BLOCKED_TOOLS` remains
+5. At every step, `MCP_CLIENT_SAFE_MODE=true` / `MCP_GATEWAY_TOOL_MODE=mcp_client`
+   remain mandatory and fail-fast, and `MCP_CLIENT_BLOCKED_TOOLS` remains
    enforced — nothing in this minimal path loosens either.
 
 ## 5. Non-goals (explicit)
@@ -237,13 +237,13 @@ go from "private rehearsal" to "a real, officially-compliant attach point,"
   plaintext HTTP are trivially interceptable.
 - **Never use the gateway master key as an MCP runtime credential**, in any
   transport, present or future.
-- **Safe mode (`MCP_CHATGPT_SAFE_MODE=true`, `MCP_GATEWAY_TOOL_MODE=chatgpt`)
+- **Safe mode (`MCP_CLIENT_SAFE_MODE=true`, `MCP_GATEWAY_TOOL_MODE=mcp_client`)
   is mandatory** for anything ChatGPT-facing; this is fail-fast enforced
   today and must remain so in any future iteration.
 - **Public exposure requires explicit operator approval** as a distinct,
   deliberate decision — never a side effect of an unrelated change.
 - **No write, Docker, or agent-launch tools in ChatGPT mode.** This project
-  already enforces this via `CHATGPT_BLOCKED_TOOLS`; any future work must
+  already enforces this via `MCP_CLIENT_BLOCKED_TOOLS`; any future work must
   not weaken it.
 - **No real tokens, IPs, domains, or paths appear in this document** or in
   any future document derived from it — placeholders only.

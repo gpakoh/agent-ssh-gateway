@@ -24,7 +24,7 @@ def token_client(valid_token):
     with patch.dict(os.environ, {"MCP_PUBLIC_TOKEN": valid_token, "MCP_AUTH_MODE": "token"}):
         import importlib
 
-        import examples.chatgpt_remote_mcp.server as srv
+        import examples.mcp_client_remote.server as srv
 
         importlib.reload(srv)
         srv.proxy_request = _mock_proxy
@@ -39,7 +39,7 @@ def oauth_client(valid_token):
     with patch.dict(os.environ, {"MCP_PUBLIC_TOKEN": valid_token, "MCP_AUTH_MODE": "oauth"}):
         import importlib
 
-        import examples.chatgpt_remote_mcp.server as srv
+        import examples.mcp_client_remote.server as srv
 
         importlib.reload(srv)
         srv.proxy_request = _mock_proxy
@@ -48,7 +48,7 @@ def oauth_client(valid_token):
 
 
 def test_oauth_public_paths():
-    from examples.chatgpt_remote_mcp.server import _is_oauth_public_path
+    from examples.mcp_client_remote.server import _is_oauth_public_path
 
     assert _is_oauth_public_path("/.well-known/oauth-authorization-server")
     assert _is_oauth_public_path("/oauth/authorize")

@@ -22,7 +22,7 @@ def test_settings_ignores_unrelated_env_vars(monkeypatch):
     monkeypatch.setenv("GATEWAY_API_KEY", "unrelated-mcp-key")
     monkeypatch.setenv("GATEWAY_SSH_HOST", "127.0.0.1")
     monkeypatch.setenv("MCP_AUTH_MODE", "oauth")
-    monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+    monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
     monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "off")
     monkeypatch.setenv("WORKSPACE_READONLY", "true")
 

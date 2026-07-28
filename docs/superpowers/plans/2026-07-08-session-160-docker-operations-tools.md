@@ -23,17 +23,17 @@
 
 | File | Action | Purpose |
 |------|--------|---------|
-| `examples/chatgpt_remote_mcp/fleet/docker_client.py` | Modify | Add write methods + compose path resolver |
+| `examples/mcp_client_remote/fleet/docker_client.py` | Modify | Add write methods + compose path resolver |
 | `examples/mcp_server/server.py` | Modify | Register new Docker tools |
 | `examples/mcp_server/tool_scopes.py` | Modify | Add scopes for new tools |
-| `examples/mcp_server/tool_modes.py` | Modify | Add new tools to chatgpt mode |
+| `examples/mcp_server/tool_modes.py` | Modify | Add new tools to mcp_client mode |
 | `tests/test_docker_client.py` | Create | Unit tests for new Docker write tools |
 | `docs/operations/MCP_OPERATOR_RUNBOOK.md` | Modify | Document Docker operations |
 
 ### Task 1: Fix compose path resolving + add path validators
 
 **Files:**
-- Modify: `examples/chatgpt_remote_mcp/fleet/docker_client.py`
+- Modify: `examples/mcp_client_remote/fleet/docker_client.py`
 
 **Interfaces:**
 - Consumes: existing `DockerClient`, `CONTAINER_NAME_RE`, `COMPOSE_FILE_RE`, `COMPOSE_PATH_TRAVERSAL_RE`
@@ -49,7 +49,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "chatgpt_remote_mcp"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "mcp_client_remote"))
 
 import pytest
 from fleet.docker_client import DockerClient, CONTAINER_NAME_RE, SERVICE_NAME_RE
@@ -249,7 +249,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add examples/chatgpt_remote_mcp/fleet/docker_client.py tests/test_docker_client.py
+git add examples/mcp_client_remote/fleet/docker_client.py tests/test_docker_client.py
 git commit -m "fix: add compose path resolver with safety validation"
 ```
 
@@ -258,7 +258,7 @@ git commit -m "fix: add compose path resolver with safety validation"
 ### Task 2: Implement Docker write operations (start/stop/restart)
 
 **Files:**
-- Modify: `examples/chatgpt_remote_mcp/fleet/docker_client.py`
+- Modify: `examples/mcp_client_remote/fleet/docker_client.py`
 
 - [ ] **Step 1: Add `start`, `stop`, `restart` methods to `DockerClient`**
 
@@ -295,7 +295,7 @@ docker ps --filter name=ssh --format '{{.Names}}'
 # Test restart (stop then start via the agent)
 python -c "
 import asyncio, sys
-sys.path.insert(0, 'examples/chatgpt_remote_mcp')
+sys.path.insert(0, 'examples/mcp_client_remote')
 from fleet.docker_client import DockerClient
 async def test():
     c = DockerClient()
@@ -310,7 +310,7 @@ asyncio.run(test())
 - [ ] **Step 4: Commit**
 
 ```bash
-git add examples/chatgpt_remote_mcp/fleet/docker_client.py
+git add examples/mcp_client_remote/fleet/docker_client.py
 git commit -m "feat: add Docker start/stop/restart operations"
 ```
 
@@ -319,7 +319,7 @@ git commit -m "feat: add Docker start/stop/restart operations"
 ### Task 3: Implement Docker Compose write operations (up/restart/build)
 
 **Files:**
-- Modify: `examples/chatgpt_remote_mcp/fleet/docker_client.py`
+- Modify: `examples/mcp_client_remote/fleet/docker_client.py`
 
 - [ ] **Step 1: Add `compose_up`, `compose_restart`, `compose_build` methods**
 
@@ -423,7 +423,7 @@ Expected: PASS
 - [ ] **Step 3: Commit**
 
 ```bash
-git add examples/chatgpt_remote_mcp/fleet/docker_client.py
+git add examples/mcp_client_remote/fleet/docker_client.py
 git commit -m "feat: add Docker compose up/restart/build/logs operations"
 ```
 
@@ -531,7 +531,7 @@ async def docker_compose_logs(
     "docker_compose_logs": ["mcp:docker"],
 ```
 
-- [ ] **Step 3: Add tools to tool_modes.py `chatgpt` set** (around line 118)
+- [ ] **Step 3: Add tools to tool_modes.py `mcp_client` set** (around line 118)
 
 ```python
         "docker_start",
@@ -629,7 +629,7 @@ Expected: all tests pass
 
 ```bash
 python -m py_compile \
-  examples/chatgpt_remote_mcp/fleet/docker_client.py \
+  examples/mcp_client_remote/fleet/docker_client.py \
   examples/mcp_server/server.py \
   examples/mcp_server/tool_scopes.py \
   examples/mcp_server/tool_modes.py
@@ -648,7 +648,7 @@ If a container is found:
 ```bash
 python -c "
 import asyncio, sys
-sys.path.insert(0, 'examples/chatgpt_remote_mcp')
+sys.path.insert(0, 'examples/mcp_client_remote')
 from fleet.docker_client import DockerClient
 async def test():
     c = DockerClient()

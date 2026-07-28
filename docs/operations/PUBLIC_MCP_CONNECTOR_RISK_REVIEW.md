@@ -19,12 +19,12 @@ accident.
 
 ## 1. What is already ready
 
-- **Safe tool mode is mandatory and fail-fast.** `MCP_GATEWAY_TOOL_MODE=chatgpt`
-  + `MCP_CHATGPT_SAFE_MODE=true` are checked before either private
+- **Safe tool mode is mandatory and fail-fast.** `MCP_GATEWAY_TOOL_MODE=mcp_client`
+  + `MCP_CLIENT_SAFE_MODE=true` are checked before either private
   entrypoint builds its FastMCP app at all (`require_safe_mode()`,
   reused unchanged by both `mcp_sse_serve.py` and
   `mcp_streamable_http_serve.py`). 84 safe tools, 30 blocked
-  (`CHATGPT_BLOCKED_TOOLS`) — write, Docker, and agent-launch tools are
+  (`MCP_CLIENT_BLOCKED_TOOLS`) — write, Docker, and agent-launch tools are
   excluded, verified by both smoke scripts (11/11 each) and by stdio.
 - **Bearer-token auth exists on both HTTP entrypoints**, independent of
   `MCP_AUTH_MODE` (`BearerAuthMiddleware`, constant-time comparison via
@@ -302,7 +302,7 @@ before it is.
 - It does not claim any public connector is live — none is.
 - It does not authorize any lab-only tunnel session described in §5;
   that remains a separate, explicit, per-session operator decision.
-- It does not weaken safe mode, `CHATGPT_BLOCKED_TOOLS`, bearer auth,
+- It does not weaken safe mode, `MCP_CLIENT_BLOCKED_TOOLS`, bearer auth,
   or Origin validation in any way, for any entrypoint.
 
 ## 8. Sources

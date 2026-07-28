@@ -42,7 +42,7 @@ class ProjectRegistry:
 
 
 # ── Module-level singleton (lazy) ───────────────────────────────
-# Imported by chatgpt_tools and server — avoids circular imports.
+# Imported by mcp_client_tools and server — avoids circular imports.
 # Created lazily on first access so config errors only surface at runtime.
 _project_registry: ProjectRegistry | None = None
 

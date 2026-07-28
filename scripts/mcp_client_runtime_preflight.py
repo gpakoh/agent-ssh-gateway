@@ -7,9 +7,9 @@ Exits non-zero on any unsafe configuration.
 Env vars checked (from process only, not from files):
   GATEWAY_URL              required
   GATEWAY_AGENT_TOKEN      required (never printed)
-  MCP_GATEWAY_TOOL_MODE    must be "chatgpt"
-  MCP_CHATGPT_SAFE_MODE    must be "true"
-  MCP_ACCESS_PROFILE       must be "chatgpt_safe" or unset
+  MCP_GATEWAY_TOOL_MODE    must be "mcp_client"
+  MCP_CLIENT_SAFE_MODE    must be "true"
+  MCP_ACCESS_PROFILE       must be "mcp_client_safe" or unset
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ def main() -> int:
     url = os.environ.get("GATEWAY_URL", "")
     token = os.environ.get("GATEWAY_AGENT_TOKEN", "")
     mode = os.environ.get("MCP_GATEWAY_TOOL_MODE", "")
-    safe = os.environ.get("MCP_CHATGPT_SAFE_MODE", "")
+    safe = os.environ.get("MCP_CLIENT_SAFE_MODE", "")
     profile = os.environ.get("MCP_ACCESS_PROFILE", "")
 
     check("GATEWAY_URL present", bool(url), "set" if url else "missing")
@@ -47,19 +47,19 @@ def main() -> int:
     check("GATEWAY_AGENT_TOKEN not printed", True)
 
     # 2. Safe mode config
-    check("MCP_GATEWAY_TOOL_MODE=chatgpt", mode == "chatgpt"), f"value={mode!r}" if mode else "missing"
-    check("MCP_CHATGPT_SAFE_MODE=true", safe.lower() in ("true", "1", "yes"), f"value={safe!r}" if safe else "missing")
-    check("MCP_ACCESS_PROFILE=chatgpt_safe", profile == "chatgpt_safe" or not profile, f"value={profile!r}")
+    check("MCP_GATEWAY_TOOL_MODE=mcp_client", mode == "mcp_client"), f"value={mode!r}" if mode else "missing"
+    check("MCP_CLIENT_SAFE_MODE=true", safe.lower() in ("true", "1", "yes"), f"value={safe!r}" if safe else "missing")
+    check("MCP_ACCESS_PROFILE=mcp_client_safe", profile == "mcp_client_safe" or not profile, f"value={profile!r}")
 
     # 3. Import tool mode and verify dangerous tools excluded
-    if mode == "chatgpt" and safe.lower() in ("true", "1", "yes"):
+    if mode == "mcp_client" and safe.lower() in ("true", "1", "yes"):
         try:
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "examples", "mcp_server"))
-            from tool_modes import CHATGPT_BLOCKED_TOOLS, get_chatgpt_safe_tools, is_chatgpt_safe_mode  # noqa: E402, I001
+            from tool_modes import MCP_CLIENT_BLOCKED_TOOLS, get_mcp_client_safe_tools, is_mcp_client_safe_mode  # noqa: E402, I001
 
-            check("is_chatgpt_safe_mode() returns True", is_chatgpt_safe_mode())
-            safe_tools = get_chatgpt_safe_tools()
-            blocked = CHATGPT_BLOCKED_TOOLS
+            check("is_mcp_client_safe_mode() returns True", is_mcp_client_safe_mode())
+            safe_tools = get_mcp_client_safe_tools()
+            blocked = MCP_CLIENT_BLOCKED_TOOLS
             check("safe set non-empty", len(safe_tools) > 0, f"{len(safe_tools)} tools")
             check("blocked set non-empty", len(blocked) > 0, f"{len(blocked)} tools")
             check("no overlap", len(safe_tools & blocked) == 0)

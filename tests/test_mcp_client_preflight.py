@@ -14,30 +14,30 @@ class TestChatGPTSafeEnvTemplate:
     """Verify the env template is safe and gitignored."""
 
     def test_template_file_exists(self):
-        path = ROOT / "examples" / "mcp_server" / "chatgpt.safe.env.example"
+        path = ROOT / "examples" / "mcp_server" / "mcp_client.safe.env.example"
         assert path.is_file(), f"Template not found: {path}"
 
     def test_template_contains_only_placeholders(self):
-        content = (ROOT / "examples" / "mcp_server" / "chatgpt.safe.env.example").read_text()
+        content = (ROOT / "examples" / "mcp_server" / "mcp_client.safe.env.example").read_text()
         assert "localhost:8085" not in content or "<gateway-url>" in content
         assert "<agent-token>" in content
-        assert "MCP_CHATGPT_SAFE_MODE=true" in content
-        assert "MCP_GATEWAY_TOOL_MODE=chatgpt" in content
+        assert "MCP_CLIENT_SAFE_MODE=true" in content
+        assert "MCP_GATEWAY_TOOL_MODE=mcp_client" in content
 
     def test_private_env_is_gitignored(self):
         gitignore = (ROOT / ".gitignore").read_text()
-        assert "chatgpt.safe.env" in gitignore
+        assert "mcp_client.safe.env" in gitignore
 
     def test_template_no_master_key_as_runtime(self):
         """Template says NEVER use master key as MCP runtime credential (not a positive assertion)."""
-        content = (ROOT / "examples" / "mcp_server" / "chatgpt.safe.env.example").read_text()
+        content = (ROOT / "examples" / "mcp_server" / "mcp_client.safe.env.example").read_text()
         # Must NOT say to use master key positively
         assert "use master key" not in content.lower() or "NEVER use master key" in content
 
     def test_template_has_safe_mode(self):
-        content = (ROOT / "examples" / "mcp_server" / "chatgpt.safe.env.example").read_text()
-        assert "MCP_CHATGPT_SAFE_MODE=true" in content
-        assert "MCP_GATEWAY_TOOL_MODE=chatgpt" in content
+        content = (ROOT / "examples" / "mcp_server" / "mcp_client.safe.env.example").read_text()
+        assert "MCP_CLIENT_SAFE_MODE=true" in content
+        assert "MCP_GATEWAY_TOOL_MODE=mcp_client" in content
 
 
 class TestChatGPTPreflight:
@@ -45,11 +45,11 @@ class TestChatGPTPreflight:
 
     def _run_preflight(self, env_overrides: dict[str, str]) -> subprocess.CompletedProcess:
         """Run preflight with custom env."""
-        script = ROOT / "scripts" / "mcp_chatgpt_runtime_preflight.py"
+        script = ROOT / "scripts" / "mcp_client_runtime_preflight.py"
         env = os.environ.copy()
         # Clear all relevant env vars first
         for key in ("GATEWAY_URL", "GATEWAY_AGENT_TOKEN", "MCP_GATEWAY_TOOL_MODE",
-                     "MCP_CHATGPT_SAFE_MODE", "MCP_ACCESS_PROFILE"):
+                     "MCP_CLIENT_SAFE_MODE", "MCP_ACCESS_PROFILE"):
             env.pop(key, None)
         env.update(env_overrides)
         return subprocess.run(
@@ -64,17 +64,17 @@ class TestChatGPTPreflight:
         result = self._run_preflight({
             "GATEWAY_URL": "http://localhost:8085",
             "GATEWAY_AGENT_TOKEN": "dummy",
-            "MCP_GATEWAY_TOOL_MODE": "chatgpt",
+            "MCP_GATEWAY_TOOL_MODE": "mcp_client",
         })
         assert result.returncode == 1
-        assert "MCP_CHATGPT_SAFE_MODE" in result.stdout
+        assert "MCP_CLIENT_SAFE_MODE" in result.stdout
 
     def test_fails_with_wrong_mode(self):
         result = self._run_preflight({
             "GATEWAY_URL": "http://localhost:8085",
             "GATEWAY_AGENT_TOKEN": "dummy",
             "MCP_GATEWAY_TOOL_MODE": "standard",
-            "MCP_CHATGPT_SAFE_MODE": "true",
+            "MCP_CLIENT_SAFE_MODE": "true",
         })
         assert result.returncode == 1
         assert "MCP_GATEWAY_TOOL_MODE" in result.stdout
@@ -83,8 +83,8 @@ class TestChatGPTPreflight:
         result = self._run_preflight({
             "GATEWAY_URL": "http://localhost:8085",
             "GATEWAY_AGENT_TOKEN": "dummy-token-for-test",
-            "MCP_GATEWAY_TOOL_MODE": "chatgpt",
-            "MCP_CHATGPT_SAFE_MODE": "true",
+            "MCP_GATEWAY_TOOL_MODE": "mcp_client",
+            "MCP_CLIENT_SAFE_MODE": "true",
         })
         assert result.returncode == 0
         assert "dummy-token-for-test" not in result.stdout, "Token must not be printed"
@@ -95,8 +95,8 @@ class TestChatGPTPreflight:
         result = self._run_preflight({
             "GATEWAY_URL": "http://localhost:8085",
             "GATEWAY_AGENT_TOKEN": "super-secret-token-value-12345",
-            "MCP_GATEWAY_TOOL_MODE": "chatgpt",
-            "MCP_CHATGPT_SAFE_MODE": "true",
+            "MCP_GATEWAY_TOOL_MODE": "mcp_client",
+            "MCP_CLIENT_SAFE_MODE": "true",
         })
         assert "super-secret-token-value-12345" not in result.stdout
         assert "super-secret-token-value-12345" not in result.stderr
@@ -104,8 +104,8 @@ class TestChatGPTPreflight:
     def test_fails_without_token(self):
         result = self._run_preflight({
             "GATEWAY_URL": "http://localhost:8085",
-            "MCP_GATEWAY_TOOL_MODE": "chatgpt",
-            "MCP_CHATGPT_SAFE_MODE": "true",
+            "MCP_GATEWAY_TOOL_MODE": "mcp_client",
+            "MCP_CLIENT_SAFE_MODE": "true",
         })
         assert result.returncode == 1
 
@@ -113,8 +113,8 @@ class TestChatGPTPreflight:
         result = self._run_preflight({
             "GATEWAY_URL": "http://localhost:8085",
             "GATEWAY_AGENT_TOKEN": "test-token",
-            "MCP_GATEWAY_TOOL_MODE": "chatgpt",
-            "MCP_CHATGPT_SAFE_MODE": "true",
+            "MCP_GATEWAY_TOOL_MODE": "mcp_client",
+            "MCP_CLIENT_SAFE_MODE": "true",
         })
         assert "project_run_opencode" in result.stdout
         assert "excluded" in result.stdout.lower()
@@ -164,11 +164,11 @@ class TestChatGPTAttachChecklist:
 
     def test_safe_mode_referenced(self):
         content = self._load_checklist()
-        assert "MCP_CHATGPT_SAFE_MODE=true" in content
+        assert "MCP_CLIENT_SAFE_MODE=true" in content
 
     def test_private_env_template_referenced(self):
         content = self._load_checklist()
-        assert "chatgpt.safe.env" in content
+        assert "mcp_client.safe.env" in content
 
     def test_cleanup_revoke_referenced(self):
         content = self._load_checklist().lower()
@@ -220,8 +220,8 @@ class TestMcpStdioSmoke:
 
     def test_script_safe_mode_flags(self):
         content = self._load_script()
-        assert "MCP_CHATGPT_SAFE_MODE" in content
-        assert '"chatgpt"' in content or "'chatgpt'" in content
+        assert "MCP_CLIENT_SAFE_MODE" in content
+        assert '"mcp_client"' in content or "'mcp_client'" in content
 
     def test_no_real_secrets_in_script(self):
         content = self._load_script()
@@ -264,43 +264,43 @@ class TestChatGPTConnectorHandoff:
 
 
 class TestChatGPTExpectedManifest:
-    """Contract tests for chatgpt.safe.manifest.expected.json."""
+    """Contract tests for mcp_client.safe.manifest.expected.json."""
 
     def _load_manifest(self) -> dict:
         import json
-        return json.loads((ROOT / "examples" / "mcp_server" / "chatgpt.safe.manifest.expected.json").read_text())
+        return json.loads((ROOT / "examples" / "mcp_server" / "mcp_client.safe.manifest.expected.json").read_text())
 
     def test_manifest_exists(self):
-        assert (ROOT / "examples" / "mcp_server" / "chatgpt.safe.manifest.expected.json").is_file()
+        assert (ROOT / "examples" / "mcp_server" / "mcp_client.safe.manifest.expected.json").is_file()
 
     def test_manifest_mode_and_safe_flag(self):
         m = self._load_manifest()
-        assert m["mode"] == "chatgpt"
+        assert m["mode"] == "mcp_client"
         assert m["safe_mode"] is True
 
     def test_manifest_counts_match_code(self):
         import sys
         sys.path.insert(0, str(ROOT / "examples" / "mcp_server"))
-        from tool_modes import CHATGPT_BLOCKED_TOOLS, get_chatgpt_safe_tools
+        from tool_modes import MCP_CLIENT_BLOCKED_TOOLS, get_mcp_client_safe_tools
         m = self._load_manifest()
-        assert m["expected_safe_count"] == len(get_chatgpt_safe_tools())
-        assert m["expected_blocked_count"] == len(CHATGPT_BLOCKED_TOOLS)
+        assert m["expected_safe_count"] == len(get_mcp_client_safe_tools())
+        assert m["expected_blocked_count"] == len(MCP_CLIENT_BLOCKED_TOOLS)
 
     def test_manifest_must_include_present_in_safe(self):
         import sys
         sys.path.insert(0, str(ROOT / "examples" / "mcp_server"))
-        from tool_modes import get_chatgpt_safe_tools
+        from tool_modes import get_mcp_client_safe_tools
         m = self._load_manifest()
-        safe = get_chatgpt_safe_tools()
+        safe = get_mcp_client_safe_tools()
         for tool in m["must_include"]:
             assert tool in safe, f"must_include tool {tool} not in safe set"
 
     def test_manifest_must_exclude_absent_from_safe(self):
         import sys
         sys.path.insert(0, str(ROOT / "examples" / "mcp_server"))
-        from tool_modes import get_chatgpt_safe_tools
+        from tool_modes import get_mcp_client_safe_tools
         m = self._load_manifest()
-        safe = get_chatgpt_safe_tools()
+        safe = get_mcp_client_safe_tools()
         for tool in m["must_exclude"]:
             assert tool not in safe, f"must_exclude tool {tool} found in safe set"
 
@@ -384,7 +384,7 @@ class TestPrivateHTTPMCPTransportSpec:
 
     def test_safe_mode_mandatory(self):
         content = self._load_spec()
-        assert "MCP_CHATGPT_SAFE_MODE=true" in content or "MCP_CHATGPT_SAFE_MODE" in content
+        assert "MCP_CLIENT_SAFE_MODE=true" in content or "MCP_CLIENT_SAFE_MODE" in content
 
     def test_public_connector_deferred(self):
         content = self._load_spec().lower()
@@ -401,22 +401,22 @@ class TestPrivateHTTPMCPTransportSpec:
 
 
 class TestPrivateSSEEnvTemplate:
-    """Verify the private SSE env template (chatgpt.sse.env.example) is
+    """Verify the private SSE env template (mcp_client.sse.env.example) is
     safe, gitignored, and placeholder-only. Phase 16B PR3.
     """
 
     def _load(self) -> str:
-        return (ROOT / "examples" / "mcp_server" / "chatgpt.sse.env.example").read_text()
+        return (ROOT / "examples" / "mcp_server" / "mcp_client.sse.env.example").read_text()
 
     def test_template_file_exists(self):
-        assert (ROOT / "examples" / "mcp_server" / "chatgpt.sse.env.example").is_file()
+        assert (ROOT / "examples" / "mcp_server" / "mcp_client.sse.env.example").is_file()
 
     def test_template_contains_only_placeholders(self):
         content = self._load()
         assert "<agent-token>" in content
         assert "<generate-private-token>" in content
-        assert "MCP_GATEWAY_TOOL_MODE=chatgpt" in content
-        assert "MCP_CHATGPT_SAFE_MODE=true" in content
+        assert "MCP_GATEWAY_TOOL_MODE=mcp_client" in content
+        assert "MCP_CLIENT_SAFE_MODE=true" in content
 
     def test_template_has_private_sse_bind_defaults(self):
         content = self._load()
@@ -426,7 +426,7 @@ class TestPrivateSSEEnvTemplate:
 
     def test_private_env_is_gitignored(self):
         gitignore = (ROOT / ".gitignore").read_text()
-        assert "chatgpt.sse.env" in gitignore
+        assert "mcp_client.sse.env" in gitignore
 
     def test_template_no_master_key_as_runtime(self):
         content = self._load()
@@ -593,7 +593,7 @@ class TestMcpPrivateSSERunbook:
 
     def test_safe_mode_required(self):
         content = self._load()
-        assert "MCP_CHATGPT_SAFE_MODE=true" in content
+        assert "MCP_CLIENT_SAFE_MODE=true" in content
         assert "mandatory" in content.lower()
 
     def test_warns_against_non_loopback_override(self):
@@ -668,8 +668,8 @@ class TestMcpSseEnvCheckScript:
     def test_passes_on_fully_valid_env(self, tmp_path):
         env = self._write_env(
             tmp_path,
-            "MCP_GATEWAY_TOOL_MODE=chatgpt\n"
-            "MCP_CHATGPT_SAFE_MODE=true\n"
+            "MCP_GATEWAY_TOOL_MODE=mcp_client\n"
+            "MCP_CLIENT_SAFE_MODE=true\n"
             "MCP_HTTP_HOST=127.0.0.1\n"
             "MCP_HTTP_BEARER_TOKEN=real-bearer-token-value\n"
             "GATEWAY_AGENT_TOKEN=real-agent-token-value\n",
@@ -681,7 +681,7 @@ class TestMcpSseEnvCheckScript:
     def test_fails_on_template_placeholders(self):
         # The shipped .example template itself must fail — placeholders
         # were never meant to be used as-is.
-        template = ROOT / "examples" / "mcp_server" / "chatgpt.sse.env.example"
+        template = ROOT / "examples" / "mcp_server" / "mcp_client.sse.env.example"
         result = self._run(template)
         assert result.returncode == 1
         assert "template placeholder" in result.stdout
@@ -690,7 +690,7 @@ class TestMcpSseEnvCheckScript:
         env = self._write_env(
             tmp_path,
             "MCP_GATEWAY_TOOL_MODE=standard\n"
-            "MCP_CHATGPT_SAFE_MODE=true\n"
+            "MCP_CLIENT_SAFE_MODE=true\n"
             "MCP_HTTP_HOST=127.0.0.1\n"
             "MCP_HTTP_BEARER_TOKEN=real-bearer-token-value\n"
             "GATEWAY_AGENT_TOKEN=real-agent-token-value\n",
@@ -702,21 +702,21 @@ class TestMcpSseEnvCheckScript:
     def test_fails_on_safe_mode_false(self, tmp_path):
         env = self._write_env(
             tmp_path,
-            "MCP_GATEWAY_TOOL_MODE=chatgpt\n"
-            "MCP_CHATGPT_SAFE_MODE=false\n"
+            "MCP_GATEWAY_TOOL_MODE=mcp_client\n"
+            "MCP_CLIENT_SAFE_MODE=false\n"
             "MCP_HTTP_HOST=127.0.0.1\n"
             "MCP_HTTP_BEARER_TOKEN=real-bearer-token-value\n"
             "GATEWAY_AGENT_TOKEN=real-agent-token-value\n",
         )
         result = self._run(env)
         assert result.returncode == 1
-        assert "MCP_CHATGPT_SAFE_MODE" in result.stdout
+        assert "MCP_CLIENT_SAFE_MODE" in result.stdout
 
     def test_fails_on_non_loopback_host(self, tmp_path):
         env = self._write_env(
             tmp_path,
-            "MCP_GATEWAY_TOOL_MODE=chatgpt\n"
-            "MCP_CHATGPT_SAFE_MODE=true\n"
+            "MCP_GATEWAY_TOOL_MODE=mcp_client\n"
+            "MCP_CLIENT_SAFE_MODE=true\n"
             "MCP_HTTP_HOST=0.0.0.0\n"
             "MCP_HTTP_BEARER_TOKEN=real-bearer-token-value\n"
             "GATEWAY_AGENT_TOKEN=real-agent-token-value\n",
@@ -728,8 +728,8 @@ class TestMcpSseEnvCheckScript:
     def test_fails_loudly_when_allow_non_loopback_enabled(self, tmp_path):
         env = self._write_env(
             tmp_path,
-            "MCP_GATEWAY_TOOL_MODE=chatgpt\n"
-            "MCP_CHATGPT_SAFE_MODE=true\n"
+            "MCP_GATEWAY_TOOL_MODE=mcp_client\n"
+            "MCP_CLIENT_SAFE_MODE=true\n"
             "MCP_HTTP_HOST=127.0.0.1\n"
             "MCP_HTTP_ALLOW_NON_LOOPBACK=true\n"
             "MCP_HTTP_BEARER_TOKEN=real-bearer-token-value\n"
@@ -742,8 +742,8 @@ class TestMcpSseEnvCheckScript:
     def test_fails_on_missing_bearer_token(self, tmp_path):
         env = self._write_env(
             tmp_path,
-            "MCP_GATEWAY_TOOL_MODE=chatgpt\n"
-            "MCP_CHATGPT_SAFE_MODE=true\n"
+            "MCP_GATEWAY_TOOL_MODE=mcp_client\n"
+            "MCP_CLIENT_SAFE_MODE=true\n"
             "MCP_HTTP_HOST=127.0.0.1\n"
             "GATEWAY_AGENT_TOKEN=real-agent-token-value\n",
         )
@@ -758,8 +758,8 @@ class TestMcpSseEnvCheckScript:
     def test_never_prints_token_values(self, tmp_path):
         env = self._write_env(
             tmp_path,
-            "MCP_GATEWAY_TOOL_MODE=chatgpt\n"
-            "MCP_CHATGPT_SAFE_MODE=true\n"
+            "MCP_GATEWAY_TOOL_MODE=mcp_client\n"
+            "MCP_CLIENT_SAFE_MODE=true\n"
             "MCP_HTTP_HOST=127.0.0.1\n"
             "MCP_HTTP_BEARER_TOKEN=super-secret-bearer-value-xyz\n"
             "GATEWAY_AGENT_TOKEN=super-secret-agent-value-abc\n",
@@ -779,8 +779,8 @@ class TestMcpSseEnvCheckScript:
 
         env = self._write_env(
             tmp_path,
-            "MCP_GATEWAY_TOOL_MODE=chatgpt\n"
-            "MCP_CHATGPT_SAFE_MODE=true\n"
+            "MCP_GATEWAY_TOOL_MODE=mcp_client\n"
+            "MCP_CLIENT_SAFE_MODE=true\n"
             "MCP_HTTP_HOST=127.0.0.1\n"
             "MCP_HTTP_PORT=8086\n"
             "MCP_HTTP_BEARER_TOKEN=real-bearer-token-value\n"
@@ -902,14 +902,14 @@ class TestOpenAIMcpAttachPathAudit:
 
     def test_safe_mode_mandatory(self):
         content = self._load()
-        assert "MCP_CHATGPT_SAFE_MODE=true" in content
+        assert "MCP_CLIENT_SAFE_MODE=true" in content
         assert "mandatory" in content.lower()
 
     def test_no_dangerous_tools(self):
         content = self._load().lower()
         assert "write" in content
         assert "docker" in content
-        assert "chatgpt_blocked_tools" in content or "blocked_tools" in content
+        assert "mcp_client_blocked_tools" in content or "blocked_tools" in content
 
     def test_ambiguity_flagged_not_guessed(self):
         content = self._load().lower()
@@ -987,7 +987,7 @@ class TestPrivateStreamableHttpTransportDesign:
 
     def test_safe_mode_mandatory(self):
         content = self._load()
-        assert "MCP_CHATGPT_SAFE_MODE=true" in content
+        assert "MCP_CLIENT_SAFE_MODE=true" in content
         assert "mandatory" in content.lower()
 
     def test_no_compose_systemd_autostart(self):
@@ -1036,7 +1036,7 @@ class TestStreamableHttpDocsEnvSync:
 
     def _env_example(self) -> str:
         return (
-            ROOT / "examples" / "mcp_server" / "chatgpt.streamable-http.env.example"
+            ROOT / "examples" / "mcp_server" / "mcp_client.streamable-http.env.example"
         ).read_text()
 
     def test_tool_attach_mentions_mcp_route_and_port(self):
@@ -1106,8 +1106,8 @@ class TestStreamableHttpDocsEnvSync:
         assert "<gateway-url>" in content
         assert "<agent-token>" in content
         assert "<generate-private-token>" in content
-        assert "MCP_GATEWAY_TOOL_MODE=chatgpt" in content
-        assert "MCP_CHATGPT_SAFE_MODE=true" in content
+        assert "MCP_GATEWAY_TOOL_MODE=mcp_client" in content
+        assert "MCP_CLIENT_SAFE_MODE=true" in content
         assert "MCP_STREAMABLE_HTTP_HOST=127.0.0.1" in content
         assert "MCP_STREAMABLE_HTTP_PORT=8087" in content
         assert "MCP_STREAMABLE_HTTP_BEARER_TOKEN=<generate-private-token>" in content
@@ -1118,7 +1118,7 @@ class TestStreamableHttpDocsEnvSync:
 
     def test_env_example_is_gitignored(self):
         gitignore = (ROOT / ".gitignore").read_text()
-        assert "chatgpt.streamable-http.env" in gitignore
+        assert "mcp_client.streamable-http.env" in gitignore
 
     def test_env_example_no_master_key_as_runtime(self):
         content = self._env_example()
@@ -1178,7 +1178,7 @@ class TestPublicMcpConnectorRiskReview:
 
     def test_safe_mode_mandatory(self):
         content = self._load()
-        assert "MCP_CHATGPT_SAFE_MODE=true" in content
+        assert "MCP_CLIENT_SAFE_MODE=true" in content
         assert "mandatory" in content.lower()
 
     def test_no_write_docker_agent_tools(self):
@@ -1261,12 +1261,12 @@ class TestPublicMcpOAuthDecision:
 
     def test_safe_mode_mandatory(self):
         content = self._load()
-        assert "MCP_CHATGPT_SAFE_MODE" in content
+        assert "MCP_CLIENT_SAFE_MODE" in content
         assert "precondition" in content.lower() or "mandatory" in content.lower()
 
     def test_no_write_docker_agent_tools(self):
         content = self._load().lower()
-        assert "chatgpt-safe" in content or "safe tool set" in content or "safe mode" in content
+        assert "mcp_client-safe" in content or "safe tool set" in content or "safe mode" in content
 
     def test_oauth_gaps_listed(self):
         content = self._load().lower()

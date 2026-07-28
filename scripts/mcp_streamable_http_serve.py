@@ -43,8 +43,8 @@ Env vars:
   MCP_STREAMABLE_HTTP_BEARER_TOKEN        required — protects /mcp
   MCP_STREAMABLE_HTTP_ALLOWED_ORIGINS     optional comma-separated
                                            extra Origin allowlist
-  MCP_CHATGPT_SAFE_MODE                   must be "true"
-  MCP_GATEWAY_TOOL_MODE                   must be "chatgpt"
+  MCP_CLIENT_SAFE_MODE                   must be "true"
+  MCP_GATEWAY_TOOL_MODE                   must be "mcp_client"
 
 MCP_STREAMABLE_HTTP_BEARER_TOKEN is never logged or echoed back in
 responses.

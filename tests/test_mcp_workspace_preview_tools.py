@@ -46,7 +46,7 @@ requires_server = pytest.mark.skipif(
 def _set_auth_mode():
     with patch.dict(
         os.environ,
-        {"MCP_AUTH_MODE": "oauth", "MCP_GATEWAY_TOOL_MODE": "chatgpt"},
+        {"MCP_AUTH_MODE": "oauth", "MCP_GATEWAY_TOOL_MODE": "mcp_client"},
         clear=False,
     ):
         yield
@@ -69,7 +69,7 @@ ALL_WRITE_TOOLS: list[str] = [
 
 ALL_WORKSPACE_TOOLS: list[str] = ALL_WRITE_TOOLS + ALL_PREVIEW_TOOLS
 
-ALL_MODES: list[str] = ["minimal", "standard", "full", "chatgpt"]
+ALL_MODES: list[str] = ["minimal", "standard", "full", "mcp_client"]
 
 # ── Source-level parse of tool_modes.py (no import needed) ──────
 
@@ -118,25 +118,25 @@ def _get_parsed_modes() -> dict[str, set[str]]:
 # ════════════════════════════════════════════════════════════════
 
 
-def test_chatgpt_mode_includes_preview_tools():
-    """chatgpt mode must include preview/verify tools."""
+def test_mcp_client_mode_includes_preview_tools():
+    """mcp_client mode must include preview/verify tools."""
     import examples.mcp_server.tool_modes as tm
     importlib.reload(tm)
     for name in ALL_PREVIEW_TOOLS:
-        assert tm.should_register_tool(name, "chatgpt"), f"{name!r} missing from chatgpt"
+        assert tm.should_register_tool(name, "mcp_client"), f"{name!r} missing from mcp_client"
 
 
-def test_chatgpt_mode_includes_write_tools():
-    """chatgpt mode includes write tools when MCP_CHATGPT_SAFE_MODE is off.
+def test_mcp_client_mode_includes_write_tools():
+    """mcp_client mode includes write tools when MCP_CLIENT_SAFE_MODE is off.
 
-    They remain in CHATGPT_BLOCKED_TOOLS, so enabling safe mode still
+    They remain in MCP_CLIENT_BLOCKED_TOOLS, so enabling safe mode still
     filters them out — see test_safe_mode_on_blocks_workspace_write in
     test_mcp_tool_modes.py.
     """
     import examples.mcp_server.tool_modes as tm
     importlib.reload(tm)
     for name in ALL_WRITE_TOOLS:
-        assert tm.should_register_tool(name, "chatgpt"), f"{name!r} missing from chatgpt"
+        assert tm.should_register_tool(name, "mcp_client"), f"{name!r} missing from mcp_client"
 
 
 def test_standard_mode_includes_all_workspace():
@@ -217,7 +217,7 @@ def test_source_parse_finds_all_modes():
         for name in ALL_WORKSPACE_TOOLS:
             assert name in parsed[mode], f"{name!r} missing from {mode} in source"
     for name in ALL_WORKSPACE_TOOLS:
-        assert name in parsed["chatgpt"], f"{name!r} missing from chatgpt in source"
+        assert name in parsed["mcp_client"], f"{name!r} missing from mcp_client in source"
     for name in ALL_WORKSPACE_TOOLS:
         assert name not in parsed["minimal"], f"{name!r} in minimal source but shouldn't be"
 

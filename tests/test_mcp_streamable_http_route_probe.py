@@ -48,9 +48,9 @@ from scripts.mcp_streamable_http_route_probe import (  # noqa: E402
 )
 
 SAFE_MODE_ENV = {
-    "MCP_GATEWAY_TOOL_MODE": "chatgpt",
-    "MCP_CHATGPT_SAFE_MODE": "true",
-    "MCP_ACCESS_PROFILE": "chatgpt_safe",
+    "MCP_GATEWAY_TOOL_MODE": "mcp_client",
+    "MCP_CLIENT_SAFE_MODE": "true",
+    "MCP_ACCESS_PROFILE": "mcp_client_safe",
 }
 
 GATEWAY_CREDENTIAL_VARS = ("GATEWAY_URL", "GATEWAY_API_KEY", "GATEWAY_AGENT_TOKEN", "API_KEY")
@@ -64,9 +64,9 @@ def _reload_gateway_server() -> None:
 
 class TestBuildStreamableHttpApp:
     def test_config_error_when_safe_mode_off(self):
-        env = {"MCP_GATEWAY_TOOL_MODE": "chatgpt", "MCP_CHATGPT_SAFE_MODE": "false"}
+        env = {"MCP_GATEWAY_TOOL_MODE": "mcp_client", "MCP_CLIENT_SAFE_MODE": "false"}
         with patch.dict(os.environ, env):
-            with pytest.raises(ConfigError, match="MCP_CHATGPT_SAFE_MODE"):
+            with pytest.raises(ConfigError, match="MCP_CLIENT_SAFE_MODE"):
                 build_streamable_http_app()
 
     def test_builds_without_any_gateway_credential(self):

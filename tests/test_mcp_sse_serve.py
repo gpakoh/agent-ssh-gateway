@@ -48,9 +48,9 @@ from scripts.mcp_sse_serve import (  # noqa: E402
 )
 
 SAFE_MODE_ENV = {
-    "MCP_GATEWAY_TOOL_MODE": "chatgpt",
-    "MCP_CHATGPT_SAFE_MODE": "true",
-    "MCP_ACCESS_PROFILE": "chatgpt_safe",
+    "MCP_GATEWAY_TOOL_MODE": "mcp_client",
+    "MCP_CLIENT_SAFE_MODE": "true",
+    "MCP_ACCESS_PROFILE": "mcp_client_safe",
 }
 
 
@@ -142,19 +142,19 @@ class TestRequireBearerToken:
 
 class TestRequireSafeMode:
     def test_wrong_tool_mode_raises(self):
-        with patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "standard", "MCP_CHATGPT_SAFE_MODE": "true"}):
+        with patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "standard", "MCP_CLIENT_SAFE_MODE": "true"}):
             with pytest.raises(ConfigError, match="MCP_GATEWAY_TOOL_MODE"):
                 require_safe_mode()
 
     def test_safe_mode_false_raises(self):
-        with patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "chatgpt", "MCP_CHATGPT_SAFE_MODE": "false"}):
-            with pytest.raises(ConfigError, match="MCP_CHATGPT_SAFE_MODE"):
+        with patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client", "MCP_CLIENT_SAFE_MODE": "false"}):
+            with pytest.raises(ConfigError, match="MCP_CLIENT_SAFE_MODE"):
                 require_safe_mode()
 
     def test_safe_mode_missing_raises(self):
-        with patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "chatgpt"}, clear=False):
-            os.environ.pop("MCP_CHATGPT_SAFE_MODE", None)
-            with pytest.raises(ConfigError, match="MCP_CHATGPT_SAFE_MODE"):
+        with patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client"}, clear=False):
+            os.environ.pop("MCP_CLIENT_SAFE_MODE", None)
+            with pytest.raises(ConfigError, match="MCP_CLIENT_SAFE_MODE"):
                 require_safe_mode()
 
     def test_safe_mode_true_passes(self):
@@ -313,10 +313,10 @@ class TestBuildAppIntegration:
                 build_app()
 
     def test_config_error_when_safe_mode_off(self):
-        env = {"MCP_GATEWAY_TOOL_MODE": "chatgpt", "MCP_CHATGPT_SAFE_MODE": "false",
+        env = {"MCP_GATEWAY_TOOL_MODE": "mcp_client", "MCP_CLIENT_SAFE_MODE": "false",
                 "MCP_HTTP_BEARER_TOKEN": "tok"}
         with patch.dict(os.environ, env):
-            with pytest.raises(ConfigError, match="MCP_CHATGPT_SAFE_MODE"):
+            with pytest.raises(ConfigError, match="MCP_CLIENT_SAFE_MODE"):
                 build_app()
 
 
@@ -331,8 +331,8 @@ class TestNoTokenInOutput:
         off, the resulting fail-fast error must not echo the token value.
         """
         env = {
-            "MCP_GATEWAY_TOOL_MODE": "chatgpt",
-            "MCP_CHATGPT_SAFE_MODE": "false",
+            "MCP_GATEWAY_TOOL_MODE": "mcp_client",
+            "MCP_CLIENT_SAFE_MODE": "false",
             "MCP_HTTP_BEARER_TOKEN": "must-not-appear-in-output",
         }
         out, err = io.StringIO(), io.StringIO()

@@ -9,14 +9,14 @@
 ### 1.1 Gateway MCP (main, port 8788)
 
 ```
-examples/chatgpt_remote_mcp/server.py
+examples/mcp_client_remote/server.py
 ```
 
 - `TokenAuthMiddleware` (line 42): validates `?mcp_token=` query param against `MCP_PUBLIC_TOKEN` env var.
 - Static token, single shared secret.
 - Proxies to internal FastMCP on `127.0.0.1:8789` (no auth, localhost only).
 - No scopes, no TTL, no rotation.
-- 85 tools in `chatgpt` mode.
+- 85 tools in `mcp_client` mode.
 
 ### 1.2 Fleet Adapters (6 services)
 
@@ -51,7 +51,7 @@ All routes: **no Authelia SSO, no mTLS** — auth is handled by the Starlette mi
 
 `examples/mcp_server/server.py`:
 - `@register_tool(name)` decorator (line 113) wraps tool registration with `should_register_tool()` filter.
-- `tool_modes.py` defines 4 modes: `minimal`, `standard`, `full`, `chatgpt` — 85 tools in chatgpt mode.
+- `tool_modes.py` defines 4 modes: `minimal`, `standard`, `full`, `mcp_client` — 85 tools in mcp_client mode.
 - No per-tool scopes, no authorization context.
 
 ### 1.5 Summary
@@ -704,7 +704,7 @@ Estimate: 1–2 sessions
    - `MCP_AUTH_MODE` env var controls middleware behavior
 
 3. **Update `MixedAuthMiddleware`**
-   - Replace `TokenAuthMiddleware` in `chatgpt_remote_mcp/server.py`
+   - Replace `TokenAuthMiddleware` in `mcp_client_remote/server.py`
    - Accept both `?mcp_token=` and `Authorization: Bearer`
 
 4. **Fleet adapters: remove internal auth**

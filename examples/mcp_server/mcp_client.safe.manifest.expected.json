@@ -1,9 +1,9 @@
 {
-  "mode": "chatgpt",
+  "mode": "mcp_client",
   "safe_mode": true,
   "expected_safe_count": 84,
   "expected_blocked_count": 30,
-  "expected_chatgpt_full_count": 111,
+  "expected_mcp_client_full_count": 111,
   "must_include": [
     "health",
     "project_info",

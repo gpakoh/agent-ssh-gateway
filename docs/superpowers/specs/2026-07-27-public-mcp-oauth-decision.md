@@ -156,7 +156,7 @@ These are real gaps, independent of the reframing above:
   presentation) — these currently surface only as raised `ValueError`s
   inside the provider, not as structured, Telegram-visible events.
 - **A second, unrelated OAuth-ish implementation already exists in
-  this repo, unreconciled.** `examples/chatgpt_remote_mcp/server.py`
+  this repo, unreconciled.** `examples/mcp_client_remote/server.py`
   implements its own separate public-path detection
   (`_is_oauth_public_path`, recognizing `/.well-known/oauth-authorization-server`,
   `/oauth/authorize`, `/oauth/token`, `/oauth/register`) and its own
@@ -220,8 +220,8 @@ it — not a second implementation.**
   `ACCESS_PROFILES` bundle mechanism (`tool_scopes.py`) rather than
   inventing a parallel scope taxonomy — but a public connector's
   *default* scope grant on successful DCR + authorization should be
-  the most restrictive profile that still satisfies the chatgpt-safe
-  tool set (mirroring `MCP_CHATGPT_SAFE_MODE`'s own restrictiveness
+  the most restrictive profile that still satisfies the mcp_client-safe
+  tool set (mirroring `MCP_CLIENT_SAFE_MODE`'s own restrictiveness
   default), not `DEFAULT_SCOPES` as currently hardcoded for the
   general case.
 
@@ -312,7 +312,7 @@ wiring, rather than duplicating either.
 
 Would mean writing a second `OAuthAuthorizationServerProvider`-compatible
 class from scratch (or adapting the already-existing, independent
-`examples/chatgpt_remote_mcp/server.py` pattern, which itself does not
+`examples/mcp_client_remote/server.py` pattern, which itself does not
 reuse `GatewayOAuthProvider`) — duplicating PKCE verification, DCR,
 token hashing, and revocation logic that already exists, tested, in
 `GatewayOAuthProvider`. The only scenario where this would be
@@ -347,7 +347,7 @@ eventually pursued.
   `TokenStore`, or either private entrypoint.
 - It does not authorize public exposure, a reverse proxy, TLS
   termination, or any tag/deploy action.
-- It does not analyze, fix, or extend `examples/chatgpt_remote_mcp/` —
+- It does not analyze, fix, or extend `examples/mcp_client_remote/` —
   mentioned only as existing, unreconciled prior art.
 - It does not claim any public connector is live — none is.
 - No real token, IP, domain, or file path appears in this document.

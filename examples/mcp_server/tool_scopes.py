@@ -34,7 +34,7 @@ ACCESS_PROFILES: dict[str, list[str]] = {
         "mcp:postgres",
         "mcp:repo",
     ],
-    "chatgpt_safe": [
+    "mcp_client_safe": [
         "mcp:read",
         "mcp:project",
         "mcp:repo",

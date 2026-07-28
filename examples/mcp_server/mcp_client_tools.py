@@ -524,16 +524,16 @@ def _build_readonly_fallback_script(
         f"cp {project_dir}/pyproject.toml {tmp_root}/pyproject.toml.new",
         f"echo 3.12 > {tmp_root}/.python-version",
         f"STAMP={tmp_root}/.uv_sync_stamp",
-        f"NEED_SYNC=0",
-        f"if [ ! -f $STAMP ]; then NEED_SYNC=1; fi",
+        "NEED_SYNC=0",
+        "if [ ! -f $STAMP ]; then NEED_SYNC=1; fi",
         f"if ! diff -q {tmp_root}/pyproject.toml.new {tmp_root}/pyproject.toml >/dev/null 2>&1; then NEED_SYNC=1; fi",
-        f"if [ $NEED_SYNC -eq 1 ]; then",
+        "if [ $NEED_SYNC -eq 1 ]; then",
         f"  cp {tmp_root}/pyproject.toml.new {tmp_root}/pyproject.toml",
         f"  test -f {project_dir}/setup.cfg && cp {project_dir}/setup.cfg {tmp_root}/ || true",
         f"  cd {tmp_root}",
-        f"  uv sync --extra dev 2>&1",
-        f"  touch $STAMP",
-        f"fi",
+        "  uv sync --extra dev 2>&1",
+        "  touch $STAMP",
+        "fi",
         f"rm -f {tmp_root}/pyproject.toml.new",
     ]
 
@@ -559,10 +559,12 @@ def _run_uv_tool(
     project: str,
     tool_key: str,
     tool_name: str,
-    target: list[str] | None = None,
+    target: list[str] | str | None = None,
 ) -> dict[str, Any]:
     """Run a uv-backed tool via SSH gateway. Shared by all uv runner tools."""
     project_dir = _resolve_project(project)
+    if isinstance(target, str):
+        target = [target]
     targets = target or ["."]
     try:
         argv = _build_uv_argv(tool_key, str(project_dir), targets)

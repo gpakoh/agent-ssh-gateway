@@ -5,8 +5,8 @@ This document packages everything a UI/client operator needs to connect a real C
 ## What to give the operator
 
 - This document
-- `examples/mcp_server/chatgpt.safe.env.example` — copy to ignored private env
-- `examples/mcp_server/chatgpt.safe.manifest.expected.json` — machine-readable manifest check
+- `examples/mcp_server/mcp_client.safe.env.example` — copy to ignored private env
+- `examples/mcp_server/mcp_client.safe.manifest.expected.json` — machine-readable manifest check
 - `scripts/mcp_stdio_safe_smoke.py` — local MCP stdio smoke test
 
 ## What NOT to give
@@ -20,16 +20,16 @@ This document packages everything a UI/client operator needs to connect a real C
 
 ## Environment variable checklist
 
-Copy `chatgpt.safe.env.example` to `chatgpt.safe.env` (gitignored) and fill:
+Copy `mcp_client.safe.env.example` to `mcp_client.safe.env` (gitignored) and fill:
 
 | Variable | Required | Safe value |
 |----------|----------|------------|
 | `GATEWAY_URL` | Yes | `<gateway-url>` (e.g. `http://localhost:8085`) |
 | `GATEWAY_API_KEY` | Yes | Restricted agent token (NOT master key) |
 | `GATEWAY_AGENT_TOKEN` | Yes | Same agent token (used by preflight) |
-| `MCP_GATEWAY_TOOL_MODE` | Yes | `chatgpt` |
-| `MCP_CHATGPT_SAFE_MODE` | Yes | `true` |
-| `MCP_ACCESS_PROFILE` | Yes | `chatgpt_safe` |
+| `MCP_GATEWAY_TOOL_MODE` | Yes | `mcp_client` |
+| `MCP_CLIENT_SAFE_MODE` | Yes | `true` |
+| `MCP_ACCESS_PROFILE` | Yes | `mcp_client_safe` |
 | `MCP_AUTH_MODE` | Yes | `token` |
 | `MCP_PUBLIC_TOKEN` | Yes | Same agent token |
 
@@ -62,7 +62,7 @@ Copy `chatgpt.safe.env.example` to `chatgpt.safe.env` (gitignored) and fill:
 - **Blocked tools**: 30
 - **Blocked tools present in safe manifest**: 0
 
-See `examples/mcp_server/chatgpt.safe.manifest.expected.json` for machine-readable check.
+See `examples/mcp_server/mcp_client.safe.manifest.expected.json` for machine-readable check.
 
 ## First 3 allowed tool calls
 
@@ -88,7 +88,7 @@ Confirm these tools are absent from the manifest (should return "not found" or n
 1. New actor (unknown agent + source_ip) starts in **pending** state
 2. Pending actors are capped to `readonly`/`testlint` profile
 3. Operator receives Telegram notification with Allow/Deny buttons
-4. **Allow** → actor granted `chatgpt_safe` profile (84 tools, readonly)
+4. **Allow** → actor granted `mcp_client_safe` profile (84 tools, readonly)
 5. **Deny** → actor blocked entirely, no tools available
 6. Operator can clear decision via `POST /api/admin/access-control/clear`
 
@@ -103,7 +103,7 @@ Confirm these tools are absent from the manifest (should return "not found" or n
 
 - If preflight fails → do not proceed, fix config first
 - If gateway returns auth errors → check token scopes
-- If blocked tools appear in manifest → verify `MCP_CHATGPT_SAFE_MODE=true`
+- If blocked tools appear in manifest → verify `MCP_CLIENT_SAFE_MODE=true`
 - If notifier shows false critical alerts → verify `access_control.decision` audit type
 - If real tokens/IPs appear in logs → stop, rotate token, report
 - If operator does not approve within TTL → actor stays pending, limited tools only

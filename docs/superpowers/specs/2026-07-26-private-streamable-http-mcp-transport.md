@@ -30,7 +30,7 @@ posture. This is a design document, not an implementation — Phase 18B
 - **The public ChatGPT/OpenAI connector is NOT live.** No public HTTPS
   endpoint, no OAuth 2.1 resource-server flow, no DCR-issued tokens are
   wired to either transport in this repo's mainline gateway. (A
-  separate, already-existing `examples/chatgpt_remote_mcp` system with
+  separate, already-existing `examples/mcp_client_remote` system with
   its own public tunnel exists but is explicitly out of scope for this
   workstream — see `docs/operations/OPENAI_MCP_ATTACH_PATH_AUDIT.md`,
   Phase 17A.)
@@ -171,12 +171,12 @@ verification step.
 ## 5. Reusing existing safe-mode enforcement
 
 No new mechanism needed. `require_safe_mode()` in `mcp_sse_serve.py`
-already validates `MCP_GATEWAY_TOOL_MODE=chatgpt` and
-`MCP_CHATGPT_SAFE_MODE=true` by calling into
+already validates `MCP_GATEWAY_TOOL_MODE=mcp_client` and
+`MCP_CLIENT_SAFE_MODE=true` by calling into
 `examples/mcp_server/tool_modes.get_tool_mode()` /
-`is_chatgpt_safe_mode()` — the single source of truth also used by the
-stdio and private-SSE paths. **`MCP_CHATGPT_SAFE_MODE=true` and
-`MCP_GATEWAY_TOOL_MODE=chatgpt` would remain mandatory** for a private
+`is_mcp_client_safe_mode()` — the single source of truth also used by the
+stdio and private-SSE paths. **`MCP_CLIENT_SAFE_MODE=true` and
+`MCP_GATEWAY_TOOL_MODE=mcp_client` would remain mandatory** for a private
 Streamable HTTP entrypoint, exactly as they are for private SSE today —
 this is a fail-fast precondition checked before any FastMCP app is
 built, not a per-request check, and a Streamable HTTP entrypoint would
