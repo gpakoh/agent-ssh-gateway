@@ -465,6 +465,14 @@ def run_tool(
                 source="gateway",
             )
         raise
+    if isinstance(data, dict) and data.get("ok") is False:
+        error_info = data.get("error") or {}
+        return error_result(
+            tool=tool,
+            title=title,
+            error=error_info.get("message", "Tool returned error"),
+            data=data,
+        )
     return text_result(tool=tool, title=title, text=success_text, data=data)
 
 
