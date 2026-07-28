@@ -51,3 +51,47 @@ def test_invalid_target_with_traversal():
 def test_invalid_target_absolute():
     result = _validate_targets("/project", ["/etc/passwd"])
     assert result == ["etc/passwd"]
+
+
+class TestReadOnlyFallbackNoPathTraversal:
+    """Bug 1: absolute target must not pass through _build_readonly_fallback_script."""
+
+    def test_readonly_fallback_strips_absolute_targets(self):
+        """Fallback script must convert /etc/passwd → <project_dir>/etc/passwd."""
+        from mcp_client_tools import _build_readonly_fallback_script
+
+        script = _build_readonly_fallback_script("pytest", "/project", ["/etc/passwd"])
+        assert "/project/etc/passwd" in script
+        last_line = [ln for ln in script.splitlines() if "pytest" in ln and "target_args" not in ln][-1]
+        assert last_line.endswith("/project/etc/passwd 2>&1")
+
+    def test_readonly_fallback_strips_absolute_targets_mypy(self):
+        from mcp_client_tools import _build_readonly_fallback_script
+
+        script = _build_readonly_fallback_script("mypy", "/project", ["/etc/shadow"])
+        assert "/project/etc/shadow" in script
+
+    def test_run_uv_tool_validates_targets_early(self, monkeypatch):
+        """_run_uv_tool must validate targets before any SSH call."""
+        from mcp_client_tools import _run_uv_tool
+
+        call_log = []
+
+        class FakeClient:
+            def execute_raw(self, cmd, **kw):
+                call_log.append(cmd)
+                return {"job_id": "j1"}
+
+            def wait_job(self, job_id, **kw):
+                return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+        monkeypatch.setattr(
+            "mcp_client_tools._resolve_project",
+            lambda _: Path("/project"),
+        )
+        client = FakeClient()
+        result = _run_uv_tool(client, "proj", "pytest", "project_run_pytest", target=["/etc/passwd"])
+
+        assert result["ok"] is True
+        assert "etc/passwd" in str(call_log)
+        assert "/etc/passwd" not in str(call_log)

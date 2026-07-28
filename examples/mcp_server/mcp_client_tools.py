@@ -513,9 +513,8 @@ def _build_readonly_fallback_script(
     for t in targets:
         p = Path(t)
         if p.is_absolute():
-            abs_targets.append(str(p))
-        else:
-            abs_targets.append(str(Path(project_dir) / t))
+            p = Path(t).relative_to("/") if len(p.parts) > 1 else Path(".")
+        abs_targets.append(str(Path(project_dir) / p))
     target_args = " ".join(shlex.quote(t) for t in abs_targets)
 
     lines = [
@@ -565,12 +564,13 @@ def _run_uv_tool(
     project_dir = _resolve_project(project)
     if isinstance(target, str):
         target = [target]
-    targets = target or ["."]
+    raw_targets = target or ["."]
     try:
-        argv = _build_uv_argv(tool_key, str(project_dir), targets)
+        targets = _validate_targets(str(project_dir), raw_targets)
     except ValueError as e:
         code, msg = str(e).split(":", 1) if ":" in str(e) else ("INVALID_INPUT", str(e))
         return tool_error(code=code.strip(), message=msg.strip(), tool_name=tool_name)
+    argv = _build_uv_argv(tool_key, str(project_dir), targets)
 
     check_result = client.execute_raw("command -v uv")
     check_job = client.wait_job(check_result["job_id"])

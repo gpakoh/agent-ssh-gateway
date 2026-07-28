@@ -335,3 +335,27 @@ class TestMetaSafety:
         for fn in [tool_success, tool_error, normalize_tool_result]:
             r = fn("t", "x")
             assert isinstance(r, dict)
+
+
+class TestRunToolErrorPropagation:
+    """Bug 2: run_tool must propagate tool_error as error_result with isError."""
+
+    def test_tool_error_propagates_as_error_result(self):
+        """When fn() returns tool_error(ok=False), run_tool must return error_result."""
+        from examples.mcp_server.server import run_tool
+
+        err = tool_error(tool="my_tool", code="TOOL_EXECUTION_FAILED", message="failed")
+        result = run_tool(tool="my_tool", title="My Tool", fn=lambda: err, success_text="Done")
+        assert result.get("isError") is True
+        assert "content" in result
+        assert "Error:" in result["content"][0]["text"]
+
+    def test_tool_success_wrapped_as_text_result(self):
+        """When fn() returns tool_success(ok=True), run_tool returns text_result."""
+        from examples.mcp_server.server import run_tool
+
+        ok = tool_success("my_tool", {"outcome": "passed"})
+        result = run_tool(tool="my_tool", title="My Tool", fn=lambda: ok, success_text="Done")
+        assert result.get("isError") is not True
+        assert result["content"][0]["text"] == "Done"
+        assert result["structuredContent"]["ok"] is True
