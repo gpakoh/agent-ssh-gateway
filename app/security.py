@@ -236,6 +236,21 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"(?i)(sshpass\s+-p\s+)([^\s]+)"),
         r"\1" + SECRET_REDACTION_PLACEHOLDER,
     ),
+    # Telegram Bot API URL: https://api.telegram.org/bot<token>/...
+    (
+        re.compile(r"(https?://api\.telegram\.org/bot)([A-Za-z0-9:_-]{20,})"),
+        r"\1" + SECRET_REDACTION_PLACEHOLDER,
+    ),
+    # Generic bot token in URL path: /bot<digits>:<token>/
+    (
+        re.compile(r"(/bot)(\d{6,}:[A-Za-z0-9_-]{30,})(/|[\s\"'])"),
+        r"\1" + SECRET_REDACTION_PLACEHOLDER + r"\3",
+    ),
+    # JWT tokens (eyJ... base64 header.payload.signature)
+    (
+        re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+        SECRET_REDACTION_PLACEHOLDER,
+    ),
     # Generic KEY=value / KEY: value (runs last)
     # authorization/bearer omitted here — covered by specific patterns above.
     (

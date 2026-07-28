@@ -384,6 +384,58 @@ def test_redact_secrets_preserves_non_secret_command():
 
 
 # ---------------------------------------------------------------------------
+# Extended secret redaction patterns
+# ---------------------------------------------------------------------------
+
+
+def test_redact_secrets_masks_telegram_bot_url():
+    text = "https://api.telegram.org/bot1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/sendMessage"
+    redacted = redact_secrets(text)
+    assert "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_secrets_masks_generic_bot_token_in_url():
+    text = "GET /bot9876543210:abcDefGhiJklMnoPqrStuVwxYz1234567890/getMe"
+    redacted = redact_secrets(text)
+    assert "abcDefGhiJklMnoPqrStuVwxYz" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_secrets_masks_jwt_token():
+    text = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456ghi789jkl012mno345pqr678"
+    redacted = redact_secrets(text)
+    assert "eyJhbGciOiJIUzI1NiJ9" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_secrets_masks_postgres_url():
+    text = "Connecting to postgresql://admin:s3cretP@ss@db-host:5432/mydb"
+    redacted = redact_secrets(text)
+    assert "s3cretP@ss" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_secrets_masks_redis_url():
+    text = "redis://:myRedisPass123@redis-host:6379/0"
+    redacted = redact_secrets(text)
+    assert "myRedisPass123" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_secrets_masks_mongodb_url():
+    text = "mongodb+srv://user:dbSecret@cluster0.abc.mongodb.net/prod"
+    redacted = redact_secrets(text)
+    assert "dbSecret" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_secrets_preserves_url_without_credentials():
+    text = "https://api.example.com/webhook/callback"
+    assert redact_secrets(text) == text
+
+
+# ---------------------------------------------------------------------------
 # C5: AuditLogger.log_command — metadata only, no full command
 # ---------------------------------------------------------------------------
 
