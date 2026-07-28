@@ -115,6 +115,17 @@ def _build_uv_argv(tool: str, project_dir: str, targets: list[str]) -> list[str]
     return ["uv", "run", "--frozen", "--directory", project_dir, "--"] + cmd + ["--"] + validated
 
 
+def _build_uvx_argv(tool: str, targets: list[str]) -> list[str]:
+    """Build argv list for ``uvx`` fallback (no project venv needed)."""
+    if tool not in _UV_TOOL_MAP:
+        raise ValueError(f"INVALID_INPUT: unknown tool '{tool}'")
+    if not targets:
+        raise ValueError("INVALID_INPUT: at least one target required")
+    validated = _validate_targets(".", targets)
+    cmd = _UV_TOOL_MAP[tool]
+    return ["uvx", "--from", tool] + cmd + ["--"] + validated
+
+
 def _map_uv_exit_code(tool: str, exit_code: int) -> tuple[str | None, str | None]:
     """Map uv exit code to (outcome, error_code).
 
@@ -517,6 +528,43 @@ def _run_uv_tool(
     command = " ".join(shlex.quote(a) for a in argv)
     result = client.execute_raw(command)
     raw = client.wait_job(result["job_id"])
+
+    stderr_lower = (raw.get("stderr", "") or "").lower()
+    is_readonly_fail = raw.get("exit_code", 0) != 0 and (
+        "read-only file system" in stderr_lower
+        or "failed to remove directory" in stderr_lower
+    )
+
+    if is_readonly_fail:
+        try:
+            uvx_argv = _build_uvx_argv(tool_key, targets)
+        except ValueError:
+            uvx_argv = None
+        if uvx_argv:
+            r2 = client.execute_argv(
+                ["env", "RUFF_CACHE_DIR=/tmp/.mcp-ruff-cache"] + uvx_argv,
+                cwd=str(project_dir),
+            )
+            outcome2, error_code2 = _map_uv_exit_code(tool_key, r2.get("exit_code", -1))
+            if error_code2:
+                return tool_error(
+                    code=error_code2,
+                    message=f"{tool_key} failed with exit code {r2.get('exit_code')}",
+                    details={"exit_code": r2.get("exit_code"), "stderr": r2.get("stderr", "")},
+                    tool_name=tool_name,
+                )
+            return tool_success(
+                build_command_result(
+                    outcome=outcome2,
+                    exit_code=r2.get("exit_code", 0),
+                    stdout=r2.get("stdout") or r2.get("output", ""),
+                    stderr=r2.get("stderr", ""),
+                    execution_duration_ms=r2.get("execution_duration_ms"),
+                    job_id=r2.get("job_id"),
+                ),
+                tool_name=tool_name,
+            )
+
     outcome, error_code = _map_uv_exit_code(tool_key, raw.get("exit_code", -1))
     if error_code:
         return tool_error(
