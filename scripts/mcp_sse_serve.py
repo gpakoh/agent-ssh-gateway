@@ -25,8 +25,8 @@ Env vars:
   MCP_HTTP_ALLOW_NON_LOOPBACK  must be exactly "true" to bind non-loopback
   MCP_HTTP_BEARER_TOKEN        required — protects the SSE + message endpoints
   MCP_HTTP_ALLOWED_ORIGINS     optional comma-separated extra Origin allowlist
-  MCP_CHATGPT_SAFE_MODE        must be "true"
-  MCP_GATEWAY_TOOL_MODE        must be "chatgpt"
+  MCP_CLIENT_SAFE_MODE        must be "true"
+  MCP_GATEWAY_TOOL_MODE        must be "mcp_client"
 
 MCP_HTTP_BEARER_TOKEN is never logged or echoed back in responses.
 
@@ -130,17 +130,17 @@ def require_safe_mode() -> None:
     instead of re-implementing the env var parsing here.
     """
     _ensure_import_paths()
-    from tool_modes import get_tool_mode, is_chatgpt_safe_mode  # noqa: PLC0415
+    from tool_modes import get_tool_mode, is_mcp_client_safe_mode  # noqa: PLC0415
 
     mode = get_tool_mode()
-    if mode != "chatgpt":
+    if mode != "mcp_client":
         raise ConfigError(
-            f"MCP_GATEWAY_TOOL_MODE must be 'chatgpt' for the private SSE "
+            f"MCP_GATEWAY_TOOL_MODE must be 'mcp_client' for the private SSE "
             f"entrypoint, got {mode!r}."
         )
-    if not is_chatgpt_safe_mode():
+    if not is_mcp_client_safe_mode():
         raise ConfigError(
-            "MCP_CHATGPT_SAFE_MODE must be true for the private SSE entrypoint."
+            "MCP_CLIENT_SAFE_MODE must be true for the private SSE entrypoint."
         )
 
 

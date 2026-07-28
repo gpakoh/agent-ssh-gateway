@@ -4,7 +4,7 @@
 
 **Goal:** Implement Phase 1 of the MCP Gateway Contract spec: uniform envelope, tool renaming, Python runners via `uv`, safe glob, compose fixes, confirmation, latency measurement.
 
-**Architecture:** All Phase 1 changes touch the existing MCP server in `examples/mcp_server/` and the fleet Docker client in `examples/chatgpt_remote_mcp/fleet/`. Core envelope logic lives in `tool_results.py`. Tool registration and renaming spans `server.py`, `tool_modes.py`, `tool_scopes.py`. Python runners are rewritten in `chatgpt_tools.py` to use `uv` via SSH. Docker compose `file_path` removal touches `docker_client.py`. Confirmation reuses the existing `ConfirmStore` in `docker_confirm.py`.
+**Architecture:** All Phase 1 changes touch the existing MCP server in `examples/mcp_server/` and the fleet Docker client in `examples/mcp_client_remote/fleet/`. Core envelope logic lives in `tool_results.py`. Tool registration and renaming spans `server.py`, `tool_modes.py`, `tool_scopes.py`. Python runners are rewritten in `mcp_client_tools.py` to use `uv` via SSH. Docker compose `file_path` removal touches `docker_client.py`. Confirmation reuses the existing `ConfirmStore` in `docker_confirm.py`.
 
 **Tech Stack:** Python 3.11+, FastMCP, Paramiko (SSH), `uv`, pytest, asyncio
 
@@ -27,7 +27,7 @@
 **Files:**
 - Modify: `examples/mcp_server/tool_results.py`
 - Modify: `examples/mcp_server/server.py` (all `@register_tool` functions)
-- Modify: `examples/mcp_server/chatgpt_tools.py` (all return paths)
+- Modify: `examples/mcp_server/mcp_client_tools.py` (all return paths)
 - Modify: `tests/test_tool_results.py`
 - Modify: `tests/test_gateway_envelope.py`
 
@@ -164,7 +164,7 @@ return tool_error("PROJECT_NOT_FOUND", "Project not found", ...)
 
 Key functions to update: `gateway_health`, `docker_ps`, `docker_images`, `docker_inspect`, `docker_logs`, `docker_stats`, `docker_compose_ps`, `docker_compose_services`, `docker_start`, `docker_stop`, `docker_restart`, etc.
 
-- [ ] **Step 7: Audit all error paths in server.py and chatgpt_tools.py**
+- [ ] **Step 7: Audit all error paths in server.py and mcp_client_tools.py**
 
 Every `raise` or raw exception return must be caught and converted to `tool_error()`. Add a catch-all wrapper if not already present.
 
@@ -176,7 +176,7 @@ Expected: same results as before (1077 pass, 3 pre-existing auth failures)
 - [ ] **Step 9: Commit**
 
 ```bash
-git add examples/mcp_server/tool_results.py examples/mcp_server/server.py examples/mcp_server/chatgpt_tools.py tests/test_tool_results.py
+git add examples/mcp_server/tool_results.py examples/mcp_server/server.py examples/mcp_server/mcp_client_tools.py tests/test_tool_results.py
 git commit -m "feat: uniform response envelope (Contract v1)
 
 tool_success/tool_error now return ok/result/error/meta structure.
@@ -190,7 +190,7 @@ All tools updated to use envelope. Error paths caught."
 
 **Files:**
 - Modify: `examples/mcp_server/tool_results.py`
-- Modify: `examples/mcp_server/chatgpt_tools.py`
+- Modify: `examples/mcp_server/mcp_client_tools.py`
 - Modify: `examples/mcp_server/gateway_client.py`
 - Modify: `tests/test_tool_results.py`
 - Create: `tests/test_command_result.py`
@@ -282,7 +282,7 @@ def build_command_result(
 Run: `pytest tests/test_command_result.py -v`
 Expected: 3 PASSED
 
-- [ ] **Step 5: Update chatgpt_tools.py to use build_command_result**
+- [ ] **Step 5: Update mcp_client_tools.py to use build_command_result**
 
 Replace all raw return dicts from functions like `project_run_pytest`, `project_run_ruff`, `project_run_mypy`, `project_run_compileall`, `project_run_tests`, `project_run_lint` to use `build_command_result()`.
 
@@ -293,7 +293,7 @@ The `GatewayClient.execute_restricted()` and `execute_project_command()` methods
 - [ ] **Step 7: Commit**
 
 ```bash
-git add examples/mcp_server/tool_results.py examples/mcp_server/chatgpt_tools.py examples/mcp_server/gateway_client.py tests/test_command_result.py
+git add examples/mcp_server/tool_results.py examples/mcp_server/mcp_client_tools.py examples/mcp_server/gateway_client.py tests/test_command_result.py
 git commit -m "feat: standardized command result shape
 
 build_command_result() returns outcome/exit_code/stdout/stderr.
@@ -307,7 +307,7 @@ meta.duration_ms tracks total MCP call time."
 
 **Files:**
 - Modify: `examples/mcp_server/server.py` (decorator names + function names)
-- Modify: `examples/mcp_server/chatgpt_tools.py` (function names)
+- Modify: `examples/mcp_server/mcp_client_tools.py` (function names)
 - Modify: `examples/mcp_server/tool_modes.py` (`TOOL_NAMES_BY_MODE`)
 - Modify: `examples/mcp_server/tool_scopes.py` (`TOOL_SCOPES`)
 - Modify: `examples/mcp_server/tools_manifest.py`
@@ -344,7 +344,7 @@ Change all keys in `TOOL_SCOPES` dict to new names. The old names become stale �
 
 - [ ] **Step 3: Update `tool_modes.py` — replace old names in `TOOL_NAMES_BY_MODE`**
 
-Change all old tool names to new ones across all modes (`minimal`, `standard`, `full`, `chatgpt`).
+Change all old tool names to new ones across all modes (`minimal`, `standard`, `full`, `mcp_client`).
 
 - [ ] **Step 4: Update `server.py` — rename `@register_tool()` arguments**
 
@@ -376,7 +376,7 @@ gateway_health → health. project_ prefix maintained for project tools."
 
 **Files:**
 - Create: `examples/mcp_server/project_registry.py`
-- Modify: `examples/mcp_server/chatgpt_tools.py`
+- Modify: `examples/mcp_server/mcp_client_tools.py`
 - Modify: `examples/mcp_server/server.py`
 - Create: `tests/test_project_registry.py`
 
@@ -528,7 +528,7 @@ _project_registry = ProjectRegistry(
 )
 ```
 
-- [ ] **Step 5: Wire into chatgpt_tools.py**
+- [ ] **Step 5: Wire into mcp_client_tools.py**
 
 Replace direct path construction in `_project_root()` with:
 
@@ -560,9 +560,9 @@ Unknown name → PROJECT_NOT_FOUND. Symlink escape → POLICY_DENIED."
 ### Task 5: Python Runner Tools — `uv` via SSH
 
 **Files:**
-- Modify: `examples/mcp_server/chatgpt_tools.py` (rewrite `project_run_ruff`, `project_run_pytest`, `project_run_mypy`, `project_run_compileall`)
+- Modify: `examples/mcp_server/mcp_client_tools.py` (rewrite `project_run_ruff`, `project_run_pytest`, `project_run_mypy`, `project_run_compileall`)
 - Modify: `examples/mcp_server/command_policy.py` (add `uv` to allowed prefixes)
-- Modify: `tests/test_mcp_chatgpt_tools.py`
+- Modify: `tests/test_mcp_mcp_client_tools.py`
 - Create: `tests/test_uv_runners.py`
 
 **Interfaces:**
@@ -575,7 +575,7 @@ Create `tests/test_uv_runners.py`:
 
 ```python
 import pytest
-from mcp_server.chatgpt_tools import _build_uv_argv
+from mcp_server.mcp_client_tools import _build_uv_argv
 
 
 def test_build_ruff_argv():
@@ -627,7 +627,7 @@ Expected: 6 FAILED
 
 - [ ] **Step 3: Implement argv builder and result mapper**
 
-Add to `chatgpt_tools.py`:
+Add to `mcp_client_tools.py`:
 
 ```python
 import shlex
@@ -693,7 +693,7 @@ def _map_uv_exit_code(tool: str, exit_code: int) -> tuple[str, str | None]:
         return (None, "TOOL_EXECUTION_FAILED")
 ```
 
-- [ ] **Step 4: Rewrite `project_run_ruff` in chatgpt_tools.py**
+- [ ] **Step 4: Rewrite `project_run_ruff` in mcp_client_tools.py**
 
 ```python
 async def project_run_ruff(
@@ -756,7 +756,7 @@ Expected: 6 PASSED
 - [ ] **Step 7: Commit**
 
 ```bash
-git add examples/mcp_server/chatgpt_tools.py examples/mcp_server/command_policy.py tests/test_uv_runners.py
+git add examples/mcp_server/mcp_client_tools.py examples/mcp_server/command_policy.py tests/test_uv_runners.py
 git commit -m "feat: python runner tools via uv over SSH
 
 project_run_ruff / pytest / mypy / compileall use uv run --frozen.
@@ -768,8 +768,8 @@ Preflight checks for uv. Full exit code mapping. argv-level safety."
 ### Task 6: `find_files` — Safe Glob
 
 **Files:**
-- Modify: `examples/mcp_server/chatgpt_tools.py` (rewrite `project_find_files`)
-- Modify: `tests/test_mcp_chatgpt_tools.py`
+- Modify: `examples/mcp_server/mcp_client_tools.py` (rewrite `project_find_files`)
+- Modify: `tests/test_mcp_mcp_client_tools.py`
 - Create: `tests/test_find_files.py`
 
 **Interfaces:**
@@ -783,7 +783,7 @@ Create `tests/test_find_files.py`:
 ```python
 import pytest
 from pathlib import Path
-from mcp_server.chatgpt_tools import _safe_glob
+from mcp_server.mcp_client_tools import _safe_glob
 
 
 def test_simple_glob(tmp_path):
@@ -850,7 +850,7 @@ Expected: 8 FAILED
 
 - [ ] **Step 3: Implement `_safe_glob()`**
 
-Add to `chatgpt_tools.py`:
+Add to `mcp_client_tools.py`:
 
 ```python
 import signal
@@ -912,7 +912,7 @@ def _safe_glob(
 
 Note: for asyncio context, replace `signal.alarm` with `asyncio.wait_for()`.
 
-- [ ] **Step 4: Rewrite `project_find_files` in chatgpt_tools.py**
+- [ ] **Step 4: Rewrite `project_find_files` in mcp_client_tools.py**
 
 ```python
 async def project_find_files(project: str, pattern: str) -> dict:
@@ -947,7 +947,7 @@ Expected: 8 PASSED
 - [ ] **Step 6: Commit**
 
 ```bash
-git add examples/mcp_server/chatgpt_tools.py tests/test_find_files.py
+git add examples/mcp_server/mcp_client_tools.py tests/test_find_files.py
 git commit -m "feat: safe glob for project_find_files
 
 pathlib.Path.glob() with symlink guard, exclusion dirs, depth/timeout limits.
@@ -959,8 +959,8 @@ Traversal and absolute patterns blocked. Meta.truncated on overflow."
 ### Task 7: Docker Compose — Remove `file_path`, Validate `project_dir`
 
 **Files:**
-- Modify: `examples/chatgpt_remote_mcp/fleet/docker_client.py` (remove `file_path` from compose methods)
-- Modify: `examples/chatgpt_remote_mcp/fleet/docker_server.py` (remove `file_path` from tool params)
+- Modify: `examples/mcp_client_remote/fleet/docker_client.py` (remove `file_path` from compose methods)
+- Modify: `examples/mcp_client_remote/fleet/docker_server.py` (remove `file_path` from tool params)
 - Modify: `examples/mcp_server/server.py` (update `docker_compose_*` tool registrations)
 - Modify: `tests/test_docker_client.py`
 
@@ -1022,7 +1022,7 @@ Expected: all pass
 - [ ] **Step 6: Commit**
 
 ```bash
-git add examples/chatgpt_remote_mcp/fleet/docker_client.py examples/chatgpt_remote_mcp/fleet/docker_server.py examples/mcp_server/server.py tests/test_docker_client.py
+git add examples/mcp_client_remote/fleet/docker_client.py examples/mcp_client_remote/fleet/docker_server.py examples/mcp_server/server.py tests/test_docker_client.py
 git commit -m "feat: remove file_path from compose tools, validate project_dir
 
 file_path parameter removed from all docker_compose_* tools.

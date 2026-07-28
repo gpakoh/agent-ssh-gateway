@@ -90,7 +90,7 @@ class TestServerWrapperBlocked:
         reason="mcp package not installed",
     )
     def test_server_wrapper_returns_error_response(self, monkeypatch):
-        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
         monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
         monkeypatch.setenv("GITEA_TOKEN", "test-token")
         monkeypatch.setenv("GITHUB_TOKEN", "test-token")
@@ -104,7 +104,7 @@ class TestServerWrapperBlocked:
         clear_prefixes = ("server", "mcp_server", "tool_modes", "opencode_tools", "command_policy",
                           "gateway_client", "handoff", "self_test", "write_modes",
                           "docker_confirm", "agent_tools", "agent_tasks",
-                          "agent_backend_router", "chatgpt_tools", "mimo_tools")
+                          "agent_backend_router", "mcp_client_tools", "mimo_tools")
         saved_modules = {}
         for name in list(sys.modules):
             if any(p in name for p in clear_prefixes):

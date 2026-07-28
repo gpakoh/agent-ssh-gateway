@@ -35,7 +35,12 @@ from agent_tasks import (
 from agent_tools import (
     project_run_agent as _project_run_agent,
 )
-from chatgpt_tools import (
+from command_policy import CommandPolicyError
+from docker_confirm import ConfirmAction, ConfirmStatus, ConfirmStore
+from gateway_client import GatewayClient, GatewayClientError, resolve_file_path
+from handoff import read_handoff, show_handoff_status, write_handoff_plan
+from mcp.server.fastmcp import FastMCP
+from mcp_client_tools import (
     git_diff_stat,
     git_status,
     project_commit_head,
@@ -73,11 +78,6 @@ from chatgpt_tools import (
     show_changes,
     working_directory,
 )
-from command_policy import CommandPolicyError
-from docker_confirm import ConfirmAction, ConfirmStatus, ConfirmStore
-from gateway_client import GatewayClient, GatewayClientError, resolve_file_path
-from handoff import read_handoff, show_handoff_status, write_handoff_plan
-from mcp.server.fastmcp import FastMCP
 from mimo_tools import (
     project_run_mimo as _project_run_mimo,
 )
@@ -89,16 +89,16 @@ from tool_modes import should_register_tool
 from tool_results import build_command_result, error_result, text_result, tool_error, tool_success
 from write_modes import WriteModeError, WritePermissionError
 
-from examples.chatgpt_remote_mcp.fleet.context7_server import (
+from examples.mcp_client_remote.fleet.context7_server import (
     _call_upstream as _call_context7_upstream,
 )
-from examples.chatgpt_remote_mcp.fleet.docker_client import DockerClient, RunResult
-from examples.chatgpt_remote_mcp.fleet.gitea_client import GiteaClient
-from examples.chatgpt_remote_mcp.fleet.github_client import (
+from examples.mcp_client_remote.fleet.docker_client import DockerClient, RunResult
+from examples.mcp_client_remote.fleet.gitea_client import GiteaClient
+from examples.mcp_client_remote.fleet.github_client import (
     GitHubClient,
     normalize_list_response,
 )
-from examples.chatgpt_remote_mcp.fleet.postgres_client import PostgresClient
+from examples.mcp_client_remote.fleet.postgres_client import PostgresClient
 
 # OAuth provider and settings
 from examples.mcp_server.latency_metrics import get_tracker

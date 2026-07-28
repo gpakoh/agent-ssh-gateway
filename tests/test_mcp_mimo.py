@@ -111,7 +111,7 @@ class TestServerWrapperBlocked:
         reason="mcp package not installed",
     )
     def test_server_wrapper_returns_error_response(self, monkeypatch):
-        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
         monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
         monkeypatch.setenv("GITEA_TOKEN", "test-token")
         monkeypatch.setenv("GITHUB_TOKEN", "test-token")
@@ -146,8 +146,8 @@ class TestServerWrapperBlocked:
 
 
 class TestToolRegistration:
-    def test_registered_in_chatgpt_mode(self, monkeypatch):
-        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+    def test_registered_in_mcp_client_mode(self, monkeypatch):
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
         import importlib
         import sys
         from pathlib import Path
@@ -158,8 +158,8 @@ class TestToolRegistration:
         tm = importlib.import_module("tool_modes")
         assert tm.should_register_tool("project_run_mimo") is True
 
-    def test_visible_in_tools_for_chatgpt(self, monkeypatch):
-        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+    def test_visible_in_tools_for_mcp_client(self, monkeypatch):
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
         import importlib
         import sys
         from pathlib import Path

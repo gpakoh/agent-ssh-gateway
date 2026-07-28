@@ -30,7 +30,7 @@
 
 | File | Change |
 |------|--------|
-| `examples/chatgpt_remote_mcp/server.py` | `TokenAuthMiddleware` → `MixedAuthMiddleware`; OAuth endpoint passthrough; MCP_AUTH_MODE env integration |
+| `examples/mcp_client_remote/server.py` | `TokenAuthMiddleware` → `MixedAuthMiddleware`; OAuth endpoint passthrough; MCP_AUTH_MODE env integration |
 | `examples/mcp_server/server.py` | FastMCP `AuthSettings` config; OAuth provider init when mode != `token` |
 | `tests/test_mcp_auth.py` | Mixed mode tests: Bearer valid/invalid, mcp_token fallback, mode switching, OAuth passthrough |
 | `pyproject.toml` | Dependencies if needed (check if `mcp` package version has AuthSettings — already in .venv) |
@@ -587,7 +587,7 @@ git commit -m "feat: implement GatewayOAuthProvider with PKCE, DCR, token manage
 ### Task 2: MixedAuthMiddleware + Proxy Integration
 
 **Files:**
-- Modify: `examples/chatgpt_remote_mcp/server.py`
+- Modify: `examples/mcp_client_remote/server.py`
 
 **Interfaces:**
 - Consumes: `GatewayOAuthProvider` from `examples/mcp_server/oauth_provider`
@@ -653,7 +653,7 @@ def test_mixed_mode_oauth_endpoints_bypass_auth():
 - [ ] **Step 2: Read current server.py to understand the exact code**
 
 ```bash
-cat -n examples/chatgpt_remote_mcp/server.py
+cat -n examples/mcp_client_remote/server.py
 ```
 
 Expected: understand the exact structure to modify with MixedAuthMiddleware.
@@ -661,7 +661,7 @@ Expected: understand the exact structure to modify with MixedAuthMiddleware.
 - [ ] **Step 3: Implement MixedAuthMiddleware**
 
 ```python
-# examples/chatgpt_remote_mcp/server.py — replace entire file with:
+# examples/mcp_client_remote/server.py — replace entire file with:
 """Remote Streamable HTTP MCP server for ChatGPT Developer Mode.
 
 Architecture:
@@ -861,7 +861,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 # We test via the proxy app factory
-from examples.chatgpt_remote_mcp.server import (
+from examples.mcp_client_remote.server import (
     create_proxy_app,
     MixedAuthMiddleware,
     _is_oauth_public_path,
@@ -878,7 +878,7 @@ def token_client(valid_token):
     with patch.dict(os.environ, {"MCP_PUBLIC_TOKEN": valid_token, "MCP_AUTH_MODE": "token"}):
         # Force module reload for env vars
         import importlib
-        import examples.chatgpt_remote_mcp.server as srv
+        import examples.mcp_client_remote.server as srv
         importlib.reload(srv)
         app = srv.create_proxy_app()
         yield TestClient(app)
@@ -888,7 +888,7 @@ def token_client(valid_token):
 def mixed_client(valid_token):
     with patch.dict(os.environ, {"MCP_PUBLIC_TOKEN": valid_token, "MCP_AUTH_MODE": "mixed"}):
         import importlib
-        import examples.chatgpt_remote_mcp.server as srv
+        import examples.mcp_client_remote.server as srv
         importlib.reload(srv)
         app = srv.create_proxy_app()
         yield TestClient(app)
@@ -967,7 +967,7 @@ Expected: 12/12 passed (some may show 502 for no backend — that's fine, auth p
 - [ ] **Step 6: Commit**
 
 ```bash
-git add tests/test_mcp_auth.py examples/chatgpt_remote_mcp/server.py
+git add tests/test_mcp_auth.py examples/mcp_client_remote/server.py
 git commit -m "feat: add MixedAuthMiddleware with token/mixed/oauth modes"
 ```
 
@@ -1138,13 +1138,13 @@ git commit -m "feat: integrate AuthSettings and GatewayOAuthProvider with FastMC
 
 **Files:**
 - Modify: `examples/mcp_server/.env.example`
-- Modify: `examples/chatgpt_remote_mcp/.env.example`
+- Modify: `examples/mcp_client_remote/.env.example`
 - Modify: `scripts/mcp_fleet_healthcheck.py` (if needed)
 - Create: None
 
 - [ ] **Step 1: Update .env.example**
 
-Add to both `examples/mcp_server/.env.example` and `examples/chatgpt_remote_mcp/.env.example`:
+Add to both `examples/mcp_server/.env.example` and `examples/mcp_client_remote/.env.example`:
 
 ```
 # MCP Auth mode: token | mixed | oauth
@@ -1167,7 +1167,7 @@ If healthcheck fails in mixed mode without mcp_token — no fix needed (it passe
 - [ ] **Step 3: Commit**
 
 ```bash
-git add examples/mcp_server/.env.example examples/chatgpt_remote_mcp/.env.example
+git add examples/mcp_server/.env.example examples/mcp_client_remote/.env.example
 git commit -m "docs: add MCP_AUTH_MODE and MCP_ISSUER_URL to env examples"
 ```
 
@@ -1220,7 +1220,7 @@ Add under `[Unreleased]`:
 
 ### Changed
 
-- `examples/chatgpt_remote_mcp/server.py`: `TokenAuthMiddleware` replaced with
+- `examples/mcp_client_remote/server.py`: `TokenAuthMiddleware` replaced with
   `MixedAuthMiddleware` supporting 3 auth modes.
 - `examples/mcp_server/server.py`: FastMCP configured with `AuthSettings` when
   `MCP_AUTH_MODE` is `mixed` or `oauth`.

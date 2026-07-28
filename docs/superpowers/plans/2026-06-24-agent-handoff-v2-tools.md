@@ -565,11 +565,11 @@ git commit -m "feat(agent-tasks): add archive_agent_task"
 
 **Files:**
 - Modify: `examples/mcp_server/server.py` (add 6 new `@register_tool` entries + `_split_lines` helper)
-- Modify: `examples/mcp_server/tool_modes.py` (add tool names to chatgpt set)
+- Modify: `examples/mcp_server/tool_modes.py` (add tool names to mcp_client set)
 
 **Interfaces:**
 - Consumes: all functions from `agent_tasks.py`
-- Produces: 6 registered Gateway MCP tools in chatgpt mode
+- Produces: 6 registered Gateway MCP tools in mcp_client mode
 
 - [ ] **Step 1: Add import to `server.py`**
 
@@ -711,7 +711,7 @@ def gateway_project_archive_agent_task(project: str, task_id: str) -> dict[str, 
 
 - [ ] **Step 4: Register tool names in `tool_modes.py`**
 
-In the `chatgpt` set, after the v1 handoff tools, add:
+In the `mcp_client` set, after the v1 handoff tools, add:
 
 ```python
         "gateway_project_write_agent_task",
@@ -751,7 +751,7 @@ git commit -m "feat: add 6 Agent Handoff v2 MCP tools to gateway"
 
 **Interfaces:**
 - Consumes: `agent_tasks.py` functions — `write_agent_task`, `read_agent_task_file`, `list_agent_tasks`, `archive_agent_task`
-- Produces: 6 registered MCP tools visible in `chatgpt` mode
+- Produces: 6 registered MCP tools visible in `mcp_client` mode
 
 - [ ] **Step 1: Add import in `server.py`**
 
@@ -897,7 +897,7 @@ def _split_lines(value: str | None) -> list[str] | None:
 
 - [ ] **Step 4: Register tool names in `tool_modes.py`**
 
-In the `chatgpt` set, after the v1 handoff tools, add:
+In the `mcp_client` set, after the v1 handoff tools, add:
 
 ```python
         "gateway_project_write_agent_task",

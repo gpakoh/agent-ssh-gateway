@@ -5,8 +5,8 @@ This runbook documents the first real safe attach path for ChatGPT/MCP against t
 ## Prerequisites
 
 - Gateway running v0.1.47a0+
-- `MCP_CHATGPT_SAFE_MODE=true`
-- `MCP_GATEWAY_TOOL_MODE=chatgpt`
+- `MCP_CLIENT_SAFE_MODE=true`
+- `MCP_GATEWAY_TOOL_MODE=mcp_client`
 - Master key available for token creation only
 
 ## Sequence
@@ -30,15 +30,15 @@ Save token value securely. Do NOT print it in logs or reports.
 ```bash
 GATEWAY_URL=http://<gateway>:8085 \
 GATEWAY_AGENT_TOKEN=<agent-token> \
-MCP_GATEWAY_TOOL_MODE=chatgpt \
-MCP_CHATGPT_SAFE_MODE=true \
+MCP_GATEWAY_TOOL_MODE=mcp_client \
+MCP_CLIENT_SAFE_MODE=true \
 python3 examples/mcp_server/server.py
 ```
 
 ### 3. Verify manifest
 
 ```bash
-python3 scripts/chatgpt_tool_attach_smoke.py
+python3 scripts/mcp_client_tool_attach_smoke.py
 ```
 
 Expected: 7/7 pass. Safe tools include health, read_file, project_* inspection. Blocked tools include docker_*, workspace write, agent launch.

@@ -52,7 +52,7 @@ def enforce_default():
 
 
 # ---------------------------------------------------------------------------
-# Commands that _run_uv_tool generates (from chatgpt_tools.py lines 492-503)
+# Commands that _run_uv_tool generates (from mcp_client_tools.py lines 492-503)
 # ---------------------------------------------------------------------------
 
 # The "uv available?" check — executed via execute_raw (no cd wrapping)
@@ -296,10 +296,10 @@ class TestRunUvToolCodePath:
 
     def test_pytest_calls_execute_raw(self, monkeypatch):
         """project_run_pytest must call execute_raw, NOT execute_project_command."""
-        from examples.mcp_server.chatgpt_tools import project_run_pytest
+        from examples.mcp_server.mcp_client_tools import project_run_pytest
 
         monkeypatch.setattr(
-            "examples.mcp_server.chatgpt_tools._resolve_project",
+            "examples.mcp_server.mcp_client_tools._resolve_project",
             lambda _: Path("/tmp/proj"),
         )
         client = self._make_mock_client()
@@ -310,10 +310,10 @@ class TestRunUvToolCodePath:
 
     def test_ruff_calls_execute_raw(self, monkeypatch):
         """project_run_ruff must call execute_raw, NOT execute_project_command."""
-        from examples.mcp_server.chatgpt_tools import project_run_ruff
+        from examples.mcp_server.mcp_client_tools import project_run_ruff
 
         monkeypatch.setattr(
-            "examples.mcp_server.chatgpt_tools._resolve_project",
+            "examples.mcp_server.mcp_client_tools._resolve_project",
             lambda _: Path("/tmp/proj"),
         )
         client = self._make_mock_client()
@@ -324,10 +324,10 @@ class TestRunUvToolCodePath:
 
     def test_mypy_calls_execute_raw(self, monkeypatch):
         """project_run_mypy must call execute_raw, NOT execute_project_command."""
-        from examples.mcp_server.chatgpt_tools import project_run_mypy
+        from examples.mcp_server.mcp_client_tools import project_run_mypy
 
         monkeypatch.setattr(
-            "examples.mcp_server.chatgpt_tools._resolve_project",
+            "examples.mcp_server.mcp_client_tools._resolve_project",
             lambda _: Path("/tmp/proj"),
         )
         client = self._make_mock_client()
@@ -338,10 +338,10 @@ class TestRunUvToolCodePath:
 
     def test_execute_raw_commands_contain_no_metachar(self, monkeypatch):
         """Every command passed to execute_raw must contain no shell metachars."""
-        from examples.mcp_server.chatgpt_tools import _run_uv_tool
+        from examples.mcp_server.mcp_client_tools import _run_uv_tool
 
         monkeypatch.setattr(
-            "examples.mcp_server.chatgpt_tools._resolve_project",
+            "examples.mcp_server.mcp_client_tools._resolve_project",
             lambda _: Path("/tmp/proj"),
         )
         client = self._make_mock_client()

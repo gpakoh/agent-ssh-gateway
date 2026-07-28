@@ -25,12 +25,12 @@ This is a one-shot discovery script, not an entrypoint:
     gateway — only the `health` tool's own call would, and this
     script never calls any tool.
   - Requires the same safe-mode preconditions as every other MCP
-    entrypoint in this repo (MCP_GATEWAY_TOOL_MODE=chatgpt,
-    MCP_CHATGPT_SAFE_MODE=true), reusing require_safe_mode() from
+    entrypoint in this repo (MCP_GATEWAY_TOOL_MODE=mcp_client,
+    MCP_CLIENT_SAFE_MODE=true), reusing require_safe_mode() from
     mcp_sse_serve.py rather than re-implementing the check.
 
 Run directly:
-    MCP_GATEWAY_TOOL_MODE=chatgpt MCP_CHATGPT_SAFE_MODE=true \
+    MCP_GATEWAY_TOOL_MODE=mcp_client MCP_CLIENT_SAFE_MODE=true \
         python3 scripts/mcp_streamable_http_route_probe.py
 
 All findings are printed to stderr as JSON (routes, methods, and the

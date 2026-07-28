@@ -66,7 +66,7 @@ MCP_INTERNAL_HOST = os.environ.get("MCP_INTERNAL_HOST", "127.0.0.1")
 MCP_INTERNAL_PORT = int(os.environ.get("MCP_INTERNAL_PORT", "8789"))
 MCP_INTERNAL_URL = f"http://{MCP_INTERNAL_HOST}:{MCP_INTERNAL_PORT}"
 
-logger = logging.getLogger("chatgpt_remote_mcp")
+logger = logging.getLogger("mcp_client_remote")
 
 MCP_AUTH_MODE = os.environ.get("MCP_AUTH_MODE", "oauth").strip().lower()
 if MCP_AUTH_MODE not in ("token", "oauth"):

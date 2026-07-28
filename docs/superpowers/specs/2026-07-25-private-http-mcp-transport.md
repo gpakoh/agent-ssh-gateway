@@ -42,9 +42,9 @@
 ## Safe mode mandatory
 
 ```
-MCP_GATEWAY_TOOL_MODE=chatgpt
-MCP_CHATGPT_SAFE_MODE=true
-MCP_ACCESS_PROFILE=chatgpt_safe
+MCP_GATEWAY_TOOL_MODE=mcp_client
+MCP_CLIENT_SAFE_MODE=true
+MCP_ACCESS_PROFILE=mcp_client_safe
 ```
 
 Preflight script validates these. HTTP transport startup must fail-fast if safe mode is not configured.
@@ -64,7 +64,7 @@ ChatGPT/OpenAI connector (future)
   ↓ HTTP SSE
 MCP HTTP Server (uvicorn, private network)
   ↓ MCP protocol
-FastMCP tools (chatgpt safe mode, 84 tools)
+FastMCP tools (mcp_client safe mode, 84 tools)
   ↓ HTTP API
 Gateway API (agent-ssh-gateway, port 8085)
   ↓ SSH
@@ -119,9 +119,9 @@ mcp-http:
   environment:
     - MCP_HTTP_HOST=0.0.0.0  # only inside container
     - MCP_HTTP_PORT=8086
-    - MCP_GATEWAY_TOOL_MODE=chatgpt
-    - MCP_CHATGPT_SAFE_MODE=true
-    - MCP_ACCESS_PROFILE=chatgpt_safe
+    - MCP_GATEWAY_TOOL_MODE=mcp_client
+    - MCP_CLIENT_SAFE_MODE=true
+    - MCP_ACCESS_PROFILE=mcp_client_safe
     - MCP_AUTH_MODE=token
   ports:
     - "127.0.0.1:8086:8086"  # host-only bind, not exposed to network
@@ -146,7 +146,7 @@ mcp-http:
 
 ### Integration with existing smoke
 
-- `chatgpt_tool_attach_smoke.py` — no change (tests stdio manifest).
+- `mcp_client_tool_attach_smoke.py` — no change (tests stdio manifest).
 - `mcp_stdio_safe_smoke.py` — no change (tests stdio protocol).
 - New: `mcp_http_safe_smoke.py` — tests HTTP SSE protocol.
 
@@ -161,7 +161,7 @@ mcp-http:
 | Threat | Mitigation |
 |--------|-----------|
 | Accidental public bind | Default `127.0.0.1`, `MCP_HTTP_BIND_PUBLIC=true` requires explicit flag, Docker `127.0.0.1:port` mapping |
-| Unsafe mode enabled | Preflight validates `MCP_CHATGPT_SAFE_MODE=true`, fail-fast on startup |
+| Unsafe mode enabled | Preflight validates `MCP_CLIENT_SAFE_MODE=true`, fail-fast on startup |
 | Token leakage in logs | Redaction in audit logger, no token in HTTP response headers |
 | Tool drift (new tools not in manifest) | Contract tests verify manifest counts match code, CI gate |
 | Agent token as master key | Preflight + manifest tests reject master key usage |

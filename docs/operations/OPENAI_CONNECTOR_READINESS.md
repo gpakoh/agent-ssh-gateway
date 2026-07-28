@@ -9,7 +9,7 @@
 - **Safe mode**: 84 safe tools, 30 blocked. Confirmed via MCP stdio protocol, via the private SSE entrypoint (`scripts/mcp_sse_safe_smoke.py`, real subprocess, 11/11 checks), and via the private Streamable HTTP entrypoint (`scripts/mcp_streamable_http_safe_smoke.py`, real subprocess, 11/11 checks).
 - **Health**: `health` tool returns 507 chars (version, build, toolset hash) over stdio.
 - **Manifest**: `tools_manifest` returns 84-tool list over stdio and over both private HTTP entrypoints.
-- **Env template**: `chatgpt.safe.env.example` (stdio), `chatgpt.sse.env.example` (private SSE), and `chatgpt.streamable-http.env.example` (private Streamable HTTP) with GATEWAY_URL, GATEWAY_API_KEY, safe mode flags, and (per-transport) their own `MCP_*_HOST`/`MCP_*_PORT`/`MCP_*_BEARER_TOKEN`/`MCP_*_ALLOWED_ORIGINS`.
+- **Env template**: `mcp_client.safe.env.example` (stdio), `mcp_client.sse.env.example` (private SSE), and `mcp_client.streamable-http.env.example` (private Streamable HTTP) with GATEWAY_URL, GATEWAY_API_KEY, safe mode flags, and (per-transport) their own `MCP_*_HOST`/`MCP_*_PORT`/`MCP_*_BEARER_TOKEN`/`MCP_*_ALLOWED_ORIGINS`.
 - **Operator checklist**: 10-step checklist in CHATGPT_ATTACH_CHECKLIST.md (stdio); private SSE and Streamable HTTP steps in CHATGPT_TOOL_ATTACH.md.
 - **Handoff package**: CHATGPT_CONNECTOR_HANDOFF.md with env/token checklists, manifest JSON.
 
@@ -18,7 +18,7 @@
 - MCP protocol layer: initialize, list_tools, call_tool all work via stdio, via the private SSE entrypoint, **and** via the private Streamable HTTP entrypoint
 - Private-network SSE transport: `scripts/mcp_sse_serve.py` (entrypoint) + `scripts/mcp_sse_safe_smoke.py` (smoke) — bind `127.0.0.1` only by default, independent bearer-token + Origin-validation auth, verified end-to-end against a real subprocess
 - Private-network Streamable HTTP transport: `scripts/mcp_streamable_http_serve.py` (entrypoint) + `scripts/mcp_streamable_http_safe_smoke.py` (smoke) — bind `127.0.0.1` only by default, same bearer-token + Origin-validation middleware reused from the SSE entrypoint, route `/mcp` empirically discovered (not assumed from spec prose), verified end-to-end against a real subprocess
-- Tool mode system: chatgpt mode with safe_mode filter
+- Tool mode system: mcp_client mode with safe_mode filter
 - Command policy: readonly/testlint allowlist for SSH execution
 - Access-control: pending/allow/deny flow with Telegram operator notifications
 - Audit: structured AuditEvent logging, redaction

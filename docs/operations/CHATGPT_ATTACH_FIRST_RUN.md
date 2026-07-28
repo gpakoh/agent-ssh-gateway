@@ -2,7 +2,7 @@
 
 **Date**: 2026-07-25
 **Gateway version**: v0.1.50a0
-**Attach mode**: MCP_CHATGPT_SAFE_MODE=true, MCP_GATEWAY_TOOL_MODE=chatgpt
+**Attach mode**: MCP_CLIENT_SAFE_MODE=true, MCP_GATEWAY_TOOL_MODE=mcp_client
 
 ## Summary
 
@@ -10,7 +10,7 @@ First actual MCP attach rehearsal completed against live v0.1.50a0 gateway. No r
 
 ## Safe tools confirmed (84)
 
-All tools in `get_chatgpt_safe_tools()` verified present:
+All tools in `get_mcp_client_safe_tools()` verified present:
 - health, tools_manifest, session_health, job_status, job_result, wait_job
 - read_file, repo_status, working_directory, git_status, recent_commits, git_diff_stat, show_changes
 - project_* read/write tools (info, read_file, search_text, find_files, list_files, tree, git status/diff/commits)
@@ -22,7 +22,7 @@ All tools in `get_chatgpt_safe_tools()` verified present:
 
 ## Blocked/absent tools confirmed (30)
 
-All tools in `CHATGPT_BLOCKED_TOOLS` verified absent from safe set:
+All tools in `MCP_CLIENT_BLOCKED_TOOLS` verified absent from safe set:
 - project_run_opencode, project_run_mimo, project_run_agent
 - docker_exec, docker_compose_up, docker_compose_restart, docker_compose_build
 - docker_start, docker_stop, docker_restart, docker_rm, docker_compose_down
@@ -97,7 +97,7 @@ Script: `scripts/mcp_stdio_safe_smoke.py`
 |------|--------|
 | MCP initialize | protocolVersion=2025-11-25 |
 | list_tools | 84 tools registered |
-| tools_manifest | OK (32055 chars), active_mode=chatgpt |
+| tools_manifest | OK (32055 chars), active_mode=mcp_client |
 | health | OK (507 chars) — gateway version, build metadata, toolset hash |
 
 ### Manifest verification
@@ -113,4 +113,4 @@ Script: `scripts/mcp_stdio_safe_smoke.py`
 
 ### Conclusion
 
-Actual MCP protocol attach via stdio **PASSED**. The MCP server correctly serves 84 safe tools and excludes all 30 blocked tools when `MCP_CHATGPT_SAFE_MODE=true`.
+Actual MCP protocol attach via stdio **PASSED**. The MCP server correctly serves 84 safe tools and excludes all 30 blocked tools when `MCP_CLIENT_SAFE_MODE=true`.

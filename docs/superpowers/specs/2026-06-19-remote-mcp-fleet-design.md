@@ -104,9 +104,9 @@ The adapter is a Python script that:
 3. Exposes a FastMCP server over Streamable HTTP on an internal port
 4. Token auth middleware wraps the public endpoint
 
-This is the same proven pattern as `chatgpt_remote_mcp/server.py` but with `mcp.client.stdio` instead of the gateway HTTP client.
+This is the same proven pattern as `mcp_client_remote/server.py` but with `mcp.client.stdio` instead of the gateway HTTP client.
 
-**Decision:** All adapters live in `examples/chatgpt_remote_mcp/fleet/` as standalone files. Shared code (TokenAuthMiddleware, env helpers) reused from the parent directory.
+**Decision:** All adapters live in `examples/mcp_client_remote/fleet/` as standalone files. Shared code (TokenAuthMiddleware, env helpers) reused from the parent directory.
 
 ## Risk Mitigation
 
@@ -162,7 +162,7 @@ This is the same proven pattern as `chatgpt_remote_mcp/server.py` but with `mcp.
 ## Files
 
 ```
-<repo-root>/examples/chatgpt_remote_mcp/
+<repo-root>/examples/mcp_client_remote/
   server.py                    existing gateway adapter (unchanged)
   fleet/
     __init__.py

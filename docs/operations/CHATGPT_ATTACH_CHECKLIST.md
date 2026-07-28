@@ -28,16 +28,16 @@ curl -s -X POST http://<gateway>:8085/api/agent/token \
 ## 2. Copy env template to private env
 
 ```bash
-cp examples/mcp_server/chatgpt.safe.env.example examples/mcp_server/chatgpt.safe.env
-# Edit chatgpt.safe.env with your values (GATEWAY_URL, GATEWAY_AGENT_TOKEN)
+cp examples/mcp_server/mcp_client.safe.env.example examples/mcp_server/mcp_client.safe.env
+# Edit mcp_client.safe.env with your values (GATEWAY_URL, GATEWAY_AGENT_TOKEN)
 # This file is gitignored — never commit it.
 ```
 
 ## 3. Run runtime preflight
 
 ```bash
-set -a && source examples/mcp_server/chatgpt.safe.env && set +a
-python3 scripts/mcp_chatgpt_runtime_preflight.py
+set -a && source examples/mcp_server/mcp_client.safe.env && set +a
+python3 scripts/mcp_client_runtime_preflight.py
 ```
 
 Expected: all config checks pass, blocked tools confirmed excluded.
@@ -45,14 +45,14 @@ Expected: all config checks pass, blocked tools confirmed excluded.
 ## 4. Start MCP server
 
 ```bash
-set -a && source examples/mcp_server/chatgpt.safe.env && set +a
+set -a && source examples/mcp_server/mcp_client.safe.env && set +a
 python3 examples/mcp_server/server.py
 ```
 
 ## 5. Verify manifest
 
 ```bash
-python3 scripts/chatgpt_tool_attach_smoke.py
+python3 scripts/mcp_client_tool_attach_smoke.py
 ```
 
 Expected: 7/7 pass. Safe tools: 84. Blocked tools: 30.
@@ -91,7 +91,7 @@ curl -s -X POST http://<gateway>:8085/api/admin/access-control/clear \
 
 - If preflight fails: do not proceed, fix config first
 - If gateway returns auth errors: check token scopes
-- If blocked tools appear in manifest: verify `MCP_CHATGPT_SAFE_MODE=true`
+- If blocked tools appear in manifest: verify `MCP_CLIENT_SAFE_MODE=true`
 - If notifier shows false critical alerts: verify `access_control.decision` audit type
 - If real tokens/IPs appear in logs: stop, rotate, report
 

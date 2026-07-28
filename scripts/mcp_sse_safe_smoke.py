@@ -94,9 +94,9 @@ def build_env(host: str, port: int, token: str) -> dict[str, str]:
         "MCP_HTTP_HOST": host,
         "MCP_HTTP_PORT": str(port),
         "MCP_HTTP_BEARER_TOKEN": token,
-        "MCP_GATEWAY_TOOL_MODE": "chatgpt",
-        "MCP_CHATGPT_SAFE_MODE": "true",
-        "MCP_ACCESS_PROFILE": "chatgpt_safe",
+        "MCP_GATEWAY_TOOL_MODE": "mcp_client",
+        "MCP_CLIENT_SAFE_MODE": "true",
+        "MCP_ACCESS_PROFILE": "mcp_client_safe",
     }
 
     for key in ("GATEWAY_URL", "GATEWAY_AGENT_TOKEN"):
@@ -189,7 +189,7 @@ async def run_protocol_checks(base_url: str, token: str) -> None:
     checks (not silently skipped, not faked as success), but do not
     abort the auth/route checks that already ran above.
     """
-    from tool_modes import CHATGPT_BLOCKED_TOOLS, get_chatgpt_safe_tools
+    from tool_modes import MCP_CLIENT_BLOCKED_TOOLS, get_mcp_client_safe_tools
 
     try:
         from mcp import ClientSession
@@ -198,7 +198,7 @@ async def run_protocol_checks(base_url: str, token: str) -> None:
         check("MCP protocol over SSE", False, f"mcp client unavailable: {exc}")
         return
 
-    expected_safe = get_chatgpt_safe_tools()
+    expected_safe = get_mcp_client_safe_tools()
     try:
         async with sse_client(
             f"{base_url}/sse",
@@ -215,13 +215,13 @@ async def run_protocol_checks(base_url: str, token: str) -> None:
             check("list_tools count == 84", len(tool_names) == 84, f"got {len(tool_names)}")
             check(
                 "blocked tool count == 30",
-                len(CHATGPT_BLOCKED_TOOLS) == 30,
-                f"got {len(CHATGPT_BLOCKED_TOOLS)}",
+                len(MCP_CLIENT_BLOCKED_TOOLS) == 30,
+                f"got {len(MCP_CLIENT_BLOCKED_TOOLS)}",
             )
 
-            overlap = tool_names & CHATGPT_BLOCKED_TOOLS
+            overlap = tool_names & MCP_CLIENT_BLOCKED_TOOLS
             check("blocked tools absent from live manifest", not overlap, f"leaked={sorted(overlap)}")
-            check("safe tools match tool_modes.get_chatgpt_safe_tools()", tool_names == expected_safe)
+            check("safe tools match tool_modes.get_mcp_client_safe_tools()", tool_names == expected_safe)
 
             manifest_result = await session.call_tool("tools_manifest", {})
             is_error = getattr(manifest_result, "isError", False)

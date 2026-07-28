@@ -199,7 +199,7 @@ Typical MCP workflows include:
 Start with:
 
 - [MCP server guide](examples/mcp_server/README.md)
-- [Remote MCP adapter](examples/chatgpt_remote_mcp/README.md)
+- [Remote MCP adapter](examples/mcp_client_remote/README.md)
 - [MCP operator runbook](docs/operations/MCP_OPERATOR_RUNBOOK.md)
 - [ChatGPT attachment guide](docs/operations/CHATGPT_TOOL_ATTACH.md)
 

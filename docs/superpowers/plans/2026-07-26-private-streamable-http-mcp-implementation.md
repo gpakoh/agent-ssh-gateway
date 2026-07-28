@@ -4,7 +4,7 @@
 
 **Goal:** Add the MCP spec's current Streamable HTTP transport (protocol version 2025-06-18) as a second, private, loopback-bound entrypoint for the `examples/mcp_server` FastMCP instance, alongside the existing stdio (default) and private SSE (deprecated-protocol) transports — additive, not a replacement — per the accepted design in `docs/superpowers/specs/2026-07-26-private-streamable-http-mcp-transport.md`. Five small sequential PRs. No runtime code in this plan document itself — plan-doc only.
 
-**Non-goal:** Public ChatGPT/OpenAI connector, OAuth 2.1 resource-server flow, Dynamic Client Registration, TLS termination, reverse proxy, Docker Compose/systemd wiring, or any change to `examples/chatgpt_remote_mcp` (a separate, already-live system — see Phase 17A audit, `docs/operations/OPENAI_MCP_ATTACH_PATH_AUDIT.md`). Removing, deprecating, or code-freezing `scripts/mcp_sse_serve.py` is also out of scope — SSE stays supported.
+**Non-goal:** Public ChatGPT/OpenAI connector, OAuth 2.1 resource-server flow, Dynamic Client Registration, TLS termination, reverse proxy, Docker Compose/systemd wiring, or any change to `examples/mcp_client_remote` (a separate, already-live system — see Phase 17A audit, `docs/operations/OPENAI_MCP_ATTACH_PATH_AUDIT.md`). Removing, deprecating, or code-freezing `scripts/mcp_sse_serve.py` is also out of scope — SSE stays supported.
 
 ---
 
@@ -12,7 +12,7 @@
 
 - No runtime code changes accepted in **this planning task** — only this plan document is written/committed here.
 - Bind default `127.0.0.1` for the new entrypoint, identical loopback guard and `MCP_HTTP_ALLOW_NON_LOOPBACK=true` escape hatch as SSE — reused, not reimplemented.
-- Safe mode mandatory: `MCP_GATEWAY_TOOL_MODE=chatgpt`, `MCP_CHATGPT_SAFE_MODE=true` — fail-fast precondition before any FastMCP app is built, exactly as `require_safe_mode()` already enforces for SSE.
+- Safe mode mandatory: `MCP_GATEWAY_TOOL_MODE=mcp_client`, `MCP_CLIENT_SAFE_MODE=true` — fail-fast precondition before any FastMCP app is built, exactly as `require_safe_mode()` already enforces for SSE.
 - Bearer auth + Origin validation mandatory on the new entrypoint — reuse `BearerAuthMiddleware`/`OriginValidationMiddleware` from `mcp_sse_serve.py` unchanged; no new middleware code.
 - No Docker Compose entry, no systemd unit, no autostart — manually started/stopped operator process, same posture as `mcp_sse_serve.py` today.
 - No other repository is touched by any slice in this plan.
@@ -68,20 +68,20 @@
 
 **Tests to add/run:**
 - `tests/test_mcp_streamable_http_serve.py` (new) — unit tests mirroring whatever `tests/test_mcp_sse_serve.py`-equivalent coverage exists for SSE (config parsing, `ConfigError` on missing token/port, safe-mode fail-fast, middleware composition) — same test *shape*, new module under test.
-- `pytest -q` full suite green, including unmodified `tests/test_chatgpt_preflight.py` (136 tests, confirmed passing at Phase 18A gate) and whatever SSE-specific tests exist.
+- `pytest -q` full suite green, including unmodified `tests/test_mcp_client_preflight.py` (136 tests, confirmed passing at Phase 18A gate) and whatever SSE-specific tests exist.
 - `ruff check .` clean.
 - Manual: one `curl` against the running entrypoint confirming a request with no bearer token is rejected (401) and Origin validation still applies, informed by PR1's actual discovered status codes rather than assumed ones.
 
 **Security invariants:**
 - Loopback bind by default, same escape hatch (`MCP_HTTP_ALLOW_NON_LOOPBACK=true`) reused, not a new flag with different semantics.
 - Bearer auth and Origin validation both required, checked ahead of any MCP-level routing — same ordering guarantee as SSE.
-- Safe mode (`MCP_GATEWAY_TOOL_MODE=chatgpt` + `MCP_CHATGPT_SAFE_MODE=true`) checked before the FastMCP app is even constructed — fail fast, not per-request.
+- Safe mode (`MCP_GATEWAY_TOOL_MODE=mcp_client` + `MCP_CLIENT_SAFE_MODE=true`) checked before the FastMCP app is even constructed — fail fast, not per-request.
 - The underlying `GatewayClient` credential remains a restricted agent token — never the master `API_KEY` — identical invariant to the private SSE runbook, re-verified in this PR's own code, not just inherited by assumption.
 - No Docker Compose entry, no systemd unit added for this script.
 
 **Rollback:** Delete `scripts/mcp_streamable_http_serve.py` and its test file. No other file in the repo imports from it (SSE and stdio paths are untouched by construction). A revert is a clean two-file removal.
 
-**Out of scope:** OAuth, DCR, public bind, TLS, any change to `examples/chatgpt_remote_mcp`. Session-ID statefulness decision (`stateless_http=True` vs default) must be made explicitly in this PR's description with a one-line justification — not silently defaulted without comment, since the spec flagged it as an open decision (§9).
+**Out of scope:** OAuth, DCR, public bind, TLS, any change to `examples/mcp_client_remote`. Session-ID statefulness decision (`stateless_http=True` vs default) must be made explicitly in this PR's description with a one-line justification — not silently defaulted without comment, since the spec flagged it as an open decision (§9).
 
 ---
 
@@ -123,7 +123,7 @@
 - `.env.example` — add `MCP_STREAMABLE_HTTP_BEARER_TOKEN` (or the shared-token var name settled in PR2), `MCP_STREAMABLE_HTTP_PORT` (default `8087`), commented, alongside the existing MCP section. **Note found during this planning task:** `MCP_HTTP_BEARER_TOKEN`/`MCP_HTTP_PORT`/`MCP_HTTP_ALLOWED_ORIGINS` (the SSE vars) are **not currently present in `.env.example` at all** — this is a pre-existing gap, not introduced by this plan. PR4 should add the SSE vars too while it's in this file, called out as a fix-in-passing in the PR description, not silently bundled without a note.
 - `docs/operations/CHATGPT_TOOL_ATTACH.md` — add a Streamable HTTP section side by side with the existing SSE section, each clearly labeled by protocol version (2024-11-05 SSE vs. 2025-06-18 Streamable HTTP) per spec §8.5, so an operator picks deliberately.
 - `docs/operations/MCP_PRIVATE_SSE_RUNBOOK.md` (or a new sibling `MCP_PRIVATE_STREAMABLE_HTTP_RUNBOOK.md`, decide in this PR based on how much genuinely differs — if the operational steps are near-identical apart from script/port names, prefer extending the existing runbook with a Streamable HTTP subsection over forking a whole new document) — must state the port, token var, and smoke command for the new transport, and must **not** remove or water down any existing SSE instructions.
-- Any "readiness" doc (`docs/operations/OPENAI_CONNECTOR_READINESS.md` or equivalent — locate exact filename in this PR, don't assume) — update to reflect that a second private transport exists, while preserving the existing "public ChatGPT/OpenAI connector is NOT live [for `examples/mcp_server`]" framing verified at the Phase 18A gate. Do not touch the separate `examples/chatgpt_remote_mcp` readiness framing (per the Phase 16A plan's own note that the two systems are deliberately not reconciled in this workstream).
+- Any "readiness" doc (`docs/operations/OPENAI_CONNECTOR_READINESS.md` or equivalent — locate exact filename in this PR, don't assume) — update to reflect that a second private transport exists, while preserving the existing "public ChatGPT/OpenAI connector is NOT live [for `examples/mcp_server`]" framing verified at the Phase 18A gate. Do not touch the separate `examples/mcp_client_remote` readiness framing (per the Phase 16A plan's own note that the two systems are deliberately not reconciled in this workstream).
 
 **Tests to add/run:**
 - `python3 scripts/check_public_hygiene.py` and `python3 scripts/check_no_hardcoded_secrets.py` — both must stay green after doc edits (no real tokens/IPs/domains introduced).

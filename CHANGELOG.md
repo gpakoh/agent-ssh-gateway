@@ -21,9 +21,9 @@ This project follows semantic versioning where practical, but the public API is 
 
 ### Added
 
-- **Private Streamable HTTP MCP transport entrypoint** (Phase 18B): `scripts/mcp_streamable_http_serve.py` serves the same chatgpt-safe-mode tool set as the private SSE entrypoint, but over the MCP spec's current transport, Streamable HTTP (protocol version 2025-06-18), bound to `127.0.0.1:8087` by default — additive alongside SSE, not a replacement. The route (`/mcp`, handling GET/POST/DELETE) was empirically discovered by a dedicated route-discovery probe, `scripts/mcp_streamable_http_route_probe.py`, rather than assumed from the spec's prose. Bearer-token auth (`MCP_STREAMABLE_HTTP_BEARER_TOKEN`) and Origin validation (`MCP_STREAMABLE_HTTP_ALLOWED_ORIGINS`) are enforced by the exact same `BearerAuthMiddleware`/`OriginValidationMiddleware` classes already used by the private SSE entrypoint, reused unchanged rather than reimplemented.
+- **Private Streamable HTTP MCP transport entrypoint** (Phase 18B): `scripts/mcp_streamable_http_serve.py` serves the same mcp_client-safe-mode tool set as the private SSE entrypoint, but over the MCP spec's current transport, Streamable HTTP (protocol version 2025-06-18), bound to `127.0.0.1:8087` by default — additive alongside SSE, not a replacement. The route (`/mcp`, handling GET/POST/DELETE) was empirically discovered by a dedicated route-discovery probe, `scripts/mcp_streamable_http_route_probe.py`, rather than assumed from the spec's prose. Bearer-token auth (`MCP_STREAMABLE_HTTP_BEARER_TOKEN`) and Origin validation (`MCP_STREAMABLE_HTTP_ALLOWED_ORIGINS`) are enforced by the exact same `BearerAuthMiddleware`/`OriginValidationMiddleware` classes already used by the private SSE entrypoint, reused unchanged rather than reimplemented.
 - **Streamable HTTP runtime smoke**: `scripts/mcp_streamable_http_safe_smoke.py` — starts the entrypoint as a real subprocess and validates both the auth boundary and the MCP protocol: `/mcp` rejects missing/wrong bearer tokens (`401`) and a non-loopback Origin (`403`), the correct token (no Origin) completes MCP `initialize`/`list_tools`/`tools_manifest`, 84 safe tools present, 30 blocked tools absent, and whether a `Mcp-Session-Id` was assigned is reported as present/absent only — never the value itself. Verified end-to-end (11/11 checks).
-- **Docs/env sync for the private Streamable HTTP entrypoint** (Phase 18C): `docs/operations/CHATGPT_TOOL_ATTACH.md` gets a full "Private Streamable HTTP entrypoint" section mirroring the existing SSE one; `docs/operations/OPENAI_CONNECTOR_READINESS.md`'s Option B is split into B1 (SSE) / B2 (Streamable HTTP); `docs/operations/MCP_PRIVATE_SSE_RUNBOOK.md` gets a short cross-reference; new placeholder-only template `examples/mcp_server/chatgpt.streamable-http.env.example`.
+- **Docs/env sync for the private Streamable HTTP entrypoint** (Phase 18C): `docs/operations/CHATGPT_TOOL_ATTACH.md` gets a full "Private Streamable HTTP entrypoint" section mirroring the existing SSE one; `docs/operations/OPENAI_CONNECTOR_READINESS.md`'s Option B is split into B1 (SSE) / B2 (Streamable HTTP); `docs/operations/MCP_PRIVATE_SSE_RUNBOOK.md` gets a short cross-reference; new placeholder-only template `examples/mcp_server/mcp_client.streamable-http.env.example`.
 
 ### Notes
 
@@ -36,7 +36,7 @@ This project follows semantic versioning where practical, but the public API is 
 
 ### Added
 
-- **Private SSE Origin validation**: `scripts/mcp_sse_serve.py` now validates the `Origin` header on `/sse` and `/messages`, per the MCP spec's DNS-rebinding-protection requirement (identified in the Phase 17A attach-path audit). A missing `Origin` header is allowed (CLI/curl/local MCP clients routinely omit it); loopback origins (`http(s)://127.0.0.1:*`, `http(s)://localhost:*`, `http(s)://[::1]:*`) are allowed by default; additional local origins can be explicitly permitted via the new `MCP_HTTP_ALLOWED_ORIGINS` env var (comma-separated); any other, non-loopback origin is rejected with `403`. Bearer-token auth remains required independently of the Origin check — both checks must pass. Docs (`docs/operations/CHATGPT_TOOL_ATTACH.md`, `docs/operations/MCP_PRIVATE_SSE_RUNBOOK.md`) and the env template (`examples/mcp_server/chatgpt.sse.env.example`) updated accordingly.
+- **Private SSE Origin validation**: `scripts/mcp_sse_serve.py` now validates the `Origin` header on `/sse` and `/messages`, per the MCP spec's DNS-rebinding-protection requirement (identified in the Phase 17A attach-path audit). A missing `Origin` header is allowed (CLI/curl/local MCP clients routinely omit it); loopback origins (`http(s)://127.0.0.1:*`, `http(s)://localhost:*`, `http(s)://[::1]:*`) are allowed by default; additional local origins can be explicitly permitted via the new `MCP_HTTP_ALLOWED_ORIGINS` env var (comma-separated); any other, non-loopback origin is rejected with `403`. Bearer-token auth remains required independently of the Origin check — both checks must pass. Docs (`docs/operations/CHATGPT_TOOL_ATTACH.md`, `docs/operations/MCP_PRIVATE_SSE_RUNBOOK.md`) and the env template (`examples/mcp_server/mcp_client.sse.env.example`) updated accordingly.
 
 ### Notes
 
@@ -48,7 +48,7 @@ This project follows semantic versioning where practical, but the public API is 
 
 ### Added
 
-- **Private SSE manual rehearsal result recorded**: `docs/operations/MCP_PRIVATE_SSE_REHEARSAL.md` — record of the first end-to-end operator rehearsal of `scripts/mcp_sse_serve.py` following the runbook. Loopback-only bind (`127.0.0.1`) verified directly against the listening socket. Bearer auth verified: missing/wrong token → `401`, correct token → non-401, SSE stream opens. MCP protocol verified over the authenticated session: `initialize`, `list_tools`, `tools_manifest` all succeeded. Tool set verified: 84 safe tools present, exact match to `tool_modes.get_chatgpt_safe_tools()`, all 30 blocked tools absent. The temporary env file (fresh bearer token, restricted agent token — never master key) was deleted after the rehearsal; no persistent service, Docker Compose entry, or systemd unit was created.
+- **Private SSE manual rehearsal result recorded**: `docs/operations/MCP_PRIVATE_SSE_REHEARSAL.md` — record of the first end-to-end operator rehearsal of `scripts/mcp_sse_serve.py` following the runbook. Loopback-only bind (`127.0.0.1`) verified directly against the listening socket. Bearer auth verified: missing/wrong token → `401`, correct token → non-401, SSE stream opens. MCP protocol verified over the authenticated session: `initialize`, `list_tools`, `tools_manifest` all succeeded. Tool set verified: 84 safe tools present, exact match to `tool_modes.get_mcp_client_safe_tools()`, all 30 blocked tools absent. The temporary env file (fresh bearer token, restricted agent token — never master key) was deleted after the rehearsal; no persistent service, Docker Compose entry, or systemd unit was created.
 
 ### Notes
 
@@ -60,7 +60,7 @@ This project follows semantic versioning where practical, but the public API is 
 ### Added
 
 - **Private SSE operator runbook**: `docs/operations/MCP_PRIVATE_SSE_RUNBOOK.md` — manual-run package for `scripts/mcp_sse_serve.py`: prerequisites, generate a private bearer token, create the gitignored env file, validate it, start on `127.0.0.1`, run the smoke test, stop the process, rollback (nothing to roll back at the infra level — it's a plain process), and an explicit "What not to do" section.
-- **Env checker**: `scripts/mcp_sse_env_check.py` — static validation of a private SSE env file before starting the entrypoint. Validates safe mode (`MCP_CHATGPT_SAFE_MODE=true`, `MCP_GATEWAY_TOOL_MODE=chatgpt`), loopback bind (`MCP_HTTP_HOST`), that `MCP_HTTP_BEARER_TOKEN` and the agent/gateway token are set with their template placeholders actually replaced, and that `MCP_HTTP_ALLOW_NON_LOOPBACK` is not enabled. The checker does not start a server, does not open any network connection, and never prints token values.
+- **Env checker**: `scripts/mcp_sse_env_check.py` — static validation of a private SSE env file before starting the entrypoint. Validates safe mode (`MCP_CLIENT_SAFE_MODE=true`, `MCP_GATEWAY_TOOL_MODE=mcp_client`), loopback bind (`MCP_HTTP_HOST`), that `MCP_HTTP_BEARER_TOKEN` and the agent/gateway token are set with their template placeholders actually replaced, and that `MCP_HTTP_ALLOW_NON_LOOPBACK` is not enabled. The checker does not start a server, does not open any network connection, and never prints token values.
 
 ### Notes
 
@@ -72,9 +72,9 @@ This project follows semantic versioning where practical, but the public API is 
 
 ### Added
 
-- **Private SSE MCP transport entrypoint**: `scripts/mcp_sse_serve.py` — serves the existing `examples/mcp_server` chatgpt-safe-mode tool set over SSE, bound to `127.0.0.1:8086` by default (env `MCP_HTTP_HOST`/`MCP_HTTP_PORT`). Local/private rehearsal only — not deployed as a persistent service, no TLS, no reverse proxy, no OAuth wired for this path. Routes are `/sse` and `/messages`.
+- **Private SSE MCP transport entrypoint**: `scripts/mcp_sse_serve.py` — serves the existing `examples/mcp_server` mcp_client-safe-mode tool set over SSE, bound to `127.0.0.1:8086` by default (env `MCP_HTTP_HOST`/`MCP_HTTP_PORT`). Local/private rehearsal only — not deployed as a persistent service, no TLS, no reverse proxy, no OAuth wired for this path. Routes are `/sse` and `/messages`.
 - **SSE runtime smoke**: `scripts/mcp_sse_safe_smoke.py` — starts the entrypoint as a real subprocess and validates both the auth boundary and the MCP protocol: `/sse`/`/messages` reject missing/wrong bearer tokens (401), the correct token opens the stream and completes MCP `initialize`/`list_tools`/`tools_manifest`, 84 safe tools present, 30 blocked tools absent. Verified end-to-end (11/11 checks).
-- **Docs/env sync for the private SSE entrypoint**: `docs/operations/OPENAI_CONNECTOR_READINESS.md` and `docs/operations/CHATGPT_TOOL_ATTACH.md` updated, new `examples/mcp_server/chatgpt.sse.env.example` placeholder template.
+- **Docs/env sync for the private SSE entrypoint**: `docs/operations/OPENAI_CONNECTOR_READINESS.md` and `docs/operations/CHATGPT_TOOL_ATTACH.md` updated, new `examples/mcp_server/mcp_client.sse.env.example` placeholder template.
 
 ### Fixed
 
@@ -83,7 +83,7 @@ This project follows semantic versioning where practical, but the public API is 
 
 ### Notes
 
-- MCP safe mode (`MCP_CHATGPT_SAFE_MODE=true`, `MCP_GATEWAY_TOOL_MODE=chatgpt`) remains mandatory for this entrypoint — enforced fail-fast before startup.
+- MCP safe mode (`MCP_CLIENT_SAFE_MODE=true`, `MCP_GATEWAY_TOOL_MODE=mcp_client`) remains mandatory for this entrypoint — enforced fail-fast before startup.
 - stdio remains the default, stable, supported MCP transport (`examples/mcp_server/server.py` unchanged).
 - Public ChatGPT/OpenAI connector is still NOT live — this release adds a private/local rehearsal entrypoint only, no public URL, TLS, reverse proxy, or OAuth app registration.
 - No tag or deploy in this release.
@@ -105,7 +105,7 @@ This project follows semantic versioning where practical, but the public API is 
 ### Added
 
 - **ChatGPT connector handoff package**: `docs/operations/CHATGPT_CONNECTOR_HANDOFF.md` — what to give operator, what NOT to give, env/token checklists, manifest counts, first tool calls, approval flow, rollback/stop. Agent token only, never master key. Forbidden scopes/tools documented as forbidden.
-- **Expected manifest JSON**: `examples/mcp_server/chatgpt.safe.manifest.expected.json` — machine-readable manifest check (84 safe, 30 blocked, must_include/must_exclude).
+- **Expected manifest JSON**: `examples/mcp_server/mcp_client.safe.manifest.expected.json` — machine-readable manifest check (84 safe, 30 blocked, must_include/must_exclude).
 - **Manifest contract tests**: 5 tests verify manifest counts match code, must_include tools in safe set, must_exclude tools in blocked set.
 
 ## [0.1.52a0] - 2026-07-25
@@ -117,7 +117,7 @@ This project follows semantic versioning where practical, but the public API is 
 ### Fixed
 
 - **FastMCP zero-arg tool signature**: `@instrumented` decorator now uses `functools.wraps` to preserve original function signature. Without it, FastMCP generated pydantic schema with required `args`/`kwargs` fields, causing zero-arg tools (e.g. `health`) to fail when called via MCP stdio.
-- **Safe env template**: `chatgpt.safe.env.example` now includes `GATEWAY_API_KEY` (required by `GatewayClient`) alongside `GATEWAY_AGENT_TOKEN`.
+- **Safe env template**: `mcp_client.safe.env.example` now includes `GATEWAY_API_KEY` (required by `GatewayClient`) alongside `GATEWAY_AGENT_TOKEN`.
 
 ## [0.1.51a0] - 2026-07-25
 
@@ -139,15 +139,15 @@ This project follows semantic versioning where practical, but the public API is 
 
 ### Added
 
-- **ChatGPT runtime preflight script**: `scripts/mcp_chatgpt_runtime_preflight.py` — verifies safe MCP config, gateway health (warning-only), never prints token.
+- **ChatGPT runtime preflight script**: `scripts/mcp_client_runtime_preflight.py` — verifies safe MCP config, gateway health (warning-only), never prints token.
 
-- **Private env template**: `examples/mcp_server/chatgpt.safe.env.example` — copy-to-ignored pattern for ChatGPT safe attach credentials.
+- **Private env template**: `examples/mcp_server/mcp_client.safe.env.example` — copy-to-ignored pattern for ChatGPT safe attach credentials.
 
-- **Gitignore protection**: `chatgpt.safe.env` excluded from tracked files.
+- **Gitignore protection**: `mcp_client.safe.env` excluded from tracked files.
 
 - **Docs update**: `docs/operations/CHATGPT_TOOL_ATTACH.md` — added quick-start with copy-template → private env → preflight → start MCP.
 
-- Safe config validation: `MCP_GATEWAY_TOOL_MODE=chatgpt` + `MCP_CHATGPT_SAFE_MODE=true` enforced by preflight script.
+- Safe config validation: `MCP_GATEWAY_TOOL_MODE=mcp_client` + `MCP_CLIENT_SAFE_MODE=true` enforced by preflight script.
 
 ## [0.1.48a0] - 2026-07-24
 
@@ -165,13 +165,13 @@ This project follows semantic versioning where practical, but the public API is 
 
 ### Added
 
-- **ChatGPT safe MCP tool mode**: `MCP_CHATGPT_SAFE_MODE=true` strips dangerous tools from chatgpt mode. Safe mode excludes agent launch (opencode/mimo/agent), docker tools, write/patch mutations, and handoff writes.
+- **ChatGPT safe MCP tool mode**: `MCP_CLIENT_SAFE_MODE=true` strips dangerous tools from mcp_client mode. Safe mode excludes agent launch (opencode/mimo/agent), docker tools, write/patch mutations, and handoff writes.
 
-- **CHATGPT_BLOCKED_TOOLS**: 30 tools permanently blocked in safe mode — no PTY, no docker admin, no agent launch, no workspace mutations.
+- **MCP_CLIENT_BLOCKED_TOOLS**: 30 tools permanently blocked in safe mode — no PTY, no docker admin, no agent launch, no workspace mutations.
 
-- **chatgpt_safe access profile**: restricted scopes (mcp:read, mcp:project, mcp:repo, mcp:docs) — no write/admin/docker scopes.
+- **mcp_client_safe access profile**: restricted scopes (mcp:read, mcp:project, mcp:repo, mcp:docs) — no write/admin/docker scopes.
 
-- **ChatGPT safe smoke script**: `scripts/chatgpt_tool_attach_smoke.py` — validates safe/blocked tool separation from repo root.
+- **ChatGPT safe smoke script**: `scripts/mcp_client_tool_attach_smoke.py` — validates safe/blocked tool separation from repo root.
 
 - **ChatGPT tool attach docs**: `docs/operations/CHATGPT_TOOL_ATTACH.md` — architecture, env vars, agent token creation (never master key), safe tool list, operator approval flow, rollback. Intentionally excludes `ssh:files` (protects write/edit/patch).
 
@@ -771,7 +771,7 @@ This project follows semantic versioning where practical, but the public API is 
 
 - **Agent Handoff v2** — 6 new MCP tools for managing agent tasks: `write_agent_task`, `read_agent_status`, `read_agent_report`, `read_agent_diff`, `list_agent_tasks`, `archive_agent_task`. Task lifecycle: `created → running → needs-review | failed`. Structured `task.json` + `current-plan.md` contract with `agent`, `allowed_files`, `forbidden_files`, `commit_allowed`, `push_allowed` fields. (Sessions 99–102)
 - **OpenCode runner** — `project_run_opencode` MCP tool (`gateway_project_run_opencode`) executes handoff tasks via OpenCode CLI (`--dangerously-skip-permissions`). Exit code → `needs-review` / `failed` status. `agent-report.md` and `implementation-diff.patch` auto-generated. (Sessions 103)
-- **Mimo runner** — `project_run_mimo` MCP tool (`gateway_project_run_mimo`, chatgpt mode only) executes handoff tasks in disposable git worktrees via Mimo CLI. 11 pre-flight guards: task.json validation, agent check, worktree isolation, `MCP_GATEWAY_WORKTREE_ROOT` enforcement, linked worktree detection, binary discovery. Designed for `--dangerously-skip-permissions` safety. (Session 104)
+- **Mimo runner** — `project_run_mimo` MCP tool (`gateway_project_run_mimo`, mcp_client mode only) executes handoff tasks in disposable git worktrees via Mimo CLI. 11 pre-flight guards: task.json validation, agent check, worktree isolation, `MCP_GATEWAY_WORKTREE_ROOT` enforcement, linked worktree detection, binary discovery. Designed for `--dangerously-skip-permissions` safety. (Session 104)
 - **Parallel two-agent dry-run** — validated end-to-end orchestration: ChatGPT coordinates OpenCode (real artifact task) + Mimo (worktree task) independently with no cross-contamination, independent status/report/diff, full cleanup, `make check` green. (Session 106)
 
 ### Tests
@@ -787,7 +787,7 @@ This project follows semantic versioning where practical, but the public API is 
 
 - `opencode_runner_wrapper.py`: hardened heredoc, permissions, timeout handling (commit `c01b59a`).
 - `mimo_tools.py`: all 11 guards execute in shell script on SSH target — binary discovery (`$MIMO_BIN`, `command -v`, `/root/.mimocode/bin/mimo`) handled inside shell, not in Python.
-- `tool_modes.py`: `gateway_project_run_mimo` registered under chatgpt mode.
+- `tool_modes.py`: `gateway_project_run_mimo` registered under mcp_client mode.
 - `server.py`: both `project_run_opencode` and `project_run_mimo` registered with `assert_handoff_write_allowed()`.
 
 ### Docs
@@ -810,7 +810,7 @@ This project follows semantic versioning where practical, but the public API is 
 
 ### Changed
 
-- Extended `tool_modes.py` chatgpt mode to include the full unified fleet toolset.
+- Extended `tool_modes.py` mcp_client mode to include the full unified fleet toolset.
 - Updated MCP fleet healthcheck expectations from 62 tools to 77 tools.
 - Simplified ChatGPT integration model: one app, one endpoint, one schema, no separate adapter apps required.
 
@@ -844,7 +844,7 @@ This project follows semantic versioning where practical, but the public API is 
 - **GitHub read-only remote MCP adapter** (`fleet/github_server.py`): 8 read-only tools (repo info, commits, branches, file contents, search code, PR list, issues, user info) via fine-grained PAT.
 - **Gitea read-only + CI/CD remote MCP adapter** (`fleet/gitea_server.py`): 12 tools (repo info, branches, file tree/read, issues, PRs, CI/CD runs, jobs, workflows, commit search).
 - Introduced `.ai-bridge` handoff protocol: `current-plan.md` write with `MCP_GATEWAY_WRITE_MODE` guard.
-- Added `MCP_GATEWAY_TOOL_MODE` visibility filter (`minimal`, `standard`, `full`, `chatgpt`).
+- Added `MCP_GATEWAY_TOOL_MODE` visibility filter (`minimal`, `standard`, `full`, `mcp_client`).
 - Added `MCP_PUBLIC_TOKEN` auth for Streamable HTTP/SSE public endpoint.
 - Added `AGENTS.md` agent reference documentation for Phase 2 workflow.
 - New CI runner: `runner-docker-e2e` dedicated to compose/E2E/smoke jobs.

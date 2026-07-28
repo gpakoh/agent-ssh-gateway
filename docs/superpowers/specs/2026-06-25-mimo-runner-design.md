@@ -20,7 +20,7 @@ examples/mcp_server/server.py
 → MCP tool: gateway_project_run_mimo(project, task_id, model=None)
 
 examples/mcp_server/tool_modes.py
-→ chatgpt set only
+→ mcp_client set only
 
 tests/test_mcp_mimo.py
 → unit tests, command construction, registration, integration
@@ -314,6 +314,6 @@ File: `tests/test_mcp_mimo.py`
 |------|--------|
 | `examples/mcp_server/mimo_tools.py` | Create — `project_run_mimo()` function |
 | `examples/mcp_server/server.py` | Edit — add `gateway_project_run_mimo` tool |
-| `examples/mcp_server/tool_modes.py` | Edit — add `"gateway_project_run_mimo"` to chatgpt set |
+| `examples/mcp_server/tool_modes.py` | Edit — add `"gateway_project_run_mimo"` to mcp_client set |
 | `tests/test_mcp_mimo.py` | Create — all test groups |
 | `scripts/mimo_runner_wrapper.py` | Create (optional) — if local CLI wrapper needed |

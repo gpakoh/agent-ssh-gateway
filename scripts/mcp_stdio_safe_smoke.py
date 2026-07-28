@@ -45,9 +45,9 @@ def _build_env() -> dict[str, str] | None:
         "GATEWAY_URL": os.environ["GATEWAY_URL"],
         "GATEWAY_API_KEY": os.environ["GATEWAY_AGENT_TOKEN"],
         "GATEWAY_AGENT_TOKEN": os.environ["GATEWAY_AGENT_TOKEN"],
-        "MCP_GATEWAY_TOOL_MODE": "chatgpt",
-        "MCP_CHATGPT_SAFE_MODE": "true",
-        "MCP_ACCESS_PROFILE": "chatgpt_safe",
+        "MCP_GATEWAY_TOOL_MODE": "mcp_client",
+        "MCP_CLIENT_SAFE_MODE": "true",
+        "MCP_ACCESS_PROFILE": "mcp_client_safe",
         "MCP_AUTH_MODE": "token",
         "MCP_PUBLIC_TOKEN": os.environ["GATEWAY_AGENT_TOKEN"],
     }
@@ -76,7 +76,7 @@ async def _run_smoke() -> int:
 
     print("Starting MCP server (stdio) in safe mode")
     print(f"  GATEWAY_URL={_redact(env['GATEWAY_URL'])}")
-    print("  MCP_CHATGPT_SAFE_MODE=true")
+    print("  MCP_CLIENT_SAFE_MODE=true")
     print("  GATEWAY_AGENT_TOKEN=<REDACTED>")
 
     async with stdio_client(server_params) as (read, write):

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Static validation for a private SSE env file (Phase 16C).
 
-Checks examples/mcp_server/chatgpt.sse.env (or a given path) BEFORE an
+Checks examples/mcp_server/mcp_client.sse.env (or a given path) BEFORE an
 operator runs scripts/mcp_sse_serve.py. Never starts the server, never
 connects to anything, never prints token values — only their presence
 and length.
 
 Checks:
-  - MCP_GATEWAY_TOOL_MODE=chatgpt
-  - MCP_CHATGPT_SAFE_MODE=true
+  - MCP_GATEWAY_TOOL_MODE=mcp_client
+  - MCP_CLIENT_SAFE_MODE=true
   - MCP_HTTP_HOST is loopback (127.0.0.1 / localhost / ::1)
   - MCP_HTTP_ALLOW_NON_LOOPBACK is not set to true
   - MCP_HTTP_BEARER_TOKEN is set and the template placeholder was replaced
@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_ENV_FILE = ROOT / "examples" / "mcp_server" / "chatgpt.sse.env"
+DEFAULT_ENV_FILE = ROOT / "examples" / "mcp_server" / "mcp_client.sse.env"
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
@@ -48,7 +48,7 @@ def check(label: str, ok: bool, detail: str = "") -> None:
 
 def parse_env_file(path: Path) -> dict[str, str]:
     """Minimal KEY=VALUE parser — good enough for the flat template
-    shape of chatgpt.sse.env.example. Not a general shell/dotenv parser.
+    shape of mcp_client.sse.env.example. Not a general shell/dotenv parser.
     """
     values: dict[str, str] = {}
     for raw_line in path.read_text().splitlines():
@@ -72,21 +72,21 @@ def main() -> int:
 
     if not env_path.is_file():
         check("env file exists", False, str(env_path))
-        print(f"\nHint: cp examples/mcp_server/chatgpt.sse.env.example {env_path}")
+        print(f"\nHint: cp examples/mcp_server/mcp_client.sse.env.example {env_path}")
         return 1
 
     values = parse_env_file(env_path)
 
     tool_mode = values.get("MCP_GATEWAY_TOOL_MODE", "")
     check(
-        "MCP_GATEWAY_TOOL_MODE=chatgpt",
-        tool_mode == "chatgpt",
+        "MCP_GATEWAY_TOOL_MODE=mcp_client",
+        tool_mode == "mcp_client",
         f"value={tool_mode!r}" if tool_mode else "missing",
     )
 
-    safe_mode = values.get("MCP_CHATGPT_SAFE_MODE", "")
+    safe_mode = values.get("MCP_CLIENT_SAFE_MODE", "")
     check(
-        "MCP_CHATGPT_SAFE_MODE=true",
+        "MCP_CLIENT_SAFE_MODE=true",
         safe_mode.strip().lower() == "true",
         f"value={safe_mode!r}" if safe_mode else "missing",
     )

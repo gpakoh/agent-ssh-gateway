@@ -2101,25 +2101,25 @@ def build_api_help(request: Request) -> dict[str, Any]:
                 },
                 {
                     "name": "workspace_preview_write",
-                    "mode": "standard, full, chatgpt",
+                    "mode": "standard, full, mcp_client",
                     "scope": "mcp:project",
                     "description": "Preview what a write would do \u2014 returns after_hash, diff_preview, file_exists_before. Read-only, no disk writes.",
                 },
                 {
                     "name": "workspace_preview_edit",
-                    "mode": "standard, full, chatgpt",
+                    "mode": "standard, full, mcp_client",
                     "scope": "mcp:project",
                     "description": "Preview an edit \u2014 returns diff, replaced flag, preview of changed file. Read-only.",
                 },
                 {
                     "name": "workspace_preview_patch",
-                    "mode": "standard, full, chatgpt",
+                    "mode": "standard, full, mcp_client",
                     "scope": "mcp:project",
                     "description": "Preview a patch \u2014 returns applied flag, diff_preview. Read-only.",
                 },
                 {
                     "name": "workspace_verify",
-                    "mode": "standard, full, chatgpt",
+                    "mode": "standard, full, mcp_client",
                     "scope": "mcp:project",
                     "description": "Verify a file matches an expected hash \u2014 returns matches (bool) and current_hash. Read-only.",
                 },
@@ -2127,7 +2127,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
             "mode_gating": {
                 "standard": "All 7 tools available (write, edit, patch, preview \u00d73, verify)",
                 "full": "All 7 tools available \u2014 same as standard",
-                "chatgpt": "Preview + verify only (4 tools). Write/edit/patch intentionally excluded \u2014 ChatGPT mode is read-only by design.",
+                "mcp_client": "Preview + verify only (4 tools). Write/edit/patch intentionally excluded \u2014 ChatGPT mode is read-only by design.",
             },
             "safe_flag": {
                 "wired": True,

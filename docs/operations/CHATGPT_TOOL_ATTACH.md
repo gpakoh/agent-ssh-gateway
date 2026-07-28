@@ -12,16 +12,16 @@ not-yet-started, explicitly approved design.
 
 ```bash
 # 1. Copy template to private env (already gitignored)
-cp examples/mcp_server/chatgpt.safe.env.example examples/mcp_server/chatgpt.safe.env
+cp examples/mcp_server/mcp_client.safe.env.example examples/mcp_server/mcp_client.safe.env
 
-# 2. Edit chatgpt.safe.env with your values
+# 2. Edit mcp_client.safe.env with your values
 #    NEVER commit this file
 
 # 3. Run preflight
-python3 scripts/mcp_chatgpt_runtime_preflight.py
+python3 scripts/mcp_client_runtime_preflight.py
 
 # 4. Start MCP server
-set -a && source examples/mcp_server/chatgpt.safe.env && set +a
+set -a && source examples/mcp_server/mcp_client.safe.env && set +a
 python3 examples/mcp_server/server.py
 ```
 
@@ -39,8 +39,8 @@ ChatGPT / OpenAI tool-use
 ```bash
 GATEWAY_URL=http://localhost:8085          # Gateway API base URL
 GATEWAY_AGENT_TOKEN=<agent-token>          # Restricted agent token (NOT master key)
-MCP_GATEWAY_TOOL_MODE=chatgpt              # Use chatgpt tool set
-MCP_CHATGPT_SAFE_MODE=true                # Strip dangerous tools from chatgpt mode
+MCP_GATEWAY_TOOL_MODE=mcp_client              # Use mcp_client tool set
+MCP_CLIENT_SAFE_MODE=true                # Strip dangerous tools from mcp_client mode
 MCP_GATEWAY_PROJECT_ROOT=/path/to/project # Project root for project tools
 ```
 
@@ -63,7 +63,7 @@ The agent token inherits the gateway's command policy. With the default profile,
 
 ## Safe mode tool set
 
-When `MCP_CHATGPT_SAFE_MODE=true`, only these tools are exposed:
+When `MCP_CLIENT_SAFE_MODE=true`, only these tools are exposed:
 
 **Read-only / inspection:**
 - `health`, `tools_manifest`, `session_health`
@@ -100,9 +100,9 @@ When `MCP_CHATGPT_SAFE_MODE=true`, only these tools are exposed:
 ```bash
 GATEWAY_URL=http://localhost:8085 \
 GATEWAY_AGENT_TOKEN=<token> \
-MCP_GATEWAY_TOOL_MODE=chatgpt \
-MCP_CHATGPT_SAFE_MODE=true \
-python3 scripts/chatgpt_tool_attach_smoke.py
+MCP_GATEWAY_TOOL_MODE=mcp_client \
+MCP_CLIENT_SAFE_MODE=true \
+python3 scripts/mcp_client_tool_attach_smoke.py
 ```
 
 The script:
@@ -121,7 +121,7 @@ The script:
 
 ## Private SSE entrypoint (local/private rehearsal)
 
-`scripts/mcp_sse_serve.py` serves the same chatgpt-safe-mode tool set over
+`scripts/mcp_sse_serve.py` serves the same mcp_client-safe-mode tool set over
 HTTP/SSE, bound to `127.0.0.1` by default — for local/private rehearsal
 only. This is **not** a public ChatGPT/OpenAI connector: no TLS, reverse
 proxy, or OAuth is wired for this path, and it is not deployed as a
@@ -137,15 +137,15 @@ Both routes require a bearer token (see Auth below).
 ### Env template
 
 ```bash
-cp examples/mcp_server/chatgpt.sse.env.example examples/mcp_server/chatgpt.sse.env
-# Edit chatgpt.sse.env with your values
+cp examples/mcp_server/mcp_client.sse.env.example examples/mcp_server/mcp_client.sse.env
+# Edit mcp_client.sse.env with your values
 #    NEVER commit this file
 ```
 
 ### Start
 
 ```bash
-set -a && source examples/mcp_server/chatgpt.sse.env && set +a
+set -a && source examples/mcp_server/mcp_client.sse.env && set +a
 python3 scripts/mcp_sse_serve.py
 ```
 
@@ -193,7 +193,7 @@ The server refuses to bind to any non-loopback address unless
 deployment:** `MCP_HTTP_ALLOW_NON_LOOPBACK=true` relaxes the loopback-only
 guard and lets the server bind to `0.0.0.0` or any other host. There is no
 TLS, no reverse proxy, and no OAuth on this path — enabling this on a host
-with any network exposure would expose the SSH gateway's chatgpt-safe
+with any network exposure would expose the SSH gateway's mcp_client-safe
 tool set without transport-level encryption or a proven auth boundary
 beyond the single bearer token. Leave unset for local/private rehearsal.
 
@@ -211,7 +211,7 @@ blocked tools are absent, and the bearer token is never printed.
 
 ## Private Streamable HTTP entrypoint (local/private rehearsal)
 
-`scripts/mcp_streamable_http_serve.py` serves the same chatgpt-safe-mode
+`scripts/mcp_streamable_http_serve.py` serves the same mcp_client-safe-mode
 tool set over the MCP spec's **current** transport, Streamable HTTP
 (protocol version 2025-06-18), bound to `127.0.0.1` by default — a
 sibling of the private SSE entrypoint above, not a replacement for it.
@@ -234,15 +234,15 @@ spec's prose. All three require a bearer token (see Auth below).
 ### Env template
 
 ```bash
-cp examples/mcp_server/chatgpt.streamable-http.env.example examples/mcp_server/chatgpt.streamable-http.env
-# Edit chatgpt.streamable-http.env with your values
+cp examples/mcp_server/mcp_client.streamable-http.env.example examples/mcp_server/mcp_client.streamable-http.env
+# Edit mcp_client.streamable-http.env with your values
 #    NEVER commit this file
 ```
 
 ### Start
 
 ```bash
-set -a && source examples/mcp_server/chatgpt.streamable-http.env && set +a
+set -a && source examples/mcp_server/mcp_client.streamable-http.env && set +a
 python3 scripts/mcp_streamable_http_serve.py
 ```
 
@@ -297,7 +297,7 @@ deployment:** `MCP_STREAMABLE_HTTP_ALLOW_NON_LOOPBACK=true` relaxes the
 loopback-only guard and lets the server bind to `0.0.0.0` or any other
 host. There is no TLS, no reverse proxy, and no OAuth on this path —
 enabling this on a host with any network exposure would expose the SSH
-gateway's chatgpt-safe tool set without transport-level encryption or
+gateway's mcp_client-safe tool set without transport-level encryption or
 a proven auth boundary beyond the single bearer token. Leave unset for
 local/private rehearsal.
 

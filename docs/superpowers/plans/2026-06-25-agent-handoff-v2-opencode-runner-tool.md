@@ -211,10 +211,10 @@ git commit -m "feat(opencode-tools): add project_run_opencode function"
 
 **Files:**
 - Modify: `examples/mcp_server/server.py` — import and register tool
-- Modify: `examples/mcp_server/tool_modes.py` — add to chatgpt set
+- Modify: `examples/mcp_server/tool_modes.py` — add to mcp_client set
 
 **Interfaces:**
-- Consumes: `project_run_opencode` from `opencode_tools.py`, `write_modes.assert_handoff_write_allowed`, `run_project_command` from `chatgpt_tools.py`
+- Consumes: `project_run_opencode` from `opencode_tools.py`, `write_modes.assert_handoff_write_allowed`, `run_project_command` from `mcp_client_tools.py`
 - Registers: `gateway_project_run_opencode` MCP tool (prefix `gateway_project_*`)
 
 - [ ] **Step 6: Write failing test for tool registration**
@@ -224,7 +224,7 @@ Add to `tests/test_mcp_opencode.py`:
 ```python
 class TestToolRegistration:
     def test_registered_in_chatgpt_mode(self, monkeypatch):
-        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
         import importlib
         import sys
         from pathlib import Path
@@ -238,11 +238,11 @@ class TestToolRegistration:
 - [ ] **Step 7: Verify test fails**
 
 Run: `python -m pytest tests/test_mcp_opencode.py::TestToolRegistration -v 2>&1`
-Expected: FAIL — `gateway_project_run_opencode` not in chatgpt set
+Expected: FAIL — `gateway_project_run_opencode` not in mcp_client set
 
-- [ ] **Step 8: Add tool to tool_modes.py chatgpt set**
+- [ ] **Step 8: Add tool to tool_modes.py mcp_client set**
 
-In `examples/mcp_server/tool_modes.py`, add `"gateway_project_run_opencode"` to the `chatgpt` set:
+In `examples/mcp_server/tool_modes.py`, add `"gateway_project_run_opencode"` to the `mcp_client` set:
 
 ```python
 "gateway_project_run_opencode",
@@ -262,7 +262,7 @@ Add to `tests/test_mcp_opencode.py`:
 ```python
 class TestServerTool:
     def test_tool_function_can_be_imported(self, monkeypatch):
-        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "chatgpt")
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
         import importlib, sys
         from pathlib import Path
         example_dir = Path(__file__).resolve().parents[1] / "examples" / "mcp_server"
@@ -331,7 +331,7 @@ git add examples/mcp_server/server.py examples/mcp_server/tool_modes.py examples
 git commit -m "feat: register gateway_project_run_opencode MCP tool
 - New opencode_tools.py module with project_run_opencode()
 - Registered in server.py with write-mode guard
-- Added to tool_modes.py chatgpt set
+- Added to tool_modes.py mcp_client set
 - 6 tests covering validation, structure, registration, import"
 ```
 

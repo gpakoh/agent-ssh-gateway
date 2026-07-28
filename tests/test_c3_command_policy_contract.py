@@ -355,11 +355,11 @@ class TestMcpProjectRunPytest:
         ]
 
         with patch(
-            "examples.mcp_server.chatgpt_tools._resolve_project",
+            "examples.mcp_server.mcp_client_tools._resolve_project",
             return_value=Path("/srv/projects/myproj"),
         ):
             with patch(
-                "examples.mcp_server.chatgpt_tools._build_uv_argv",
+                "examples.mcp_server.mcp_client_tools._build_uv_argv",
                 return_value=["uv", "run", "--frozen", "--directory", "/srv/projects/myproj", "--", "pytest", "--", "tests/"],
             ):
                 with patch.object(
@@ -373,10 +373,10 @@ class TestMcpProjectRunPytest:
                         return_value={"exit_code": 0, "stdout": "passed", "stderr": ""},
                     ):
                         with patch(
-                            "examples.mcp_server.chatgpt_tools.build_command_result",
+                            "examples.mcp_server.mcp_client_tools.build_command_result",
                             return_value={"outcome": "passed", "exit_code": 0},
                         ):
-                            from examples.mcp_server.chatgpt_tools import project_run_pytest
+                            from examples.mcp_server.mcp_client_tools import project_run_pytest
 
                             project_run_pytest(client, "myproj", ["tests/"])
 

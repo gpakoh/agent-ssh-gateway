@@ -97,7 +97,7 @@ class TestGatewaySuccessEnvelope:
 
     def test_preserves_manifest_payload(self):
         payload = {
-            "active_mode": "chatgpt",
+            "active_mode": "mcp_client",
             "tool_count": 106,
             "tools": [],
             "scopes": {},

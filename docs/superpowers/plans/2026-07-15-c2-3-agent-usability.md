@@ -406,4 +406,4 @@ Add/update `api_help.py` entries for:
 1. **Stage A SDK file not yet touched** — `sdk/ssh_gateway.py` on master has no preview/verify methods. The test file `tests/test_sdk_workspace.py` is a TDD scaffold written ahead of implementation.
 2. **`safe=True` forces `before_content` read** — bounded to 10MB by `_exact_read`, acceptable.
 3. **Preview uses `validate_read`, write uses `validate_write`** — agent tokens need both `project:read` and `project:write` for full workflow. Documented.
-4. **No mode registration for `standard`/`chatgpt`** — write tools only in `full` mode. Intentional.
+4. **No mode registration for `standard`/`mcp_client`** — write tools only in `full` mode. Intentional.

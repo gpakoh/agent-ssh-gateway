@@ -22,7 +22,7 @@ Use a scoped gateway token, not a master key.
 ## Quick start
 
 ```bash
-cd examples/chatgpt_remote_mcp
+cd examples/mcp_client_remote
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -52,7 +52,7 @@ Tool visibility is controlled by `MCP_GATEWAY_TOOL_MODE`:
 - `minimal` — health, session health, restricted execute, job status/result
 - `standard` — adds file reading, repo status, session listing, job waiting
 - `full` — adds `gateway_self_test` and handoff tools
-- `chatgpt` (recommended for ChatGPT) — replaces `gateway_execute_restricted` with high-level read-only tools to avoid platform-level blocking
+- `mcp_client` (recommended for ChatGPT) — replaces `gateway_execute_restricted` with high-level read-only tools to avoid platform-level blocking
 
 ## Reverse proxy (nginx)
 
@@ -82,7 +82,7 @@ ChatGPT (Create App)
 nginx (ssh-gateway.example.com)
      │  proxy_pass to 127.0.0.1:8788
      ▼
-chatgpt_remote_mcp/server.py
+mcp_client_remote/server.py
      │  TokenAuthMiddleware (validates mcp_token)
      │  mounts mcp_server.streamable_http_app()
      ▼

@@ -141,7 +141,7 @@ Failure (`exit_code != 0`):
 
 ## DockerClient Additions
 
-**File:** `examples/chatgpt_remote_mcp/fleet/docker_client.py`
+**File:** `examples/mcp_client_remote/fleet/docker_client.py`
 
 New methods follow existing pattern: argv-only, no shell=True, existing validation:
 
@@ -193,7 +193,7 @@ New tools follow existing `@register_tool("docker_*")` pattern. All are async, a
 
 All scoped `["mcp:docker"]` in `tool_scopes.py`.
 
-All registered in `chatgpt` mode in `tool_modes.py`.
+All registered in `mcp_client` mode in `tool_modes.py`.
 
 ## Safety Rules
 
@@ -245,11 +245,11 @@ docker run -d --name mcp-docker-confirm-test alpine sleep 300
 
 | File | Change |
 |------|--------|
-| `examples/chatgpt_remote_mcp/fleet/docker_client.py` | Add `RunResult`, `_run_with_result()`, `rm()`, `compose_down()`, `prune()`, `_validate_prune_type()` |
+| `examples/mcp_client_remote/fleet/docker_client.py` | Add `RunResult`, `_run_with_result()`, `rm()`, `compose_down()`, `prune()`, `_validate_prune_type()` |
 | `examples/mcp_server/docker_confirm.py` | New — confirmation store |
 | `examples/mcp_server/server.py` | Add 5 `@register_tool` functions |
 | `examples/mcp_server/tool_scopes.py` | Add 5 tools → `["mcp:docker"]` |
-| `examples/mcp_server/tool_modes.py` | Add 5 tools → `chatgpt` mode |
+| `examples/mcp_server/tool_modes.py` | Add 5 tools → `mcp_client` mode |
 | `tests/test_docker_confirm.py` | New — unit tests for confirm store |
 | `tests/test_docker_client.py` or new | Tests for new DockerClient methods |
 | `scripts/mcp_fleet_healthcheck.py` | Update expected tool count: 97 → 102 |

@@ -22,7 +22,7 @@ instead, see the "Private Streamable HTTP entrypoint" section of
 - [ ] A restricted **agent token** already issued (see
       `docs/operations/CHATGPT_ATTACH_CHECKLIST.md` step 1) — **never the
       master key**
-- [ ] `examples/mcp_server/chatgpt.sse.env.example` present in the repo
+- [ ] `examples/mcp_server/mcp_client.sse.env.example` present in the repo
 - [ ] Python environment with project dependencies installed (`mcp`,
       `starlette`, `uvicorn`, `httpx`)
 
@@ -42,15 +42,15 @@ trackers, or commit messages.
 ## 2. Create the gitignored env file
 
 ```bash
-cp examples/mcp_server/chatgpt.sse.env.example examples/mcp_server/chatgpt.sse.env
+cp examples/mcp_server/mcp_client.sse.env.example examples/mcp_server/mcp_client.sse.env
 ```
 
-Edit `examples/mcp_server/chatgpt.sse.env` with your values:
+Edit `examples/mcp_server/mcp_client.sse.env` with your values:
 
 - `GATEWAY_URL`, `GATEWAY_API_KEY` / `GATEWAY_AGENT_TOKEN` — the restricted
   agent token from Prerequisites, **not** the master key
 - `MCP_HTTP_BEARER_TOKEN` — the private token generated in step 1
-- Leave `MCP_GATEWAY_TOOL_MODE=chatgpt`, `MCP_CHATGPT_SAFE_MODE=true`,
+- Leave `MCP_GATEWAY_TOOL_MODE=mcp_client`, `MCP_CLIENT_SAFE_MODE=true`,
   `MCP_HTTP_HOST=127.0.0.1`, `MCP_HTTP_PORT=8086` as shipped in the
   template — do not change these for a rehearsal run
 - `MCP_HTTP_ALLOWED_ORIGINS` (optional) — leave unset unless you have a
@@ -58,12 +58,12 @@ Edit `examples/mcp_server/chatgpt.sse.env` with your values:
   requests with no `Origin` header are already permitted by default (see
   "Origin validation" below). Never add a public origin here.
 
-`examples/mcp_server/chatgpt.sse.env` is gitignored. **Never commit it.**
+`examples/mcp_server/mcp_client.sse.env` is gitignored. **Never commit it.**
 
 ## 3. Validate the env file (recommended)
 
 ```bash
-python3 scripts/mcp_sse_env_check.py examples/mcp_server/chatgpt.sse.env
+python3 scripts/mcp_sse_env_check.py examples/mcp_server/mcp_client.sse.env
 ```
 
 Static check only — does not start the server or connect to anything.
@@ -74,7 +74,7 @@ placeholders were actually replaced. Never prints token values.
 ## 4. Start manually on 127.0.0.1
 
 ```bash
-set -a && source examples/mcp_server/chatgpt.sse.env && set +a
+set -a && source examples/mcp_server/mcp_client.sse.env && set +a
 python3 scripts/mcp_sse_serve.py
 ```
 
@@ -140,7 +140,7 @@ There is nothing to roll back at the infrastructure level:
 - If you revoked or rotated the gateway agent token as part of testing,
   reissue or restore it via the normal agent-token flow
   (`docs/operations/CHATGPT_ATTACH_CHECKLIST.md`).
-- Delete `examples/mcp_server/chatgpt.sse.env` if you no longer need the
+- Delete `examples/mcp_server/mcp_client.sse.env` if you no longer need the
   private rehearsal env (it is gitignored either way, so this is
   housekeeping, not a security requirement).
 
@@ -162,8 +162,8 @@ There is nothing to roll back at the infrastructure level:
 - **Do not use the master key** as `GATEWAY_API_KEY` /
   `GATEWAY_AGENT_TOKEN` for this entrypoint. Use a restricted agent
   token only, same as the stdio attach flow.
-- **Do not run with safe mode off.** `MCP_GATEWAY_TOOL_MODE=chatgpt` and
-  `MCP_CHATGPT_SAFE_MODE=true` are mandatory — the entrypoint fails fast
+- **Do not run with safe mode off.** `MCP_GATEWAY_TOOL_MODE=mcp_client` and
+  `MCP_CLIENT_SAFE_MODE=true` are mandatory — the entrypoint fails fast
   if either is missing or wrong. Do not work around this by editing the
   script; if you need a different tool set, that is a separate,
   deliberate decision outside the scope of this runbook.

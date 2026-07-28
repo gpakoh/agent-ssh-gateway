@@ -28,7 +28,7 @@
 
 **Files:**
 - Modify: `examples/mcp_server/tool_results.py`
-- Modify: `examples/chatgpt_remote_mcp/fleet/docker_client.py`
+- Modify: `examples/mcp_client_remote/fleet/docker_client.py`
 - Test: `tests/test_docker_client.py`
 
 **Interfaces:**
@@ -390,7 +390,7 @@ Expected: all tests pass.
 - [ ] **Step 12: Commit**
 
 ```bash
-git add examples/mcp_server/tool_results.py examples/chatgpt_remote_mcp/fleet/docker_client.py tests/test_docker_client.py
+git add examples/mcp_server/tool_results.py examples/mcp_client_remote/fleet/docker_client.py tests/test_docker_client.py
 git commit -m "feat(docker): add DockerClient admin methods and error codes"
 ```
 
@@ -441,7 +441,7 @@ After the existing `# dangerous docker operations (Session 164) — mcp:docker` 
     "docker_volume_rm": ["mcp:docker:admin"],
 ```
 
-- [ ] **Step 3: Add tools to `TOOL_NAMES_BY_MODE["chatgpt"]` in `tool_modes.py`**
+- [ ] **Step 3: Add tools to `TOOL_NAMES_BY_MODE["mcp_client"]` in `tool_modes.py`**
 
 After `"docker_pending_actions",`:
 ```python
@@ -1048,9 +1048,9 @@ python -c "
 import sys
 sys.path.insert(0, 'examples/mcp_server')
 from tool_modes import TOOL_NAMES_BY_MODE
-chatgpt = TOOL_NAMES_BY_MODE['chatgpt']
-docker_tools = [t for t in chatgpt if t.startswith('docker_')]
-print(f'Docker tools in chatgpt mode: {len(docker_tools)}')
+mcp_client = TOOL_NAMES_BY_MODE['mcp_client']
+docker_tools = [t for t in mcp_client if t.startswith('docker_')]
+print(f'Docker tools in mcp_client mode: {len(docker_tools)}')
 print(sorted(docker_tools))
 "
 ```

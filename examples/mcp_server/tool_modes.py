@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Literal
 
-ToolMode = Literal["minimal", "standard", "full", "chatgpt"]
+ToolMode = Literal["minimal", "standard", "full", "mcp_client"]
 
 DEFAULT_TOOL_MODE: ToolMode = "standard"
 
@@ -63,7 +63,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "workspace_preview_patch",
         "workspace_verify",
     },
-    "chatgpt": {
+    "mcp_client": {
         "health",
         "tools_manifest",
         "session_health",
@@ -188,7 +188,7 @@ class ToolModeError(ValueError):
 
 # Tools that are NEVER exposed to ChatGPT in safe mode.
 # These allow mutation, agent launch, or privileged operations.
-CHATGPT_BLOCKED_TOOLS: frozenset[str] = frozenset({
+MCP_CLIENT_BLOCKED_TOOLS: frozenset[str] = frozenset({
     # Agent launch — never safe for first attach
     "project_run_opencode",
     "project_run_mimo",
@@ -227,17 +227,17 @@ CHATGPT_BLOCKED_TOOLS: frozenset[str] = frozenset({
 })
 
 
-def is_chatgpt_safe_mode() -> bool:
-    """Return True when MCP_CHATGPT_SAFE_MODE is enabled."""
-    return os.environ.get("MCP_CHATGPT_SAFE_MODE", "false").strip().lower() in {"1", "true", "yes"}
+def is_mcp_client_safe_mode() -> bool:
+    """Return True when MCP_CLIENT_SAFE_MODE is enabled."""
+    return os.environ.get("MCP_CLIENT_SAFE_MODE", "false").strip().lower() in {"1", "true", "yes"}
 
 
-def get_chatgpt_safe_tools() -> frozenset[str]:
+def get_mcp_client_safe_tools() -> frozenset[str]:
     """Return the set of tools allowed in ChatGPT safe mode.
 
-    Starts from the full chatgpt mode set, removes blocked tools.
+    Starts from the full mcp_client mode set, removes blocked tools.
     """
-    return frozenset(TOOL_NAMES_BY_MODE["chatgpt"] - CHATGPT_BLOCKED_TOOLS)
+    return frozenset(TOOL_NAMES_BY_MODE["mcp_client"] - MCP_CLIENT_BLOCKED_TOOLS)
 
 
 def get_tool_mode() -> ToolMode:
@@ -252,7 +252,7 @@ def get_tool_mode() -> ToolMode:
 def should_register_tool(tool_name: str, mode: ToolMode | None = None) -> bool:
     """Return whether a tool should be registered for the selected mode.
 
-    When MCP_CHATGPT_SAFE_MODE=true and mode is chatgpt, only safe tools are registered.
+    When MCP_CLIENT_SAFE_MODE=true and mode is mcp_client, only safe tools are registered.
     """
     selected_mode = mode or get_tool_mode()
     if selected_mode not in TOOL_NAMES_BY_MODE:
@@ -260,8 +260,8 @@ def should_register_tool(tool_name: str, mode: ToolMode | None = None) -> bool:
         raise ToolModeError(
             f"Invalid MCP_GATEWAY_TOOL_MODE={selected_mode!r}; expected one of: {allowed}"
         )
-    if selected_mode == "chatgpt" and is_chatgpt_safe_mode():
-        return tool_name in get_chatgpt_safe_tools()
+    if selected_mode == "mcp_client" and is_mcp_client_safe_mode():
+        return tool_name in get_mcp_client_safe_tools()
     return tool_name in TOOL_NAMES_BY_MODE[selected_mode]
 
 

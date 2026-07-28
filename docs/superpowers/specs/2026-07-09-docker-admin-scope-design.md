@@ -330,7 +330,7 @@ All 4 new tools + 2 expanded tools must be registered in:
 | File | Change |
 |------|--------|
 | `tool_scopes.py` | Add tools with `["mcp:docker:admin"]` scope |
-| `tool_modes.py` | Register in `chatgpt` mode |
+| `tool_modes.py` | Register in `mcp_client` mode |
 | `tools_manifest.py` | Add to manifest |
 | `server.py` | Add `@register_tool` functions |
 
