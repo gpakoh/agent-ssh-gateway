@@ -215,20 +215,21 @@ class DockerClient:
     def _truncate_table_output(output: str, limit: int) -> str:
         """Truncate tabular docker output to *limit* data rows, preserving the header.
 
-        Docker table output always starts with a header line followed by a separator
-        line (dashes).  We keep both plus *limit* data lines and append a notice when
-        truncated.
+        Docker ``--format "table ..."`` prints a header line followed by data
+        rows (NO dash-separator).  The first line is always the header when
+        ``table`` format is used; for plain ``--format`` without ``table`` the
+        entire output is data.
         """
         lines = output.splitlines()
-        if len(lines) <= 2:
+        if len(lines) <= 1:
             return output
-        header = lines[:2]
-        data = lines[2:]
+        header = lines[0]
+        data = lines[1:]
         if len(data) <= limit:
             return output
         truncated = data[:limit]
         total = len(data)
-        return "\n".join(header + truncated) + (
+        return "\n".join([header] + truncated) + (
             f"\n[showing {limit} of {total} results — use limit or filter to narrow]"
         )
 
@@ -288,13 +289,45 @@ class DockerClient:
         return result
 
     def _sanitize_inspect_output(self, raw: str) -> str:
-        """Redact secrets from docker inspect JSON output."""
+        """Redact secrets from docker inspect JSON output.
+
+        Strips Config.Env entirely (lists all env vars with values) and hides
+        host source paths in Mounts.  Also applies key-level redaction as a
+        defense-in-depth measure for any remaining sensitive keys.
+        """
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
             return raw
+        data = self._strip_container_secrets(data)
         data = self._sanitize_value(data)
         return json.dumps(data, indent=2, ensure_ascii=False)
+
+    def _strip_container_secrets(self, data: object) -> object:
+        """Strip secrets from top-level container inspect entries.
+
+        Walks the docker inspect result list (or single object) and:
+          - removes Config.Env entirely
+          - replaces Mounts[*].Source with '<redacted>'
+        """
+        entries = data if isinstance(data, list) else [data]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            config = entry.get("Config")
+            if isinstance(config, dict):
+                config.pop("Env", None)
+            mounts = entry.get("Mounts")
+            if isinstance(mounts, list):
+                for m in mounts:
+                    if isinstance(m, dict) and "Source" in m:
+                        m["Source"] = REDACTED
+            host_config = entry.get("HostConfig")
+            if isinstance(host_config, dict):
+                binds = host_config.get("Binds")
+                if isinstance(binds, list):
+                    host_config["Binds"] = [REDACTED]
+        return data
 
     def _sanitize_value(self, value: object) -> object:
         """Recursively sanitize a JSON value, redacting secrets."""
