@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.command_policy import (
     _check_compose_destructive,
     _check_docker_destructive,
@@ -1410,3 +1412,171 @@ class TestKubernetesScanTool:
                      "kustomize-build-delete"}
         for name in expected:
             assert name in names, f"expected {name} in {names}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — cloud provider destructive pattern tests (AWS, GCP, Azure)
+# ---------------------------------------------------------------------------
+
+class TestCloudScanTool:
+    """Tests for cloud provider destructive patterns (port from DCG cloud pack)."""
+
+    @pytest.mark.parametrize("cmd,expected", [
+        ("aws ec2 terminate-instances i-abc123", "aws-ec2-terminate"),
+        ("aws ec2 delete-snapshot snap-123", "aws-ec2-delete"),
+        ("aws s3 rm s3://bucket/logs/ --recursive", "aws-s3-rm-recursive"),
+        ("aws s3 rb s3://old-bucket", "aws-s3-rb"),
+        ("aws s3api delete-bucket --bucket my-bucket", "aws-s3api-delete-bucket"),
+        ("aws s3api delete-objects --bucket x --delete file://keys.json", "aws-s3api-delete-object"),
+        ("aws rds delete-db-instance --db-instance-identifier prod", "aws-rds-delete"),
+        ("aws cloudformation delete-stack --stack-name my-stack", "aws-cfn-delete-stack"),
+        ("aws lambda delete-function --function-name my-func", "aws-lambda-delete"),
+        ("aws iam delete-user --user-name bot", "aws-iam-delete"),
+        ("aws dynamodb delete-table --table-name users", "aws-dynamodb-delete"),
+        ("aws eks delete-cluster --name prod", "aws-eks-delete"),
+        ("aws ecr delete-repository --repository-name my-app", "aws-ecr-delete-repository"),
+        ("aws kms schedule-key-deletion --key-id alias/my-key", "aws-kms-schedule-key-deletion"),
+        ("aws secretsmanager delete-secret --secret-id db-pass", "aws-secretsmanager-delete-secret"),
+        ("aws route53 delete-hosted-zone --id Z123", "aws-route53-delete-hosted-zone"),
+        ("aws cloudtrail delete-trail --name my-trail", "aws-cloudtrail-delete-trail"),
+        ("aws redshift delete-cluster --cluster-id prod", "aws-redshift-delete-cluster"),
+        ("aws logs delete-log-group --log-group-name /aws/lambda/my-func",
+         "aws-logs-delete-log-group"),
+    ])
+    def test_aws_destructive(self, cmd, expected):
+        from app.command_policy import scan_command
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    @pytest.mark.parametrize("cmd,expected", [
+        ("gcloud compute instances delete my-vm --zone=us-east1-b", "gcp-compute-delete"),
+        ("gcloud compute disks delete my-disk --zone=us-east1-b", "gcp-disk-delete"),
+        ("gcloud sql instances delete my-db", "gcp-sql-delete"),
+        ("gsutil rm -r gs://bucket/logs", "gcp-gsutil-rm-recursive"),
+        ("gsutil rb gs://empty-bucket", "gcp-gsutil-rb"),
+        ("gcloud container clusters delete prod-cluster --region=us-east1",
+         "gcp-gke-delete"),
+        ("gcloud projects delete my-project-123", "gcp-project-delete"),
+        ("gcloud functions delete my-function --region=us-east1", "gcp-functions-delete"),
+        ("gcloud firestore delete --all-collections", "gcp-firestore-delete"),
+        ("gcloud secrets delete my-secret", "gcp-secrets-delete"),
+        ("gcloud kms keys versions destroy --keyring my-ring --key my-key --version 1",
+         "gcp-kms-keys-destroy"),
+        ("gcloud iam service-accounts delete my-sa@project.iam.gserviceaccount.com",
+         "gcp-iam-service-accounts-delete"),
+        ("gcloud dns managed-zones delete my-zone", "gcp-dns-managed-zones-delete"),
+        ("gcloud spanner instances delete prod-instance", "gcp-spanner-instances-delete"),
+        ("gcloud bigtable instances delete prod-instance", "gcp-bigtable-instances-delete"),
+        ("bq rm -r my_dataset", "gcp-bq-rm-recursive"),
+    ])
+    def test_gcp_destructive(self, cmd, expected):
+        from app.command_policy import scan_command
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    @pytest.mark.parametrize("cmd,expected", [
+        ("az vm delete --name my-vm --resource-group prod-rg", "az-vm-delete"),
+        ("az storage account delete --name mystorage --resource-group prod-rg",
+         "az-storage-delete"),
+        ("az storage blob delete --container-name logs --name error.log",
+         "az-blob-delete"),
+        ("az sql server delete --name prod-srv --resource-group prod-rg", "az-sql-delete"),
+        ("az group delete --name prod-rg --yes --no-wait", "az-group-delete"),
+        ("az aks delete --name prod-cluster --resource-group prod-rg", "az-aks-delete"),
+        ("az webapp delete --name my-app --resource-group prod-rg", "az-webapp-delete"),
+        ("az cosmosdb delete --name my-cosmos --resource-group prod-rg",
+         "az-cosmosdb-delete"),
+        ("az keyvault delete --name prod-kv --resource-group prod-rg", "az-keyvault-delete"),
+        ("az acr delete --name myregistry --resource-group prod-rg", "az-acr-delete"),
+        ("az acr repository delete --name myregistry --repository my-app",
+         "az-acr-repository-delete"),
+        ("az keyvault key delete --vault-name prod-kv --name my-key",
+         "az-keyvault-item-delete-or-purge"),
+        ("az ad sp delete --id 00000000-0000-0000-0000-000000000000", "az-ad-sp-delete"),
+        ("az ad app delete --id 00000000-0000-0000-0000-000000000000", "az-ad-app-delete"),
+        ("az network dns zone delete --name example.com --resource-group prod-rg",
+         "az-network-dns-zone-delete"),
+    ])
+    def test_azure_destructive(self, cmd, expected):
+        from app.command_policy import scan_command
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    def test_cloud_global_flags(self):
+        from app.command_policy import scan_command
+
+        cases = [
+            ("aws --profile prod --region us-east-1 s3 rm s3://bucket/logs/ --recursive",
+             "aws-s3-rm-recursive"),
+            ("aws --profile prod ec2 terminate-instances i-abc123", "aws-ec2-terminate"),
+            ("gcloud --project my-proj compute instances delete my-vm", "gcp-compute-delete"),
+            ("gcloud --quiet container clusters delete prod-cluster", "gcp-gke-delete"),
+            ("az --subscription 123 --output table vm delete --name my-vm -g prod",
+             "az-vm-delete"),
+            ("az --verbose group delete --name prod-rg --yes", "az-group-delete"),
+        ]
+        for cmd, expected in cases:
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    def test_gsutil_rm_recursive_variant(self):
+        """Verify gsutil rm -r variant with same-flag-bundle."""
+        from app.command_policy import scan_command
+
+        r = scan_command("gsutil rm -rf gs://bucket")
+        names = {f.pattern_name for f in r.findings}
+        assert "gcp-gsutil-rm-recursive" in names
+
+    def test_bq_rm_force_variant(self):
+        """Verify bq rm -f (force without confirmation)."""
+        from app.command_policy import scan_command
+
+        r = scan_command("bq rm -f my_dataset.my_table")
+        names = {f.pattern_name for f in r.findings}
+        assert "gcp-bq-rm-recursive" in names
+
+    def test_safe_cloud_commands_not_matched(self):
+        from app.command_policy import scan_command
+
+        for cmd in ("aws s3 ls s3://bucket",
+                     "aws ec2 describe-instances",
+                     "aws rds describe-db-instances",
+                     "aws s3api list-buckets",
+                     "gcloud compute instances list",
+                     "gcloud container clusters list",
+                     "gcloud sql instances list",
+                     "gsutil ls gs://bucket",
+                     "bq ls",
+                     "az vm list",
+                     "az storage account list",
+                     "az group list"):
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            cloud_matches = [n for n in names if n.startswith(("aws-", "gcp-", "az-"))]
+            assert not cloud_matches, f"False positive for {cmd!r}: {cloud_matches}"
+
+    def test_az_short_name_no_false_positive(self):
+        """Verify 'az' as Azure CLI does not match unrelated commands."""
+        from app.command_policy import scan_command
+
+        for cmd in ("gzip file.txt", "amazon-linux-extras install nginx",
+                     "gazette list"):
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            az_matches = [n for n in names if n.startswith("az-")]
+            assert not az_matches, f"False positive for {cmd!r}: {az_matches}"
+
+    def test_cloud_combined_manifest(self):
+        from app.command_policy import scan_command
+
+        cmd = ("aws s3 rm s3://bucket/logs/ --recursive && "
+               "gcloud compute instances delete my-vm && "
+               "az group delete --name prod-rg --yes")
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        for expected in ("aws-s3-rm-recursive", "gcp-compute-delete", "az-group-delete"):
+            assert expected in names, f"expected {expected} in {names}"
