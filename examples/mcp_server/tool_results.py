@@ -1,8 +1,24 @@
+import re
 import time
 import uuid
 from typing import Any
 
 CONTRACT_VERSION = "1"
+
+# Patterns to redact in error messages
+_INTERNAL_PATH_RE = re.compile(r"(?<!['\w])/(?:media|root|app|home|tmp|var|etc|opt|usr|mnt|data)\S*")
+_API_ENDPOINT_RE = re.compile(r"(?:GET|POST|PUT|DELETE|PATCH)\s+/api/\S+")
+
+
+def _redact_error_message(message: str) -> tuple[str, bool]:
+    """Strip internal paths and API endpoints from error messages.
+
+    Returns (redacted_message, was_redacted).
+    """
+    original = message
+    message = _INTERNAL_PATH_RE.sub("[PATH]", message)
+    message = _API_ENDPOINT_RE.sub("[API]", message)
+    return message, message != original
 
 ERROR_CODES = {
     "TOOL_NOT_FOUND",
@@ -120,16 +136,22 @@ def tool_error(
 
     effective_tool = tool_name or tool
     meta = _make_meta(effective_tool)
-    meta["redacted"] = bool(redacted)
     meta["truncated"] = bool(truncated)
     meta["source"] = source if source in SAFE_SOURCE_VALUES else "unknown"
     if duration_ms is not None:
         meta["duration_ms"] = round(duration_ms, 1)
     meta.update(extra_meta)
 
+    raw_message = str(message)
+    redacted_message, was_redacted = _redact_error_message(raw_message)
+    meta["redacted"] = bool(redacted) or was_redacted
+    if was_redacted:
+        meta.setdefault("warnings", [])
+        meta["warnings"].append("Error message redacted for security")
+
     error: dict[str, Any] = {
         "code": code,
-        "message": str(message),
+        "message": redacted_message,
         "retryable": bool(retryable),
     }
     if hint is not None:
