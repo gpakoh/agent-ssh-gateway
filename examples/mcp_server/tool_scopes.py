@@ -59,6 +59,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     # ops — mcp:read / mcp:execute
     "health": ["mcp:read"],
     "tools_manifest": ["mcp:read"],
+    "project_list": ["mcp:read"],
     "list_sessions": ["mcp:read"],
     "session_health": ["mcp:read"],
     "execute_restricted": ["mcp:execute"],

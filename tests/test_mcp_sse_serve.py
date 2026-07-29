@@ -246,7 +246,7 @@ class TestBuildAppIntegration:
             _reload_gateway_server()
             import examples.mcp_server.server as srv
 
-            assert len(srv.mcp._tool_manager._tools) == 73
+            assert len(srv.mcp._tool_manager._tools) == 74
 
     def test_fastmcp_own_auth_is_unwired(self):
         """Regression guard for a real bug found while building the PR2
