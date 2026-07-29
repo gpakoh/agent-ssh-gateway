@@ -550,6 +550,7 @@ def _classify_gateway_error(exc: GatewayClientError) -> tuple[str, bool]:
             if mapped_code is not None:
                 return mapped_code, gateway_retryable
             if gateway_code in ERROR_CODES:
+                assert isinstance(gateway_code, str)
                 return gateway_code, gateway_retryable
             if status == 404 and ("file not found" in msg or "cannot read" in msg):
                 return "FILE_NOT_FOUND", gateway_retryable
