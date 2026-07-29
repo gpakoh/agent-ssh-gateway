@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Literal
+from typing import Literal, cast
 
 ToolMode = Literal["minimal", "standard", "full", "mcp_client"]
 
@@ -233,7 +233,7 @@ def get_tool_mode() -> ToolMode:
     if raw not in TOOL_NAMES_BY_MODE:
         allowed = ", ".join(sorted(TOOL_NAMES_BY_MODE))
         raise ToolModeError(f"Invalid MCP_GATEWAY_TOOL_MODE={raw!r}; expected one of: {allowed}")
-    return raw
+    return cast(ToolMode, raw)  # type: ignore[redundant-cast]
 
 
 def should_register_tool(tool_name: str, mode: ToolMode | None = None) -> bool:
