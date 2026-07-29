@@ -152,4 +152,4 @@ def test_mcp_project_apply_patch_tool_exists():
 
     importlib.reload(srv)
     tool_names = [t.name for t in srv.mcp._tool_manager._tools.values()]
-    assert "project_apply_patch" in tool_names
+    assert "apply_patch" in tool_names

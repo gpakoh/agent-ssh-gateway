@@ -43,7 +43,7 @@ class TestPasswordInMetadataRedacted:
         logger = _tmp_logger(tmp_path)
         event = McpAuditEvent(
             event_type="mcp.tool_blocked",
-            tool="project_run_opencode",
+            tool="run_opencode",
             decision="block",
             metadata={"task": "deploy password=secret123 to prod"},
         )

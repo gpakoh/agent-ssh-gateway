@@ -139,9 +139,9 @@ class TestChatGPTSafeMode:
         assert is_mcp_client_safe_mode()
 
     def test_blocked_tools_excludes_agent_launch(self):
-        assert "project_run_opencode" in MCP_CLIENT_BLOCKED_TOOLS
-        assert "project_run_mimo" in MCP_CLIENT_BLOCKED_TOOLS
-        assert "project_run_agent" in MCP_CLIENT_BLOCKED_TOOLS
+        assert "run_opencode" in MCP_CLIENT_BLOCKED_TOOLS
+        assert "run_mimo" in MCP_CLIENT_BLOCKED_TOOLS
+        assert "run_agent" in MCP_CLIENT_BLOCKED_TOOLS
 
     def test_blocked_tools_excludes_docker(self):
         for name in ("docker_exec", "docker_compose_up", "docker_compose_down", "docker_prune"):
@@ -149,7 +149,7 @@ class TestChatGPTSafeMode:
 
     def test_blocked_tools_excludes_write_mutations(self):
         for name in ("workspace_file_write", "workspace_file_edit", "workspace_apply_patch",
-                       "project_apply_patch"):
+                       "apply_patch"):
             assert name in MCP_CLIENT_BLOCKED_TOOLS
 
     def test_safe_tools_include_readonly(self):
@@ -159,7 +159,7 @@ class TestChatGPTSafeMode:
 
     def test_safe_tools_include_testlint(self):
         safe = get_mcp_client_safe_tools()
-        for name in ("run_tests", "run_lint", "project_run_pytest", "project_run_ruff"):
+        for name in ("run_tests", "run_lint", "run_pytest", "run_ruff"):
             assert name in safe
 
     def test_safe_tools_exclude_blocked(self):
@@ -171,14 +171,14 @@ class TestChatGPTSafeMode:
         monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
         assert should_register_tool("health")
         assert should_register_tool("read_file")
-        assert not should_register_tool("project_run_opencode")
+        assert not should_register_tool("run_opencode")
         assert not should_register_tool("docker_exec")
         assert not should_register_tool("workspace_file_write")
 
     def test_safe_mode_off_allows_all_mcp_client(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
         monkeypatch.delenv("MCP_CLIENT_SAFE_MODE", raising=False)
-        assert should_register_tool("project_run_opencode")
+        assert should_register_tool("run_opencode")
         assert should_register_tool("docker_exec")
         assert should_register_tool("workspace_file_write")
         assert should_register_tool("workspace_file_edit")

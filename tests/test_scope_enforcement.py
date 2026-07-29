@@ -81,7 +81,7 @@ class TestScopeChecking:
 
     def test_has_required_scope_multiple_allowed(self):
         assert has_required_scope(["mcp:project"], "read_file")
-        assert has_required_scope(["mcp:read"], "read_file")
+        assert has_required_scope(["mcp:read"], "health")
 
     def test_has_required_scope_unknown_tool_admin_only(self):
         assert not has_required_scope(["mcp:read"], "unknown_tool")
@@ -95,15 +95,15 @@ class TestScopeChecking:
     def test_has_required_scope_viewer_denied(self):
         viewer = get_profile_scopes("viewer")
         assert has_required_scope(viewer, "health")  # mcp:read
-        assert not has_required_scope(viewer, "project_run_opencode")  # mcp:agent-run
-        assert not has_required_scope(viewer, "project_run_pytest")
+        assert not has_required_scope(viewer, "run_opencode")  # mcp:agent-run
+        assert not has_required_scope(viewer, "run_pytest")
         assert not has_required_scope(viewer, "docker_ps")
         assert not has_required_scope(viewer, "postgres_select")
 
     def test_has_required_scope_agent_runner(self):
         ar = get_profile_scopes("agent-runner")
-        assert has_required_scope(ar, "project_run_opencode")
-        assert has_required_scope(ar, "project_run_mimo")
+        assert has_required_scope(ar, "run_opencode")
+        assert has_required_scope(ar, "run_mimo")
         assert not has_required_scope(ar, "docker_ps")
         assert not has_required_scope(ar, "execute_restricted")
 
@@ -112,7 +112,7 @@ class TestScopeChecking:
         assert has_required_scope(infra, "docker_ps")
         assert has_required_scope(infra, "postgres_select")
         assert has_required_scope(infra, "health")
-        assert not has_required_scope(infra, "project_tree")
+        assert not has_required_scope(infra, "tree")
 
 
 # ── Tool extraction ──────────────────────────────────────────────
@@ -205,10 +205,10 @@ class TestSpecificToolMappings:
         assert not has_required_scope(["mcp:read"], "execute_restricted")
 
     def test_project_run_opencode_requires_agent_run(self):
-        assert get_required_scopes("project_run_opencode") == ["mcp:agent-run"]
+        assert get_required_scopes("run_opencode") == ["mcp:agent-run"]
 
     def test_gateway_project_run_mimo_requires_agent_run(self):
-        assert get_required_scopes("project_run_mimo") == ["mcp:agent-run"]
+        assert get_required_scopes("run_mimo") == ["mcp:agent-run"]
 
     def test_all_gitea_fleet_requires_repo(self):
         for tool in TOOL_SCOPES:

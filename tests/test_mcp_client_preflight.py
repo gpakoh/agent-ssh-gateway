@@ -116,7 +116,7 @@ class TestChatGPTPreflight:
             "MCP_GATEWAY_TOOL_MODE": "mcp_client",
             "MCP_CLIENT_SAFE_MODE": "true",
         })
-        assert "project_run_opencode" in result.stdout
+        assert "run_opencode" in result.stdout
         assert "excluded" in result.stdout.lower()
 
     def test_docs_no_master_key_as_runtime_credential(self):
@@ -197,9 +197,9 @@ class TestMcpStdioSmoke:
 
     def test_script_has_blocked_tools_set(self):
         content = self._load_script()
-        for tool in ("project_run_opencode", "project_run_mimo", "project_run_agent",
+        for tool in ("run_opencode", "run_mimo", "run_agent",
                       "docker_exec", "docker_compose_up", "workspace_file_write",
-                      "workspace_apply_patch", "project_apply_patch"):
+                      "workspace_apply_patch", "apply_patch"):
             assert tool in content, f"Blocked tool {tool} missing from BLOCKED_TOOLS"
 
     def test_script_has_required_tools(self):

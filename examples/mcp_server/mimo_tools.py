@@ -46,7 +46,7 @@ def project_run_mimo(
 
         get_audit_logger().append(McpAuditEvent(
             event_type="mcp.tool_blocked",
-            tool="project_run_mimo",
+            tool="run_mimo",
             action="execute_task",
             decision="block",
             reason="--dangerously-skip-permissions is not allowed",
@@ -56,6 +56,6 @@ def project_run_mimo(
         pass  # audit failure must not change tool behavior
 
     raise CommandPolicyError(
-        "project_run_mimo is blocked: --dangerously-skip-permissions is not allowed. "
-        "Use project_run_pytest or project_run_ruff for safe command execution."
+        "run_mimo is blocked: --dangerously-skip-permissions is not allowed. "
+        "Use run_pytest or run_ruff for safe command execution."
     )

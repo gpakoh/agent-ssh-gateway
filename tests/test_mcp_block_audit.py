@@ -125,7 +125,7 @@ class TestRunToolWriteMode:
 
         with patch("examples.mcp_server.server.get_audit_logger", return_value=mock_logger):
             result = run_tool(
-                tool="project_write_handoff_plan",
+                tool="write_handoff_plan",
                 title="Write handoff",
                 fn=_raising_fn(error),
                 success_text="ok",
@@ -148,12 +148,12 @@ class TestRunToolOpenCodeBlocked:
 
         mock_logger = _make_mock_logger()
         error = CommandPolicyError(
-            "project_run_opencode is blocked: --dangerously-skip-permissions is not allowed."
+            "run_opencode is blocked: --dangerously-skip-permissions is not allowed."
         )
 
         with patch("examples.mcp_server.server.get_audit_logger", return_value=mock_logger):
             result = run_tool(
-                tool="project_run_opencode",
+                tool="run_opencode",
                 title="Run opencode task",
                 fn=_raising_fn(error),
                 success_text="ok",
@@ -174,12 +174,12 @@ class TestRunToolMimoBlocked:
 
         mock_logger = _make_mock_logger()
         error = CommandPolicyError(
-            "project_run_mimo is blocked: --dangerously-skip-permissions is not allowed."
+            "run_mimo is blocked: --dangerously-skip-permissions is not allowed."
         )
 
         with patch("examples.mcp_server.server.get_audit_logger", return_value=mock_logger):
             result = run_tool(
-                tool="project_run_mimo",
+                tool="run_mimo",
                 title="Run mimo task",
                 fn=_raising_fn(error),
                 success_text="ok",
@@ -200,12 +200,12 @@ class TestRunToolAgentBackendBlocked:
 
         mock_logger = _make_mock_logger()
         error = CommandPolicyError(
-            "project_run_agent is blocked: opencode agent backend is not allowed."
+            "run_agent is blocked: opencode agent backend is not allowed."
         )
 
         with patch("examples.mcp_server.server.get_audit_logger", return_value=mock_logger):
             result = run_tool(
-                tool="project_run_agent",
+                tool="run_agent",
                 title="Run agent task",
                 fn=_raising_fn(error),
                 success_text="ok",
@@ -229,7 +229,7 @@ class TestRunGatewayPolicyViolation:
 
         with patch("examples.mcp_server.server.get_audit_logger", return_value=mock_logger):
             result = _run_gateway(
-                tool="project_list_files",
+                tool="list_files",
                 fn=_raising_fn(error),
             )
 
@@ -239,7 +239,7 @@ class TestRunGatewayPolicyViolation:
         mock_logger.append.assert_called_once()
         event = mock_logger.append.call_args[0][0]
         assert event.event_type == "mcp.command_denied"
-        assert event.tool == "project_list_files"
+        assert event.tool == "list_files"
         assert event.decision == "deny"
         assert event.error_code == "POLICY_VIOLATION"
 
@@ -332,7 +332,7 @@ class TestOpenCodeToolsAudit:
         mock_logger.append.assert_called_once()
         event = mock_logger.append.call_args[0][0]
         assert event.event_type == "mcp.tool_blocked"
-        assert event.tool == "project_run_opencode"
+        assert event.tool == "run_opencode"
         assert event.error_code == "OPENCODE_BLOCKED"
 
 
@@ -357,7 +357,7 @@ class TestMimoToolsAudit:
         mock_logger.append.assert_called_once()
         event = mock_logger.append.call_args[0][0]
         assert event.event_type == "mcp.tool_blocked"
-        assert event.tool == "project_run_mimo"
+        assert event.tool == "run_mimo"
         assert event.error_code == "MIMO_BLOCKED"
 
 
@@ -394,7 +394,7 @@ class TestAgentToolsAudit:
         mock_logger.append.assert_called_once()
         event = mock_logger.append.call_args[0][0]
         assert event.event_type == "mcp.tool_blocked"
-        assert event.tool == "project_run_agent"
+        assert event.tool == "run_agent"
         assert event.error_code == "AGENT_BACKEND_BLOCKED"
 
 

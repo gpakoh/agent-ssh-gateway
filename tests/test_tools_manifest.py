@@ -33,11 +33,11 @@ def sample_tools() -> list[FakeTool]:
     """Return a small set of known tools matching the registered set."""
     return [
         FakeTool("health"),
-        FakeTool("project_search_text"),
+        FakeTool("search_text"),
         FakeTool("tools_manifest"),
         FakeTool("docker_restart"),
         FakeTool("docker_compose_up"),
-        FakeTool("project_run_agent"),
+        FakeTool("run_agent"),
     ]
 
 
@@ -107,12 +107,12 @@ class TestBuildManifest:
     def test_known_tool_search_text_present(self, sample_tools: list[FakeTool]) -> None:
         result = build_manifest(sample_tools, mode_override="mcp_client")
         names = [t["name"] for t in result["tools"]]
-        assert "project_search_text" in names
+        assert "search_text" in names
 
     def test_known_tool_run_agent_present(self, sample_tools: list[FakeTool]) -> None:
         result = build_manifest(sample_tools, mode_override="mcp_client")
         names = [t["name"] for t in result["tools"]]
-        assert "project_run_agent" in names
+        assert "run_agent" in names
 
     def test_known_tool_docker_restart_present(self, sample_tools: list[FakeTool]) -> None:
         result = build_manifest(sample_tools, mode_override="mcp_client")
@@ -132,7 +132,7 @@ class TestBuildManifest:
     def test_scopes_for_known_tool(self, sample_tools: list[FakeTool]) -> None:
         result = build_manifest(sample_tools, mode_override="mcp_client")
         by_name = {t["name"]: t for t in result["tools"]}
-        assert "mcp:project" in by_name["project_search_text"]["scopes"]
+        assert "mcp:project" in by_name["search_text"]["scopes"]
 
     def test_modes_present(self, sample_tools: list[FakeTool]) -> None:
         result = build_manifest(sample_tools, mode_override="mcp_client")
