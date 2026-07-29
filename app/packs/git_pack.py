@@ -1,0 +1,142 @@
+from __future__ import annotations
+
+from app.command_policy import DestructivePattern, Severity
+from app.packs import Pack
+
+GIT_PATTERNS: tuple[DestructivePattern, ...] = (
+DestructivePattern(
+        name="git-push-force",
+        regex=r"git\b.*?\bpush(?:[^\n;]*\s(?:--force(?:=\S*)?|--force-with-lease(?:=\S*)?|-f)(?=\s|$)|(?:\s+\S+)*\s+(?:\$?[\"']|\\)*\+\S+)",
+        reason="Force push rewrites remote history",
+        severity=Severity.CRITICAL,
+        description="All forms of force push (--force, --force-with-lease, +refspec) "
+        "rewrite remote history and may cause data loss for collaborators.",
+        suggestions=(),
+    ),
+DestructivePattern(
+        name="git-push-mirror",
+        regex=r"git\b.*?\bpush\b[^\n;]*(?:^|\s)--mirror(?:=\S*)?(?=\s|$)",
+        reason="git push --mirror force-updates and deletes remote refs",
+        severity=Severity.CRITICAL,
+        description="Mirror push deletes remote refs absent locally. Extremely destructive.",
+        suggestions=(),
+    ),
+DestructivePattern(
+        name="git-push-dynamic-arg",
+        regex=r"git\b.*?\bpush\b[^\n;]*(?:\\|\$|`|\*|\?|\{|\}|\[)",
+        reason="Shell-expanded push argument cannot be verified as non-forcing",
+        severity=Severity.HIGH,
+        description="Variables, globs, or escaped args in git push may expand to destructive refspecs.",
+        suggestions=(),
+    ),
+DestructivePattern(
+        name="git-rebase",
+        regex=r"git\b.*?\brebase\b",
+        reason="git rebase rewrites commit history",
+        severity=Severity.HIGH,
+        description="Rebase rewrites commits. Force push needed afterward. Conflicts may lose changes.",
+        suggestions=(),
+    ),
+DestructivePattern(
+        name="git-commit-amend",
+        regex=r"git\b.*?\bcommit\s+.*--amend",
+        reason="git commit --amend rewrites the last commit",
+        severity=Severity.HIGH,
+        description="Amending a pushed commit rewrites history. Previous commit is lost.",
+        suggestions=(),
+    ),
+DestructivePattern(
+        name="git-filter-branch",
+        regex=r"git\b.*?\bfilter-branch\b",
+        reason="git filter-branch rewrites entire repository history",
+        severity=Severity.CRITICAL,
+        description="Rewrites ALL commits. Extremely dangerous. Use filter-repo instead.",
+        suggestions=(),
+    ),
+DestructivePattern(
+        name="git-filter-repo",
+        regex=r"git\b.*?\bfilter-repo\b",
+        reason="git filter-repo rewrites repository history",
+        severity=Severity.CRITICAL,
+        description="Modern replacement for filter-branch. Still rewrites all history.",
+        suggestions=(),
+    ),
+DestructivePattern(
+        name="git-cherry-pick",
+        regex=r"git\b.*?\bcherry-pick\b",
+        reason="git cherry-pick can introduce duplicate commits",
+        severity=Severity.MEDIUM,
+        description="Cherry-pick creates duplicate commits. Can cause merge conflicts later.",
+        suggestions=(),
+    ),
+DestructivePattern(
+        name="git-reflog-expire",
+        regex=r"git\b.*?\breflog\s+expire",
+        reason="git reflog expire removes recovery entries",
+        severity=Severity.HIGH,
+        description="Reflog is the last resort for recovery. Expiring entries may lose data permanently.",
+        suggestions=(),
+    ),
+DestructivePattern(
+        name="git-gc-aggressive",
+        regex=r"git\b.*?\bgc\s+.*--(?:aggressive|prune)",
+        reason="git gc with aggressive/prune removes recoverable objects",
+        severity=Severity.HIGH,
+        description="Prunes loose objects. Reflog entries and stashed changes may be lost.",
+        suggestions=(),
+    ),
+DestructivePattern(
+        name="git-worktree-remove",
+        regex=r"git\b.*?\bworktree\s+remove",
+        reason="git worktree remove deletes a linked working tree",
+        severity=Severity.HIGH,
+        description="Uncommitted changes in the worktree are lost.",
+        suggestions=(),
+    ),
+DestructivePattern(
+        name="git-submodule-deinit",
+        regex=r"git\b.*?\bsubmodule\s+deinit",
+        reason="git submodule deinit removes submodule configuration",
+        severity=Severity.MEDIUM,
+        description="Submodule working tree is removed. Clone again to restore.",
+        suggestions=(),
+    ),
+DestructivePattern(
+        name="git-add-all-dot",
+        regex=r"git\b.*?\badd\s+['\"]?\.['\"]?(?:\s|$)",
+        reason="git add . stages everything including secrets, .env, build artifacts",
+        severity=Severity.MEDIUM,
+        description="All changes in the repo are staged. Secrets or build artifacts may be committed.",
+        suggestions=(),
+    ),
+DestructivePattern(
+        name="git-add-all-flag",
+        regex=r"git\b.*?\badd\s+(?:-A|--all)\b",
+        reason="git add -A/--all stages all changes including secrets",
+        severity=Severity.MEDIUM,
+        description="Tracks new and modified files. Secrets may be unintentionally staged.",
+        suggestions=(),
+    ),
+DestructivePattern(
+        name="git-push-to-master",
+        regex=r"git\s+(?:\S+\s+)*push\s+(?:.*[\s:/])?\+?master(?:\s|$)",
+        reason="Direct push to master/main branch is blocked",
+        severity=Severity.MEDIUM,
+        description="Push to default branch may bypass review. Use a feature branch and PR.",
+        suggestions=(),
+    ),
+DestructivePattern(
+        name="git-push-to-main",
+        regex=r"git\s+(?:\S+\s+)*push\s+(?:.*[\s:/])?\+?main(?:\s|$)",
+        reason="Direct push to main branch is blocked",
+        severity=Severity.MEDIUM,
+        description="Push to default branch may bypass review. Use a feature branch and PR.",
+        suggestions=(),
+    ),
+)
+
+def build_git_pack() -> Pack:
+    return Pack(id="git", name="Git patterns",
+        destructive_patterns=GIT_PATTERNS,
+        keywords=("git",),
+    )
