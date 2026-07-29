@@ -13,6 +13,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
     "minimal": {
         "health",
         "tools_manifest",
+        "project_list",
         "session_health",
         "execute_restricted",
         "job_status",
@@ -21,6 +22,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
     "standard": {
         "health",
         "tools_manifest",
+        "project_list",
         "list_sessions",
         "session_health",
         "execute_restricted",
@@ -42,6 +44,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
     "full": {
         "health",
         "tools_manifest",
+        "project_list",
         "list_sessions",
         "session_health",
         "execute_restricted",
@@ -64,6 +67,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "workspace_verify",
     },
     "mcp_client": {
+        "project_list",
         "health",
         "tools_manifest",
         "session_health",

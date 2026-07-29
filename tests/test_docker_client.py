@@ -456,11 +456,11 @@ def test_compose_down_volumes_argv():
 # ── _truncate_table_output ──
 
 _HEADER = "NAMES\tIMAGE\tSTATUS\tPORTS"
-_SEP = "--\t--\t--\t--"
 
 
 def _table(lines: list[str]) -> str:
-    return "\n".join([_HEADER, _SEP] + lines)
+    """Docker ``--format "table ..."`` does NOT print a separator — just header + data."""
+    return "\n".join([_HEADER] + lines)
 
 
 def test_truncate_no_truncation_needed():
@@ -475,7 +475,7 @@ def test_truncate_limits_data_rows():
     output = _table(rows)
     result = DockerClient._truncate_table_output(output, limit=10)
     lines = result.splitlines()
-    assert len(lines) == 2 + 10 + 1  # header + sep + 10 data rows + truncation notice
+    assert len(lines) == 1 + 10 + 1  # header + 10 data rows + truncation notice
     assert "showing 10 of 100 results" in lines[-1]
     assert "use limit or filter" in lines[-1]
 
@@ -486,9 +486,9 @@ def test_truncate_empty_output():
 
 
 def test_truncate_header_only():
-    result = DockerClient._truncate_table_output(_HEADER + "\n" + _SEP, limit=10)
+    result = DockerClient._truncate_table_output(_HEADER, limit=10)
     lines = result.splitlines()
-    assert len(lines) == 2
+    assert len(lines) == 1
     assert "showing" not in result
 
 
@@ -506,4 +506,3 @@ def test_truncate_preserves_header_format():
     result = DockerClient._truncate_table_output(output, limit=5)
     lines = result.splitlines()
     assert lines[0] == _HEADER
-    assert lines[1] == _SEP
