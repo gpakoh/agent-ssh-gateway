@@ -401,6 +401,17 @@ async def ssh_execute(
             profile=decision.profile,
             command_root=decision.command_root,
         )
+        if decision.requires_approval and decision.approval_id:
+            raise HTTPException(
+                status_code=202,
+                detail={
+                    "code": 202,
+                    "message": "Command requires operator approval (ASK mode)",
+                    "approval_id": decision.approval_id,
+                    "command_root": decision.command_root,
+                    "reason": decision.reason,
+                },
+            )
         raise HTTPException(
             status_code=403,
             detail=_err(403, f"Command denied by policy: {decision.reason}"),

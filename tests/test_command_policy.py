@@ -826,12 +826,12 @@ class TestComposeDestructivePatterns:
     def test_rm_force_short_flag(self):
         match = _check_compose_destructive("docker-compose rm -f")
         assert match is not None
-        assert match.pattern_name == "rm-force"
+        assert match.pattern_name == "compose-rm-force"
 
     def test_rm_force_long_flag(self):
         match = _check_compose_destructive("docker compose rm --force")
         assert match is not None
-        assert match.pattern_name == "rm-force"
+        assert match.pattern_name == "compose-rm-force"
 
     def test_down_without_volumes_allowed(self):
         """docker-compose down without -v/--volumes should not match destructive patterns."""
@@ -878,6 +878,7 @@ class TestComposeDestructiveSeverity:
         match = _check_compose_destructive("docker-compose rm -f")
         assert match is not None
         assert match.severity.value == "medium"
+        assert match.pattern_name == "compose-rm-force"
 
 
 # ---------------------------------------------------------------------------
