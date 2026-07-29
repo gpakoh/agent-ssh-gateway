@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from app.command_policy import (
+    _check_compose_destructive,
+    _check_docker_destructive,
     contains_dangerous_token,
     contains_metachar,
     contains_shell_redirection,
@@ -602,4 +604,345 @@ class TestTestlintCommandFindSed:
 
     def test_python_c_fails_testlint(self):
         d = evaluate_command_policy("python -c 'import os'", mode="enforce", profile="testlint")
+        assert d.allowed is False
+
+
+# ---------------------------------------------------------------------------
+# DCG-ported: Docker destructive pattern detection
+# ---------------------------------------------------------------------------
+
+
+class TestDockerDestructivePatterns:
+    """Verify each DCG-ported docker destructive pattern catches the right command."""
+
+    def test_system_prune_blocked(self):
+        match = _check_docker_destructive("docker system prune")
+        assert match is not None
+        assert match.pattern_name == "system-prune"
+
+    def test_system_prune_all_blocked(self):
+        match = _check_docker_destructive("docker system prune --all")
+        assert match is not None
+        assert match.pattern_name == "system-prune"
+
+    def test_volume_prune_blocked(self):
+        match = _check_docker_destructive("docker volume prune")
+        assert match is not None
+        assert match.pattern_name == "volume-prune"
+
+    def test_network_prune_blocked(self):
+        match = _check_docker_destructive("docker network prune")
+        assert match is not None
+        assert match.pattern_name == "network-prune"
+
+    def test_image_prune_blocked(self):
+        match = _check_docker_destructive("docker image prune")
+        assert match is not None
+        assert match.pattern_name == "image-prune"
+
+    def test_container_prune_blocked(self):
+        match = _check_docker_destructive("docker container prune")
+        assert match is not None
+        assert match.pattern_name == "container-prune"
+
+    def test_rm_force_blocked(self):
+        match = _check_docker_destructive("docker rm -f container")
+        assert match is not None
+        assert match.pattern_name == "rm-force"
+
+    def test_rm_force_long_flag_blocked(self):
+        match = _check_docker_destructive("docker rm --force container")
+        assert match is not None
+        assert match.pattern_name == "rm-force"
+
+    def test_rm_force_combined_flags_blocked(self):
+        match = _check_docker_destructive("docker rm -vf container")
+        assert match is not None
+        assert match.pattern_name == "rm-force"
+
+    def test_rmi_force_blocked(self):
+        match = _check_docker_destructive("docker rmi -f image")
+        assert match is not None
+        assert match.pattern_name == "rmi-force"
+
+    def test_rmi_force_long_flag_blocked(self):
+        match = _check_docker_destructive("docker rmi --force image")
+        assert match is not None
+        assert match.pattern_name == "rmi-force"
+
+    def test_volume_rm_blocked(self):
+        match = _check_docker_destructive("docker volume rm my-volume")
+        assert match is not None
+        assert match.pattern_name == "volume-rm"
+
+    def test_stop_all_shell_substitution_blocked(self):
+        match = _check_docker_destructive("docker stop $(docker ps -q)")
+        assert match is not None
+        assert match.pattern_name == "stop-all"
+
+    def test_kill_all_shell_substitution_blocked(self):
+        match = _check_docker_destructive("docker kill $(docker ps -aq)")
+        assert match is not None
+        assert match.pattern_name == "stop-all"
+
+    def test_rm_without_force_allowed(self):
+        """docker rm without -f flag should NOT match rm-force pattern."""
+        match = _check_docker_destructive("docker rm container")
+        assert match is None
+
+    def test_rmi_without_force_allowed(self):
+        """docker rmi without -f flag should NOT match rmi-force pattern."""
+        match = _check_docker_destructive("docker rmi image")
+        assert match is None
+
+    def test_ps_allowed(self):
+        """docker ps should not match any destructive pattern."""
+        assert _check_docker_destructive("docker ps") is None
+
+    def test_logs_allowed(self):
+        assert _check_docker_destructive("docker logs myapp") is None
+
+    def test_images_allowed(self):
+        assert _check_docker_destructive("docker images") is None
+
+
+class TestDockerDestructiveWithGlobalFlags:
+    """DCG edge case: global CLI flags between 'docker' and subcommand."""
+
+    def test_context_flag_system_prune(self):
+        match = _check_docker_destructive("docker --context prod system prune")
+        assert match is not None
+        assert match.pattern_name == "system-prune"
+
+    def test_host_flag_volume_prune(self):
+        match = _check_docker_destructive("docker --host ssh://prod-host system prune --all")
+        assert match is not None
+        assert match.pattern_name == "system-prune"
+
+    def test_config_and_context_rm_force(self):
+        match = _check_docker_destructive("docker --config /tmp/dc --context prod rm -f prod-db")
+        assert match is not None
+        assert match.pattern_name == "rm-force"
+
+    def test_log_level_context_image_prune(self):
+        match = _check_docker_destructive("docker --log-level debug --context prod image prune --all")
+        assert match is not None
+        assert match.pattern_name == "image-prune"
+
+    def test_context_flag_volume_rm(self):
+        match = _check_docker_destructive("docker --context prod volume rm critical-vol")
+        assert match is not None
+        assert match.pattern_name == "volume-rm"
+
+
+class TestDockerContainerNameEdgeCases:
+    """DCG edge cases: container named as safe subcommand must not bypass."""
+
+    def test_container_named_ps_still_blocked(self):
+        """docker rm -f ps (container literally named 'ps') must still match rm-force."""
+        match = _check_docker_destructive("docker rm -f ps")
+        assert match is not None
+        assert match.pattern_name == "rm-force"
+
+    def test_container_named_logs_still_blocked(self):
+        match = _check_docker_destructive("docker rm --force logs")
+        assert match is not None
+        assert match.pattern_name == "rm-force"
+
+    def test_image_named_build_still_blocked(self):
+        match = _check_docker_destructive("docker rmi -f build")
+        assert match is not None
+        assert match.pattern_name == "rmi-force"
+
+    def test_container_name_contains_ps_still_blocked(self):
+        """docker rm -f ps-container must still block (name contains 'ps' substring)."""
+        match = _check_docker_destructive("docker rm -f ps-container")
+        assert match is not None
+        assert match.pattern_name == "rm-force"
+
+    def test_container_name_contains_build_still_blocked(self):
+        match = _check_docker_destructive("docker rmi -f build-server-img")
+        assert match is not None
+        assert match.pattern_name == "rmi-force"
+
+    def test_container_name_contains_logs_still_blocked(self):
+        """docker volume rm logs-archive must still block (name contains 'logs')."""
+        match = _check_docker_destructive("docker volume rm logs-archive")
+        assert match is not None
+        assert match.pattern_name == "volume-rm"
+
+    def test_empty_subshell_still_blocked(self):
+        """Sanitized command substitution ($()) must still match stop-all."""
+        match = _check_docker_destructive("docker stop $()")
+        assert match is not None
+        assert match.pattern_name == "stop-all"
+
+
+# ---------------------------------------------------------------------------
+# DCG-ported: Compose destructive pattern detection
+# ---------------------------------------------------------------------------
+
+
+class TestComposeDestructivePatterns:
+    """Verify each DCG-ported compose destructive pattern catches the right command."""
+
+    def test_down_volumes_short_flag(self):
+        match = _check_compose_destructive("docker-compose down -v")
+        assert match is not None
+        assert match.pattern_name == "down-volumes"
+
+    def test_down_volumes_long_flag(self):
+        match = _check_compose_destructive("docker-compose down --volumes")
+        assert match is not None
+        assert match.pattern_name == "down-volumes"
+
+    def test_docker_space_compose_down_volumes(self):
+        match = _check_compose_destructive("docker compose down -v")
+        assert match is not None
+        assert match.pattern_name == "down-volumes"
+
+    def test_down_rmi_all(self):
+        match = _check_compose_destructive("docker-compose down --rmi all")
+        assert match is not None
+        assert match.pattern_name == "down-rmi-all"
+
+    def test_docker_space_compose_down_rmi_all(self):
+        match = _check_compose_destructive("docker compose down --rmi all")
+        assert match is not None
+        assert match.pattern_name == "down-rmi-all"
+
+    def test_rm_volumes_short_flag(self):
+        match = _check_compose_destructive("docker-compose rm -v")
+        assert match is not None
+        assert match.pattern_name == "rm-volumes"
+
+    def test_rm_volumes_long_flag(self):
+        match = _check_compose_destructive("docker compose rm --volumes")
+        assert match is not None
+        assert match.pattern_name == "rm-volumes"
+
+    def test_rm_force_short_flag(self):
+        match = _check_compose_destructive("docker-compose rm -f")
+        assert match is not None
+        assert match.pattern_name == "rm-force"
+
+    def test_rm_force_long_flag(self):
+        match = _check_compose_destructive("docker compose rm --force")
+        assert match is not None
+        assert match.pattern_name == "rm-force"
+
+    def test_down_without_volumes_allowed(self):
+        """docker-compose down without -v/--volumes should not match destructive patterns."""
+        assert _check_compose_destructive("docker-compose down") is None
+
+    def test_docker_compose_down_allowed(self):
+        assert _check_compose_destructive("docker compose down") is None
+
+    def test_config_allowed(self):
+        assert _check_compose_destructive("docker-compose config") is None
+
+    def test_ps_allowed(self):
+        assert _check_compose_destructive("docker-compose ps") is None
+
+    def test_logs_allowed(self):
+        assert _check_compose_destructive("docker compose logs") is None
+
+    def test_up_allowed(self):
+        assert _check_compose_destructive("docker-compose up") is None
+
+    def test_build_allowed(self):
+        assert _check_compose_destructive("docker compose build") is None
+
+
+class TestComposeDestructiveSeverity:
+    """DCG severity verification for compose patterns."""
+
+    def test_down_volumes_critical(self):
+        match = _check_compose_destructive("docker-compose down -v")
+        assert match is not None
+        assert match.severity.value == "critical"
+
+    def test_down_rmi_all_high(self):
+        match = _check_compose_destructive("docker-compose down --rmi all")
+        assert match is not None
+        assert match.severity.value == "high"
+
+    def test_rm_volumes_high(self):
+        match = _check_compose_destructive("docker-compose rm -v")
+        assert match is not None
+        assert match.severity.value == "high"
+
+    def test_rm_force_medium(self):
+        match = _check_compose_destructive("docker-compose rm -f")
+        assert match is not None
+        assert match.severity.value == "medium"
+
+
+# ---------------------------------------------------------------------------
+# DCG-ported: destructive patterns in profile integration
+# ---------------------------------------------------------------------------
+
+
+class TestDockerDestructiveInOpsProfile:
+    """Destructive docker commands blocked in ops profile."""
+
+    def test_docker_ps_allowed_in_ops(self):
+        d = evaluate_command_policy("docker ps", mode="enforce", profile="ops")
+        assert d.allowed is True
+
+    def test_system_prune_blocked_in_ops(self):
+        d = evaluate_command_policy("docker system prune", mode="enforce", profile="ops")
+        assert d.allowed is False
+
+    def test_compose_down_v_blocked_in_ops(self):
+        d = evaluate_command_policy("docker-compose down -v", mode="enforce", profile="ops")
+        assert d.allowed is False
+
+
+class TestDockerDestructiveInDockerAdminProfile:
+    """Destructive docker commands blocked in docker-admin profile."""
+
+    def test_docker_rm_allowed_no_force(self):
+        """docker rm without -f is allowed in docker-admin."""
+        d = evaluate_command_policy("docker rm myapp", mode="enforce", profile="docker-admin")
+        assert d.allowed is True
+
+    def test_docker_rm_force_blocked(self):
+        """docker rm -f is blocked by destructive pattern even in docker-admin."""
+        d = evaluate_command_policy("docker rm -f myapp", mode="enforce", profile="docker-admin")
+        assert d.allowed is False
+        assert "rm -f" in d.reason or "forcibly" in d.reason.lower()
+
+    def test_docker_rmi_allowed_no_force(self):
+        d = evaluate_command_policy("docker rmi myimage", mode="enforce", profile="docker-admin")
+        assert d.allowed is True
+
+    def test_docker_rmi_force_blocked(self):
+        d = evaluate_command_policy("docker rmi -f myimage", mode="enforce", profile="docker-admin")
+        assert d.allowed is False
+
+    def test_docker_volume_ls_allowed(self):
+        """docker volume ls is read-only, should be allowed."""
+        d = evaluate_command_policy("docker volume ls", mode="enforce", profile="docker-admin")
+        assert d.allowed is True
+
+    def test_docker_volume_rm_blocked(self):
+        """docker volume rm is destructive, blocked even in docker-admin."""
+        d = evaluate_command_policy("docker volume rm my-volume", mode="enforce", profile="docker-admin")
+        assert d.allowed is False
+
+    def test_docker_system_prune_blocked(self):
+        d = evaluate_command_policy("docker system prune", mode="enforce", profile="docker-admin")
+        assert d.allowed is False
+
+    def test_docker_volume_prune_blocked(self):
+        d = evaluate_command_policy("docker volume prune", mode="enforce", profile="docker-admin")
+        assert d.allowed is False
+
+    def test_compose_down_v_blocked(self):
+        d = evaluate_command_policy("docker-compose down -v", mode="enforce", profile="docker-admin")
+        assert d.allowed is False
+
+    def test_compose_rm_force_blocked(self):
+        d = evaluate_command_policy("docker-compose rm -f", mode="enforce", profile="docker-admin")
         assert d.allowed is False
