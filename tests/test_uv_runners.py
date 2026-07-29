@@ -153,7 +153,7 @@ class TestRunUvToolContract:
                 self._phase += 1
                 return {"job_id": f"j{self._phase}"}
             def wait_job(self, job_id, **kw):
-                if "j0" in job_id:
+                if job_id == "j1":
                     return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
                 return {
                     "exit_code": exit_code,
@@ -281,12 +281,16 @@ class TestRunUvToolContract:
 
     def test_run_tool_wraps_uv_failure_as_error_result(self, monkeypatch):
         """run_tool wrapper must set isError for tool_error from _run_uv_tool."""
-        from examples.mcp_server.server import run_tool
         from mcp_client_tools import _run_uv_tool
+
+        from examples.mcp_server.server import run_tool
         monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
         client = self._make_mock(exit_code=1, stdout="", stderr="2 failed")
-        fn = lambda: _run_uv_tool(client, "proj", "pytest", "project_run_pytest", target=["."])
-        result = run_tool(tool="project_run_pytest", title="Test", fn=fn, success_text="Done")
+
+        def _call():
+            return _run_uv_tool(client, "proj", "pytest", "project_run_pytest", target=["."])
+
+        result = run_tool(tool="project_run_pytest", title="Test", fn=_call, success_text="Done")
         assert result.get("isError") is True
         assert result["structuredContent"]["ok"] is False
         assert result["structuredContent"]["result"]["exit_code"] == 1
@@ -341,3 +345,53 @@ class TestReadOnlyFallbackTraversal:
         from mcp_client_tools import _build_readonly_fallback_script
         script = _build_readonly_fallback_script("pytest", "/project", ["../outside"])
         assert "../outside" in script or "/project/../outside" in script
+
+
+class TestProjectNotFound:
+    """PROJECT_NOT_FOUND must be classified correctly, not as INTERNAL_ERROR."""
+
+    def test_resolve_unknown_project_raises_project_not_found(self):
+        from gateway_client import GatewayClientError
+        from mcp_client_tools import _resolve_project
+
+        with pytest.raises(GatewayClientError) as exc_info:
+            _resolve_project("nonexistent_project")
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.body is not None
+        assert exc_info.value.body["detail"]["code"] == "PROJECT_NOT_FOUND"
+        assert exc_info.value.body["detail"]["retryable"] is False
+
+    def test_classify_gateway_error_project_not_found(self):
+        from gateway_client import GatewayClientError
+        from server import _classify_gateway_error
+
+        exc = GatewayClientError(
+            "PROJECT_NOT_FOUND: unknown project 'foo'",
+            status_code=404,
+            body={"detail": {"code": "PROJECT_NOT_FOUND", "retryable": False}},
+        )
+        code, retryable = _classify_gateway_error(exc)
+        assert code == "PROJECT_NOT_FOUND"
+        assert retryable is False
+
+    def test_classify_gateway_error_real_internal_error(self):
+        """A genuine 500 without structured body must remain INTERNAL_ERROR."""
+        from gateway_client import GatewayClientError
+        from server import _classify_gateway_error
+
+        exc = GatewayClientError(
+            "Internal server error",
+            status_code=500,
+            body={"detail": "oops"},
+        )
+        code, retryable = _classify_gateway_error(exc)
+        assert code == "INTERNAL_ERROR"
+        assert retryable is True
+
+        exc_no_body = GatewayClientError(
+            "connection refused",
+            status_code=502,
+        )
+        code, retryable = _classify_gateway_error(exc_no_body)
+        assert code == "INTERNAL_ERROR"
+        assert retryable is True

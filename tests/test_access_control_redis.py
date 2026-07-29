@@ -114,3 +114,51 @@ class TestRedisSaveAndLoad:
             assert "actor_fp_abc123" not in key
             assert "10.0.0.1" not in key
             assert key.startswith("ac:")
+
+
+class TestRedisClose:
+    """AccessControlStore must close its owned Redis client."""
+
+    @pytest.mark.asyncio
+    async def test_close_calls_aclose(self):
+        """close() invokes aclose() on the internally-owned Redis client."""
+        store = AccessControlStore(
+            pending_ttl=900,
+            allow_ttl=86400,
+            deny_ttl=86400,
+            redis_url="redis://localhost:6379/0",
+        )
+        mock_redis = AsyncMock()
+        mock_redis.aclose = AsyncMock()
+        store._redis = mock_redis
+
+        await store.close()
+        mock_redis.aclose.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_close_idempotent(self):
+        """Subsequent close() calls are no-ops."""
+        store = AccessControlStore(
+            pending_ttl=900,
+            allow_ttl=86400,
+            deny_ttl=86400,
+            redis_url="redis://localhost:6379/0",
+        )
+        mock_redis = AsyncMock()
+        mock_redis.aclose = AsyncMock()
+        store._redis = mock_redis
+
+        await store.close()
+        await store.close()
+        mock_redis.aclose.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_close_no_redis_no_error(self):
+        """close() does nothing when no Redis client was created."""
+        store = AccessControlStore(
+            pending_ttl=900,
+            allow_ttl=86400,
+            deny_ttl=86400,
+            redis_url=None,
+        )
+        await store.close()  # must not raise

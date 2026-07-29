@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from gateway_client import GatewayClient, GatewayClientError
-from project_registry import get_project_registry
+from project_registry import ProjectNotFoundError, get_project_registry
 from tool_results import build_command_result, tool_error, tool_success
 
 
@@ -21,8 +21,11 @@ def _resolve_project(project_name: str) -> Path:
     """Resolve a project name to a validated filesystem path via the registry."""
     try:
         return get_project_registry().resolve(project_name)
-    except ValueError as e:
-        raise GatewayClientError(str(e), status_code=404) from e
+    except ProjectNotFoundError as exc:
+        body = {"detail": {"code": "PROJECT_NOT_FOUND", "retryable": False}}
+        raise GatewayClientError(str(exc), status_code=404, body=body) from exc
+    except ValueError as exc:
+        raise GatewayClientError(str(exc), status_code=404) from exc
 
 
 def _validate_project(project: str) -> str:
@@ -599,27 +602,30 @@ def _run_uv_tool(
             script = _build_readonly_fallback_script(tool_key, str(project_dir), targets)
             r2 = client.execute_project_script(project, script, timeout_s=300)
             outcome2, error_code2 = _map_uv_exit_code(tool_key, r2.get("exit_code", -1))
-            if error_code2:
+            if error_code2 or outcome2 == "failed":
                 return tool_error(
-                    code=error_code2,
-                    message=f"{tool_key} failed with exit code {r2.get('exit_code')}",
-                    details={
-                        "exit_code": r2.get("exit_code"),
-                        "stderr": r2.get("stderr", ""),
-                        "hint": "Read-only workspace: uv synced deps into /tmp fallback venv",
-                    },
+                    code=error_code2 or "CHECK_FAILED",
+                    message=f"{tool_key} exit code {r2.get('exit_code', -1)}",
+                    result=build_command_result(
+                        outcome=outcome2 or "error",
+                        exit_code=r2.get("exit_code", -1),
+                        stdout=r2.get("stdout") or r2.get("output", ""),
+                        stderr=r2.get("stderr", ""),
+                        execution_duration_ms=r2.get("execution_duration_ms"),
+                        job_id=r2.get("job_id"),
+                    ),
                     tool_name=tool_name,
                 )
             return tool_success(
-                build_command_result(
-                    outcome=outcome2,
+                tool=tool_name,
+                result=build_command_result(
+                    outcome=outcome2 or "passed",
                     exit_code=r2.get("exit_code", 0),
                     stdout=r2.get("stdout") or r2.get("output", ""),
                     stderr=r2.get("stderr", ""),
                     execution_duration_ms=r2.get("execution_duration_ms"),
                     job_id=r2.get("job_id"),
                 ),
-                tool_name=tool_name,
             )
         else:
             try:
@@ -632,50 +638,64 @@ def _run_uv_tool(
                     cwd=str(project_dir),
                 )
                 outcome2, error_code2 = _map_uv_exit_code(tool_key, r2.get("exit_code", -1))
-                if error_code2:
+                if error_code2 or outcome2 == "failed":
                     return tool_error(
-                        code=error_code2,
-                        message=f"{tool_key} failed with exit code {r2.get('exit_code')}",
-                        details={"exit_code": r2.get("exit_code"), "stderr": r2.get("stderr", "")},
+                        code=error_code2 or "CHECK_FAILED",
+                        message=f"{tool_key} exit code {r2.get('exit_code', -1)}",
+                        result=build_command_result(
+                            outcome=outcome2 or "error",
+                            exit_code=r2.get("exit_code", -1),
+                            stdout=r2.get("stdout") or r2.get("output", ""),
+                            stderr=r2.get("stderr", ""),
+                            execution_duration_ms=r2.get("execution_duration_ms"),
+                            job_id=r2.get("job_id"),
+                        ),
                         tool_name=tool_name,
                     )
                 return tool_success(
-                    build_command_result(
-                        outcome=outcome2,
+                    tool=tool_name,
+                    result=build_command_result(
+                        outcome=outcome2 or "passed",
                         exit_code=r2.get("exit_code", 0),
                         stdout=r2.get("stdout") or r2.get("output", ""),
                         stderr=r2.get("stderr", ""),
                         execution_duration_ms=r2.get("execution_duration_ms"),
                         job_id=r2.get("job_id"),
                     ),
-                    tool_name=tool_name,
                 )
 
     outcome, error_code = _map_uv_exit_code(tool_key, raw.get("exit_code", -1))
-    if error_code:
+    if error_code or outcome == "failed":
         return tool_error(
-            code=error_code,
-            message=f"{tool_key} failed with exit code {raw.get('exit_code')}",
-            details={"exit_code": raw.get("exit_code"), "stderr": raw.get("stderr", "")},
+            code=error_code or "CHECK_FAILED",
+            message=f"{tool_key} exit code {raw.get('exit_code', -1)}",
+            result=build_command_result(
+                outcome=outcome or "error",
+                exit_code=raw.get("exit_code", -1),
+                stdout=raw.get("stdout") or raw.get("output", ""),
+                stderr=raw.get("stderr", ""),
+                execution_duration_ms=raw.get("execution_duration_ms"),
+                job_id=raw.get("job_id"),
+            ),
             tool_name=tool_name,
         )
     return tool_success(
-        build_command_result(
-            outcome=outcome,
+        tool=tool_name,
+        result=build_command_result(
+            outcome=outcome or "passed",
             exit_code=raw.get("exit_code", 0),
             stdout=raw.get("stdout") or raw.get("output", ""),
             stderr=raw.get("stderr", ""),
             execution_duration_ms=raw.get("execution_duration_ms"),
             job_id=raw.get("job_id"),
         ),
-        tool_name=tool_name,
     )
 
 
 def project_run_pytest(
     client: GatewayClient,
     project: str,
-    target: list[str] | None = None,
+    target: list[str] | str | None = None,
 ) -> dict[str, Any]:
     return _run_uv_tool(client, project, "pytest", "project_run_pytest", target)
 
@@ -683,7 +703,7 @@ def project_run_pytest(
 def project_run_ruff(
     client: GatewayClient,
     project: str,
-    target: list[str] | None = None,
+    target: list[str] | str | None = None,
 ) -> dict[str, Any]:
     return _run_uv_tool(client, project, "ruff", "project_run_ruff", target)
 
@@ -691,7 +711,7 @@ def project_run_ruff(
 def project_run_mypy(
     client: GatewayClient,
     project: str,
-    target: list[str] | None = None,
+    target: list[str] | str | None = None,
 ) -> dict[str, Any]:
     return _run_uv_tool(client, project, "mypy", "project_run_mypy", target)
 

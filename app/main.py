@@ -276,6 +276,7 @@ async def lifespan(app: FastAPI):
     await state.manager.stop_cleanup_task()
     if state.access_control_store:
         await state.access_control_store.stop_cleanup_task()
+        await state.access_control_store.close()
 
     sessions = await state.manager.list_sessions()
     if sessions:

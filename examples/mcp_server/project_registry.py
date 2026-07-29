@@ -5,6 +5,10 @@ from pathlib import Path
 from examples.mcp_server.config import ALLOWED_PROJECT_ROOTS, PROJECT_MAP
 
 
+class ProjectNotFoundError(ValueError):
+    """Raised when a configured project or its path does not exist."""
+
+
 class ProjectRegistry:
     """Maps project names to validated filesystem paths with symlink escape protection.
 
@@ -17,7 +21,7 @@ class ProjectRegistry:
         for name, path_str in projects.items():
             p = Path(path_str)
             if not p.exists():
-                raise ValueError(
+                raise ProjectNotFoundError(
                     f"PROJECT_NOT_FOUND: path does not exist for '{name}': {path_str}"
                 )
             self._projects[name] = p
@@ -25,7 +29,7 @@ class ProjectRegistry:
 
     def resolve(self, name: str) -> Path:
         if name not in self._projects:
-            raise ValueError(f"PROJECT_NOT_FOUND: unknown project '{name}'")
+            raise ProjectNotFoundError(f"PROJECT_NOT_FOUND: unknown project '{name}'")
         path = self._projects[name]
         resolved = path.resolve()
         # Symlink escape check: resolved must be under an allowed root
