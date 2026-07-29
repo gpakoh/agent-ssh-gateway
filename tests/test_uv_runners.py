@@ -280,7 +280,7 @@ class TestRunUvToolContract:
         assert result["error"]["code"] == "CHECK_FAILED"
 
     def test_run_tool_wraps_uv_failure_as_error_result(self, monkeypatch):
-        """run_tool wrapper must set isError for tool_error from _run_uv_tool."""
+        """run_tool wrapper returns canonical error for _run_uv_tool failure."""
         from mcp_client_tools import _run_uv_tool
 
         from examples.mcp_server.server import run_tool
@@ -291,9 +291,9 @@ class TestRunUvToolContract:
             return _run_uv_tool(client, "proj", "pytest", "run_pytest", target=["."])
 
         result = run_tool(tool="run_pytest", title="Test", fn=_call, success_text="Done")
-        assert result.get("isError") is True
-        assert result["structuredContent"]["ok"] is False
-        assert result["structuredContent"]["result"]["exit_code"] == 1
+        assert result.get("ok") is False
+        assert result.get("error", {}).get("code") == "CHECK_FAILED"
+        assert result.get("error", {}).get("retryable") is False
 
 
 class TestMapUvExitCodeContract:
@@ -428,30 +428,33 @@ class TestProjectNotFound:
         assert exc_info.value.body["detail"]["code"] == "PROJECT_NOT_FOUND"
         assert exc_info.value.body["detail"]["retryable"] is False
 
+    def _classify(self, exc):
+        from examples.mcp_server.server import _classify_gateway_error
+
+        return _classify_gateway_error(exc)
+
     def test_classify_gateway_error_project_not_found(self):
         from gateway_client import GatewayClientError
-        from server import _classify_gateway_error
 
         exc = GatewayClientError(
             "PROJECT_NOT_FOUND: unknown project 'foo'",
             status_code=404,
             body={"detail": {"code": "PROJECT_NOT_FOUND", "retryable": False}},
         )
-        code, retryable = _classify_gateway_error(exc)
+        code, retryable = self._classify(exc)
         assert code == "PROJECT_NOT_FOUND"
         assert retryable is False
 
     def test_classify_gateway_error_real_internal_error(self):
         """A genuine 500 without structured body must remain INTERNAL_ERROR."""
         from gateway_client import GatewayClientError
-        from server import _classify_gateway_error
 
         exc = GatewayClientError(
             "Internal server error",
             status_code=500,
             body={"detail": "oops"},
         )
-        code, retryable = _classify_gateway_error(exc)
+        code, retryable = self._classify(exc)
         assert code == "INTERNAL_ERROR"
         assert retryable is True
 
@@ -459,6 +462,6 @@ class TestProjectNotFound:
             "connection refused",
             status_code=502,
         )
-        code, retryable = _classify_gateway_error(exc_no_body)
+        code, retryable = self._classify(exc_no_body)
         assert code == "INTERNAL_ERROR"
         assert retryable is True

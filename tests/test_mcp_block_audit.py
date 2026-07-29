@@ -59,7 +59,7 @@ class TestRunToolReadonlyCommand:
                 success_text="ok",
             )
 
-        assert result["isError"] is True
+        assert result.get("ok") is False
         mock_logger.append.assert_called_once()
         event = mock_logger.append.call_args[0][0]
         assert isinstance(event, McpAuditEvent)
@@ -82,7 +82,7 @@ class TestRunToolReadonlyCommand:
                 fn=_raising_fn(error),
                 success_text="ok",
             )
-        assert result["isError"] is True
+        assert result.get("ok") is False
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +104,7 @@ class TestRunToolWritePermission:
                 success_text="ok",
             )
 
-        assert result["isError"] is True
+        assert result.get("ok") is False
         mock_logger.append.assert_called_once()
         event = mock_logger.append.call_args[0][0]
         assert event.event_type == "mcp.tool_blocked"
@@ -131,7 +131,7 @@ class TestRunToolWriteMode:
                 success_text="ok",
             )
 
-        assert result["isError"] is True
+        assert result.get("ok") is False
         mock_logger.append.assert_called_once()
         event = mock_logger.append.call_args[0][0]
         assert event.event_type == "mcp.tool_blocked"
@@ -159,7 +159,7 @@ class TestRunToolOpenCodeBlocked:
                 success_text="ok",
             )
 
-        assert result["isError"] is True
+        assert result.get("ok") is False
         event = mock_logger.append.call_args[0][0]
         assert event.error_code == "OPENCODE_BLOCKED"
 
@@ -185,7 +185,7 @@ class TestRunToolMimoBlocked:
                 success_text="ok",
             )
 
-        assert result["isError"] is True
+        assert result.get("ok") is False
         event = mock_logger.append.call_args[0][0]
         assert event.error_code == "MIMO_BLOCKED"
 
@@ -211,7 +211,7 @@ class TestRunToolAgentBackendBlocked:
                 success_text="ok",
             )
 
-        assert result["isError"] is True
+        assert result.get("ok") is False
         event = mock_logger.append.call_args[0][0]
         assert event.error_code == "AGENT_BACKEND_BLOCKED"
 
@@ -464,5 +464,5 @@ class TestAuditFailureIsolation:
             )
 
         # Tool still returns the error result (error_result envelope)
-        assert result["isError"] is True
-        assert "denied" in str(result.get("content", ""))
+        assert result.get("ok") is False
+        assert "denied" in str(result.get("error", {}).get("message", ""))

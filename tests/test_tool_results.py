@@ -343,21 +343,19 @@ class TestRunToolErrorPropagation:
     """Bug 2: run_tool must propagate tool_error as error_result with isError."""
 
     def test_tool_error_propagates_as_error_result(self):
-        """When fn() returns tool_error(ok=False), run_tool must return error_result."""
+        """When fn() returns tool_error(ok=False), run_tool returns canonical error."""
         from examples.mcp_server.server import run_tool
 
         err = tool_error(tool="my_tool", code="TOOL_EXECUTION_FAILED", message="failed")
         result = run_tool(tool="my_tool", title="My Tool", fn=lambda: err, success_text="Done")
-        assert result.get("isError") is True
-        assert "content" in result
-        assert "Error:" in result["content"][0]["text"]
+        assert result.get("ok") is False
+        assert result.get("error", {}).get("code") == "TOOL_EXECUTION_FAILED"
 
-    def test_tool_success_wrapped_as_text_result(self):
-        """When fn() returns tool_success(ok=True), run_tool returns text_result."""
+    def test_tool_success_passed_through(self):
+        """When fn() returns tool_success(ok=True), run_tool returns canonical dict directly."""
         from examples.mcp_server.server import run_tool
 
         ok = tool_success("my_tool", {"outcome": "passed"})
         result = run_tool(tool="my_tool", title="My Tool", fn=lambda: ok, success_text="Done")
-        assert result.get("isError") is not True
-        assert result["content"][0]["text"] == "Done"
-        assert result["structuredContent"]["ok"] is True
+        assert result.get("ok") is True
+        assert result.get("tool") == "my_tool"

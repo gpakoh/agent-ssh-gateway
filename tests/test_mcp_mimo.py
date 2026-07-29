@@ -132,9 +132,9 @@ class TestServerWrapperBlocked:
             assert tool_fn is not None
 
             result = tool_fn(project="test", task_id=TASK_ID)
-            # run_tool catches CommandPolicyError → MCP error response
-            assert result.get("isError") is True
-            err_msg = result.get("structuredContent", {}).get("error", "")
+            # run_tool catches CommandPolicyError → canonical error envelope
+            assert result.get("ok") is False
+            err_msg = result.get("error", {}).get("message", "")
             assert "blocked" in err_msg.lower()
         finally:
             sys.modules.update(saved_modules)

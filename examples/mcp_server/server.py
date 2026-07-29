@@ -80,7 +80,14 @@ from opencode_tools import (
 )
 from self_test import run_self_test
 from tool_modes import should_register_tool
-from tool_results import build_command_result, error_result, text_result, tool_error, tool_success
+from tool_results import (
+    ERROR_CODES,
+    build_command_result,
+    error_result,
+    text_result,
+    tool_error,
+    tool_success,
+)
 from write_modes import WriteModeError, WritePermissionError
 
 from examples.mcp_client_remote.fleet.context7_server import (
@@ -410,6 +417,11 @@ def run_tool(
     success_text: str,
 ) -> dict[str, Any]:
     """Execute a tool call with structured error handling."""
+    _start = _time.monotonic()
+
+    def _elapsed() -> float:
+        return (_time.monotonic() - _start) * 1000
+
     try:
         data = fn()
     except Exception as exc:
@@ -446,7 +458,12 @@ def run_tool(
             except Exception:
                 pass  # audit failure must not change tool behavior
 
-            return error_result(tool=tool, title=title, error=str(exc))
+            return tool_error(
+                tool=tool,
+                code=error_code,
+                message=str(exc),
+                duration_ms=_elapsed(),
+            )
         if isinstance(exc, GatewayClientError):
             code, retryable = _classify_gateway_error(exc)
             hint = "The requested file does not exist at the specified path" if code == "FILE_NOT_FOUND" else None
@@ -456,18 +473,36 @@ def run_tool(
                 message=str(exc),
                 retryable=retryable,
                 hint=hint,
+                duration_ms=_elapsed(),
                 source="gateway",
+            )
+        if isinstance(exc, ValueError):
+            msg = str(exc).lower()
+            if "traversal" in msg or "blocked" in msg or "denied" in msg:
+                err_code = "POLICY_DENIED"
+            else:
+                err_code = "INVALID_INPUT"
+            return tool_error(
+                tool=tool,
+                code=err_code,
+                message=str(exc),
+                duration_ms=_elapsed(),
             )
         raise
     if isinstance(data, dict) and data.get("ok") is False:
         error_info = data.get("error") or {}
-        return error_result(
+        return tool_error(
             tool=tool,
-            title=title,
-            error=error_info.get("message", "Tool returned error"),
-            data=data,
+            code=error_info.get("code", "INTERNAL_ERROR"),
+            message=error_info.get("message", "Tool returned error"),
+            duration_ms=_elapsed(),
         )
-    return text_result(tool=tool, title=title, text=success_text, data=data)
+    if isinstance(data, dict) and "ok" in data:
+        if "duration_ms" not in data.get("meta", {}) or data["meta"].get("duration_ms", 0) == 0:
+            meta = data.get("meta", {})
+            meta["duration_ms"] = round(_elapsed(), 1)
+        return data
+    return tool_success(tool=tool, result=success_text, duration_ms=_elapsed())
 
 
 # Maps the gateway's own error `code` values (from its structured
@@ -481,6 +516,11 @@ _GATEWAY_ERROR_CODE_MAP: dict[str, str] = {
     "SESSION_NOT_FOUND": "SESSION_NOT_FOUND",
     "FORBIDDEN": "PERMISSION_DENIED",
     "PROJECT_NOT_FOUND": "PROJECT_NOT_FOUND",
+    "POLICY_DENIED": "PERMISSION_DENIED",
+    "INVALID_INPUT": "INVALID_INPUT",
+    "RATE_LIMITED": "RATE_LIMITED",
+    "TIMEOUT": "TIMEOUT",
+    "WRITE_PERMISSION_DENIED": "PERMISSION_DENIED",
 }
 
 
@@ -503,15 +543,17 @@ def _classify_gateway_error(exc: GatewayClientError) -> tuple[str, bool]:
         if isinstance(maybe_detail, dict):
             detail = maybe_detail
 
-    if detail is not None and isinstance(detail.get("retryable"), bool):
-        gateway_retryable: bool = detail["retryable"]
-        gateway_code = detail.get("code")
-        mapped_code = _GATEWAY_ERROR_CODE_MAP.get(gateway_code) if gateway_code else None
-        if mapped_code is not None:
-            return mapped_code, gateway_retryable
-        if status == 404 and ("file not found" in msg or "cannot read" in msg):
-            return "FILE_NOT_FOUND", gateway_retryable
-        return "INTERNAL_ERROR", gateway_retryable
+        if detail is not None and isinstance(detail.get("retryable"), bool):
+            gateway_retryable: bool = detail["retryable"]
+            gateway_code = detail.get("code")
+            mapped_code = _GATEWAY_ERROR_CODE_MAP.get(gateway_code) if gateway_code else None
+            if mapped_code is not None:
+                return mapped_code, gateway_retryable
+            if gateway_code in ERROR_CODES:
+                return gateway_code, gateway_retryable
+            if status == 404 and ("file not found" in msg or "cannot read" in msg):
+                return "FILE_NOT_FOUND", gateway_retryable
+            return "INTERNAL_ERROR", gateway_retryable
 
     if status == 404 and ("file not found" in msg or "cannot read" in msg):
         return "FILE_NOT_FOUND", False
@@ -524,12 +566,12 @@ def _classify_gateway_error(exc: GatewayClientError) -> tuple[str, bool]:
     if status is not None and status >= 500:
         return "INTERNAL_ERROR", True
 
+    if status == 400:
+        return "INVALID_INPUT", False
     if status == 404:
-        return "INTERNAL_ERROR", False
-    if status == 502:
-        return "INTERNAL_ERROR", True
-    if status == 504:
-        return "INTERNAL_ERROR", True
+        return "FILE_NOT_FOUND", False
+    if status == 422:
+        return "INVALID_INPUT", False
 
     return "INTERNAL_ERROR", True
 
@@ -649,6 +691,21 @@ def gateway_health() -> dict[str, Any]:
         },
         "gateway": gateway_data,
     }
+
+
+@register_tool("project_list")
+@instrumented("project_list")
+def gateway_project_list() -> dict[str, Any]:
+    """List all registered projects with their type, description and tags."""
+    registry = _get_workspace_registry()
+    projects = registry.list_projects()
+    return tool_success(
+        tool="project_list",
+        result={
+            "count": len(projects),
+            "projects": projects,
+        },
+    )
 
 
 @register_tool("list_sessions")
@@ -1683,31 +1740,47 @@ async def docker_stats(format: str | None = None, limit: int = 50) -> str:
 @register_tool("docker_compose_ps")
 async def docker_compose_ps(
     project_dir: str | None = None, limit: int = 50
-) -> str:
+) -> dict[str, Any]:
     """List containers in a Docker Compose project. limit: max rows (default 50)."""
-    return await DockerClient().compose_ps(project_dir=project_dir, limit=limit)
+    try:
+        result = await DockerClient().compose_ps(project_dir=project_dir, limit=limit)
+        return tool_success("docker_compose_ps", result)
+    except ValueError as exc:
+        return tool_error(tool="docker_compose_ps", code="INVALID_INPUT", message=str(exc))
 
 
 @register_tool("docker_compose_services")
 async def docker_compose_services(
     project_dir: str | None = None,
-) -> str:
+) -> dict[str, Any]:
     """List service names defined in a Docker Compose project."""
-    return await DockerClient().compose_services(project_dir=project_dir)
+    try:
+        result = await DockerClient().compose_services(project_dir=project_dir)
+        return tool_success("docker_compose_services", result)
+    except ValueError as exc:
+        return tool_error(tool="docker_compose_services", code="INVALID_INPUT", message=str(exc))
 
 
-# ── Docker write tools (Session 160) ─────────────────────────────
-
-
-@register_tool("docker_start")
-async def docker_start(container: str, timeout: int | None = None) -> dict[str, Any]:
-    """Start a stopped container. DANGEROUS: requires confirmation via confirm_operation(token)."""
-    DockerClient()._validate_container_name(container)
-    summary = f"Start container {container}"
-    action = _confirm_store.create_action(
-        "docker_start", {"container": container, "timeout": timeout}, summary, risk="medium"
-    )
-    return _confirmation_response(action)
+@register_tool("docker_compose_logs")
+async def docker_compose_logs(
+    project_dir: str | None = None,
+    services: list[str] | None = None,
+    tail: int = 100,
+    follow: bool = False,
+    timestamps: bool = False,
+) -> dict[str, Any]:
+    """Fetch logs from services in a Docker Compose project. tail: 1-1000 lines."""
+    try:
+        result = await DockerClient().compose_logs(
+            project_dir=project_dir,
+            services=services,
+            tail=tail,
+            follow=follow,
+            timestamps=timestamps,
+        )
+        return tool_success("docker_compose_logs", result)
+    except ValueError as exc:
+        return tool_error(tool="docker_compose_logs", code="INVALID_INPUT", message=str(exc))
 
 
 @register_tool("docker_stop")
@@ -1789,24 +1862,6 @@ async def docker_compose_build(
         risk="medium",
     )
     return _confirmation_response(action)
-
-
-@register_tool("docker_compose_logs")
-async def docker_compose_logs(
-    project_dir: str | None = None,
-    services: list[str] | None = None,
-    tail: int = 100,
-    follow: bool = False,
-    timestamps: bool = False,
-) -> str:
-    """Fetch logs from services in a Docker Compose project. tail: 1-1000 lines."""
-    return await DockerClient().compose_logs(
-        project_dir=project_dir,
-        services=services,
-        tail=tail,
-        follow=follow,
-        timestamps=timestamps,
-    )
 
 
 # ── Dangerous Docker operations (Session 164) ────────────────────
