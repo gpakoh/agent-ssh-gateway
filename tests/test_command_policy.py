@@ -1880,3 +1880,118 @@ class TestFirewallScanTool:
         names = {f.pattern_name for f in r.findings}
         for expected in ("iptables-flush", "ufw-disable", "nft-flush-ruleset"):
             assert expected in names, f"expected {expected} in {names}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5e — loadbalancer destructive pattern tests (DCG port)
+# ---------------------------------------------------------------------------
+
+class TestLoadbalancerScanTool:
+    """Tests for loadbalancer destructive patterns (nginx, haproxy, traefik, ELB)."""
+
+    @pytest.mark.parametrize("cmd,expected", [
+        # nginx (5)
+        ("nginx -s stop", "nginx-stop"),
+        ("nginx -s quit", "nginx-quit"),
+        ("systemctl stop nginx", "systemctl-stop-nginx"),
+        ("systemctl stop nginx.service", "systemctl-stop-nginx"),
+        ("service nginx stop", "service-stop-nginx"),
+        ("rm /etc/nginx/nginx.conf", "nginx-config-delete"),
+        ("rm -f /etc/nginx/sites-enabled/default", "nginx-config-delete"),
+        # haproxy (9)
+        ("haproxy -sf $(cat /run/haproxy.pid)", "haproxy-soft-stop"),
+        ("haproxy -st $(cat /run/haproxy.pid)", "haproxy-hard-stop"),
+        ("systemctl stop haproxy", "haproxy-systemctl-stop"),
+        ("service haproxy stop", "haproxy-service-stop"),
+        ("echo 'disable server backend/web1' | socat stdio /run/haproxy.sock",
+         "haproxy-socat-disable-server"),
+        ("echo 'shutdown sessions server backend/web1' | socat stdio /run/haproxy.sock",
+         "haproxy-socat-shutdown-sessions"),
+        ("printf 'disable frontend http' | socat stdio /run/haproxy.sock",
+         "haproxy-socat-disable-frontend"),
+        ("echo 'shutdown frontend http' | socat stdio /run/haproxy.sock",
+         "haproxy-socat-shutdown-frontend"),
+        ("rm /etc/haproxy/haproxy.cfg", "haproxy-config-delete"),
+        # traefik (9)
+        ("docker stop traefik", "traefik-docker-stop"),
+        ("docker kill traefik", "traefik-docker-stop"),
+        ("docker rm traefik", "traefik-docker-rm"),
+        ("docker-compose down traefik", "traefik-compose-down"),
+        ("kubectl delete pod traefik-abc123", "traefik-kubectl-delete-pod"),
+        ("kubectl delete deployment traefik", "traefik-kubectl-delete-pod"),
+        ("kubectl delete ingressroute my-route", "traefik-kubectl-delete-ingressroute"),
+        ("rm /etc/traefik/traefik.yml", "traefik-config-delete"),
+        ("rm /etc/traefik/traefik.toml", "traefik-config-delete"),
+        ("curl -X DELETE http://traefik:8080/api/http/routers/foo",
+         "traefik-api-delete"),
+        ("systemctl stop traefik", "traefik-systemctl-stop"),
+        ("service traefik stop", "traefik-service-stop"),
+        # AWS ELB (7)
+        ("aws elbv2 delete-load-balancer --load-balancer-arn arn:aws:elb:abc",
+         "elbv2-delete-load-balancer"),
+        ("aws --profile prod elbv2 delete-target-group --target-group-arn arn:aws:tg:abc",
+         "elbv2-delete-target-group"),
+        ("aws elbv2 deregister-targets --target-group-arn arn:aws:tg:abc --targets Id=i-123",
+         "elbv2-deregister-targets"),
+        ("aws elbv2 delete-listener --listener-arn arn:aws:listener:abc",
+         "elbv2-delete-listener"),
+        ("aws elbv2 delete-rule --rule-arn arn:aws:rule:abc",
+         "elbv2-delete-rule"),
+        ("aws elb delete-load-balancer --load-balancer-name my-elb",
+         "elb-delete-load-balancer"),
+        ("aws elb deregister-instances-from-load-balancer --load-balancer-name my-elb --instances i-123",
+         "elb-deregister-instances"),
+    ])
+    def test_loadbalancer_destructive(self, cmd, expected):
+        from app.command_policy import scan_command
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    def test_loadbalancer_global_flags(self):
+        from app.command_policy import scan_command
+
+        cases = [
+            ("systemctl -H remote-host stop nginx", "systemctl-stop-nginx"),
+            ("systemctl --user stop nginx.service", "systemctl-stop-nginx"),
+            ("kubectl -n prod delete deployment traefik", "traefik-kubectl-delete-pod"),
+            ("aws --region us-west-2 elbv2 delete-load-balancer --lb-arn abc", "elbv2-delete-load-balancer"),
+        ]
+        for cmd, expected in cases:
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    def test_safe_loadbalancer_commands_not_matched(self):
+        from app.command_policy import scan_command
+
+        for cmd in ("nginx -t", "nginx -s reload", "systemctl status nginx",
+                     "service nginx status",
+                     "haproxy -c -f /etc/haproxy/haproxy.cfg", "haproxy -v",
+                     "systemctl status haproxy", "service haproxy status",
+                     "echo 'show stat' | socat stdio /run/haproxy.sock",
+                     "traefik version", "traefik healthcheck",
+                     "docker inspect traefik", "docker logs traefik",
+                     "kubectl get ingressroute", "kubectl describe ingressroute my-route",
+                     "systemctl status traefik", "service traefik status",
+                     "aws elbv2 describe-load-balancers",
+                     "aws elbv2 describe-target-groups",
+                     "aws elb describe-load-balancers",
+                     "aws elbv2 describe-target-health"):
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            lb_matches = [n for n in names if n.startswith(
+                ("nginx-", "haproxy-", "traefik-", "elb", "systemctl-stop-nginx",
+                 "service-stop-nginx"))]
+            assert not lb_matches, f"False positive for {cmd!r}: {lb_matches}"
+
+    def test_loadbalancer_combined_manifest(self):
+        from app.command_policy import scan_command
+
+        cmd = ("nginx -s stop && systemctl stop haproxy && docker stop traefik && "
+               "aws elbv2 delete-load-balancer --lb-arn abc")
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        for expected in ("nginx-stop", "haproxy-systemctl-stop",
+                          "traefik-docker-stop", "elbv2-delete-load-balancer"):
+            assert expected in names, f"expected {expected} in {names}"
