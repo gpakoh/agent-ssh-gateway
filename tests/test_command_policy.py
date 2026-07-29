@@ -1711,3 +1711,104 @@ class TestDatabaseScanTool:
                           "redis-mass-delete-pipeline", "psql-delete-without-where",
                           "psql-truncate-table"):
             assert expected in names, f"expected {expected} in {names}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5c — git destructive pattern tests (DCG strict-git pack)
+# ---------------------------------------------------------------------------
+
+class TestGitScanTool:
+    """Tests for git destructive patterns (DCG strict-git pack port)."""
+
+    @pytest.mark.parametrize("cmd,expected", [
+        ("git push --force", "git-push-force"),
+        ("git push origin --force-with-lease", "git-push-force"),
+        ("git push -f origin main", "git-push-force"),
+        ("git push origin +main", "git-push-force"),
+        ("git push origin --force=lease", "git-push-force"),
+        ("git push --mirror origin", "git-push-mirror"),
+        ("git push origin $BRANCH", "git-push-dynamic-arg"),
+        ("git push origin \\refspec", "git-push-dynamic-arg"),
+        ("git rebase -i HEAD~3", "git-rebase"),
+        ("git rebase main", "git-rebase"),
+        ("git commit --amend -m 'new msg'", "git-commit-amend"),
+        ("git filter-branch --tree-filter 'rm -f secret' HEAD", "git-filter-branch"),
+        ("git filter-repo --path secret.txt", "git-filter-repo"),
+        ("git cherry-pick abc123", "git-cherry-pick"),
+        ("git reflog expire --expire=now --all", "git-reflog-expire"),
+        ("git gc --aggressive --prune=now", "git-gc-aggressive"),
+        ("git worktree remove /tmp/repo", "git-worktree-remove"),
+        ("git submodule deinit my-module", "git-submodule-deinit"),
+        ("git add .", "git-add-all-dot"),
+        ("git add '.'", "git-add-all-dot"),
+        ("git add -A", "git-add-all-flag"),
+        ("git add --all", "git-add-all-flag"),
+        ("git push origin master", "git-push-to-master"),
+        ("git push origin +master", "git-push-to-master"),
+        ("git push origin HEAD:refs/heads/master", "git-push-to-master"),
+        ("git push origin main", "git-push-to-main"),
+        ("git push origin +main", "git-push-to-main"),
+        ("git push origin HEAD:refs/heads/main", "git-push-to-main"),
+    ])
+    def test_git_destructive(self, cmd, expected):
+        from app.command_policy import scan_command
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    def test_git_global_flags(self):
+        """Git global flags like -C and -c appear before subcommand."""
+        from app.command_policy import scan_command
+
+        cases = [
+            ("git -C /path/to/repo push --force", "git-push-force"),
+            ("git -C /path/to/repo rebase -i HEAD~3", "git-rebase"),
+            ("git -c user.email=bot@corp.com commit --amend", "git-commit-amend"),
+            ("git --git-dir=/prod/.git filter-branch HEAD", "git-filter-branch"),
+            ("git -C /repo worktree remove dead", "git-worktree-remove"),
+            ("git -C /prod add .", "git-add-all-dot"),
+            ("git -C /prod add -A", "git-add-all-flag"),
+        ]
+        for cmd, expected in cases:
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    def test_git_push_to_master_separator_variants(self):
+        """Refspec separators: ' ' and ':' and '/' must all work."""
+        from app.command_policy import scan_command
+
+        for cmd in ("git push origin master",
+                     "git push origin HEAD:master",
+                     "git push origin HEAD:refs/heads/master"):
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            assert "git-push-to-master" in names, f"not found for {cmd!r}"
+
+    def test_safe_git_commands_not_matched(self):
+        from app.command_policy import scan_command
+
+        for cmd in ("git status", "git log --oneline", "git branch",
+                     "git diff", "git commit -m 'fix'", "git push origin feature-branch",
+                     "git checkout -b new-feature", "git merge feature",
+                     "git fetch origin", "git pull origin main",
+                     "git clone https://github.com/org/repo.git",
+                     "git stash", "git stash pop", "git tag v1.0.0",
+                     "git remote -v", "git config user.name 'me'",
+                     "git add src/main.py", "git add -p",
+                     "git push origin develop"):
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            git_matches = [n for n in names if n.startswith("git-")]
+            assert not git_matches, f"False positive for {cmd!r}: {git_matches}"
+
+    def test_git_combined_manifest(self):
+        from app.command_policy import scan_command
+
+        cmd = ("git push --force && git rebase -i HEAD~3 && "
+               "git commit --amend -m 'new' && git filter-branch HEAD")
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        for expected in ("git-push-force", "git-rebase", "git-commit-amend",
+                          "git-filter-branch"):
+            assert expected in names, f"expected {expected} in {names}"
