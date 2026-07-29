@@ -1195,3 +1195,218 @@ class TestFilesystemScanTool:
                      "mkfs-destructive", "shred-destructive"}
         for name in expected:
             assert name in names, f"expected {name} in scan findings: {names}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — kubernetes destructive pattern tests
+# ---------------------------------------------------------------------------
+
+
+class TestKubernetesScanTool:
+    """Tests for kubernetes destructive patterns (kubectl, helm, kustomize)."""
+
+    def test_kubectl_delete_namespace(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kubectl delete namespace production")
+        names = {f.pattern_name for f in r.findings}
+        assert "kubectl-delete-namespace" in names
+
+    def test_kubectl_delete_namespace_short(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kubectl delete ns staging")
+        names = {f.pattern_name for f in r.findings}
+        assert "kubectl-delete-namespace" in names
+
+    def test_kubectl_delete_all(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kubectl delete pods --all")
+        names = {f.pattern_name for f in r.findings}
+        assert "kubectl-delete-all" in names
+
+    def test_kubectl_delete_all_namespaces(self):
+        from app.command_policy import scan_command
+
+        for cmd in ("kubectl delete pods -A", "kubectl delete pods --all-namespaces"):
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            assert "kubectl-delete-all-namespaces" in names, f"not found for {cmd!r}"
+
+    def test_kubectl_drain_node(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kubectl drain node-1")
+        names = {f.pattern_name for f in r.findings}
+        assert "kubectl-drain-node" in names
+
+    def test_kubectl_cordon_node(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kubectl cordon node-1")
+        names = {f.pattern_name for f in r.findings}
+        assert "kubectl-cordon-node" in names
+
+    def test_kubectl_taint_noexecute(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kubectl taint nodes n1 key=val:NoExecute")
+        names = {f.pattern_name for f in r.findings}
+        assert "kubectl-taint-noexecute" in names
+
+    def test_kubectl_delete_workload(self):
+        from app.command_policy import scan_command
+
+        for res in ("deployment", "statefulset", "daemonset", "replicaset"):
+            r = scan_command(f"kubectl delete {res} my-app")
+            names = {f.pattern_name for f in r.findings}
+            assert "kubectl-delete-workload" in names, f"not found for {res}"
+
+    def test_kubectl_delete_pvc(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kubectl delete pvc data-volume")
+        names = {f.pattern_name for f in r.findings}
+        assert "kubectl-delete-pvc" in names
+
+    def test_kubectl_delete_pv(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kubectl delete pv my-volume")
+        names = {f.pattern_name for f in r.findings}
+        assert "kubectl-delete-pv" in names
+
+    def test_kubectl_scale_to_zero(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kubectl scale deployment web --replicas=0")
+        names = {f.pattern_name for f in r.findings}
+        assert "kubectl-scale-to-zero" in names
+
+    def test_kubectl_delete_force(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kubectl delete pod foo --force --grace-period=0")
+        names = {f.pattern_name for f in r.findings}
+        assert "kubectl-delete-force" in names
+
+    def test_kubectl_apply_force(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kubectl apply -f deploy.yaml --force")
+        names = {f.pattern_name for f in r.findings}
+        assert "kubectl-apply-force" in names
+
+    def test_kubectl_delete_from_stdin(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kubectl delete -f-")
+        names = {f.pattern_name for f in r.findings}
+        assert "kubectl-delete-from-stdin" in names
+
+    def test_kubectl_delete_from_directory(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kubectl delete -f .")
+        names = {f.pattern_name for f in r.findings}
+        assert "kubectl-delete-from-directory" in names
+
+    def test_helm_uninstall(self):
+        from app.command_policy import scan_command
+
+        for cmd in ("helm uninstall my-release", "helm delete my-release"):
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            assert "helm-uninstall" in names, f"not found for {cmd!r}"
+
+    def test_helm_rollback(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("helm rollback my-release 3")
+        names = {f.pattern_name for f in r.findings}
+        assert "helm-rollback" in names
+
+    def test_helm_upgrade_force(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("helm upgrade my-release ./chart --force")
+        names = {f.pattern_name for f in r.findings}
+        assert "helm-upgrade-force" in names
+
+    def test_helm_upgrade_reset_values(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("helm upgrade my-release ./chart --reset-values")
+        names = {f.pattern_name for f in r.findings}
+        assert "helm-upgrade-reset-values" in names
+
+    def test_kustomize_build_pipe_delete(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kustomize build ./prod | kubectl delete -f -")
+        names = {f.pattern_name for f in r.findings}
+        assert "kustomize-build-delete" in names
+
+    def test_kubectl_kustomize_pipe_delete(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kubectl kustomize ./prod | kubectl delete -f -")
+        names = {f.pattern_name for f in r.findings}
+        assert "kubectl-kustomize-delete" in names
+
+    def test_kubectl_delete_k(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kubectl delete -k ./overlays/prod")
+        names = {f.pattern_name for f in r.findings}
+        assert "kubectl-delete-k" in names
+
+    def test_kubectl_global_flags(self):
+        from app.command_policy import scan_command
+
+        cases = [
+            ("kubectl --context prod delete namespace critical", "kubectl-delete-namespace"),
+            ("kubectl --kubeconfig /tmp/prod.yaml delete pods --all", "kubectl-delete-all"),
+            ("kubectl -n prod delete pod stuck --force --grace-period=0", "kubectl-delete-force"),
+            ("helm --kube-context prod uninstall critical-release", "helm-uninstall"),
+        ]
+        for cmd, expected in cases:
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    def test_kubectl_global_flags_all_namespaces(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("kubectl --context prod delete pods --all-namespaces")
+        names = {f.pattern_name for f in r.findings}
+        assert "kubectl-delete-all-namespaces" in names
+
+    def test_safe_kubectl_not_matched(self):
+        from app.command_policy import scan_command
+
+        for cmd in ("kubectl get pods", "kubectl describe pod foo",
+                     "kubectl logs deploy/myapp", "kubectl top nodes"):
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            kubectl_matches = [n for n in names if "kubectl" in n or "helm" in n or "kustomize" in n]
+            assert not kubectl_matches, f"False positive for {cmd!r}: {kubectl_matches}"
+
+    def test_kubernetes_scan_manifest(self):
+        """Verify all kubernetes pattern names appear in combined scan output."""
+        from app.command_policy import scan_command
+
+        cmd = ("kubectl delete namespace prod && kubectl delete pods --all "
+               "&& kubectl drain node-1 && kubectl delete pvc data "
+               "&& kubectl scale deploy web --replicas=0 "
+               "&& helm uninstall my-release "
+               "&& kustomize build . | kubectl delete -f -")
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        expected = {"kubectl-delete-namespace", "kubectl-delete-all",
+                     "kubectl-drain-node", "kubectl-delete-pvc",
+                     "kubectl-scale-to-zero", "helm-uninstall",
+                     "kustomize-build-delete"}
+        for name in expected:
+            assert name in names, f"expected {name} in {names}"
