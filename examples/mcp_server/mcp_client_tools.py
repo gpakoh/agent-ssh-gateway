@@ -13,19 +13,19 @@ from pathlib import Path
 from typing import Any
 
 from gateway_client import GatewayClient, GatewayClientError
-from project_registry import ProjectNotFoundError, get_project_registry
 from tool_results import build_command_result, tool_error, tool_success
 
 
 def _resolve_project(project_name: str) -> Path:
-    """Resolve a project name to a validated filesystem path via the registry."""
+    """Resolve a project name to a validated filesystem path via the workspace registry."""
     try:
-        return get_project_registry().resolve(project_name)
-    except ProjectNotFoundError as exc:
+        from app.workspace.registry import get_registry
+
+        info = get_registry().project_info(project_name)
+        return Path(info["root"])
+    except Exception as exc:
         body = {"detail": {"code": "PROJECT_NOT_FOUND", "retryable": False}}
         raise GatewayClientError(str(exc), status_code=404, body=body) from exc
-    except ValueError as exc:
-        raise GatewayClientError(str(exc), status_code=404) from exc
 
 
 def _validate_project(project: str) -> str:
@@ -179,8 +179,25 @@ def read_file(
     project: str,
     path: str,
 ) -> dict[str, Any]:
+    """Read a UTF-8 text file inside a registered project with secret/hidden path filtering."""
+    from app.workspace.files import project_file_read
+    from app.workspace.registry import get_registry
+
     safe = _safe_relpath(path)
-    return run_project_command(client, project, f"cat {safe}")
+    try:
+        result = project_file_read(
+            project_id=project,
+            relative_path=safe,
+            registry=get_registry(),
+        )
+        return tool_success(tool="read_file", result=result)
+    except Exception as exc:
+        return tool_error(
+            tool="read_file",
+            code="FILE_READ_ERROR",
+            message=str(exc),
+            retryable=False,
+        )
 
 
 def search_text(
@@ -784,7 +801,10 @@ def run_project_command(
 
 
 def working_directory(client: GatewayClient, project: str) -> dict[str, Any]:
-    return run_project_command(client, project, "pwd")
+    result = run_project_command(client, project, "pwd")
+    if result.get("exit_code", -1) != 0:
+        result["ok"] = False
+    return result
 
 
 def info(client: GatewayClient, project: str) -> dict[str, Any]:
@@ -814,10 +834,15 @@ def git_diff_stat(client: GatewayClient, project: str) -> dict[str, Any]:
 
 
 def show_changes(client: GatewayClient, project: str) -> dict[str, Any]:
-    return {
-        "git_status": git_status(client, project),
-        "git_diff_stat": git_diff_stat(client, project),
+    gs = git_status(client, project)
+    gds = git_diff_stat(client, project)
+    result = {
+        "git_status": gs,
+        "git_diff_stat": gds,
     }
+    if gs.get("exit_code", -1) != 0 and gds.get("exit_code", -1) != 0:
+        result["ok"] = False
+    return result
 
 
 def git_add(
