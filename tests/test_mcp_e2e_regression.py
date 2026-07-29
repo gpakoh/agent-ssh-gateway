@@ -296,8 +296,6 @@ class TestRunUvToolCodePath:
 
     def test_pytest_calls_execute_raw(self, monkeypatch):
         """project_run_pytest must call execute_raw, NOT execute_project_command."""
-        from examples.mcp_server.mcp_client_tools import run_pytest as project_run_pytest
-        from examples.mcp_server.mcp_client_tools import run_ruff as project_run_ruff
         from examples.mcp_server.mcp_client_tools import run_mypy as project_run_mypy
 
         monkeypatch.setattr(

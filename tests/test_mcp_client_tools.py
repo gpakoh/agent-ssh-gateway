@@ -94,17 +94,3 @@ class _FakeClient:
             "stdout": "ok",
             "stderr": "",
         }
-    def __init__(self) -> None:
-        self.commands: list[str] = []
-
-    def execute_restricted(self, command: str, session_id: str | None = None) -> dict:
-        self.commands.append(command)
-        return {"job_id": f"job-{len(self.commands)}"}
-
-    def wait_job(self, job_id: str) -> dict:
-        return {
-            "job_id": job_id,
-            "exit_code": 0,
-            "stdout": "ok",
-            "stderr": "",
-        }
