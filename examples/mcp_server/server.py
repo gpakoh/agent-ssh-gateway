@@ -486,6 +486,7 @@ _GATEWAY_ERROR_CODE_MAP: dict[str, str] = {
     "MASTER_KEY_REQUIRED": "AUTH_ERROR",
     "SESSION_NOT_FOUND": "SESSION_NOT_FOUND",
     "FORBIDDEN": "PERMISSION_DENIED",
+    "PROJECT_NOT_FOUND": "PROJECT_NOT_FOUND",
 }
 
 
@@ -1336,8 +1337,8 @@ def gateway_self_test() -> dict[str, Any]:
 def gateway_latency_report() -> dict[str, Any]:
     """Return accumulated per-tool latency statistics."""
     return tool_success(
-        get_tracker().summary(),
-        tool_name="latency_report",
+        tool="latency_report",
+        result=get_tracker().summary(),
     )
 
 
@@ -1353,11 +1354,11 @@ def gateway_diagnostics_latency() -> dict[str, Any]:
         gw_data = {"error": "gateway diagnostics unavailable"}
 
     return tool_success(
-        {
+        tool="diagnostics_latency",
+        result={
             "mcp": mcp_summary,
             "gateway": gw_data,
         },
-        tool_name="diagnostics_latency",
     )
 
 

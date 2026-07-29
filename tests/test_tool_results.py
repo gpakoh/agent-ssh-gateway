@@ -308,6 +308,8 @@ class TestErrorCodes:
             "JOB_NOT_FOUND",
             "PERMISSION_DENIED",
             "DANGEROUS_PERMISSIONS_BLOCKED",
+            "CHECK_FAILED",
+            "PROJECT_NOT_FOUND",
         }
         assert ERROR_CODES == known
 

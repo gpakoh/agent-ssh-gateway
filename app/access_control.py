@@ -12,6 +12,8 @@ import logging
 import time
 from dataclasses import dataclass
 
+from app.redis_compat import close_redis_client
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -50,7 +52,6 @@ class AccessDeniedError(Exception):
 
 class AccessPendingApprovalError(Exception):
     """Raised when an operation requires operator approval first."""
-
 
 # ---------------------------------------------------------------------------
 # Key Hashing
@@ -240,6 +241,19 @@ class AccessControlStore:
             except asyncio.CancelledError:
                 pass
             self._cleanup_task = None
+
+    async def close(self) -> None:
+        """Close the owned Redis client.
+
+        Safe to call multiple times — subsequent calls are no-ops.
+        The store OWNS the Redis client because it creates it internally
+        via ``_get_redis()`` → ``aioredis.from_url()``.  A client passed
+        from outside is NEVER stored; ``_get_redis()`` always creates a
+        new one on first call.
+        """
+        if self._redis is not None:
+            await close_redis_client(self._redis)
+            self._redis = None
 
     # -- Redis (best-effort) --
 
