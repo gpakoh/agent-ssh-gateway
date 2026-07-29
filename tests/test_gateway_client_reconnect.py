@@ -225,8 +225,11 @@ class TestExecuteRestrictedReconnect:
 
 class TestExecuteProjectCommandReconnect:
     def test_reconnects_and_retries(self):
-        client = _client(MCP_GATEWAY_PROJECT_ROOT="/projects")
+        client = _client()
         call_count = 0
+
+        class _FakeInfo:
+            root = "/projects"
 
         def _post_side_effect(path, payload):
             nonlocal call_count
@@ -238,10 +241,9 @@ class TestExecuteProjectCommandReconnect:
         with patch.object(client, "_post") as mock_post:
             mock_post.side_effect = _post_side_effect
             with patch.object(client, "_reconnect_session") as mock_reconnect:
-                with patch.dict(
-                    os.environ,
-                    {"MCP_GATEWAY_PROJECT_ROOT": "/projects"},
-                ):
+                with patch("app.workspace.registry.get_registry") as mock_get_reg:
+                    mock_reg = mock_get_reg.return_value
+                    mock_reg.project_info.return_value = _FakeInfo()
                     result = client.execute_project_command("myapp", "pwd")
         assert result == {"job_id": "job-1"}
         assert call_count == 2

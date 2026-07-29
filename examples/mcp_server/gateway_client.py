@@ -274,16 +274,10 @@ class GatewayClient:
     @_retry_on_session_not_found
     def execute_project_command(self, project: str, command: str) -> dict[str, Any]:
         sid = self._require_session_id()
-        cwd: str | None = None
-        try:
-            from project_registry import get_project_registry
+        from app.workspace.registry import get_registry
 
-            registry = get_project_registry()
-            cwd = str(registry.resolve(project))
-        except (ValueError, Exception):
-            root = _project_root()
-            proj = _safe_project(project)
-            cwd = f"{root}/{proj}"
+        info = get_registry().project_info(project)
+        cwd = str(info.root)
         import shlex as _shlex
         argv = _shlex.split(command)
         return self._post(
@@ -365,14 +359,12 @@ class GatewayClient:
 
         cwd: str | None = None
         try:
-            from project_registry import get_project_registry
+            from app.workspace.registry import get_registry
 
-            registry = get_project_registry()
-            cwd = str(registry.resolve(project))
-        except (ValueError, Exception):
-            root = _project_root()
-            proj = _safe_project(project)
-            cwd = f"{root}/{proj}"
+            info = get_registry().project_info(project)
+            cwd = str(info.root)
+        except Exception:
+            raise
 
         tmp_dir = os.path.join(cwd, ".ai-bridge", "tmp")
         os.makedirs(tmp_dir, exist_ok=True)
@@ -516,4 +508,10 @@ class GatewayClient:
                 lines = stdout.strip().split("\n")[:10]
                 result["stdout"] = "\n".join(lines)
             output[name] = result
+        all_failed = all(
+            isinstance(r, dict) and r.get("exit_code", -1) != 0
+            for r in output.values()
+        )
+        if all_failed:
+            output["ok"] = False
         return output
