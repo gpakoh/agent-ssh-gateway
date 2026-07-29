@@ -740,6 +740,92 @@ def gateway_scan_command(command: str) -> dict[str, Any]:
     )
 
 
+@register_tool("scan_file")
+@instrumented("scan_file")
+def gateway_scan_file(project: str, path: str) -> dict[str, Any]:
+    """Scan a file for destructive command patterns.
+
+    Reads the file through the project workspace and runs each line through
+    the destructive pattern scanner. Returns findings with line numbers.
+    """
+    from app.command_policy import scan_command as _scan
+
+    file_result = read_file(project=project, path=path)
+    if not file_result.get("ok"):
+        return tool_error(
+            tool="scan_file",
+            code="READ_ERROR",
+            message=f"Failed to read file: {file_result.get('error', {}).get('message', 'unknown error')}",
+        )
+    content = file_result.get("result", {}).get("content", "")
+    if not isinstance(content, str):
+        return tool_success(
+            tool="scan_file",
+            result={"path": path, "lines_scanned": 0, "findings": [], "total": 0},
+        )
+
+    lines = content.splitlines()
+    findings: list[dict[str, Any]] = []
+    for lineno, line in enumerate(lines, 1):
+        report = _scan(line)
+        for f in report.findings:
+            findings.append({
+                "line": lineno,
+                "content": line.strip(),
+                "pattern_name": f.pattern_name,
+                "severity": f.severity,
+                "reason": f.reason,
+                "suggestion": f.suggestion,
+            })
+
+    return tool_success(
+        tool="scan_file",
+        result={
+            "path": path,
+            "lines_scanned": len(lines),
+            "findings": findings,
+            "total": len(findings),
+        },
+    )
+
+
+@register_tool("explain_pattern")
+@instrumented("explain_pattern")
+def gateway_explain_pattern(pattern_name: str) -> dict[str, Any]:
+    """Look up a destructive pattern by name and return its full details.
+
+    Searches across all 9 registered packs (docker, filesystem, kubernetes,
+    cloud, database, git, firewall, loadbalancer, system).
+    """
+    from app.packs.registry import get_registry as _get_registry
+
+    registry = _get_registry()
+    for pack in registry.all_packs:
+        for dp in pack.destructive_patterns:
+            if dp.name == pattern_name:
+                return tool_success(
+                    tool="explain_pattern",
+                    result={
+                        "name": dp.name,
+                        "pack": {"id": pack.id, "name": pack.name},
+                        "regex": dp.regex,
+                        "severity": dp.severity,
+                        "reason": dp.reason,
+                        "description": dp.description,
+                        "suggestions": [
+                            {"command": s.command, "description": s.description}
+                            for s in dp.suggestions
+                        ],
+                    },
+                )
+
+    return tool_error(
+        tool="explain_pattern",
+        code="PATTERN_NOT_FOUND",
+        message=f"Pattern '{pattern_name}' not found in any pack",
+    )
+
+
 @register_tool("list_sessions")
 @instrumented("list_sessions")
 def gateway_list_sessions() -> dict[str, Any]:
