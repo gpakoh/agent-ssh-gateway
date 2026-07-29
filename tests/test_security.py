@@ -59,6 +59,12 @@ def test_validate_path_base():
     assert validate_path("/home/user/file.txt", base_path="/home/user") == "/home/user/file.txt"
 
 
+def test_validate_path_base_rejects_similar_prefix():
+    """/home/user-evil must NOT pass when base is /home/user."""
+    with pytest.raises(ValueError, match="outside allowed directory"):
+        validate_path("/home/user-evil/file.txt", base_path="/home/user")
+
+
 def test_validate_path_whitespace_stripped():
     assert validate_path("  /home/file.txt  ") == "/home/file.txt"
 
