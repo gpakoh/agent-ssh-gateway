@@ -44,6 +44,7 @@ HIDDEN_DIR_PATTERNS: tuple[str, ...] = (
     ".env.*",
     ".env.local",
     ".env.production",
+    ".git",
     ".ssh",
     ".gnupg",
     ".config",
