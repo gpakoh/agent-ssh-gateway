@@ -21,8 +21,9 @@ Security model:
 
 from __future__ import annotations
 
+import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 # ---------------------------------------------------------------------------
@@ -43,6 +44,48 @@ class CommandPolicyProfile(StrEnum):
     PROJECT_AUTOMATION = "project-automation"
     OPS = "ops"
     DOCKER_ADMIN = "docker-admin"
+
+
+class Severity(StrEnum):
+    """Severity level for destructive docker/compose patterns.
+
+    Mirrors DCG severity levels:
+    - Critical: irreversible, always block
+    - High: block by default (allowlistable)
+    - Medium: warn (log + allow)
+    - Low: log only
+    """
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+@dataclass(frozen=True)
+class PatternSuggestion:
+    """Safe alternative command suggestion."""
+    command: str
+    description: str
+
+
+@dataclass(frozen=True)
+class DestructivePattern:
+    """Docker/compose destructive pattern definition (ported from DCG)."""
+    name: str
+    regex: str
+    reason: str
+    severity: Severity
+    description: str
+    suggestions: tuple[PatternSuggestion, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class DestructiveMatch:
+    """Result of a destructive pattern match."""
+    pattern_name: str
+    reason: str
+    severity: Severity
+    suggestion: str | None = None
 
 
 @dataclass(frozen=True)
@@ -344,6 +387,212 @@ DOCKER_ADMIN_ALLOWED_ACTIONS: set[str] = OPS_ALLOWED_DOCKER_ACTIONS | {
     "kill", "cp", "wait", "rename", "update", "pause", "unpause",
 }
 
+# ---------------------------------------------------------------------------
+# DCG-ported destructive docker patterns — defense-in-depth
+# ---------------------------------------------------------------------------
+
+DOCKER_DESTRUCTIVE_PATTERNS: tuple[DestructivePattern, ...] = (
+    DestructivePattern(
+        name="system-prune",
+        regex=r"docker\b.*?\bsystem\s+prune",
+        reason="docker system prune removes ALL unused containers, networks, images, and build cache",
+        severity=Severity.HIGH,
+        description="docker system prune is Docker's most aggressive cleanup command. "
+        "With --volumes it also removes all unused volumes (data loss!).",
+        suggestions=(
+            PatternSuggestion("docker system df -v", "Preview what would be removed without deleting"),
+            PatternSuggestion("docker container prune", "Remove only stopped containers"),
+            PatternSuggestion("docker image prune", "Remove only dangling images"),
+        ),
+    ),
+    DestructivePattern(
+        name="volume-prune",
+        regex=r"docker\b.*?\bvolume\s+prune",
+        reason="docker volume prune permanently deletes ALL unused volumes and their data",
+        severity=Severity.HIGH,
+        description="docker volume prune deletes all volumes not attached to a running container. "
+        "Database data, uploads, and application state are lost permanently.",
+        suggestions=(
+            PatternSuggestion("docker volume ls", "List all volumes first"),
+            PatternSuggestion("docker volume rm <specific-volume>", "Remove specific volumes by name"),
+        ),
+    ),
+    DestructivePattern(
+        name="network-prune",
+        regex=r"docker\b.*?\bnetwork\s+prune",
+        reason="docker network prune removes ALL unused networks",
+        severity=Severity.HIGH,
+        description="docker network prune removes all user-defined networks not used by any container.",
+        suggestions=(
+            PatternSuggestion("docker network ls", "List networks before pruning"),
+            PatternSuggestion("docker network rm <specific-network>", "Remove specific networks"),
+        ),
+    ),
+    DestructivePattern(
+        name="image-prune",
+        regex=r"docker\b.*?\bimage\s+prune",
+        reason="docker image prune removes unused (dangling) images",
+        severity=Severity.MEDIUM,
+        description="docker image prune removes dangling images. With -a flag, removes ALL unused images.",
+        suggestions=(
+            PatternSuggestion("docker images -f dangling=true", "List dangling images first"),
+            PatternSuggestion("docker rmi <image-id>", "Remove specific images by ID"),
+        ),
+    ),
+    DestructivePattern(
+        name="container-prune",
+        regex=r"docker\b.*?\bcontainer\s+prune",
+        reason="docker container prune removes ALL stopped containers",
+        severity=Severity.MEDIUM,
+        description="docker container prune removes all stopped containers. "
+        "Container logs and filesystem layers are lost.",
+        suggestions=(
+            PatternSuggestion("docker ps -a -f status=exited", "List stopped containers first"),
+            PatternSuggestion("docker rm <specific-container>", "Remove specific containers"),
+        ),
+    ),
+    DestructivePattern(
+        name="rm-force",
+        regex=r"docker\b.*?\brm\s+.*(?:-[a-zA-Z0-9]*f|--force)",
+        reason="docker rm -f forcibly removes containers without graceful shutdown",
+        severity=Severity.HIGH,
+        description="docker rm -f sends SIGKILL instead of SIGTERM. "
+        "Running processes are killed immediately, in-flight requests dropped, data may be corrupted.",
+        suggestions=(
+            PatternSuggestion("docker stop <container> && docker rm <container>",
+                              "Graceful shutdown (SIGTERM) before removal"),
+            PatternSuggestion("docker ps -a | grep <container>", "Check container status before removal"),
+        ),
+    ),
+    DestructivePattern(
+        name="rmi-force",
+        regex=r"docker\b.*?\brmi\s+.*(?:-[a-zA-Z0-9]*f|--force)",
+        reason="docker rmi -f forcibly removes images even if in use by containers",
+        severity=Severity.HIGH,
+        description="docker rmi -f forces image removal, potentially breaking running containers.",
+        suggestions=(
+            PatternSuggestion("docker rmi <image>", "Remove without force (fails safely if in use)"),
+            PatternSuggestion("docker image prune", "Remove only dangling images"),
+        ),
+    ),
+    DestructivePattern(
+        name="volume-rm",
+        regex=r"docker\b.*?\bvolume\s+rm",
+        reason="docker volume rm permanently deletes volumes and their data",
+        severity=Severity.HIGH,
+        description="docker volume rm permanently deletes named volumes. "
+        "Database files, uploads, and configuration in the volume are lost forever.",
+        suggestions=(
+            PatternSuggestion("docker volume inspect <volume>", "Inspect volume metadata first"),
+            PatternSuggestion("docker run --rm -v <volume>:/data alpine ls -la /data",
+                              "List volume contents before deletion"),
+        ),
+    ),
+    DestructivePattern(
+        name="stop-all",
+        regex=r"docker\b.*?\b(?:stop|kill)\s+\$\(",
+        reason="Stopping/killing all containers can disrupt running services",
+        severity=Severity.HIGH,
+        description="This pattern stops or kills ALL running containers via command substitution. "
+        "Production services go down, database connections are severed.",
+        suggestions=(
+            PatternSuggestion("docker stop <container-name>", "Stop specific containers by name"),
+            PatternSuggestion("docker ps --format '{{.Names}}: {{.Status}}'",
+                              "List running containers before stopping"),
+        ),
+    ),
+)
+
+COMPOSE_DESTRUCTIVE_PATTERNS: tuple[DestructivePattern, ...] = (
+    DestructivePattern(
+        name="down-volumes",
+        regex=r"(?:docker-compose|docker\s+compose)\s+down\s+.*(?:-v\b|--volumes)",
+        reason="docker-compose down -v removes volumes and their data permanently",
+        severity=Severity.CRITICAL,
+        description="The -v/--volumes flag causes down to remove named volumes declared in Compose. "
+        "Database data, uploads, and persistent state are permanently destroyed.",
+        suggestions=(
+            PatternSuggestion("docker-compose down", "Stops containers without touching volumes"),
+            PatternSuggestion("docker-compose stop", "Stops containers, preserves everything"),
+        ),
+    ),
+    DestructivePattern(
+        name="down-rmi-all",
+        regex=r"(?:docker-compose|docker\s+compose)\s+down\s+.*--rmi\s+all",
+        reason="docker-compose down --rmi all removes all images used by services",
+        severity=Severity.HIGH,
+        description="The --rmi all flag removes all images used by services. "
+        "Base images must be re-pulled, custom images need rebuilding.",
+        suggestions=(
+            PatternSuggestion("docker-compose down", "Preserves images for faster restarts"),
+            PatternSuggestion("docker-compose down --rmi local", "Only removes images without custom tag"),
+        ),
+    ),
+    DestructivePattern(
+        name="rm-volumes",
+        regex=r"(?:docker-compose|docker\s+compose)\s+rm\s+.*(?:-v\b|--volumes)",
+        reason="docker-compose rm -v removes volumes attached to containers",
+        severity=Severity.HIGH,
+        description="The -v flag with rm removes anonymous volumes. "
+        "Application state, session data, and caches may be lost.",
+        suggestions=(
+            PatternSuggestion("docker-compose rm", "Removes containers without touching volumes"),
+            PatternSuggestion("docker-compose stop", "Stops without removing anything"),
+        ),
+    ),
+    DestructivePattern(
+        name="rm-force",
+        regex=r"(?:docker-compose|docker\s+compose)\s+rm\s+.*(?:-f\b|--force)",
+        reason="docker-compose rm -f forcibly removes containers without confirmation",
+        severity=Severity.MEDIUM,
+        description="The -f flag removes containers without asking. "
+        "Running containers are stopped abruptly (SIGKILL).",
+        suggestions=(
+            PatternSuggestion("docker-compose stop", "Graceful shutdown first"),
+            PatternSuggestion("docker-compose rm", "Asks for confirmation"),
+        ),
+    ),
+)
+
+# Precompile patterns
+_COMPILED_DOCKER_PATTERNS: list[tuple[re.Pattern, DestructivePattern]] = [
+    (re.compile(p.regex, re.IGNORECASE), p) for p in DOCKER_DESTRUCTIVE_PATTERNS
+]
+_COMPILED_COMPOSE_PATTERNS: list[tuple[re.Pattern, DestructivePattern]] = [
+    (re.compile(p.regex, re.IGNORECASE), p) for p in COMPOSE_DESTRUCTIVE_PATTERNS
+]
+
+
+def _check_docker_destructive(command: str) -> DestructiveMatch | None:
+    """Check a docker command against destructive patterns (ported from DCG).
+
+    Returns a DestructiveMatch if a destructive pattern is found, None otherwise.
+    """
+    for compiled, pattern in _COMPILED_DOCKER_PATTERNS:
+        if compiled.search(command):
+            suggestion = pattern.suggestions[0].command if pattern.suggestions else None
+            return DestructiveMatch(
+                pattern_name=pattern.name,
+                reason=pattern.reason,
+                severity=pattern.severity,
+                suggestion=suggestion,
+            )
+    return None
+
+
+def _check_compose_destructive(command: str) -> DestructiveMatch | None:
+    """Check a docker-compose command against destructive patterns (ported from DCG)."""
+    for compiled, pattern in _COMPILED_COMPOSE_PATTERNS:
+        if compiled.search(command):
+            suggestion = pattern.suggestions[0].command if pattern.suggestions else None
+            return DestructiveMatch(
+                pattern_name=pattern.name,
+                reason=pattern.reason,
+                severity=pattern.severity,
+                suggestion=suggestion,
+            )
+    return None
+
 
 def _validate_git_subcommand(parts: list[str]) -> tuple[bool, str]:
     """Validate git subcommand for read-only profiles."""
@@ -400,12 +649,34 @@ def _validate_docker_command(parts: list[str], allowed_actions: set[str]) -> tup
 
 
 def _validate_docker_action(effective: list[str], allowed_actions: set[str]) -> tuple[bool, str]:
-    """Validate docker action against allowed actions set."""
+    """Validate docker action against allowed actions set.
+
+    After the allowlist check, runs defense-in-depth destructive pattern
+    matching (ported from DCG containers pack) to catch dangerous flag
+    combinations like ``rm -f``, ``volume prune``, ``down -v``.
+    """
     if len(effective) < 2:
         return False, "Missing docker action"
     action = effective[1]
     if action not in allowed_actions:
         return False, f"docker action '{action}' not allowed"
+
+    # Defense-in-depth: check destructive docker/compose patterns
+    cmd = " ".join(effective)
+    match = _check_docker_destructive(cmd)
+    if match:
+        msg = f"Destructive docker operation blocked: {match.reason}"
+        if match.suggestion:
+            msg += f" (safer: {match.suggestion})"
+        return False, msg
+
+    match = _check_compose_destructive(cmd)
+    if match:
+        msg = f"Destructive docker-compose operation blocked: {match.reason}"
+        if match.suggestion:
+            msg += f" (safer: {match.suggestion})"
+        return False, msg
+
     return True, ""
 
 
