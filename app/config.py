@@ -85,6 +85,9 @@ class Settings(BaseSettings):
         default="127.0.0.0/8,::1/128,169.254.0.0/16,0.0.0.0/8,224.0.0.0/4",
         alias="DENIED_TARGET_CIDRS",
     )
+    ssh_health_user: str = Field(default="", alias="SSH_HEALTH_USER")
+    ssh_health_password: str = Field(default="", alias="SSH_HEALTH_PASSWORD")
+
     max_sessions_per_ip: int = Field(default=10, alias="MAX_SESSIONS_PER_IP")
     rate_limit_requests: int = Field(default=100, alias="RATE_LIMIT_REQUESTS")
     rate_limit_window: int = Field(default=60, alias="RATE_LIMIT_WINDOW")

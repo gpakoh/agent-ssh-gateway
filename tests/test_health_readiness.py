@@ -58,6 +58,8 @@ class TestHealthReadiness:
             mock_settings.persistent_sessions_enabled = False
             mock_settings.api_auth_enabled = True
             mock_settings.api_key = "test-key"
+            mock_settings.ssh_health_user = ""
+            mock_settings.ssh_health_password = ""
             mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
             mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
 
@@ -83,6 +85,8 @@ class TestHealthReadiness:
             mock_settings.persistent_sessions_enabled = False
             mock_settings.api_auth_enabled = True
             mock_settings.api_key = "test-key"
+            mock_settings.ssh_health_user = ""
+            mock_settings.ssh_health_password = ""
             mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
             mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
 
@@ -107,6 +111,8 @@ class TestHealthReadiness:
             mock_settings.redis_url = "redis://localhost:6379"
             mock_settings.persistent_sessions_enabled = True
             mock_settings.api_auth_enabled = False
+            mock_settings.ssh_health_user = ""
+            mock_settings.ssh_health_password = ""
             mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
             mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
 
@@ -133,6 +139,8 @@ class TestHealthReadiness:
             mock_settings.persistent_sessions_enabled = False
             mock_settings.api_auth_enabled = True
             mock_settings.api_key = ""
+            mock_settings.ssh_health_user = ""
+            mock_settings.ssh_health_password = ""
             mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
             mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
 
@@ -159,6 +167,8 @@ class TestHealthReadiness:
             mock_settings.persistent_sessions_enabled = False
             mock_settings.api_auth_enabled = True
             mock_settings.api_key = "test-key"
+            mock_settings.ssh_health_user = ""
+            mock_settings.ssh_health_password = ""
             mock_socket.create_connection.side_effect = OSError("Connection refused")
 
             with TestClient(app) as client:
@@ -184,6 +194,8 @@ class TestHealthReadiness:
             mock_settings.persistent_sessions_enabled = False
             mock_settings.api_auth_enabled = False
             mock_settings.api_key = ""
+            mock_settings.ssh_health_user = ""
+            mock_settings.ssh_health_password = ""
             mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
             mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
 

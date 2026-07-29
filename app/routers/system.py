@@ -35,6 +35,32 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 
+async def _deep_ssh_check(host: str, port: int) -> bool | None:
+    """SSH deep check: try to authenticate and run `true`.
+
+    Returns:
+        True  — SSH is fully functional.
+        False — SSH connection or command failed.
+        None  — not configured (no test credentials).
+    """
+    user = settings.ssh_health_user
+    password = settings.ssh_health_password
+    if not user:
+        return None
+    try:
+        import paramiko
+
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(host, port=port, username=user, password=password, timeout=5, allow_agent=False, look_for_keys=False)
+        _, stdout, _ = client.exec_command("true", timeout=5)
+        exit_code = stdout.channel.recv_exit_status()
+        client.close()
+        return exit_code == 0
+    except Exception:
+        return False
+
+
 @router.get("/health", tags=["system"], response_model=HealthResponse)
 async def health_check():
     """Health check endpoint.
@@ -53,12 +79,18 @@ async def health_check():
 
     ssh_host = os.environ.get("GATEWAY_SSH_HOST", "sshd")
     ssh_port = int(os.environ.get("GATEWAY_SSH_PORT", "22"))
-    ssh_ok = False
+
+    # TCP-level check (always)
+    ssh_tcp_ok = False
     try:
         with socket.create_connection((ssh_host, ssh_port), timeout=2):
-            ssh_ok = True
+            ssh_tcp_ok = True
     except (OSError, TimeoutError):
         pass
+
+    # Deep SSH check (only when test credentials configured)
+    ssh_deep_ok = await _deep_ssh_check(ssh_host, ssh_port)
+    ssh_ok = ssh_tcp_ok if ssh_deep_ok is None else ssh_deep_ok
 
     redis_degraded = not redis_ok and settings.redis_url
     sessions_degraded = settings.persistent_sessions_enabled and not persistent_sessions_ok
