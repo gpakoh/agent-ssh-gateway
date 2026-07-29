@@ -946,3 +946,252 @@ class TestDockerDestructiveInDockerAdminProfile:
     def test_compose_rm_force_blocked(self):
         d = evaluate_command_policy("docker-compose rm -f", mode="enforce", profile="docker-admin")
         assert d.allowed is False
+
+
+# ---------------------------------------------------------------------------
+# Scan tool tests
+# ---------------------------------------------------------------------------
+
+
+class TestScanTool:
+    """Tests for scan_command() which evaluates a command against all
+    registered destructive patterns and returns structured findings."""
+
+    def test_clean_command_returns_empty_report(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("ls -la")
+        assert r.total == 0
+        assert r.findings == ()
+
+    def test_docker_system_prune_found(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("docker system prune -a")
+        assert r.total == 1
+        f = r.findings[0]
+        assert f.pattern_name == "system-prune"
+        assert f.severity == "high"
+        assert "docker system prune" in f.reason.lower()
+
+    def test_docker_rm_force_found(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("docker rm -f my-container")
+        assert r.total == 1
+        f = r.findings[0]
+        assert f.pattern_name == "rm-force"
+        assert f.severity == "high"
+
+    def test_compose_down_volumes_found(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("docker-compose down -v")
+        assert r.total == 1
+        f = r.findings[0]
+        assert f.pattern_name == "down-volumes"
+        assert f.severity == "critical"
+
+    def test_compose_rm_force_found(self):
+        """docker-compose rm -f matches docker rm-force AND compose rm-force patterns.
+
+        The compose-specific finding is identified by medium severity
+        (docker rm-force is high).
+        """
+        from app.command_policy import scan_command
+
+        r = scan_command("docker-compose rm -f")
+        assert r.total >= 2, f"Expected >=2 findings (docker+compose), got {r.total}: {r.findings}"
+        severities = [f.severity for f in r.findings]
+        assert "medium" in severities, f"Expected medium (compose) severity in {severities}"
+
+    def test_docker_volume_prune_found(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("docker volume prune")
+        assert r.total == 1
+        f = r.findings[0]
+        assert f.pattern_name == "volume-prune"
+        assert f.severity == "high"
+
+    def test_docker_stop_all_found(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("docker stop $(docker ps -q)")
+        assert r.total == 1
+        f = r.findings[0]
+        assert f.pattern_name == "stop-all"
+
+    def test_multiple_docker_patterns_in_one_command(self):
+        """A single command may match multiple patterns (rare but possible)."""
+        from app.command_policy import scan_command
+
+        r = scan_command("docker system prune -a && docker volume rm data")
+        assert r.total >= 2, f"Expected >=2 findings, got {r.total}: {r.findings}"
+        names = {f.pattern_name for f in r.findings}
+        assert "system-prune" in names, f"system-prune not in {names}"
+        assert "volume-rm" in names, f"volume-rm not in {names}"
+
+    def test_report_is_frozen(self):
+        import pytest
+
+        from app.command_policy import ScanReport, scan_command
+
+        r = scan_command("ls")
+        with pytest.raises(AttributeError):
+            r.findings = ()  # type: ignore[misc]
+        assert isinstance(r, ScanReport)
+
+    def test_finding_is_frozen(self):
+        import pytest
+
+        from app.command_policy import ScanFinding
+
+        f = ScanFinding(pattern_name="test", severity="low", reason="test")
+        with pytest.raises(AttributeError):
+            f.pattern_name = "other"  # type: ignore[misc]
+
+    def test_finding_optional_suggestion(self):
+        from app.command_policy import ScanFinding
+
+        f = ScanFinding(pattern_name="test", severity="low", reason="test", suggestion="use --dry-run")
+        assert f.suggestion == "use --dry-run"
+
+    def test_finding_suggestion_none_by_default(self):
+        from app.command_policy import ScanFinding
+
+        f = ScanFinding(pattern_name="test", severity="low", reason="test")
+        assert f.suggestion is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — filesystem destructive pattern tests
+# ---------------------------------------------------------------------------
+
+
+class TestFilesystemScanTool:
+    """Tests for filesystem destructive patterns in scan_command()."""
+
+    def test_rm_rf_root_detected(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("rm -rf /")
+        names = {f.pattern_name for f in r.findings}
+        assert "rm-rf-root" in names, f"rm-rf-root not in {names}"
+
+    def test_rm_rf_root_with_asterisk(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("rm -rf /*")
+        names = {f.pattern_name for f in r.findings}
+        assert "rm-rf-root" in names
+
+    def test_rm_rf_root_long_flags(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("rm --recursive --force /")
+        names = {f.pattern_name for f in r.findings}
+        assert "rm-rf-root" in names
+
+    def test_rm_rf_root_separate_flags(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("rm -fr /")
+        names = {f.pattern_name for f in r.findings}
+        assert "rm-rf-root" in names
+
+    def test_rm_rf_sensitive_dirs(self):
+        from app.command_policy import scan_command
+
+        for sysdir in ("/etc", "/var", "/boot", "/usr", "/lib", "/bin", "/opt", "/root"):
+            r = scan_command(f"rm -rf {sysdir}")
+            names = {f.pattern_name for f in r.findings}
+            assert "rm-rf-sensitive" in names, (
+                f"rm-rf-sensitive not in {names} for {sysdir}"
+            )
+
+    def test_rm_rf_general_detected(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("rm -rf /home/user/data")
+        names = {f.pattern_name for f in r.findings}
+        assert "rm-rf" in names
+
+    def test_safe_rm_not_matched(self):
+        from app.command_policy import scan_command
+
+        for cmd in ("rm file.txt", "rm -f file.txt", "rm --verbose file.txt"):
+            r = scan_command(cmd)
+            assert r.total == 0, f"Expected 0 for {cmd!r}, got {r.findings}"
+
+    def test_find_delete_detected(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("find /tmp -type f -delete")
+        names = {f.pattern_name for f in r.findings}
+        assert "find-delete" in names
+
+    def test_find_exec_rm_detected(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("find /var -type f -exec rm {} +")
+        names = {f.pattern_name for f in r.findings}
+        assert "find-exec-rm" in names
+
+    def test_dd_block_device_detected(self):
+        from app.command_policy import scan_command
+
+        for dev in ("/dev/sda", "/dev/nvme0n1", "/dev/vda1", "/dev/mmcblk0"):
+            r = scan_command(f"dd if=/dev/zero of={dev} bs=1M")
+            names = {f.pattern_name for f in r.findings}
+            assert "dd-block-device" in names, f"not detected for {dev}"
+
+    def test_mkfs_detected(self):
+        from app.command_policy import scan_command
+
+        for cmd in ("mkfs.ext4 /dev/sda1", "mkfs -t xfs /dev/sdb", "mkfs.btrfs -f /dev/sdc"):
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            assert "mkfs-destructive" in names, f"not detected for {cmd!r}"
+
+    def test_shred_detected(self):
+        from app.command_policy import scan_command
+
+        for cmd in ("shred -u /etc/shadow", "shred --remove secret.key"):
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            assert "shred-destructive" in names, f"not detected for {cmd!r}"
+
+    def test_safe_find_not_matched(self):
+        from app.command_policy import scan_command
+
+        for cmd in ("find /tmp -type f", "find /var -name '*.log'"):
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            assert "find-delete" not in names
+            assert "find-exec-rm" not in names
+
+    def test_safe_dd_not_matched(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("dd if=/dev/zero of=/tmp/test.img bs=1M count=10")
+        names = {f.pattern_name for f in r.findings}
+        assert "dd-block-device" not in names, f"unexpected match: {r.findings}"
+
+    def test_rm_recursive_without_force_detected(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("rm -r /tmp/some-dir")
+        names = {f.pattern_name for f in r.findings}
+        assert "rm-recursive" in names
+
+    def test_filesystem_patterns_in_scan_manifest(self):
+        """Verify all filesystem pattern names appear in scan output when matched."""
+        from app.command_policy import scan_command
+
+        r = scan_command("rm -rf / && find / -delete && dd if=/dev/zero of=/dev/sda && mkfs.ext4 /dev/sdb1 && shred -u secret.key")
+        names = {f.pattern_name for f in r.findings}
+        expected = {"rm-rf-root", "rm-rf", "find-delete", "dd-block-device",
+                     "mkfs-destructive", "shred-destructive"}
+        for name in expected:
+            assert name in names, f"expected {name} in scan findings: {names}"

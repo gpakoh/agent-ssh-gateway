@@ -1,13 +1,14 @@
 {
   "mode": "mcp_client",
   "safe_mode": true,
-  "expected_safe_count": 74,
+  "expected_safe_count": 75,
   "expected_blocked_count": 29,
-  "expected_mcp_client_full_count": 103,
+  "expected_mcp_client_full_count": 104,
   "must_include": [
     "health",
     "info",
     "repo_status",
+    "scan_command",
     "tools_manifest"
   ],
   "must_exclude": [
