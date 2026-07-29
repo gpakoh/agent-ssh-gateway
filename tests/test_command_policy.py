@@ -1812,3 +1812,71 @@ class TestGitScanTool:
         for expected in ("git-push-force", "git-rebase", "git-commit-amend",
                           "git-filter-branch"):
             assert expected in names, f"expected {expected} in {names}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5d — firewall destructive pattern tests (iptables, ufw, nftables)
+# ---------------------------------------------------------------------------
+
+class TestFirewallScanTool:
+    """Tests for firewall destructive patterns (iptables, ufw, nftables)."""
+
+    @pytest.mark.parametrize("cmd,expected", [
+        # iptables
+        ("iptables -F", "iptables-flush"),
+        ("iptables --flush", "iptables-flush"),
+        ("iptables -t nat -F", "iptables-flush"),
+        ("iptables -P INPUT DROP", "iptables-policy-drop"),
+        ("iptables -P FORWARD DROP", "iptables-policy-drop"),
+        ("iptables -P OUTPUT DROP", "iptables-policy-drop"),
+        ("iptables -X", "iptables-delete-chains"),
+        ("iptables-restore /etc/iptables/rules.v4", "iptables-restore"),
+        ("ip6tables -F", "ip6tables-flush"),
+        ("iptables -A INPUT -j DROP", "iptables-insert-reject"),
+        ("iptables -I INPUT 1 -j REJECT", "iptables-insert-reject"),
+        ("iptables -I INPUT -j DROP", "iptables-insert-reject"),
+        # ufw
+        ("ufw disable", "ufw-disable"),
+        ("ufw --force disable", "ufw-disable"),
+        ("ufw reset", "ufw-reset"),
+        ("ufw default deny", "ufw-default-deny"),
+        ("ufw delete 1", "ufw-delete"),
+        ("ufw delete allow 22", "ufw-delete"),
+        # nftables
+        ("nft flush ruleset", "nft-flush-ruleset"),
+        ("nft delete table inet filter", "nft-delete-table"),
+        ("nft delete table ip nat", "nft-delete-table"),
+        ("nft -f /dev/stdin", "nft-load-stdin"),
+        ("nft -f -", "nft-load-stdin"),
+    ])
+    def test_firewall_destructive(self, cmd, expected):
+        from app.command_policy import scan_command
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    def test_safe_firewall_commands_not_matched(self):
+        from app.command_policy import scan_command
+
+        for cmd in ("iptables -L", "iptables -L -n -v", "iptables -S",
+                     "iptables --list-rules", "ip6tables -L",
+                     "ufw status", "ufw status verbose", "ufw enable",
+                     "ufw allow 22/tcp", "ufw allow ssh",
+                     "nft list ruleset", "nft list table inet filter",
+                     "nft -f /etc/nftables.conf",
+                     "ip addr show", "ip link set eth0 up",
+                     "ss -tulpn", "ping 8.8.8.8"):
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            fw_matches = [n for n in names if n.startswith(
+                ("iptables-", "ip6tables-", "ufw-", "nft-"))]
+            assert not fw_matches, f"False positive for {cmd!r}: {fw_matches}"
+
+    def test_firewall_combined_manifest(self):
+        from app.command_policy import scan_command
+
+        cmd = ("iptables -F && ufw disable && nft flush ruleset")
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        for expected in ("iptables-flush", "ufw-disable", "nft-flush-ruleset"):
+            assert expected in names, f"expected {expected} in {names}"
