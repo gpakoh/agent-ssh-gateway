@@ -90,7 +90,7 @@ class TestReadOnlyFallbackNoPathTraversal:
             lambda _: Path("/project"),
         )
         client = FakeClient()
-        result = _run_uv_tool(client, "proj", "pytest", "project_run_pytest", target=["/etc/passwd"])
+        result = _run_uv_tool(client, "proj", "pytest", "run_pytest", target=["/etc/passwd"])
 
         assert result["ok"] is True
         assert "etc/passwd" in str(call_log)
@@ -176,7 +176,7 @@ class TestRunUvToolContract:
         from mcp_client_tools import _run_uv_tool
         monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
         client = self._make_mock(exit_code=0, stdout="OK", stderr="")
-        result = _run_uv_tool(client, "proj", "pytest", "project_run_pytest", target=["."])
+        result = _run_uv_tool(client, "proj", "pytest", "run_pytest", target=["."])
         assert result["ok"] is True
         assert result["result"]["outcome"] == "passed"
         assert result["result"]["exit_code"] == 0
@@ -187,7 +187,7 @@ class TestRunUvToolContract:
         from mcp_client_tools import _run_uv_tool
         monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
         client = self._make_mock(exit_code=1, stdout="FAILED_TEST", stderr="1 failed")
-        result = _run_uv_tool(client, "proj", "pytest", "project_run_pytest", target=["."])
+        result = _run_uv_tool(client, "proj", "pytest", "run_pytest", target=["."])
         assert result["ok"] is False
         assert result["result"]["outcome"] == "failed"
         assert result["result"]["exit_code"] == 1
@@ -199,7 +199,7 @@ class TestRunUvToolContract:
         from mcp_client_tools import _run_uv_tool
         monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
         client = self._make_mock(exit_code=0, stdout="Success: no issues")
-        result = _run_uv_tool(client, "proj", "mypy", "project_run_mypy", target=["."])
+        result = _run_uv_tool(client, "proj", "mypy", "run_mypy", target=["."])
         assert result["ok"] is True
         assert result["result"]["outcome"] == "passed"
         assert result["result"]["exit_code"] == 0
@@ -208,7 +208,7 @@ class TestRunUvToolContract:
         from mcp_client_tools import _run_uv_tool
         monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
         client = self._make_mock(exit_code=1, stdout="", stderr="found 3 errors")
-        result = _run_uv_tool(client, "proj", "mypy", "project_run_mypy", target=["."])
+        result = _run_uv_tool(client, "proj", "mypy", "run_mypy", target=["."])
         assert result["ok"] is False
         assert result["result"]["outcome"] == "failed"
         assert result["result"]["exit_code"] == 1
@@ -220,7 +220,7 @@ class TestRunUvToolContract:
         from mcp_client_tools import _run_uv_tool
         monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
         client = self._make_mock()
-        result = _run_uv_tool(client, "proj", "pytest", "project_run_pytest", target=["../escape"])
+        result = _run_uv_tool(client, "proj", "pytest", "run_pytest", target=["../escape"])
         assert result["ok"] is False
         assert result["error"]["code"] == "POLICY_DENIED"
 
@@ -245,7 +245,7 @@ class TestRunUvToolContract:
             def execute_project_script(self, proj, script, timeout_s=300):
                 return {"exit_code": 0, "stdout": "fallback OK", "stderr": "", "execution_duration_ms": 456, "job_id": "j-fb"}
 
-        result = _run_uv_tool(_FB(), "proj", "pytest", "project_run_pytest", target=["."])
+        result = _run_uv_tool(_FB(), "proj", "pytest", "run_pytest", target=["."])
         assert result["ok"] is True
         assert result["result"]["outcome"] == "passed"
         assert result["result"]["exit_code"] == 0
@@ -272,7 +272,7 @@ class TestRunUvToolContract:
             def execute_project_script(self, proj, script, timeout_s=300):
                 return {"exit_code": 1, "stdout": "", "stderr": "2 failed", "execution_duration_ms": 456, "job_id": "j-fb"}
 
-        result = _run_uv_tool(_FB(), "proj", "pytest", "project_run_pytest", target=["."])
+        result = _run_uv_tool(_FB(), "proj", "pytest", "run_pytest", target=["."])
         assert result["ok"] is False
         assert result["result"]["outcome"] == "failed"
         assert result["result"]["exit_code"] == 1
@@ -288,9 +288,9 @@ class TestRunUvToolContract:
         client = self._make_mock(exit_code=1, stdout="", stderr="2 failed")
 
         def _call():
-            return _run_uv_tool(client, "proj", "pytest", "project_run_pytest", target=["."])
+            return _run_uv_tool(client, "proj", "pytest", "run_pytest", target=["."])
 
-        result = run_tool(tool="project_run_pytest", title="Test", fn=_call, success_text="Done")
+        result = run_tool(tool="run_pytest", title="Test", fn=_call, success_text="Done")
         assert result.get("isError") is True
         assert result["structuredContent"]["ok"] is False
         assert result["structuredContent"]["result"]["exit_code"] == 1

@@ -1,22 +1,22 @@
 {
   "mode": "mcp_client",
   "safe_mode": true,
-  "expected_safe_count": 84,
-  "expected_blocked_count": 30,
-  "expected_mcp_client_full_count": 111,
+  "expected_safe_count": 73,
+  "expected_blocked_count": 29,
+  "expected_mcp_client_full_count": 102,
   "must_include": [
     "health",
-    "project_info",
+    "info",
     "repo_status",
     "tools_manifest"
   ],
   "must_exclude": [
     "docker_compose_up",
     "docker_exec",
-    "project_apply_patch",
-    "project_run_agent",
-    "project_run_mimo",
-    "project_run_opencode",
+    "apply_patch",
+    "run_agent",
+    "run_mimo",
+    "run_opencode",
     "workspace_apply_patch",
     "workspace_file_write"
   ]

@@ -19,11 +19,11 @@ from tool_results import CONTRACT_VERSION, tool_error, tool_success  # noqa: E40
 
 GATEWAY_READ_TOOLS = [
     "health",
-    "project_working_directory",
-    "project_info",
-    "project_list_files",
-    "project_tree",
-    "project_list_tree",
+    "working_directory",
+    "info",
+    "list_files",
+    "tree",
+    "list_tree",
     "tools_manifest",
 ]
 
@@ -70,12 +70,12 @@ class TestGatewaySuccessEnvelope:
             "is_git_repo": True,
         }
         result = tool_success(
-            tool="project_info",
+            tool="info",
             result=payload,
             source="gateway",
             read_only=True,
         )
-        assert_tool_envelope(result, ok=True, tool="project_info", source="gateway")
+        assert_tool_envelope(result, ok=True, tool="info", source="gateway")
         assert result["result"] == payload
 
     def test_preserves_files_list_payload(self):
@@ -87,12 +87,12 @@ class TestGatewaySuccessEnvelope:
             "count": 2,
         }
         result = tool_success(
-            tool="project_list_files",
+            tool="list_files",
             result=payload,
             source="gateway",
             read_only=True,
         )
-        assert_tool_envelope(result, ok=True, tool="project_list_files", source="gateway")
+        assert_tool_envelope(result, ok=True, tool="list_files", source="gateway")
         assert result["result"] == payload
 
     def test_preserves_manifest_payload(self):
@@ -126,13 +126,13 @@ class TestGatewaySuccessEnvelope:
     def test_preserves_working_directory_payload(self):
         payload = {"stdout": "/data/projects/my-project\n", "stderr": "", "exit_code": 0}
         result = tool_success(
-            tool="project_working_directory",
+            tool="working_directory",
             result=payload,
             source="gateway",
             read_only=True,
         )
         assert_tool_envelope(
-            result, ok=True, tool="project_working_directory", source="gateway"
+            result, ok=True, tool="working_directory", source="gateway"
         )
         assert result["result"] == payload
         assert result["meta"].get("read_only") is True
@@ -167,7 +167,7 @@ class TestGatewayErrorEnvelope:
 
     def test_policy_violation(self):
         self._assert_gateway_error(
-            "project_working_directory", "POLICY_VIOLATION", retryable=False
+            "working_directory", "POLICY_VIOLATION", retryable=False
         )
 
     def test_error_for_each_tool(self):

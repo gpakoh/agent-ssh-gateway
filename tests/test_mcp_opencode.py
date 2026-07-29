@@ -74,7 +74,7 @@ class TestProjectRunOpencodeBlocked:
 
     def test_error_message_includes_safe_alternatives(self):
         """Error message suggests safe alternatives."""
-        with pytest.raises(CommandPolicyError, match="project_run_pytest"):
+        with pytest.raises(CommandPolicyError, match="run_pytest"):
             project_run_opencode(
                 _fake_run_cmd,
                 project="test",
@@ -111,7 +111,7 @@ class TestServerWrapperBlocked:
                 saved_modules[name] = sys.modules.pop(name)
         try:
             server = importlib.import_module("server")
-            tool_fn = getattr(server, "project_run_opencode", None)
+            tool_fn = getattr(server, "gateway_run_opencode", None)
             assert tool_fn is not None
 
             result = tool_fn(project="test", task_id="2026-06-25-fix-auth-opencode")

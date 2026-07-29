@@ -64,7 +64,7 @@ def main() -> int:
             check("blocked set non-empty", len(blocked) > 0, f"{len(blocked)} tools")
             check("no overlap", len(safe_tools & blocked) == 0)
 
-            for dangerous in ["project_run_opencode", "project_run_mimo", "project_run_agent",
+            for dangerous in ["run_opencode", "run_mimo", "run_agent",
                               "docker_exec", "docker_compose_up", "workspace_file_write",
                               "workspace_apply_patch"]:
                 check(f"{dangerous} excluded", dangerous not in safe_tools)

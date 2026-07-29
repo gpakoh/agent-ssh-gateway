@@ -199,7 +199,7 @@ class TestEnvelopeContract:
     def test_checks_failed_not_error(self):
         """Non-zero exit from a check tool is ok:true, outcome:failed — NOT an error."""
         result = tool_success(
-            tool="project_run_lint",
+            tool="run_lint",
             result={"outcome": "failed", "exit_code": 1, "stdout": "", "stderr": "lint errors"},
         )
         assert result["ok"] is True

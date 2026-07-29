@@ -211,7 +211,7 @@ class TestC1MCPToolRegistration:
 
     def test_patch_tool_has_instrumented_decorator(self):
         src = self._read_server_source()
-        assert '@register_tool("project_apply_patch")' in src
+        assert '@register_tool("apply_patch")' in src
 
     def test_write_tool_has_instrumented_decorator(self):
         src = self._read_server_source()

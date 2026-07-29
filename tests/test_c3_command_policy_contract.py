@@ -376,7 +376,7 @@ class TestMcpProjectRunPytest:
                             "examples.mcp_server.mcp_client_tools.build_command_result",
                             return_value={"outcome": "passed", "exit_code": 0},
                         ):
-                            from examples.mcp_server.mcp_client_tools import project_run_pytest
+                            from examples.mcp_server.mcp_client_tools import run_pytest as project_run_pytest
 
                             project_run_pytest(client, "myproj", ["tests/"])
 

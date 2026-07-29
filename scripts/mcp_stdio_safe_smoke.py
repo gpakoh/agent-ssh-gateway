@@ -17,14 +17,14 @@ ROOT = Path(__file__).resolve().parent.parent
 SERVER_PY = ROOT / "examples" / "mcp_server" / "server.py"
 
 BLOCKED_TOOLS = frozenset({
-    "project_run_opencode",
-    "project_run_mimo",
-    "project_run_agent",
+    "run_opencode",
+    "run_mimo",
+    "run_agent",
     "docker_exec",
     "docker_compose_up",
     "workspace_file_write",
     "workspace_apply_patch",
-    "project_apply_patch",
+    "apply_patch",
 })
 
 REQUIRED_TOOLS = frozenset({"health", "tools_manifest"})

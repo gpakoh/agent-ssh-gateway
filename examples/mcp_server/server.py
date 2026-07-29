@@ -37,49 +37,40 @@ from agent_tools import (
 )
 from command_policy import CommandPolicyError
 from docker_confirm import ConfirmAction, ConfirmStatus, ConfirmStore
-from gateway_client import GatewayClient, GatewayClientError, resolve_file_path
-from handoff import read_handoff, show_handoff_status, write_handoff_plan
+from gateway_client import GatewayClient, GatewayClientError
 from mcp.server.fastmcp import FastMCP
 from mcp_client_tools import (
+    commit_head,
+    current_branch,
+    find_files,
+    git_add,
+    git_commit,
+    git_diff,
+    git_diff_cached,
     git_diff_stat,
+    git_push,
     git_status,
-    project_commit_head,
-    project_current_branch,
-    project_find_files,
-    project_git_add,
-    project_git_commit,
-    project_git_diff,
-    project_git_diff_cached,
-    project_git_diff_stat,
-    project_git_push,
-    project_git_status,
-    project_info,
-    project_list_files,
-    project_list_tree,
-    project_read_file,
-    project_read_handoff,
-    project_recent_commits,
-    project_remotes,
-    project_run_compileall,
-    project_run_lint,
-    project_run_mypy,
-    project_run_pytest,
-    project_run_ruff,
-    project_run_tests,
-    project_search_text,
-    project_show_changes,
-    project_show_file_diff,
-    project_show_handoff_status,
-    project_tree,
-    project_working_directory,
-    project_write_handoff_plan,
+    info,
+    list_files,
+    list_tree,
+    read_file,
+    read_handoff,
     recent_commits,
+    remotes,
     run_compileall,
     run_lint,
+    run_mypy,
     run_project_command,
+    run_pytest,
+    run_ruff,
     run_tests,
+    search_text,
     show_changes,
+    show_file_diff,
+    show_handoff_status,
+    tree,
     working_directory,
+    write_handoff_plan,
 )
 from mimo_tools import (
     project_run_mimo as _project_run_mimo,
@@ -751,9 +742,9 @@ def gateway_execute_argv(
     )
 
 
-@register_tool("project_apply_patch")
-@instrumented("project_apply_patch")
-def gateway_project_apply_patch(
+@register_tool("apply_patch")
+@instrumented("apply_patch")
+def gateway_apply_patch(
     session_id: str,
     project: str,
     patch: str,
@@ -786,12 +777,12 @@ def gateway_project_apply_patch(
         )
     except GatewayClientError as e:
         return tool_error(
-            tool="project_apply_patch",
+            tool="apply_patch",
             code="TOOL_EXECUTION_FAILED",
             message=str(e),
         )
     return tool_success(
-        tool="project_apply_patch",
+        tool="apply_patch",
         result={
             "success": raw.get("success", False),
             "files_applied": raw.get("files_applied", 0),
@@ -896,26 +887,6 @@ def gateway_job_wait(job_id: str, timeout_sec: int | None = None) -> dict[str, A
     )
 
 
-@register_tool("read_file")
-def gateway_read_file(path: str, session_id: str | None = None) -> dict[str, Any]:
-    """Read a file through the gateway file API.
-
-    Relative paths are resolved under MCP_GATEWAY_PROJECT_ROOT.
-    Absolute paths must be under the project root.
-    """
-    resolved = resolve_file_path(path)
-
-    def _read() -> dict[str, Any]:
-        return client.read_file(resolved, session_id=session_id)
-
-    return run_tool(
-        tool="read_file",
-        title="Read file",
-        fn=_read,
-        success_text=f"File {resolved} read successfully.",
-    )
-
-
 @register_tool("repo_status")
 def gateway_repo_status(
     session_id: str | None = None, project: str | None = None
@@ -940,223 +911,135 @@ def gateway_repo_status(
 
 
 @register_tool("working_directory")
-def gateway_working_directory(session_id: str | None = None) -> dict[str, Any]:
-    """Print working directory on the SSH target."""
-    return run_tool(
-        tool="working_directory",
-        title="Working directory",
-        fn=lambda: working_directory(client, session_id=session_id),
-        success_text="Collected current working directory.",
-    )
-
-
-@register_tool("git_status")
-def gateway_git_status(session_id: str | None = None) -> dict[str, Any]:
-    """Show git working tree status (short format)."""
-    return run_tool(
-        tool="git_status",
-        title="Git status",
-        fn=lambda: git_status(client, session_id=session_id),
-        success_text="Collected git status.",
-    )
-
-
-@register_tool("recent_commits")
-def gateway_recent_commits(session_id: str | None = None) -> dict[str, Any]:
-    """List recent commits (git log --oneline -10)."""
-    return run_tool(
-        tool="recent_commits",
-        title="Recent commits",
-        fn=lambda: recent_commits(client, session_id=session_id),
-        success_text="Collected recent commits.",
-    )
-
-
-@register_tool("git_diff_stat")
-def gateway_git_diff_stat(session_id: str | None = None) -> dict[str, Any]:
-    """Show uncommitted diff stat (git diff --stat)."""
-    return run_tool(
-        tool="git_diff_stat",
-        title="Git diff stat",
-        fn=lambda: git_diff_stat(client, session_id=session_id),
-        success_text="Collected git diff stat.",
-    )
-
-
-@register_tool("show_changes")
-def gateway_show_changes(session_id: str | None = None, project: str | None = None) -> dict[str, Any]:
-    """Show combined git status and diff stat."""
-    return run_tool(
-        tool="show_changes",
-        title="Show changes",
-        fn=lambda: show_changes(client, session_id=session_id, project=project),
-        success_text="Collected repository change summary.",
-    )
-
-
-@register_tool("run_tests")
-def gateway_run_tests(session_id: str | None = None) -> dict[str, Any]:
-    """Run test suite (pytest -q)."""
-    return run_tool(
-        tool="run_tests",
-        title="Run tests",
-        fn=lambda: run_tests(client, session_id=session_id),
-        success_text="Ran test suite.",
-    )
-
-
-@register_tool("run_lint")
-def gateway_run_lint(session_id: str | None = None) -> dict[str, Any]:
-    """Run ruff linter on the project."""
-    return run_tool(
-        tool="run_lint",
-        title="Run lint",
-        fn=lambda: run_lint(client, session_id=session_id),
-        success_text="Ran lint checks.",
-    )
-
-
-@register_tool("run_compileall")
-def gateway_run_compileall(session_id: str | None = None) -> dict[str, Any]:
-    """Run Python compileall on the project."""
-    return run_tool(
-        tool="run_compileall",
-        title="Run compileall",
-        fn=lambda: run_compileall(client, session_id=session_id),
-        success_text="Ran Python compileall.",
-    )
-
-
-@register_tool("project_working_directory")
-def gateway_project_working_directory(project: str) -> dict[str, Any]:
+def gateway_working_directory(project: str) -> dict[str, Any]:
     """Print working directory within MCP_GATEWAY_PROJECT_ROOT/{project}."""
     return _run_gateway(
-        tool="project_working_directory",
-        fn=lambda: project_working_directory(client, project),
+        tool="working_directory",
+        fn=lambda: working_directory(client, project),
     )
 
 
-@register_tool("project_info")
-def gateway_project_info(project: str) -> dict[str, Any]:
+@register_tool("info")
+def gateway_info(project: str) -> dict[str, Any]:
     """Return resolved project metadata for a configured project name.
     Read-only. Does not execute user-provided shell commands.
     """
     return _run_gateway(
-        tool="project_info",
-        fn=lambda: project_info(client, project),
+        tool="info",
+        fn=lambda: info(client, project),
     )
 
 
-@register_tool("project_git_status")
-def gateway_project_git_status(project: str) -> dict[str, Any]:
+@register_tool("git_status")
+def gateway_git_status(project: str) -> dict[str, Any]:
     """Show git working tree status within a project directory."""
     return run_tool(
-        tool="project_git_status",
-        title="Project git status",
-        fn=lambda: project_git_status(client, project),
+        tool="git_status",
+        title="git status",
+        fn=lambda: git_status(client, project),
         success_text="Collected project git status.",
     )
 
 
-@register_tool("project_recent_commits")
-def gateway_project_recent_commits(project: str) -> dict[str, Any]:
+@register_tool("recent_commits")
+def gateway_recent_commits(project: str) -> dict[str, Any]:
     """List recent commits within a project (git log --oneline -10)."""
     return run_tool(
-        tool="project_recent_commits",
-        title="Project recent commits",
-        fn=lambda: project_recent_commits(client, project),
+        tool="recent_commits",
+        title="recent commits",
+        fn=lambda: recent_commits(client, project),
         success_text="Collected project recent commits.",
     )
 
 
-@register_tool("project_git_diff_stat")
-def gateway_project_git_diff_stat(project: str) -> dict[str, Any]:
+@register_tool("git_diff_stat")
+def gateway_git_diff_stat(project: str) -> dict[str, Any]:
     """Show uncommitted diff stat within a project."""
     return run_tool(
-        tool="project_git_diff_stat",
-        title="Project git diff stat",
-        fn=lambda: project_git_diff_stat(client, project),
+        tool="git_diff_stat",
+        title="git diff stat",
+        fn=lambda: git_diff_stat(client, project),
         success_text="Collected project git diff stat.",
     )
 
 
-@register_tool("project_show_changes")
-def gateway_project_show_changes(project: str) -> dict[str, Any]:
+@register_tool("show_changes")
+def gateway_show_changes(project: str) -> dict[str, Any]:
     """Show combined git status and diff stat within a project."""
     return run_tool(
-        tool="project_show_changes",
-        title="Project show changes",
-        fn=lambda: project_show_changes(client, project),
+        tool="show_changes",
+        title="show changes",
+        fn=lambda: show_changes(client, project),
         success_text="Collected project change summary.",
     )
 
 
-@register_tool("project_git_add")
-def gateway_project_git_add(project: str, paths: list[str]) -> dict[str, Any]:
+@register_tool("git_add")
+def gateway_git_add(project: str, paths: list[str]) -> dict[str, Any]:
     """Stage files for commit (git add)."""
     return run_tool(
-        tool="project_git_add",
-        title="Project git add",
-        fn=lambda: project_git_add(client, project, paths),
+        tool="git_add",
+        title="git add",
+        fn=lambda: git_add(client, project, paths),
         success_text="Staged files.",
     )
 
 
-@register_tool("project_git_commit")
-def gateway_project_git_commit(project: str, message: str) -> dict[str, Any]:
+@register_tool("git_commit")
+def gateway_git_commit(project: str, message: str) -> dict[str, Any]:
     """Commit staged changes with a message (git commit -m)."""
     return run_tool(
-        tool="project_git_commit",
-        title="Project git commit",
-        fn=lambda: project_git_commit(client, project, message),
+        tool="git_commit",
+        title="git commit",
+        fn=lambda: git_commit(client, project, message),
         success_text="Committed changes.",
     )
 
 
-@register_tool("project_git_push")
-def gateway_project_git_push(
+@register_tool("git_push")
+def gateway_git_push(
     project: str,
     remote: str = "origin",
     branch: str | None = None,
 ) -> dict[str, Any]:
     """Push commits to remote (git push)."""
     return run_tool(
-        tool="project_git_push",
-        title="Project git push",
-        fn=lambda: project_git_push(client, project, remote=remote, branch=branch),
+        tool="git_push",
+        title="git push",
+        fn=lambda: git_push(client, project, remote=remote, branch=branch),
         success_text="Pushed to remote.",
     )
 
 
-@register_tool("project_run_tests")
-def gateway_project_run_tests(project: str) -> dict[str, Any]:
+@register_tool("run_tests")
+def gateway_run_tests(project: str) -> dict[str, Any]:
     """Run test suite within a project (pytest -q)."""
     return run_tool(
-        tool="project_run_tests",
-        title="Project run tests",
-        fn=lambda: project_run_tests(client, project),
+        tool="run_tests",
+        title="run tests",
+        fn=lambda: run_tests(client, project),
         success_text="Ran project test suite.",
     )
 
 
-@register_tool("project_run_lint")
-def gateway_project_run_lint(project: str) -> dict[str, Any]:
+@register_tool("run_lint")
+def gateway_run_lint(project: str) -> dict[str, Any]:
     """Run ruff linter within a project."""
     return run_tool(
-        tool="project_run_lint",
-        title="Project run lint",
-        fn=lambda: project_run_lint(client, project),
+        tool="run_lint",
+        title="run lint",
+        fn=lambda: run_lint(client, project),
         success_text="Ran project lint checks.",
     )
 
 
-@register_tool("project_run_compileall")
-def gateway_project_run_compileall(project: str) -> dict[str, Any]:
+@register_tool("run_compileall")
+def gateway_run_compileall(project: str) -> dict[str, Any]:
     """Run Python compileall within a project."""
     return run_tool(
-        tool="project_run_compileall",
-        title="Project run compileall",
-        fn=lambda: project_run_compileall(client, project),
+        tool="run_compileall",
+        title="run compileall",
+        fn=lambda: run_compileall(client, project),
         success_text="Ran project Python compileall.",
     )
 
@@ -1164,198 +1047,198 @@ def gateway_project_run_compileall(project: str) -> dict[str, Any]:
 # ── Phase 2 project tools ─────────────────────────────────────────
 
 
-@register_tool("project_read_file")
-def gateway_project_read_file(project: str, path: str) -> dict[str, Any]:
+@register_tool("read_file")
+def gateway_read_file(project: str, path: str) -> dict[str, Any]:
     """Read a file within MCP_GATEWAY_PROJECT_ROOT/{project}."""
     return run_tool(
-        tool="project_read_file",
-        title="Project read file",
-        fn=lambda: project_read_file(client, project, path),
+        tool="read_file",
+        title="read file",
+        fn=lambda: read_file(client, project, path),
         success_text="Read project file.",
     )
 
 
-@register_tool("project_search_text")
-def gateway_project_search_text(
+@register_tool("search_text")
+def gateway_search_text(
     project: str, query: str, glob: str | None = None
 ) -> dict[str, Any]:
     """Search for text across project files using grep."""
     return run_tool(
-        tool="project_search_text",
-        title="Project search text",
-        fn=lambda: project_search_text(client, project, query, glob=glob),
+        tool="search_text",
+        title="search text",
+        fn=lambda: search_text(client, project, query, glob=glob),
         success_text="Searched project text.",
     )
 
 
-@register_tool("project_find_files")
-def gateway_project_find_files(project: str, pattern: str) -> dict[str, Any]:
+@register_tool("find_files")
+def gateway_find_files(project: str, pattern: str) -> dict[str, Any]:
     """Find files matching a glob pattern in the project."""
     return run_tool(
-        tool="project_find_files",
-        title="Project find files",
-        fn=lambda: project_find_files(project, pattern),
+        tool="find_files",
+        title="find files",
+        fn=lambda: find_files(project, pattern),
         success_text="Found project files.",
     )
 
 
-@register_tool("project_list_files")
-def gateway_project_list_files(project: str, pattern: str) -> dict[str, Any]:
+@register_tool("list_files")
+def gateway_list_files(project: str, pattern: str) -> dict[str, Any]:
     """List files matching a glob pattern using Python pathlib — no shell execution."""
     return _run_gateway(
-        tool="project_list_files",
-        fn=lambda: project_list_files(client, project, pattern),
+        tool="list_files",
+        fn=lambda: list_files(client, project, pattern),
     )
 
 
-@register_tool("project_tree")
-def gateway_project_tree(project: str, depth: int = 2, glob: str | None = None) -> dict[str, Any]:
+@register_tool("tree")
+def gateway_tree(project: str, depth: int = 2, glob: str | None = None) -> dict[str, Any]:
     """List project directory tree up to a given depth."""
     return _run_gateway(
-        tool="project_tree",
-        fn=lambda: project_tree(client, project, depth=depth, glob=glob),
+        tool="tree",
+        fn=lambda: tree(client, project, depth=depth, glob=glob),
     )
 
 
-@register_tool("project_list_tree")
-def gateway_project_list_tree(project: str, depth: int = 2) -> dict[str, Any]:
+@register_tool("list_tree")
+def gateway_list_tree(project: str, depth: int = 2) -> dict[str, Any]:
     """List project directory tree using Python pathlib — no shell execution."""
     return _run_gateway(
-        tool="project_list_tree",
-        fn=lambda: project_list_tree(client, project, depth=depth),
+        tool="list_tree",
+        fn=lambda: list_tree(client, project, depth=depth),
     )
 
 
-@register_tool("project_git_diff")
-def gateway_project_git_diff(project: str, path: str | None = None) -> dict[str, Any]:
+@register_tool("git_diff")
+def gateway_git_diff(project: str, path: str | None = None) -> dict[str, Any]:
     """Show git diff (uncommitted changes) in a project."""
     return run_tool(
-        tool="project_git_diff",
-        title="Project git diff",
-        fn=lambda: project_git_diff(client, project, path=path),
+        tool="git_diff",
+        title="git diff",
+        fn=lambda: git_diff(client, project, path=path),
         success_text="Collected project git diff.",
     )
 
 
-@register_tool("project_git_diff_cached")
-def gateway_project_git_diff_cached(project: str, path: str | None = None) -> dict[str, Any]:
+@register_tool("git_diff_cached")
+def gateway_git_diff_cached(project: str, path: str | None = None) -> dict[str, Any]:
     """Show git --cached diff (staged changes) in a project."""
     return run_tool(
-        tool="project_git_diff_cached",
-        title="Project git diff cached",
-        fn=lambda: project_git_diff_cached(client, project, path=path),
+        tool="git_diff_cached",
+        title="git diff cached",
+        fn=lambda: git_diff_cached(client, project, path=path),
         success_text="Collected project staged diff.",
     )
 
 
-@register_tool("project_show_file_diff")
-def gateway_project_show_file_diff(project: str, path: str) -> dict[str, Any]:
+@register_tool("show_file_diff")
+def gateway_show_file_diff(project: str, path: str) -> dict[str, Any]:
     """Show uncommitted diff for a specific file in the project."""
     return run_tool(
-        tool="project_show_file_diff",
-        title="Project show file diff",
-        fn=lambda: project_show_file_diff(client, project, path),
+        tool="show_file_diff",
+        title="show file diff",
+        fn=lambda: show_file_diff(client, project, path),
         success_text="Collected file diff.",
     )
 
 
-@register_tool("project_run_pytest")
-def gateway_project_run_pytest(project: str, target: str) -> dict[str, Any]:
+@register_tool("run_pytest")
+def gateway_run_pytest(project: str, target: str) -> dict[str, Any]:
     """Run pytest on a specific target within the project."""
     return run_tool(
-        tool="project_run_pytest",
-        title="Project run pytest",
-        fn=lambda: project_run_pytest(client, project, target),
+        tool="run_pytest",
+        title="run pytest",
+        fn=lambda: run_pytest(client, project, target),
         success_text="Ran project pytest.",
     )
 
 
-@register_tool("project_run_ruff")
-def gateway_project_run_ruff(project: str, target: str) -> dict[str, Any]:
+@register_tool("run_ruff")
+def gateway_run_ruff(project: str, target: str) -> dict[str, Any]:
     """Run ruff linter on a specific target within the project."""
     return run_tool(
-        tool="project_run_ruff",
-        title="Project run ruff",
-        fn=lambda: project_run_ruff(client, project, target),
+        tool="run_ruff",
+        title="run ruff",
+        fn=lambda: run_ruff(client, project, target),
         success_text="Ran project ruff check.",
     )
 
 
-@register_tool("project_run_mypy")
-def gateway_project_run_mypy(project: str, target: str) -> dict[str, Any]:
+@register_tool("run_mypy")
+def gateway_run_mypy(project: str, target: str) -> dict[str, Any]:
     """Run mypy type checker on a specific target within the project."""
     return run_tool(
-        tool="project_run_mypy",
-        title="Project run mypy",
-        fn=lambda: project_run_mypy(client, project, target),
+        tool="run_mypy",
+        title="run mypy",
+        fn=lambda: run_mypy(client, project, target),
         success_text="Ran project mypy.",
     )
 
 
-@register_tool("project_remotes")
-def gateway_project_remotes(project: str) -> dict[str, Any]:
+@register_tool("remotes")
+def gateway_remotes(project: str) -> dict[str, Any]:
     """List git remotes for the project."""
     return run_tool(
-        tool="project_remotes",
-        title="Project remotes",
-        fn=lambda: project_remotes(client, project),
+        tool="remotes",
+        title="remotes",
+        fn=lambda: remotes(client, project),
         success_text="Collected project remotes.",
     )
 
 
-@register_tool("project_current_branch")
-def gateway_project_current_branch(project: str) -> dict[str, Any]:
+@register_tool("current_branch")
+def gateway_current_branch(project: str) -> dict[str, Any]:
     """Show current git branch for the project."""
     return run_tool(
-        tool="project_current_branch",
-        title="Project current branch",
-        fn=lambda: project_current_branch(client, project),
+        tool="current_branch",
+        title="current branch",
+        fn=lambda: current_branch(client, project),
         success_text="Collected project current branch.",
     )
 
 
-@register_tool("project_commit_head")
-def gateway_project_commit_head(project: str) -> dict[str, Any]:
+@register_tool("commit_head")
+def gateway_commit_head(project: str) -> dict[str, Any]:
     """Show HEAD commit SHA for the project."""
     return run_tool(
-        tool="project_commit_head",
-        title="Project commit HEAD",
-        fn=lambda: project_commit_head(client, project),
+        tool="commit_head",
+        title="commit HEAD",
+        fn=lambda: commit_head(client, project),
         success_text="Collected project HEAD commit.",
     )
 
 
-@register_tool("project_read_handoff")
-def gateway_project_read_handoff(project: str) -> dict[str, Any]:
+@register_tool("read_handoff")
+def gateway_read_handoff(project: str) -> dict[str, Any]:
     """Read .ai-bridge handoff files for a project."""
     return run_tool(
-        tool="project_read_handoff",
-        title="Project read handoff",
-        fn=lambda: project_read_handoff(client, project),
+        tool="read_handoff",
+        title="read handoff",
+        fn=lambda: read_handoff(client, project),
         success_text="Read project handoff.",
     )
 
 
-@register_tool("project_write_handoff_plan")
-def gateway_project_write_handoff_plan(
+@register_tool("write_handoff_plan")
+def gateway_write_handoff_plan(
     project: str, task: str, agent: str = "opencode", notes: str | None = None
 ) -> dict[str, Any]:
     """Write .ai-bridge/current-plan.md for a project (requires MCP_GATEWAY_WRITE_MODE=handoff)."""
     return run_tool(
-        tool="project_write_handoff_plan",
-        title="Project write handoff",
-        fn=lambda: project_write_handoff_plan(client, project, task, agent=agent, notes=notes),
+        tool="write_handoff_plan",
+        title="write handoff",
+        fn=lambda: write_handoff_plan(client, project, task, agent=agent, notes=notes),
         success_text="Wrote project handoff plan.",
     )
 
 
-@register_tool("project_show_handoff_status")
-def gateway_project_show_handoff_status(project: str) -> dict[str, Any]:
+@register_tool("show_handoff_status")
+def gateway_show_handoff_status(project: str) -> dict[str, Any]:
     """Show .ai-bridge file listing for a project."""
     return run_tool(
-        tool="project_show_handoff_status",
-        title="Project handoff status",
-        fn=lambda: project_show_handoff_status(client, project),
+        tool="show_handoff_status",
+        title="handoff status",
+        fn=lambda: show_handoff_status(client, project),
         success_text="Checked project handoff status.",
     )
 
@@ -1399,50 +1282,6 @@ def gateway_diagnostics_latency() -> dict[str, Any]:
             "mcp": mcp_summary,
             "gateway": gw_data,
         },
-    )
-
-
-@register_tool("read_handoff")
-def gateway_read_handoff(session_id: str | None = None) -> dict[str, Any]:
-    """Read .ai-bridge handoff files."""
-    return run_tool(
-        tool="read_handoff",
-        title="Read handoff",
-        fn=lambda: read_handoff(client, session_id=session_id),
-        success_text="Read .ai-bridge handoff files.",
-    )
-
-
-@register_tool("show_handoff_status")
-def gateway_show_handoff_status(session_id: str | None = None) -> dict[str, Any]:
-    """Show compact handoff file availability."""
-    return run_tool(
-        tool="show_handoff_status",
-        title="Handoff status",
-        fn=lambda: show_handoff_status(client, session_id=session_id),
-        success_text="Collected .ai-bridge handoff status.",
-    )
-
-
-@register_tool("write_handoff_plan")
-def gateway_write_handoff_plan(
-    task: str,
-    agent: str = "opencode",
-    notes: str | None = None,
-    session_id: str | None = None,
-) -> dict[str, Any]:
-    """Write .ai-bridge/current-plan.md given a task description."""
-    return run_tool(
-        tool="write_handoff_plan",
-        title="Write handoff plan",
-        fn=lambda: write_handoff_plan(
-            client,
-            task=task,
-            agent=agent,
-            notes=notes,
-            session_id=session_id,
-        ),
-        success_text="Wrote .ai-bridge/current-plan.md.",
     )
 
 
@@ -2679,8 +2518,8 @@ async def query_docs(libraryId: str, query: str) -> str:
 # ── Agent Handoff v2 tools ──────────────────────────────────────────
 
 
-@register_tool("project_write_agent_task")
-def gateway_project_write_agent_task(
+@register_tool("write_agent_task")
+def gateway_write_agent_task(
     project: str,
     task_id: str,
     agent: str,
@@ -2714,18 +2553,18 @@ def gateway_project_write_agent_task(
         )
 
     return run_tool(
-        tool="project_write_agent_task",
+        tool="write_agent_task",
         title="Write agent task",
         fn=_fn,
         success_text="Wrote agent task.",
     )
 
 
-@register_tool("project_read_agent_status")
-def gateway_project_read_agent_status(project: str, task_id: str) -> dict[str, Any]:
+@register_tool("read_agent_status")
+def gateway_read_agent_status(project: str, task_id: str) -> dict[str, Any]:
     """Read .ai-bridge/tasks/<task_id>/agent-status.md."""
     return run_tool(
-        tool="project_read_agent_status",
+        tool="read_agent_status",
         title="Read agent status",
         fn=lambda: _read_agent_task_file(
             lambda p, c: run_project_command(client, p, c),
@@ -2737,11 +2576,11 @@ def gateway_project_read_agent_status(project: str, task_id: str) -> dict[str, A
     )
 
 
-@register_tool("project_read_agent_report")
-def gateway_project_read_agent_report(project: str, task_id: str) -> dict[str, Any]:
+@register_tool("read_agent_report")
+def gateway_read_agent_report(project: str, task_id: str) -> dict[str, Any]:
     """Read .ai-bridge/tasks/<task_id>/agent-report.md."""
     return run_tool(
-        tool="project_read_agent_report",
+        tool="read_agent_report",
         title="Read agent report",
         fn=lambda: _read_agent_task_file(
             lambda p, c: run_project_command(client, p, c),
@@ -2753,11 +2592,11 @@ def gateway_project_read_agent_report(project: str, task_id: str) -> dict[str, A
     )
 
 
-@register_tool("project_read_agent_diff")
-def gateway_project_read_agent_diff(project: str, task_id: str) -> dict[str, Any]:
+@register_tool("read_agent_diff")
+def gateway_read_agent_diff(project: str, task_id: str) -> dict[str, Any]:
     """Read .ai-bridge/tasks/<task_id>/implementation-diff.patch."""
     return run_tool(
-        tool="project_read_agent_diff",
+        tool="read_agent_diff",
         title="Read agent diff",
         fn=lambda: _read_agent_task_file(
             lambda p, c: run_project_command(client, p, c),
@@ -2769,11 +2608,11 @@ def gateway_project_read_agent_diff(project: str, task_id: str) -> dict[str, Any
     )
 
 
-@register_tool("project_list_agent_tasks")
-def gateway_project_list_agent_tasks(project: str) -> dict[str, Any]:
+@register_tool("list_agent_tasks")
+def gateway_list_agent_tasks(project: str) -> dict[str, Any]:
     """List task directories under .ai-bridge/tasks/."""
     return run_tool(
-        tool="project_list_agent_tasks",
+        tool="list_agent_tasks",
         title="List agent tasks",
         fn=lambda: _list_agent_tasks(
             lambda p, c: run_project_command(client, p, c),
@@ -2783,11 +2622,11 @@ def gateway_project_list_agent_tasks(project: str) -> dict[str, Any]:
     )
 
 
-@register_tool("project_archive_agent_task")
-def gateway_project_archive_agent_task(project: str, task_id: str) -> dict[str, Any]:
+@register_tool("archive_agent_task")
+def gateway_archive_agent_task(project: str, task_id: str) -> dict[str, Any]:
     """Move .ai-bridge/tasks/<task_id>/ -> .ai-bridge/archive/<task_id>/."""
     return run_tool(
-        tool="project_archive_agent_task",
+        tool="archive_agent_task",
         title="Archive agent task",
         fn=lambda: _archive_agent_task(
             lambda p, c: run_project_command(client, p, c),
@@ -2798,8 +2637,8 @@ def gateway_project_archive_agent_task(project: str, task_id: str) -> dict[str, 
     )
 
 
-@register_tool("project_run_opencode")
-def project_run_opencode(
+@register_tool("run_opencode")
+def gateway_run_opencode(
     project: str,
     task_id: str,
     model: str | None = None,
@@ -2810,7 +2649,7 @@ def project_run_opencode(
 
     assert_handoff_write_allowed()
     return run_tool(
-        tool="project_run_opencode",
+        tool="run_opencode",
         title="Run opencode task",
         fn=lambda: _project_run_opencode(
             lambda p, c: run_project_command(client, p, c),
@@ -2822,8 +2661,8 @@ def project_run_opencode(
     )
 
 
-@register_tool("project_run_mimo")
-def gateway_project_run_mimo(
+@register_tool("run_mimo")
+def gateway_run_mimo(
     project: str,
     task_id: str,
     model: str | None = None,
@@ -2835,7 +2674,7 @@ def gateway_project_run_mimo(
 
     assert_handoff_write_allowed()
     return run_tool(
-        tool="project_run_mimo",
+        tool="run_mimo",
         title="Run mimo task",
         fn=lambda: _project_run_mimo(
             lambda p, c: run_project_command(client, p, c),
@@ -2847,8 +2686,8 @@ def gateway_project_run_mimo(
     )
 
 
-@register_tool("project_run_agent")
-def gateway_project_run_agent(
+@register_tool("run_agent")
+def gateway_run_agent(
     project: str,
     task_id: str,
     model: str | None = None,
@@ -2860,7 +2699,7 @@ def gateway_project_run_agent(
 
     assert_handoff_write_allowed()
     return run_tool(
-        tool="project_run_agent",
+        tool="run_agent",
         title="Run agent task (router)",
         fn=lambda: _project_run_agent(
             lambda p, c: run_project_command(client, p, c),

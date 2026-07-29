@@ -77,7 +77,7 @@ def main() -> int:
 
     # Verify key blocked tools are absent
     required_blocked = {
-        "project_run_opencode", "project_run_mimo", "project_run_agent",
+        "run_opencode", "run_mimo", "run_agent",
         "docker_exec", "docker_compose_up", "workspace_file_write",
         "workspace_apply_patch",
     }

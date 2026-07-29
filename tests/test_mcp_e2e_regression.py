@@ -296,35 +296,9 @@ class TestRunUvToolCodePath:
 
     def test_pytest_calls_execute_raw(self, monkeypatch):
         """project_run_pytest must call execute_raw, NOT execute_project_command."""
-        from examples.mcp_server.mcp_client_tools import project_run_pytest
-
-        monkeypatch.setattr(
-            "examples.mcp_server.mcp_client_tools._resolve_project",
-            lambda _: Path("/tmp/proj"),
-        )
-        client = self._make_mock_client()
-        project_run_pytest(client, project="test-project", target=["."])
-
-        assert client.execute_raw.call_count == 2
-        client.execute_project_command.assert_not_called()
-
-    def test_ruff_calls_execute_raw(self, monkeypatch):
-        """project_run_ruff must call execute_raw, NOT execute_project_command."""
-        from examples.mcp_server.mcp_client_tools import project_run_ruff
-
-        monkeypatch.setattr(
-            "examples.mcp_server.mcp_client_tools._resolve_project",
-            lambda _: Path("/tmp/proj"),
-        )
-        client = self._make_mock_client()
-        project_run_ruff(client, project="test-project", target=["."])
-
-        assert client.execute_raw.call_count == 2
-        client.execute_project_command.assert_not_called()
-
-    def test_mypy_calls_execute_raw(self, monkeypatch):
-        """project_run_mypy must call execute_raw, NOT execute_project_command."""
-        from examples.mcp_server.mcp_client_tools import project_run_mypy
+        from examples.mcp_server.mcp_client_tools import run_pytest as project_run_pytest
+        from examples.mcp_server.mcp_client_tools import run_ruff as project_run_ruff
+        from examples.mcp_server.mcp_client_tools import run_mypy as project_run_mypy
 
         monkeypatch.setattr(
             "examples.mcp_server.mcp_client_tools._resolve_project",

@@ -29,7 +29,7 @@ def _fake_run_cmd(project: str, command: str) -> dict:
 
 
 class TestProjectRunMimoBlocked:
-    """project_run_mimo is hard-blocked — --dangerously-skip-permissions not allowed."""
+    """run_mimo is hard-blocked — --dangerously-skip-permissions not allowed."""
 
     def test_raises_command_policy_error(self):
         """Must raise CommandPolicyError, never execute."""
@@ -83,7 +83,7 @@ class TestProjectRunMimoBlocked:
 
     def test_error_message_includes_safe_alternatives(self):
         """Error message suggests safe alternatives."""
-        with pytest.raises(CommandPolicyError, match="project_run_pytest"):
+        with pytest.raises(CommandPolicyError, match="run_pytest"):
             project_run_mimo(
                 _fake_run_cmd,
                 project="test",
@@ -128,7 +128,7 @@ class TestServerWrapperBlocked:
                 saved_modules[name] = sys.modules.pop(name)
         try:
             server = importlib.import_module("server")
-            tool_fn = getattr(server, "gateway_project_run_mimo", None)
+            tool_fn = getattr(server, "gateway_run_mimo", None)
             assert tool_fn is not None
 
             result = tool_fn(project="test", task_id=TASK_ID)
@@ -156,7 +156,7 @@ class TestToolRegistration:
         monkeypatch.syspath_prepend(str(example_dir))
         sys.modules.pop("tool_modes", None)
         tm = importlib.import_module("tool_modes")
-        assert tm.should_register_tool("project_run_mimo") is True
+        assert tm.should_register_tool("run_mimo") is True
 
     def test_visible_in_tools_for_mcp_client(self, monkeypatch):
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
@@ -169,4 +169,4 @@ class TestToolRegistration:
         sys.modules.pop("tool_modes", None)
         tm = importlib.import_module("tool_modes")
         tools = tm.tools_for_mode()
-        assert "project_run_mimo" in tools
+        assert "run_mimo" in tools
