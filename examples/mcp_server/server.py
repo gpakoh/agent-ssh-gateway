@@ -46,9 +46,12 @@ from mcp_client_tools import (
     project_commit_head,
     project_current_branch,
     project_find_files,
+    project_git_add,
+    project_git_commit,
     project_git_diff,
     project_git_diff_cached,
     project_git_diff_stat,
+    project_git_push,
     project_git_status,
     project_info,
     project_list_files,
@@ -1085,6 +1088,43 @@ def gateway_project_show_changes(project: str) -> dict[str, Any]:
         title="Project show changes",
         fn=lambda: project_show_changes(client, project),
         success_text="Collected project change summary.",
+    )
+
+
+@register_tool("project_git_add")
+def gateway_project_git_add(project: str, paths: list[str]) -> dict[str, Any]:
+    """Stage files for commit (git add)."""
+    return run_tool(
+        tool="project_git_add",
+        title="Project git add",
+        fn=lambda: project_git_add(client, project, paths),
+        success_text="Staged files.",
+    )
+
+
+@register_tool("project_git_commit")
+def gateway_project_git_commit(project: str, message: str) -> dict[str, Any]:
+    """Commit staged changes with a message (git commit -m)."""
+    return run_tool(
+        tool="project_git_commit",
+        title="Project git commit",
+        fn=lambda: project_git_commit(client, project, message),
+        success_text="Committed changes.",
+    )
+
+
+@register_tool("project_git_push")
+def gateway_project_git_push(
+    project: str,
+    remote: str = "origin",
+    branch: str | None = None,
+) -> dict[str, Any]:
+    """Push commits to remote (git push)."""
+    return run_tool(
+        tool="project_git_push",
+        title="Project git push",
+        fn=lambda: project_git_push(client, project, remote=remote, branch=branch),
+        success_text="Pushed to remote.",
     )
 
 
