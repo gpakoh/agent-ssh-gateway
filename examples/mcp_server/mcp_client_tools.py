@@ -462,6 +462,7 @@ def _build_readonly_fallback_script(
 
     lines = [
         "set -eu",
+        f"export WORKSPACE_REGISTRY_ROOT={shlex.quote(project_dir)}",
         f"mkdir -p {tmp_root}",
         f"cp {project_dir}/pyproject.toml {tmp_root}/pyproject.toml.new",
         f"echo 3.12 > {tmp_root}/.python-version",

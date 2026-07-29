@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -34,9 +35,12 @@ def set_registry_root(path: str | Path) -> None:
 
 
 def get_registry_root() -> Path:
-    if _registry_root is None:
-        return Path.cwd()
-    return _registry_root
+    if _registry_root is not None:
+        return _registry_root
+    env_root = os.environ.get("WORKSPACE_REGISTRY_ROOT", "")
+    if env_root:
+        return Path(env_root).resolve()
+    return Path.cwd()
 
 
 # ── Default hidden / vendor / cache patterns ──────────────────────
