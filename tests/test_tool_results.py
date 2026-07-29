@@ -310,6 +310,8 @@ class TestErrorCodes:
             "DANGEROUS_PERMISSIONS_BLOCKED",
             "CHECK_FAILED",
             "PROJECT_NOT_FOUND",
+            "READ_ERROR",
+            "PATTERN_NOT_FOUND",
         }
         assert ERROR_CODES == known
 

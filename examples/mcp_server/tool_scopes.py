@@ -61,6 +61,8 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "tools_manifest": ["mcp:read"],
     "project_list": ["mcp:read"],
     "scan_command": ["mcp:read", "mcp:project"],
+    "scan_file": ["mcp:read", "mcp:project"],
+    "explain_pattern": ["mcp:read"],
     "list_sessions": ["mcp:read"],
     "session_health": ["mcp:read"],
     "execute_restricted": ["mcp:execute"],
