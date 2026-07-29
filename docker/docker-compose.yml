@@ -85,7 +85,7 @@ services:
     networks:
       internal_net: {}
     ports:
-      - "8085:8085"
+      - "127.0.0.1:8085:8085"
     environment:
       - UVICORN_HOST=0.0.0.0
       - UVICORN_PORT=8085
@@ -94,7 +94,7 @@ services:
       - AGENT_TOKEN=${AGENT_TOKEN:?set AGENT_TOKEN}
       - AGENT_TOKEN_TTL=${AGENT_TOKEN_TTL:-0}
       - AGENT_TOKEN_SCOPES=["ssh:connect","ssh:execute","ssh:files","ssh:disconnect","ssh:port-check","jobs:read"]
-      - SSH_STRICT_HOST_KEY_CHECKING=false
+      - SSH_STRICT_HOST_KEY_CHECKING=true
       - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET}
       - AUTH_DB_PATH=/app/data/auth.sqlite3
       - JWT_EXPIRES_MINUTES=${JWT_EXPIRES_MINUTES:-1440}
