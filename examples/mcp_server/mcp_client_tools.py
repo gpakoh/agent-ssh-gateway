@@ -879,6 +879,36 @@ def project_show_changes(client: GatewayClient, project: str) -> dict[str, Any]:
     }
 
 
+def project_git_add(
+    client: GatewayClient,
+    project: str,
+    paths: list[str],
+) -> dict[str, Any]:
+    quoted = " ".join(shlex.quote(p) for p in paths)
+    return run_project_command(client, project, f"git add {quoted}")
+
+
+def project_git_commit(
+    client: GatewayClient,
+    project: str,
+    message: str,
+) -> dict[str, Any]:
+    return run_project_command(client, project, f"git commit -m {shlex.quote(message)}")
+
+
+def project_git_push(
+    client: GatewayClient,
+    project: str,
+    remote: str = "origin",
+    branch: str | None = None,
+) -> dict[str, Any]:
+    if branch is None:
+        cmd = f"git push {shlex.quote(remote)}"
+    else:
+        cmd = f"git push {shlex.quote(remote)} {shlex.quote(branch)}"
+    return run_project_command(client, project, cmd)
+
+
 def project_run_tests(client: GatewayClient, project: str) -> dict[str, Any]:
     return _run_uv_tool(client, project, "pytest", "project_run_tests", ["."])
 
