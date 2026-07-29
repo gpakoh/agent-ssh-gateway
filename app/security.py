@@ -173,9 +173,9 @@ def validate_path(path: str, base_path: str | None = None) -> str:
         resolved_base = _Path(base_path).resolve()
         try:
             resolved.relative_to(resolved_base)
-        except ValueError:
+        except ValueError as err:
             logger.warning("Blocked path outside base: %s (base: %s)", path, base_path)
-            raise ValueError("Path is outside allowed directory")
+            raise ValueError("Path is outside allowed directory") from err
 
     return path
 
