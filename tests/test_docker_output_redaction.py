@@ -44,62 +44,28 @@ SAMPLE_INSPECT = {
 }
 
 
-def test_redacts_token_env():
+def test_strips_config_env_entirely():
+    """Config.Env is stripped entirely from docker inspect output."""
     sanitized = _client()._sanitize_inspect_output(json.dumps(SAMPLE_INSPECT))
     data = json.loads(sanitized)
-    env = data["Config"]["Env"]
-    assert "TOKEN=<redacted>" in env
-    assert "TOKEN=sk-abc123def456" not in env
+    assert "Env" not in data.get("Config", {})
 
 
-def test_redacts_secret_env():
+def test_redacts_hostconfig_binds():
+    """HostConfig.Binds should be redacted (host paths exposed)."""
     sanitized = _client()._sanitize_inspect_output(json.dumps(SAMPLE_INSPECT))
     data = json.loads(sanitized)
-    env = data["Config"]["Env"]
-    assert "SECRET=<redacted>" in env
-    assert "SECRET=super-secret-value" not in env
+    assert data["HostConfig"]["Binds"] == ["<redacted>"]
+    assert "/host/path" not in sanitized
 
 
-def test_redacts_password_env():
+def test_keeps_other_config_fields():
+    """Non-secret config fields survive sanitization."""
     sanitized = _client()._sanitize_inspect_output(json.dumps(SAMPLE_INSPECT))
     data = json.loads(sanitized)
-    env = data["Config"]["Env"]
-    assert "PASSWORD=<redacted>" in env
-    assert "PASSWORD=hunter2" not in env
-
-
-def test_redacts_jwt_env():
-    sanitized = _client()._sanitize_inspect_output(json.dumps(SAMPLE_INSPECT))
-    data = json.loads(sanitized)
-    env = data["Config"]["Env"]
-    assert "JWT=<redacted>" in env
-    assert "eyJhbGciOiJIUzI1NiJ9" not in json.dumps(env)
-
-
-def test_redacts_api_key_env():
-    sanitized = _client()._sanitize_inspect_output(json.dumps(SAMPLE_INSPECT))
-    data = json.loads(sanitized)
-    env = data["Config"]["Env"]
-    assert "API_KEY=<redacted>" in env
-    assert "API_KEY=abcdef123456" not in env
-
-
-def test_redacts_pgpassword_env():
-    sanitized = _client()._sanitize_inspect_output(json.dumps(SAMPLE_INSPECT))
-    data = json.loads(sanitized)
-    env = data["Config"]["Env"]
-    assert "PGPASSWORD=<redacted>" in env
-    # 'PGPASSWORD' contains 'PASS' — should match
-    assert "PGPASSWORD=db_secret_123" not in env
-
-
-def test_keeps_benign_env():
-    sanitized = _client()._sanitize_inspect_output(json.dumps(SAMPLE_INSPECT))
-    data = json.loads(sanitized)
-    env = data["Config"]["Env"]
-    assert "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" in env
-    assert "MY_VAR=hello_world" in env
-    assert "SOME_PATH=/safe/path" in env
+    assert data["Id"] == "abc123"
+    assert data["Name"] == "/test-container"
+    assert data["NetworkSettings"]["Ports"]["80/tcp"] is None
 
 
 def test_redacts_sensitive_dict_keys():
