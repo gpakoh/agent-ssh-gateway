@@ -562,6 +562,232 @@ _COMPILED_COMPOSE_PATTERNS: list[tuple[re.Pattern, DestructivePattern]] = [
     (re.compile(p.regex, re.IGNORECASE), p) for p in COMPOSE_DESTRUCTIVE_PATTERNS
 ]
 
+# ---------------------------------------------------------------------------
+# DCG-ported destructive filesystem patterns
+# ---------------------------------------------------------------------------
+
+FILESYSTEM_DESTRUCTIVE_PATTERNS: tuple[DestructivePattern, ...] = (
+    DestructivePattern(
+        name="rm-rf-root",
+        regex=r"\brm\b.*(?:-[a-zA-Z0-9]*(?:r[a-zA-Z0-9]*f|f[a-zA-Z0-9]*r)"
+        r"|--recursive\s+--force|--force\s+--recursive)"
+        r'\s+["\']?(?:/|/\*)["\']?(?:\s|&&|\|\||;|\||$|#)',
+        reason="rm -rf targeting root filesystem (/) will DESTROY THE OPERATING SYSTEM",
+        severity=Severity.CRITICAL,
+        description="Recursive force-delete on / wipes the entire filesystem. "
+        "In a container this is unrecoverable without rebuild. In Docker it "
+        "destroys the container's writable layer including application data.",
+        suggestions=(
+            PatternSuggestion(
+                "rm -rf /path/to/specific/directory",
+                "Always target specific directories, never the root filesystem",
+            ),
+            PatternSuggestion(
+                "ls -la /important/path",
+                "Verify what you intend to delete before running rm",
+            ),
+            PatternSuggestion(
+                "find / -maxdepth 1 | head -20",
+                "List top-level directories before considering deletion",
+            ),
+        ),
+    ),
+    DestructivePattern(
+        name="rm-rf-sensitive",
+        regex=r"\brm\b.*(?:-[a-zA-Z0-9]*(?:r[a-zA-Z0-9]*f|f[a-zA-Z0-9]*r)"
+        r"|--recursive\s+--force|--force\s+--recursive)"
+        r'\s+/'
+        r"(?:etc(?=[ /\t]|$)|var(?=[ /\t]|$)|boot(?=[ /\t]|$)|dev(?=[ /\t]|$)"
+        r"|proc(?=[ /\t]|$)|sys(?=[ /\t]|$)|usr(?=[ /\t]|$)"
+        r"|lib(?=[ /\t]|$)|bin(?=[ /\t]|$)|sbin(?=[ /\t]|$)"
+        r"|opt(?=[ /\t]|$)|root(?=[ /\t]|$))",
+        reason="rm -rf targeting a system-critical directory (/{path}) "
+        "will BREAK the operating system or container",
+        severity=Severity.CRITICAL,
+        description="System directories like /etc, /var, /usr contain critical files. "
+        "Deleting them will break applications, networking, package management, or ssh.",
+        suggestions=(
+            PatternSuggestion(
+                "rm -rf /tmp/specific/subdir",
+                "Use /tmp for temporary deletions (safe temp directory)",
+            ),
+            PatternSuggestion(
+                "ls -la /etc/specific-path",
+                "List the directory before considering any deletion",
+            ),
+            PatternSuggestion(
+                "cp -a /etc /etc.bak && rm -rf /etc/specific-path",
+                "Backup first, then remove only the specific sub-path",
+            ),
+        ),
+    ),
+    DestructivePattern(
+        name="rm-rf",
+        regex=r"\brm\b.*(?:-[a-zA-Z0-9]*(?:r[a-zA-Z0-9]*f|f[a-zA-Z0-9]*r)"
+        r"|--recursive\s+--force|--force\s+--recursive)",
+        reason="rm -rf is destructive — recursively forces deletion without confirmation",
+        severity=Severity.HIGH,
+        description="Recursive force-delete is the most dangerous filesystem command. "
+        "Use interactive removal or trash for safety.",
+        suggestions=(
+            PatternSuggestion(
+                "rm -ri {path}",
+                "Interactive mode: confirms each file before deletion",
+            ),
+            PatternSuggestion(
+                "ls -la {path}",
+                "List directory contents to verify before deletion",
+            ),
+            PatternSuggestion(
+                "mv {path} /tmp/delete-me-$(date +%s)",
+                "Move to temp area instead of deleting immediately",
+            ),
+            PatternSuggestion(
+                "find {path} -type f | head -20",
+                "Preview files that would be deleted",
+            ),
+        ),
+    ),
+    DestructivePattern(
+        name="rm-recursive",
+        regex=r"\brm\b.*\s+(?:-(?:[a-zA-Z]*[rR][a-zA-Z]*)|--recursive)(?:\s|$)",
+        reason="Recursive rm can silently remove an entire directory tree",
+        severity=Severity.MEDIUM,
+        description="Recursive rm without --force is less aggressive but still "
+        "deletes entire directory trees without individual file prompts.",
+        suggestions=(
+            PatternSuggestion(
+                "rm -ri {path}",
+                "Add -i for interactive confirmation per file",
+            ),
+            PatternSuggestion(
+                "ls -laR {path}",
+                "Recursively list all contents before deleting",
+            ),
+            PatternSuggestion(
+                "mv {path} /tmp/delete-me",
+                "Move to /tmp instead of immediate deletion",
+            ),
+        ),
+    ),
+    DestructivePattern(
+        name="find-delete",
+        regex=r"\bfind\b.*\s+-delete\b",
+        reason="find -delete recursively removes files matching the search — "
+        "bytewise equivalent to rm -rf on the matching tree",
+        severity=Severity.HIGH,
+        description="find -delete silently removes every matched file. "
+        "Combine with -print to preview; never use on system directories.",
+        suggestions=(
+            PatternSuggestion(
+                "find /tmp -type f | head -20",
+                "Preview files before adding -delete",
+            ),
+            PatternSuggestion(
+                "find /tmp -type f -print -delete",
+                "Use -print to log every deleted file",
+            ),
+            PatternSuggestion(
+                "find /tmp -type f | wc -l",
+                "Count files that would be deleted before proceeding",
+            ),
+        ),
+    ),
+    DestructivePattern(
+        name="find-exec-rm",
+        regex=r"\bfind\b.*\s+-exec\b.*\brm\b",
+        reason="find -exec rm runs rm on every matched file — bulk deletion",
+        severity=Severity.HIGH,
+        description="find combined with -exec rm deletes every file matched by "
+        "the find expression. Particularly dangerous with -prune or -type.",
+        suggestions=(
+            PatternSuggestion(
+                "find /tmp -type f | head -20",
+                "Preview files first, then add -exec rm",
+            ),
+            PatternSuggestion(
+                "find /tmp -type f -ok rm {} \\;",
+                "Use -ok for confirmation prompts",
+            ),
+            PatternSuggestion(
+                "find /tmp -type f -print -exec rm {} \\;",
+                "Log every deletion with -print",
+            ),
+        ),
+    ),
+    DestructivePattern(
+        name="dd-block-device",
+        regex=r"\bdd\b.*\bof=\s*/dev/(?:sd[a-z]|nvme\d+n\d+|vd[a-z]|mmcblk\d+|loop\d+|dm-\d+|md\d+)",
+        reason="dd writing directly to a block device will DESTROY filesystem and data",
+        severity=Severity.CRITICAL,
+        description="dd of=/dev/sdX overwrites the raw block device, destroying "
+        "the partition table, filesystem, and all data. Equivalent to physically "
+        "destroying the disk.",
+        suggestions=(
+            PatternSuggestion(
+                "lsblk",
+                "List block devices to verify the correct target",
+            ),
+            PatternSuggestion(
+                "dd if=/dev/zero of=/tmp/test.img bs=1M count=100",
+                "Write to a file instead of a block device",
+            ),
+            PatternSuggestion(
+                "dd if=/dev/urandom of=/tmp/output.dat bs=4k count=1000",
+                "Use a file path, not a block device, for testing",
+            ),
+        ),
+    ),
+    DestructivePattern(
+        name="mkfs-destructive",
+        regex=r"\bmkfs\b",
+        reason="mkfs formats a filesystem, ERASING ALL DATA on the target device",
+        severity=Severity.CRITICAL,
+        description="mkfs creates a new filesystem, destroying all existing data "
+        "on the partition. Common variants: mkfs.ext4, mkfs.xfs, mkfs.btrfs.",
+        suggestions=(
+            PatternSuggestion(
+                "lsblk -f",
+                "Check existing filesystems before formatting",
+            ),
+            PatternSuggestion(
+                "blkid /dev/sdX1",
+                "Verify the target partition and its current contents",
+            ),
+            PatternSuggestion(
+                "mount | grep /dev/sdX",
+                "Ensure the target is not currently mounted",
+            ),
+        ),
+    ),
+    DestructivePattern(
+        name="shred-destructive",
+        regex=r"\bshred\b.*(?:-[a-zA-Z0-9]*u\b|--remove)",
+        reason="shred -u overwrites AND removes files — no recovery possible",
+        severity=Severity.HIGH,
+        description="shred -u overwrites the file with random data (multiple passes) "
+        "then unlinks it. Contents are unrecoverable even with forensic tools.",
+        suggestions=(
+            PatternSuggestion(
+                "ls -la {path}",
+                "Verify the path before shredding (no recovery)",
+            ),
+            PatternSuggestion(
+                "cp {path} {path}.bak && shred -u {path}",
+                "Make a backup first if you might need the data",
+            ),
+            PatternSuggestion(
+                "rm -P {path}",
+                "Single-pass overwrite then delete (FreeBSD/macOS)",
+            ),
+        ),
+    ),
+)
+
+_COMPILED_FILESYSTEM_PATTERNS: list[tuple[re.Pattern, DestructivePattern]] = [
+    (re.compile(p.regex, re.IGNORECASE), p) for p in FILESYSTEM_DESTRUCTIVE_PATTERNS
+]
+
 
 def _check_docker_destructive(command: str) -> DestructiveMatch | None:
     """Check a docker command against destructive patterns (ported from DCG).
@@ -592,6 +818,101 @@ def _check_compose_destructive(command: str) -> DestructiveMatch | None:
                 suggestion=suggestion,
             )
     return None
+
+
+# ---------------------------------------------------------------------------
+# Scan tool — evaluate command against ALL registered patterns
+# ---------------------------------------------------------------------------
+
+# Registry of all scan-checker functions for extensibility
+# Each checker is callable(command: str) -> DestructiveMatch | None
+_SCAN_CHECKERS: list[DestructiveMatch | None] = []  # type: ignore[valid-type]
+
+
+@dataclass(frozen=True)
+class ScanFinding:
+    """One finding from scanning a command against destructive patterns."""
+    pattern_name: str
+    severity: str
+    reason: str
+    suggestion: str | None = None
+
+
+@dataclass(frozen=True)
+class ScanReport:
+    """Complete scan result for a single command."""
+    findings: tuple[ScanFinding, ...]
+    total: int
+
+
+def _check_all_destructive(command: str) -> list[DestructiveMatch]:
+    """Check a command against ALL compiled patterns and return ALL matches.
+
+    Unlike ``_check_docker_destructive`` / ``_check_compose_destructive``
+    which return only the FIRST match, this function iterates every pattern
+    and collects every match — used by the scan tool.
+    """
+    findings: list[DestructiveMatch] = []
+
+    for compiled, pattern in _COMPILED_DOCKER_PATTERNS:
+        if compiled.search(command):
+            findings.append(DestructiveMatch(
+                pattern_name=pattern.name,
+                reason=pattern.reason,
+                severity=pattern.severity,
+                suggestion=pattern.description,
+            ))
+
+    for compiled, pattern in _COMPILED_COMPOSE_PATTERNS:
+        if compiled.search(command):
+            findings.append(DestructiveMatch(
+                pattern_name=pattern.name,
+                reason=pattern.reason,
+                severity=pattern.severity,
+                suggestion=pattern.description,
+            ))
+
+    for compiled, pattern in _COMPILED_FILESYSTEM_PATTERNS:
+        if compiled.search(command):
+            findings.append(DestructiveMatch(
+                pattern_name=pattern.name,
+                reason=pattern.reason,
+                severity=pattern.severity,
+                suggestion=pattern.description,
+            ))
+
+    return findings
+
+
+def scan_command(command: str) -> ScanReport:
+    """Evaluate a command string against ALL registered destructive patterns.
+
+    Unlike the policy engine (which returns ALLOW/BLOCK based on profile),
+    scan_command returns ALL matching destructive patterns regardless of
+    profile — for introspection, debugging, and CI.
+
+    Currently checks:
+    - Docker destructive patterns (Phase 1)
+    - Docker Compose destructive patterns (Phase 1)
+
+    Extensible: add new checkers to ``_SCAN_CHECKERS`` as new packs are ported.
+    """
+    matches = _check_all_destructive(command)
+
+    findings = [
+        ScanFinding(
+            pattern_name=m.pattern_name,
+            severity=m.severity.value,
+            reason=m.reason,
+            suggestion=m.suggestion,
+        )
+        for m in matches
+    ]
+
+    return ScanReport(
+        findings=tuple(findings),
+        total=len(findings),
+    )
 
 
 def _validate_git_subcommand(parts: list[str]) -> tuple[bool, str]:

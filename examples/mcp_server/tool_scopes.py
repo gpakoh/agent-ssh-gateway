@@ -60,6 +60,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "health": ["mcp:read"],
     "tools_manifest": ["mcp:read"],
     "project_list": ["mcp:read"],
+    "scan_command": ["mcp:read", "mcp:project"],
     "list_sessions": ["mcp:read"],
     "session_health": ["mcp:read"],
     "execute_restricted": ["mcp:execute"],

@@ -709,6 +709,37 @@ def gateway_project_list() -> dict[str, Any]:
     )
 
 
+@register_tool("scan_command")
+@instrumented("scan_command")
+def gateway_scan_command(command: str) -> dict[str, Any]:
+    """Scan a command string against all destructive patterns and return findings.
+
+    Unlike the policy engine (which returns allow/block based on profile),
+    scan_command returns ALL matching destructive patterns regardless of
+    profile — for introspection, debugging, and CI use.
+
+    Currently checks Docker and Docker Compose destructive patterns.
+    """
+    from app.command_policy import scan_command as _scan
+
+    report = _scan(command)
+    return tool_success(
+        tool="scan_command",
+        result={
+            "findings": [
+                {
+                    "pattern_name": f.pattern_name,
+                    "severity": f.severity,
+                    "reason": f.reason,
+                    "suggestion": f.suggestion,
+                }
+                for f in report.findings
+            ],
+            "total": report.total,
+        },
+    )
+
+
 @register_tool("list_sessions")
 @instrumented("list_sessions")
 def gateway_list_sessions() -> dict[str, Any]:
