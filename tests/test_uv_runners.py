@@ -336,6 +336,73 @@ class TestMapUvExitCodeContract:
         assert error is None
 
 
+class TestReadOnlyFallbackRejectsAbsoluteTargetsInRealFlow:
+    """_run_uv_tool must pass sanitized (validated) targets to the readonly fallback.
+    Absolute target like /etc/passwd must reach fallback as project_dir/etc/passwd."""
+
+    def _make_fallback_mock(self):
+        """Mock: first execute_raw fails with read-only, execute_project_script captures script."""
+        class _FBMock:
+            def __init__(self):
+                self._n = 0
+                self.fallback_script = None
+            def execute_raw(self, cmd, **kw):
+                self._n += 1
+                return {"job_id": f"j{self._n}"}
+            def wait_job(self, job_id, **kw):
+                if job_id in ("j0", "j1"):
+                    return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+                return {"exit_code": 1, "stdout": "", "stderr": "read-only file system"}
+            def execute_project_script(self, proj, script, timeout_s=300):
+                self.fallback_script = script
+                return {"exit_code": 0, "stdout": "", "stderr": "", "execution_duration_ms": 456, "job_id": "j-fb"}
+        return _FBMock()
+
+    def test_fallback_receives_sanitized_target_not_absolute(self, monkeypatch):
+        from mcp_client_tools import _run_uv_tool
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        mock = self._make_fallback_mock()
+        _run_uv_tool(mock, "proj", "pytest", "run_pytest", target=["/etc/passwd"])
+        assert mock.fallback_script is not None, "fallback must be triggered"
+        last_line = [ln for ln in mock.fallback_script.splitlines() if "uv run pytest" in ln][-1]
+        assert "/etc/passwd" not in last_line.split() or last_line.endswith("/project/etc/passwd 2>&1"), (
+            f"fallback must not use raw absolute /etc/passwd, last line: {last_line}"
+        )
+
+    def test_fallback_receives_sanitized_target_relative_safe(self, monkeypatch):
+        """Relative target must pass through unchanged."""
+        from mcp_client_tools import _run_uv_tool
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        mock = self._make_fallback_mock()
+        _run_uv_tool(mock, "proj", "pytest", "run_pytest", target=["tests/"])
+        assert mock.fallback_script is not None
+        last_line = [ln for ln in mock.fallback_script.splitlines() if "uv run pytest" in ln][-1]
+        assert "/project/tests" in last_line
+
+    def test_fallback_receives_sanitized_target_with_traversal_blocked(self, monkeypatch):
+        """../escape must be blocked before reaching fallback."""
+        from mcp_client_tools import _run_uv_tool
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        mock = self._make_fallback_mock()
+        result = _run_uv_tool(mock, "proj", "pytest", "run_pytest", target=["../outside"])
+        assert result["ok"] is False
+        assert result["error"]["code"] == "POLICY_DENIED"
+        assert mock.fallback_script is None, "fallback must NOT be called after POLICY_DENIED"
+
+    def test_fallback_receives_sanitized_target_mypy(self, monkeypatch):
+        """Same guarantee for mypy tool."""
+        from mcp_client_tools import _run_uv_tool
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        mock = self._make_fallback_mock()
+        _run_uv_tool(mock, "proj", "mypy", "run_mypy", target=["/etc/shadow"])
+        assert mock.fallback_script is not None
+        last_line = [ln for ln in mock.fallback_script.splitlines() if "uv run mypy" in ln][-1]
+        assert not any(w == "/etc/shadow" for w in last_line.split()), (
+            f"fallback must not use raw absolute /etc/shadow, last line: {last_line}"
+        )
+        assert last_line.endswith("/project/etc/shadow 2>&1")
+
+
 class TestReadOnlyFallbackTraversal:
     """_build_readonly_fallback_script relies on callers (_validate_targets) for path traversal
     protection. This documents that the function itself does NOT block '..' — the guarantee lives
