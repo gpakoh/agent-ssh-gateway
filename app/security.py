@@ -152,8 +152,6 @@ def validate_path(path: str, base_path: str | None = None) -> str:
     Raises:
         ValueError: If path is forbidden or contains traversal attempts
     """
-    import os
-
     path = path.strip()
 
     # Check For Obvious Traversal Attempts
@@ -169,9 +167,13 @@ def validate_path(path: str, base_path: str | None = None) -> str:
 
     # If Base_path Provided, Ensure Path Is Within It
     if base_path:
-        abs_path = os.path.abspath(path)
-        abs_base = os.path.abspath(base_path)
-        if not abs_path.startswith(abs_base):
+        from pathlib import Path as _Path
+
+        resolved = _Path(path).resolve()
+        resolved_base = _Path(base_path).resolve()
+        try:
+            resolved.relative_to(resolved_base)
+        except ValueError:
             logger.warning("Blocked path outside base: %s (base: %s)", path, base_path)
             raise ValueError("Path is outside allowed directory")
 
