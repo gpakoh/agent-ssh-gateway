@@ -1995,3 +1995,160 @@ class TestLoadbalancerScanTool:
         for expected in ("nginx-stop", "haproxy-systemctl-stop",
                           "traefik-docker-stop", "elbv2-delete-load-balancer"):
             assert expected in names, f"expected {expected} in {names}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5f — system destructive pattern tests (DCG port)
+# ---------------------------------------------------------------------------
+
+class TestSystemScanTool:
+    """Tests for system destructive patterns (disk, permissions, services)."""
+
+    @pytest.mark.parametrize("cmd,expected", [
+        # ---- disk: dd ----
+        ("dd if=/dev/zero of=/dev/sda bs=1M", "dd-device"),
+        ("dd if=/dev/urandom of=/dev/sdb bs=4K", "dd-wipe"),
+        # ---- disk: partition tools ----
+        ("fdisk /dev/sda", "fdisk-edit"),
+        ("parted /dev/sda mklabel gpt", "parted-modify"),
+        # ---- disk: filesystem creation ----
+        ("mkfs.ext4 /dev/sdb1", "mkfs"),
+        ("mkswap /dev/sdb1", "mkswap"),
+        ("wipefs --all /dev/sdb", "wipefs"),
+        # ---- disk: mount ----
+        ("mount --bind /mnt/tmp /", "mount-bind-root"),
+        ("umount -f /mnt/data", "umount-force"),
+        ("losetup /dev/loop0 /image.img", "losetup-device"),
+        # ---- disk: mdadm ----
+        ("mdadm --stop /dev/md0", "mdadm-stop"),
+        ("mdadm --remove /dev/md0", "mdadm-remove"),
+        ("mdadm --fail /dev/sda1", "mdadm-fail"),
+        ("mdadm --zero-superblock /dev/sda1", "mdadm-zero-superblock"),
+        ("mdadm --create /dev/md0 --level=1 --raid-devices=2 /dev/sda /dev/sdb", "mdadm-create"),
+        ("mdadm --grow /dev/md0 --raid-devices=3", "mdadm-grow"),
+        # ---- disk: btrfs ----
+        ("btrfs subvolume delete /mnt/foo", "btrfs-subvolume-delete"),
+        ("btrfs device remove /dev/sdb1 /mnt", "btrfs-device-remove"),
+        ("btrfs device add /dev/sdc1 /mnt", "btrfs-device-add"),
+        ("btrfs balance start /mnt", "btrfs-balance"),
+        ("btrfs check --repair /dev/sda1", "btrfs-check-repair"),
+        ("btrfs rescue super-recover /dev/sda1", "btrfs-rescue"),
+        ("btrfs filesystem resize -10G /mnt", "btrfs-filesystem-resize"),
+        # ---- disk: dmsetup ----
+        ("dmsetup remove my-dev", "dmsetup-remove"),
+        ("dmsetup remove_all", "dmsetup-remove-all"),
+        ("dmsetup wipe_table my-dev", "dmsetup-wipe-table"),
+        ("dmsetup clear my-dev", "dmsetup-clear"),
+        ("dmsetup load my-dev --table '0 1000 linear'", "dmsetup-load"),
+        ("dmsetup create my-dev --table '0 1000 linear'", "dmsetup-create"),
+        # ---- disk: nbd ----
+        ("nbd-client -d /dev/nbd0", "nbd-client-disconnect"),
+        ("nbd-client server.example.com 10809 /dev/nbd0", "nbd-client-connect"),
+        # ---- disk: LVM ----
+        ("pvremove /dev/sda1", "pvremove"),
+        ("vgremove my-vg", "vgremove"),
+        ("lvremove my-vg/my-lv", "lvremove"),
+        ("vgreduce my-vg /dev/sda1", "vgreduce"),
+        ("lvreduce -L -5G my-vg/my-lv", "lvreduce"),
+        ("lvresize -L -5G my-vg/my-lv", "lvresize-shrink"),
+        ("pvmove /dev/sda1", "pvmove"),
+        ("lvconvert --merge my-vg/my-snap", "lvconvert-merge"),
+        # ---- permissions ----
+        ("chmod 777 /tmp/myfile", "chmod-777"),
+        ("chmod -R 0755 /etc", "chmod-recursive-root"),
+        ("chown -R user:group /var", "chown-recursive-root"),
+        ("chmod u+s /usr/bin/myapp", "chmod-setuid"),
+        ("chmod g+s /shared", "chmod-setgid"),
+        ("chown root: /tmp/myfile", "chown-to-root"),
+        ("setfacl -R -m u:app:rwx /etc", "setfacl-all"),
+        # ---- services ----
+        ("systemctl stop sshd", "systemctl-stop-critical"),
+        ("systemctl disable docker", "systemctl-stop-critical"),
+        ("systemctl mask networking", "systemctl-stop-critical"),
+        ("systemctl stop myservice", "systemctl-stop"),
+        ("service ssh stop", "service-stop-critical"),
+        ("systemctl isolate rescue.target", "systemctl-isolate"),
+        ("systemctl poweroff", "systemctl-power"),
+        ("systemctl reboot", "systemctl-power"),
+        ("systemctl halt", "systemctl-power"),
+        ("shutdown -h now", "shutdown"),
+        ("reboot", "reboot"),
+        ("init 0", "init-level"),
+        ("init 6", "init-level"),
+    ])
+    def test_system_destructive(self, cmd, expected):
+        from app.command_policy import scan_command
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    def test_system_global_flags(self):
+        from app.command_policy import scan_command
+
+        cases = [
+            ("systemctl -H remote-host stop sshd", "systemctl-stop-critical"),
+            ("systemctl --user disable my-unit", "systemctl-stop"),
+            ("systemctl -M machine mask containerd", "systemctl-stop-critical"),
+            ("systemctl --system poweroff", "systemctl-power"),
+            ("systemctl -H host isolate rescue.target", "systemctl-isolate"),
+            ("btrfs --format json subvolume delete /mnt/foo", "btrfs-subvolume-delete"),
+            ("btrfs --verbose check --repair /dev/sda1", "btrfs-check-repair"),
+            ("dmsetup -v remove_all", "dmsetup-remove-all"),
+            ("dmsetup --noudevsync remove my-dev", "dmsetup-remove"),
+            ("chmod --recursive 0755 /etc", "chmod-recursive-root"),
+            ("chown --recursive user:group /var", "chown-recursive-root"),
+        ]
+        for cmd, expected in cases:
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    def test_safe_system_commands_not_matched(self):
+        from app.command_policy import scan_command
+
+        for cmd in ("dd if=myfile of=output.bin", "dd if=myfile of=output.img",
+                     "lsblk", "fdisk -l",
+                     "parted /dev/sda print", "parted /dev/sda print free",
+                     "blkid", "df -h",
+                     "mount", "mount -t ext4 /dev/sda1 /mnt",
+                     "btrfs subvolume list /mnt", "btrfs filesystem show",
+                     "dmsetup ls", "dmsetup status", "dmsetup info",
+                     "lvs", "vgs", "pvs", "lvdisplay", "vgdisplay", "pvdisplay",
+                     "stat /tmp/myfile", "ls -la /tmp",
+                     "getfacl /tmp/myfile", "namei -l /tmp/myfile",
+                     "systemctl status sshd", "service ssh status",
+                     "journalctl -u sshd", "systemctl daemon-reload",
+                     "systemctl cat sshd", "systemctl list-units",
+                     "systemctl is-active sshd",
+                     "systemctl list-unit-files"):
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            system_matches = [n for n in names if n in (
+                "dd-device", "dd-wipe", "fdisk-edit", "parted-modify",
+                "mkfs", "mkswap", "wipefs", "mount-bind-root", "umount-force",
+                "losetup-device", "mdadm-stop", "mdadm-remove", "mdadm-fail",
+                "mdadm-zero-superblock", "mdadm-create", "mdadm-grow",
+                "btrfs-subvolume-delete", "btrfs-device-remove", "btrfs-device-add",
+                "btrfs-balance", "btrfs-check-repair", "btrfs-rescue",
+                "btrfs-filesystem-resize",
+                "dmsetup-remove", "dmsetup-remove-all", "dmsetup-wipe-table",
+                "dmsetup-clear", "dmsetup-load", "dmsetup-create",
+                "nbd-client-disconnect", "nbd-client-connect",
+                "pvremove", "vgremove", "lvremove", "vgreduce", "lvreduce",
+                "lvresize-shrink", "pvmove", "lvconvert-merge",
+                "chmod-777", "chmod-recursive-root", "chown-recursive-root",
+                "chmod-setuid", "chmod-setgid", "chown-to-root", "setfacl-all",
+                "systemctl-stop-critical", "systemctl-stop", "service-stop-critical",
+                "systemctl-isolate", "systemctl-power",
+                "shutdown", "reboot", "init-level",
+            )]
+            assert not system_matches, f"False positive for {cmd!r}: {system_matches}"
+
+    def test_system_combined_manifest(self):
+        from app.command_policy import scan_command
+
+        cmd = ("mkfs.ext4 /dev/sdb1 && chmod -R 0755 /etc && systemctl stop sshd")
+        r = scan_command(cmd)
+        names = {f.pattern_name for f in r.findings}
+        for expected in ("mkfs", "chmod-recursive-root", "systemctl-stop-critical"):
+            assert expected in names, f"expected {expected} in {names}"
