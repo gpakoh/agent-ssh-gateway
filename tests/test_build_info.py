@@ -16,7 +16,8 @@ class TestBuildSha:
     def test_unknown_when_no_env_and_no_git(self):
         with patch.dict(os.environ, {"BUILD_SHA": ""}, clear=False):
             with patch("subprocess.run", side_effect=FileNotFoundError):
-                sha = build_info._resolve_build_sha()
+                with patch.object(build_info, "_resolve_build_sha_from_gitlink", return_value=None):
+                    sha = build_info._resolve_build_sha()
         assert sha == "unknown"
 
 

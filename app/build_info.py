@@ -8,10 +8,30 @@ import os
 import subprocess
 import time as _time
 from datetime import UTC, datetime
+from pathlib import Path
 
 BUILD_SHA: str = ""
 BUILD_TIME: str = ""
 _started_at: float | None = None
+
+
+def _resolve_build_sha_from_gitlink(git_dir: Path) -> str | None:
+    """Resolve HEAD commit from a .git/HEAD file (works without `git` binary)."""
+    head_file = git_dir / "HEAD"
+    if not head_file.is_file():
+        return None
+    try:
+        ref = head_file.read_text("utf-8").strip()
+        if ref.startswith("ref: "):
+            ref_path = ref[5:]
+            ref_file = git_dir / ref_path
+            if ref_file.is_file():
+                return ref_file.read_text("utf-8").strip()
+        elif len(ref) == 40:
+            return ref
+    except OSError:
+        pass
+    return None
 
 
 def _resolve_build_sha() -> str:
@@ -29,6 +49,12 @@ def _resolve_build_sha() -> str:
             return result.stdout.strip()
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
+    sha = _resolve_build_sha_from_gitlink(Path(".git"))
+    if sha:
+        return sha
+    sha = _resolve_build_sha_from_gitlink(Path(__file__).resolve().parent.parent / ".git")
+    if sha:
+        return sha
     return "unknown"
 
 
