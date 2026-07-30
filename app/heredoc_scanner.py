@@ -78,6 +78,19 @@ class ExtractedCommand(NamedTuple):
     language: str
 
 
+def _find_closing_quote(text: str, quote: str, start: int = 1) -> int:
+    """Find unescaped closing quote, respecting backslash escapes."""
+    i = start
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == quote:
+            return i
+        i += 1
+    return -1
+
+
 def extract_inline_scripts(command: str) -> list[ExtractedCommand]:
     """Extract code from `python -c "..."`, `bash -c '...'`, etc."""
     results: list[ExtractedCommand] = []
@@ -102,14 +115,12 @@ def extract_inline_scripts(command: str) -> list[ExtractedCommand]:
             after_flag = rest[flag_m.end():].lstrip()
             if not after_flag:
                 continue
-            # Extract quoted string
+            # Extract quoted string with escape-aware closing-quote scan
             quote = after_flag[0]
             if quote not in ('"', "'"):
                 continue
-            # Find closing quote
-            end = after_flag.find(quote, 1)
+            end = _find_closing_quote(after_flag, quote)
             if end == -1:
-                # No closing quote - take rest of string
                 code = after_flag[1:]
             else:
                 code = after_flag[1:end]
@@ -123,9 +134,17 @@ def extract_eval_exec(command: str) -> list[ExtractedCommand]:
     """Extract code from `eval "..."` or `exec "..."`."""
     results: list[ExtractedCommand] = []
     for cmd_name in ("eval", "exec"):
-        pattern = rf"\b{cmd_name}\s+(['\"])(.*?)(\1)"
-        for m in re.finditer(pattern, command, re.DOTALL):
-            code = m.group(2).strip()
+        pattern = rf"\b{cmd_name}\s+['\"]"
+        for m in re.finditer(pattern, command):
+            quote_pos = m.end() - 1
+            quote = command[quote_pos]
+            rest = command[quote_pos + 1:]
+            end = _find_closing_quote(rest, quote)
+            if end == -1:
+                code = rest
+            else:
+                code = rest[:end]
+            code = code.strip()
             if code:
                 results.append(ExtractedCommand(code, f"{cmd_name}_call", "shell"))
     return results
