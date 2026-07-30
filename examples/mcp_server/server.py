@@ -740,6 +740,51 @@ def gateway_scan_command(command: str) -> dict[str, Any]:
     )
 
 
+@register_tool("simulate")
+@instrumented("simulate")
+def gateway_simulate(
+    content: str,
+    mode: str = "audit",
+    profile: str = "default",
+    agent: str | None = None,
+    project: str | None = None,
+    max_lines: int | None = None,
+) -> dict[str, Any]:
+    """Replay commands through the policy engine for testing.
+
+    Parses multiple input formats (plain text, hook JSON, DCG decision log),
+    evaluates each command against the policy, and returns structured results.
+
+    Args:
+        content: Command log content (one command per line, or hook JSON).
+        mode: Policy mode (audit, enforce, ask). Default: audit (no blocking).
+        profile: Policy profile to evaluate against. Default: default.
+        agent: Optional agent name for agent-specific mode overrides.
+        project: Optional project name.
+        max_lines: Maximum lines to process. Default: no limit.
+    """
+    from app.simulate import simulate as _simulate
+
+    limits = None
+    if max_lines is not None:
+        from app.simulate import SimLimits
+        limits = SimLimits(max_lines=max_lines)
+
+    result = _simulate(
+        content,
+        mode=mode,
+        profile=profile,
+        agent=agent,
+        project=project,
+        limits=limits,
+    )
+
+    return tool_success(
+        tool="simulate",
+        result=result,
+    )
+
+
 @register_tool("scan_file")
 @instrumented("scan_file")
 def gateway_scan_file(project: str, path: str) -> dict[str, Any]:
