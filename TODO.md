@@ -84,14 +84,15 @@ DCG has 4-layer allowlist: Agent > Project > User > System
 ### QoL
 - [x] `project_scan_destructive` tool (scan git repo for destructive patterns — DCG-style)
 - [x] Suggestions в ответе при блокировке ("use chmod 755 instead of 777")
-- [ ] Confidence scoring (regex vs AST weight)
-- [ ] SARIF/JSON output for scan tool
-- [ ] Policy mode per-agent (not global)
+- [ ] Confidence scoring (regex vs AST weight) — приоритет низкий
+- [ ] SARIF/JSON output for scan tool — приоритет низкий
+- [x] Policy mode per-agent (not global) — chatgpt=enforce, claude=audit
 
 ### CI/DevOps
-- [ ] Gitea CI: coverage threshold (70% minimum)
-- [ ] Gitea CI: test count sentinel (like DCG's 3700 min)
-- [ ] pip-audit step in CI (currently failing in kojo, may need same fix)
+- [x] Gitea CI: coverage threshold (70% minimum)
+- [x] Gitea CI: test count sentinel (3500 min)
+- [x] pip-audit step in CI
+- [ ] Docs/Examples
 
 ### Docs/Examples
 - [ ] MCP server README with tool examples
