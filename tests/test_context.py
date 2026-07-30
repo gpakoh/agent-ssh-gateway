@@ -80,10 +80,55 @@ def test_check_context_filter_false():
     assert check_context_filter("# just a comment") is False
 
 
-def test_heredoc_body():
+def test_heredoc_body_checked():
     spans = classify_command("cat <<EOF\nrm -rf /\nEOF")
     kinds = [s.kind for s in spans]
     assert SpanKind.HEREDOC_BODY in kinds
+    assert check_context_filter("cat <<EOF\nrm -rf /\nEOF") is True
+
+
+def test_heredoc_body_matches_should_check():
+    assert SpanKind.HEREDOC_BODY.should_check() is True
+
+
+def test_heredoc_body_scanned():
+    """Heredoc body content should count as 'should_check'."""
+    assert check_context_filter("cat <<'EOF'\nrm -rf /\nEOF") is True
+
+
+def test_heredoc_multi_line_body():
+    spans = classify_command("cat <<EOF\nrm -rf /\ndocker volume prune\nEOF")
+    body_spans = [s for s in spans if s.kind == SpanKind.HEREDOC_BODY]
+    assert len(body_spans) >= 1
+    assert "rm -rf" in body_spans[0].text
+    assert "docker volume prune" in body_spans[0].text
+
+
+def test_heredoc_tab_indented():
+    spans = classify_command("cat <<-EOF\n\trm -rf /\n\tEOF")
+    kinds = [s.kind for s in spans]
+    assert SpanKind.HEREDOC_BODY in kinds
+
+
+def test_heredoc_single_quoted_delim():
+    spans = classify_command("cat <<'EOF'\nrm -rf /\nEOF")
+    kinds = [s.kind for s in spans]
+    assert SpanKind.HEREDOC_BODY in kinds
+
+
+def test_heredoc_destructive_detected():
+    """Heredoc body with destructive command should be caught by policy."""
+    from app.heredoc_scanner import check_nested_commands
+    findings = check_nested_commands("cat <<EOF\nrm -rf /\nEOF")
+    assert any("rm-rf" in f.pattern_name for f in findings)
+
+
+def test_heredoc_delimiter_not_confused_with_contents():
+    """Delimiter 'EOF' should not match 'EOF123' in content."""
+    spans = classify_command("cat <<EOF\ndata EOF123 data\nEOF")
+    body_spans = [s for s in spans if s.kind == SpanKind.HEREDOC_BODY]
+    assert len(body_spans) >= 1
+    assert "EOF123" in body_spans[0].text
 
 
 def test_empty_command():
