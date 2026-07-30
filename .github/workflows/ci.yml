@@ -52,4 +52,4 @@ jobs:
       - name: pip-audit
         run: |
           python -m pip install pip-audit
-          pip-audit --strict --require-cve --progress-spinner=off
+          pip-audit --strict --progress-spinner=off
