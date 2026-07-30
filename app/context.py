@@ -199,7 +199,7 @@ def _tokenize(command: str) -> list[tuple[str, int, SpanKind]]:
 
 
 def _classify_tokens(
-    tokens: list[tuple[str, int, str]],
+    tokens: list[tuple[str, int, SpanKind]],
 ) -> list[Span]:
     """Classify pending tokens based on command structure.
 
