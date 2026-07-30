@@ -991,6 +991,7 @@ async def validation_exception_handler(request, exc: RequestValidationError):
 # ---------------------------------------------------------------------------
 
 from app.routers.admin_access import router as admin_access_router  # noqa: E402
+from app.routers.admin_approval import router as admin_approval_router  # noqa: E402
 from app.routers.audit import router as audit_router  # noqa: E402
 from app.routers.batch import router as batch_router  # noqa: E402
 from app.routers.code import router as code_router  # noqa: E402
@@ -1035,6 +1036,7 @@ app.include_router(auth_identity_router)
 app.include_router(workspace_router)
 app.include_router(audit_router)
 app.include_router(admin_access_router)
+app.include_router(admin_approval_router)
 
 # Static Files Mount (after All Router Includes So Static Routes Take Precedence)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")

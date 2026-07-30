@@ -192,14 +192,16 @@ async def test_callback_posts_correct_gateway_payload():
 
     posted: list[dict[str, Any]] = []
 
-    async def fake_post(*, gateway_url, gateway_api_key, actor_fingerprint, source_ip, decision, reason):
+    async def fake_post(*, gateway_url, gateway_api_key, api_path, body):
         posted.append({
             "gateway_url": gateway_url,
             "gateway_api_key": gateway_api_key,
-            "actor_fingerprint": actor_fingerprint,
-            "source_ip": source_ip,
-            "decision": decision,
-            "reason": reason,
+            "api_path": api_path,
+            "body": body,
+            "actor_fingerprint": body.get("actor_fingerprint", ""),
+            "source_ip": body.get("source_ip", ""),
+            "decision": body["decision"],
+            "reason": body.get("reason", ""),
         })
         return "ok"
 
@@ -219,6 +221,7 @@ async def test_callback_posts_correct_gateway_payload():
     assert posted[0]["reason"] == "operator:op"
     assert posted[0]["gateway_url"] == "http://gw:8085"
     assert posted[0]["gateway_api_key"] == "key-123"
+    assert posted[0]["api_path"] == "/api/admin/access-control/decision"
 
 
 @pytest.mark.asyncio()
@@ -257,10 +260,13 @@ async def test_callback_sends_x_api_key_header():
         result = await _post_decision_to_gateway(
             gateway_url="http://gw:8085",
             gateway_api_key="secret-key",
-            actor_fingerprint="fp",
-            source_ip="1.2.3.4",
-            decision="deny",
-            reason="operator:admin",
+            api_path="/api/admin/access-control/decision",
+            body={
+                "actor_fingerprint": "fp",
+                "source_ip": "1.2.3.4",
+                "decision": "deny",
+                "reason": "operator:admin",
+            },
         )
 
     assert result == "ok"

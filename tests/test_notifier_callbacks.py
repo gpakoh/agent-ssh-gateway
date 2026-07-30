@@ -71,10 +71,12 @@ def test_handle_callback_posts_allow_to_gateway():
     assert result["action_taken"] is True
     assert result["decision"] == "allow"
     assert len(posted) == 1
-    assert posted[0]["decision"] == "allow"
-    assert posted[0]["actor_fingerprint"] == "fingerprint-abc"
-    assert posted[0]["source_ip"] == "192.0.2.50"
-    assert posted[0]["reason"] == "operator:operator"
+    # Without approval_id, posts to access-control endpoint
+    assert posted[0]["api_path"] == "/api/admin/access-control/decision"
+    assert posted[0]["body"]["decision"] == "allow"
+    assert posted[0]["body"]["actor_fingerprint"] == "fingerprint-abc"
+    assert posted[0]["body"]["source_ip"] == "192.0.2.50"
+    assert posted[0]["body"]["reason"] == "operator:operator"
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +109,70 @@ def test_handle_callback_posts_deny_to_gateway():
     assert result["action_taken"] is True
     assert result["decision"] == "deny"
     assert len(posted) == 1
-    assert posted[0]["decision"] == "deny"
+    assert posted[0]["body"]["decision"] == "deny"
+
+
+# ---------------------------------------------------------------------------
+# Tests — approval_id routing
+# ---------------------------------------------------------------------------
+
+
+def test_handle_callback_routes_to_approval_when_approval_id():
+    token = create_action(
+        action_type="allow_actor",
+        actor_fingerprint="fp-appr",
+        source_ip="10.0.0.7",
+        event_type="command.deny",
+        request_id="req-appr",
+        approval_id="approval_abc123",
+    )
+
+    posted: list[dict[str, Any]] = []
+
+    async def fake_post(**kwargs):
+        posted.append(kwargs)
+        return "ok"
+
+    with patch("app.notifier.callbacks._post_decision_to_gateway", new=fake_post):
+        result = _run(handle_callback_query(
+            {"id": "cb-appr", "data": token, "from": {"username": "op"}},
+            gateway_url="http://gw:8085",
+            gateway_api_key="key",
+        ))
+
+    assert result["action_taken"] is True
+    assert len(posted) == 1
+    assert posted[0]["api_path"] == "/api/admin/approval/decision"
+    assert posted[0]["body"]["approval_id"] == "approval_abc123"
+    assert posted[0]["body"]["decision"] == "allow"
+
+
+def test_handle_callback_routes_to_access_control_when_no_approval_id():
+    token = create_action(
+        action_type="deny_actor",
+        actor_fingerprint="fp-ac",
+        source_ip="10.0.0.8",
+        event_type="command.deny",
+        request_id="req-ac",
+    )
+
+    posted: list[dict[str, Any]] = []
+
+    async def fake_post(**kwargs):
+        posted.append(kwargs)
+        return "ok"
+
+    with patch("app.notifier.callbacks._post_decision_to_gateway", new=fake_post):
+        result = _run(handle_callback_query(
+            {"id": "cb-ac", "data": token, "from": {"username": "admin"}},
+            gateway_url="http://gw:8085",
+            gateway_api_key="key",
+        ))
+
+    assert result["action_taken"] is True
+    assert len(posted) == 1
+    assert posted[0]["api_path"] == "/api/admin/access-control/decision"
+    assert "approval_id" not in posted[0]["body"]
 
 
 # ---------------------------------------------------------------------------

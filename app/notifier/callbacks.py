@@ -11,6 +11,9 @@ from app.notifier.actions import pop_action
 
 logger = logging.getLogger(__name__)
 
+_APPROVAL_API_PATH = "/api/admin/approval/decision"
+_ACCESS_API_PATH = "/api/admin/access-control/decision"
+
 
 async def handle_callback_query(
     callback_query: dict[str, Any],
@@ -48,15 +51,29 @@ async def handle_callback_query(
         "decided_by": username,
     }
 
-    # POST to gateway admin API
+    # POST to gateway admin API — approval endpoint if approval_id present,
+    # otherwise access-control endpoint (existing behavior)
     if gateway_url and gateway_api_key:
+        if payload.approval_id:
+            api_path = _APPROVAL_API_PATH
+            body = {
+                "approval_id": payload.approval_id,
+                "decision": decision,
+                "operator": username,
+            }
+        else:
+            api_path = _ACCESS_API_PATH
+            body = {
+                "actor_fingerprint": payload.actor_fingerprint,
+                "source_ip": payload.source_ip,
+                "decision": decision,
+                "reason": f"operator:{username}",
+            }
         post_result = await _post_decision_to_gateway(
             gateway_url=gateway_url,
             gateway_api_key=gateway_api_key,
-            actor_fingerprint=payload.actor_fingerprint,
-            source_ip=payload.source_ip,
-            decision=decision,
-            reason=f"operator:{username}",
+            api_path=api_path,
+            body=body,
         )
         result["gateway_post"] = post_result
     else:
@@ -64,10 +81,11 @@ async def handle_callback_query(
         logger.warning("callback_skipped_gateway_post: no gateway_url or api_key")
 
     logger.info(
-        "callback_decided: action=%s source_ip=%s by=%s",
+        "callback_decided: action=%s source_ip=%s by=%s approval_id=%s",
         decision,
         payload.source_ip,
         username,
+        payload.approval_id or "",
     )
 
     # Answer callback query (removes loading spinner)
@@ -103,22 +121,14 @@ async def _post_decision_to_gateway(
     *,
     gateway_url: str,
     gateway_api_key: str,
-    actor_fingerprint: str,
-    source_ip: str,
-    decision: str,
-    reason: str,
+    api_path: str,
+    body: dict[str, Any],
 ) -> str:
-    """POST access-control decision to gateway admin API.
+    """POST a decision to a gateway admin API endpoint.
 
     Returns "ok" on success, or error description on failure.
     """
-    url = f"{gateway_url.rstrip('/')}/api/admin/access-control/decision"
-    body = {
-        "actor_fingerprint": actor_fingerprint,
-        "source_ip": source_ip,
-        "decision": decision,
-        "reason": reason,
-    }
+    url = f"{gateway_url.rstrip('/')}{api_path}"
     headers = {"X-API-Key": gateway_api_key}
     try:
         async with aiohttp.ClientSession() as session:

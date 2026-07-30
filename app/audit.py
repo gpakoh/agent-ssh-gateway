@@ -219,10 +219,19 @@ def emit_command_policy_decision(
     route: str = "",
     actor_fingerprint: str = "",
     request_id: str = "",
+    approval_id: str | None = None,
+    requires_approval: bool = False,
 ) -> None:
     """Emit a COMMAND_DENY or COMMAND_EXECUTE event for command policy decisions."""
     if not event_logger:
         return
+    meta: dict[str, Any] = {}
+    if command_root:
+        meta["command_root"] = command_root
+    if approval_id:
+        meta["approval_id"] = approval_id
+    if requires_approval:
+        meta["requires_approval"] = True
     event_logger.append(AuditEvent(
         event_type=(
             AuditEventType.COMMAND_EXECUTE if decision_allowed
@@ -239,7 +248,7 @@ def emit_command_policy_decision(
         profile=effective_profile,
         decision=Decision.ALLOWED if decision_allowed else Decision.DENIED,
         reason=decision_reason,
-        metadata={"command_root": command_root} if command_root else {},
+        metadata=meta,
     ))
 
 
