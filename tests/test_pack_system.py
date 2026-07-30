@@ -297,7 +297,7 @@ class TestPackRegistry:
         for m in matches:
             assert hasattr(m, "confidence")
             assert isinstance(m.confidence, float)
-            assert 0.5 <= m.confidence <= 0.95
+            assert 0.5 <= m.confidence <= 1.0  # can exceed 0.95 with span-aware boost
 
     def test_confidence_longer_regex_higher(self):
         """Longer, more specific patterns should have higher confidence."""
