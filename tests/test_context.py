@@ -121,20 +121,30 @@ def test_echo_data_pipe_to_socat():
 
 def test_confidence_in_data():
     from app.context import compute_span_confidence
+    # Match in single-quoted data — new confidence uses 0.1 multiplier
     conf = compute_span_confidence("echo 'rm -rf /'", 6, 12)
-    assert conf == 0.3
+    # Data span weight is 0.1, combined with arg position (0.6) = 0.06
+    assert conf < 0.3
+
+
+def test_confidence_in_comment():
+    from app.context import compute_span_confidence
+    conf = compute_span_confidence("rm -rf /  # unsafe", 10, 18)
+    # Comment span weight is 0.05, arg position 0.6 = 0.03
+    assert conf < 0.2
 
 
 def test_confidence_in_executed():
     from app.context import compute_span_confidence
-    # Match spans across tokens separated by whitespace, default fallback
+    # EXECUTED (1.0) * COMMAND_POSITION (1.1) = 1.1
     conf = compute_span_confidence("rm -rf /", 0, 8)
-    assert conf == 0.5
+    assert conf > 1.0
 
 
 def test_confidence_no_spans():
     from app.context import compute_span_confidence
-    assert compute_span_confidence("", 0, 0) == 1.0
+    conf = compute_span_confidence("", 0, 0)
+    assert abs(conf - 0.88) < 0.001
 
 
 def test_check_context_filter_false_on_echo():

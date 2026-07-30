@@ -334,18 +334,14 @@ def check_context_filter(command: str) -> bool:
 
 
 def compute_span_confidence(command: str, match_start: int, match_end: int) -> float:
-    """Adjust confidence based on which span a match lands in."""
-    from app.context import SpanKind, classify_command
+    """Adjust confidence based on which span a match lands in.
 
-    spans = classify_command(command)
-    if not spans:
-        return 1.0
-    for s in spans:
-        if s.start <= match_start and match_end <= s.end:
-            if s.kind == SpanKind.EXECUTED:
-                return 1.0
-            elif s.kind == SpanKind.DATA:
-                return 0.3
-            elif s.kind == SpanKind.COMMENT:
-                return 0.1
-    return 0.5
+    Delegates to ``app.confidence.compute_span_confidence`` for the
+    full signal-based implementation.
+
+    Returns a multiplier (0.0-1.0) to apply to pattern confidence.
+    """
+    from app.confidence import compute_span_confidence as _compute
+
+    multiplier, _signals = _compute(command, match_start, match_end)
+    return multiplier

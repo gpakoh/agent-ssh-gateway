@@ -9,14 +9,14 @@ from app.command_policy import (
 
 
 def _compute_confidence(dp: DestructivePattern) -> float:
-    """Compute detection confidence from pattern characteristics.
+    """Compute base detection confidence from pattern characteristics.
 
     Factors:
     - Base: 0.5
     - Regex length (longer = more specific): +0.1 @ >30, +0.2 @ >50, +0.3 @ >100
     - Severity: CRITICAL +0.2, HIGH +0.1
     - Has suggestion: +0.1
-    - Capped at 0.95 (reserve 1.0 for future AST-level analysis)
+    - Capped at 0.95; span-aware boost (P9) can push final value to 1.0
     """
     conf = 0.5
     rlen = len(dp.regex)
@@ -33,6 +33,21 @@ def _compute_confidence(dp: DestructivePattern) -> float:
     if dp.suggestions:
         conf += 0.1
     return min(conf, 0.95)
+
+
+def _span_adjusted_confidence(
+    pattern_confidence: float,
+    command: str,
+    match_start: int,
+    match_end: int,
+) -> float:
+    """Apply span-aware adjustment to a pattern's base confidence."""
+    from app.confidence import compute_match_confidence
+
+    final, _signals = compute_match_confidence(
+        pattern_confidence, command, match_start, match_end
+    )
+    return final
 
 
 class Pack:
@@ -80,13 +95,18 @@ class Pack:
         if not self.matches_keywords(command):
             return results
         for compiled, dp in self._compiled:
-            if compiled.search(command):
+            m = compiled.search(command)
+            if m:
+                base_conf = _compute_confidence(dp)
+                final_conf = _span_adjusted_confidence(
+                    base_conf, command, m.start(), m.end()
+                )
                 results.append(DestructiveMatch(
                     pattern_name=dp.name,
                     reason=dp.reason,
                     severity=dp.severity,
                     suggestion=dp.suggestions[0].command if dp.suggestions else None,
-                    confidence=_compute_confidence(dp),
+                    confidence=final_conf,
                 ))
         return results
 
