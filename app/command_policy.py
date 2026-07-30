@@ -139,6 +139,7 @@ class DestructiveMatch:
     reason: str
     severity: Severity
     suggestion: str | None = None
+    confidence: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -478,6 +479,7 @@ class ScanFinding:
     severity: str
     reason: str
     suggestion: str | None = None
+    confidence: float | None = None
 
 
 @dataclass(frozen=True)
@@ -526,6 +528,7 @@ def scan_command(command: str) -> ScanReport:
             severity=m.severity.value,
             reason=m.reason,
             suggestion=m.suggestion,
+            confidence=m.confidence,
         )
         for m in matches
     ]

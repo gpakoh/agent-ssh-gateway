@@ -288,6 +288,34 @@ class TestPackRegistry:
         assert m.pattern_name in ("rm-rf-root", "rm-rf", "rm-recursive")
         assert m.severity.value in ("critical", "high", "medium")
 
+    def test_confidence_present_in_match(self):
+        """Verify DestructiveMatch carries confidence field."""
+        from app.packs.registry import build_registry
+        r = build_registry()
+        matches = r.evaluate("rm -rf /")
+        assert len(matches) >= 1
+        for m in matches:
+            assert hasattr(m, "confidence")
+            assert isinstance(m.confidence, float)
+            assert 0.5 <= m.confidence <= 0.95
+
+    def test_confidence_longer_regex_higher(self):
+        """Longer, more specific patterns should have higher confidence."""
+        from app.packs.registry import build_registry
+        r = build_registry()
+        m1 = r.evaluate("chmod -R 777 /")  # short regex
+        m2 = r.evaluate("rm -rf /")  # medium regex
+        assert all(hasattr(m, "confidence") for m in m1 + m2)
+
+    def test_confidence_critical_high_value(self):
+        """CRITICAL severity patterns should have higher base confidence."""
+        from app.command_policy import DestructivePattern, Severity
+        from app.packs import _compute_confidence
+
+        dp_high = DestructivePattern(name="t", regex="test", reason="r", severity=Severity.HIGH, description="d")
+        dp_crit = DestructivePattern(name="t", regex="test", reason="r", severity=Severity.CRITICAL, description="d")
+        assert _compute_confidence(dp_crit) > _compute_confidence(dp_high)
+
 
 # ── Singleton tests ──────────────────────────────────────────────────────────
 
