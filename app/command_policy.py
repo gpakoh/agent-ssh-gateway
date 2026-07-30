@@ -13,6 +13,7 @@ Profiles:
     default           — deny obviously dangerous root commands (defense-in-depth)
 
 Security model:
+    0. Allowlist (gate 0) — agent/project/user/system layers, bypasses all checks
     1. Blanket metachar denial (| ; && || ` $(...)) — always enforced in enforce mode
     2. Argument-shape checks — language interpreters, find -exec, dangerous patterns
     3. Profile-specific root allowlist
@@ -774,6 +775,9 @@ def evaluate_command_policy(
     *,
     mode: str,
     profile: str,
+    agent: str | None = None,
+    project: str | None = None,
+    user: str | None = None,
 ) -> CommandPolicyDecision:
     """Evaluate a command against the policy engine.
 
@@ -785,6 +789,9 @@ def evaluate_command_policy(
     Ask mode: gates 1 (metachar) and 2 (argument_shape) still block;
     gates 2b (heredoc) and 3 (profile) create a pending approval request
     instead of blocking.
+
+    The allowlist (agent > project > user > system) is checked before any
+    gates — if matched, the command is allowed immediately.
     """
     mode_value = (mode or CommandPolicyMode.AUDIT.value).lower()
     profile_value = (profile or CommandPolicyProfile.DEFAULT.value).lower()
@@ -795,6 +802,29 @@ def evaluate_command_policy(
         return CommandPolicyDecision(
             allowed=True,
             reason="Command policy is disabled",
+            profile=profile_value,
+            mode=mode_value,
+            command_root=root,
+        )
+
+    # Gate 0: allowlist — bypasses all policy gates if matched
+    from app.allowlist import get_allowlist
+    allowlist = get_allowlist()
+    allow_match = allowlist.check(
+        command,
+        agent=agent,
+        project=project,
+        user=user,
+    )
+    if allow_match is not None:
+        entry = allow_match.entry
+        return CommandPolicyDecision(
+            allowed=True,
+            reason=(
+                f"Allowlist match [{entry.layer}] "
+                f"{entry.selector_type}={entry.selector_value}"
+                f"{'; ' + entry.reason if entry.reason else ''}"
+            ),
             profile=profile_value,
             mode=mode_value,
             command_root=root,
