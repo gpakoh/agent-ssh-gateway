@@ -98,6 +98,7 @@ class CommandPolicyDecision:
     command_root: str | None = None
     requires_approval: bool = False
     approval_id: str | None = None
+    suggestion: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +443,14 @@ def _check_all_destructive(command: str) -> list[DestructiveMatch]:
     """
     from app.packs.registry import get_registry
     return get_registry().evaluate(command)
+
+
+def _get_suggestion(command: str) -> str | None:
+    """Return the first suggestion from destructive patterns matching command."""
+    for m in _check_all_destructive(command):
+        if m.suggestion:
+            return m.suggestion
+    return None
 
 
 def scan_command(command: str) -> ScanReport:
@@ -851,6 +860,7 @@ def evaluate_command_policy(
                 profile=profile_value,
                 mode=mode_value,
                 command_root=root,
+                suggestion=_get_suggestion(command),
             )
         # Gates 2b (heredoc) and 3 (profile) → ask for approval
         from app.policy_ask import create_approval_request
@@ -868,6 +878,7 @@ def evaluate_command_policy(
             command_root=root,
             requires_approval=True,
             approval_id=approval.approval_id,
+            suggestion=_get_suggestion(command),
         )
 
     # Enforce mode: run the full decision pipeline
@@ -881,6 +892,7 @@ def evaluate_command_policy(
             profile=profile_value,
             mode=mode_value,
             command_root=root,
+            suggestion=_get_suggestion(command) if not allowed else None,
         )
 
     # AUDIT mode: same pipeline, but always allow and report would_allow
