@@ -513,12 +513,6 @@ def scan_command(command: str) -> ScanReport:
     Unlike the policy engine (which returns ALLOW/BLOCK based on profile),
     scan_command returns ALL matching destructive patterns regardless of
     profile — for introspection, debugging, and CI.
-
-    Currently checks:
-    - Docker destructive patterns (Phase 1)
-    - Docker Compose destructive patterns (Phase 1)
-
-    Extensible: add new checkers to ``_SCAN_CHECKERS`` as new packs are ported.
     """
     matches = _check_all_destructive(command)
 

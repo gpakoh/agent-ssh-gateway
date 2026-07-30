@@ -1,100 +1,60 @@
 # Agent SSH Gateway — TODO
 
-## ✅ Done (Phases 1-5f + DCG P1-P2)
-- Phase 1: Docker/Compose destructive patterns (9+4)
-- Phase 2: gateway_scan_command MCP tool
-- Phase 3: Filesystem destructive patterns (10)
-- Phase 4: Kubernetes destructive patterns (21)
-- Phase 5: Cloud destructive patterns (52 — AWS/GCP/Azure)
-- Phase 5b: Database destructive patterns (39 — PG/MySQL/SQLite/Mongo/Redis)
-- Phase 5c: Git destructive patterns (16)
-- Phase 5d: Firewall destructive patterns (13 — iptables/ufw/nftables)
-- Phase 5e: Loadbalancer destructive patterns (30 — nginx/haproxy/traefik/ELB)
-- Phase 5f: System destructive patterns (54 — disk/permissions/services)
-- P1: Heredoc scanning — 2-tier detection (T1 triggers + T2 extractors), integrated into policy engine, 52 tests
-- P2: DecisionMode Ask — operator approval flow with in-memory store, ASK mode in policy engine, 202 + approval_id API response, 19 tests
-- P3: Agent profiles — TrustLevel, built-in profiles (chatgpt/claude-code/codex-cli/aider/cursor), env+proc detection, effective_packs(), 14 tests
-- **Total: 204 destructive patterns, 3388 tests**
+## ✅ Done
+
+- Task tracking (old P1-P6, QoL, CI/DevOps) — все сделано и закоммичено
+- **P7 Context Detection** — `app/context.py`, 23 тестов, span-классификация команд, known-safe wrappers
+- **P8 AST Matching** — `app/ast_matcher.py`, 17 тестов, stdlib ast для Python, regex fallback
+- **P9 Confidence v2** — `app/confidence.py`, 18 тестов, span-aware, сигналы (executed/data/comment/boosters)
+- **P10 Simulate Mode** — `app/simulate.py`, 15 тестов, `gateway_simulate` MCP tool, три формата (plain/hook_json/decision_log)
+
+## 🔜 DCG-Inspired Features (to port)
+
+### ~~P7 — Context Detection (span-level command classification)~~ ✅ Done
+DCG `src/context.rs` (4124 строк)
+
+`app/context.py` — shell-парсер, SpanKind (EXECUTED/DATA/COMMENT/ARGUMENT/...),
+known-safe wrappers, `check_context_filter()`, `compute_span_confidence()`.
 
 ---
 
-## 🔜 DCG-Inspired Features (приоритет)
+### ~~P8 — AST Matching for Embedded Code~~ ✅ Done
+DCG `src/ast_matcher.rs` (4297 строк)
 
-### P1 — Heredoc scanning
-DCG has 3-tier heredoc detection (src/heredoc.rs):
-- Tier 1: Trigger detection (`<<`, `python -c`, `bash -c`, `eval`, `exec`, `$()`)
-- Tier 2: Content extraction (inline scripts, herestrings, heredocs)
-- Tier 3: AST analysis (future in DCG too)
-
-**Why**: GPT-агенты постоянно шлют `python -c "..."` и `bash -c "..."` — метахар-проверка это пропускает. Нужно извлекать и сканировать вложенные команды.
-
-**Files**: `app/heredoc_scanner.py` (new), `app/command_policy.py` (integrate into `_evaluate_enforce_decision`)
-**Tests**: `tests/test_heredoc_scanner.py` (new)
-
-### P2 — DecisionMode Ask (operator approval)
-Add `ask` mode between deny and allow:
-- Policy says "deny by default" + ASK mode = ask operator via Telegram
-- Severity-based: Critical=deny, High=ask+TTL, Medium=warn, Low=log
-- `CommandPolicyDecision` gets `decision_mode` field
-- Наш access-control flow (confirm_operation) уже есть — связать
-
-**Files**: `app/command_policy.py` (DecisionMode enum, evaluate), `app/policy_ask.py` (callback/TTL)
-**Tests**: `tests/test_policy_ask.py`
-
-### P3 — Agent profiles
-DCG-style agent profiles instead of flat `chatgpt_safe`:
-- `TrustLevel`: high/medium/low
-- per-agent: disabled_packs, extra_packs, additional_allowlist
-- Detection: env vars (CLAUDE_CODE, CODEX_CLI), env name
-
-**Files**: `app/agent_profiles.py` (new), `app/command_policy.py` (integrate profile lookup)
-**Tests**: `tests/test_agent_profiles.py`
-
-### P4 — Pack system refactor
-Current `command_policy.py` has flat tuples. DCG has proper Pack struct:
-- `Pack`: id, keywords, destructive_patterns, safe_patterns
-- `PackRegistry`: lazy-loaded packs, keyword-based quick reject
-- `PackEntry`: metadata + builder fn
-
-**Why**: Модульность, быстрый reject, возможность включать/выключать паки per-agent.
-
-**Files**: `app/packs/` (directory with pack modules), `app/pack_registry.py`
-**Tests**: `tests/test_pack_registry.py`
-
-### P5 — MCP tools
-Add 2 more MCP tools (DCG-style):
-- `gateway_scan_file` — scan a file for destructive commands (like DCG `scan_file`)
-- `gateway_explain_pattern` — explain a pattern by rule_id (like DCG `explain_pattern`)
-
-**Files**: `app/mcp_tools.py` or `server.py`
-**Tests**: `tests/test_mcp_tools.py`
-
-### P6 — Allowlist layers
-DCG has 4-layer allowlist: Agent > Project > User > System
-- Hierarchical with TTL/expiration/session
-- Selectors: rule_id, exact command, prefix, regex
-
-**Files**: `app/allowlist.py` (new)
-**Tests**: `tests/test_allowlist.py`
+`app/ast_matcher.py` — stdlib `ast` для Python, regex для bash/javascript/ruby/typescript.
+`_PYTHON_MODULE_FUNC` dict: (module, func) → severity. Импорты отслеживаются через AST Walk.
+17 тестов.
 
 ---
 
-## 📋 Прочие задачи
+### ~~P9 — Confidence Scoring v2 (span-aware)~~ ✅ Done
+DCG `src/confidence.rs` (419 строк)
 
-### QoL
-- [x] `project_scan_destructive` tool (scan git repo for destructive patterns — DCG-style)
-- [x] Suggestions в ответе при блокировке ("use chmod 755 instead of 777")
-- [ ] Confidence scoring (regex vs AST weight) — приоритет низкий
-- [ ] SARIF/JSON output for scan tool — приоритет низкий
-- [x] Policy mode per-agent (not global) — chatgpt=enforce, claude=audit
+`app/confidence.py` — ConfidenceSignal (10 видов), `compute_match_confidence()`,
+`compute_span_confidence()`. Интегрирован в `Pack.check()` → confidence каждого
+DestructiveMatch учитывает span-контекст, операторы рядом, позицию команды.
+18 тестов.
 
-### CI/DevOps
-- [x] Gitea CI: coverage threshold (69% minimum)
-- [x] Gitea CI: test count sentinel (3500 min)
-- [x] pip-audit step in CI
-- [ ] Docs/Examples
+---
 
-### Docs/Examples
-- [x] MCP server README with tool examples
-- [x] command_policy.py module docstring with architecture overview
-- [x] Примеры ask-mode flow через Telegram
+### ~~P10 — Simulate Mode (command replay)~~ ✅ Done
+DCG `src/simulate.rs` (1819 строк)
+
+`app/simulate.py` — пропускает лог команд через policy engine для тестирования.
+Три формата: plain text, hook JSON, DCG decision log.
+`gateway_simulate` MCP tool.
+15 тестов.
+
+---
+
+- **P11 Suggest Allowlist Clustering** — `app/suggest.py`, 55 тестов, Jaccard-кластеризация, генерация паттернов, safety filter.
+
+---
+
+### P12 — SQLite History (persistent decision log)
+DCG `src/history/`
+
+Персистентный лог решений в SQLite с временными метками, ruleId, confidence.
+У нас есть JSONL audit — но без индексов и запросов.
+
+**Приоритет**: самый низкий — JSONL audit уже работает.
