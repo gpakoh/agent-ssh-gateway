@@ -8,6 +8,33 @@ from app.command_policy import (
 )
 
 
+def _compute_confidence(dp: DestructivePattern) -> float:
+    """Compute detection confidence from pattern characteristics.
+
+    Factors:
+    - Base: 0.5
+    - Regex length (longer = more specific): +0.1 @ >30, +0.2 @ >50, +0.3 @ >100
+    - Severity: CRITICAL +0.2, HIGH +0.1
+    - Has suggestion: +0.1
+    - Capped at 0.95 (reserve 1.0 for future AST-level analysis)
+    """
+    conf = 0.5
+    rlen = len(dp.regex)
+    if rlen > 100:
+        conf += 0.3
+    elif rlen > 50:
+        conf += 0.2
+    elif rlen > 30:
+        conf += 0.1
+    if dp.severity.value in ("critical",):
+        conf += 0.2
+    elif dp.severity.value in ("high",):
+        conf += 0.1
+    if dp.suggestions:
+        conf += 0.1
+    return min(conf, 0.95)
+
+
 class Pack:
     """A group of destructive (and optional safe) patterns (DCG-style).
 
@@ -59,6 +86,7 @@ class Pack:
                     reason=dp.reason,
                     severity=dp.severity,
                     suggestion=dp.suggestions[0].command if dp.suggestions else None,
+                    confidence=_compute_confidence(dp),
                 ))
         return results
 

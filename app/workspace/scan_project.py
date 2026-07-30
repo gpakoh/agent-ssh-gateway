@@ -86,6 +86,7 @@ def scan_project(
                     "severity": f.severity,
                     "reason": f.reason,
                     "suggestion": f.suggestion,
+                    "confidence": f.confidence,
                 })
 
         if file_findings:

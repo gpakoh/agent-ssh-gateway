@@ -1134,6 +1134,18 @@ class TestScanTool:
         f = ScanFinding(pattern_name="test", severity="low", reason="test")
         assert f.suggestion is None
 
+    def test_finding_confidence_default_none(self):
+        from app.command_policy import ScanFinding
+
+        f = ScanFinding(pattern_name="test", severity="low", reason="test")
+        assert f.confidence is None
+
+    def test_finding_confidence_set(self):
+        from app.command_policy import ScanFinding
+
+        f = ScanFinding(pattern_name="test", severity="low", reason="test", confidence=0.8)
+        assert f.confidence == 0.8
+
 
 # ---------------------------------------------------------------------------
 # Phase 3 — filesystem destructive pattern tests
