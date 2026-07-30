@@ -83,7 +83,7 @@ DCG has 4-layer allowlist: Agent > Project > User > System
 
 ### QoL
 - [x] `project_scan_destructive` tool (scan git repo for destructive patterns — DCG-style)
-- [ ] Suggestions в ответе при блокировке ("use chmod 755 instead of 777")
+- [x] Suggestions в ответе при блокировке ("use chmod 755 instead of 777")
 - [ ] Confidence scoring (regex vs AST weight)
 - [ ] SARIF/JSON output for scan tool
 - [ ] Policy mode per-agent (not global)
