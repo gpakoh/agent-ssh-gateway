@@ -481,7 +481,7 @@ def generate_enhanced_suggestions(
             members = [_TempCluster(records=[first], rep_tokens=set(first.tokens))]
             remaining: list[_Record] = []
             for other in unclustered:
-                best_sim = max(jaccard_similarity(m.rep_tokens, set(other.tokens)) for m in members)
+                best_sim = max(jaccard_similarity(m.rep_tokens, list(other.tokens)) for m in members)
                 if best_sim >= similarity_threshold:
                     members.append(_TempCluster(records=[other], rep_tokens=set(other.tokens)))
                 else:
