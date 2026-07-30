@@ -1,6 +1,6 @@
 """Tests for project_scan_destructive — scanning project for destructive patterns."""
 
-
+import json
 
 from app.workspace.scan_project import _is_binary, scan_project
 
@@ -63,3 +63,38 @@ class TestScanProject:
         result = scan_project("test", pattern="*.txt", max_files=10, _root_override=tmp_path)
         assert result["files_scanned"] == 1
         assert "notes.txt" in result["findings"]
+
+    def test_json_format(self, tmp_path):
+        (tmp_path / "script.sh").write_text("rm -rf /\n")
+        result = scan_project("test", pattern="*", max_files=10, _root_override=tmp_path, fmt="json")
+        assert isinstance(result, str)
+        parsed = json.loads(result)
+        assert parsed["total_findings"] >= 1
+        assert "script.sh" in parsed["findings"]
+
+    def test_sarif_format(self, tmp_path):
+        (tmp_path / "script.sh").write_text("rm -rf /\n")
+        result = scan_project("test", pattern="*", max_files=10, _root_override=tmp_path, fmt="sarif")
+        assert isinstance(result, str)
+        parsed = json.loads(result)
+        assert parsed["version"] == "2.1.0"
+        assert len(parsed["runs"]) == 1
+        run = parsed["runs"][0]
+        assert len(run["results"]) >= 1
+        assert run["tool"]["driver"]["name"] == "agent-ssh-gateway scan_project"
+        assert run["results"][0]["ruleId"] is not None
+        assert run["results"][0]["locations"][0]["physicalLocation"]["region"]["startLine"]
+
+    def test_sarif_empty_project(self, tmp_path):
+        (tmp_path / "file.py").write_text("print('ok')\n")
+        result = scan_project("test", pattern="*", max_files=10, _root_override=tmp_path, fmt="sarif")
+        parsed = json.loads(result)
+        assert parsed["version"] == "2.1.0"
+        assert len(parsed["runs"][0]["results"]) == 0
+
+    def test_sarif_severity_mapping(self, tmp_path):
+        (tmp_path / "x.sh").write_text("chmod -R 777 /etc\n")
+        result = scan_project("test", pattern="*", max_files=10, _root_override=tmp_path, fmt="sarif")
+        parsed = json.loads(result)
+        for r in parsed["runs"][0]["results"]:
+            assert r["level"] in ("error", "warning", "note")

@@ -795,6 +795,7 @@ def gateway_project_scan_destructive(
     project: str,
     pattern: str = "*",
     max_files: int = 100,
+    fmt: str = "dict",
 ) -> dict[str, Any]:
     """Scan a project directory for destructive command patterns.
 
@@ -806,11 +807,12 @@ def gateway_project_scan_destructive(
         project: Registered project name.
         pattern: Glob pattern to filter files (default ``*``).
         max_files: Maximum files to scan (default 100).
+        fmt: Output format — ``dict`` (default), ``json``, or ``sarif``.
     """
     from app.workspace.scan_project import scan_project as _scan
 
     try:
-        result = _scan(project, pattern=pattern, max_files=max_files)
+        result = _scan(project, pattern=pattern, max_files=max_files, fmt=fmt)
     except Exception as exc:
         return tool_error(
             tool="project_scan_destructive",

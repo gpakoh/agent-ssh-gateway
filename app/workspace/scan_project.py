@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -25,30 +26,95 @@ def _is_binary(data: bytes) -> bool:
     return b"\0" in data[:512]
 
 
-def scan_project(
-    project_id: str,
-    *,
-    pattern: str = "*",
-    max_files: int = MAX_FILES,
-    _root_override: Path | None = None,
-) -> dict:
-    """Scan a project for destructive command patterns.
+_SARIF_LEVEL_MAP = {
+    "critical": "error",
+    "high": "error",
+    "medium": "warning",
+    "low": "note",
+}
 
-    Returns:
-        dict with keys: project_id, root, files_scanned,
-        findings (list per file), total_findings, truncated, elapsed_ms
-    """
-    start = time.monotonic()
-    if _root_override is not None:
-        root = _root_override.resolve()
-    else:
-        registry = get_registry()
-        info = registry.project_info(project_id)
-        root = Path(info["root"]).resolve()
+
+def _build_sarif(
+    project_id: str,
+    root: str,
+    files_scanned: int,
+    findings_by_file: dict[str, list[dict]],
+    total_findings: int,
+    truncated: bool,
+    elapsed_ms: float,
+) -> str:
+    """Build a SARIF v2.1.0 report string."""
+    rules: dict[str, dict] = {}
+    results: list[dict] = []
+
+    for file_path, file_findings in sorted(findings_by_file.items()):
+        for finding in file_findings:
+            pname = finding["pattern_name"]
+            if pname not in rules:
+                rules[pname] = {
+                    "id": pname,
+                    "shortDescription": {"text": finding["reason"]},
+                    "fullDescription": {"text": finding["reason"]},
+                    "defaultConfiguration": {
+                        "level": _SARIF_LEVEL_MAP.get(finding["severity"], "warning"),
+                    },
+                    "properties": {
+                        "severity": finding["severity"],
+                        "confidence": finding["confidence"],
+                    },
+                }
+            results.append({
+                "ruleId": pname,
+                "level": _SARIF_LEVEL_MAP.get(finding["severity"], "warning"),
+                "message": {"text": finding["content"]},
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": {"uri": file_path},
+                        "region": {"startLine": finding["line"]},
+                    }
+                }],
+                "properties": {
+                    "suggestion": finding.get("suggestion"),
+                    "confidence": finding["confidence"],
+                },
+            })
+
+    sarif_doc = {
+        "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "agent-ssh-gateway scan_project",
+                    "informationUri": "https://github.com/gpakoh/agent-ssh-gateway",
+                    "rules": sorted(rules.values(), key=lambda r: r["id"]),
+                }
+            },
+            "results": results,
+            "properties": {
+                "project_id": project_id,
+                "files_scanned": files_scanned,
+                "total_findings": total_findings,
+                "truncated": truncated,
+                "elapsed_ms": round(elapsed_ms, 1),
+            },
+        }],
+    }
+    return json.dumps(sarif_doc, indent=2, ensure_ascii=False)
+
+
+def _scan(
+    project_id: str,
+    root: Path,
+    pattern: str,
+    max_files: int,
+) -> dict:
+    """Core scanning logic — collect findings grouped by file."""
     findings_by_file: dict[str, list[dict]] = {}
     files_scanned = 0
     truncated = False
     total_findings = 0
+    start = time.monotonic()
 
     for path in sorted(root.rglob(pattern)):
         if time.monotonic() - start > TIMEOUT_S:
@@ -99,7 +165,6 @@ def scan_project(
             break
 
     elapsed = (time.monotonic() - start) * 1000
-
     return {
         "project_id": project_id,
         "root": str(root),
@@ -109,3 +174,48 @@ def scan_project(
         "truncated": truncated,
         "elapsed_ms": round(elapsed, 1),
     }
+
+
+def scan_project(
+    project_id: str,
+    *,
+    pattern: str = "*",
+    max_files: int = MAX_FILES,
+    _root_override: Path | None = None,
+    fmt: str = "dict",
+) -> dict | str:
+    """Scan a project for destructive command patterns.
+
+    Args:
+        project_id: Registered project name.
+        pattern: Glob pattern to filter files.
+        max_files: Maximum files to scan.
+        fmt: Output format — ``"dict"`` (default), ``"json"``, or ``"sarif"``.
+
+    Returns:
+        dict when fmt="dict", str (JSON) when fmt="json" or fmt="sarif".
+    """
+    if _root_override is not None:
+        root = _root_override.resolve()
+    else:
+        registry = get_registry()
+        info = registry.project_info(project_id)
+        root = Path(info["root"]).resolve()
+
+    data = _scan(project_id, root, pattern, max_files)
+
+    if fmt == "sarif":
+        return _build_sarif(
+            project_id=data["project_id"],
+            root=data["root"],
+            files_scanned=data["files_scanned"],
+            findings_by_file=data["findings"],
+            total_findings=data["total_findings"],
+            truncated=data["truncated"],
+            elapsed_ms=data["elapsed_ms"],
+        )
+
+    if fmt == "json":
+        return json.dumps(data, indent=2, ensure_ascii=False, default=str)
+
+    return data
