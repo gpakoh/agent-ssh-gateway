@@ -31,7 +31,7 @@ class SpanKind(StrEnum):
     UNKNOWN = "unknown"
 
     def should_check(self) -> bool:
-        return self in (SpanKind.EXECUTED, SpanKind.INLINE_CODE, SpanKind.UNKNOWN)
+        return self in (SpanKind.EXECUTED, SpanKind.INLINE_CODE, SpanKind.HEREDOC_BODY, SpanKind.UNKNOWN)
 
 
 @dataclass(frozen=True)
@@ -154,33 +154,63 @@ def _tokenize(command: str) -> list[tuple[str, int, SpanKind]]:
             tokens.append((command[start:i], start, SpanKind.EXECUTED))
             continue
 
-        # Heredoc start — find the delimiter
+        # Heredoc start — find the delimiter, then capture body
         if ch == "<" and i + 1 < n and command[i + 1] == "<":
             start = i
             i += 2
-            # Skip optional -
+            strip_tabs = False
             if i < n and command[i] == "-":
+                strip_tabs = True
                 i += 1
-            # Skip optional whitespace
+            # Skip optional whitespace, handle quoted delimiter
             while i < n and command[i] in " \t":
+                i += 1
+            # Quoted delimiter: <<'EOF' or <<"EOF"
+            quoted = False
+            if i < n and command[i] in ("'", '"'):
+                quote_char = command[i]
+                quoted = True
                 i += 1
             # Read delimiter
             delim_start = i
-            while i < n and command[i] not in " \t\n;|&":
+            while i < n and command[i] not in (" \t\n;|&" if not quoted else (quote_char,)):
                 i += 1
             delim = command[delim_start:i]
+            if quoted and i < n and command[i] == quote_char:
+                i += 1  # skip closing quote
             tokens.append((command[start:i], start, SpanKind.UNKNOWN))
-            # Find the delimiter on its own line
-            if delim and i < n:
-                body_start = i
-                while i < n:
-                    # Check for delimiter at start of line
-                    if (i == body_start or command[i - 1] == "\n") and command[i:].startswith(delim):
-                        end = i + len(delim)
-                        tokens.append((command[i:end], i, SpanKind.HEREDOC_BODY))
-                        i = end
-                        break
+
+            if not delim or i >= n:
+                continue
+
+            # <<< is a here-string (single-line data), not a heredoc
+            if delim == "<" and command[delim_start - 1 : delim_start + 1] == "<<":
+                tokens.append((command[i:], i, SpanKind.DATA))
+                break
+
+            body_start = i
+            while i < n:
+                line_start = i
+                # Skip to next newline or end
+                while i < n and command[i] != "\n":
                     i += 1
+                line_end = i
+                # Check for delimiter at line start (after optional tab for <<-)
+                check_pos = line_start
+                if strip_tabs and check_pos < n and command[check_pos] == "\t":
+                    check_pos += 1
+                if command[check_pos:].startswith(delim) and check_pos < n:
+                    body_end = line_start
+                    if body_end > body_start:
+                        tokens.append((command[body_start:body_end], body_start, SpanKind.HEREDOC_BODY))
+                    tokens.append((command[line_start:line_end], line_start, SpanKind.UNKNOWN))
+                    i = line_end + 1 if line_end < n else line_end
+                    break
+                # Skip newline
+                if line_end < n:
+                    i = line_end + 1
+                else:
+                    i = line_end
             continue
 
         # Normal word or whitespace, or shell metacharacter (|, ;, &)

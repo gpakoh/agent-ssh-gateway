@@ -10,43 +10,33 @@
 - **P11 Suggest Allowlist Clustering** — `app/suggest.py`, 55 тестов, Jaccard-кластеризация, генерация паттернов, safety filter
 - **P12 SQLite History** — `app/history.py`, 35 тестов, SQLite-логирование решений, batch write, prune, статистика
 
-## 🔜 DCG-Inspired Features (to port)
+## 📋 Remaining (from DCG gap analysis)
 
-### ~~P7 — Context Detection (span-level command classification)~~ ✅ Done
-DCG `src/context.rs` (4124 строк)
+### ✅ P13 — Docker pack patterns
+Все DCG-паттерны уже присутствуют в `app/packs/docker.py` (9 docker + 4 compose).
+Safe-паттерны (allow list для docker ps/logs/build...) — опционально.
 
-`app/context.py` — shell-парсер, SpanKind (EXECUTED/DATA/COMMENT/ARGUMENT/...),
-known-safe wrappers, `check_context_filter()`, `compute_span_confidence()`.
+### P14 — Heredoc scanning ✅ (mostly done)
+`app/heredoc_scanner.py` уже существует:
+- Tier 1: trigger detection (inline scripts, heredocs, here-strings, cmd subs)
+- Tier 2: content extraction + recursive scan via `_check_all_destructive()`
+- Интегрирован в pipeline как Gate 2b (command_policy.py:800-812)
+- 52 теста в `tests/test_heredoc_scanner.py`
+- Исправлено: `HEREDOC_BODY` добавлен в `should_check()` в context.py
 
----
+### P15 — Inline script scanning
+`extract_inline_scripts` в `app/heredoc_scanner.py` работает для:
+- bash -c, sh -c ✅
+- python -c, ruby -e, perl -e, node -e, php -r ✅
+- PowerShell -Command / -EncodedCommand ✅
+- Проблема: вложенные кавычки в python -c отрезают код
 
-### ~~P8 — AST Matching for Embedded Code~~ ✅ Done
-DCG `src/ast_matcher.rs` (4297 строк)
+### P16 — Ask mode (operator approval через Telegram)
+Не реализовано. Нужно связать pipeline с Telegram-уведомлениями.
 
-`app/ast_matcher.py` — stdlib `ast` для Python, regex для bash/javascript/ruby/typescript.
-`_PYTHON_MODULE_FUNC` dict: (module, func) → severity. Импорты отслеживаются через AST Walk.
-17 тестов.
+### P17 — Suggestions при блокировке
+Уже есть в DestructivePattern.suggestions (все пакеты).
+Отображается в ответе policy evaluation.
 
----
-
-### ~~P9 — Confidence Scoring v2 (span-aware)~~ ✅ Done
-DCG `src/confidence.rs` (419 строк)
-
-`app/confidence.py` — ConfidenceSignal (10 видов), `compute_match_confidence()`,
-`compute_span_confidence()`. Интегрирован в `Pack.check()` → confidence каждого
-DestructiveMatch учитывает span-контекст, операторы рядом, позицию команды.
-18 тестов.
-
----
-
-### ~~P10 — Simulate Mode (command replay)~~ ✅ Done
-DCG `src/simulate.rs` (1819 строк)
-
-`app/simulate.py` — пропускает лог команд через policy engine для тестирования.
-Три формата: plain text, hook JSON, DCG decision log.
-`gateway_simulate` MCP tool.
-15 тестов.
-
----
-
-
+### P18 — Больше pack-паттернов (K8s, AWS, GCP, БД, DNS...)
+У DCG ~50 доменов, у нас ~10. Постепенное расширение по необходимости.
