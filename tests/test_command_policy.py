@@ -17,6 +17,7 @@ from app.command_policy import (
     evaluate_project_automation,
     evaluate_readonly,
     evaluate_testlint,
+    parse_agent_modes,
 )
 
 # ---------------------------------------------------------------------------
@@ -331,9 +332,7 @@ class TestEvaluateCommandPolicy:
         assert d.allowed is True
 
 
-# ---------------------------------------------------------------------------
-# Dangerous token tests
-# ---------------------------------------------------------------------------
+
 
 
 class TestDangerousTokens:
@@ -952,7 +951,76 @@ class TestDockerDestructiveInDockerAdminProfile:
 
 
 # ---------------------------------------------------------------------------
-# Scan tool tests
+# Per-agent mode tests
+# ---------------------------------------------------------------------------
+
+class TestParseAgentModes:
+    def test_parse_agent_modes_valid(self):
+        result = parse_agent_modes('{"chatgpt":"enforce","claude-code":"audit"}')
+        assert result == {"chatgpt": "enforce", "claude-code": "audit"}
+
+    def test_parse_agent_modes_case_mapped(self):
+        result = parse_agent_modes('{"chatgpt":"EnForCe"}')
+        assert result == {"chatgpt": "enforce"}
+
+    def test_parse_agent_modes_empty(self):
+        assert parse_agent_modes("{}") == {}
+
+    def test_parse_agent_modes_malformed(self):
+        assert parse_agent_modes("not-json") == {}
+        assert parse_agent_modes("") == {}
+
+    def test_parse_agent_modes_not_dict(self):
+        assert parse_agent_modes('["a","b"]') == {}
+
+
+class TestAgentModeOverride:
+    def test_no_override_without_config(self):
+        """Without agent_modes config, the agent name has no effect on mode."""
+        d = evaluate_command_policy(
+            "pytest -q",
+            mode="audit",
+            profile="default",
+            agent="chatgpt",
+        )
+        assert d.mode == "audit"
+
+    def test_agent_override_active(self, monkeypatch):
+        from app.config import settings
+        monkeypatch.setattr(settings, "command_policy_agent_modes", '{"chatgpt":"enforce"}')
+        d = evaluate_command_policy("pytest -q", mode="audit", profile="default", agent="chatgpt")
+        assert d.mode == "enforce"
+
+    def test_agent_override_blocks_command(self, monkeypatch):
+        from app.config import settings
+        monkeypatch.setattr(settings, "command_policy_agent_modes", '{"chatgpt":"enforce"}')
+        d = evaluate_command_policy("rm -rf /", mode="audit", profile="readonly", agent="chatgpt")
+        assert d.mode == "enforce"
+        assert d.allowed is False
+
+    def test_unknown_agent_uses_global_mode(self, monkeypatch):
+        from app.config import settings
+        monkeypatch.setattr(settings, "command_policy_agent_modes", '{"chatgpt":"enforce"}')
+        d = evaluate_command_policy("pytest -q", mode="audit", profile="default", agent="unknown")
+        assert d.mode == "audit"
+
+    def test_agent_not_in_map_uses_global_mode(self, monkeypatch):
+        from app.config import settings
+        monkeypatch.setattr(settings, "command_policy_agent_modes", '{"chatgpt":"enforce"}')
+        d = evaluate_command_policy("pytest -q", mode="audit", profile="default", agent="claude-code")
+        assert d.mode == "audit"
+
+    def test_agent_detected_from_env_uses_override(self, monkeypatch):
+        from app.config import settings
+        monkeypatch.setattr(settings, "command_policy_agent_modes", '{"claude-code":"audit"}')
+        monkeypatch.setenv("CLAUDE_CODE", "1")
+        d = evaluate_command_policy("rm -rf /", mode="enforce", profile="default")
+        assert d.mode == "audit"
+        assert d.allowed is True  # audit always allows
+
+
+# ---------------------------------------------------------------------------
+# Dangerous token tests
 # ---------------------------------------------------------------------------
 
 

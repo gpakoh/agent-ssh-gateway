@@ -48,6 +48,11 @@ class Settings(BaseSettings):
         alias="COMMAND_POLICY_KEY_PROFILES",
         description="JSON mapping API key fingerprint → profile name (e.g. {\"abc123\": \"testlint\"})",
     )
+    command_policy_agent_modes: str = Field(
+        default="{}",
+        alias="COMMAND_POLICY_AGENT_MODES",
+        description="JSON mapping agent name → policy mode (e.g. {\"chatgpt\":\"enforce\",\"claude-code\":\"audit\"})",
+    )
     command_output_redaction_enabled: bool = Field(
         default=False, alias="COMMAND_OUTPUT_REDACTION_ENABLED"
     )

@@ -801,7 +801,21 @@ def evaluate_command_policy(
 
     The allowlist (agent > project > user > system) is checked before any
     gates — if matched, the command is allowed immediately.
+
+    Per‐agent mode: if ``*_AGENT_MODES`` is configured and the calling
+    agent (detected or explicitly passed) has a mapping, it overrides the
+    global ``mode`` parameter.
     """
+    # Resolve per-agent mode override
+    if agent is None:
+        from app.agent_profiles import detect_agent
+        agent = detect_agent()
+    if agent:
+        from app.config import settings
+        agent_modes = parse_agent_modes(settings.command_policy_agent_modes)
+        if agent in agent_modes:
+            mode = agent_modes[agent]
+
     mode_value = (mode or CommandPolicyMode.AUDIT.value).lower()
     profile_value = (profile or CommandPolicyProfile.DEFAULT.value).lower()
     root = get_command_root(command)
@@ -948,6 +962,21 @@ def parse_key_profiles(raw: str) -> dict[str, str]:
         data = json.loads(raw)
         if isinstance(data, dict):
             return {str(k): str(v) for k, v in data.items()}
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return {}
+
+
+def parse_agent_modes(raw: str) -> dict[str, str]:
+    """Parse COMMAND_POLICY_AGENT_MODES JSON string into dict.
+
+    Returns empty dict on parse failure (fail-open to global mode).
+    """
+    import json
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return {str(k): str(v).lower() for k, v in data.items()}
     except (json.JSONDecodeError, TypeError):
         pass
     return {}
