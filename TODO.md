@@ -7,6 +7,8 @@
 - **P8 AST Matching** — `app/ast_matcher.py`, 17 тестов, stdlib ast для Python, regex fallback
 - **P9 Confidence v2** — `app/confidence.py`, 18 тестов, span-aware, сигналы (executed/data/comment/boosters)
 - **P10 Simulate Mode** — `app/simulate.py`, 15 тестов, `gateway_simulate` MCP tool, три формата (plain/hook_json/decision_log)
+- **P11 Suggest Allowlist Clustering** — `app/suggest.py`, 55 тестов, Jaccard-кластеризация, генерация паттернов, safety filter
+- **P12 SQLite History** — `app/history.py`, 35 тестов, SQLite-логирование решений, batch write, prune, статистика
 
 ## 🔜 DCG-Inspired Features (to port)
 
@@ -47,14 +49,4 @@ DCG `src/simulate.rs` (1819 строк)
 
 ---
 
-- **P11 Suggest Allowlist Clustering** — `app/suggest.py`, 55 тестов, Jaccard-кластеризация, генерация паттернов, safety filter.
 
----
-
-### P12 — SQLite History (persistent decision log)
-DCG `src/history/`
-
-Персистентный лог решений в SQLite с временными метками, ruleId, confidence.
-У нас есть JSONL audit — но без индексов и запросов.
-
-**Приоритет**: самый низкий — JSONL audit уже работает.
