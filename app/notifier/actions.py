@@ -14,6 +14,7 @@ class ActionPayload:
     source_ip: str
     event_type: str
     request_id: str
+    approval_id: str | None = None
     created_at: float = field(default_factory=time.time)
     expires_at: float = 0.0
 
@@ -28,6 +29,7 @@ def create_action(
     source_ip: str,
     event_type: str,
     request_id: str,
+    approval_id: str | None = None,
     ttl_seconds: float = 3600.0,
 ) -> str:
     token = secrets.token_urlsafe(16)
@@ -37,6 +39,7 @@ def create_action(
         source_ip=source_ip,
         event_type=event_type,
         request_id=request_id,
+        approval_id=approval_id,
         expires_at=time.time() + ttl_seconds,
     )
     return token

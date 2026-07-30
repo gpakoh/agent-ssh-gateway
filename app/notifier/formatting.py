@@ -16,7 +16,7 @@ _ALERT_TITLES = {
     "system.error": "Gateway system error",
 }
 
-_ALLOWED_METADATA_KEYS = {"command_root"}
+_ALLOWED_METADATA_KEYS = {"command_root", "approval_id", "requires_approval"}
 _MAX_FIELD_LEN = 180
 _IP_CLIP_LEN = 80
 
@@ -106,6 +106,14 @@ def format_audit_event(
     reason = _clip(event.get("reason"), limit=120)
     if reason:
         lines.append(f"reason: <code>{reason}</code>")
+
+    approval_id = _metadata_value(event, "approval_id")
+    if approval_id:
+        lines.append(f"approval_id: <code>{approval_id}</code>")
+
+    requires_approval_val = _metadata_value(event, "requires_approval")
+    if requires_approval_val:
+        lines.append(f"requires_approval: <code>{requires_approval_val}</code>")
 
     return "\n".join(lines)
 

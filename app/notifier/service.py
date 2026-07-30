@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -204,6 +204,7 @@ class GatewayNotifierService:
                     actor_fingerprint=str(event["actor_fingerprint"]),
                     source_ip=str(event["source_ip"]),
                     request_id=str(event.get("event_id", "")),
+                    approval_id=_extract_approval_id(event),
                 )
 
             await self._telegram.send_message(text, reply_markup=reply_markup)
@@ -255,6 +256,7 @@ def _build_action_keyboard(
     actor_fingerprint: str,
     source_ip: str,
     request_id: str,
+    approval_id: str | None = None,
 ) -> dict[str, Any]:
     """Create inline keyboard with Allow + Deny buttons for operator action."""
     allow_token = create_action(
@@ -263,6 +265,7 @@ def _build_action_keyboard(
         source_ip=source_ip,
         event_type=event_type,
         request_id=request_id,
+        approval_id=approval_id,
     )
     deny_token = create_action(
         action_type="deny_actor",
@@ -270,6 +273,7 @@ def _build_action_keyboard(
         source_ip=source_ip,
         event_type=event_type,
         request_id=request_id,
+        approval_id=approval_id,
     )
     return {
         "inline_keyboard": [
@@ -279,6 +283,14 @@ def _build_action_keyboard(
             ],
         ],
     }
+
+
+def _extract_approval_id(event: Mapping[str, Any]) -> str | None:
+    """Extract approval_id from event metadata dict."""
+    metadata = event.get("metadata")
+    if isinstance(metadata, dict):
+        return metadata.get("approval_id")
+    return None
 
 
 def _now_iso() -> str:

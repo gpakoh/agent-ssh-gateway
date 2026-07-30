@@ -393,6 +393,8 @@ async def ssh_execute(
         route="POST /api/ssh/execute",
         actor_fingerprint=_identity.fingerprint[:12] if _identity else "",
         request_id=getattr(request.state, "request_id", ""),
+        approval_id=decision.approval_id,
+        requires_approval=decision.requires_approval,
     )
 
     if not decision.allowed:

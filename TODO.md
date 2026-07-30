@@ -24,15 +24,22 @@ Safe-паттерны (allow list для docker ps/logs/build...) — опцио
 - 52 теста в `tests/test_heredoc_scanner.py`
 - Исправлено: `HEREDOC_BODY` добавлен в `should_check()` в context.py
 
-### P15 — Inline script scanning
+### P15 — Inline script scanning ✅
 `extract_inline_scripts` в `app/heredoc_scanner.py` работает для:
-- bash -c, sh -c ✅
-- python -c, ruby -e, perl -e, node -e, php -r ✅
+- bash -c, sh -c, python -c, ruby -e, perl -e, node -e, php -r ✅
 - PowerShell -Command / -EncodedCommand ✅
-- Проблема: вложенные кавычки в python -c отрезают код
+- Исправлены вложенные/escaped ковычки через `_find_closing_quote()` ✅
 
-### P16 — Ask mode (operator approval через Telegram)
-Не реализовано. Нужно связать pipeline с Telegram-уведомлениями.
+### P16 — Ask mode (operator approval через Telegram) ✅
+- `CommandPolicyMode.ASK` определён и обрабатывается в evaluate_command_policy
+- `ApprovalRequest` store в `app/policy_ask.py` (in-memory, TTL 300s)
+- SSH router возвращает HTTP 202 с approval_id при ASK mode
+- `POST /api/admin/approval/decision` — эндпоинт для approve/deny per-command
+- Telegram notifier поддерживает approval_id в action payloads:
+  - С approval_id → POST в `/api/admin/approval/decision`
+  - Без approval_id → POST в `/api/admin/access-control/decision` (как было)
+- `approval_id` и `requires_approval` передаются в structured audit events
+- Форматирование показывает approval_id в Telegram-сообщениях
 
 ### P17 — Suggestions при блокировке
 Уже есть в DestructivePattern.suggestions (все пакеты).
