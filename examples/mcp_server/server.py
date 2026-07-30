@@ -789,6 +789,41 @@ def gateway_scan_file(project: str, path: str) -> dict[str, Any]:
     )
 
 
+@register_tool("project_scan_destructive")
+@instrumented("project_scan_destructive")
+def gateway_project_scan_destructive(
+    project: str,
+    pattern: str = "*",
+    max_files: int = 100,
+) -> dict[str, Any]:
+    """Scan a project directory for destructive command patterns.
+
+    Walks files matching ``pattern`` (glob), skips binary/vendor/cache,
+    reads each file, runs ``scan_command`` per line, and returns findings
+    grouped by file path.
+
+    Parameters:
+        project: Registered project name.
+        pattern: Glob pattern to filter files (default ``*``).
+        max_files: Maximum files to scan (default 100).
+    """
+    from app.workspace.scan_project import scan_project as _scan
+
+    try:
+        result = _scan(project, pattern=pattern, max_files=max_files)
+    except Exception as exc:
+        return tool_error(
+            tool="project_scan_destructive",
+            code="SCAN_ERROR",
+            message=str(exc),
+        )
+
+    return tool_success(
+        tool="project_scan_destructive",
+        result=result,
+    )
+
+
 @register_tool("explain_pattern")
 @instrumented("explain_pattern")
 def gateway_explain_pattern(pattern_name: str) -> dict[str, Any]:
