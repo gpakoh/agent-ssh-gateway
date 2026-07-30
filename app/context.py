@@ -19,10 +19,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-_PENDING = "PENDING"
-
 
 class SpanKind(StrEnum):
+    PENDING = "pending"
     EXECUTED = "executed"
     DATA = "data"
     COMMENT = "comment"
@@ -189,11 +188,11 @@ def _tokenize(command: str) -> list[tuple[str, int, SpanKind]]:
         while i < n and command[i] not in " \t\n'\"`#<|;&":
             i += 1
         if i > start:
-            tokens.append((command[start:i], start, _PENDING))
+            tokens.append((command[start:i], start, SpanKind.PENDING))
             continue
 
         # Shell metacharacter — emit as UNKNOWN (reset context in classifier)
-        tokens.append((command[i], i, _PENDING))
+        tokens.append((command[i], i, SpanKind.PENDING))
         i += 1
 
     return tokens
@@ -220,7 +219,7 @@ def _classify_tokens(
     while i < len(tokens):
         text, start, kind = tokens[i]
 
-        if kind != _PENDING:
+        if kind != SpanKind.PENDING:
             spans.append(Span(kind, text, start))
             i += 1
             continue
