@@ -1,24 +1,76 @@
 """Command policy engine — profile-based command authorization (C3).
 
-Modes:
+Modes (CommandPolicyMode):
     off     — policy disabled, all commands allowed
-    audit   — policy logs decisions but does not block
+    audit   — policy evaluates and logs decisions but does not block
     enforce — policy blocks commands not matching the selected profile
+    ask     — policy creates ApprovalRequest for blocked commands (operator
+              approves/denies via API, 300s TTL)
 
 Profiles:
-    readonly          — read-only inspection only
-    testlint          — pytest/ruff/mypy/compileall + readonly
-    project-automation — project-automation + testlint + git read-only
-    ops/docker-admin  — limited service/docker operations + project-automation
-    default           — deny obviously dangerous root commands (defense-in-depth)
+    readonly             — read-only inspection only (cat, ls, git status, ...)
+    testlint             — pytest/ruff/mypy/compileall + readonly
+    project-automation   — project-automation + testlint + git read-only
+    ops/docker-admin     — limited service/docker operations + project-automation
+    default              — deny obviously dangerous root commands (defense-in-depth)
 
-Security model:
-    0. Allowlist (gate 0) — agent/project/user/system layers, bypasses all checks
-    1. Blanket metachar denial (| ; && || ` $(...)) — always enforced in enforce mode
-    2. Argument-shape checks — language interpreters, find -exec, dangerous patterns
-    3. Profile-specific root allowlist
-    4. Denylist as defense-in-depth only
+Agent override:
+    COMMAND_POLICY_AGENT_MODES maps agent name → mode (bypasses global mode).
+    Resolution: caller-provided mode → agent_modes[agent] → global mode.
+    Agent auto-detected via env/proc (detect_agent()).
+
+Evaluation pipeline (evaluate_command_policy):
+    0. Allowlist (Gate 0)      — agent/project/user/system four-layer hierarchy
+                                 with TTL; exact/prefix/regex/rule_id selectors.
+                                 Bypasses ALL subsequent gates.
+    1. Metachar denial (Gate 1) — blanket block on | ; && || ` $() $() $[]
+                                 Always enforced in enforce mode.
+    2. Argument shape (Gate 2)  — language interpreters (python -c, bash -c),
+                                 find -exec, dangerous patterns, URL w/ password.
+    2b. Heredoc scanner (Gate 2b) — inline scripts, heredocs, herestrings,
+                                 command substitutions; extracted content runs
+                                 through full profile evaluation recursively.
+    3. Profile eval (Gate 3)    — profile-specific root allowlist match.
+    4. Denylist (Gate 4)        — defense-in-depth denylist (rarely hit).
+
+Gate behavior by mode:
+    off:     all gates skipped, commands always allowed.
+    audit:   gates run, decisions logged but not enforced.
+    enforce: gates 1-2 always block; gate 2b blocks; gate 3 blocks;
+             gate 4 blocks.
+    ask:     gates 1-2 always block; gates 2b-3 create ApprovalRequest;
+             gate 4 blocks.
+
+Decision output (CommandPolicyDecision):
+    allowed: bool
+    mode: CommandPolicyMode
+    profile: str
+    blocked_by: str | None  — which gate blocked (None if allowed)
+    reason: str
+    agent: str | None
+    suggestion: str | None  — first matching destructive-pattern suggestion
+    requires_approval: bool
+    approval_id: str | None
+    effective_packs: list[str]
+
+Key modules:
+    app/command_policy.py   — gates, profiles, evaluate (982 loc)
+    app/command_policy.py   — per-agent mode resolution in §804-814
+    app/command_policy.py   — parse_agent_modes() parser in §969-980
+    app/policy_ask.py       — ApprovalRequest store (95 loc, in-memory, 300s TTL)
+    app/allowlist.py        — four-layer allowlist (agent/project/user/system)
+    app/heredoc_scanner.py  — 2-tier heredoc extraction + recursive check
+    app/agent_profiles.py   — TrustLevel, AgentProfile, effective_packs()
+    app/config.py           — COMMAND_POLICY_AGENT_MODES env var
+
+Destructive pattern packs (app/packs/):
+    docker, filesystem, kubernetes, cloud, database,
+    git, firewall, loadbalancer, system
 """
+
+
+
+
 
 from __future__ import annotations
 

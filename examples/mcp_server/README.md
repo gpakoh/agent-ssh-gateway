@@ -129,6 +129,121 @@ Tools:
 - `gateway_show_handoff_status` — compact handoff file availability check
 - `gateway_write_handoff_plan` — write `.ai-bridge/current-plan.md` (requires `WRITE_MODE=handoff`)
 
+## Tool usage examples
+
+### gateway_health
+
+```bash
+curl -s http://localhost:8085/health | jq .
+# → {"status":"ok","version":"0.1.61","build_sha":"abc123"}
+```
+
+### gateway_execute_restricted
+
+```
+User:  Run `git log --oneline -5`
+Agent: [calls gateway_execute_restricted("git log --oneline -5")]
+       → "abc1234 feat: add per-agent mode
+          def5678 ci: fix coverage threshold
+          ..."
+```
+
+### gateway_read_file
+
+```
+User:  Read package.json
+Agent: [calls gateway_read_file("package.json")]
+       → "{ \"name\": \"agent-ssh-gateway\", ... }"
+```
+
+### gateway_show_changes (mcp_client mode)
+
+```
+User:  What changed in the last commit?
+Agent: [calls gateway_show_changes()]
+       → " M  app/command_policy.py
+           M  examples/mcp_server/README.md
+
+           app/command_policy.py | 4 ++--
+           examples/mcp_server/README.md | 68 ++++++++++++++++++++++++++"
+```
+
+### gateway_run_tests / gateway_run_lint (mcp_client mode)
+
+```
+User:  Run tests
+Agent: [calls gateway_run_tests()]
+       → "3506 passed, 1 skipped in 142.32s"
+
+User:  Run linter
+Agent: [calls gateway_run_lint()]
+       → "All checks passed!"
+```
+
+## Ask mode
+
+Ask mode (`COMMAND_POLICY_MODE=ask`) creates approval requests when a command
+is blocked by gates 2b or 3 (heredocs, profile rules). The operator approves
+or denies via API.
+
+### Flow
+
+1. Agent sends a command blocked by ask-mode policy
+2. Gateway returns HTTP 202 with `approval_id`
+3. Operator reviews and acts:
+
+```bash
+# List pending requests
+curl -s $BASE_URL/api/policy/ask/pending | jq .
+
+# Approve
+curl -X POST $BASE_URL/api/policy/ask/<approval_id>/approve
+
+# Deny
+curl -X POST $BASE_URL/api/policy/ask/<approval_id>/deny
+```
+
+4. Agent re-submits the command; gateway checks the approval status
+5. Approved: command runs. Denied: command blocked permanently.
+
+### Telegram integration
+
+When the Telegram notifier sidecar is enabled, ask-mode events appear
+in the operator's Telegram chat:
+
+```
+🚨 ASK MODE — approval required
+Agent: chatgpt
+Command: docker compose down
+Profile: docker-admin
+ID: a1b2c3d4
+Approve: POST /api/policy/ask/a1b2c3d4/approve
+Deny:    POST /api/policy/ask/a1b2c3d4/deny
+```
+
+Enable the notifier:
+
+```bash
+export GATEWAY_NOTIFIER_ENABLED=true
+export GATEWAY_NOTIFIER_TELEGRAM_TOKEN=...
+export GATEWAY_NOTIFIER_CHAT_IDS=...
+```
+
+See `docs/superpowers/specs/2026-07-22-phase-7-gateway-telegram-notifier.md`
+for full configuration and safety rules.
+
+### Example scenario
+
+```text
+Operator: Your agent wants to restart Docker.
+Agent:    docker compose restart web
+Gateway:  [ask-mode] Blocked by profile docker-admin.
+          Approval ID: req_abc123
+
+Operator: curl -X POST $BASE_URL/api/policy/ask/req_abc123/approve
+Agent:    docker compose restart web → Container restarted successfully
+```
+
 ## Workspace tools
 
 The MCP server exposes scoped workspace write, preview, and verify tools.

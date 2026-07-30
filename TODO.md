@@ -89,12 +89,12 @@ DCG has 4-layer allowlist: Agent > Project > User > System
 - [x] Policy mode per-agent (not global) — chatgpt=enforce, claude=audit
 
 ### CI/DevOps
-- [x] Gitea CI: coverage threshold (70% minimum)
+- [x] Gitea CI: coverage threshold (69% minimum)
 - [x] Gitea CI: test count sentinel (3500 min)
 - [x] pip-audit step in CI
 - [ ] Docs/Examples
 
 ### Docs/Examples
-- [ ] MCP server README with tool examples
-- [ ] command_policy.py module docstring with architecture overview
-- [ ] Примеры ask-mode flow через Telegram
+- [x] MCP server README with tool examples
+- [x] command_policy.py module docstring with architecture overview
+- [x] Примеры ask-mode flow через Telegram
