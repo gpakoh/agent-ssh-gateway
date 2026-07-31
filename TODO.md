@@ -60,3 +60,17 @@ Safe-паттерны (allow list для docker ps/logs/build...) — опцио
 
 ### P18 — Больше pack-паттернов (K8s, AWS, GCP, БД, DNS...)
 У DCG ~50 доменов, у нас ~10. Постепенное расширение по необходимости.
+
+#### Итерация 1 — DNS + Package Managers ✅
+- Новый пак **dns** (10 паттернов): nsupdate delete/local, dig AXFR/IXFR, Cloudflare (wrangler dns-records delete, API delete dns_record/zone, terraform destroy record), Route53 (change-resource-record-sets DELETE, delete health-check/query-logging/traffic-policy)
+- Новый пак **package_managers** (15 паттернов): npm/yarn/pnpm publish + unpublish, pip uninstall/install-URL, apt remove/purge/autoremove, yum/dnf remove, cargo publish/yank, gem push, brew uninstall, poetry publish/remove, mvn deploy/release:perform, gradle publish
+- Все паттерны с 2 suggestions (preview + alternative), dry-run не блокируется (negative lookahead)
+- Регистрация в registry.py, 11 паков / 274 паттерна
+- Тесты: +7 (pack_count 9→11, cross-section, smoke dns/pkg, suggestions-конвенция) — 3707 passed, ruff clean
+
+#### Идеи следующих итераций
+- **secrets** (Vault: vault kv delete, delete secret; aws secretsmanager delete-secret; gcp secrets delete)
+- **backup** (restic forget, borg delete/prune, restic remove, duplicity remove-older-than)
+- **monitoring** (promtool delete series, influx delete, graphite whisper delete)
+- **storage** (lvm lvremove, mdadm, zfs destroy, parted rm, fdisk delete)
+- **cicd** (gh run delete, gitlab pipeline delete, circleci orphan-delete)

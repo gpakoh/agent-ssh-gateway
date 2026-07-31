@@ -334,9 +334,10 @@ class TestRegistrySingleton:
     def test_get_registry_has_all_packs(self):
         from app.packs.registry import get_registry
         r = get_registry()
-        assert r.pack_count == 9
+        assert r.pack_count == 11
         expected_ids = {"docker", "filesystem", "kubernetes", "cloud",
-                        "database", "git", "firewall", "loadbalancer", "system"}
+                        "database", "dns", "git", "firewall", "loadbalancer",
+                        "package_managers", "system"}
         actual_ids = {p.id for p in r.all_packs}
         assert actual_ids == expected_ids
 
@@ -401,6 +402,10 @@ class TestPackSmoke:
         ("ufw disable", "firewall"),
         ("nginx -s stop", "loadbalancer"),
         ("dd if=/dev/zero of=/dev/sda bs=1M", "system"),
+        ("nsupdate -l delete example.com", "dns"),
+        ("dig example.com axfr", "dns"),
+        ("npm publish", "package_managers"),
+        ("pip uninstall requests", "package_managers"),
     ])
     def test_evaluate_pack_cross_section(self, cmd, expected_pack):
         """Verify each pack matches at least one expected command."""
@@ -425,6 +430,9 @@ class TestPackSmoke:
             "iptables -F",
             "nginx -s quit",
             "dd if=/dev/zero of=/dev/sda",
+            "nsupdate -l delete example.com",
+            "npm publish",
+            "apt purge nginx",
         ):
             matches = r.evaluate(cmd)
             assert len(matches) >= 1, f"No matches for {cmd!r} (global quick-reject false negative)"
@@ -437,3 +445,49 @@ class TestPackSmoke:
                      "date", "whoami", "top", "df -h"):
             matches = r.evaluate(cmd)
             assert len(matches) == 0, f"False positive for {cmd!r}: {[m.pattern_name for m in matches]}"
+
+    def test_dns_pack_patterns(self):
+        """DNS pack (P18) covers nsupdate, dig zone transfer, cloudflare, route53."""
+        from app.packs.registry import build_registry
+        r = build_registry()
+        cases = {
+            "nsupdate -l delete example.com": "dns-nsupdate-local",
+            "dig example.com axfr": "dns-dig-zone-transfer",
+            "wrangler dns-records delete --id 1": "cloudflare-wrangler-dns-delete",
+            "aws route53 delete-health-check --health-check-id 1": "route53-delete-health-check",
+        }
+        for cmd, expected in cases.items():
+            matches = r.evaluate(cmd)
+            names = {m.pattern_name for m in matches}
+            assert expected in names, f"{cmd!r}: expected {expected}, got {names}"
+
+    def test_package_managers_pack_patterns(self):
+        """Package managers pack (P18) covers npm/pip/apt/cargo/gem."""
+        from app.packs.registry import build_registry
+        r = build_registry()
+        cases = {
+            "npm publish": "npm-publish",
+            "npm publish --dry-run": None,
+            "pip uninstall requests": "pip-uninstall",
+            "apt purge nginx": "apt-remove",
+            "cargo yank my-crate --vers 0.1.0": "cargo-yank",
+            "gem push mygem.gem": "gem-push",
+        }
+        for cmd, expected in cases.items():
+            matches = r.evaluate(cmd)
+            names = {m.pattern_name for m in matches}
+            if expected is None:
+                assert not names, f"{cmd!r}: expected no match, got {names}"
+            else:
+                assert expected in names, f"{cmd!r}: expected {expected}, got {names}"
+
+    def test_new_packs_patterns_carry_suggestions(self):
+        """All patterns in dns + package_managers packs have suggestions (P17 convention)."""
+        from app.packs.registry import build_registry
+        r = build_registry()
+        for pack_id in ("dns", "package_managers"):
+            pack = r.get(pack_id)
+            assert pack is not None
+            for dp in pack.destructive_patterns:
+                assert dp.suggestions, f"{pack_id}/{dp.name} has no suggestions"
+                assert all(s.command and s.description for s in dp.suggestions)
