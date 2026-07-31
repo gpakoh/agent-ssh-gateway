@@ -73,6 +73,48 @@ services:
       timeout: 3s
       retries: 3
 
+  mcp-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.mcp-server
+    container_name: mcp-server
+    hostname: mcp-server
+    networks:
+      internal_net: {}
+    ports:
+      - "127.0.0.1:8087:8087"
+    environment:
+      - GATEWAY_BASE_URL=http://web-ssh-gateway:8085
+      - GATEWAY_API_KEY=${MCP_GATEWAY_API_KEY:?set MCP_GATEWAY_API_KEY}
+      - MCP_GATEWAY_TOOL_MODE=mcp_client
+      - MCP_CLIENT_SAFE_MODE=true
+      - MCP_ACCESS_PROFILE=mcp_client_safe
+      - MCP_STREAMABLE_HTTP_HOST=0.0.0.0
+      - MCP_STREAMABLE_HTTP_PORT=8087
+      - MCP_STREAMABLE_HTTP_ALLOW_NON_LOOPBACK=true
+      - MCP_STREAMABLE_HTTP_BEARER_TOKEN=${MCP_STREAMABLE_HTTP_BEARER_TOKEN:?set MCP_STREAMABLE_HTTP_BEARER_TOKEN}
+    volumes:
+      - ../projects.yaml:/app/projects.yaml:ro
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    depends_on:
+      web-ssh-gateway:
+        condition: service_healthy
+
   web-ssh-gateway:
     build:
       context: ..
