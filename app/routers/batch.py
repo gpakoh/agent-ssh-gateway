@@ -97,6 +97,7 @@ async def batch_execute(
     # Record metrics for execute-type operations that passed policy
     for op in req.operations:
         if op.type == "execute" and op.command:
+            assert effective_profile is not None
             record_allowed(profile=effective_profile)
 
     return BatchExecuteResponse(

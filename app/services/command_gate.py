@@ -30,9 +30,9 @@ class CommandGateDecision:
 
     allowed: bool
     reason: str
-    command_root: str
     effective_profile: str
     policy_mode: str
+    command_root: str | None = None
     requires_approval: bool = False
     approval_id: str | None = None
 
