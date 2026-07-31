@@ -2,11 +2,8 @@
 
 import asyncio
 import logging
-import os
 import shlex
 import time
-import uuid
-from typing import Any
 
 from fastapi import (
     APIRouter,
@@ -35,12 +32,10 @@ from app.models import (
     ASTRefactorRenameResponse,
     BatchEditRequest,
     BatchEditResponse,
-    BatchEditResult,
     BatchReadRequest,
     BatchReadResponse,
     FileEditRequest,
     FileEditResponse,
-    FileMetadata,
     FileReadRequest,
     FileReadResponse,
     FileUploadRequest,
@@ -51,18 +46,19 @@ from app.models import (
     PatchApplyResponse,
     ProjectPatchApplyRequest,
     ProjectPatchApplyResponse,
-    ProjectPatchFileResult,
     ProjectStructureRequest,
     ProjectStructureResponse,
 )
 from app.patch_apply import (
     HashMismatchError,
-    PatchApplier,
     PatchValidationError,
     RollbackFailedError,
 )
 from app.routers.workspace import assert_workspace_writable
 from app.security import rate_limit_mutation, validate_path
+from app.services.file_editing import edit_many
+from app.services.project_patch import ProjectNotFoundError, apply_project_patch
+from app.services.project_structure import scan_project_structure, scan_project_tree
 from app.state import _err
 
 logger = logging.getLogger(__name__)
@@ -197,190 +193,16 @@ async def project_apply_patch(
         raise HTTPException(status_code=404, detail=_err(404, "Session not found"))
     ensure_session_owner(session, _identity)
 
-    applier = PatchApplier()
-    rid = uuid.uuid4().hex[:12]
-
     try:
-        # Validate patch size
-        applier._validate_patch_size(len(req.patch.encode("utf-8")))
-
-        # Parse patch
-        files = applier._parse_patch(req.patch, strip=req.strip)
-
-        # Validate limits
-        applier._validate_file_count(len(files))
-        total_hunks = sum(f["hunk_count"] for f in files)
-        applier._validate_hunk_count(total_hunks)
-
-        # Validate forbidden ops
-        applier._validate_no_forbidden_ops(files)
-
-        # Resolve project path via workspace registry
-        from app.workspace.registry import get_registry
-
-        try:
-            registry = get_registry()
-            project_root = registry._policy._resolve_project_root(project)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=404, detail=_err(404, f"Project not found: {project}")
-            ) from exc
-
-        file_results: list[ProjectPatchFileResult] = []
-
-        # Dry run: apply in memory only
-        if req.dry_run:
-            preview_parts = []
-            for f in files:
-                full_path = project_root / f["path"]
-                if full_path.exists():
-                    original = full_path.read_text(encoding="utf-8", errors="replace")
-                else:
-                    original = ""
-                new_content = applier._apply_in_memory(original, f)
-                if original != new_content:
-                    preview_parts.append(f"--- {f['path']}\n+++ {f['path']}\n{new_content}")
-                file_results.append(
-                    ProjectPatchFileResult(
-                        path=f["path"],
-                        status="dry_run",
-                        hunks_applied=f["hunk_count"],
-                    )
-                )
-            return ProjectPatchApplyResponse(
-                success=True,
-                files_applied=len(files),
-                files_failed=0,
-                hunks_applied=total_hunks,
-                preview="\n".join(preview_parts),
-                files=file_results,
-            )
-
-        # Apply: read, verify hashes, apply in memory
-        prepared: list[tuple[object, str, str, int]] = []
-
-        for f in files:
-            full_path = project_root / f["path"]
-
-            # Check file size
-            if full_path.exists():
-                file_size = full_path.stat().st_size
-                if file_size > applier.MAX_FILE_SIZE:
-                    raise PatchValidationError(
-                        f"File '{f['path']}' is {file_size} bytes, exceeds {applier.MAX_FILE_SIZE} limit"
-                    )
-                original = full_path.read_text(encoding="utf-8", errors="replace")
-            else:
-                original = ""
-
-            # Verify hash for existing files
-            if f["path"] in req.expected_hashes and full_path.exists():
-                applier._check_hash(f["path"], original, req.expected_hashes[f["path"]])
-
-            new_content = applier._apply_in_memory(original, f)
-            prepared.append((full_path, original, new_content, f["hunk_count"]))
-
-        # Transactional write with rollback
-        completed: list[tuple[object, object]] = []
-
-        for full_path, _original, new_content, _hunk_count in prepared:
-            import shutil
-
-            backup = full_path.parent / f".{full_path.name}.mcp-patch-{rid}.bak"
-            tmp = full_path.parent / f".{full_path.name}.mcp-patch-{rid}.tmp"
-
-            try:
-                # Backup
-                if full_path.exists():
-                    shutil.copy2(str(full_path), str(backup))
-                else:
-                    backup.write_text("", encoding="utf-8")
-
-                # Write temp file
-                tmp.write_text(new_content, encoding="utf-8")
-
-                # fsync
-                fd = os.open(str(tmp), os.O_RDONLY)
-                try:
-                    os.fsync(fd)
-                finally:
-                    os.close(fd)
-
-                # Atomic rename
-                os.rename(str(tmp), str(full_path))
-
-                completed.append((full_path, backup))
-
-            except Exception as exc:
-                logger.error("Patch write failed for %s: %s", full_path, exc)
-                # Rollback completed files
-                rollback_errors = []
-                for rb_path, rb_backup in completed:
-                    try:
-                        os.rename(str(rb_backup), str(rb_path))
-                    except Exception as rb_exc:
-                        rollback_errors.append(f"{rb_path}: {rb_exc}")
-                        logger.error("Rollback failed for %s: %s", rb_path, rb_exc)
-
-                # Cleanup temp files
-                for rb_path, _ in completed:
-                    tmp_rb = rb_path.parent / f".{rb_path.name}.mcp-patch-{rid}.tmp"
-                    try:
-                        tmp_rb.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-
-                if rollback_errors:
-                    raise RollbackFailedError(
-                        f"Write failed for {full_path} and rollback also failed: "
-                        + "; ".join(rollback_errors)
-                    ) from exc
-
-                file_results.append(
-                    ProjectPatchFileResult(
-                        path=str(full_path.relative_to(project_root)),
-                        status="failed",
-                        error=str(exc),
-                    )
-                )
-                return ProjectPatchApplyResponse(
-                    success=False,
-                    files_applied=0,
-                    files_failed=1,
-                    hunks_applied=0,
-                    errors=file_results,
-                    files=file_results,
-                )
-
-        # Cleanup backups on success
-        for rb_path, rb_backup in completed:
-            try:
-                rb_backup.unlink(missing_ok=True)
-            except Exception:
-                pass
-            tmp = rb_path.parent / f".{rb_path.name}.mcp-patch-{rid}.tmp"
-            try:
-                tmp.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-        file_results = [
-            ProjectPatchFileResult(
-                path=str(p.relative_to(project_root)),
-                status="applied",
-                hunks_applied=h,
-            )
-            for p, _, _, h in prepared
-        ]
-
-        return ProjectPatchApplyResponse(
-            success=True,
-            files_applied=len(prepared),
-            files_failed=0,
-            hunks_applied=sum(h for _, _, _, h in prepared),
-            files=file_results,
+        return await apply_project_patch(
+            project,
+            patch=req.patch,
+            strip=req.strip,
+            expected_hashes=req.expected_hashes,
+            dry_run=req.dry_run,
         )
-
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_err(404, str(exc))) from exc
     except (PatchValidationError, HashMismatchError) as exc:
         raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
     except RollbackFailedError as exc:
@@ -831,34 +653,10 @@ async def project_tree(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
 
-    cmd = f"cd {shlex.quote(validated)} && find . -maxdepth {max_depth} -not -path '*/\\.*' -not -path '*/node_modules/*' -not -path '*/__pycache__/*' -not -path '*/venv/*' -printf '%y|%p|%s\\n' 2>/dev/null || echo 'ERROR'"
-    result = await _state.manager.execute(session_id, cmd, timeout=30)
-
-    if result["exit_code"] != 0 or "ERROR" in result["stdout"]:
-        raise HTTPException(
-            status_code=500, detail=_err(500, f"Cannot read directory: {result['stderr']}")
-        )
-
-    items = []
-    for line in result["stdout"].strip().split("\n"):
-        if not line or line == "ERROR":
-            continue
-        parts = line.split("|", 3)
-        if len(parts) < 3:
-            continue
-
-        ftype, fpath, fsize = parts
-        fpath = fpath.lstrip("./")
-        if not fpath:
-            continue
-
-        items.append(
-            {
-                "type": "directory" if ftype == "d" else "file",
-                "path": fpath,
-                "size": int(fsize) if fsize and ftype == "f" else None,
-            }
-        )
+    try:
+        items = await scan_project_tree(_state.manager, session_id, validated, max_depth)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=_err(500, str(exc))) from exc
 
     return {"items": items, "count": len(items)}
 
@@ -877,91 +675,16 @@ async def project_structure_files(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
 
-    cmd = f"cd {shlex.quote(validated_path)} && find . -maxdepth {req.max_depth} -printf '%y|%p|%s|%m|%TY-%Tm-%Td %TH:%TM:%TS\\n' 2>/dev/null || echo 'ERROR'"
-    result = await _state.manager.execute(req.session_id, cmd, timeout=30)
-
-    if result["exit_code"] != 0 or "ERROR" in result["stdout"]:
-        raise HTTPException(
-            status_code=500, detail=_err(500, f"Cannot read directory: {result['stderr']}")
+    try:
+        files, total_files, total_directories, tree = await scan_project_structure(
+            _state.manager,
+            req.session_id,
+            validated_path,
+            req.max_depth,
+            include_git_status=req.include_git_status,
         )
-
-    files = []
-    total_files = 0
-    total_directories = 0
-
-    for line in result["stdout"].strip().split("\n"):
-        if not line or line == "ERROR":
-            continue
-        parts = line.split("|", 4)
-        if len(parts) < 5:
-            continue
-
-        file_type, path, size, permissions, mtime = parts
-        path = path.lstrip("./")
-
-        if not path:
-            continue
-
-        type_map = {"f": "file", "d": "directory", "l": "symlink"}
-        file_type = type_map.get(file_type, "file")
-
-        if file_type == "file":
-            total_files += 1
-        elif file_type == "directory":
-            total_directories += 1
-
-        extension = None
-        if "." in path and file_type == "file":
-            extension = path.split(".")[-1]
-
-        files.append(
-            FileMetadata(
-                name=path.split("/")[-1] if "/" in path else path,
-                path=path,
-                type=file_type,
-                size=int(size) if size else 0,
-                permissions=permissions,
-                modified_at=mtime if mtime else None,
-                extension=extension,
-            )
-        )
-
-    if req.include_git_status:
-        git_cmd = f"cd {shlex.quote(validated_path)} && git status --short 2>/dev/null || echo ''"
-        git_result = await _state.manager.execute(req.session_id, git_cmd, timeout=10)
-
-        git_status_map = {}
-        for line in git_result["stdout"].strip().split("\n"):
-            if line and len(line) > 3:
-                status = line[:2].strip()
-                file_path = line[3:].strip()
-                git_status_map[file_path] = status
-
-        for file_meta in files:
-            if file_meta.path in git_status_map:
-                file_meta.git_status = git_status_map[file_meta.path]
-
-    tree: dict[str, Any] = {"name": ".", "type": "directory", "children": {}}
-
-    for file_meta in files:
-        parts = file_meta.path.split("/")
-        current = tree
-
-        for i, part in enumerate(parts):
-            if not part:
-                continue
-
-            if current.get("children") is None:
-                current["children"] = {}
-
-            if part not in current["children"]:
-                current["children"][part] = {
-                    "name": part,
-                    "type": file_meta.type if i == len(parts) - 1 else "directory",
-                    "children": {} if i < len(parts) - 1 else None,
-                }
-
-            current = current["children"][part]
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=_err(500, str(exc))) from exc
 
     return ProjectStructureResponse(
         path=req.path,
@@ -992,59 +715,7 @@ async def batch_edit(
     )
     await _check_session_ownership(req.session_id, request)
 
-    results = []
-    files_changed = 0
-    total_operations = 0
-
-    for file_op in req.files:
-        try:
-            validate_path(file_op.path)
-        except ValueError as exc:
-            results.append(
-                BatchEditResult(
-                    path=file_op.path,
-                    success=False,
-                    operations_applied=0,
-                    changed=False,
-                    error=str(exc),
-                )
-            )
-            continue
-
-        try:
-            result = await _state.file_editor.edit_file(
-                req.session_id,
-                file_op.path,
-                [op.model_dump() for op in file_op.operations],
-            )
-            results.append(
-                BatchEditResult(
-                    path=file_op.path,
-                    success=True,
-                    operations_applied=result.get("operations_applied", 0),
-                    changed=result.get("changed", False),
-                )
-            )
-            total_operations += result.get("operations_applied", 0)
-            if result.get("changed", False):
-                files_changed += 1
-        except Exception as exc:
-            results.append(
-                BatchEditResult(
-                    path=file_op.path,
-                    success=False,
-                    operations_applied=0,
-                    changed=False,
-                    error=str(exc),
-                )
-            )
-
-    return BatchEditResponse(
-        results=results,
-        total_files=len(req.files),
-        files_changed=files_changed,
-        total_operations=total_operations,
-    )
+    return await edit_many(_state.file_editor, req.session_id, req.files, validate=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1105,45 +776,7 @@ async def bulk_edit_files(
     )
     await _check_session_ownership(req.session_id, request)
 
-    results = []
-    files_changed = 0
-    total_operations = 0
-
-    for file_op in req.files:
-        try:
-            result = await _state.file_editor.edit_file(
-                req.session_id,
-                file_op.path,
-                [op.model_dump() for op in file_op.operations],
-            )
-            results.append(
-                BatchEditResult(
-                    path=file_op.path,
-                    success=True,
-                    operations_applied=result.get("operations_applied", 0),
-                    changed=result.get("changed", False),
-                )
-            )
-            total_operations += result.get("operations_applied", 0)
-            if result.get("changed", False):
-                files_changed += 1
-        except Exception as exc:
-            results.append(
-                BatchEditResult(
-                    path=file_op.path,
-                    success=False,
-                    operations_applied=0,
-                    changed=False,
-                    error=str(exc),
-                )
-            )
-
-    return BatchEditResponse(
-        results=results,
-        total_files=len(req.files),
-        files_changed=files_changed,
-        total_operations=total_operations,
-    )
+    return await edit_many(_state.file_editor, req.session_id, req.files)
 
 
 # ---------------------------------------------------------------------------

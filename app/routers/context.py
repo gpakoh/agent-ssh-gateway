@@ -1,14 +1,11 @@
 """Context management, validation, templates, and project structure routes."""
 
 import logging
-import os
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_master_key
-from app.diff_generator import DiffGenerator
 from app.git_manager import GitStatus
 from app.models import (
     AddBookmarkRequest,
@@ -18,11 +15,8 @@ from app.models import (
     ContextCreateRequest,
     ContextListResponse,
     ContextResponse,
-    DiffLine,
-    DiffResponse,
     FileEditWithContextRequest,
     FileEditWithContextResponse,
-    FileMetadata,
     FileReadRequest,
     FileReadResponse,
     GitInfoResponse,
@@ -43,6 +37,9 @@ from app.models import (
     ValidationStepResult,
 )
 from app.routers.workspace import assert_workspace_writable
+from app.services.context_editing import ContextEditError, edit_file_with_context
+from app.services.project_structure import scan_project_structure
+from app.services.scaffolding import scaffold_python_class as scaffold_python_class_service
 from app.state import _err
 from app.template_library import TemplateLibrary
 
@@ -209,131 +206,31 @@ async def context_file_edit(
 
     logger.info(f"Context edit: ctx={req.context_id}, path={req.path}, ops={len(req.operations)}")
 
-    # Create Automatic Backup Before Editing (if Git Is Initialized)
-    if ctx.git_info and ctx.git_info.status.value != "not_initialized":
-        try:
-            await _state.context_manager.create_backup(
-                req.context_id, f"before_edit_{req.path.replace('/', '_')}"
-            )
-        except Exception as exc:
-            logger.warning("Auto-backup failed: %s", exc)
-
-    # Perform Edit (resolve Relative Path Against Context Path)
-    file_path = req.path if req.path.startswith("/") else os.path.join(ctx.path, req.path)
-
     try:
-        result = await _state.file_editor.edit_file(
-            ctx.session_id,
-            file_path,
-            [op.model_dump() for op in req.operations],
+        result = await edit_file_with_context(
+            ctx,
+            _state.context_manager,
+            _state.file_editor,
+            _state.manager,
+            path=req.path,
+            operations=[op.model_dump() for op in req.operations],
+            commit_message=req.commit_message,
+            run_validation=req.run_validation,
         )
-        logger.info(f"Edit result: {result}")
-    except Exception as exc:
-        logger.error(f"Edit failed: {exc}")
+    except ContextEditError as exc:
         raise HTTPException(status_code=500, detail=_err(500, f"Edit failed: {exc}")) from exc
 
-    await _state.context_manager.record_edit(req.context_id, req.path, "edit")
-    await _state.context_manager.add_file_to_context(req.context_id, req.path)
-
     response = FileEditWithContextResponse(
-        success=result.get("success", True),
-        path=req.path,
-        operations_applied=result.get("operations_applied", 0),
-        changed=result.get("changed", False),
+        success=result.success,
+        path=result.path,
+        operations_applied=result.operations_applied,
+        changed=result.changed,
+        diff=result.diff,
+        git_commit=result.git_commit,
+        validation_result=result.validation_result,
+        warning=result.warning,
     )
     logger.info(f"Response object: success={response.success}, changed={response.changed}")
-
-    # Generate Diff If File Was Changed And Git Is Initialized
-    if (
-        result.get("changed", False)
-        and ctx.git_info
-        and ctx.git_info.status.value != "not_initialized"
-    ):
-        try:
-            # Quick Check If File Is Tracked In Git
-            check_result = await _state.manager.execute(
-                ctx.session_id,
-                f"cd {ctx.path} && git ls-files --error-unmatch '{req.path}' 2>/dev/null || echo 'NOT_TRACKED'",
-                timeout=2,
-            )
-
-            if check_result["stdout"].strip() != "NOT_TRACKED":
-                # Read Old Content From Git (fast, File Is Tracked)
-                git_result = await _state.manager.execute(
-                    ctx.session_id,
-                    f"cd {ctx.path} && git show HEAD:'{req.path}' 2>/dev/null || echo ''",
-                    timeout=2,
-                )
-                old_content = git_result["stdout"]
-
-                # Read New Content
-                new_content = await _state.file_editor.read_file(ctx.session_id, req.path)
-
-                # Generate Diff
-                unified_diff = DiffGenerator.generate_unified_diff(
-                    old_content, new_content, req.path, req.path
-                )
-                inline_diff = DiffGenerator.generate_inline_diff(old_content, new_content)
-                changes = DiffGenerator.count_changes(unified_diff)
-
-                response.diff = DiffResponse(
-                    unified_diff=unified_diff,
-                    inline_diff=[DiffLine(**line) for line in inline_diff],
-                    changes=changes,
-                    old_path=req.path,
-                    new_path=req.path,
-                )
-        except Exception as exc:
-            logger.warning("Diff generation failed: %s", exc)
-
-    # Auto-commit If Enabled
-    if ctx.auto_commit and result.get("changed", False):
-        commit_msg = req.commit_message or f"Update {req.path}"
-        commit_result = await _state.context_manager.commit_changes(
-            req.context_id, commit_msg, [req.path]
-        )
-        if commit_result["success"]:
-            response.git_commit = commit_result.get("hash")
-
-    # Validation If Requested Or Auto_validate Enabled
-    if req.run_validation or ctx.auto_validate:
-        try:
-            report = await _state.context_manager.validate_context(req.context_id)
-            response.validation_result = ValidationReportResponse(
-                overall_status=report.overall_status.value,
-                summary=report.summary,
-                total_duration=report.total_duration,
-                can_commit=report.can_commit,
-                steps=[
-                    ValidationStepResult(
-                        name=step.name,
-                        status=step.status.value,
-                        output=step.output,
-                        errors=step.errors,
-                        warnings=step.warnings,
-                        duration=step.duration,
-                    )
-                    for step in report.steps
-                ],
-            )
-
-            # If Validation Failed And Auto_commit Is On, Rollback Commit
-            if not report.can_commit and ctx.auto_commit:
-                response.warning = "\u26a0\ufe0f \u0412\u0430\u043b\u0438\u0434\u0430\u0446\u0438\u044f \u043d\u0435 \u043f\u0440\u043e\u0439\u0434\u0435\u043d\u0430, \u043a\u043e\u043c\u043c\u0438\u0442 \u043e\u0442\u043c\u0435\u043d\u0451\u043d"
-                response.git_commit = None
-        except Exception as exc:
-            logger.error("Validation error: %s", exc)
-            response.validation_result = ValidationReportResponse(
-                overall_status="error",
-                summary=f"\u041e\u0448\u0438\u0431\u043a\u0430 \u0432\u0430\u043b\u0438\u0434\u0430\u0446\u0438\u0438: {exc}",
-                total_duration=0,
-                can_commit=False,
-                steps=[],
-            )
-
-    # Warning If Git Not Initialized
-    if ctx.git_info and ctx.git_info.status == GitStatus.NOT_INITIALIZED:
-        response.warning = "\u26a0\ufe0f \u041f\u0440\u043e\u0435\u043a\u0442 \u043d\u0435 \u0432 Git. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 POST /api/git/init \u0434\u043b\u044f \u0438\u043d\u0438\u0446\u0438\u0430\u043b\u0438\u0437\u0430\u0446\u0438\u0438."
 
     return response
 
@@ -427,47 +324,14 @@ async def scaffold_python_class(
         actor_fingerprint=_identity.fingerprint[:12],
         route="POST /api/scaffold/python-class",
     )
-    files_created = []
-    module_dir = req.module_path.rstrip("/")
-
-    # Ensure Directory Exists
-    await _state.manager.execute(req.session_id, f"mkdir -p '{module_dir}'", timeout=10)
-
-    # Generate Class File
-    methods_str = ""
-    for method in req.methods:
-        methods_str += f"""
-    async def {method}(self):
-        \"\"\"TODO: Implement {method}.\"\"\"
-        raise NotImplementedError("{method} not implemented")
-"""
-
-    class_content = f'"""{req.class_name} module."""\n\n\nclass {req.class_name}:\n    """{req.class_name} service."""\n\n    def __init__(self) -> None:\n        pass\n{methods_str}\n'
-
-    class_path = f"{module_dir}/{req.class_name.lower()}.py"
-    await _state.file_editor.write_file(req.session_id, class_path, class_content)
-    files_created.append(class_path)
-
-    # Generate Test File
-    if req.include_test:
-        test_methods = ""
-        for method in req.methods:
-            test_methods += f"""
-    async def test_{method}(self):
-        \"\"\"Test {method}.\"\"\"
-        # TODO: implement test
-        pass
-"""
-
-        test_content = f'"""Tests for {req.class_name}."""\n\nimport pytest\nfrom {module_dir.replace("/", ".")}.{req.class_name.lower()} import {req.class_name}\n\n\nclass Test{req.class_name}:\n    """Test suite for {req.class_name}."""\n{test_methods}\n'
-
-        test_path = f"{module_dir}/test_{req.class_name.lower()}.py"
-        await _state.file_editor.write_file(req.session_id, test_path, test_content)
-        files_created.append(test_path)
-
-    return ScaffoldResponse(
-        files_created=files_created,
-        message=f"Created {req.class_name} class with {len(req.methods)} methods",
+    return await scaffold_python_class_service(
+        _state.manager,
+        _state.file_editor,
+        session_id=req.session_id,
+        module_path=req.module_path,
+        class_name=req.class_name,
+        methods=req.methods,
+        include_test=req.include_test,
     )
 
 
@@ -600,96 +464,16 @@ async def project_structure(
     req: ProjectStructureRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Get project structure with metadata and git status."""
-
-    # Get File List With Metadata Using Find
-    cmd = f"cd '{req.path}' && find . -maxdepth {req.max_depth} -printf '%y|%p|%s|%m|%TY-%Tm-%Td %TH:%TM:%TS\\n' 2>/dev/null || echo 'ERROR'"
-    result = await _state.manager.execute(req.session_id, cmd, timeout=30)
-
-    if result["exit_code"] != 0 or "ERROR" in result["stdout"]:
-        raise HTTPException(
-            status_code=500, detail=_err(500, f"Cannot read directory: {result['stderr']}")
+    try:
+        files, total_files, total_directories, tree = await scan_project_structure(
+            _state.manager,
+            req.session_id,
+            req.path,
+            req.max_depth,
+            include_git_status=req.include_git_status,
         )
-
-    files = []
-    total_files = 0
-    total_directories = 0
-
-    for line in result["stdout"].strip().split("\n"):
-        if not line or line == "ERROR":
-            continue
-
-        parts = line.split("|", 4)
-        if len(parts) < 5:
-            continue
-
-        file_type, path, size, permissions, mtime = parts
-        path = path.lstrip("./")
-
-        if not path:
-            continue
-
-        type_map = {"f": "file", "d": "directory", "l": "symlink"}
-        file_type = type_map.get(file_type, "file")
-
-        if file_type == "file":
-            total_files += 1
-        elif file_type == "directory":
-            total_directories += 1
-
-        extension = None
-        if "." in path and file_type == "file":
-            extension = path.split(".")[-1]
-
-        files.append(
-            FileMetadata(
-                name=path.split("/")[-1] if "/" in path else path,
-                path=path,
-                type=file_type,
-                size=int(size) if size else 0,
-                permissions=permissions,
-                modified_at=mtime if mtime else None,
-                extension=extension,
-            )
-        )
-
-    # Get Git Status If Requested
-    if req.include_git_status:
-        git_cmd = f"cd '{req.path}' && git status --short 2>/dev/null || echo ''"
-        git_result = await _state.manager.execute(req.session_id, git_cmd, timeout=10)
-
-        git_status_map = {}
-        for line in git_result["stdout"].strip().split("\n"):
-            if line and len(line) > 3:
-                status = line[:2].strip()
-                file_path = line[3:].strip()
-                git_status_map[file_path] = status
-
-        for file_meta in files:
-            if file_meta.path in git_status_map:
-                file_meta.git_status = git_status_map[file_meta.path]
-
-    # Build Tree Structure
-    tree: dict[str, Any] = {"name": ".", "type": "directory", "children": {}}
-
-    for file_meta in files:
-        parts = file_meta.path.split("/")
-        current = tree
-
-        for i, part in enumerate(parts):
-            if not part:
-                continue
-
-            if current.get("children") is None:
-                current["children"] = {}
-
-            if part not in current["children"]:
-                current["children"][part] = {
-                    "name": part,
-                    "type": file_meta.type if i == len(parts) - 1 else "directory",
-                    "children": {} if i < len(parts) - 1 else None,
-                }
-
-            current = current["children"][part]
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=_err(500, str(exc))) from exc
 
     return ProjectStructureResponse(
         path=req.path,
