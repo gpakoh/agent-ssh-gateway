@@ -334,10 +334,10 @@ class TestRegistrySingleton:
     def test_get_registry_has_all_packs(self):
         from app.packs.registry import get_registry
         r = get_registry()
-        assert r.pack_count == 11
+        assert r.pack_count == 12
         expected_ids = {"docker", "filesystem", "kubernetes", "cloud",
                         "database", "dns", "git", "firewall", "loadbalancer",
-                        "package_managers", "system"}
+                        "package_managers", "secrets", "system"}
         actual_ids = {p.id for p in r.all_packs}
         assert actual_ids == expected_ids
 
@@ -406,6 +406,8 @@ class TestPackSmoke:
         ("dig example.com axfr", "dns"),
         ("npm publish", "package_managers"),
         ("pip uninstall requests", "package_managers"),
+        ("vault kv delete secret/x", "secrets"),
+        ("op item delete login", "secrets"),
     ])
     def test_evaluate_pack_cross_section(self, cmd, expected_pack):
         """Verify each pack matches at least one expected command."""
@@ -433,6 +435,8 @@ class TestPackSmoke:
             "nsupdate -l delete example.com",
             "npm publish",
             "apt purge nginx",
+            "vault kv delete secret/x",
+            "aws secretsmanager delete-resource-policy --secret-id x",
         ):
             matches = r.evaluate(cmd)
             assert len(matches) >= 1, f"No matches for {cmd!r} (global quick-reject false negative)"
@@ -491,3 +495,41 @@ class TestPackSmoke:
             for dp in pack.destructive_patterns:
                 assert dp.suggestions, f"{pack_id}/{dp.name} has no suggestions"
                 assert all(s.command and s.description for s in dp.suggestions)
+
+    def test_secrets_pack_patterns(self):
+        """Secrets pack (P18) covers vault, aws ssm/secretsmanager, doppler, 1password."""
+        from app.packs.registry import build_registry
+        r = build_registry()
+        cases = {
+            "vault kv destroy -versions=1 secret/x": "vault-kv-destroy",
+            "vault secrets disable kv": "vault-secrets-disable",
+            "vault policy delete my-policy": "vault-policy-delete",
+            "vault auth disable userpass": "vault-auth-disable",
+            "vault token revoke 123": "vault-token-revoke",
+            "aws ssm delete-parameter --name /app/DB_PASS": "aws-ssm-delete-parameter",
+            "aws secretsmanager delete-resource-policy --secret-id x": "aws-secretsmanager-delete-resource-policy",
+            "doppler secrets delete KEY": "doppler-secrets-delete",
+            "op item delete login-item": "op-item-delete",
+            "op vault delete prod": "op-vault-delete",
+        }
+        for cmd, expected in cases.items():
+            matches = r.evaluate(cmd)
+            names = {m.pattern_name for m in matches}
+            assert expected in names, f"{cmd!r}: expected {expected}, got {names}"
+
+    def test_secrets_pack_reads_not_blocked(self):
+        """Read/list operations on secrets tools must NOT be blocked."""
+        from app.packs.registry import build_registry
+        r = build_registry()
+        for cmd in (
+            "vault kv get secret/x",
+            "vault kv list secret/",
+            "vault read secret/x",
+            "vault secrets list",
+            "aws secretsmanager describe-secret --secret-id x",
+            "aws ssm get-parameter --name /app/DB_PASS",
+            "doppler secrets get KEY",
+            "op item get login-item",
+        ):
+            matches = r.evaluate(cmd)
+            assert len(matches) == 0, f"False positive for {cmd!r}: {[m.pattern_name for m in matches]}"

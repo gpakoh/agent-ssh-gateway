@@ -16,6 +16,7 @@ from app.packs.git_pack import build_git_pack
 from app.packs.kubernetes import build_kubernetes_pack
 from app.packs.loadbalancer import build_loadbalancer_pack
 from app.packs.package_managers import build_package_managers_pack
+from app.packs.secrets import build_secrets_pack
 from app.packs.system import build_system_pack
 
 
@@ -31,6 +32,7 @@ def build_registry() -> PackRegistry:
     registry.register(build_firewall_pack())
     registry.register(build_loadbalancer_pack())
     registry.register(build_package_managers_pack())
+    registry.register(build_secrets_pack())
     registry.register(build_system_pack())
     return registry
 
