@@ -21,10 +21,13 @@ RUN groupadd -r -g 1000 appuser && \
 # Set working directory
 WORKDIR /app
 
-# Security: Install Python dependencies
-COPY docker/requirements.txt .
-RUN pip install --default-timeout=120 --no-cache-dir -r requirements.txt && \
-    rm -rf /root/.cache/pip
+# Security: Install Python dependencies from frozen lockfile
+COPY pyproject.toml uv.lock ./
+RUN python -m pip install --default-timeout=120 --no-cache-dir uv && \
+    uv sync --frozen --no-dev --no-install-project && \
+    rm -rf /root/.cache/pip /root/.cache/uv && \
+    chmod -R 755 /app/.venv
+ENV PATH="/app/.venv/bin:$PATH"
 
 # Security: Copy application with proper ownership
 COPY --chown=appuser:appuser app/ ./app/

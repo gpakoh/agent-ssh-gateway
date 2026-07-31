@@ -35,6 +35,7 @@ dependencies = [
   "sqlalchemy",
   "alembic",
   "asyncpg",
+  "psycopg2-binary>=2.9.9",
   "aiosqlite",
   "aiohttp",
   "slowapi",
