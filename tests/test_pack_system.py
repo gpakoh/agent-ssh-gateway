@@ -334,8 +334,8 @@ class TestRegistrySingleton:
     def test_get_registry_has_all_packs(self):
         from app.packs.registry import get_registry
         r = get_registry()
-        assert r.pack_count == 12
-        expected_ids = {"docker", "filesystem", "kubernetes", "cloud",
+        assert r.pack_count == 13
+        expected_ids = {"backup", "docker", "filesystem", "kubernetes", "cloud",
                         "database", "dns", "git", "firewall", "loadbalancer",
                         "package_managers", "secrets", "system"}
         actual_ids = {p.id for p in r.all_packs}
@@ -408,6 +408,8 @@ class TestPackSmoke:
         ("pip uninstall requests", "package_managers"),
         ("vault kv delete secret/x", "secrets"),
         ("op item delete login", "secrets"),
+        ("restic forget --keep-daily 7", "backup"),
+        ("borg prune repo", "backup"),
     ])
     def test_evaluate_pack_cross_section(self, cmd, expected_pack):
         """Verify each pack matches at least one expected command."""
@@ -437,6 +439,8 @@ class TestPackSmoke:
             "apt purge nginx",
             "vault kv delete secret/x",
             "aws secretsmanager delete-resource-policy --secret-id x",
+            "restic prune",
+            "rclone sync src: dest:",
         ):
             matches = r.evaluate(cmd)
             assert len(matches) >= 1, f"No matches for {cmd!r} (global quick-reject false negative)"
@@ -530,6 +534,48 @@ class TestPackSmoke:
             "aws ssm get-parameter --name /app/DB_PASS",
             "doppler secrets get KEY",
             "op item get login-item",
+        ):
+            matches = r.evaluate(cmd)
+            assert len(matches) == 0, f"False positive for {cmd!r}: {[m.pattern_name for m in matches]}"
+
+    def test_backup_pack_patterns(self):
+        """Backup pack (P18) covers borg, restic, rclone, velero, duplicity."""
+        from app.packs.registry import build_registry
+        r = build_registry()
+        cases = {
+            "borg delete repo::old": "borg-delete",
+            "borg prune --keep-daily 7 repo": "borg-prune",
+            "restic forget --keep-daily 7": "restic-forget",
+            "restic prune": "restic-prune",
+            "restic key remove 1": "restic-key-remove",
+            "rclone sync src: dest:": "rclone-sync",
+            "rclone purge remote:dir": "rclone-purge",
+            "rclone dedupe remote:dir": "rclone-dedupe",
+            "velero backup delete --yes": "velero-backup-delete",
+            "velero schedule delete daily": "velero-schedule-delete",
+            "duplicity remove-older-than 30D file:///backup": "duplicity-remove-older-than",
+        }
+        for cmd, expected in cases.items():
+            matches = r.evaluate(cmd)
+            names = {m.pattern_name for m in matches}
+            assert expected in names, f"{cmd!r}: expected {expected}, got {names}"
+
+    def test_backup_pack_reads_not_blocked(self):
+        """Read/list/dry-run operations on backup tools must NOT be blocked."""
+        from app.packs.registry import build_registry
+        r = build_registry()
+        for cmd in (
+            "borg list repo",
+            "borg info repo",
+            "borg check repo",
+            "restic snapshots",
+            "restic check",
+            "restic list snapshots",
+            "rclone copy src dest --dry-run",
+            "rclone ls remote:dir",
+            "velero backup get",
+            "velero restore get",
+            "duplicity collection-status file:///backup",
         ):
             matches = r.evaluate(cmd)
             assert len(matches) == 0, f"False positive for {cmd!r}: {[m.pattern_name for m in matches]}"
