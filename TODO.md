@@ -69,9 +69,14 @@ Safe-паттерны (allow list для docker ps/logs/build...) — опцио
 - Тесты: +7 (pack_count 9→11, cross-section, smoke dns/pkg, suggestions-конвенция) — 3707 passed, ruff clean
 
 #### Идеи следующих итераций
-- **monitoring** (promtool delete series, influx delete, graphite whisper delete)
 - **storage** (lvm lvremove, mdadm, zfs destroy, parted rm, fdisk delete)
 - **cicd** (gh run delete, gitlab pipeline delete, circleci orphan-delete)
+
+#### Итерация 4 — Monitoring ✅
+- Новый пак **monitoring** (17 паттернов): promtool (tsdb delete/remove-limits, rules-file delete), Prometheus API (delete_series), Grafana (CLI plugins uninstall / admin reset-admin-password, API delete dashboard/datasource), InfluxDB (delete/bucket delete/org delete/task delete, 1.x DROP DATABASE/SERIES), whisper (delete/clean), kubectl delete PrometheusOperator resources
+- Все паттерны с 2 suggestions (preview + alternative); list/get/query/check/dry-run не блокируются
+- Регистрация в registry.py, 14 паков / 336 паттернов
+- Тесты: +4 (pack_count 13→14, cross-section, smoke monitoring, reads-not-blocked) — 3719 passed, ruff clean
 
 #### Итерация 3 — Backup ✅
 - Новый пак **backup** (22 паттерна): borg (delete/prune/compact/recreate/break-lock), restic (forget/prune/key remove/unlock --remove-all/cache --cleanup), rclone (sync/delete/deletefile/purge/cleanup/dedupe/move), velero (backup/schedule/restore delete), duplicity (remove-older-than/delete)
