@@ -69,8 +69,14 @@ Safe-паттерны (allow list для docker ps/logs/build...) — опцио
 - Тесты: +7 (pack_count 9→11, cross-section, smoke dns/pkg, suggestions-конвенция) — 3707 passed, ruff clean
 
 #### Идеи следующих итераций
-- **secrets** (Vault: vault kv delete, delete secret; aws secretsmanager delete-secret; gcp secrets delete)
 - **backup** (restic forget, borg delete/prune, restic remove, duplicity remove-older-than)
 - **monitoring** (promtool delete series, influx delete, graphite whisper delete)
 - **storage** (lvm lvremove, mdadm, zfs destroy, parted rm, fdisk delete)
 - **cicd** (gh run delete, gitlab pipeline delete, circleci orphan-delete)
+
+#### Итерация 2 — Secrets ✅
+- Новый пак **secrets** (23 паттерна): Vault (secrets disable, kv destroy/metadata-delete/delete, delete, policy delete, auth disable, token/lease revoke), AWS (secretsmanager delete-resource-policy/remove-regions, ssm delete-parameter(s)), Doppler (secrets/projects/environments/configs delete), 1Password (op item/document/vault/user/group/connect-token delete)
+- GCP (gcloud secrets delete, kms versions destroy) — уже были в cloud.py, НЕ дублированы
+- Все паттерны с 2 suggestions (preview + alternative); read/list операции не блокируются
+- Регистрация в registry.py, 12 паков / 297 паттернов
+- Тесты: +4 (pack_count 11→12, cross-section, smoke secrets, read-ops-not-blocked) — 3711 passed, ruff clean
