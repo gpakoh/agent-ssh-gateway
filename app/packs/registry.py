@@ -6,6 +6,7 @@ Lazy-builds packs on first access (DCG-style PackEntry pattern).
 from __future__ import annotations
 
 from app.packs import PackRegistry
+from app.packs.backup import build_backup_pack
 from app.packs.cloud import build_cloud_pack
 from app.packs.database import build_database_pack
 from app.packs.dns import build_dns_pack
@@ -22,6 +23,7 @@ from app.packs.system import build_system_pack
 
 def build_registry() -> PackRegistry:
     registry = PackRegistry()
+    registry.register(build_backup_pack())
     registry.register(build_docker_pack())
     registry.register(build_filesystem_pack())
     registry.register(build_kubernetes_pack())

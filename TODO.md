@@ -69,10 +69,15 @@ Safe-паттерны (allow list для docker ps/logs/build...) — опцио
 - Тесты: +7 (pack_count 9→11, cross-section, smoke dns/pkg, suggestions-конвенция) — 3707 passed, ruff clean
 
 #### Идеи следующих итераций
-- **backup** (restic forget, borg delete/prune, restic remove, duplicity remove-older-than)
 - **monitoring** (promtool delete series, influx delete, graphite whisper delete)
 - **storage** (lvm lvremove, mdadm, zfs destroy, parted rm, fdisk delete)
 - **cicd** (gh run delete, gitlab pipeline delete, circleci orphan-delete)
+
+#### Итерация 3 — Backup ✅
+- Новый пак **backup** (22 паттерна): borg (delete/prune/compact/recreate/break-lock), restic (forget/prune/key remove/unlock --remove-all/cache --cleanup), rclone (sync/delete/deletefile/purge/cleanup/dedupe/move), velero (backup/schedule/restore delete), duplicity (remove-older-than/delete)
+- Все паттерны с 2 suggestions (preview + alternative); list/info/check/snapshots/dry-run не блокируются
+- Регистрация в registry.py, 13 паков / 319 паттернов
+- Тесты: +4 (pack_count 12→13, cross-section, smoke backup, reads-not-blocked) — 3715 passed, ruff clean
 
 #### Итерация 2 — Secrets ✅
 - Новый пак **secrets** (23 паттерна): Vault (secrets disable, kv destroy/metadata-delete/delete, delete, policy delete, auth disable, token/lease revoke), AWS (secretsmanager delete-resource-policy/remove-regions, ssm delete-parameter(s)), Doppler (secrets/projects/environments/configs delete), 1Password (op item/document/vault/user/group/connect-token delete)
