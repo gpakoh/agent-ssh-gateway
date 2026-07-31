@@ -334,10 +334,10 @@ class TestRegistrySingleton:
     def test_get_registry_has_all_packs(self):
         from app.packs.registry import get_registry
         r = get_registry()
-        assert r.pack_count == 13
+        assert r.pack_count == 14
         expected_ids = {"backup", "docker", "filesystem", "kubernetes", "cloud",
                         "database", "dns", "git", "firewall", "loadbalancer",
-                        "package_managers", "secrets", "system"}
+                        "monitoring", "package_managers", "secrets", "system"}
         actual_ids = {p.id for p in r.all_packs}
         assert actual_ids == expected_ids
 
@@ -410,6 +410,8 @@ class TestPackSmoke:
         ("op item delete login", "secrets"),
         ("restic forget --keep-daily 7", "backup"),
         ("borg prune repo", "backup"),
+        ("promtool tsdb delete --match job=x", "monitoring"),
+        ("influx delete --bucket b --start 2020-01-01T00:00:00Z --stop 2020-01-02T00:00:00Z", "monitoring"),
     ])
     def test_evaluate_pack_cross_section(self, cmd, expected_pack):
         """Verify each pack matches at least one expected command."""
@@ -441,6 +443,8 @@ class TestPackSmoke:
             "aws secretsmanager delete-resource-policy --secret-id x",
             "restic prune",
             "rclone sync src: dest:",
+            "promtool tsdb delete --match job=x",
+            "influx bucket delete --id 1",
         ):
             matches = r.evaluate(cmd)
             assert len(matches) >= 1, f"No matches for {cmd!r} (global quick-reject false negative)"
@@ -576,6 +580,43 @@ class TestPackSmoke:
             "velero backup get",
             "velero restore get",
             "duplicity collection-status file:///backup",
+        ):
+            matches = r.evaluate(cmd)
+            assert len(matches) == 0, f"False positive for {cmd!r}: {[m.pattern_name for m in matches]}"
+
+    def test_monitoring_pack_patterns(self):
+        """Monitoring pack (P18) covers promtool, grafana, influx, whisper."""
+        from app.packs.registry import build_registry
+        r = build_registry()
+        cases = {
+            "promtool tsdb delete --match job=x": "promtool-tsdb-delete",
+            "curl -X POST http://localhost:9090/api/v1/admin/tsdb/delete_series --data match[]=up": "prometheus-api-delete-series",
+            "grafana-cli plugins uninstall grafana-piechart-panel": "grafana-cli-plugins-uninstall",
+            "curl -X DELETE http://localhost:3000/api/dashboards/uid/abc": "grafana-api-delete-dashboard",
+            "influx delete --bucket b --start 2020-01-01T00:00:00Z --stop 2020-01-02T00:00:00Z": "influx-delete",
+            "influx bucket delete --id 1": "influx-bucket-delete",
+            "influx org delete --id 2": "influx-org-delete",
+            "whisper-delete.py /var/lib/graphite/whisper/cpu.wsp": "whisper-delete",
+            "kubectl delete prometheusrule my-alert -n monitoring": "kubectl-delete-monitoring-resources",
+        }
+        for cmd, expected in cases.items():
+            matches = r.evaluate(cmd)
+            names = {m.pattern_name for m in matches}
+            assert expected in names, f"{cmd!r}: expected {expected}, got {names}"
+
+    def test_monitoring_pack_reads_not_blocked(self):
+        """Read/list operations on monitoring tools must NOT be blocked."""
+        from app.packs.registry import build_registry
+        r = build_registry()
+        for cmd in (
+            "promtool tsdb list",
+            "promtool check rules /etc/prometheus/rules.yml",
+            "grafana-cli plugins ls",
+            "curl http://localhost:3000/api/datasources",
+            "curl -X GET http://localhost:9090/api/v1/series?match[]=up",
+            "influx bucket list",
+            "influx task list",
+            "influx query 'from(bucket:\"b\") |> range(start: -1h)'",
         ):
             matches = r.evaluate(cmd)
             assert len(matches) == 0, f"False positive for {cmd!r}: {[m.pattern_name for m in matches]}"
