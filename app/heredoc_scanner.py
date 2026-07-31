@@ -257,6 +257,7 @@ def check_nested_commands(command: str) -> list[DestructiveMatch]:
                 reason=f"[{ec.extractor} → {ec.language}] {m.reason}",
                 severity=m.severity,
                 suggestion=m.suggestion,
+                suggestions=m.suggestions,
             ))
 
     return findings

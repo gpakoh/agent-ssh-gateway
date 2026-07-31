@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.command_policy import DestructivePattern, PatternSuggestion, Severity
+from app.command_policy import DestructivePattern, PatternSuggestion, Severity, SuggestionKind
 from app.packs import Pack
 
 DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
@@ -12,8 +12,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="All schemas, tables, indexes, and data lost.",
         suggestions=(
-            PatternSuggestion(command="pg_dump {db} > {db}.sql", description="Dump database before dropping"),
-            PatternSuggestion(command="CREATE DATABASE {name} WITH TEMPLATE {old_db}", description="Copy database as backup first"),
+            PatternSuggestion(command="pg_dump {db} > {db}.sql", description="Dump database before dropping", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="CREATE DATABASE {name} WITH TEMPLATE {old_db}", description="Copy database as backup first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -23,8 +23,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Table definition and all rows lost. Related views/indexes affected.",
         suggestions=(
-            PatternSuggestion(command="DROP TABLE IF EXISTS {table}", description="Avoid error if table is missing"),
-            PatternSuggestion(command="DELETE FROM {table} WHERE {condition}", description="Selective deletion instead of full drop"),
+            PatternSuggestion(command="DROP TABLE IF EXISTS {table}", description="Avoid error if table is missing", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="DELETE FROM {table} WHERE {condition}", description="Selective deletion instead of full drop", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -34,8 +34,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="All tables, views, functions in the schema lost.",
         suggestions=(
-            PatternSuggestion(command="pg_dump --schema={schema} {db} > schema.sql", description="Dump schema first"),
-            PatternSuggestion(command="DROP SCHEMA IF EXISTS {schema} CASCADE", description="Use IF EXISTS for safety"),
+            PatternSuggestion(command="pg_dump --schema={schema} {db} > schema.sql", description="Dump schema first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="DROP SCHEMA IF EXISTS {schema} CASCADE", description="Use IF EXISTS for safety", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -45,8 +45,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="All rows deleted. Cannot roll back in many contexts.",
         suggestions=(
-            PatternSuggestion(command="SELECT COUNT(*) FROM {table}", description="Check row count before truncating"),
-            PatternSuggestion(command="BEGIN; DELETE FROM {table}; ROLLBACK;", description="Wrap in transaction — can roll back"),
+            PatternSuggestion(command="SELECT COUNT(*) FROM {table}", description="Check row count before truncating", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="BEGIN; DELETE FROM {table}; ROLLBACK;", description="Wrap in transaction — can roll back", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -56,8 +56,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="All rows deleted if WHERE clause is missing.",
         suggestions=(
-            PatternSuggestion(command="BEGIN; DELETE FROM {table} ... ; ROLLBACK;", description="Wrap in transaction for safety"),
-            PatternSuggestion(command="DELETE FROM {table} WHERE {condition}", description="Add a WHERE clause"),
+            PatternSuggestion(command="BEGIN; DELETE FROM {table} ... ; ROLLBACK;", description="Wrap in transaction for safety", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="DELETE FROM {table} WHERE {condition}", description="Add a WHERE clause", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -67,8 +67,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="The dropdb command-line tool destroys the database cluster-side.",
         suggestions=(
-            PatternSuggestion(command="pg_dump {db} > {db}.sql", description="Backup database before dropping"),
-            PatternSuggestion(command="createdb {new_db}", description="Create a new database instead of dropping"),
+            PatternSuggestion(command="pg_dump {db} > {db}.sql", description="Backup database before dropping", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="createdb {new_db}", description="Create a new database instead of dropping", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -78,8 +78,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Restoring the dump will DROP existing objects before recreating them.",
         suggestions=(
-            PatternSuggestion(command="pg_dump {db} > {db}.sql", description="Dump without --clean for safe restore"),
-            PatternSuggestion(command="pg_dump --clean --if-exists {db}", description="Use --if-exists to avoid errors"),
+            PatternSuggestion(command="pg_dump {db} > {db}.sql", description="Dump without --clean for safe restore", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="pg_dump --clean --if-exists {db}", description="Use --if-exists to avoid errors", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     # ---- MySQL / MariaDB ----
@@ -90,8 +90,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="All tables and data within the database lost.",
         suggestions=(
-            PatternSuggestion(command="mysqldump {db} > {db}.sql", description="Dump database before dropping"),
-            PatternSuggestion(command="CREATE DATABASE {new_db}", description="Create a new database instead"),
+            PatternSuggestion(command="mysqldump {db} > {db}.sql", description="Dump database before dropping", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="CREATE DATABASE {new_db}", description="Create a new database instead", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -101,8 +101,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Table definition and all rows lost.",
         suggestions=(
-            PatternSuggestion(command="mysqldump {db} {table} > {table}.sql", description="Dump table before dropping"),
-            PatternSuggestion(command="RENAME TABLE {table} TO {table}_old", description="Rename as a safer alternative"),
+            PatternSuggestion(command="mysqldump {db} {table} > {table}.sql", description="Dump table before dropping", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="RENAME TABLE {table} TO {table}_old", description="Rename as a safer alternative", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -112,8 +112,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="InnoDB: all rows removed implicitly. No per-row delete triggers fired.",
         suggestions=(
-            PatternSuggestion(command="SELECT COUNT(*) FROM {table}", description="Check row count first"),
-            PatternSuggestion(command="DELETE FROM {table} WHERE {condition}", description="Use DELETE with WHERE if possible (InnoDB transaction)"),
+            PatternSuggestion(command="SELECT COUNT(*) FROM {table}", description="Check row count first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="DELETE FROM {table} WHERE {condition}", description="Use DELETE with WHERE if possible (InnoDB transaction)", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -123,9 +123,9 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="All rows deleted if WHERE clause is missing.",
         suggestions=(
-            PatternSuggestion(command="BEGIN; DELETE FROM {table} ... ; ROLLBACK;", description="Wrap in transaction for safety"),
-            PatternSuggestion(command="SELECT * FROM {table} LIMIT 100", description="Preview rows first"),
-            PatternSuggestion(command="DELETE FROM {table} WHERE {condition}", description="Add a WHERE clause"),
+            PatternSuggestion(command="BEGIN; DELETE FROM {table} ... ; ROLLBACK;", description="Wrap in transaction for safety", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="SELECT * FROM {table} LIMIT 100", description="Preview rows first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="DELETE FROM {table} WHERE {condition}", description="Add a WHERE clause", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -135,8 +135,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="mysqladmin drop destroys the database server-side without confirmation.",
         suggestions=(
-            PatternSuggestion(command="mysqldump {db} > {db}.sql", description="Dump database first"),
-            PatternSuggestion(command="mysqladmin ping", description="Check server status before destructive action"),
+            PatternSuggestion(command="mysqldump {db} > {db}.sql", description="Dump database first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="mysqladmin ping", description="Check server status before destructive action", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -146,8 +146,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Restoring the dump will DROP the database first.",
         suggestions=(
-            PatternSuggestion(command="mysqldump {db} > {db}.sql", description="Dump without --add-drop-database"),
-            PatternSuggestion(command="mysqldump --no-data {db} > schema.sql", description="Dump schema only"),
+            PatternSuggestion(command="mysqldump {db} > {db}.sql", description="Dump without --add-drop-database", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="mysqldump --no-data {db} > schema.sql", description="Dump schema only", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -157,8 +157,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.MEDIUM,
         description="Existing tables will be dropped before restore.",
         suggestions=(
-            PatternSuggestion(command="mysqldump {db} > {db}.sql", description="Dump without --add-drop-table"),
-            PatternSuggestion(command="mysqldump --no-data {db} > schema.sql", description="Dump schema only"),
+            PatternSuggestion(command="mysqldump {db} > {db}.sql", description="Dump without --add-drop-table", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="mysqldump --no-data {db} > schema.sql", description="Dump schema only", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -168,8 +168,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Full administrative access granted across all databases.",
         suggestions=(
-            PatternSuggestion(command="GRANT {privileges} ON {db}.* TO {user}", description="Grant only specific privileges on specific DBs"),
-            PatternSuggestion(command="SHOW GRANTS FOR {user}", description="Check current grants first"),
+            PatternSuggestion(command="GRANT {privileges} ON {db}.* TO {user}", description="Grant only specific privileges on specific DBs", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="SHOW GRANTS FOR {user}", description="Check current grants first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -179,8 +179,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.MEDIUM,
         description="User deleted. All privileges revoked. Existing connections may break.",
         suggestions=(
-            PatternSuggestion(command="DROP USER IF EXISTS {user}", description="Avoid error if user does not exist"),
-            PatternSuggestion(command="REVOKE ALL PRIVILEGES ... FROM {user}", description="Revoke privileges instead of dropping user"),
+            PatternSuggestion(command="DROP USER IF EXISTS {user}", description="Avoid error if user does not exist", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="REVOKE ALL PRIVILEGES ... FROM {user}", description="Revoke privileges instead of dropping user", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -190,8 +190,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Breaks replication. All binlog history lost.",
         suggestions=(
-            PatternSuggestion(command="SHOW BINARY LOGS", description="Check binary log status before reset"),
-            PatternSuggestion(command="PURGE BINARY LOGS BEFORE NOW()", description="Remove old logs safely without full reset"),
+            PatternSuggestion(command="SHOW BINARY LOGS", description="Check binary log status before reset", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="PURGE BINARY LOGS BEFORE NOW()", description="Remove old logs safely without full reset", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     # ---- SQLite (sqlite3) ----
@@ -202,8 +202,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Table and all rows deleted from the database file.",
         suggestions=(
-            PatternSuggestion(command="DROP TABLE IF EXISTS {table}", description="Avoid error if table is missing"),
-            PatternSuggestion(command="sqlite3 {db} '.dump {table}' > {table}.sql", description="Dump table before dropping"),
+            PatternSuggestion(command="DROP TABLE IF EXISTS {table}", description="Avoid error if table is missing", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="sqlite3 {db} '.dump {table}' > {table}.sql", description="Dump table before dropping", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -213,8 +213,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="SQLite does not support TRUNCATE. DELETE without WHERE removes all rows.",
         suggestions=(
-            PatternSuggestion(command="BEGIN; DELETE FROM {table} ... ; ROLLBACK;", description="Wrap in transaction for safety"),
-            PatternSuggestion(command="SELECT COUNT(*) FROM {table}", description="Check row count first"),
+            PatternSuggestion(command="BEGIN; DELETE FROM {table} ... ; ROLLBACK;", description="Wrap in transaction for safety", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="SELECT COUNT(*) FROM {table}", description="Check row count first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -224,8 +224,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.MEDIUM,
         description="Target file is overwritten without warning.",
         suggestions=(
-            PatternSuggestion(command="VACUUM", description="Vacuum in-place without overwriting another file"),
-            PatternSuggestion(command="PRAGMA page_count", description="Check database size first"),
+            PatternSuggestion(command="VACUUM", description="Vacuum in-place without overwriting another file", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="PRAGMA page_count", description="Check database size first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -235,8 +235,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Read SQL from file command — file contents not inspected by guard.",
         suggestions=(
-            PatternSuggestion(command="sqlite3 {db} '.read {file}'", description="Use dot-command to read file in-process"),
-            PatternSuggestion(command="cat {file} | sqlite3 {db}", description="Pipe file contents for visibility"),
+            PatternSuggestion(command="sqlite3 {db} '.read {file}'", description="Use dot-command to read file in-process", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="cat {file} | sqlite3 {db}", description="Pipe file contents for visibility", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     # ---- MongoDB (mongosh) ----
@@ -247,8 +247,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="All collections, indexes, and data lost.",
         suggestions=(
-            PatternSuggestion(command="db.adminCommand('listDatabases')", description="List databases first"),
-            PatternSuggestion(command="mongodump --db {db}", description="Backup before dropping"),
+            PatternSuggestion(command="db.adminCommand('listDatabases')", description="List databases first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="mongodump --db {db}", description="Backup before dropping", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -258,8 +258,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="All documents and indexes in the collection lost.",
         suggestions=(
-            PatternSuggestion(command="db.{coll}.find().limit(10)", description="Preview documents first"),
-            PatternSuggestion(command="mongodump --collection {coll} --db {db}", description="Backup collection first"),
+            PatternSuggestion(command="db.{coll}.find().limit(10)", description="Preview documents first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="mongodump --collection {coll} --db {db}", description="Backup collection first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -269,8 +269,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="All documents in the collection deleted.",
         suggestions=(
-            PatternSuggestion(command="db.{coll}.find().limit(100)", description="Preview documents first"),
-            PatternSuggestion(command="db.{coll}.deleteMany({filter})", description="Use a filter for selective deletion"),
+            PatternSuggestion(command="db.{coll}.find().limit(100)", description="Preview documents first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="db.{coll}.deleteMany({filter})", description="Use a filter for selective deletion", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -280,8 +280,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Existing collections are dropped before data restoration.",
         suggestions=(
-            PatternSuggestion(command="mongodump --db {db} --out /tmp/backup", description="Backup before restoring"),
-            PatternSuggestion(command="mongorestore --nsInclude {db}.*", description="Restore specific namespaces only"),
+            PatternSuggestion(command="mongodump --db {db} --out /tmp/backup", description="Backup before restoring", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="mongorestore --nsInclude {db}.*", description="Restore specific namespaces only", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     # ---- Redis (redis-cli) ----
@@ -292,8 +292,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Every key in every database is deleted immediately.",
         suggestions=(
-            PatternSuggestion(command="redis-cli --scan --pattern '*' | head -20", description="Preview keys in all databases first"),
-            PatternSuggestion(command="redis-cli DBSIZE", description="Check number of keys before flushing"),
+            PatternSuggestion(command="redis-cli --scan --pattern '*' | head -20", description="Preview keys in all databases first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="redis-cli DBSIZE", description="Check number of keys before flushing", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -303,8 +303,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="All keys in the selected database deleted.",
         suggestions=(
-            PatternSuggestion(command="redis-cli --scan --pattern '*' | head -20", description="Preview keys first"),
-            PatternSuggestion(command="redis-cli DBSIZE", description="Check key count before flushing"),
+            PatternSuggestion(command="redis-cli --scan --pattern '*' | head -20", description="Preview keys first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="redis-cli DBSIZE", description="Check key count before flushing", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -314,8 +314,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Mass key deletion via pipe. Can affect many keys at once.",
         suggestions=(
-            PatternSuggestion(command="redis-cli --bigkeys", description="Check key distribution first"),
-            PatternSuggestion(command="redis-cli --scan --pattern 'prefix:*'", description="Use a specific prefix for targeted deletion"),
+            PatternSuggestion(command="redis-cli --bigkeys", description="Check key distribution first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="redis-cli --scan --pattern 'prefix:*'", description="Use a specific prefix for targeted deletion", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -325,8 +325,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Redis server process crashes. Data loss may occur.",
         suggestions=(
-            PatternSuggestion(command="redis-cli PING", description="Check server health instead"),
-            PatternSuggestion(command="redis-cli INFO server", description="Check server info instead"),
+            PatternSuggestion(command="redis-cli PING", description="Check server health instead", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="redis-cli INFO server", description="Check server info instead", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -336,8 +336,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Redis blocked for N seconds. All clients time out.",
         suggestions=(
-            PatternSuggestion(command="redis-cli PING", description="Check server health instead"),
-            PatternSuggestion(command="redis-cli LATENCY LATEST", description="Check latency first"),
+            PatternSuggestion(command="redis-cli PING", description="Check server health instead", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="redis-cli LATENCY LATEST", description="Check latency first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -347,8 +347,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Redis server shut down gracefully (or with NOSAVE, losing data).",
         suggestions=(
-            PatternSuggestion(command="redis-cli SAVE", description="Save RDB before shutdown"),
-            PatternSuggestion(command="redis-cli BGSAVE", description="Background save before shutdown"),
+            PatternSuggestion(command="redis-cli SAVE", description="Save RDB before shutdown", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="redis-cli BGSAVE", description="Background save before shutdown", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -359,8 +359,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         description="Changing dir+dbfilename writes key data outside data dir. "
         "slaveof/replicaof can leak keys to attacker.",
         suggestions=(
-            PatternSuggestion(command="redis-cli CONFIG GET dir", description="Check current directory first"),
-            PatternSuggestion(command="redis-cli CONFIG GET dbfilename", description="Check current filename first"),
+            PatternSuggestion(command="redis-cli CONFIG GET dir", description="Check current directory first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="redis-cli CONFIG GET dbfilename", description="Check current filename first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -370,8 +370,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Setting maxmemory too low causes Redis to evict keys aggressively.",
         suggestions=(
-            PatternSuggestion(command="redis-cli INFO memory", description="Check current memory usage first"),
-            PatternSuggestion(command="redis-cli MEMORY STATS", description="Detailed memory analysis"),
+            PatternSuggestion(command="redis-cli INFO memory", description="Check current memory usage first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="redis-cli MEMORY STATS", description="Detailed memory analysis", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -381,8 +381,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Changing to allkeys-lru or volatile-ttl can evict any key.",
         suggestions=(
-            PatternSuggestion(command="redis-cli CONFIG GET maxmemory-policy", description="Check current policy first"),
-            PatternSuggestion(command="redis-cli INFO stats", description="Check eviction stats first"),
+            PatternSuggestion(command="redis-cli CONFIG GET maxmemory-policy", description="Check current policy first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="redis-cli INFO stats", description="Check eviction stats first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -392,8 +392,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Setting save to empty disables snapshots. Data lost on restart.",
         suggestions=(
-            PatternSuggestion(command="redis-cli CONFIG GET save", description="Check current save config first"),
-            PatternSuggestion(command="redis-cli LASTSAVE", description="Check last save timestamp"),
+            PatternSuggestion(command="redis-cli CONFIG GET save", description="Check current save config first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="redis-cli LASTSAVE", description="Check last save timestamp", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -403,8 +403,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Disabling AOF removes append-only log. Data may be lost on restart.",
         suggestions=(
-            PatternSuggestion(command="redis-cli CONFIG GET appendonly", description="Check current AOF status first"),
-            PatternSuggestion(command="redis-cli INFO persistence", description="Check persistence status"),
+            PatternSuggestion(command="redis-cli CONFIG GET appendonly", description="Check current AOF status first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="redis-cli INFO persistence", description="Check persistence status", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -414,8 +414,8 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Runtime CONFIG SET changes are persisted to disk.",
         suggestions=(
-            PatternSuggestion(command="redis-cli CONFIG GET *", description="Review current config before persisting"),
-            PatternSuggestion(command="redis-cli INFO server", description="Check server info before rewriting config"),
+            PatternSuggestion(command="redis-cli CONFIG GET *", description="Review current config before persisting", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="redis-cli INFO server", description="Check server info before rewriting config", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 )

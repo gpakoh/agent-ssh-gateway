@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.command_policy import DestructivePattern, PatternSuggestion, Severity
+from app.command_policy import DestructivePattern, PatternSuggestion, Severity, SuggestionKind
 from app.packs import Pack
 
 # Every DestructivePattern verbatim from command_policy.py's CLOUD_DESTRUCTIVE_PATTERNS
@@ -16,9 +16,11 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         description="Instance is stopped and deleted. EBS volumes and Elastic IPs are lost.",
         suggestions=(
             PatternSuggestion("aws ec2 stop-instances --instance-ids i-xxx",
-                              "Stop instead of terminate for recoverable pause"),
+                              "Stop instead of terminate for recoverable pause",
+            kind=SuggestionKind.SAFER_ALTERNATIVE),
             PatternSuggestion("aws ec2 describe-instances --instance-ids i-xxx",
-                              "Verify instance details before terminating"),
+                              "Verify instance details before terminating",
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -28,8 +30,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="EC2 delete commands: delete-snapshot, delete-volume, delete-vpc, delete-image.",
         suggestions=(
-            PatternSuggestion(command="aws ec2 describe-snapshots/volumes/vpcs/images", description="List resources before deletion"),
-            PatternSuggestion(command="aws ec2 create-snapshot --volume-id {vol}", description="Backup volume before deleting"),
+            PatternSuggestion(command="aws ec2 describe-snapshots/volumes/vpcs/images", description="List resources before deletion", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws ec2 create-snapshot --volume-id {vol}", description="Backup volume before deleting", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -41,9 +43,11 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         "No recovery unless bucket versioning is enabled.",
         suggestions=(
             PatternSuggestion("aws s3 rm s3://bucket/path/ --recursive --dryrun",
-                              "Preview deletions with --dryrun"),
+                              "Preview deletions with --dryrun",
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion("aws s3 ls s3://bucket/path/ --recursive",
-                              "List objects to verify before deleting"),
+                              "List objects to verify before deleting",
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -53,8 +57,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="rb removes an S3 bucket. With --force, deletes all contents first.",
         suggestions=(
-            PatternSuggestion(command="aws s3 ls s3://{bucket}", description="List bucket contents first"),
-            PatternSuggestion(command="aws s3api get-bucket-versioning --bucket {bucket}", description="Check versioning status first"),
+            PatternSuggestion(command="aws s3 ls s3://{bucket}", description="List bucket contents first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws s3api get-bucket-versioning --bucket {bucket}", description="Check versioning status first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -64,8 +68,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Bucket must be empty. Check contents before deleting.",
         suggestions=(
-            PatternSuggestion(command="aws s3api list-objects --bucket {bucket} --max-items 10", description="List objects before deleting"),
-            PatternSuggestion(command="aws s3api get-bucket-versioning --bucket {bucket}", description="Check versioning status first"),
+            PatternSuggestion(command="aws s3api list-objects --bucket {bucket} --max-items 10", description="List objects before deleting", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws s3api get-bucket-versioning --bucket {bucket}", description="Check versioning status first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -77,7 +81,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         "Without versioning, objects are permanently gone.",
         suggestions=(
             PatternSuggestion("aws s3api get-bucket-versioning --bucket xxx",
-                              "Check if versioning is enabled first"),
+                              "Check if versioning is enabled first",
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -88,8 +93,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         description="RDS delete commands remove database instances, clusters, and snapshots. "
         "Create a final snapshot before deletion.",
         suggestions=(
-            PatternSuggestion(command="aws rds describe-db-instances", description="List instances before deletion"),
-            PatternSuggestion(command="aws rds delete-db-instance --skip-final-snapshot false", description="Create final snapshot before deletion"),
+            PatternSuggestion(command="aws rds describe-db-instances", description="List instances before deletion", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws rds delete-db-instance --skip-final-snapshot false", description="Create final snapshot before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -99,8 +104,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="All EC2, RDS, S3, IAM resources created by the stack are deleted.",
         suggestions=(
-            PatternSuggestion(command="aws cloudformation describe-stack-resources --stack-name {name}", description="List resources first"),
-            PatternSuggestion(command="aws cloudformation get-template --stack-name {name}", description="Save template before deletion"),
+            PatternSuggestion(command="aws cloudformation describe-stack-resources --stack-name {name}", description="List resources first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws cloudformation get-template --stack-name {name}", description="Save template before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -110,8 +115,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Function code, versions, aliases, and event source mappings are removed.",
         suggestions=(
-            PatternSuggestion(command="aws lambda list-functions", description="List functions before deletion"),
-            PatternSuggestion(command="aws lambda get-function --function-name {name}", description="Save function config first"),
+            PatternSuggestion(command="aws lambda list-functions", description="List functions before deletion", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws lambda get-function --function-name {name}", description="Save function config first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -121,8 +126,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="IAM deletions break authentication for users and services using those resources.",
         suggestions=(
-            PatternSuggestion(command="aws iam list-attached-role-policies --role-name {role}", description="Check attached policies first"),
-            PatternSuggestion(command="aws iam get-policy --policy-arn {arn}", description="Save policy document before deletion"),
+            PatternSuggestion(command="aws iam list-attached-role-policies --role-name {role}", description="Check attached policies first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws iam get-policy --policy-arn {arn}", description="Save policy document before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -132,8 +137,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="All items, indexes, and table configuration are lost.",
         suggestions=(
-            PatternSuggestion(command="aws dynamodb list-tables", description="List tables first"),
-            PatternSuggestion(command="aws dynamodb describe-table --table-name {name}", description="Check table details before deletion"),
+            PatternSuggestion(command="aws dynamodb list-tables", description="List tables first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws dynamodb describe-table --table-name {name}", description="Check table details before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -143,8 +148,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Control plane is deleted. Node groups must be deleted separately first.",
         suggestions=(
-            PatternSuggestion(command="aws eks list-nodegroups --cluster-name {name}", description="List nodegroups before deletion"),
-            PatternSuggestion(command="aws eks describe-cluster --name {name}", description="Check cluster details first"),
+            PatternSuggestion(command="aws eks list-nodegroups --cluster-name {name}", description="List nodegroups before deletion", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws eks describe-cluster --name {name}", description="Check cluster details first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -154,8 +159,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="All images in the repository are deleted.",
         suggestions=(
-            PatternSuggestion(command="aws ecr list-images --repository-name {name}", description="List images first"),
-            PatternSuggestion(command="aws ecr describe-repositories", description="List repositories before deletion"),
+            PatternSuggestion(command="aws ecr list-images --repository-name {name}", description="List images first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws ecr describe-repositories", description="List repositories before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -167,7 +172,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         "CancelKeyDeletion can abort within the waiting window.",
         suggestions=(
             PatternSuggestion("aws kms disable-key --key-id xxx",
-                              "Disable key instead of deletion for reversible deactivation"),
+                              "Disable key instead of deletion for reversible deactivation",
+            kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -177,8 +183,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="30-day recovery window unless --force-delete-without-recovery used.",
         suggestions=(
-            PatternSuggestion(command="aws secretsmanager describe-secret --secret-id {name}", description="Check secret details first"),
-            PatternSuggestion(command="aws secretsmanager list-secrets", description="List secrets before deletion"),
+            PatternSuggestion(command="aws secretsmanager describe-secret --secret-id {name}", description="Check secret details first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws secretsmanager list-secrets", description="List secrets before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -189,7 +195,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         description="All DNS records deleted. Production traffic can become unroutable immediately.",
         suggestions=(
             PatternSuggestion("aws route53 list-resource-record-sets --hosted-zone-id xxx",
-                              "Export records first"),
+                              "Export records first",
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -199,8 +206,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Historical logs in S3 are preserved, but future events stop being recorded.",
         suggestions=(
-            PatternSuggestion(command="aws cloudtrail describe-trails", description="List trails before deletion"),
-            PatternSuggestion(command="aws cloudtrail get-trail-status --name {name}", description="Check trail status first"),
+            PatternSuggestion(command="aws cloudtrail describe-trails", description="List trails before deletion", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws cloudtrail get-trail-status --name {name}", description="Check trail status first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -210,8 +217,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="With --skip-final-cluster-snapshot, ALL data is destroyed immediately.",
         suggestions=(
-            PatternSuggestion(command="aws redshift describe-clusters", description="List clusters before deletion"),
-            PatternSuggestion(command="aws redshift delete-cluster --final-cluster-snapshot-identifier {snap}", description="Create final snapshot before delete"),
+            PatternSuggestion(command="aws redshift describe-clusters", description="List clusters before deletion", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws redshift delete-cluster --final-cluster-snapshot-identifier {snap}", description="Create final snapshot before delete", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -221,8 +228,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="All log streams, events, metric filters, and subscriptions are lost.",
         suggestions=(
-            PatternSuggestion(command="aws logs describe-log-groups", description="List log groups first"),
-            PatternSuggestion(command="aws logs export-task --log-group-name {name} --destination {bucket}", description="Export logs before deletion"),
+            PatternSuggestion(command="aws logs describe-log-groups", description="List log groups first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws logs export-task --log-group-name {name} --destination {bucket}", description="Export logs before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     # ---- GCP / gcloud CLI ----
@@ -233,8 +240,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Boot disk deleted unless --keep-disks specified. External IPs released.",
         suggestions=(
-            PatternSuggestion(command="gcloud compute instances list", description="List instances first"),
-            PatternSuggestion(command="gcloud compute instances stop {name} --zone={zone}", description="Stop instead of delete"),
+            PatternSuggestion(command="gcloud compute instances list", description="List instances first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="gcloud compute instances stop {name} --zone={zone}", description="Stop instead of delete", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -244,8 +251,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="All data on disk is lost forever without snapshots.",
         suggestions=(
-            PatternSuggestion(command="gcloud compute disks list", description="List disks first"),
-            PatternSuggestion(command="gcloud compute disks snapshot {disk} --zone={zone} --snapshot-names {snap}", description="Create snapshot before deletion"),
+            PatternSuggestion(command="gcloud compute disks list", description="List disks first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="gcloud compute disks snapshot {disk} --zone={zone} --snapshot-names {snap}", description="Create snapshot before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -255,8 +262,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Database and all data deleted along with backups and read replicas.",
         suggestions=(
-            PatternSuggestion(command="gcloud sql instances list", description="List instances first"),
-            PatternSuggestion(command="gcloud sql instances describe {name}", description="Check instance details first"),
+            PatternSuggestion(command="gcloud sql instances list", description="List instances first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="gcloud sql instances describe {name}", description="Check instance details first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -267,9 +274,11 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         description="All objects under path deleted. No recovery without versioning.",
         suggestions=(
             PatternSuggestion("gsutil ls -r gs://bucket/path/",
-                              "List objects first"),
+                              "List objects first",
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion("gsutil versioning set on gs://bucket",
-                              "Enable versioning for recovery"),
+                              "Enable versioning for recovery",
+            kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -279,8 +288,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Bucket name becomes available to others. Bucket must be empty.",
         suggestions=(
-            PatternSuggestion(command="gsutil ls gs://{bucket}", description="List bucket contents first"),
-            PatternSuggestion(command="gsutil versioning get gs://{bucket}", description="Check versioning status first"),
+            PatternSuggestion(command="gsutil ls gs://{bucket}", description="List bucket contents first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="gsutil versioning get gs://{bucket}", description="Check versioning status first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -290,8 +299,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="All nodes and workloads terminated. Persistent volumes may be deleted.",
         suggestions=(
-            PatternSuggestion(command="gcloud container clusters list", description="List clusters first"),
-            PatternSuggestion(command="kubectl get all --all-namespaces", description="Check workloads before deleting cluster"),
+            PatternSuggestion(command="gcloud container clusters list", description="List clusters first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="kubectl get all --all-namespaces", description="Check workloads before deleting cluster", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -302,8 +311,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         description="ALL resources deleted: VMs, databases, storage, functions, IAM. "
         "30-day recovery window, then permanent.",
         suggestions=(
-            PatternSuggestion(command="gcloud projects list", description="List projects first"),
-            PatternSuggestion(command="gcloud services list --project {name}", description="List enabled APIs before deletion"),
+            PatternSuggestion(command="gcloud projects list", description="List projects first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="gcloud services list --project {name}", description="List enabled APIs before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -313,8 +322,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Function code, configuration, triggers, and event subscriptions removed.",
         suggestions=(
-            PatternSuggestion(command="gcloud functions list", description="List functions first"),
-            PatternSuggestion(command="gcloud functions describe {name}", description="Check function details first"),
+            PatternSuggestion(command="gcloud functions list", description="List functions first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="gcloud functions describe {name}", description="Check function details first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -324,8 +333,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Documents and collections deleted. No automatic backups by default.",
         suggestions=(
-            PatternSuggestion(command="gcloud firestore indexes list", description="List indexes first"),
-            PatternSuggestion(command="gcloud firestore export gs://{bucket}", description="Export Firestore data before deletion"),
+            PatternSuggestion(command="gcloud firestore indexes list", description="List indexes first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="gcloud firestore export gs://{bucket}", description="Export Firestore data before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -335,8 +344,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Secret and ALL versions permanently deleted. No recovery window.",
         suggestions=(
-            PatternSuggestion(command="gcloud secrets list", description="List secrets first"),
-            PatternSuggestion(command="gcloud secrets versions list {name}", description="Check versions before deletion"),
+            PatternSuggestion(command="gcloud secrets list", description="List secrets first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="gcloud secrets versions list {name}", description="Check versions before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -346,8 +355,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Data encrypted under this key version becomes unrecoverable.",
         suggestions=(
-            PatternSuggestion(command="gcloud kms keys list --keyring {ring} --location {loc}", description="List keys first"),
-            PatternSuggestion(command="gcloud kms keys versions list --key {key}", description="Check key versions before destruction"),
+            PatternSuggestion(command="gcloud kms keys list --keyring {ring} --location {loc}", description="List keys first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="gcloud kms keys versions list --key {key}", description="Check key versions before destruction", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -357,8 +366,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Workloads using this SA lose access. Can undelete within 30 days.",
         suggestions=(
-            PatternSuggestion(command="gcloud iam service-accounts list", description="List service accounts first"),
-            PatternSuggestion(command="gcloud iam service-accounts get-iam-policy {sa}", description="Check IAM bindings first"),
+            PatternSuggestion(command="gcloud iam service-accounts list", description="List service accounts first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="gcloud iam service-accounts get-iam-policy {sa}", description="Check IAM bindings first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -368,8 +377,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="All record sets deleted. Production traffic can go dark.",
         suggestions=(
-            PatternSuggestion(command="gcloud dns managed-zones list", description="List zones first"),
-            PatternSuggestion(command="gcloud dns record-sets list --zone={zone}", description="Export record sets first"),
+            PatternSuggestion(command="gcloud dns managed-zones list", description="List zones first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="gcloud dns record-sets list --zone={zone}", description="Export record sets first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -379,8 +388,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="All databases inside instance deleted. Unrecoverable without export.",
         suggestions=(
-            PatternSuggestion(command="gcloud spanner instances list", description="List instances first"),
-            PatternSuggestion(command="gcloud spanner databases list --instance={name}", description="List databases before deletion"),
+            PatternSuggestion(command="gcloud spanner instances list", description="List instances first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="gcloud spanner databases list --instance={name}", description="List databases before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -390,8 +399,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="All tables, clusters, and data permanently deleted.",
         suggestions=(
-            PatternSuggestion(command="gcloud bigtable instances list", description="List instances first"),
-            PatternSuggestion(command="gcloud bigtable instances describe {name}", description="Check instance details first"),
+            PatternSuggestion(command="gcloud bigtable instances list", description="List instances first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="gcloud bigtable instances describe {name}", description="Check instance details first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -402,8 +411,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         description="bq rm -r removes dataset + ALL tables/views/models inside. "
         "bq rm -f removes table without confirmation.",
         suggestions=(
-            PatternSuggestion(command="bq ls {project}:{dataset}", description="List dataset contents first"),
-            PatternSuggestion(command="bq show {project}:{dataset}.{table}", description="Check table metadata before removal"),
+            PatternSuggestion(command="bq ls {project}:{dataset}", description="List dataset contents first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="bq show {project}:{dataset}.{table}", description="Check table metadata before removal", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     # ---- Azure / az CLI ----
@@ -414,8 +423,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="VM deallocated and deleted. OS disk deleted unless --os-disk=detach.",
         suggestions=(
-            PatternSuggestion(command="az vm list", description="List VMs first"),
-            PatternSuggestion(command="az vm deallocate --name {name} --resource-group {rg}", description="Deallocate instead of delete"),
+            PatternSuggestion(command="az vm list", description="List VMs first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="az vm deallocate --name {name} --resource-group {rg}", description="Deallocate instead of delete", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -425,8 +434,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="ALL blobs, files, queues, tables deleted. Unrecoverable.",
         suggestions=(
-            PatternSuggestion(command="az storage account list", description="List storage accounts first"),
-            PatternSuggestion(command="az storage container list --account-name {name}", description="Check containers before deletion"),
+            PatternSuggestion(command="az storage account list", description="List storage accounts first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="az storage container list --account-name {name}", description="Check containers before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -436,8 +445,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Blob delete removes individual blobs. Container delete removes ALL blobs.",
         suggestions=(
-            PatternSuggestion(command="az storage blob list --container-name {container}", description="List blobs first"),
-            PatternSuggestion(command="az storage container list", description="List containers before deletion"),
+            PatternSuggestion(command="az storage blob list --container-name {container}", description="List blobs first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="az storage container list", description="List containers before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -447,8 +456,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Server delete removes ALL databases. Database delete removes specific DB.",
         suggestions=(
-            PatternSuggestion(command="az sql server list", description="List servers first"),
-            PatternSuggestion(command="az sql db list --server {server} --resource-group {rg}", description="List databases first"),
+            PatternSuggestion(command="az sql server list", description="List servers first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="az sql db list --server {server} --resource-group {rg}", description="List databases first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -458,8 +467,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="ALL resources in the group deleted: VMs, storage, databases, networks.",
         suggestions=(
-            PatternSuggestion(command="az resource list --resource-group {rg}", description="List all resources in group first"),
-            PatternSuggestion(command="az group export --name {rg}", description="Export resource group ARM template first"),
+            PatternSuggestion(command="az resource list --resource-group {rg}", description="List all resources in group first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="az group export --name {rg}", description="Export resource group ARM template first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -469,8 +478,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="All nodes, workloads, load balancers terminated. Node resource group deleted.",
         suggestions=(
-            PatternSuggestion(command="az aks list", description="List clusters first"),
-            PatternSuggestion(command="kubectl get all --all-namespaces", description="Check workloads before deleting cluster"),
+            PatternSuggestion(command="az aks list", description="List clusters first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="kubectl get all --all-namespaces", description="Check workloads before deleting cluster", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -480,8 +489,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Application code, configuration, custom domains, and SSL certificates removed.",
         suggestions=(
-            PatternSuggestion(command="az webapp list", description="List webapps first"),
-            PatternSuggestion(command="az webapp config backup list --webapp-name {name}", description="Check backups first"),
+            PatternSuggestion(command="az webapp list", description="List webapps first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="az webapp config backup list --webapp-name {name}", description="Check backups first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -491,8 +500,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Account delete removes entire Cosmos DB. Database/collection delete removes data.",
         suggestions=(
-            PatternSuggestion(command="az cosmosdb list", description="List accounts first"),
-            PatternSuggestion(command="az cosmosdb sql database list --account-name {name}", description="List databases first"),
+            PatternSuggestion(command="az cosmosdb list", description="List accounts first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="az cosmosdb sql database list --account-name {name}", description="List databases first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -502,8 +511,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="All secrets, keys, certificates deleted. Soft delete allows recovery if enabled.",
         suggestions=(
-            PatternSuggestion(command="az keyvault list", description="List vaults first"),
-            PatternSuggestion(command="az keyvault secret list --vault-name {name}", description="List secrets before deletion"),
+            PatternSuggestion(command="az keyvault list", description="List vaults first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="az keyvault secret list --vault-name {name}", description="List secrets before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -513,8 +522,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="ALL repositories and images deleted. Registry name becomes available.",
         suggestions=(
-            PatternSuggestion(command="az acr list", description="List registries first"),
-            PatternSuggestion(command="az acr repository list --name {name}", description="List repositories first"),
+            PatternSuggestion(command="az acr list", description="List registries first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="az acr repository list --name {name}", description="List repositories first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -524,8 +533,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="All tags and images in the repository deleted. New pulls will fail.",
         suggestions=(
-            PatternSuggestion(command="az acr repository show-tags --name {name} --repository {repo}", description="List tags before deletion"),
-            PatternSuggestion(command="az acr repository show-manifests --name {name} --repository {repo}", description="List manifests first"),
+            PatternSuggestion(command="az acr repository show-tags --name {name} --repository {repo}", description="List tags before deletion", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="az acr repository show-manifests --name {name} --repository {repo}", description="List manifests first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -535,8 +544,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Purge is PERMANENT. Applications/services bound to the item fail immediately.",
         suggestions=(
-            PatternSuggestion(command="az keyvault key/secret/certificate list --vault-name {name}", description="List items before deletion"),
-            PatternSuggestion(command="az keyvault {secret} show --vault-name {name}", description="Check item details first"),
+            PatternSuggestion(command="az keyvault key/secret/certificate list --vault-name {name}", description="List items before deletion", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="az keyvault {secret} show --vault-name {name}", description="Check item details first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -547,8 +556,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         description="All workloads authenticating via this SP lose access. "
         "Can restore within 30 days via Graph API.",
         suggestions=(
-            PatternSuggestion(command="az ad sp list", description="List service principals first"),
-            PatternSuggestion(command="az ad sp show --id {id}", description="Check SP details before deletion"),
+            PatternSuggestion(command="az ad sp list", description="List service principals first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="az ad sp show --id {id}", description="Check SP details before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -559,8 +568,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         description="All service principals derived from this app stop working. "
         "OAuth grants invalidated.",
         suggestions=(
-            PatternSuggestion(command="az ad app list", description="List app registrations first"),
-            PatternSuggestion(command="az ad app show --id {id}", description="Check app details first"),
+            PatternSuggestion(command="az ad app list", description="List app registrations first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="az ad app show --id {id}", description="Check app details first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -570,8 +579,8 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="All record sets deleted. Production traffic goes dark.",
         suggestions=(
-            PatternSuggestion(command="az network dns zone list", description="List zones first"),
-            PatternSuggestion(command="az network dns record-set list --zone-name {zone}", description="Export record sets first"),
+            PatternSuggestion(command="az network dns zone list", description="List zones first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="az network dns record-set list --zone-name {zone}", description="Export record sets first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 )

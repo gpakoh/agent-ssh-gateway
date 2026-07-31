@@ -203,6 +203,7 @@ def simulate(
                 "severity": f.severity,
                 "confidence": f.confidence,
                 "suggestion": f.suggestion,
+                "suggestions": f.suggestions,
             }
             for f in scan.findings
         ]
@@ -217,6 +218,7 @@ def simulate(
                 "mode": decision.mode,
                 "profile": decision.profile,
                 "requires_approval": decision.requires_approval,
+                "suggestions": decision.suggestions,
                 "findings": findings,
             }
         )

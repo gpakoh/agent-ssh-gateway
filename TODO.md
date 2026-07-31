@@ -48,5 +48,15 @@ Safe-паттерны (allow list для docker ps/logs/build...) — опцио
 - Конвенция: 2 suggestions на паттерн — preview/check + safer alternative
 - Отображается в ответе policy evaluation (decision.suggestion)
 
+### P17a — Модель suggestions: kind + список + описания ✅
+Апгрейд по образцу DCG (`src/suggestions.rs`):
+- `SuggestionKind` enum (5 типов: preview_first, safer_alternative, workflow_fix, documentation, allow_safely)
+- `PatternSuggestion` получил поле `kind` (478 записей во всех 9 паках)
+- `DestructiveMatch.suggestions` / `ScanFinding.suggestions` — полный список с command+description+kind
+- `CommandPolicyDecision.suggestions` — все suggestions строкой «cmd — описание»
+- Обратная совместимость: `suggestion` (первый command) сохранён
+- В serialize-точках: simulate.py, scan_project.py, heredoc_scanner.py
+- +4 теста (kind default, scan findings, blocked decision)
+
 ### P18 — Больше pack-паттернов (K8s, AWS, GCP, БД, DNS...)
 У DCG ~50 доменов, у нас ~10. Постепенное расширение по необходимости.
