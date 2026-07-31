@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from app.packs import PackRegistry
 from app.packs.backup import build_backup_pack
+from app.packs.cicd import build_cicd_pack
 from app.packs.cloud import build_cloud_pack
 from app.packs.database import build_database_pack
 from app.packs.dns import build_dns_pack
@@ -30,6 +31,7 @@ def build_registry() -> PackRegistry:
     registry.register(build_filesystem_pack())
     registry.register(build_kubernetes_pack())
     registry.register(build_cloud_pack())
+    registry.register(build_cicd_pack())
     registry.register(build_database_pack())
     registry.register(build_dns_pack())
     registry.register(build_git_pack())
