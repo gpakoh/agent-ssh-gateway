@@ -122,7 +122,7 @@ class TestRecordSshCommand:
 
 
 class TestSshExecuteMetrics:
-    @patch("app.routers.ssh.metrics")
+    @patch("app.services.command_gate.metrics")
     def test_execute_denied_increments_denied(self, mock_metrics):
         """Denied command increments the denied counter."""
         with patch("app.auth_middleware.get_client_ip", return_value="127.0.0.1"):
@@ -136,7 +136,7 @@ class TestSshExecuteMetrics:
                 call_kwargs = mock_metrics.record_ssh_command.call_args.kwargs
                 assert call_kwargs["status"] == "denied"
 
-    @patch("app.routers.ssh.metrics")
+    @patch("app.services.command_gate.metrics")
     def test_execute_allowed_increments_allowed(self, mock_metrics):
         """Allowed command increments the allowed counter."""
         with patch("app.auth_middleware.get_client_ip", return_value="127.0.0.1"):
@@ -162,7 +162,7 @@ class TestSshExecuteMetrics:
                     call_kwargs = mock_metrics.record_ssh_command.call_args.kwargs
                     assert call_kwargs["status"] == "allowed"
 
-    @patch("app.routers.ssh.metrics")
+    @patch("app.services.command_gate.metrics")
     def test_metric_no_raw_command_text(self, mock_metrics):
         """Ensure no raw command text appears in metric labels."""
         with patch("app.auth_middleware.get_client_ip", return_value="127.0.0.1"):
