@@ -16,7 +16,6 @@ class BulkOperationsManager:
 
     def __init__(self, max_concurrency: int = 10):
         self._max_concurrency = max_concurrency
-        self._semaphore = asyncio.Semaphore(max_concurrency)
 
     async def execute_bulk(
         self,
