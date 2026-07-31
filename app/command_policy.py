@@ -114,11 +114,28 @@ class Severity(StrEnum):
     LOW = "low"
 
 
+class SuggestionKind(StrEnum):
+    """Category of a suggestion. Mirrors DCG's suggestion kinds.
+
+    - PREVIEW_FIRST: inspect/check state before acting (look before you leap)
+    - SAFER_ALTERNATIVE: do this less destructive thing instead
+    - WORKFLOW_FIX: fix the workflow that led to the dangerous command
+    - DOCUMENTATION: point to docs for more context
+    - ALLOW_SAFELY: how to allowlist this specific rule safely
+    """
+    PREVIEW_FIRST = "preview_first"
+    SAFER_ALTERNATIVE = "safer_alternative"
+    WORKFLOW_FIX = "workflow_fix"
+    DOCUMENTATION = "documentation"
+    ALLOW_SAFELY = "allow_safely"
+
+
 @dataclass(frozen=True)
 class PatternSuggestion:
     """Safe alternative command suggestion."""
     command: str
     description: str
+    kind: SuggestionKind = SuggestionKind.SAFER_ALTERNATIVE
 
 
 @dataclass(frozen=True)
@@ -139,6 +156,7 @@ class DestructiveMatch:
     reason: str
     severity: Severity
     suggestion: str | None = None
+    suggestions: tuple[PatternSuggestion, ...] = field(default_factory=tuple)
     confidence: float = 0.5
 
 
@@ -152,6 +170,7 @@ class CommandPolicyDecision:
     requires_approval: bool = False
     approval_id: str | None = None
     suggestion: str | None = None
+    suggestions: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +498,7 @@ class ScanFinding:
     severity: str
     reason: str
     suggestion: str | None = None
+    suggestions: tuple[dict, ...] = ()
     confidence: float | None = None
 
 
@@ -500,11 +520,27 @@ def _check_all_destructive(command: str) -> list[DestructiveMatch]:
 
 
 def _get_suggestion(command: str) -> str | None:
-    """Return the first suggestion from destructive patterns matching command."""
+    """Return the first suggestion command from destructive patterns matching command."""
     for m in _check_all_destructive(command):
         if m.suggestion:
             return m.suggestion
+        if m.suggestions:
+            return m.suggestions[0].command
     return None
+
+
+def _suggestion_dict(s: PatternSuggestion) -> dict:
+    """Serialize a PatternSuggestion for API output."""
+    return {"command": s.command, "description": s.description, "kind": s.kind.value}
+
+
+def _get_suggestions(command: str) -> tuple[str, ...]:
+    """Return formatted suggestions from destructive patterns matching command."""
+    formatted: list[str] = []
+    for m in _check_all_destructive(command):
+        for s in m.suggestions:
+            formatted.append(f"{s.command} — {s.description}")
+    return tuple(formatted)
 
 
 def scan_command(command: str) -> ScanReport:
@@ -522,6 +558,7 @@ def scan_command(command: str) -> ScanReport:
             severity=m.severity.value,
             reason=m.reason,
             suggestion=m.suggestion,
+            suggestions=tuple(_suggestion_dict(s) for s in m.suggestions),
             confidence=m.confidence,
         )
         for m in matches
@@ -606,8 +643,8 @@ def _validate_docker_action(effective: list[str], allowed_actions: set[str]) -> 
     matches = get_registry().evaluate_pack("docker", cmd)
     for match in matches:
         msg = f"Destructive docker operation blocked: {match.reason}"
-        if match.suggestion:
-            msg += f" (safer: {match.suggestion})"
+        if match.suggestions:
+            msg += " (safer: " + "; ".join(f"{s.command} — {s.description}" for s in match.suggestions) + ")"
         return False, msg
 
     return True, ""
@@ -924,6 +961,7 @@ def evaluate_command_policy(
                 mode=mode_value,
                 command_root=root,
                 suggestion=_get_suggestion(command),
+                suggestions=_get_suggestions(command),
             )
         # Gates 2b (heredoc) and 3 (profile) → ask for approval
         from app.policy_ask import create_approval_request
@@ -942,6 +980,7 @@ def evaluate_command_policy(
             requires_approval=True,
             approval_id=approval.approval_id,
             suggestion=_get_suggestion(command),
+            suggestions=_get_suggestions(command),
         )
 
     # Enforce mode: run the full decision pipeline
@@ -956,6 +995,7 @@ def evaluate_command_policy(
             mode=mode_value,
             command_root=root,
             suggestion=_get_suggestion(command) if not allowed else None,
+            suggestions=_get_suggestions(command) if not allowed else (),
         )
 
     # AUDIT mode: same pipeline, but always allow and report would_allow

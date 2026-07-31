@@ -106,6 +106,7 @@ class Pack:
                     reason=dp.reason,
                     severity=dp.severity,
                     suggestion=dp.suggestions[0].command if dp.suggestions else None,
+                    suggestions=dp.suggestions,
                     confidence=final_conf,
                 ))
         return results

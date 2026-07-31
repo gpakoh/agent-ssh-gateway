@@ -152,6 +152,7 @@ def _scan(
                     "severity": f.severity,
                     "reason": f.reason,
                     "suggestion": f.suggestion,
+                    "suggestions": f.suggestions,
                     "confidence": f.confidence,
                 })
 

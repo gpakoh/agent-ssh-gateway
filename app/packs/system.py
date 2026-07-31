@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.command_policy import DestructivePattern, PatternSuggestion, Severity
+from app.command_policy import DestructivePattern, PatternSuggestion, Severity, SuggestionKind
 from app.packs import Pack
 
 SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
@@ -12,8 +12,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Dangerous! dd to /dev/* block device overwrites data.",
         suggestions=(
-            PatternSuggestion(command="lsblk", description="List block devices first"),
-            PatternSuggestion(command="dd if={src} of={dst} bs=4M status=progress", description="Use bs=4M and status=progress for safety"),
+            PatternSuggestion(command="lsblk", description="List block devices first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="dd if={src} of={dst} bs=4M status=progress", description="Use bs=4M and status=progress for safety", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -23,8 +23,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="dd wipe from /dev/zero|urandom|random to block device.",
         suggestions=(
-            PatternSuggestion(command="lsblk -f", description="Check existing filesystems first"),
-            PatternSuggestion(command="wipefs -n /dev/{dev}", description="Preview what would be wiped"),
+            PatternSuggestion(command="lsblk -f", description="Check existing filesystems first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="wipefs -n /dev/{dev}", description="Preview what would be wiped", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     # ---- disk: partition tools ----
@@ -35,8 +35,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="fdisk edits partition tables on /dev/*.",
         suggestions=(
-            PatternSuggestion(command="fdisk -l /dev/{dev}", description="List partition table without editing"),
-            PatternSuggestion(command="lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT", description="View partition layout safely"),
+            PatternSuggestion(command="fdisk -l /dev/{dev}", description="List partition table without editing", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT", description="View partition layout safely", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -46,8 +46,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="parted modifies partition tables.",
         suggestions=(
-            PatternSuggestion(command="parted /dev/{dev} print", description="View current partition table"),
-            PatternSuggestion(command="parted /dev/{dev} print free", description="Show free space on device"),
+            PatternSuggestion(command="parted /dev/{dev} print", description="View current partition table", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="parted /dev/{dev} print free", description="Show free space on device", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     # ---- disk: filesystem creation/destruction ----
@@ -58,8 +58,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="mkfs creates a filesystem, erasing existing data.",
         suggestions=(
-            PatternSuggestion(command="lsblk -f", description="Check existing filesystem first"),
-            PatternSuggestion(command="fsck -N /dev/{dev}", description="Detect existing filesystem type"),
+            PatternSuggestion(command="lsblk -f", description="Check existing filesystem first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="fsck -N /dev/{dev}", description="Detect existing filesystem type", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -69,8 +69,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="mkswap creates swap area, overwriting existing data.",
         suggestions=(
-            PatternSuggestion(command="swapon --show", description="Show current swap devices"),
-            PatternSuggestion(command="free -h", description="Check memory and swap usage"),
+            PatternSuggestion(command="swapon --show", description="Show current swap devices", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="free -h", description="Check memory and swap usage", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -80,8 +80,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="wipefs erases filesystem signatures from a device.",
         suggestions=(
-            PatternSuggestion(command="wipefs -n /dev/{dev}", description="Preview what signatures would be erased"),
-            PatternSuggestion(command="blkid /dev/{dev}", description="Show current filesystem signatures"),
+            PatternSuggestion(command="wipefs -n /dev/{dev}", description="Preview what signatures would be erased", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="blkid /dev/{dev}", description="Show current filesystem signatures", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     # ---- disk: mount/umount ----
@@ -92,8 +92,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Mount --bind to / may cause system issues.",
         suggestions=(
-            PatternSuggestion(command="mount --bind /source /specific/target", description="Bind mount to a specific directory"),
-            PatternSuggestion(command="ln -s /source /target", description="Use symlink as a non-destructive alternative"),
+            PatternSuggestion(command="mount --bind /source /specific/target", description="Bind mount to a specific directory", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="ln -s /source /target", description="Use symlink as a non-destructive alternative", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -103,8 +103,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Force unmount can cause data loss.",
         suggestions=(
-            PatternSuggestion(command="lsof {mnt}", description="Find processes using the mount"),
-            PatternSuggestion(command="fuser -v {mnt}", description="Find processes using the mount point"),
+            PatternSuggestion(command="lsof {mnt}", description="Find processes using the mount", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="fuser -v {mnt}", description="Find processes using the mount point", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -114,8 +114,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="losetup on /dev/loop changes device mapping.",
         suggestions=(
-            PatternSuggestion(command="losetup -a", description="List all current loop devices"),
-            PatternSuggestion(command="losetup -f --show {file}", description="Let system choose a free loop device"),
+            PatternSuggestion(command="losetup -a", description="List all current loop devices", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="losetup -f --show {file}", description="Let system choose a free loop device", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     # ---- disk: mdadm RAID ----
@@ -126,8 +126,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Stops a RAID array. Data may become inaccessible.",
         suggestions=(
-            PatternSuggestion(command="mdadm --detail /dev/md{0}", description="Check array status before stopping"),
-            PatternSuggestion(command="cat /proc/mdstat", description="Check RAID status"),
+            PatternSuggestion(command="mdadm --detail /dev/md{0}", description="Check array status before stopping", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="cat /proc/mdstat", description="Check RAID status", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -137,8 +137,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Removes device from RAID. Data loss if no redundancy.",
         suggestions=(
-            PatternSuggestion(command="mdadm --detail /dev/md{0}", description="Check array health first"),
-            PatternSuggestion(command="smartctl -a /dev/{sdc}", description="Check device SMART status before removal"),
+            PatternSuggestion(command="mdadm --detail /dev/md{0}", description="Check array health first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="smartctl -a /dev/{sdc}", description="Check device SMART status before removal", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -148,8 +148,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Marks RAID device as failed.",
         suggestions=(
-            PatternSuggestion(command="mdadm --detail /dev/md{0}", description="Check array health first"),
-            PatternSuggestion(command="smartctl -a /dev/{sdc}", description="Check device SMART status first"),
+            PatternSuggestion(command="mdadm --detail /dev/md{0}", description="Check array health first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="smartctl -a /dev/{sdc}", description="Check device SMART status first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -159,8 +159,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Erases RAID superblock. Array cannot be reassembled.",
         suggestions=(
-            PatternSuggestion(command="mdadm --examine /dev/{sdc}", description="Inspect superblock before erasing"),
-            PatternSuggestion(command="mdadm --examine --brief /dev/{sdc}", description="Dump superblock metadata"),
+            PatternSuggestion(command="mdadm --examine /dev/{sdc}", description="Inspect superblock before erasing", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="mdadm --examine --brief /dev/{sdc}", description="Dump superblock metadata", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -170,8 +170,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Creates new RAID, erasing existing data on members.",
         suggestions=(
-            PatternSuggestion(command="mdadm --detail --scan", description="Save existing array config first"),
-            PatternSuggestion(command="wipefs -n /dev/{sdc}", description="Check if disks have existing filesystems"),
+            PatternSuggestion(command="mdadm --detail --scan", description="Save existing array config first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="wipefs -n /dev/{sdc}", description="Check if disks have existing filesystems", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -181,8 +181,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Grows/reshapes RAID. Backup first.",
         suggestions=(
-            PatternSuggestion(command="mdadm --detail /dev/md{0}", description="Check current array layout first"),
-            PatternSuggestion(command='echo check > /sys/block/md{0}/md/sync_action', description="Verify array health before growing"),
+            PatternSuggestion(command="mdadm --detail /dev/md{0}", description="Check current array layout first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command='echo check > /sys/block/md{0}/md/sync_action', description="Verify array health before growing", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     # ---- disk: btrfs ----
@@ -193,8 +193,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Deletes a btrfs subvolume permanently.",
         suggestions=(
-            PatternSuggestion(command="btrfs subvolume list {path}", description="List subvolumes first"),
-            PatternSuggestion(command="btrfs subvolume show {path}", description="Show subvolume details"),
+            PatternSuggestion(command="btrfs subvolume list {path}", description="List subvolumes first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="btrfs subvolume show {path}", description="Show subvolume details", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -204,8 +204,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Removes device from btrfs filesystem.",
         suggestions=(
-            PatternSuggestion(command="btrfs device usage {mnt}", description="Check device allocation first"),
-            PatternSuggestion(command="btrfs filesystem usage {mnt}", description="Check space usage before removal"),
+            PatternSuggestion(command="btrfs device usage {mnt}", description="Check device allocation first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="btrfs filesystem usage {mnt}", description="Check space usage before removal", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -215,8 +215,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Adds device to btrfs filesystem. Verify target.",
         suggestions=(
-            PatternSuggestion(command="btrfs filesystem show {mnt}", description="Check current device configuration"),
-            PatternSuggestion(command="lsblk", description="Verify new device is correct"),
+            PatternSuggestion(command="btrfs filesystem show {mnt}", description="Check current device configuration", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="lsblk", description="Verify new device is correct", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -226,8 +226,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Starts btrfs balance operation.",
         suggestions=(
-            PatternSuggestion(command="btrfs balance status {mnt}", description="Check if a balance is already running"),
-            PatternSuggestion(command="btrfs balance start -dusage=5 {mnt}", description="Start with data usage filter for safety"),
+            PatternSuggestion(command="btrfs balance status {mnt}", description="Check if a balance is already running", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="btrfs balance start -dusage=5 {mnt}", description="Start with data usage filter for safety", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -237,8 +237,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="btrfs check --repair modifies filesystem. Backup first!",
         suggestions=(
-            PatternSuggestion(command="btrfs check --readonly /dev/{dev}", description="Run read-only check first"),
-            PatternSuggestion(command="btrfs device stats {mnt}", description="Check device errors first"),
+            PatternSuggestion(command="btrfs check --readonly /dev/{dev}", description="Run read-only check first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="btrfs device stats {mnt}", description="Check device errors first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -248,8 +248,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="btrfs rescue operations modify metadata.",
         suggestions=(
-            PatternSuggestion(command="btrfs rescue super-recover -y /dev/{dev}", description="Attempt superblock recovery only"),
-            PatternSuggestion(command="btrfs restore -l /dev/{dev}", description="List files without attempting recovery"),
+            PatternSuggestion(command="btrfs rescue super-recover -y /dev/{dev}", description="Attempt superblock recovery only", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="btrfs restore -l /dev/{dev}", description="List files without attempting recovery", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -259,8 +259,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Resizes btrfs filesystem. Can cause data loss if shrinking.",
         suggestions=(
-            PatternSuggestion(command="btrfs filesystem usage {mnt}", description="Check space usage before resizing"),
-            PatternSuggestion(command="btrfs filesystem show {mnt}", description="Check device sizes before resizing"),
+            PatternSuggestion(command="btrfs filesystem usage {mnt}", description="Check space usage before resizing", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="btrfs filesystem show {mnt}", description="Check device sizes before resizing", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     # ---- disk: dmsetup ----
@@ -271,8 +271,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Removes a device-mapper device.",
         suggestions=(
-            PatternSuggestion(command="dmsetup info {dev}", description="Check device info first"),
-            PatternSuggestion(command="dmsetup table {dev}", description="Show current mapping table"),
+            PatternSuggestion(command="dmsetup info {dev}", description="Check device info first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="dmsetup table {dev}", description="Show current mapping table", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -282,8 +282,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Removes ALL device-mapper devices. Extremely dangerous!",
         suggestions=(
-            PatternSuggestion(command="dmsetup info", description="List ALL device-mapper devices first"),
-            PatternSuggestion(command="dmsetup table", description="Show all mappings before bulk removal"),
+            PatternSuggestion(command="dmsetup info", description="List ALL device-mapper devices first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="dmsetup table", description="Show all mappings before bulk removal", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -293,8 +293,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Wipes device-mapper table. All I/O will fail.",
         suggestions=(
-            PatternSuggestion(command="dmsetup table {dev}", description="Save current table first"),
-            PatternSuggestion(command="dmsetup info {dev}", description="Check device status before wiping"),
+            PatternSuggestion(command="dmsetup table {dev}", description="Save current table first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="dmsetup info {dev}", description="Check device status before wiping", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -304,8 +304,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Clears device-mapper mapping table.",
         suggestions=(
-            PatternSuggestion(command="dmsetup table {dev}", description="Backup current mapping first"),
-            PatternSuggestion(command="dmsetup info {dev}", description="Check device status before clearing"),
+            PatternSuggestion(command="dmsetup table {dev}", description="Backup current mapping first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="dmsetup info {dev}", description="Check device status before clearing", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -315,8 +315,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Loads new device-mapper table. Verify correctness.",
         suggestions=(
-            PatternSuggestion(command="dmsetup table {dev}", description="Backup current table first"),
-            PatternSuggestion(command="dmsetup info {dev}", description="Check device info before changing"),
+            PatternSuggestion(command="dmsetup table {dev}", description="Backup current table first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="dmsetup info {dev}", description="Check device info before changing", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -326,8 +326,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Creates a device-mapper device. Verify parameters.",
         suggestions=(
-            PatternSuggestion(command="dmsetup info", description="List existing devices first"),
-            PatternSuggestion(command="losetup -a", description="Check loop devices if used by DM"),
+            PatternSuggestion(command="dmsetup info", description="List existing devices first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="losetup -a", description="Check loop devices if used by DM", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     # ---- disk: nbd-client ----
@@ -338,8 +338,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Disconnects NBD device. Data loss if not unmounted.",
         suggestions=(
-            PatternSuggestion(command="lsblk /dev/nbd{0}", description="Check if NBD device is mounted"),
-            PatternSuggestion(command="mount | grep nbd", description="Check active mounts on NBD device"),
+            PatternSuggestion(command="lsblk /dev/nbd{0}", description="Check if NBD device is mounted", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="mount | grep nbd", description="Check active mounts on NBD device", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -349,8 +349,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Connects NBD device. Verify server and device target.",
         suggestions=(
-            PatternSuggestion(command="nbd-client -l {server}", description="List exports available on server"),
-            PatternSuggestion(command="lsblk", description="Check local block devices before connecting"),
+            PatternSuggestion(command="nbd-client -l {server}", description="List exports available on server", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="lsblk", description="Check local block devices before connecting", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     # ---- disk: LVM ----
@@ -361,8 +361,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Removes LVM PV. Data becomes inaccessible.",
         suggestions=(
-            PatternSuggestion(command="pvs", description="List all PVs before removal"),
-            PatternSuggestion(command="pvdisplay /dev/{sdc}", description="Check PV details before removing"),
+            PatternSuggestion(command="pvs", description="List all PVs before removal", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="pvdisplay /dev/{sdc}", description="Check PV details before removing", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -372,8 +372,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Removes LVM VG and all logical volumes.",
         suggestions=(
-            PatternSuggestion(command="vgs", description="List all VGs before removal"),
-            PatternSuggestion(command="lvdisplay {vg}", description="Check LVs in VG before removal"),
+            PatternSuggestion(command="vgs", description="List all VGs before removal", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="lvdisplay {vg}", description="Check LVs in VG before removal", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -383,8 +383,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Deletes LVM LV and ALL data on it.",
         suggestions=(
-            PatternSuggestion(command="lvs", description="List all LVs before removal"),
-            PatternSuggestion(command="lvdisplay {vg}/{lv}", description="Check LV details before removing"),
+            PatternSuggestion(command="lvs", description="List all LVs before removal", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="lvdisplay {vg}/{lv}", description="Check LV details before removing", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -394,8 +394,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Reduces VG by removing a PV.",
         suggestions=(
-            PatternSuggestion(command="vgdisplay {vg}", description="Check VG details first"),
-            PatternSuggestion(command="pvs -o+vg_name", description="Verify PV belongs to correct VG"),
+            PatternSuggestion(command="vgdisplay {vg}", description="Check VG details first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="pvs -o+vg_name", description="Verify PV belongs to correct VG", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -405,8 +405,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Shrinks LV. Data loss if FS not resized first!",
         suggestions=(
-            PatternSuggestion(command="lvdisplay {vg}/{lv}", description="Check current LV size"),
-            PatternSuggestion(command="df -h /dev/{vg}/{lv}", description="Check FS usage before shrinking"),
+            PatternSuggestion(command="lvdisplay {vg}/{lv}", description="Check current LV size", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="df -h /dev/{vg}/{lv}", description="Check FS usage before shrinking", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -416,8 +416,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Shrinks LV via negative size. Resize FS first!",
         suggestions=(
-            PatternSuggestion(command="lvdisplay {vg}/{lv}", description="Check current LV size"),
-            PatternSuggestion(command="df -h /dev/{vg}/{lv}", description="Verify FS usage before shrinking"),
+            PatternSuggestion(command="lvdisplay {vg}/{lv}", description="Check current LV size", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="df -h /dev/{vg}/{lv}", description="Verify FS usage before shrinking", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -427,8 +427,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Moves data between physical volumes. Interruption causes loss.",
         suggestions=(
-            PatternSuggestion(command="pvs", description="Check PV allocation first"),
-            PatternSuggestion(command="pvdisplay /dev/{sdc}", description="Check source PV details"),
+            PatternSuggestion(command="pvs", description="Check PV allocation first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="pvdisplay /dev/{sdc}", description="Check source PV details", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -438,8 +438,8 @@ SYSTEM_DISK_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Merges LV snapshot, discarding changes since snapshot.",
         suggestions=(
-            PatternSuggestion(command="lvdisplay {vg}/{lv}", description="Check snapshot and origin details"),
-            PatternSuggestion(command="lvs -a", description="List all LVs including snapshots"),
+            PatternSuggestion(command="lvdisplay {vg}/{lv}", description="Check snapshot and origin details", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="lvs -a", description="List all LVs including snapshots", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 )
@@ -453,8 +453,8 @@ SYSTEM_PERMISSIONS_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="chmod 777 grants read/write/execute to everyone.",
         suggestions=(
-            PatternSuggestion(command="chmod 755 {dir}", description="More restrictive permissions for directories"),
-            PatternSuggestion(command='find {dir} -type f -exec chmod 644 {} \\;', description="Set files to 644, directories to 755"),
+            PatternSuggestion(command="chmod 755 {dir}", description="More restrictive permissions for directories", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command='find {dir} -type f -exec chmod 644 {} \\;', description="Set files to 644, directories to 755", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -464,8 +464,8 @@ SYSTEM_PERMISSIONS_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Recursive chmod on system dirs can break the system.",
         suggestions=(
-            PatternSuggestion(command="chmod -R 755 {specific_dir}", description="Use a specific directory, not root"),
-            PatternSuggestion(command='find {dir} -type f -exec chmod 644 {} \\;', description="Set files and dirs separately"),
+            PatternSuggestion(command="chmod -R 755 {specific_dir}", description="Use a specific directory, not root", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command='find {dir} -type f -exec chmod 644 {} \\;', description="Set files and dirs separately", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -475,8 +475,8 @@ SYSTEM_PERMISSIONS_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Recursive chown on system dirs can break services.",
         suggestions=(
-            PatternSuggestion(command="chown -R {user}:{group} {specific_dir}", description="Use a specific directory, not root"),
-            PatternSuggestion(command='find {dir} ! -user {user} -exec chown {user}:{group} {} \\;', description="Selective ownership change"),
+            PatternSuggestion(command="chown -R {user}:{group} {specific_dir}", description="Use a specific directory, not root", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command='find {dir} ! -user {user} -exec chown {user}:{group} {} \\;', description="Selective ownership change", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -486,8 +486,8 @@ SYSTEM_PERMISSIONS_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="setuid allows running with owner privileges.",
         suggestions=(
-            PatternSuggestion(command="chmod u-s {file}", description="Remove setuid bit for safety"),
-            PatternSuggestion(command="capsh --print", description="Check capabilities as an alternative"),
+            PatternSuggestion(command="chmod u-s {file}", description="Remove setuid bit for safety", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="capsh --print", description="Check capabilities as an alternative", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -497,8 +497,8 @@ SYSTEM_PERMISSIONS_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="setgid affects group privileges.",
         suggestions=(
-            PatternSuggestion(command="chmod g-s {file}", description="Remove setgid bit for safety"),
-            PatternSuggestion(command="getfacl {file}", description="Check ACLs as an alternative"),
+            PatternSuggestion(command="chmod g-s {file}", description="Remove setgid bit for safety", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="getfacl {file}", description="Check ACLs as an alternative", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -508,8 +508,8 @@ SYSTEM_PERMISSIONS_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="chown to root makes files inaccessible to normal users.",
         suggestions=(
-            PatternSuggestion(command="chown {user}:{group} {file}", description="Use a specific non-root user"),
-            PatternSuggestion(command="sudo -u {user} {command}", description="Run as a specific user instead of chown"),
+            PatternSuggestion(command="chown {user}:{group} {file}", description="Use a specific non-root user", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="sudo -u {user} {command}", description="Run as a specific user instead of chown", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -519,8 +519,8 @@ SYSTEM_PERMISSIONS_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Recursive setfacl on system dirs breaks security boundaries.",
         suggestions=(
-            PatternSuggestion(command="setfacl -R -m u:{user}:rwx {specific_dir}", description="Use a specific directory, not root"),
-            PatternSuggestion(command="getfacl -R /{dir} | head -100", description="Preview current ACLs first"),
+            PatternSuggestion(command="setfacl -R -m u:{user}:rwx {specific_dir}", description="Use a specific directory, not root", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="getfacl -R /{dir} | head -100", description="Preview current ACLs first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 )
@@ -534,8 +534,8 @@ SYSTEM_SERVICES_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Stop critical service: ssh, network, firewall, container runtime.",
         suggestions=(
-            PatternSuggestion(command="systemctl status {service}", description="Check service status first"),
-            PatternSuggestion(command="systemctl restart {service}", description="Restart instead of stop"),
+            PatternSuggestion(command="systemctl status {service}", description="Check service status first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="systemctl restart {service}", description="Restart instead of stop", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -545,8 +545,8 @@ SYSTEM_SERVICES_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Stops, disables, or masks a systemd service.",
         suggestions=(
-            PatternSuggestion(command="systemctl status {service}", description="Check service status first"),
-            PatternSuggestion(command="systemctl restart {service}", description="Restart instead of stopping"),
+            PatternSuggestion(command="systemctl status {service}", description="Check service status first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="systemctl restart {service}", description="Restart instead of stopping", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -556,8 +556,8 @@ SYSTEM_SERVICES_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Stops a critical service via SysV init.",
         suggestions=(
-            PatternSuggestion(command="service {service} status", description="Check service status first"),
-            PatternSuggestion(command="service {service} restart", description="Restart instead of stopping"),
+            PatternSuggestion(command="service {service} status", description="Check service status first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="service {service} restart", description="Restart instead of stopping", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -567,8 +567,8 @@ SYSTEM_SERVICES_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Isolates to a different systemd target.",
         suggestions=(
-            PatternSuggestion(command="systemctl list-units --type=target", description="List available targets"),
-            PatternSuggestion(command="systemctl get-default", description="Check current default target"),
+            PatternSuggestion(command="systemctl list-units --type=target", description="List available targets", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="systemctl get-default", description="Check current default target", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -578,8 +578,8 @@ SYSTEM_SERVICES_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="System power state change: poweroff, reboot, halt, suspend.",
         suggestions=(
-            PatternSuggestion(command='shutdown -r +5 "Scheduled restart"', description="Scheduled reboot with delay"),
-            PatternSuggestion(command='wall "System will power off" && sleep 60 && shutdown -h now', description="Warn users before shutdown"),
+            PatternSuggestion(command='shutdown -r +5 "Scheduled restart"', description="Scheduled reboot with delay", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command='wall "System will power off" && sleep 60 && shutdown -h now', description="Warn users before shutdown", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -589,8 +589,8 @@ SYSTEM_SERVICES_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Shuts down or restarts the system.",
         suggestions=(
-            PatternSuggestion(command='shutdown -r +5 "Scheduled restart"', description="Scheduled reboot with delay"),
-            PatternSuggestion(command="shutdown -c", description="Cancel a scheduled shutdown"),
+            PatternSuggestion(command='shutdown -r +5 "Scheduled restart"', description="Scheduled reboot with delay", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="shutdown -c", description="Cancel a scheduled shutdown", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -600,8 +600,8 @@ SYSTEM_SERVICES_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Restarts the system immediately.",
         suggestions=(
-            PatternSuggestion(command='shutdown -r +5 "Scheduled restart"', description="Schedule reboot with delay instead of immediate"),
-            PatternSuggestion(command='wall "System will restart" && sleep 60 && reboot', description="Warn users before restarting"),
+            PatternSuggestion(command='shutdown -r +5 "Scheduled restart"', description="Schedule reboot with delay instead of immediate", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command='wall "System will restart" && sleep 60 && reboot', description="Warn users before restarting", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -611,8 +611,8 @@ SYSTEM_SERVICES_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Init runlevel change to 0 (halt) or 6 (reboot).",
         suggestions=(
-            PatternSuggestion(command='shutdown -r +5 "Scheduled restart"', description="Use shutdown with delay instead of init 6"),
-            PatternSuggestion(command="systemctl isolate multi-user.target", description="Use systemctl isolate for non-destructive runlevel change"),
+            PatternSuggestion(command='shutdown -r +5 "Scheduled restart"', description="Use shutdown with delay instead of init 6", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="systemctl isolate multi-user.target", description="Use systemctl isolate for non-destructive runlevel change", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
 )

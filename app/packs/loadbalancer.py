@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.command_policy import DestructivePattern, PatternSuggestion, Severity
+from app.command_policy import DestructivePattern, PatternSuggestion, Severity, SuggestionKind
 from app.packs import Pack
 
 LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
@@ -12,8 +12,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Sending the stop signal terminates nginx immediately. All in-flight requests are dropped.",
         suggestions=(
-            PatternSuggestion(command="nginx -s quit", description="Graceful shutdown instead of immediate stop"),
-            PatternSuggestion(command="systemctl status nginx", description="Check status first"),
+            PatternSuggestion(command="nginx -s quit", description="Graceful shutdown instead of immediate stop", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="systemctl status nginx", description="Check status first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -23,8 +23,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="The quit signal stops accepting new connections. No new traffic is routed.",
         suggestions=(
-            PatternSuggestion(command="systemctl status nginx", description="Check status first"),
-            PatternSuggestion(command="nginx -t", description="Test configuration before restart"),
+            PatternSuggestion(command="systemctl status nginx", description="Check status first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="nginx -t", description="Test configuration before restart", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -34,8 +34,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Stopping nginx via systemctl shuts down all worker processes.",
         suggestions=(
-            PatternSuggestion(command="nginx -s reload", description="Reload configuration without stopping"),
-            PatternSuggestion(command="systemctl restart nginx", description="Restart instead of stop"),
+            PatternSuggestion(command="nginx -s reload", description="Reload configuration without stopping", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="systemctl restart nginx", description="Restart instead of stop", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -45,8 +45,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Stopping nginx via the service command terminates all worker processes.",
         suggestions=(
-            PatternSuggestion(command="nginx -s reload", description="Reload configuration without stopping"),
-            PatternSuggestion(command="service nginx restart", description="Restart instead of stop"),
+            PatternSuggestion(command="nginx -s reload", description="Reload configuration without stopping", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="service nginx restart", description="Restart instead of stop", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -56,8 +56,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Deleting nginx config removes site definitions, upstream blocks, and SSL references.",
         suggestions=(
-            PatternSuggestion(command="cp /etc/nginx /tmp/nginx.backup", description="Backup config before deleting"),
-            PatternSuggestion(command="ls -la /etc/nginx/", description="List config files before deletion"),
+            PatternSuggestion(command="cp /etc/nginx /tmp/nginx.backup", description="Backup config before deleting", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="ls -la /etc/nginx/", description="List config files before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     # haproxy
@@ -68,8 +68,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Soft-stop gracefully finishes current connections before shutting down.",
         suggestions=(
-            PatternSuggestion(command="systemctl status haproxy", description="Check status first"),
-            PatternSuggestion(command="haproxy -c -f {cfg}", description="Validate config before restart"),
+            PatternSuggestion(command="systemctl status haproxy", description="Check status first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="haproxy -c -f {cfg}", description="Validate config before restart", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -79,8 +79,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Hard-stop kills HAProxy immediately. Active connections are dropped.",
         suggestions=(
-            PatternSuggestion(command="haproxy -sf {pid}", description="Use soft-stop instead of hard stop"),
-            PatternSuggestion(command="systemctl restart haproxy", description="Restart instead of hard stop"),
+            PatternSuggestion(command="haproxy -sf {pid}", description="Use soft-stop instead of hard stop", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="systemctl restart haproxy", description="Restart instead of hard stop", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -90,8 +90,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Stopping HAProxy via systemctl terminates all proxy processes.",
         suggestions=(
-            PatternSuggestion(command="systemctl reload haproxy", description="Reload config without stopping"),
-            PatternSuggestion(command="haproxy -c -f {cfg}", description="Validate config before restart"),
+            PatternSuggestion(command="systemctl reload haproxy", description="Reload config without stopping", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="haproxy -c -f {cfg}", description="Validate config before restart", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -101,8 +101,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Stopping HAProxy via service command terminates all proxy processes.",
         suggestions=(
-            PatternSuggestion(command="service haproxy restart", description="Restart instead of stop"),
-            PatternSuggestion(command="service haproxy status", description="Check status first"),
+            PatternSuggestion(command="service haproxy restart", description="Restart instead of stop", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="service haproxy status", description="Check status first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -112,8 +112,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Disabling a server via socat removes it from the load balancer pool immediately.",
         suggestions=(
-            PatternSuggestion(command="socat /var/run/haproxy.sock 'show stat'", description="Check server status first"),
-            PatternSuggestion(command="socat /var/run/haproxy.sock 'set server {backend}/{server} weight 0'", description="Drain connections before disabling"),
+            PatternSuggestion(command="socat /var/run/haproxy.sock 'show stat'", description="Check server status first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="socat /var/run/haproxy.sock 'set server {backend}/{server} weight 0'", description="Drain connections before disabling", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -123,8 +123,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Shutting down sessions terminates all active connections to the backend.",
         suggestions=(
-            PatternSuggestion(command="socat /var/run/haproxy.sock 'show sess'", description="List active sessions first"),
-            PatternSuggestion(command="socat /var/run/haproxy.sock 'set server {backend}/{server} weight 0'", description="Drain traffic gradually"),
+            PatternSuggestion(command="socat /var/run/haproxy.sock 'show sess'", description="List active sessions first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="socat /var/run/haproxy.sock 'set server {backend}/{server} weight 0'", description="Drain traffic gradually", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -134,8 +134,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Disabling a frontend immediately stops accepting new connections.",
         suggestions=(
-            PatternSuggestion(command="socat /var/run/haproxy.sock 'show stat'", description="Check frontend stats first"),
-            PatternSuggestion(command="socat /var/run/haproxy.sock 'set frontend {frtnd} maxconn 0'", description="Limit connections instead of disabling"),
+            PatternSuggestion(command="socat /var/run/haproxy.sock 'show stat'", description="Check frontend stats first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="socat /var/run/haproxy.sock 'set frontend {frtnd} maxconn 0'", description="Limit connections instead of disabling", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -145,8 +145,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Shutting down a frontend terminates the frontend and all its connections.",
         suggestions=(
-            PatternSuggestion(command="socat /var/run/haproxy.sock 'show frontend {frtnd}'", description="Check frontend state first"),
-            PatternSuggestion(command="socat /var/run/haproxy.sock 'disable frontend {frtnd}'", description="Disable instead of full shutdown"),
+            PatternSuggestion(command="socat /var/run/haproxy.sock 'show frontend {frtnd}'", description="Check frontend state first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="socat /var/run/haproxy.sock 'disable frontend {frtnd}'", description="Disable instead of full shutdown", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -156,8 +156,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Deleting HAProxy config removes backend definitions and frontend configurations.",
         suggestions=(
-            PatternSuggestion(command="cp -r /etc/haproxy /tmp/haproxy.backup", description="Backup config first"),
-            PatternSuggestion(command="ls -la /etc/haproxy/", description="List config files before deleting"),
+            PatternSuggestion(command="cp -r /etc/haproxy /tmp/haproxy.backup", description="Backup config first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="ls -la /etc/haproxy/", description="List config files before deleting", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     # traefik
@@ -168,8 +168,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Stopping or killing the Traefik container immediately halts all traffic routing.",
         suggestions=(
-            PatternSuggestion(command="docker ps -f name=traefik", description="Check container status first"),
-            PatternSuggestion(command="docker restart {container}", description="Restart instead of stop"),
+            PatternSuggestion(command="docker ps -f name=traefik", description="Check container status first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="docker restart {container}", description="Restart instead of stop", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -179,8 +179,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Removing the Traefik container deletes it entirely, including runtime state.",
         suggestions=(
-            PatternSuggestion(command="docker stop {container}", description="Stop without removing"),
-            PatternSuggestion(command="docker commit {container} traefik-backup", description="Backup container state first"),
+            PatternSuggestion(command="docker stop {container}", description="Stop without removing", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="docker commit {container} traefik-backup", description="Backup container state first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -190,8 +190,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="docker-compose down stops and removes Traefik containers and networks.",
         suggestions=(
-            PatternSuggestion(command="docker-compose stop traefik", description="Stop service without removing"),
-            PatternSuggestion(command="docker-compose ps", description="Check service status first"),
+            PatternSuggestion(command="docker-compose stop traefik", description="Stop service without removing", kind=SuggestionKind.SAFER_ALTERNATIVE),
+            PatternSuggestion(command="docker-compose ps", description="Check service status first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -201,8 +201,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Deleting Traefik pods or deployments removes the load balancer from the cluster.",
         suggestions=(
-            PatternSuggestion(command="kubectl get pods -l app.kubernetes.io/name=traefik", description="List traefik pods first"),
-            PatternSuggestion(command="kubectl rollout restart deployment/traefik", description="Restart instead of delete"),
+            PatternSuggestion(command="kubectl get pods -l app.kubernetes.io/name=traefik", description="List traefik pods first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="kubectl rollout restart deployment/traefik", description="Restart instead of delete", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -212,8 +212,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Deleting IngressRoute CRDs removes routing rules, making services unreachable.",
         suggestions=(
-            PatternSuggestion(command="kubectl get ingressroute -A", description="List all ingress routes first"),
-            PatternSuggestion(command="kubectl describe ingressroute {name}", description="Describe route before deleting"),
+            PatternSuggestion(command="kubectl get ingressroute -A", description="List all ingress routes first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="kubectl describe ingressroute {name}", description="Describe route before deleting", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -223,8 +223,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Deleting Traefik config removes entrypoints, middleware, and provider settings.",
         suggestions=(
-            PatternSuggestion(command="cp {config} {config}.backup", description="Backup config file first"),
-            PatternSuggestion(command="ls -la /etc/traefik/", description="List config files before deleting"),
+            PatternSuggestion(command="cp {config} {config}.backup", description="Backup config file first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="ls -la /etc/traefik/", description="List config files before deleting", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -234,8 +234,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Sending DELETE to Traefik API removes routers, services, or middleware.",
         suggestions=(
-            PatternSuggestion(command="curl -X GET {traefik-url}/api/http/routers", description="List routers before deleting"),
-            PatternSuggestion(command="curl -X PUT {traefik-url}/api/http/routers/{name}", description="Update instead of delete"),
+            PatternSuggestion(command="curl -X GET {traefik-url}/api/http/routers", description="List routers before deleting", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="curl -X PUT {traefik-url}/api/http/routers/{name}", description="Update instead of delete", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -245,8 +245,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Stopping Traefik via systemctl shuts down the load balancer process.",
         suggestions=(
-            PatternSuggestion(command="systemctl status traefik", description="Check status first"),
-            PatternSuggestion(command="systemctl reload traefik", description="Reload instead of stop"),
+            PatternSuggestion(command="systemctl status traefik", description="Check status first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="systemctl reload traefik", description="Reload instead of stop", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -256,8 +256,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Stopping Traefik via service command terminates the load balancer.",
         suggestions=(
-            PatternSuggestion(command="service traefik status", description="Check status first"),
-            PatternSuggestion(command="service traefik restart", description="Restart instead of stop"),
+            PatternSuggestion(command="service traefik status", description="Check status first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="service traefik restart", description="Restart instead of stop", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     # AWS ELB
@@ -268,8 +268,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Deletes an ALB or NLB. All traffic to that load balancer stops immediately.",
         suggestions=(
-            PatternSuggestion(command="aws elbv2 describe-load-balancers", description="List load balancers first"),
-            PatternSuggestion(command="aws elbv2 describe-listeners --load-balancer-arn {arn}", description="Check listeners before deletion"),
+            PatternSuggestion(command="aws elbv2 describe-load-balancers", description="List load balancers first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws elbv2 describe-listeners --load-balancer-arn {arn}", description="Check listeners before deletion", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -279,8 +279,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Deletes an ELBv2 target group. Instances in the group become unreachable.",
         suggestions=(
-            PatternSuggestion(command="aws elbv2 describe-target-groups", description="List target groups first"),
-            PatternSuggestion(command="aws elbv2 describe-target-health --target-group-arn {arn}", description="Check target health first"),
+            PatternSuggestion(command="aws elbv2 describe-target-groups", description="List target groups first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws elbv2 describe-target-health --target-group-arn {arn}", description="Check target health first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -290,8 +290,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Deregisters targets from an ALB/NLB target group. Live traffic is disrupted.",
         suggestions=(
-            PatternSuggestion(command="aws elbv2 describe-target-health --target-group-arn {arn}", description="Check target health first"),
-            PatternSuggestion(command="aws elbv2 register-targets --target-group-arn {arn}", description="Register alternative targets first"),
+            PatternSuggestion(command="aws elbv2 describe-target-health --target-group-arn {arn}", description="Check target health first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws elbv2 register-targets --target-group-arn {arn}", description="Register alternative targets first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -301,8 +301,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Deletes a listener. All rules in the listener are removed.",
         suggestions=(
-            PatternSuggestion(command="aws elbv2 describe-rules --listener-arn {arn}", description="List rules first"),
-            PatternSuggestion(command="aws elbv2 modify-listener --listener-arn {arn}", description="Modify instead of delete"),
+            PatternSuggestion(command="aws elbv2 describe-rules --listener-arn {arn}", description="List rules first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws elbv2 modify-listener --listener-arn {arn}", description="Modify instead of delete", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -312,8 +312,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Deletes a listener rule. Associated routing logic is removed.",
         suggestions=(
-            PatternSuggestion(command="aws elbv2 describe-rules --listener-arn {arn}", description="List all rules first"),
-            PatternSuggestion(command="aws elbv2 modify-rule --rule-arn {arn}", description="Modify instead of delete"),
+            PatternSuggestion(command="aws elbv2 describe-rules --listener-arn {arn}", description="List all rules first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws elbv2 modify-rule --rule-arn {arn}", description="Modify instead of delete", kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     DestructivePattern(
@@ -323,8 +323,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Deletes a Classic ELB. All traffic stops immediately.",
         suggestions=(
-            PatternSuggestion(command="aws elb describe-load-balancers", description="List load balancers first"),
-            PatternSuggestion(command="aws elb describe-instance-health --load-balancer-name {name}", description="Check instance health first"),
+            PatternSuggestion(command="aws elb describe-load-balancers", description="List load balancers first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws elb describe-instance-health --load-balancer-name {name}", description="Check instance health first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -334,8 +334,8 @@ LOADBALANCER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Deregisters EC2 instances from a Classic ELB. Live traffic is disrupted.",
         suggestions=(
-            PatternSuggestion(command="aws elb describe-instance-health --load-balancer-name {name}", description="Check instance health first"),
-            PatternSuggestion(command="aws elb register-instances-with-load-balancer --load-balancer-name {name}", description="Register new instances first"),
+            PatternSuggestion(command="aws elb describe-instance-health --load-balancer-name {name}", description="Check instance health first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="aws elb register-instances-with-load-balancer --load-balancer-name {name}", description="Register new instances first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 )

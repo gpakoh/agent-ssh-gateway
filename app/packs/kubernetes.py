@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.command_policy import DestructivePattern, PatternSuggestion, Severity
+from app.command_policy import DestructivePattern, PatternSuggestion, Severity, SuggestionKind
 from app.packs import Pack
 
 KUBERNETES_PATTERNS: tuple[DestructivePattern, ...] = (
@@ -19,15 +19,15 @@ DestructivePattern(
             PatternSuggestion(
                 "kubectl delete ns {ns} --dry-run=client -o yaml",
                 "Preview what would be deleted without making changes",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl get all -n {ns}",
                 "See all resources in the namespace before deleting",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl delete ns {ns} --grace-period=60",
                 "Allow graceful shutdown with 60-second grace period",
-            ),
+            kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
 DestructivePattern(
@@ -42,15 +42,15 @@ DestructivePattern(
             PatternSuggestion(
                 "kubectl delete {resource} --all --dry-run=client",
                 "Preview what would be deleted without making changes",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl rollout restart deployment/{name}",
                 "Restart pods via deployment for graceful recreation",
-            ),
+            kind=SuggestionKind.SAFER_ALTERNATIVE),
             PatternSuggestion(
                 "kubectl delete {resource} {specific-name}",
                 "Delete a specific resource instead of all",
-            ),
+            kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
 DestructivePattern(
@@ -64,11 +64,11 @@ DestructivePattern(
             PatternSuggestion(
                 "kubectl delete {resource} -n {namespace}",
                 "Always specify a namespace explicitly",
-            ),
+            kind=SuggestionKind.SAFER_ALTERNATIVE),
             PatternSuggestion(
                 "kubectl get {resource} -A",
                 "Preview cluster-wide resources before making changes",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 DestructivePattern(
@@ -83,15 +83,15 @@ DestructivePattern(
             PatternSuggestion(
                 "kubectl get pods -o wide | grep {node}",
                 "Check what's running on the node before draining",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl get pdb -A",
                 "Check disruption budgets before eviction",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl cordon {node}",
                 "Cordon first: prevent new pods, then drain gradually",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 DestructivePattern(
@@ -105,11 +105,11 @@ DestructivePattern(
             PatternSuggestion(
                 "kubectl uncordon {node}",
                 "To reverse: uncordon the node",
-            ),
+            kind=SuggestionKind.SAFER_ALTERNATIVE),
             PatternSuggestion(
                 "kubectl describe node {node} | grep Taints",
                 "Check node status and taints",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 DestructivePattern(
@@ -123,15 +123,15 @@ DestructivePattern(
             PatternSuggestion(
                 "kubectl describe node {node} | grep Taints",
                 "Check current taints before modifying",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl taint nodes {node} key=value:NoSchedule",
                 "Consider NoSchedule first (only blocks new pods)",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl taint nodes {node} key=value:NoExecute-",
                 "Remove a NoExecute taint",
-            ),
+            kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
 DestructivePattern(
@@ -145,15 +145,15 @@ DestructivePattern(
             PatternSuggestion(
                 "kubectl delete {type} {name} --dry-run=client",
                 "Preview without making changes",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl get pods -l app={name}",
                 "Check affected pods before deleting",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl scale deployment {name} --replicas=0",
                 "Scale to zero first for controlled shutdown",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 DestructivePattern(
@@ -167,15 +167,15 @@ DestructivePattern(
             PatternSuggestion(
                 "kubectl describe pvc {name}",
                 "Check PVC status and usage before deleting",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl get pv $(kubectl get pvc {name} -o jsonpath='{.spec.volumeName}')",
                 "Check the reclaim policy of the backing PV",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl delete pvc {name} --dry-run=client",
                 "Preview deletion without making changes",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 DestructivePattern(
@@ -189,15 +189,15 @@ DestructivePattern(
             PatternSuggestion(
                 "kubectl get pvc -A | grep {pv-name}",
                 "Check what PVCs use this PV",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl get storageclass {class} -o yaml",
                 "Check storage class reclaim policy",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl delete pv {name} --dry-run=client",
                 "Preview without making changes",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 DestructivePattern(
@@ -211,11 +211,11 @@ DestructivePattern(
             PatternSuggestion(
                 "kubectl get deployment {name} -o jsonpath='{.spec.replicas}'",
                 "Check current replica count before scaling",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl scale deployment {name} --replicas={N}",
                 "Scale to a non-zero value to restore service",
-            ),
+            kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
 DestructivePattern(
@@ -230,11 +230,11 @@ DestructivePattern(
             PatternSuggestion(
                 "kubectl delete pod {name}",
                 "Use default 30-second grace period for graceful shutdown",
-            ),
+            kind=SuggestionKind.SAFER_ALTERNATIVE),
             PatternSuggestion(
                 "kubectl describe pod {name} | grep -A5 Status",
                 "Check why pod is stuck before force-deleting",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
     DestructivePattern(
@@ -248,11 +248,11 @@ DestructivePattern(
             PatternSuggestion(
                 "kubectl diff -f {file}",
                 "Preview what changes would be applied",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl apply --server-side -f {file}",
                 "Use server-side apply for safer updates",
-            ),
+            kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
     # kubectl delete -f - (stdin),
@@ -269,11 +269,11 @@ DestructivePattern(
             PatternSuggestion(
                 "kustomize build {dir} > /tmp/manifest.yaml",
                 "Save manifest to a file for review first",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl diff -f /tmp/manifest.yaml",
                 "Preview what will change before deleting",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 DestructivePattern(
@@ -289,15 +289,15 @@ DestructivePattern(
             PatternSuggestion(
                 "ls -la {dir}/*.yaml",
                 "List files in the directory before deleting",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl diff -f {dir}",
                 "Preview what would change",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl delete -f {specific-file.yaml}",
                 "Delete specific files instead of entire directory",
-            ),
+            kind=SuggestionKind.SAFER_ALTERNATIVE),
         ),
     ),
 DestructivePattern(
@@ -311,15 +311,15 @@ DestructivePattern(
             PatternSuggestion(
                 "helm uninstall {release} --dry-run",
                 "Preview what will be deleted",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "helm status {release}",
                 "Review current release state before deleting",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "helm get manifest {release}",
                 "See all resources managed by the release",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 DestructivePattern(
@@ -334,15 +334,15 @@ DestructivePattern(
             PatternSuggestion(
                 "helm rollback {release} {revision} --dry-run",
                 "Preview changes before rolling back",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "helm history {release}",
                 "Review available revisions before rolling back",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "helm diff rollback {release} {revision}",
                 "Compare changes before rolling back (requires diff plugin)",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 DestructivePattern(
@@ -356,15 +356,15 @@ DestructivePattern(
             PatternSuggestion(
                 "helm upgrade {release} {chart}",
                 "Remove --force to use rolling updates",
-            ),
+            kind=SuggestionKind.SAFER_ALTERNATIVE),
             PatternSuggestion(
                 "helm upgrade --dry-run --debug",
                 "Preview changes before upgrading",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "helm diff upgrade {release} {chart}",
                 "Compare before upgrading (requires diff plugin)",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 DestructivePattern(
@@ -378,11 +378,11 @@ DestructivePattern(
             PatternSuggestion(
                 "helm get values {release}",
                 "Review current values before upgrading",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "helm upgrade --reuse-values",
                 "Keep existing values",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 DestructivePattern(
@@ -396,15 +396,15 @@ DestructivePattern(
             PatternSuggestion(
                 "kustomize build {dir} > /tmp/manifest.yaml",
                 "Save and review manifests before deleting",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kustomize build {dir} | kubectl delete --dry-run=client -f -",
                 "Preview with dry-run first",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kustomize build {dir} | kubectl diff -f -",
                 "Compare with cluster state before deleting",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 DestructivePattern(
@@ -418,11 +418,11 @@ DestructivePattern(
             PatternSuggestion(
                 "kubectl kustomize {dir}",
                 "Review manifests first",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl delete --dry-run=client -k {dir}",
                 "Preview deletion with dry-run",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 DestructivePattern(
@@ -436,15 +436,15 @@ DestructivePattern(
             PatternSuggestion(
                 "kubectl delete -k {dir} --dry-run=client",
                 "Preview what will be deleted",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl kustomize {dir}",
                 "Review manifests before deleting",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
             PatternSuggestion(
                 "kubectl get -k {dir}",
                 "List resources that would be affected",
-            ),
+            kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
 )

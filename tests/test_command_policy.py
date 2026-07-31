@@ -1146,6 +1146,43 @@ class TestScanTool:
         f = ScanFinding(pattern_name="test", severity="low", reason="test", confidence=0.8)
         assert f.confidence == 0.8
 
+    def test_finding_suggestions_default_empty(self):
+        from app.command_policy import ScanFinding
+
+        f = ScanFinding(pattern_name="test", severity="low", reason="test")
+        assert f.suggestions == ()
+
+    def test_pattern_suggestion_kind_default(self):
+        from app.command_policy import SuggestionKind
+
+        assert SuggestionKind.PREVIEW_FIRST.value == "preview_first"
+        assert SuggestionKind.SAFER_ALTERNATIVE.value == "safer_alternative"
+        assert SuggestionKind.WORKFLOW_FIX.value == "workflow_fix"
+        assert SuggestionKind.DOCUMENTATION.value == "documentation"
+        assert SuggestionKind.ALLOW_SAFELY.value == "allow_safely"
+
+    def test_scan_command_exposes_all_suggestions_with_kind(self):
+        from app.command_policy import scan_command
+
+        report = scan_command("systemctl stop nginx")
+        findings = [f for f in report.findings if f.pattern_name == "systemctl-stop"]
+        assert findings
+        f = findings[0]
+        assert f.suggestion == "systemctl status {service}"
+        kinds = [s["kind"] for s in f.suggestions]
+        assert "preview_first" in kinds
+        assert "safer_alternative" in kinds
+        assert all({"command", "description", "kind"} <= set(s) for s in f.suggestions)
+
+    def test_blocked_decision_returns_all_suggestions(self):
+        from app.command_policy import evaluate_command_policy
+
+        d = evaluate_command_policy("rm -rf /", mode="enforce", profile="default")
+        assert not d.allowed
+        assert d.suggestion is not None
+        assert len(d.suggestions) >= 1
+        assert all(" — " in s for s in d.suggestions)
+
 
 # ---------------------------------------------------------------------------
 # Phase 3 — filesystem destructive pattern tests
