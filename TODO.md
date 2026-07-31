@@ -102,3 +102,16 @@ Safe-паттерны (allow list для docker ps/logs/build...) — опцио
 - Все паттерны с 2 suggestions (preview + alternative); list/view/status/verify не блокируются
 - Регистрация в registry.py, 16 паков / 380 паттернов
 - Тесты: +4 (pack_count 15→16, cross-section, smoke cicd, reads-not-blocked) — 3727 passed, ruff clean
+
+## 🔧 Аудит архитектуры (P19, по architecture-code-rules.md) — Jul 2026
+
+Критический аудит по правилам `/media/1TB/Python/architecture-code-rules.md`.
+Статусы: **исправить** / исключение / отложить.
+
+- **P19.1 — Batch-менеджеры: контракт-тесты + чистка (исправить)**: аудит показал «дубликат», но при разборе выяснилось: `BatchOperationsManager` (транзакционный файловый батч, routers/batch.py) и `BulkOperationsManager` (конкурентный исполнитель, routers/jobs.py + files.py) — разные обязанности (SRP), слияние ухудшило бы код. Реально убрано: мёртвый `self._semaphore` в `bulk_operations_v2.py` + добавлены контракт-тесты `tests/test_batch_managers.py` (11 тестов: execute_bulk, execute_batch_commands, read/edit_files_bulk, execute_batch read/edit/unknown/stop/commit), чтобы пути не разошлись. Асимметрия policy-check: v1 проверяет в `_execute_command`, v2 — только в роутере — оставлено, роутерная проверка покрыта test_command_policy_enforcement.py.
+- **P19.2 — Сервис-слой для god-объектов (исправить)**: `routers/files.py` (1277 строк), `routers/context.py` (700), `routers/jobs.py` (452), `admin_access.py` (262). Бизнес-логика в роутерах; `app/services/` почти пуст. Вынести ~100–200 строк на сервис.
+- **P19.3 — Чекер границ импортов (исправить)**: ARC-31 рекомендует лёгкий AST/import-чекер первым шагом. Скрипт, запрещающий `app/routers/*` → `app/packs/*` и обратно; прогнать в CI.
+- **P19.4 — Тест-инвариант авторизации (дыра)**: auth через middleware, но нет теста, что каждый роут с исключениями (login/health/register) отвечает 401/403. Добавить инвариант-тест.
+- **P19.5 — Разбить test_pack_system.py (отложить)**: монолит 84 теста после P18; разбить на `tests/packs/test_<pack>.py` без изменения ассертов.
+- **P19.6 — Плоская структура app/ (исключение)**: 60+ модулей без слоёв; полный переход на Clean Architecture — вне скоупа (legacy «MUST NOT worsen»); новый код класть в `app/services/`.
+- **P19.7 — Версии зависимостей (отложить)**: security-раннер (trivy/pip-audit) уже в CI; локально не пинать.
