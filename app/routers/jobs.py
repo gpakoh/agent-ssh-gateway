@@ -9,10 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import state as _state
-from app.access_control import AccessDeniedError, AccessPendingApprovalError
-from app.auth_middleware import AuthIdentity, get_client_ip, parse_cidrs, require_scope
-from app.command_policy import evaluate_command_policy, parse_key_profiles, profile_for_identity
-from app.config import settings
+from app.auth_middleware import AuthIdentity, require_scope
 from app.exceptions import JobNotFoundError, PermissionDeniedError
 from app.metrics import metrics
 from app.models import (
@@ -27,6 +24,11 @@ from app.models import (
 )
 from app.output_redaction import should_redact_command_output
 from app.security import rate_limit_mutation, redact_secrets
+from app.services.command_gate import (
+    evaluate_with_access_gate,
+    record_allowed,
+    resolve_effective_profile,
+)
 from app.state import _err
 
 router = APIRouter(tags=["jobs"])
@@ -48,85 +50,36 @@ async def jobs_run(
             status_code=404, detail=_err(404, f"Session {req.session_id} not found")
         )
 
-    # Access control gate
-    access_effective_profile = None
-    if settings.access_control_enabled and _state.access_control_store is not None:
-        source_ip = get_client_ip(request, parse_cidrs(settings.trusted_proxy_cidrs))
-        try:
-            access = _state.access_control_store.resolve_access_policy(
-                actor_fingerprint=_identity.fingerprint,
-                token_type=_identity.token_type,
-                source_ip=source_ip,
-                requested_profile=settings.command_policy_profile,
-                enforce_master=settings.access_control_enforce_master,
-            )
-            access_effective_profile = access.effective_profile
-        except AccessDeniedError:
-            raise HTTPException(status_code=403, detail=_err(403, "ACCESS_DENIED")) from None
-        except AccessPendingApprovalError:
-            pass
-
-    # Command Policy Evaluation — server-owned profile resolution
-    key_profiles = parse_key_profiles(settings.command_policy_key_profiles)
-    effective_profile = (
-        access_effective_profile
-        if access_effective_profile is not None
-        else profile_for_identity(
-            _identity.fingerprint[:12] if _identity else None,
-            key_profiles=key_profiles,
-            default_profile=settings.command_policy_profile,
-        )
-    )
-    decision = evaluate_command_policy(
+    # Access control + command policy gate (single implementation, see services)
+    gate = evaluate_with_access_gate(
+        request,
+        _identity,
         req.command,
-        mode=settings.command_policy_mode,
-        profile=effective_profile,
-    )
-    source_ip = request.client.host if request.client else "unknown"
-    _state.audit_logger.log_security_event(
-        "COMMAND_POLICY_DECISION",
-        f"session_id={req.session_id}; command_root={decision.command_root}; "
-        f"allowed={decision.allowed}; reason={decision.reason}; "
-        f"profile={decision.profile}; mode={decision.mode}",
-        source_ip,
+        route="POST /api/jobs/run",
     )
 
     # Structured audit event
     from app.audit import emit_command_policy_decision as _emit_jobs
+    source_ip = request.client.host if request.client else "unknown"
     _emit_jobs(
         event_logger=_state.event_audit_logger,
         command=req.command,
         session_id=req.session_id,
-        effective_profile=effective_profile,
-        decision_allowed=decision.allowed,
-        decision_reason=decision.reason,
-        command_root=decision.command_root,
+        effective_profile=gate.effective_profile,
+        decision_allowed=gate.allowed,
+        decision_reason=gate.reason,
+        command_root=gate.command_root,
         source_ip=source_ip,
         route="POST /api/jobs/run",
         actor_fingerprint=_identity.fingerprint[:12] if _identity else "",
         request_id=getattr(request.state, "request_id", ""),
     )
 
-    if not decision.allowed:
-        metrics.record_ssh_command(
-            status="denied",
-            profile=decision.profile,
-            command_root=decision.command_root,
-        )
-        raise HTTPException(
-            status_code=403,
-            detail=_err(403, f"Command denied by policy: {decision.reason}"),
-        )
-
+    record_allowed(profile=gate.effective_profile, command_root=gate.command_root)
     job_id = await _state.job_manager.create_job(
         session_id=req.session_id,
         command=req.command,
         owner_id=_identity.fingerprint,
-    )
-    metrics.record_ssh_command(
-        status="allowed",
-        profile=decision.profile,
-        command_root=decision.command_root,
     )
     return JobRunResponse(job_id=job_id)
 
@@ -194,59 +147,14 @@ async def bulk_execute(
     _identity: AuthIdentity = Depends(require_scope("jobs:run")),
 ):
     """Execute multiple commands concurrently."""
-    # Access control gate
-    access_effective_profile = None
-    if settings.access_control_enabled and _state.access_control_store is not None:
-        source_ip = get_client_ip(request, parse_cidrs(settings.trusted_proxy_cidrs))
-        try:
-            access = _state.access_control_store.resolve_access_policy(
-                actor_fingerprint=_identity.fingerprint,
-                token_type=_identity.token_type,
-                source_ip=source_ip,
-                requested_profile=settings.command_policy_profile,
-                enforce_master=settings.access_control_enforce_master,
-            )
-            access_effective_profile = access.effective_profile
-        except AccessDeniedError:
-            raise HTTPException(status_code=403, detail=_err(403, "ACCESS_DENIED")) from None
-        except AccessPendingApprovalError:
-            pass
-
-    # Command Policy Evaluation — check all commands before execution
-    source_ip = request.client.host if request.client else "unknown"
-    key_profiles = parse_key_profiles(settings.command_policy_key_profiles)
-    effective_profile = (
-        access_effective_profile
-        if access_effective_profile is not None
-        else profile_for_identity(
-            _identity.fingerprint[:12] if _identity else None,
-            key_profiles=key_profiles,
-            default_profile=settings.command_policy_profile,
-        )
-    )
+    # Access control + command policy gate for every command (single impl)
     for cmd in req.commands:
-        decision = evaluate_command_policy(
+        evaluate_with_access_gate(
+            request,
+            _identity,
             cmd,
-            mode=settings.command_policy_mode,
-            profile=effective_profile,
+            route="POST /api/bulk/execute",
         )
-        _state.audit_logger.log_security_event(
-            "COMMAND_POLICY_DECISION",
-            f"bulk_execute; command_root={decision.command_root}; "
-            f"allowed={decision.allowed}; reason={decision.reason}; "
-            f"profile={decision.profile}; mode={decision.mode}",
-            source_ip,
-        )
-        if not decision.allowed:
-            metrics.record_ssh_command(
-                status="denied",
-                profile=decision.profile,
-                command_root=decision.command_root,
-            )
-            raise HTTPException(
-                status_code=403,
-                detail=_err(403, f"Command denied by policy: {decision.reason}"),
-            )
 
     start_time = time.time()
     results = await _state.bulk_ops.execute_batch_commands(
@@ -256,11 +164,7 @@ async def bulk_execute(
         max_concurrency=10,
     )
     for _cmd in req.commands:
-        metrics.record_ssh_command(
-            status="allowed",
-            profile=effective_profile,
-            command_root=None,
-        )
+        record_allowed(profile=resolve_effective_profile(_identity))
 
     # Convert To Response Format
     response_results = []
