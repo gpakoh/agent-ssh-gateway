@@ -71,7 +71,7 @@ Safe-паттерны (allow list для docker ps/logs/build...) — опцио
 #### Идеи следующих итераций
 - Все DCG-домены портированы (dns, package_managers, secrets, backup, monitoring, storage, cicd) — P18 завершён ✅
 - Идея: **DCG monitoring SaaS-паки** — datadog (4), newrelic (6), pagerduty (7), splunk (4) → расширение monitoring.py (после P18.7 — уже в работе)
-- Идея: **MCP-портал в прод** — деплой `examples/mcp_server` как отдельный сервис (read/audit-first tools) — отдельная тема вне pack-системы
+- Идея: **MCP-портал в прод** — деплой `examples/mcp_server` как отдельный сервис (read/audit-first tools) — отдельная тема вне pack-системы (ВЫПОЛНЕНО: Dockerfile.mcp-server + compose-сервис mcp-server, streamable-http 8087, `13e8bc85`)
 
 #### Итерация 2 — Secrets ✅
 - Новый пак **secrets** (23 паттерна): Vault (secrets disable, kv destroy/metadata-delete/delete, delete, policy delete, auth disable, token/lease revoke), AWS (secretsmanager delete-resource-policy/remove-regions, ssm delete-parameter(s)), Doppler (secrets/projects/environments/configs delete), 1Password (op item/document/vault/user/group/connect-token delete)
