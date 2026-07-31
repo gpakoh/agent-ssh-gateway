@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.command_policy import DestructivePattern, Severity
+from app.command_policy import DestructivePattern, PatternSuggestion, Severity
 from app.packs import Pack
 
 FIREWALL_PATTERNS: tuple[DestructivePattern, ...] = (
@@ -10,7 +10,10 @@ DestructivePattern(
         reason="iptables --flush removes all firewall rules",
         severity=Severity.CRITICAL,
         description="Flushes all iptables rules. Network access will be lost immediately.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="iptables -L -n -v", description="List current rules before flushing"),
+            PatternSuggestion(command="iptables-save > /tmp/rules.backup", description="Backup rules first"),
+        ),
     ),
 DestructivePattern(
         name="iptables-policy-drop",
@@ -18,7 +21,10 @@ DestructivePattern(
         reason="Setting default policy to DROP disconnects all traffic",
         severity=Severity.CRITICAL,
         description="Changes the default policy to DROP. SSH session will be terminated.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="iptables -L -n", description="Check current policy first"),
+            PatternSuggestion(command="at now +5 minutes <<< 'iptables -P INPUT ACCEPT'", description="Schedule automatic rollback"),
+        ),
     ),
 DestructivePattern(
         name="iptables-delete-chains",
@@ -26,7 +32,10 @@ DestructivePattern(
         reason="Deleting custom iptables chains removes security rules",
         severity=Severity.HIGH,
         description="Removes all user-defined chains. Security rules and jump rules are lost.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="iptables-save > /tmp/rules.backup", description="Backup rules first"),
+            PatternSuggestion(command="iptables -L -n", description="List all rules before deleting chains"),
+        ),
     ),
 DestructivePattern(
         name="iptables-restore",
@@ -34,7 +43,10 @@ DestructivePattern(
         reason="iptables-restore replaces the entire ruleset at once",
         severity=Severity.HIGH,
         description="Replaces all iptables rules. A malformed ruleset disconnects the server.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="iptables-save > /tmp/rules.backup", description="Backup current rules first"),
+            PatternSuggestion(command="iptables-restore --test < {file}", description="Test ruleset before applying"),
+        ),
     ),
 DestructivePattern(
         name="ip6tables-flush",
@@ -42,7 +54,10 @@ DestructivePattern(
         reason="ip6tables --flush removes all IPv6 firewall rules",
         severity=Severity.CRITICAL,
         description="Flushes all ip6tables rules. IPv6 network access will be lost.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="ip6tables -L -n -v", description="List IPv6 rules first"),
+            PatternSuggestion(command="ip6tables-save > /tmp/rules6.backup", description="Backup IPv6 rules first"),
+        ),
     ),
 DestructivePattern(
         name="iptables-insert-reject",
@@ -50,7 +65,10 @@ DestructivePattern(
         reason="Inserting a DROP/REJECT rule locks out matching traffic",
         severity=Severity.HIGH,
         description="A DROP/REJECT rule at the top of INPUT chain blocks SSH if rule matches.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="iptables -L INPUT -n -v", description="Check INPUT chain first"),
+            PatternSuggestion(command="iptables --check INPUT -s {ip} -j DROP", description="Test if a similar rule already exists"),
+        ),
     ),
 DestructivePattern(
         name="ufw-disable",
@@ -58,7 +76,10 @@ DestructivePattern(
         reason="Disabling ufw removes all firewall protection",
         severity=Severity.CRITICAL,
         description="ufw is disabled. No firewall rules are enforced.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="ufw status verbose", description="Check current ufw status first"),
+            PatternSuggestion(command="ufw reload", description="Reload instead of disable"),
+        ),
     ),
 DestructivePattern(
         name="ufw-reset",
@@ -66,7 +87,10 @@ DestructivePattern(
         reason="Resetting ufw deletes all custom rules",
         severity=Severity.HIGH,
         description="All ufw rules are deleted and firewall is disabled.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="ufw status numbered", description="List rules with numbers before reset"),
+            PatternSuggestion(command="ufw delete {num}", description="Delete individual rules instead of full reset"),
+        ),
     ),
 DestructivePattern(
         name="ufw-default-deny",
@@ -74,7 +98,10 @@ DestructivePattern(
         reason="Setting ufw default to deny blocks all incoming traffic",
         severity=Severity.HIGH,
         description="Changes the default ufw policy to deny. SSH access may be lost.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="ufw status verbose", description="Check current default policy first"),
+            PatternSuggestion(command="ufw default deny incoming", description="Only deny incoming, keep outgoing allowed"),
+        ),
     ),
 DestructivePattern(
         name="ufw-delete",
@@ -82,7 +109,10 @@ DestructivePattern(
         reason="Deleting ufw rules may remove SSH access rules",
         severity=Severity.MEDIUM,
         description="Deletes a ufw rule. Removing the wrong rule may lock out SSH.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="ufw status numbered", description="List rules with numbers first"),
+            PatternSuggestion(command="ufw show added", description="Show ufw user-defined rules"),
+        ),
     ),
 DestructivePattern(
         name="nft-flush-ruleset",
@@ -90,7 +120,10 @@ DestructivePattern(
         reason="nft flush ruleset removes all nftables rules",
         severity=Severity.CRITICAL,
         description="Flushes the entire nftables ruleset. All firewall rules are removed at once.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="nft list ruleset", description="List current ruleset before flushing"),
+            PatternSuggestion(command="nft list ruleset > /tmp/nftables.backup", description="Backup ruleset first"),
+        ),
     ),
 DestructivePattern(
         name="nft-delete-table",
@@ -98,7 +131,10 @@ DestructivePattern(
         reason="Deleting an nftables table removes all chains and rules",
         severity=Severity.HIGH,
         description="Deletes an entire nftables table. All chains, rules, and sets are removed.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="nft list table {table}", description="List table rules before deleting"),
+            PatternSuggestion(command="nft list ruleset | grep -A5 'table {table}'", description="Inspect table contents"),
+        ),
     ),
 DestructivePattern(
         name="nft-load-stdin",
@@ -106,7 +142,10 @@ DestructivePattern(
         reason="Loading nftables rules from stdin can inject destructive rules",
         severity=Severity.HIGH,
         description="Loading rules from stdin or a pipe is risky. A malformed ruleset disconnects the server.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="nft -c -f {file}", description="Check syntax before loading"),
+            PatternSuggestion(command="nft list ruleset > /tmp/backup.nft", description="Backup current ruleset first"),
+        ),
     ),
 )
 
