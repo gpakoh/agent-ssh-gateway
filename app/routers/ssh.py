@@ -34,9 +34,7 @@ from app.auth_middleware import (
     require_scope,
     ws_auth_check,
 )
-from app.command_policy import evaluate_command_policy, parse_key_profiles, profile_for_identity
 from app.config import settings
-from app.metrics import metrics
 from app.models import (
     AgentTokenRefreshRequest,
     AgentTokenRefreshResponse,
@@ -59,6 +57,7 @@ from app.models import (
 )
 from app.output_redaction import should_redact_command_output
 from app.security import rate_limit_mutation, redact_secrets, sanitize_command, validate_target_host
+from app.services.command_gate import evaluate_with_access_gate, record_allowed
 from app.ssh_manager import SessionNotFoundError
 from app.state import _err
 
@@ -324,24 +323,6 @@ async def ssh_execute(
     _identity: AuthIdentity = Depends(require_scope("ssh:execute")),
 ):
     """Execute a command on an existing SSH session."""
-    # Access control gate
-    access_effective_profile = None
-    if settings.access_control_enabled and _state.access_control_store is not None:
-        source_ip = get_client_ip(request, parse_cidrs(settings.trusted_proxy_cidrs))
-        try:
-            access = _state.access_control_store.resolve_access_policy(
-                actor_fingerprint=_identity.fingerprint,
-                token_type=_identity.token_type,
-                source_ip=source_ip,
-                requested_profile=settings.command_policy_profile,
-                enforce_master=settings.access_control_enforce_master,
-            )
-            access_effective_profile = access.effective_profile
-        except AccessDeniedError:
-            raise HTTPException(status_code=403, detail=_err(403, "ACCESS_DENIED")) from None
-        except AccessPendingApprovalError:
-            pass
-
     # Sanitize Command
     try:
         sanitized = sanitize_command(req.command)
@@ -349,34 +330,13 @@ async def ssh_execute(
         _state.audit_logger.log_security_event("BLOCKED_COMMAND", str(exc), request.client.host)
         raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
 
-    # Command Policy Evaluation — server-owned profile resolution
-    key_profiles = parse_key_profiles(settings.command_policy_key_profiles)
-    effective_profile = (
-        access_effective_profile
-        if access_effective_profile is not None
-        else profile_for_identity(
-            _identity.fingerprint[:12] if _identity else None,
-            key_profiles=key_profiles,
-            default_profile=settings.command_policy_profile,
-        )
-    )
-    decision = evaluate_command_policy(
+    # Access control + command policy gate (single implementation, see services)
+    gate = evaluate_with_access_gate(
+        request,
+        _identity,
         req.command,
-        mode=settings.command_policy_mode,
-        profile=effective_profile,
-    )
-
-    _state.audit_logger.log_security_event(
-        "COMMAND_POLICY_DECISION",
-        (
-            f"session_id={req.session_id}; "
-            f"command_root={decision.command_root}; "
-            f"allowed={decision.allowed}; "
-            f"reason={decision.reason}; "
-            f"profile={decision.profile}; "
-            f"mode={decision.mode}"
-        ),
-        request.client.host if request.client else "unknown",
+        route="POST /api/ssh/execute",
+        raise_on_deny=False,
     )
 
     # Structured audit event
@@ -385,38 +345,33 @@ async def ssh_execute(
         event_logger=_state.event_audit_logger,
         command=req.command,
         session_id=req.session_id,
-        effective_profile=effective_profile,
-        decision_allowed=decision.allowed,
-        decision_reason=decision.reason,
-        command_root=decision.command_root,
+        effective_profile=gate.effective_profile,
+        decision_allowed=gate.allowed,
+        decision_reason=gate.reason,
+        command_root=gate.command_root,
         source_ip=request.client.host if request.client else "unknown",
         route="POST /api/ssh/execute",
         actor_fingerprint=_identity.fingerprint[:12] if _identity else "",
         request_id=getattr(request.state, "request_id", ""),
-        approval_id=decision.approval_id,
-        requires_approval=decision.requires_approval,
+        approval_id=gate.approval_id,
+        requires_approval=gate.requires_approval,
     )
 
-    if not decision.allowed:
-        metrics.record_ssh_command(
-            status="denied",
-            profile=decision.profile,
-            command_root=decision.command_root,
-        )
-        if decision.requires_approval and decision.approval_id:
+    if not gate.allowed:
+        if gate.requires_approval and gate.approval_id:
             raise HTTPException(
                 status_code=202,
                 detail={
                     "code": 202,
                     "message": "Command requires operator approval (ASK mode)",
-                    "approval_id": decision.approval_id,
-                    "command_root": decision.command_root,
-                    "reason": decision.reason,
+                    "approval_id": gate.approval_id,
+                    "command_root": gate.command_root,
+                    "reason": gate.reason,
                 },
             )
         raise HTTPException(
             status_code=403,
-            detail=_err(403, f"Command denied by policy: {decision.reason}"),
+            detail=_err(403, f"Command denied by policy: {gate.reason}"),
         )
 
     # Audit Log
@@ -445,11 +400,7 @@ async def ssh_execute(
         command=sanitized,
         timeout=req.timeout,
     )
-    metrics.record_ssh_command(
-        status="allowed",
-        profile=decision.profile,
-        command_root=decision.command_root,
-    )
+    record_allowed(profile=gate.effective_profile, command_root=gate.command_root)
     stdout = result["stdout"]
     stderr = result["stderr"]
     if should_redact_command_output(req.redact_output):
@@ -476,52 +427,13 @@ async def ssh_execute_argv(
     """
     command_str = shlex.join(req.argv)
 
-    # Access control gate
-    access_effective_profile = None
-    if settings.access_control_enabled and _state.access_control_store is not None:
-        source_ip = get_client_ip(request, parse_cidrs(settings.trusted_proxy_cidrs))
-        try:
-            access = _state.access_control_store.resolve_access_policy(
-                actor_fingerprint=_identity.fingerprint,
-                token_type=_identity.token_type,
-                source_ip=source_ip,
-                requested_profile=settings.command_policy_profile,
-                enforce_master=settings.access_control_enforce_master,
-            )
-            access_effective_profile = access.effective_profile
-        except AccessDeniedError:
-            raise HTTPException(status_code=403, detail=_err(403, "ACCESS_DENIED")) from None
-        except AccessPendingApprovalError:
-            pass
-
-    # Server-owned profile resolution
-    key_profiles = parse_key_profiles(settings.command_policy_key_profiles)
-    effective_profile = (
-        access_effective_profile
-        if access_effective_profile is not None
-        else profile_for_identity(
-            _identity.fingerprint[:12] if _identity else None,
-            key_profiles=key_profiles,
-            default_profile=settings.command_policy_profile,
-        )
-    )
-    decision = evaluate_command_policy(
+    # Access control + command policy gate (single implementation, see services)
+    gate = evaluate_with_access_gate(
+        request,
+        _identity,
         command_str,
-        mode=settings.command_policy_mode,
-        profile=effective_profile,
-    )
-
-    _state.audit_logger.log_security_event(
-        "COMMAND_POLICY_DECISION",
-        (
-            f"session_id={req.session_id}; "
-            f"command_root={decision.command_root}; "
-            f"allowed={decision.allowed}; "
-            f"reason={decision.reason}; "
-            f"profile={decision.profile}; "
-            f"mode={decision.mode}"
-        ),
-        request.client.host if request.client else "unknown",
+        route="POST /api/ssh/execute-argv",
+        raise_on_deny=False,
     )
 
     # Structured audit event
@@ -530,25 +442,31 @@ async def ssh_execute_argv(
         event_logger=_state.event_audit_logger,
         command=command_str,
         session_id=req.session_id,
-        effective_profile=effective_profile,
-        decision_allowed=decision.allowed,
-        decision_reason=decision.reason,
-        command_root=decision.command_root,
+        effective_profile=gate.effective_profile,
+        decision_allowed=gate.allowed,
+        decision_reason=gate.reason,
+        command_root=gate.command_root,
         source_ip=request.client.host if request.client else "unknown",
         route="POST /api/ssh/execute-argv",
         actor_fingerprint=_identity.fingerprint[:12] if _identity else "",
         request_id=getattr(request.state, "request_id", ""),
     )
 
-    if not decision.allowed:
-        metrics.record_ssh_command(
-            status="denied",
-            profile=decision.profile,
-            command_root=decision.command_root,
-        )
+    if not gate.allowed:
+        if gate.requires_approval and gate.approval_id:
+            raise HTTPException(
+                status_code=202,
+                detail={
+                    "code": 202,
+                    "message": "Command requires operator approval (ASK mode)",
+                    "approval_id": gate.approval_id,
+                    "command_root": gate.command_root,
+                    "reason": gate.reason,
+                },
+            )
         raise HTTPException(
             status_code=403,
-            detail=_err(403, f"Command denied by policy: {decision.reason}"),
+            detail=_err(403, f"Command denied by policy: {gate.reason}"),
         )
 
     _state.audit_logger.log_command(req.session_id, command_str, request.client.host)
@@ -570,11 +488,7 @@ async def ssh_execute_argv(
         stdin_data=stdin_bytes,
         timeout=req.timeout_s,
     )
-    metrics.record_ssh_command(
-        status="allowed",
-        profile=decision.profile,
-        command_root=decision.command_root,
-    )
+    record_allowed(profile=gate.effective_profile, command_root=gate.command_root)
 
     max_output = 10 * 1024 * 1024
     stdout = result["stdout"][:max_output]
@@ -755,46 +669,25 @@ async def ssh_execute_stream(websocket: WebSocket):
             await websocket.close()
             return
 
-        # Server-owned profile resolution
-        key_profiles = parse_key_profiles(settings.command_policy_key_profiles)
-        effective_profile = profile_for_identity(
-            identity.fingerprint[:12] if identity else None,
-            key_profiles=key_profiles,
-            default_profile=settings.command_policy_profile,
-        )
+        ws_source_ip = websocket.client.host if websocket.client else "unknown"
 
-        # Access control gate (WebSocket)
-        if settings.access_control_enabled and _state.access_control_store is not None:
-            ws_source_ip = websocket.client.host if websocket.client else "unknown"
-            try:
-                ws_access = _state.access_control_store.resolve_access_policy(
-                    actor_fingerprint=identity.fingerprint,
-                    token_type=identity.token_type,
-                    source_ip=ws_source_ip,
-                    requested_profile=effective_profile,
-                    enforce_master=settings.access_control_enforce_master,
-                )
-                effective_profile = ws_access.effective_profile
-            except AccessDeniedError:
-                await websocket.send_json(
-                    {"type": "error", "code": "ACCESS_DENIED", "message": "Actor denied by access control"}
-                )
-                await websocket.close()
-                return
-
-        decision = evaluate_command_policy(
-            command,
-            mode=settings.command_policy_mode,
-            profile=effective_profile,
-        )
-
-        _state.audit_logger.log_security_event(
-            "COMMAND_POLICY_DECISION",
-            f"session_id={session_id}; command_root={decision.command_root}; "
-            f"allowed={decision.allowed}; reason={decision.reason}; "
-            f"profile={decision.profile}; mode={decision.mode}",
-            websocket.client.host if websocket.client else "unknown",
-        )
+        # Access control + command policy gate (single implementation, see services)
+        try:
+            gate = evaluate_with_access_gate(
+                None,
+                identity,
+                command,
+                route="WS /api/ssh/execute/stream",
+                source_ip=ws_source_ip,
+                raise_on_deny=False,
+            )
+        except HTTPException:
+            # With raise_on_deny=False the only raise path is access-control denial
+            await websocket.send_json(
+                {"type": "error", "code": "ACCESS_DENIED", "message": "Actor denied by access control"}
+            )
+            await websocket.close()
+            return
 
         # Structured audit event
         from app.audit import emit_command_policy_decision as _emit_ws
@@ -802,27 +695,22 @@ async def ssh_execute_stream(websocket: WebSocket):
             event_logger=_state.event_audit_logger,
             command=command,
             session_id=session_id,
-            effective_profile=effective_profile,
-            decision_allowed=decision.allowed,
-            decision_reason=decision.reason,
-            command_root=decision.command_root,
-            source_ip=websocket.client.host if websocket.client else "unknown",
+            effective_profile=gate.effective_profile,
+            decision_allowed=gate.allowed,
+            decision_reason=gate.reason,
+            command_root=gate.command_root,
+            source_ip=ws_source_ip,
             route="WS /api/ssh/execute/stream",
             actor_fingerprint=identity.fingerprint[:12] if identity else "",
             request_id=_extract_ws_request_id(websocket),
         )
 
-        if not decision.allowed:
-            metrics.record_ssh_command(
-                status="denied",
-                profile=decision.profile,
-                command_root=decision.command_root,
-            )
+        if not gate.allowed:
             await websocket.send_json(
                 {
                     "type": "error",
                     "code": "COMMAND_POLICY_DENIED",
-                    "message": f"Command denied by policy: {decision.reason}",
+                    "message": f"Command denied by policy: {gate.reason}",
                 }
             )
             await websocket.close()
@@ -850,11 +738,7 @@ async def ssh_execute_stream(websocket: WebSocket):
         async for msg_type, msg_data in _state.manager.execute_stream(session_id, command):
             await websocket.send_json({"type": msg_type, "data": msg_data})
 
-        metrics.record_ssh_command(
-            status="allowed",
-            profile=decision.profile,
-            command_root=decision.command_root,
-        )
+        record_allowed(profile=gate.effective_profile, command_root=gate.command_root)
 
     except WebSocketDisconnect:
         logger.info("Websocket Client Disconnected")

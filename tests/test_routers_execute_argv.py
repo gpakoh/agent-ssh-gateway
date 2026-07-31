@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.main import app
+from app.services.command_gate import CommandGateDecision
 
 
 @pytest.fixture
@@ -91,9 +92,13 @@ def test_execute_argv_command_policy_denied(client, monkeypatch):
     mock_session.owner_token_fingerprint = None
     _app_state.manager.get_session = AsyncMock(return_value=mock_session)
 
-    with patch("app.routers.ssh.evaluate_command_policy") as mock_policy:
-        mock_policy.return_value = MagicMock(
-            allowed=False, reason="denied", profile="default", mode="enforce", command_root="rm"
+    with patch("app.routers.ssh.evaluate_with_access_gate") as mock_gate:
+        mock_gate.return_value = CommandGateDecision(
+            allowed=False,
+            reason="denied",
+            command_root="rm",
+            effective_profile="default",
+            policy_mode="enforce",
         )
         resp = client.post(
             "/api/ssh/execute-argv",

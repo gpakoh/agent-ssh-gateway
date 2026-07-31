@@ -5,16 +5,13 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import state as _state
-from app.access_control import AccessDeniedError, AccessPendingApprovalError
-from app.auth_middleware import AuthIdentity, get_client_ip, parse_cidrs, require_master_key
-from app.command_policy import evaluate_command_policy, parse_key_profiles, profile_for_identity
-from app.config import settings
-from app.metrics import metrics
+from app.auth_middleware import AuthIdentity, require_master_key
 from app.models import (
     BatchExecuteRequest,
     BatchExecuteResponse,
     BatchOperationResultResponse,
 )
+from app.services.command_gate import evaluate_with_access_gate, record_allowed
 from app.state import _err
 
 router = APIRouter()
@@ -28,50 +25,19 @@ async def batch_execute(
 ):
     """Execute multiple file operations in a single transaction."""
 
-    # Access control gate
-    access_effective_profile = None
-    if settings.access_control_enabled and _state.access_control_store is not None:
-        source_ip = get_client_ip(request, parse_cidrs(settings.trusted_proxy_cidrs))
-        try:
-            access = _state.access_control_store.resolve_access_policy(
-                actor_fingerprint=_identity.fingerprint,
-                token_type=_identity.token_type,
-                source_ip=source_ip,
-                requested_profile=settings.command_policy_profile,
-                enforce_master=settings.access_control_enforce_master,
-            )
-            access_effective_profile = access.effective_profile
-        except AccessDeniedError:
-            raise HTTPException(status_code=403, detail=_err(403, "ACCESS_DENIED")) from None
-        except AccessPendingApprovalError:
-            pass
-
     # Command Policy Evaluation — check execute-type operations before execution
     source_ip = request.client.host if request.client else "unknown"
-    key_profiles = parse_key_profiles(settings.command_policy_key_profiles)
-    effective_profile = (
-        access_effective_profile
-        if access_effective_profile is not None
-        else profile_for_identity(
-            _identity.fingerprint[:12] if _identity else None,
-            key_profiles=key_profiles,
-            default_profile=settings.command_policy_profile,
-        )
-    )
+    effective_profile = None
     for op in req.operations:
         if op.type == "execute" and op.command:
-            decision = evaluate_command_policy(
+            gate = evaluate_with_access_gate(
+                request,
+                _identity,
                 op.command,
-                mode=settings.command_policy_mode,
-                profile=effective_profile,
+                route="POST /api/batch/execute",
+                raise_on_deny=False,
             )
-            _state.audit_logger.log_security_event(
-                "COMMAND_POLICY_DECISION",
-                f"batch_execute; command_root={decision.command_root}; "
-                f"allowed={decision.allowed}; reason={decision.reason}; "
-                f"profile={decision.profile}; mode={decision.mode}",
-                source_ip,
-            )
+            effective_profile = gate.effective_profile
 
             # Structured audit event
             from app.audit import emit_command_policy_decision as _emit_batch
@@ -79,25 +45,20 @@ async def batch_execute(
                 event_logger=_state.event_audit_logger,
                 command=op.command,
                 session_id=getattr(req, "context_id", ""),
-                effective_profile=effective_profile,
-                decision_allowed=decision.allowed,
-                decision_reason=decision.reason,
-                command_root=decision.command_root,
+                effective_profile=gate.effective_profile,
+                decision_allowed=gate.allowed,
+                decision_reason=gate.reason,
+                command_root=gate.command_root,
                 source_ip=source_ip,
                 route="POST /api/batch/execute",
                 actor_fingerprint=_identity.fingerprint[:12] if _identity else "",
                 request_id=getattr(request.state, "request_id", ""),
             )
 
-            if not decision.allowed:
-                metrics.record_ssh_command(
-                    status="denied",
-                    profile=decision.profile,
-                    command_root=decision.command_root,
-                )
+            if not gate.allowed:
                 raise HTTPException(
                     status_code=403,
-                    detail=_err(403, f"Command denied by policy: {decision.reason}"),
+                    detail=_err(403, f"Command denied by policy: {gate.reason}"),
                 )
 
     ctx = await _state.context_manager.get_context(req.context_id)
@@ -136,11 +97,7 @@ async def batch_execute(
     # Record metrics for execute-type operations that passed policy
     for op in req.operations:
         if op.type == "execute" and op.command:
-            metrics.record_ssh_command(
-                status="allowed",
-                profile=effective_profile,
-                command_root=None,
-            )
+            record_allowed(profile=effective_profile)
 
     return BatchExecuteResponse(
         transaction_id=result.transaction_id,
