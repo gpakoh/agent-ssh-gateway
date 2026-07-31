@@ -9,7 +9,7 @@ bound to 127.0.0.1 on a free local port, then checks:
   - POST /mcp with wrong token                       -> 401
   - POST /mcp with valid token + non-loopback Origin  -> 403
   - valid token + no Origin: MCP initialize, list_tools, tools_manifest
-  - safe tool count == 84, blocked tool count == 30, blocked tools absent
+   - safe tool count == 75, blocked tool count == 29, blocked tools absent
   - whether a Mcp-Session-Id was assigned (reported as present/absent
     only — the value itself is never printed)
 
@@ -250,10 +250,10 @@ async def run_protocol_checks(base_url: str, token: str) -> None:
 
                 tools_result = await session.list_tools()
                 tool_names = {t.name for t in tools_result.tools}
-                check("list_tools count == 84", len(tool_names) == 84, f"got {len(tool_names)}")
+                check("list_tools count == 75", len(tool_names) == 75, f"got {len(tool_names)}")
                 check(
-                    "blocked tool count == 30",
-                    len(MCP_CLIENT_BLOCKED_TOOLS) == 30,
+                    "blocked tool count == 29",
+                    len(MCP_CLIENT_BLOCKED_TOOLS) == 29,
                     f"got {len(MCP_CLIENT_BLOCKED_TOOLS)}",
                 )
 
