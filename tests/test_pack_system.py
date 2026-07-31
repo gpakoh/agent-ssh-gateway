@@ -334,11 +334,11 @@ class TestRegistrySingleton:
     def test_get_registry_has_all_packs(self):
         from app.packs.registry import get_registry
         r = get_registry()
-        assert r.pack_count == 15
+        assert r.pack_count == 16
         expected_ids = {"backup", "docker", "filesystem", "kubernetes", "cloud",
                         "database", "dns", "git", "firewall", "loadbalancer",
                         "monitoring", "package_managers", "secrets", "storage",
-                        "system"}
+                        "cicd", "system"}
         actual_ids = {p.id for p in r.all_packs}
         assert actual_ids == expected_ids
 
@@ -415,6 +415,8 @@ class TestPackSmoke:
         ("influx delete --bucket b --start 2020-01-01T00:00:00Z --stop 2020-01-02T00:00:00Z", "monitoring"),
         ("zfs destroy tank/data", "storage"),
         ("mc rb --force --recursive myminio/backups", "storage"),
+        ("gh secret delete FOO", "cicd"),
+        ("gitlab-runner unregister --all-runners", "cicd"),
     ])
     def test_evaluate_pack_cross_section(self, cmd, expected_pack):
         """Verify each pack matches at least one expected command."""
@@ -450,6 +452,8 @@ class TestPackSmoke:
             "influx bucket delete --id 1",
             "zfs destroy tank/data",
             "mc rb --force --recursive myminio/backups",
+            "gh secret delete FOO",
+            "circleci context delete gh org ctx",
         ):
             matches = r.evaluate(cmd)
             assert len(matches) >= 1, f"No matches for {cmd!r} (global quick-reject false negative)"
@@ -615,6 +619,65 @@ class TestPackSmoke:
             "az storage account list",
             "az storage container list --account-name myacct",
             "azcopy list 'https://acct.blob.core.windows.net/cont?SAS'",
+        ):
+            matches = r.evaluate(cmd)
+            assert len(matches) == 0, f"False positive for {cmd!r}: {[m.pattern_name for m in matches]}"
+
+    def test_cicd_pack_patterns(self):
+        """CI/CD pack (P18) covers gh, glab, gitlab-runner, circleci, jenkins."""
+        from app.packs.registry import build_registry
+        r = build_registry()
+        cases = {
+            "gh secret delete FOO": "gh-actions-secret-remove",
+            "gh variable delete FOO": "gh-actions-variable-remove",
+            "gh workflow disable ci.yml": "gh-actions-workflow-disable",
+            "gh run cancel 12345": "gh-actions-run-cancel",
+            "gh run delete 12345": "gh-actions-run-delete",
+            "gh api -X DELETE repos/o/r/actions/secrets/FOO": "gh-actions-api-delete-secrets",
+            "glab variable delete FOO": "glab-variable-delete",
+            "glab ci delete 123": "glab-ci-delete",
+            "glab api -X DELETE projects/1/variables/FOO": "glab-api-delete-variables",
+            "gitlab-runner unregister --all-runners": "gitlab-runner-unregister",
+            "circleci context delete github org ctx": "circleci-context-delete",
+            "circleci context remove-secret github org ctx SECRET": "circleci-context-remove-secret",
+            "circleci orb delete org/orb@1.0.0": "circleci-orb-delete",
+            "circleci namespace delete org": "circleci-namespace-delete",
+            "circleci pipeline delete 123": "circleci-pipeline-delete",
+            "curl -X DELETE https://circleci.com/api/v2/project/gh/org/repo/envvar/FOO": "circleci-api-delete-envvar",
+            "jenkins-cli delete-job myjob": "jenkins-cli-delete-job",
+            "jenkins-cli delete-node node1": "jenkins-cli-delete-node",
+            "java -jar jenkins-cli.jar delete-credentials store cred": "jenkins-cli-delete-credentials",
+            "jenkins-cli delete-builds myjob 1-10": "jenkins-cli-delete-builds",
+            "jenkins-cli delete-view myview": "jenkins-cli-delete-view",
+            "curl -X POST http://localhost:8080/job/myjob/doDelete": "jenkins-curl-do-delete",
+        }
+        for cmd, expected in cases.items():
+            matches = r.evaluate(cmd)
+            names = {m.pattern_name for m in matches}
+            assert expected in names, f"{cmd!r}: expected {expected}, got {names}"
+
+    def test_cicd_pack_reads_not_blocked(self):
+        """Read/list operations on CI/CD tools must NOT be blocked."""
+        from app.packs.registry import build_registry
+        r = build_registry()
+        for cmd in (
+            "gh secret list",
+            "gh variable list",
+            "gh workflow list",
+            "gh run list",
+            "gh run view 12345",
+            "gh api repos/o/r/actions/secrets",
+            "glab variable list",
+            "glab ci list",
+            "gitlab-runner list",
+            "gitlab-runner verify",
+            "circleci context list gh org",
+            "circleci context show gh org ctx",
+            "circleci orb list org",
+            "jenkins-cli list-jobs",
+            "jenkins-cli list-nodes",
+            "jenkins-cli list-views",
+            "curl http://localhost:8080/job/myjob/api/json",
         ):
             matches = r.evaluate(cmd)
             assert len(matches) == 0, f"False positive for {cmd!r}: {[m.pattern_name for m in matches]}"

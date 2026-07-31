@@ -69,13 +69,7 @@ Safe-паттерны (allow list для docker ps/logs/build...) — опцио
 - Тесты: +7 (pack_count 9→11, cross-section, smoke dns/pkg, suggestions-конвенция) — 3707 passed, ruff clean
 
 #### Идеи следующих итераций
-- **cicd** (gh run delete, gitlab pipeline delete, circleci orphan-delete)
-
-#### Итерация 3 — Backup ✅
-- Новый пак **backup** (22 паттерна): borg (delete/prune/compact/recreate/break-lock), restic (forget/prune/key remove/unlock --remove-all/cache --cleanup), rclone (sync/delete/deletefile/purge/cleanup/dedupe/move), velero (backup/schedule/restore delete), duplicity (remove-older-than/delete)
-- Все паттерны с 2 suggestions (preview + alternative); list/info/check/snapshots/dry-run не блокируются
-- Регистрация в registry.py, 13 паков / 319 паттернов
-- Тесты: +4 (pack_count 12→13, cross-section, smoke backup, reads-not-blocked) — 3715 passed, ruff clean
+- Все DCG-домены портированы (dns, package_managers, secrets, backup, monitoring, storage, cicd) — P18 завершён ✅
 
 #### Итерация 2 — Secrets ✅
 - Новый пак **secrets** (23 паттерна): Vault (secrets disable, kv destroy/metadata-delete/delete, delete, policy delete, auth disable, token/lease revoke), AWS (secretsmanager delete-resource-policy/remove-regions, ssm delete-parameter(s)), Doppler (secrets/projects/environments/configs delete), 1Password (op item/document/vault/user/group/connect-token delete)
@@ -83,6 +77,12 @@ Safe-паттерны (allow list для docker ps/logs/build...) — опцио
 - Все паттерны с 2 suggestions (preview + alternative); read/list операции не блокируются
 - Регистрация в registry.py, 12 паков / 297 паттернов
 - Тесты: +4 (pack_count 11→12, cross-section, smoke secrets, read-ops-not-blocked) — 3711 passed, ruff clean
+
+#### Итерация 3 — Backup ✅
+- Новый пак **backup** (22 паттерна): borg (delete/prune/compact/recreate/break-lock), restic (forget/prune/key remove/unlock --remove-all/cache --cleanup), rclone (sync/delete/deletefile/purge/cleanup/dedupe/move), velero (backup/schedule/restore delete), duplicity (remove-older-than/delete)
+- Все паттерны с 2 suggestions (preview + alternative); list/info/check/snapshots/dry-run не блокируются
+- Регистрация в registry.py, 13 паков / 319 паттернов
+- Тесты: +4 (pack_count 12→13, cross-section, smoke backup, reads-not-blocked) — 3715 passed, ruff clean
 
 #### Итерация 4 — Monitoring ✅
 - Новый пак **monitoring** (17 паттернов): promtool (tsdb delete/remove-limits, rules-file delete), Prometheus API (delete_series), Grafana (CLI plugins uninstall / admin reset-admin-password, API delete dashboard/datasource), InfluxDB (delete/bucket delete/org delete/task delete, 1.x DROP DATABASE/SERIES), whisper (delete/clean), kubectl delete PrometheusOperator resources
@@ -95,3 +95,10 @@ Safe-паттерны (allow list для docker ps/logs/build...) — опцио
 - Все паттерны с 2 suggestions (preview + alternative); list/describe/ls/dry-run/-n не блокируются
 - Регистрация в registry.py, 15 паков / 357 паттернов
 - Тесты: +4 (pack_count 14→15, cross-section, smoke storage, reads-not-blocked) — 3723 passed, ruff clean
+
+#### Итерация 6 — CI/CD ✅
+- Новый пак **cicd** (23 паттерна): GitHub Actions (gh secret/variable delete, workflow disable, run cancel/delete, api DELETE secrets/variables), GitLab (glab variable/ci delete, api DELETE variables, gitlab-runner unregister), CircleCI (context delete/remove-secret, orb delete, namespace delete, pipeline delete, api DELETE envvar), Jenkins (jenkins-cli delete-job/node/credentials/builds/view, curl doDelete)
+- gh run delete добавлен вручную (в DCG только run cancel)
+- Все паттерны с 2 suggestions (preview + alternative); list/view/status/verify не блокируются
+- Регистрация в registry.py, 16 паков / 380 паттернов
+- Тесты: +4 (pack_count 15→16, cross-section, smoke cicd, reads-not-blocked) — 3727 passed, ruff clean
