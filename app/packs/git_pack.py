@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.command_policy import DestructivePattern, Severity
+from app.command_policy import DestructivePattern, PatternSuggestion, Severity
 from app.packs import Pack
 
 GIT_PATTERNS: tuple[DestructivePattern, ...] = (
@@ -11,7 +11,10 @@ DestructivePattern(
         severity=Severity.CRITICAL,
         description="All forms of force push (--force, --force-with-lease, +refspec) "
         "rewrite remote history and may cause data loss for collaborators.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="git push --force-with-lease", description="Safer force push — respects remote changes"),
+            PatternSuggestion(command="git push {remote} {branch}", description="Normal push without force"),
+        ),
     ),
 DestructivePattern(
         name="git-push-mirror",
@@ -19,7 +22,10 @@ DestructivePattern(
         reason="git push --mirror force-updates and deletes remote refs",
         severity=Severity.CRITICAL,
         description="Mirror push deletes remote refs absent locally. Extremely destructive.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="git remote -v", description="List remotes first"),
+            PatternSuggestion(command="git push --all {remote}", description="Push all branches without mirror semantics"),
+        ),
     ),
 DestructivePattern(
         name="git-push-dynamic-arg",
@@ -27,7 +33,10 @@ DestructivePattern(
         reason="Shell-expanded push argument cannot be verified as non-forcing",
         severity=Severity.HIGH,
         description="Variables, globs, or escaped args in git push may expand to destructive refspecs.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="echo {arg}", description="Expand and review argument first"),
+            PatternSuggestion(command="git push {remote} {branch}", description="Use an explicit refspec"),
+        ),
     ),
 DestructivePattern(
         name="git-rebase",
@@ -35,7 +44,10 @@ DestructivePattern(
         reason="git rebase rewrites commit history",
         severity=Severity.HIGH,
         description="Rebase rewrites commits. Force push needed afterward. Conflicts may lose changes.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="git merge {branch}", description="Merge instead of rebase — preserves history"),
+            PatternSuggestion(command="git rebase --interactive HEAD~{n}", description="Interactive rebase with control"),
+        ),
     ),
 DestructivePattern(
         name="git-commit-amend",
@@ -43,7 +55,10 @@ DestructivePattern(
         reason="git commit --amend rewrites the last commit",
         severity=Severity.HIGH,
         description="Amending a pushed commit rewrites history. Previous commit is lost.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="git commit --amend --no-edit", description="Amend without changing the message"),
+            PatternSuggestion(command="git log -1", description="Review last commit before amending"),
+        ),
     ),
 DestructivePattern(
         name="git-filter-branch",
@@ -51,7 +66,10 @@ DestructivePattern(
         reason="git filter-branch rewrites entire repository history",
         severity=Severity.CRITICAL,
         description="Rewrites ALL commits. Extremely dangerous. Use filter-repo instead.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="git filter-repo --path {path}", description="Use filter-repo with path scope"),
+            PatternSuggestion(command="git clone {repo} /tmp/backup", description="Clone a backup before rewriting history"),
+        ),
     ),
 DestructivePattern(
         name="git-filter-repo",
@@ -59,7 +77,10 @@ DestructivePattern(
         reason="git filter-repo rewrites repository history",
         severity=Severity.CRITICAL,
         description="Modern replacement for filter-branch. Still rewrites all history.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="git filter-repo --dry-run", description="Preview changes first"),
+            PatternSuggestion(command="git clone {repo} /tmp/backup", description="Clone a backup before rewriting history"),
+        ),
     ),
 DestructivePattern(
         name="git-cherry-pick",
@@ -67,7 +88,10 @@ DestructivePattern(
         reason="git cherry-pick can introduce duplicate commits",
         severity=Severity.MEDIUM,
         description="Cherry-pick creates duplicate commits. Can cause merge conflicts later.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="git log --oneline -10", description="Review recent commits before picking"),
+            PatternSuggestion(command="git merge {branch}", description="Merge instead of cherry-pick"),
+        ),
     ),
 DestructivePattern(
         name="git-reflog-expire",
@@ -75,7 +99,10 @@ DestructivePattern(
         reason="git reflog expire removes recovery entries",
         severity=Severity.HIGH,
         description="Reflog is the last resort for recovery. Expiring entries may lose data permanently.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="git reflog show", description="Review reflog before expiring"),
+            PatternSuggestion(command="git reflog expire --expire=90.days --all", description="Use a longer expiration time"),
+        ),
     ),
 DestructivePattern(
         name="git-gc-aggressive",
@@ -83,7 +110,10 @@ DestructivePattern(
         reason="git gc with aggressive/prune removes recoverable objects",
         severity=Severity.HIGH,
         description="Prunes loose objects. Reflog entries and stashed changes may be lost.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="git count-objects -vH", description="Check repo size before gc"),
+            PatternSuggestion(command="git gc --auto", description="Run auto gc instead"),
+        ),
     ),
 DestructivePattern(
         name="git-worktree-remove",
@@ -91,7 +121,10 @@ DestructivePattern(
         reason="git worktree remove deletes a linked working tree",
         severity=Severity.HIGH,
         description="Uncommitted changes in the worktree are lost.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="git worktree list", description="List all worktrees first"),
+            PatternSuggestion(command="git stash -u && git worktree remove {name}", description="Stash changes before removing"),
+        ),
     ),
 DestructivePattern(
         name="git-submodule-deinit",
@@ -99,7 +132,10 @@ DestructivePattern(
         reason="git submodule deinit removes submodule configuration",
         severity=Severity.MEDIUM,
         description="Submodule working tree is removed. Clone again to restore.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="git submodule status", description="Check submodule status first"),
+            PatternSuggestion(command="git submodule deinit -f {name}", description="Force deinit if needed"),
+        ),
     ),
 DestructivePattern(
         name="git-add-all-dot",
@@ -107,7 +143,10 @@ DestructivePattern(
         reason="git add . stages everything including secrets, .env, build artifacts",
         severity=Severity.MEDIUM,
         description="All changes in the repo are staged. Secrets or build artifacts may be committed.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="git status", description="Review changes before staging"),
+            PatternSuggestion(command="git add {specific-file}", description="Stage specific files only"),
+        ),
     ),
 DestructivePattern(
         name="git-add-all-flag",
@@ -115,7 +154,10 @@ DestructivePattern(
         reason="git add -A/--all stages all changes including secrets",
         severity=Severity.MEDIUM,
         description="Tracks new and modified files. Secrets may be unintentionally staged.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="git status", description="Review changes before staging"),
+            PatternSuggestion(command="git add -p", description="Interactive staging to review each change"),
+        ),
     ),
 DestructivePattern(
         name="git-push-to-master",
@@ -123,7 +165,10 @@ DestructivePattern(
         reason="Direct push to master/main branch is blocked",
         severity=Severity.MEDIUM,
         description="Push to default branch may bypass review. Use a feature branch and PR.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="git checkout -b feature/{name}", description="Create a feature branch"),
+            PatternSuggestion(command="gh pr create", description="Create a PR instead of direct push"),
+        ),
     ),
 DestructivePattern(
         name="git-push-to-main",
@@ -131,7 +176,10 @@ DestructivePattern(
         reason="Direct push to main branch is blocked",
         severity=Severity.MEDIUM,
         description="Push to default branch may bypass review. Use a feature branch and PR.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="git checkout -b feature/{name}", description="Create a feature branch"),
+            PatternSuggestion(command="gh pr create", description="Create a PR instead of direct push"),
+        ),
     ),
 )
 

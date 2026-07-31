@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.command_policy import DestructivePattern, Severity
+from app.command_policy import DestructivePattern, PatternSuggestion, Severity
 from app.packs import Pack
 
 DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
@@ -11,7 +11,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="DROP DATABASE permanently deletes the entire database",
         severity=Severity.CRITICAL,
         description="All schemas, tables, indexes, and data lost.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="pg_dump {db} > {db}.sql", description="Dump database before dropping"),
+            PatternSuggestion(command="CREATE DATABASE {name} WITH TEMPLATE {old_db}", description="Copy database as backup first"),
+        ),
     ),
     DestructivePattern(
         name="psql-drop-table",
@@ -19,7 +22,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="DROP TABLE permanently deletes the table and its data",
         severity=Severity.HIGH,
         description="Table definition and all rows lost. Related views/indexes affected.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="DROP TABLE IF EXISTS {table}", description="Avoid error if table is missing"),
+            PatternSuggestion(command="DELETE FROM {table} WHERE {condition}", description="Selective deletion instead of full drop"),
+        ),
     ),
     DestructivePattern(
         name="psql-drop-schema",
@@ -27,7 +33,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="DROP SCHEMA deletes the schema and all objects within it",
         severity=Severity.CRITICAL,
         description="All tables, views, functions in the schema lost.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="pg_dump --schema={schema} {db} > schema.sql", description="Dump schema first"),
+            PatternSuggestion(command="DROP SCHEMA IF EXISTS {schema} CASCADE", description="Use IF EXISTS for safety"),
+        ),
     ),
     DestructivePattern(
         name="psql-truncate-table",
@@ -35,7 +44,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="TRUNCATE removes ALL rows from the table irreversibly",
         severity=Severity.HIGH,
         description="All rows deleted. Cannot roll back in many contexts.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="SELECT COUNT(*) FROM {table}", description="Check row count before truncating"),
+            PatternSuggestion(command="BEGIN; DELETE FROM {table}; ROLLBACK;", description="Wrap in transaction — can roll back"),
+        ),
     ),
     DestructivePattern(
         name="psql-delete-without-where",
@@ -43,7 +55,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="DELETE without WHERE clause removes ALL rows",
         severity=Severity.HIGH,
         description="All rows deleted if WHERE clause is missing.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="BEGIN; DELETE FROM {table} ... ; ROLLBACK;", description="Wrap in transaction for safety"),
+            PatternSuggestion(command="DELETE FROM {table} WHERE {condition}", description="Add a WHERE clause"),
+        ),
     ),
     DestructivePattern(
         name="psql-dropdb-cli",
@@ -51,7 +66,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="dropdb CLI permanently deletes the entire database",
         severity=Severity.CRITICAL,
         description="The dropdb command-line tool destroys the database cluster-side.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="pg_dump {db} > {db}.sql", description="Backup database before dropping"),
+            PatternSuggestion(command="createdb {new_db}", description="Create a new database instead of dropping"),
+        ),
     ),
     DestructivePattern(
         name="psql-dump-clean",
@@ -59,7 +77,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="pg_dump --clean adds DROP statements to the dump script",
         severity=Severity.HIGH,
         description="Restoring the dump will DROP existing objects before recreating them.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="pg_dump {db} > {db}.sql", description="Dump without --clean for safe restore"),
+            PatternSuggestion(command="pg_dump --clean --if-exists {db}", description="Use --if-exists to avoid errors"),
+        ),
     ),
     # ---- MySQL / MariaDB ----
     DestructivePattern(
@@ -68,7 +89,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="DROP DATABASE permanently deletes the entire database",
         severity=Severity.CRITICAL,
         description="All tables and data within the database lost.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="mysqldump {db} > {db}.sql", description="Dump database before dropping"),
+            PatternSuggestion(command="CREATE DATABASE {new_db}", description="Create a new database instead"),
+        ),
     ),
     DestructivePattern(
         name="mysql-drop-table",
@@ -76,7 +100,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="DROP TABLE permanently deletes the table",
         severity=Severity.HIGH,
         description="Table definition and all rows lost.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="mysqldump {db} {table} > {table}.sql", description="Dump table before dropping"),
+            PatternSuggestion(command="RENAME TABLE {table} TO {table}_old", description="Rename as a safer alternative"),
+        ),
     ),
     DestructivePattern(
         name="mysql-truncate-table",
@@ -84,7 +111,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="TRUNCATE removes ALL rows — cannot roll back in MySQL",
         severity=Severity.HIGH,
         description="InnoDB: all rows removed implicitly. No per-row delete triggers fired.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="SELECT COUNT(*) FROM {table}", description="Check row count first"),
+            PatternSuggestion(command="DELETE FROM {table} WHERE {condition}", description="Use DELETE with WHERE if possible (InnoDB transaction)"),
+        ),
     ),
     DestructivePattern(
         name="mysql-delete-without-where",
@@ -92,7 +122,11 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="DELETE without WHERE clause removes ALL rows",
         severity=Severity.HIGH,
         description="All rows deleted if WHERE clause is missing.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="BEGIN; DELETE FROM {table} ... ; ROLLBACK;", description="Wrap in transaction for safety"),
+            PatternSuggestion(command="SELECT * FROM {table} LIMIT 100", description="Preview rows first"),
+            PatternSuggestion(command="DELETE FROM {table} WHERE {condition}", description="Add a WHERE clause"),
+        ),
     ),
     DestructivePattern(
         name="mysql-mysqladmin-drop",
@@ -100,7 +134,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="mysqladmin drop permanently deletes the entire database",
         severity=Severity.CRITICAL,
         description="mysqladmin drop destroys the database server-side without confirmation.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="mysqldump {db} > {db}.sql", description="Dump database first"),
+            PatternSuggestion(command="mysqladmin ping", description="Check server status before destructive action"),
+        ),
     ),
     DestructivePattern(
         name="mysql-mysqldump-add-drop-database",
@@ -108,7 +145,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="mysqldump --add-drop-database adds DROP DATABASE to the dump",
         severity=Severity.HIGH,
         description="Restoring the dump will DROP the database first.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="mysqldump {db} > {db}.sql", description="Dump without --add-drop-database"),
+            PatternSuggestion(command="mysqldump --no-data {db} > schema.sql", description="Dump schema only"),
+        ),
     ),
     DestructivePattern(
         name="mysql-mysqldump-add-drop-table",
@@ -116,7 +156,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="mysqldump --add-drop-table adds DROP TABLE before CREATE TABLE",
         severity=Severity.MEDIUM,
         description="Existing tables will be dropped before restore.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="mysqldump {db} > {db}.sql", description="Dump without --add-drop-table"),
+            PatternSuggestion(command="mysqldump --no-data {db} > schema.sql", description="Dump schema only"),
+        ),
     ),
     DestructivePattern(
         name="mysql-grant-all",
@@ -124,7 +167,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="GRANT ALL ON *.* gives unrestricted access to all databases",
         severity=Severity.HIGH,
         description="Full administrative access granted across all databases.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="GRANT {privileges} ON {db}.* TO {user}", description="Grant only specific privileges on specific DBs"),
+            PatternSuggestion(command="SHOW GRANTS FOR {user}", description="Check current grants first"),
+        ),
     ),
     DestructivePattern(
         name="mysql-drop-user",
@@ -132,7 +178,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="DROP USER permanently deletes the user account",
         severity=Severity.MEDIUM,
         description="User deleted. All privileges revoked. Existing connections may break.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="DROP USER IF EXISTS {user}", description="Avoid error if user does not exist"),
+            PatternSuggestion(command="REVOKE ALL PRIVILEGES ... FROM {user}", description="Revoke privileges instead of dropping user"),
+        ),
     ),
     DestructivePattern(
         name="mysql-reset-master",
@@ -140,7 +189,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="RESET MASTER deletes all binary logs and resets binlog position",
         severity=Severity.CRITICAL,
         description="Breaks replication. All binlog history lost.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="SHOW BINARY LOGS", description="Check binary log status before reset"),
+            PatternSuggestion(command="PURGE BINARY LOGS BEFORE NOW()", description="Remove old logs safely without full reset"),
+        ),
     ),
     # ---- SQLite (sqlite3) ----
     DestructivePattern(
@@ -149,7 +201,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="DROP TABLE permanently deletes the table and all data",
         severity=Severity.CRITICAL,
         description="Table and all rows deleted from the database file.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="DROP TABLE IF EXISTS {table}", description="Avoid error if table is missing"),
+            PatternSuggestion(command="sqlite3 {db} '.dump {table}' > {table}.sql", description="Dump table before dropping"),
+        ),
     ),
     DestructivePattern(
         name="sqlite-delete-without-where",
@@ -157,7 +212,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="DELETE without WHERE clause removes ALL rows",
         severity=Severity.CRITICAL,
         description="SQLite does not support TRUNCATE. DELETE without WHERE removes all rows.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="BEGIN; DELETE FROM {table} ... ; ROLLBACK;", description="Wrap in transaction for safety"),
+            PatternSuggestion(command="SELECT COUNT(*) FROM {table}", description="Check row count first"),
+        ),
     ),
     DestructivePattern(
         name="sqlite-vacuum-into",
@@ -165,7 +223,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="VACUUM INTO overwrites the target file if it exists",
         severity=Severity.MEDIUM,
         description="Target file is overwritten without warning.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="VACUUM", description="Vacuum in-place without overwriting another file"),
+            PatternSuggestion(command="PRAGMA page_count", description="Check database size first"),
+        ),
     ),
     DestructivePattern(
         name="sqlite-sqlite3-file-input",
@@ -173,7 +234,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="SQL loaded from file may contain destructive commands",
         severity=Severity.HIGH,
         description="Read SQL from file command — file contents not inspected by guard.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="sqlite3 {db} '.read {file}'", description="Use dot-command to read file in-process"),
+            PatternSuggestion(command="cat {file} | sqlite3 {db}", description="Pipe file contents for visibility"),
+        ),
     ),
     # ---- MongoDB (mongosh) ----
     DestructivePattern(
@@ -182,7 +246,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="dropDatabase() permanently deletes the entire database",
         severity=Severity.CRITICAL,
         description="All collections, indexes, and data lost.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="db.adminCommand('listDatabases')", description="List databases first"),
+            PatternSuggestion(command="mongodump --db {db}", description="Backup before dropping"),
+        ),
     ),
     DestructivePattern(
         name="mongodb-drop-collection",
@@ -190,7 +257,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="drop()/dropCollection() permanently deletes the collection",
         severity=Severity.HIGH,
         description="All documents and indexes in the collection lost.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="db.{coll}.find().limit(10)", description="Preview documents first"),
+            PatternSuggestion(command="mongodump --collection {coll} --db {db}", description="Backup collection first"),
+        ),
     ),
     DestructivePattern(
         name="mongodb-delete-all",
@@ -198,7 +268,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="remove({})/deleteMany({}) removes ALL documents",
         severity=Severity.HIGH,
         description="All documents in the collection deleted.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="db.{coll}.find().limit(100)", description="Preview documents first"),
+            PatternSuggestion(command="db.{coll}.deleteMany({filter})", description="Use a filter for selective deletion"),
+        ),
     ),
     DestructivePattern(
         name="mongodb-mongorestore-drop",
@@ -206,7 +279,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="mongorestore --drop drops existing collections before restoring",
         severity=Severity.HIGH,
         description="Existing collections are dropped before data restoration.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="mongodump --db {db} --out /tmp/backup", description="Backup before restoring"),
+            PatternSuggestion(command="mongorestore --nsInclude {db}.*", description="Restore specific namespaces only"),
+        ),
     ),
     # ---- Redis (redis-cli) ----
     DestructivePattern(
@@ -215,7 +291,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="FLUSHALL deletes ALL keys in ALL databases",
         severity=Severity.CRITICAL,
         description="Every key in every database is deleted immediately.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="redis-cli --scan --pattern '*' | head -20", description="Preview keys in all databases first"),
+            PatternSuggestion(command="redis-cli DBSIZE", description="Check number of keys before flushing"),
+        ),
     ),
     DestructivePattern(
         name="redis-flushdb",
@@ -223,7 +302,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="FLUSHDB deletes ALL keys in the current database",
         severity=Severity.HIGH,
         description="All keys in the selected database deleted.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="redis-cli --scan --pattern '*' | head -20", description="Preview keys first"),
+            PatternSuggestion(command="redis-cli DBSIZE", description="Check key count before flushing"),
+        ),
     ),
     DestructivePattern(
         name="redis-mass-delete-pipeline",
@@ -231,7 +313,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="KEYS/SCAN piped through xargs to DEL/UNLINK mass-deletes many keys",
         severity=Severity.HIGH,
         description="Mass key deletion via pipe. Can affect many keys at once.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="redis-cli --bigkeys", description="Check key distribution first"),
+            PatternSuggestion(command="redis-cli --scan --pattern 'prefix:*'", description="Use a specific prefix for targeted deletion"),
+        ),
     ),
     DestructivePattern(
         name="redis-debug-crash",
@@ -239,7 +324,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="DEBUG SEGFAULT/CRASH crashes the Redis server",
         severity=Severity.CRITICAL,
         description="Redis server process crashes. Data loss may occur.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="redis-cli PING", description="Check server health instead"),
+            PatternSuggestion(command="redis-cli INFO server", description="Check server info instead"),
+        ),
     ),
     DestructivePattern(
         name="redis-debug-sleep",
@@ -247,7 +335,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="DEBUG SLEEP blocks the Redis server",
         severity=Severity.HIGH,
         description="Redis blocked for N seconds. All clients time out.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="redis-cli PING", description="Check server health instead"),
+            PatternSuggestion(command="redis-cli LATENCY LATEST", description="Check latency first"),
+        ),
     ),
     DestructivePattern(
         name="redis-shutdown",
@@ -255,7 +346,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="SHUTDOWN stops the Redis server (SHUTDOWN NOSAVE loses data)",
         severity=Severity.HIGH,
         description="Redis server shut down gracefully (or with NOSAVE, losing data).",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="redis-cli SAVE", description="Save RDB before shutdown"),
+            PatternSuggestion(command="redis-cli BGSAVE", description="Background save before shutdown"),
+        ),
     ),
     DestructivePattern(
         name="redis-config-dangerous",
@@ -264,7 +358,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.CRITICAL,
         description="Changing dir+dbfilename writes key data outside data dir. "
         "slaveof/replicaof can leak keys to attacker.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="redis-cli CONFIG GET dir", description="Check current directory first"),
+            PatternSuggestion(command="redis-cli CONFIG GET dbfilename", description="Check current filename first"),
+        ),
     ),
     DestructivePattern(
         name="redis-config-set-maxmemory",
@@ -272,7 +369,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="CONFIG SET maxmemory can trigger mass key eviction",
         severity=Severity.CRITICAL,
         description="Setting maxmemory too low causes Redis to evict keys aggressively.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="redis-cli INFO memory", description="Check current memory usage first"),
+            PatternSuggestion(command="redis-cli MEMORY STATS", description="Detailed memory analysis"),
+        ),
     ),
     DestructivePattern(
         name="redis-config-set-maxmemory-policy",
@@ -280,7 +380,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="CONFIG SET maxmemory-policy changes eviction policy — risk of data loss",
         severity=Severity.CRITICAL,
         description="Changing to allkeys-lru or volatile-ttl can evict any key.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="redis-cli CONFIG GET maxmemory-policy", description="Check current policy first"),
+            PatternSuggestion(command="redis-cli INFO stats", description="Check eviction stats first"),
+        ),
     ),
     DestructivePattern(
         name="redis-config-set-save",
@@ -288,7 +391,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="CONFIG SET save can disable RDB persistence entirely",
         severity=Severity.HIGH,
         description="Setting save to empty disables snapshots. Data lost on restart.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="redis-cli CONFIG GET save", description="Check current save config first"),
+            PatternSuggestion(command="redis-cli LASTSAVE", description="Check last save timestamp"),
+        ),
     ),
     DestructivePattern(
         name="redis-config-set-appendonly",
@@ -296,7 +402,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="CONFIG SET appendonly can disable AOF persistence",
         severity=Severity.HIGH,
         description="Disabling AOF removes append-only log. Data may be lost on restart.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="redis-cli CONFIG GET appendonly", description="Check current AOF status first"),
+            PatternSuggestion(command="redis-cli INFO persistence", description="Check persistence status"),
+        ),
     ),
     DestructivePattern(
         name="redis-config-rewrite",
@@ -304,7 +413,10 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
         reason="CONFIG REWRITE saves runtime changes to redis.conf permanently",
         severity=Severity.HIGH,
         description="Runtime CONFIG SET changes are persisted to disk.",
-        suggestions=(),
+        suggestions=(
+            PatternSuggestion(command="redis-cli CONFIG GET *", description="Review current config before persisting"),
+            PatternSuggestion(command="redis-cli INFO server", description="Check server info before rewriting config"),
+        ),
     ),
 )
 

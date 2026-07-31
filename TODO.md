@@ -41,9 +41,12 @@ Safe-паттерны (allow list для docker ps/logs/build...) — опцио
 - `approval_id` и `requires_approval` передаются в structured audit events
 - Форматирование показывает approval_id в Telegram-сообщениях
 
-### P17 — Suggestions при блокировке
-Уже есть в DestructivePattern.suggestions (все пакеты).
-Отображается в ответе policy evaluation.
+### P17 — Suggestions при блокировке ✅
+`DestructivePattern.suggestions` заполнен во ВСЕХ паках (300 паттернов):
+- system.py (54), database.py (37), git_pack.py (16), firewall.py (13),
+  loadbalancer.py (30), cloud.py (50), docker.py + compose (13 + остальные)
+- Конвенция: 2 suggestions на паттерн — preview/check + safer alternative
+- Отображается в ответе policy evaluation (decision.suggestion)
 
 ### P18 — Больше pack-паттернов (K8s, AWS, GCP, БД, DNS...)
 У DCG ~50 доменов, у нас ~10. Постепенное расширение по необходимости.

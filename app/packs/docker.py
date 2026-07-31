@@ -58,6 +58,18 @@ DOCKER_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.HIGH,
         description="Stops/kills ALL running containers via command substitution.",
         suggestions=(PatternSuggestion("docker stop <container>", "Stop specific containers"),)),
+    DestructivePattern(name="builder-prune",
+        regex=r"docker\b.*?\bbuilder\s+prune",
+        reason="docker builder prune removes ALL build cache — rebuilds will be slow",
+        severity=Severity.MEDIUM,
+        description="Removes the entire build cache layer. All images must be rebuilt from scratch.",
+        suggestions=(PatternSuggestion("docker builder ls", "List builders first"),)),
+    DestructivePattern(name="network-rm",
+        regex=r"docker\b.*?\bnetwork\s+rm\b",
+        reason="docker network rm can break connectivity between running containers",
+        severity=Severity.HIGH,
+        description="Removing a network currently in use by containers will disconnect them.",
+        suggestions=(PatternSuggestion("docker network inspect <name>", "Check which containers use it"),)),
 )
 
 COMPOSE_PATTERNS: tuple[DestructivePattern, ...] = (
@@ -85,6 +97,12 @@ COMPOSE_PATTERNS: tuple[DestructivePattern, ...] = (
         severity=Severity.MEDIUM,
         description="Running containers are stopped abruptly (SIGKILL).",
         suggestions=(PatternSuggestion("docker-compose stop", "Graceful shutdown first"),)),
+    DestructivePattern(name="compose-kill",
+        regex=r"(?:docker-compose|docker\s+compose)\s+kill\b",
+        reason="docker compose kill sends SIGKILL to all service containers",
+        severity=Severity.MEDIUM,
+        description="All containers are killed without graceful shutdown.",
+        suggestions=(PatternSuggestion("docker-compose stop", "Graceful stop (SIGTERM) instead"),)),
 )
 
 
