@@ -432,6 +432,7 @@ class TestSsoEndpoints:
         assert "text/html" in resp.headers["content-type"]
         assert "auth_token" in resp.text
         assert "location.href = '/'" in resp.text
+        assert "eyJ" in resp.text
 
     def test_callback_email_not_allowed(self, monkeypatch):
         monkeypatch.setattr(settings, "oauth_allowed_emails", "team@example.com")
