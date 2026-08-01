@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from app.audit import AuditEventLogger
@@ -62,6 +63,9 @@ from app.agent_token_store import AgentTokenStore  # noqa: E402
 
 agent_token_store: AgentTokenStore | None = None
 active_websockets: set[WebSocket] = set()
+
+# session_id -> asyncio.Task for in-flight pre-warm connections
+prewarm_tasks: dict[str, asyncio.Task] = {}
 
 
 def get_agent_token_store() -> AgentTokenStore:

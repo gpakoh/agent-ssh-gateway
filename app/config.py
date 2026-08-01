@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     known_hosts_store: str = Field(default="", alias="KNOWN_HOSTS_STORE")
     known_hosts_file: str = Field(default="known_hosts", alias="KNOWN_HOSTS_FILE")
 
+    # SSH connection pooling (optional; 0 = disabled)
+    ssh_connection_pool_size: int = Field(default=0, alias="SSH_CONNECTION_POOL_SIZE")
+    ssh_connection_pool_ttl_seconds: int = Field(
+        default=60, alias="SSH_CONNECTION_POOL_TTL_SECONDS"
+    )
+
     server_default_configs: str = Field(
         default="{}",
         alias="SERVER_DEFAULT_CONFIGS",

@@ -21,6 +21,7 @@ from app.circuit_breaker import CircuitBreakerRegistry
 from app.config import settings
 from app.known_hosts import HostKeyStore, KnownHostsPolicy, NullHostKeyStore
 from app.security import SecretManager
+from app.ssh_pool import ConnectionPool
 
 # Lazy Import To Avoid Circular Dependency
 
@@ -123,6 +124,7 @@ class SessionRecord:
     owner_name: str | None = None
     owner_token_fingerprint: str | None = None
     source_ip: str | None = None
+    auth_method: str = "password"
 
     def touch(self) -> None:
         """Update last activity timestamp."""
@@ -156,6 +158,8 @@ class SSHSessionManager:
         cleanup_interval: int = 60,
         host_key_store: HostKeyStore | None = None,
         circuit_breakers: CircuitBreakerRegistry | None = None,
+        connection_pool_size: int = 0,
+        connection_pool_ttl_seconds: int = 60,
     ) -> None:
         self._sessions: dict[str, SessionRecord] = {}
         self._lock = asyncio.Lock()
@@ -165,6 +169,11 @@ class SSHSessionManager:
         self._strict_host_key = settings.ssh_strict_host_key_checking
         self._host_key_store = host_key_store or NullHostKeyStore()
         self._circuit_breakers = circuit_breakers
+        self._pool = (
+            ConnectionPool(max_size=connection_pool_size, ttl_seconds=connection_pool_ttl_seconds)
+            if connection_pool_size > 0
+            else None
+        )
         try:
             self._secret_manager = (
                 SecretManager(settings.encryption_key) if settings.encryption_key else None
@@ -275,10 +284,25 @@ class SSHSessionManager:
         owner_name: str | None = None,
         owner_token_fingerprint: str | None = None,
         source_ip: str | None = None,
+        session_id: str | None = None,
     ) -> str:
-        """Create a new SSH session and return its session ID."""
+        """Create a new SSH session and return its session ID.
+
+        When a connection pool is enabled, an idle transport matching
+        (host, port, username, auth_method) is reused instead of paying a
+        fresh TCP handshake. The optional ``session_id`` is used by the
+        pre-warm endpoint so the caller can learn the id before the
+        background connection finishes.
+        """
+        auth_method = "password" if password is not None else "key"
+        pool_key = (host, port, username, auth_method)
+
+        pooled_client = None
+        if self._pool is not None:
+            pooled_client = await self._pool.acquire(pool_key)
+
         breaker = None
-        if self._circuit_breakers is not None:
+        if self._circuit_breakers is not None and pooled_client is None:
             breaker = await self._circuit_breakers.get_breaker(host)
             if not await breaker.can_execute():
                 raise ConnectionError(
@@ -286,56 +310,64 @@ class SSHSessionManager:
                     "failures, refusing to attempt connection"
                 )
 
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(self._get_host_key_policy(port=port))
-
-        pkey = None
-        if private_key:
-            pkey = await self._load_private_key(private_key, key_passphrase)
-
-        try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                lambda: client.connect(
-                    hostname=host,
-                    port=port,
-                    username=username,
-                    password=password,
-                    pkey=pkey,
-                    timeout=30,
-                    banner_timeout=30,
-                    auth_timeout=30,
-                    look_for_keys=False,
-                ),
+        if pooled_client is not None:
+            client = pooled_client
+            logger.info(
+                "Reused pooled SSH connection for %s@%s:%d", username, host, port
             )
-        except AuthenticationException as exc:
-            # Host is reachable, credentials are wrong — not a circuit-breaker
-            # failure signal (would otherwise let repeated bad passwords
-            # deny service to legitimate connections against a healthy host).
-            client.close()
-            raise AuthenticationError(
-                f"Authentication failed for {username}@{host}: {exc}"
-            ) from exc
-        except (NoValidConnectionsError, SSHException, OSError) as exc:
+            # Transport already exists; refresh window size is harmless no-op
+            # but keep the same post-connect setup the fresh path applies.
+        else:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(self._get_host_key_policy(port=port))
+
+            pkey = None
+            if private_key:
+                pkey = await self._load_private_key(private_key, key_passphrase)
+
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: client.connect(
+                        hostname=host,
+                        port=port,
+                        username=username,
+                        password=password,
+                        pkey=pkey,
+                        timeout=30,
+                        banner_timeout=30,
+                        auth_timeout=30,
+                        look_for_keys=False,
+                    ),
+                )
+            except AuthenticationException as exc:
+                # Host is reachable, credentials are wrong — not a circuit-breaker
+                # failure signal (would otherwise let repeated bad passwords
+                # deny service to legitimate connections against a healthy host).
+                client.close()
+                raise AuthenticationError(
+                    f"Authentication failed for {username}@{host}: {exc}"
+                ) from exc
+            except (NoValidConnectionsError, SSHException, OSError) as exc:
+                if breaker is not None:
+                    await breaker.record_failure()
+                client.close()
+                raise ConnectionError(f"Could not connect to {host}:{port}: {exc}") from exc
+
             if breaker is not None:
-                await breaker.record_failure()
-            client.close()
-            raise ConnectionError(f"Could not connect to {host}:{port}: {exc}") from exc
+                await breaker.record_success()
 
-        if breaker is not None:
-            await breaker.record_success()
+            # Увеличить размер окна ssh для потоковой передачи
+            transport = client.get_transport()
+            if transport:
+                transport.window_size = 2**20
+                transport.packetizer.REKEY_BYTES = 2**30
+                transport.packetizer.REKEY_PACKETS = 2**30
 
-        # Увеличить размер окна ssh для потоковой передачи
-        transport = client.get_transport()
-        if transport:
-            transport.window_size = 2**20
-            transport.packetizer.REKEY_BYTES = 2**30
-            transport.packetizer.REKEY_PACKETS = 2**30
-
-        session_id = str(uuid.uuid4())
+        resolved_id = session_id or str(uuid.uuid4())
         record = SessionRecord(
-            session_id=session_id,
+            session_id=resolved_id,
             client=client,
             host=host,
             port=port,
@@ -344,20 +376,21 @@ class SSHSessionManager:
             owner_name=owner_name,
             owner_token_fingerprint=owner_token_fingerprint,
             source_ip=source_ip,
+            auth_method=auth_method,
         )
 
         async with self._lock:
-            self._sessions[session_id] = record
+            self._sessions[resolved_id] = record
 
-        logger.info("SSH session %s created for %s@%s:%d", session_id, username, host, port)
+        logger.info("SSH session %s created for %s@%s:%d", resolved_id, username, host, port)
         _emit(
             "session.connected",
-            session_id=session_id,
+            session_id=resolved_id,
             host=host,
             port=port,
             username=username,
         )
-        return session_id
+        return resolved_id
 
     async def reconnect(self, session_id: str) -> bool:
         """Reconnect a disconnected session.
@@ -731,7 +764,7 @@ class SSHSessionManager:
     # ------------------------------------------------------------------
 
     async def disconnect(self, session_id: str) -> None:
-        """Close an SSH session."""
+        """Close an SSH session (or return its transport to the pool)."""
         async with self._lock:
             record = self._sessions.pop(session_id, None)
 
@@ -741,9 +774,21 @@ class SSHSessionManager:
         host, port, username = record.host, record.port, record.username
 
         try:
-            record.client.close()
-        except Exception as exc:
-            logger.warning("Error closing client for session %s: %s", session_id, exc)
+            transport = record.client.get_transport()
+            alive = transport is not None and transport.is_active()
+        except Exception:
+            alive = False
+
+        if self._pool is not None and alive:
+            # Return the idle transport to the pool for reuse instead of
+            # tearing down the TCP connection.
+            pool_key = (host, port, username, record.auth_method)
+            await self._pool.release(pool_key, record.client)
+        else:
+            try:
+                record.client.close()
+            except Exception as exc:
+                logger.warning("Error closing client for session %s: %s", session_id, exc)
 
         logger.info("SSH session %s disconnected", session_id)
         _emit(
@@ -754,6 +799,18 @@ class SSHSessionManager:
             username=username,
             reason="manual",
         )
+
+    async def close_pool(self) -> None:
+        """Close all idle pooled connections (graceful shutdown)."""
+        if self._pool is not None:
+            await self._pool.close_all()
+
+    @property
+    def pool_stats(self) -> dict[str, int] | None:
+        """Return connection pool stats, or None when pooling is disabled."""
+        if self._pool is None:
+            return None
+        return self._pool.stats()
 
     # ------------------------------------------------------------------
     # List Sessions

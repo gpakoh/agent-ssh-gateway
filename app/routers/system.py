@@ -178,6 +178,8 @@ async def prometheus_metrics(_identity: AuthIdentity = Depends(require_master_ke
     if _state.circuit_breakers is not None:
         counts = await _state.circuit_breakers.count_by_state()
         metrics.set_circuit_breaker_counts(counts)
+    if _state.manager is not None and isinstance(_state.manager.pool_stats, dict):
+        metrics.update_pool_metrics(**_state.manager.pool_stats)
     return Response(content=metrics.get_metrics(), media_type="text/plain")
 
 
