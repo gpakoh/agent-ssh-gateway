@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -59,4 +60,59 @@ async def audit_recent(
         "events": events_data,
         "total": len(events_data),
         "buffer_size": event_logger.recent_count,
+    }
+
+
+@router.get("/api/audit")
+async def audit_query(
+    _identity: AuthIdentity = Depends(require_master_key),
+    session_id: str | None = Query(None, description="Filter by session id"),
+    event_type: str | None = Query(None, description="Filter by event type"),
+    decision: str | None = Query(None, description="Filter by decision (allowed/denied/error)"),
+    since: datetime | None = Query(None, description="Only events at or after this timestamp"),
+    until: datetime | None = Query(None, description="Only events at or before this timestamp"),
+    limit: int = Query(100, ge=1, le=1000, description="Max events to return"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+) -> dict[str, Any]:
+    """Query the persistent audit log stored in PostgreSQL.
+
+    Read-only. Master key required. Newest-first with pagination.
+    Returns 503 when the persistent audit store is not configured.
+    """
+    store = _state.audit_log_store
+    if store is None:
+        raise HTTPException(
+            status_code=503,
+            detail=_err(
+                503,
+                "Persistent audit log not configured "
+                "(set AUDIT_LOG_PERSIST_ENABLED=true and DATABASE_URL)",
+            ),
+        )
+
+    since_aware = since if since is None or since.tzinfo else since.replace(tzinfo=UTC)
+    until_aware = until if until is None or until.tzinfo else until.replace(tzinfo=UTC)
+
+    events = await store.query(
+        session_id=session_id,
+        event_type=event_type,
+        decision=decision,
+        since=since_aware,
+        until=until_aware,
+        limit=limit,
+        offset=offset,
+    )
+    total = await store.count(
+        session_id=session_id,
+        event_type=event_type,
+        decision=decision,
+        since=since_aware,
+        until=until_aware,
+    )
+
+    return {
+        "events": [e.to_dict() for e in events],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
     }

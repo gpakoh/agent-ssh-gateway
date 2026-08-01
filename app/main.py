@@ -62,6 +62,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+async def _audit_retention_loop(
+    store, *, retention_days: int, interval_seconds: int
+) -> None:
+    """Periodically prune audit_log entries older than retention_days."""
+    while True:
+        try:
+            await store.cleanup_retention(retention_days)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("audit retention cleanup failed", exc_info=True)
+        await asyncio.sleep(max(1, interval_seconds))
+
 # ---------------------------------------------------------------------------
 # Lifespan — Initializes Globals In App.state
 # ---------------------------------------------------------------------------
@@ -139,6 +153,29 @@ async def lifespan(app: FastAPI):
         log_path=settings.audit_log_path,
         recent_limit=settings.audit_recent_limit,
     )
+
+    # Initialize persistent audit log store (PostgreSQL) if configured
+    state.audit_log_store = None
+    if settings.audit_log_persist_enabled and settings.database_url:
+        try:
+            from app.audit_store import AuditLogStore
+
+            state.audit_log_store = AuditLogStore(settings.database_url)
+            await state.audit_log_store.create_tables()
+            logger.info("Persistent Audit Log Store Connected")
+
+            # Retention cleanup task
+            _retention_task = asyncio.create_task(
+                _audit_retention_loop(
+                    state.audit_log_store,
+                    retention_days=settings.audit_log_retention_days,
+                    interval_seconds=settings.audit_log_cleanup_interval_seconds,
+                )
+            )
+            state._audit_retention_task = _retention_task
+        except Exception as exc:
+            logger.warning("Persistent audit log not available: %s", exc)
+            state.audit_log_store = None
 
     # Initialize Swarm Components
     state.redis_queue = RedisJobQueue(settings.redis_url)
@@ -304,6 +341,16 @@ async def lifespan(app: FastAPI):
         await state.dist_lock.disconnect()
     if state.agent_token_store:
         await state.agent_token_store.disconnect()
+    ret_task = getattr(state, "_audit_retention_task", None)
+    if ret_task:
+        ret_task.cancel()
+        try:
+            await ret_task
+        except (asyncio.CancelledError, Exception):
+            pass
+    if state.audit_log_store:
+        await state.audit_log_store.close()
+        logger.info("Persistent Audit Log Store Disconnected")
     ds = getattr(state, "delivery_service", None)
     if ds:
         await ds.close()
