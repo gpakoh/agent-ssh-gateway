@@ -2534,6 +2534,34 @@ textarea {
     text-decoration: underline;
 }
 
+.auth-divider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text-tertiary);
+    font: var(--text-sm);
+    margin: var(--space-3) 0;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--border-subtle, rgba(127, 127, 127, 0.25));
+}
+
+.btn-sso {
+    background: var(--surface-secondary, rgba(255, 255, 255, 0.04));
+    border: 1px solid var(--border, rgba(127, 127, 127, 0.35));
+    color: var(--text-primary, #e5e5e5);
+}
+
+.btn-sso:hover {
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+}
+
 .auth-user-badge {
     display: inline-flex;
     align-items: center;

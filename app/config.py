@@ -67,6 +67,30 @@ class Settings(BaseSettings):
     jwt_expires_minutes: int = Field(default=1440, alias="JWT_EXPIRES_MINUTES")
     auth_db_path: str = Field(default="/app/data/auth.sqlite3", alias="AUTH_DB_PATH")
 
+    # OAuth2/SSO (optional; "" = disabled)
+    oauth_provider: str = Field(
+        default="",
+        alias="OAUTH_PROVIDER",
+        description="OAuth provider: github, gitlab, google, or oidc (generic OIDC). Empty disables SSO.",
+    )
+    oauth_client_id: str = Field(default="", alias="OAUTH_CLIENT_ID")
+    oauth_client_secret: str = Field(default="", alias="OAUTH_CLIENT_SECRET")
+    oauth_issuer_url: str = Field(
+        default="",
+        alias="OAUTH_ISSUER_URL",
+        description="OIDC issuer URL for provider=oidc (auto-discovery of /.well-known/openid-configuration)",
+    )
+    oauth_redirect_uri: str = Field(
+        default="",
+        alias="OAUTH_REDIRECT_URI",
+        description="Public callback URL (e.g. https://gateway.example.com/api/auth/oauth/callback). Empty = auto-detect from request.",
+    )
+    oauth_allowed_emails: str = Field(
+        default="",
+        alias="OAUTH_ALLOWED_EMAILS",
+        description="Comma-separated allowlist of SSO emails. Empty = allow any authenticated identity.",
+    )
+
     @property
     def jwt_secret_required(self) -> str:
         if not self.jwt_secret:
