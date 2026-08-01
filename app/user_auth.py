@@ -95,11 +95,12 @@ def validate_password(password: str) -> tuple[bool, str]:
     return True, ""
 
 
-def create_jwt(username: str, user_id: int) -> str:
+def create_jwt(username: str, user_id: int, role: str = "admin") -> str:
     secret = settings.jwt_secret_required
     payload = {
         "sub": username,
         "uid": user_id,
+        "role": role,
         "type": "web-ui",
         "exp": datetime.now(UTC) + timedelta(minutes=settings.jwt_expires_minutes),
         "iat": datetime.now(UTC),

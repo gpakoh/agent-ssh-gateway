@@ -125,6 +125,7 @@ class SessionRecord:
     owner_token_fingerprint: str | None = None
     source_ip: str | None = None
     auth_method: str = "password"
+    tenant_labels: tuple[str, ...] = ()
 
     def touch(self) -> None:
         """Update last activity timestamp."""
@@ -284,6 +285,7 @@ class SSHSessionManager:
         owner_name: str | None = None,
         owner_token_fingerprint: str | None = None,
         source_ip: str | None = None,
+        tenant_labels: tuple[str, ...] = (),
         session_id: str | None = None,
     ) -> str:
         """Create a new SSH session and return its session ID.
@@ -377,6 +379,7 @@ class SSHSessionManager:
             owner_token_fingerprint=owner_token_fingerprint,
             source_ip=source_ip,
             auth_method=auth_method,
+            tenant_labels=tuple(tenant_labels or ()),
         )
 
         async with self._lock:
