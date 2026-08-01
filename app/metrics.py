@@ -63,6 +63,12 @@ class MetricsCollector:
             ["status", "profile", "command_root"],
         )
 
+        # Connection pool metrics (only meaningful when pooling is enabled)
+        self.ssh_pool_idle = Gauge("ssh_gateway_ssh_pool_idle_connections", "Idle pooled SSH connections")
+        self.ssh_pool_hits = Counter("ssh_gateway_ssh_pool_hits_total", "Pool hits (reused connection)")
+        self.ssh_pool_misses = Counter("ssh_gateway_ssh_pool_misses_total", "Pool misses (fresh connection)")
+        self.ssh_pool_evictions = Counter("ssh_gateway_ssh_pool_evictions_total", "Pool LRU/TTL evictions")
+
         # Job metrics
         self.jobs_enqueued = Counter(
             "ssh_gateway_jobs_enqueued_total", "Total jobs enqueued", ["priority"]
@@ -141,6 +147,16 @@ class MetricsCollector:
         """
         root = _normalize_command_root(command_root)
         self.ssh_commands.labels(status=status, profile=profile, command_root=root).inc()
+
+    def update_pool_metrics(self, idle: int, hits: int, misses: int, evictions: int) -> None:
+        """Update SSH connection pool gauges/counters from a stats snapshot."""
+        self.ssh_pool_idle.set(idle)
+        # Counters need to converge from a snapshot: set the internal value
+        # directly so scrapes reflect the authoritative pool counters even
+        # across restart-less deltas.
+        self.ssh_pool_hits._value.set(hits)  # type: ignore[attr-defined]
+        self.ssh_pool_misses._value.set(misses)  # type: ignore[attr-defined]
+        self.ssh_pool_evictions._value.set(evictions)  # type: ignore[attr-defined]
 
     def record_job_enqueued(self, priority: int = 0):
         """Record job enqueue."""

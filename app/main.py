@@ -50,6 +50,7 @@ from app.ssh_manager import (
     SSHSessionManager,
     TimeoutError,
 )
+from app.ssh_pool import ConnectionPool
 from app.state import _err
 from app.user_auth import init_auth_db
 from app.user_auth import router as auth_router
@@ -96,6 +97,8 @@ async def lifespan(app: FastAPI):
         cleanup_interval=settings.cleanup_interval,
         host_key_store=state.host_key_store,
         circuit_breakers=state.circuit_breakers,
+        connection_pool_size=settings.ssh_connection_pool_size,
+        connection_pool_ttl_seconds=settings.ssh_connection_pool_ttl_seconds,
     )
     await state.manager.start_cleanup_task()
 
@@ -334,6 +337,10 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
         state.active_websockets.clear()
+
+    if state.manager is not None and isinstance(state.manager._pool, ConnectionPool):
+        await state.manager.close_pool()
+        logger.info("SSH Connection Pool Shut Down")
 
     if state.redis_queue:
         await state.redis_queue.disconnect()

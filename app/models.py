@@ -121,6 +121,22 @@ class ExecuteArgvResponse(BaseModel):
     duration: float = 0.0
 
 
+class PrewarmRequest(ConnectRequest):
+    """Request body for pre-warming an SSH session.
+
+    Same body as ConnectRequest; the connection is established in the
+    background so the caller gets the session_id immediately.
+    """
+
+
+class PrewarmResponse(BaseModel):
+    """Response after scheduling a session pre-warm."""
+
+    session_id: str
+    status: str = "prewarming"
+    message: str = "SSH session pre-warming in background"
+
+
 # ---------------------------------------------------------------------------
 # Session Management
 # ---------------------------------------------------------------------------

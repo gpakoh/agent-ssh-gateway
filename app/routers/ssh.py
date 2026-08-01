@@ -49,6 +49,8 @@ from app.models import (
     ExecuteRequest,
     ExecuteResponse,
     JobRunResponse,
+    PrewarmRequest,
+    PrewarmResponse,
     SessionConfigResponse,
     SessionInfo,
     SessionsResponse,
@@ -359,6 +361,131 @@ async def ssh_connect(
     return ConnectResponse(session_id=session_id)
 
 
+async def _await_prewarm(session_id: str, *, timeout: float = 35.0) -> None:
+    """Wait for an in-flight pre-warm connection to finish.
+
+    Used by execute/execute-argv so a command issued right after prewarm
+    waits for the background connection instead of hitting "session not
+    found". No-op when the session was not pre-warmed.
+    """
+    task = _state.prewarm_tasks.pop(session_id, None)
+    if task is None:
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    except TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=_err(504, "Pre-warmed connection not ready in time"),
+        ) from None
+    except Exception as exc:
+        logger.warning("Pre-warm for session %s failed: %s", session_id, exc)
+        raise HTTPException(
+            status_code=502,
+            detail=_err(502, f"Pre-warm connection failed: {exc}"),
+        ) from exc
+
+
+@router.post("/api/ssh/prewarm", response_model=PrewarmResponse)
+@rate_limit_mutation(10, "minute")
+async def ssh_prewarm(
+    req: PrewarmRequest,
+    request: Request,
+    _identity: AuthIdentity = Depends(require_scope("ssh:connect")),
+):
+    """Pre-warm an SSH session in the background.
+
+    Accepts the same body as /api/ssh/connect but returns the session_id
+    immediately while the TCP connection is established asynchronously.
+    """
+    source_ip = get_client_ip(request, parse_cidrs(settings.trusted_proxy_cidrs))
+
+    # Access control gate (same as connect)
+    if settings.access_control_enabled and _state.access_control_store is not None:
+        try:
+            _state.access_control_store.resolve_access_policy(
+                actor_fingerprint=_identity.fingerprint,
+                token_type=_identity.token_type,
+                source_ip=source_ip,
+                requested_profile=settings.command_policy_profile,
+                enforce_master=settings.access_control_enforce_master,
+            )
+        except AccessDeniedError:
+            raise HTTPException(status_code=403, detail=_err(403, "ACCESS_DENIED")) from None
+        except AccessPendingApprovalError:
+            pass  # pending: allow prewarm, just track
+
+    try:
+        validate_target_host(
+            req.host,
+            settings.allowed_target_cidrs,
+            settings.denied_target_cidrs,
+        )
+    except ValueError as exc:
+        _state.audit_logger.log_security_event(
+            "BLOCKED_TARGET_HOST",
+            str(exc),
+            request.client.host if request.client else "unknown",
+        )
+        raise HTTPException(status_code=403, detail=_err(403, str(exc))) from exc
+
+    session_id = str(uuid.uuid4())
+    _password = req.password.get_secret_value() if req.password else None
+    _private_key = req.private_key.get_secret_value() if req.private_key else None
+    _passphrase = req.key_passphrase.get_secret_value() if req.key_passphrase else None
+
+    async def _prewarm_connect() -> None:
+        try:
+            await _state.manager.create_session(
+                host=req.host,
+                port=req.port,
+                username=req.username,
+                password=_password,
+                private_key=_private_key,
+                key_passphrase=_passphrase,
+                owner_type=_identity.token_type,
+                owner_name=_identity.name,
+                owner_token_fingerprint=_identity.fingerprint,
+                source_ip=source_ip,
+                session_id=session_id,
+            )
+            if _state.session_store:
+                try:
+                    await _state.session_store.save_session(
+                        session_id=session_id,
+                        host=req.host,
+                        port=req.port,
+                        username=req.username,
+                        password=_password,
+                        private_key=_private_key,
+                        key_passphrase=_passphrase,
+                        ttl=settings.session_timeout,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to persist prewarmed session %s: %s", session_id, exc)
+
+            from app.audit import emit_session_lifecycle_event as _emit_session
+
+            _emit_session(
+                event_logger=_state.event_audit_logger,
+                connected=True,
+                session_id=session_id,
+                actor_type=_identity.token_type,
+                actor_name=_identity.name or "",
+                actor_fingerprint=_identity.fingerprint[:12],
+                source_ip=request.client.host if request.client else "unknown",
+                route="POST /api/ssh/prewarm",
+                request_id=getattr(request.state, "request_id", ""),
+            )
+            logger.info("Pre-warmed SSH session %s for %s@%s", session_id, req.username, req.host)
+        except Exception as exc:
+            logger.warning("Pre-warm connect failed for session %s: %s", session_id, exc)
+            raise
+
+    _state.prewarm_tasks[session_id] = asyncio.create_task(_prewarm_connect())
+    return PrewarmResponse(session_id=session_id)
+
+
 @router.post("/api/ssh/execute", response_model=ExecuteResponse | JobRunResponse)
 @rate_limit_mutation(60, "minute")
 async def ssh_execute(
@@ -435,6 +562,9 @@ async def ssh_execute(
 
     # Audit Log
     _state.audit_logger.log_command(req.session_id, sanitized, request.client.host)
+
+    # Wait for a pre-warmed connection if this session is still connecting
+    await _await_prewarm(req.session_id)
 
     # Session Ownership Check
     session = await _state.manager.get_session(req.session_id)
@@ -573,6 +703,9 @@ async def ssh_execute_argv(
         )
 
     _state.audit_logger.log_command(req.session_id, command_str, request.client.host)
+
+    # Wait for a pre-warmed connection if this session is still connecting
+    await _await_prewarm(req.session_id)
 
     session = await _state.manager.get_session(req.session_id)
     if session is None:
