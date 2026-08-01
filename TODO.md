@@ -2,6 +2,7 @@
 
 ## ✅ Done
 
+- **Issue #5 — Connection pooling + pre-warming** ✅ (`9814e55e`): `ConnectionPool` (`app/ssh_pool.py`) — пул бездействующих SSH-транспортов по ключу (host, port, username, auth_method), LRU eviction + TTL expiry, включается через `SSH_CONNECTION_POOL_SIZE` (default 0 = выключен) + `SSH_CONNECTION_POOL_TTL_SECONDS` (default 60); `POST /api/ssh/prewarm` — session_id возвращается сразу, подключение в background; execute/execute-argv ждут prewarm-задачу; пул-метрики (idle/hits/misses/evictions) в `/metrics`; graceful shutdown. 18 новых тестов, полный прогон 3786 passed, ruff+mypy clean, CI green оба remote.
 - **Issue #1 — Audit log persistence в PostgreSQL** ✅ (`f9d60ee9`): `audit_log` таблица (Alembic `002_audit_log`) + `AuditLogEntry` модель + `AuditLogStore` (`app/audit_store.py`); каждый `POST /api/ssh/execute` и `execute-argv` пишет строку (allowed/denied/async-job) с command/exit_code/duration_ms; `GET /api/audit` — фильтры session_id/event_type/decision/since/until + пагинация (limit/offset); ретенция по расписанию (`AUDIT_LOG_RETENTION_DAYS` default 90, `AUDIT_LOG_CLEANUP_INTERVAL_SECONDS`); обратная совместимость — выключен по умолчанию (`AUDIT_LOG_PERSIST_ENABLED=false`), JSONL-аудит не тронут, create_tables идемпотентен. 23 новых теста, полный прогон 3768 passed, ruff+mypy clean.
 - Task tracking (old P1-P6, QoL, CI/DevOps) — все сделано и закоммичено
 - **P7 Context Detection** — `app/context.py`, 23 тестов, span-классификация команд, known-safe wrappers
