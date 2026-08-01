@@ -108,6 +108,15 @@ class Settings(BaseSettings):
     # Audit trail
     audit_log_path: str = Field(default="./data/audit/events.jsonl", alias="AUDIT_LOG_PATH")
     audit_recent_limit: int = Field(default=500, alias="AUDIT_RECENT_LIMIT")
+    audit_log_persist_enabled: bool = Field(
+        default=False, alias="AUDIT_LOG_PERSIST_ENABLED"
+    )
+    audit_log_retention_days: int = Field(
+        default=90, alias="AUDIT_LOG_RETENTION_DAYS"
+    )
+    audit_log_cleanup_interval_seconds: int = Field(
+        default=3600, alias="AUDIT_LOG_CLEANUP_INTERVAL_SECONDS"
+    )
 
     event_hooks_enabled: bool = Field(default=False, alias="EVENT_HOOKS_ENABLED")
     event_hooks_max: int = Field(default=50, alias="EVENT_HOOKS_MAX")

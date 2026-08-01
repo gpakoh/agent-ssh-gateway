@@ -29,6 +29,7 @@ from app.webhook_manager import WebhookManager
 
 if TYPE_CHECKING:
     from app.access_control import AccessControlStore
+    from app.audit_store import AuditLogStore
 
 manager: SSHSessionManager | None = None
 job_manager: JobManager | None = None
@@ -45,6 +46,7 @@ analytics: ProjectAnalytics | None = None
 secret_manager: SecretManager | None = None
 audit_logger: AuditLogger | None = None
 event_audit_logger: AuditEventLogger | None = None
+audit_log_store: AuditLogStore | None = None
 redis_queue: RedisJobQueue | None = None
 circuit_breakers: CircuitBreakerRegistry | None = None
 dist_lock: DistributedLock | None = None

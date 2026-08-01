@@ -114,6 +114,72 @@ class WebhookDelivery(Base):
     )
 
 
+class AuditLogEntry(Base):
+    """Persistent audit log entry — command execution trail in PostgreSQL.
+
+    Mirrors the metadata-only AuditEvent fields plus command execution
+    details (command, exit_code, duration_ms). No command output, no
+    file content, no secrets are stored.
+    """
+
+    __tablename__ = "audit_log"
+
+    id = Column(String(36), primary_key=True)
+    event_id = Column(String(64), nullable=False, index=True)
+    event_type = Column(String(64), nullable=False, index=True)
+    session_id = Column(String(36), nullable=True, index=True)
+    actor_type = Column(String(64), nullable=True)
+    actor_name = Column(String(255), nullable=True)
+    actor_fingerprint = Column(String(64), nullable=True)
+    request_id = Column(String(64), nullable=True)
+    source_ip = Column(String(64), nullable=True)
+    route = Column(String(255), nullable=True)
+    tool = Column(String(128), nullable=True)
+    action = Column(String(512), nullable=True)
+    target_type = Column(String(64), nullable=True)
+    target_id = Column(String(512), nullable=True)
+    policy = Column(String(128), nullable=True)
+    profile = Column(String(128), nullable=True)
+    decision = Column(String(16), nullable=True)
+    reason = Column(Text, nullable=True)
+    error_code = Column(String(64), nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+    command = Column(Text, nullable=True)
+    exit_code = Column(Integer, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "event_id": self.event_id,
+            "event_type": self.event_type,
+            "session_id": self.session_id,
+            "actor_type": self.actor_type,
+            "actor_name": self.actor_name,
+            "actor_fingerprint": self.actor_fingerprint,
+            "request_id": self.request_id,
+            "source_ip": self.source_ip,
+            "route": self.route,
+            "tool": self.tool,
+            "action": self.action,
+            "target_type": self.target_type,
+            "target_id": self.target_id,
+            "policy": self.policy,
+            "profile": self.profile,
+            "decision": self.decision,
+            "reason": self.reason,
+            "error_code": self.error_code,
+            "metadata": self.metadata_json or {},
+            "command": self.command,
+            "exit_code": self.exit_code,
+            "duration_ms": self.duration_ms,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class SessionStore:
     """Async session store using PostgreSQL."""
 

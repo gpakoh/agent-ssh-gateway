@@ -73,6 +73,50 @@ _REQUEST_ID_RE = re.compile(r"^[a-zA-Z0-9\-]+$")
 _REQUEST_ID_MAX_LEN = 64
 
 
+async def _persist_command_audit(
+    *,
+    session_id: str,
+    command: str,
+    exit_code: int | None,
+    duration_ms: int,
+    actor_type: str,
+    actor_name: str,
+    actor_fingerprint: str,
+    source_ip: str,
+    route: str,
+    request_id: str,
+    decision: str = "allowed",
+    reason: str = "",
+    event_type: str = "command.execute",
+) -> None:
+    """Persist a command execution record to the PostgreSQL audit log.
+
+    No-op when the persistent audit store is not configured, so existing
+    JSONL-only deployments keep working unchanged.
+    """
+    store = _state.audit_log_store
+    if store is None:
+        return
+    try:
+        await store.insert_command_execution(
+            session_id=session_id,
+            command=command,
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            actor_type=actor_type,
+            actor_name=actor_name,
+            actor_fingerprint=actor_fingerprint,
+            source_ip=source_ip,
+            route=route,
+            request_id=request_id,
+            decision=decision,
+            reason=reason,
+            event_type=event_type,
+        )
+    except Exception:
+        logger.warning("audit: failed to persist command execution", exc_info=True)
+
+
 def _extract_ws_request_id(websocket: WebSocket) -> str:
     """Extract and validate X-Request-ID from websocket upgrade headers.
 
@@ -358,6 +402,21 @@ async def ssh_execute(
     )
 
     if not gate.allowed:
+        await _persist_command_audit(
+            session_id=req.session_id,
+            command=req.command,
+            exit_code=None,
+            duration_ms=0,
+            actor_type=_identity.token_type,
+            actor_name=_identity.name or "",
+            actor_fingerprint=_identity.fingerprint[:12],
+            source_ip=request.client.host if request.client else "unknown",
+            route="POST /api/ssh/execute",
+            request_id=getattr(request.state, "request_id", ""),
+            decision="denied",
+            reason=gate.reason,
+            event_type="command.deny",
+        )
         if gate.requires_approval and gate.approval_id:
             raise HTTPException(
                 status_code=202,
@@ -389,6 +448,20 @@ async def ssh_execute(
             command=sanitized,
             owner_id=_identity.fingerprint,
         )
+        await _persist_command_audit(
+            session_id=req.session_id,
+            command=req.command,
+            exit_code=None,
+            duration_ms=0,
+            actor_type=_identity.token_type,
+            actor_name=_identity.name or "",
+            actor_fingerprint=_identity.fingerprint[:12],
+            source_ip=request.client.host if request.client else "unknown",
+            route="POST /api/ssh/execute",
+            request_id=getattr(request.state, "request_id", ""),
+            decision="allowed",
+            event_type="command.job",
+        )
         return JobRunResponse(
             job_id=job_id,
             status="running",
@@ -406,6 +479,21 @@ async def ssh_execute(
     if should_redact_command_output(req.redact_output):
         stdout = redact_secrets(stdout)
         stderr = redact_secrets(stderr)
+
+    await _persist_command_audit(
+        session_id=req.session_id,
+        command=req.command,
+        exit_code=result["exit_code"],
+        duration_ms=int(round(result.get("duration", 0.0) * 1000)),
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        source_ip=request.client.host if request.client else "unknown",
+        route="POST /api/ssh/execute",
+        request_id=getattr(request.state, "request_id", ""),
+        decision="allowed",
+        event_type="command.execute",
+    )
     return ExecuteResponse(
         stdout=stdout,
         stderr=stderr,
@@ -453,6 +541,21 @@ async def ssh_execute_argv(
     )
 
     if not gate.allowed:
+        await _persist_command_audit(
+            session_id=req.session_id,
+            command=command_str,
+            exit_code=None,
+            duration_ms=0,
+            actor_type=_identity.token_type,
+            actor_name=_identity.name or "",
+            actor_fingerprint=_identity.fingerprint[:12],
+            source_ip=request.client.host if request.client else "unknown",
+            route="POST /api/ssh/execute-argv",
+            request_id=getattr(request.state, "request_id", ""),
+            decision="denied",
+            reason=gate.reason,
+            event_type="command.deny",
+        )
         if gate.requires_approval and gate.approval_id:
             raise HTTPException(
                 status_code=202,
@@ -493,6 +596,21 @@ async def ssh_execute_argv(
     max_output = 10 * 1024 * 1024
     stdout = result["stdout"][:max_output]
     stderr = result["stderr"][:max_output]
+
+    await _persist_command_audit(
+        session_id=req.session_id,
+        command=final_command,
+        exit_code=result["exit_code"],
+        duration_ms=int(round(result.get("duration", 0.0) * 1000)),
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        source_ip=request.client.host if request.client else "unknown",
+        route="POST /api/ssh/execute-argv",
+        request_id=getattr(request.state, "request_id", ""),
+        decision="allowed",
+        event_type="command.execute",
+    )
 
     return ExecuteArgvResponse(
         stdout=stdout,

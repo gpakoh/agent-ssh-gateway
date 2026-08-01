@@ -4,9 +4,9 @@ This document describes what the gateway logs, what it intentionally does **not*
 
 ---
 
-## Two audit systems
+## Audit systems overview
 
-The gateway has **two independent audit subsystems**. They serve different purposes, use different formats, and are not connected.
+The gateway has **three independent audit subsystems** plus an optional PostgreSQL-backed persistent audit log. They serve different purposes, use different formats, and are not connected.
 
 ### 1. Security Audit Logger (`app/security.py:291`)
 
@@ -70,6 +70,36 @@ The gateway has **two independent audit subsystems**. They serve different purpo
 | `success` | bool | Whether the operation succeeded |
 | `error` | str | Error message if failed (empty string on success) |
 
+### 3. Persistent Audit Log — PostgreSQL (`app/audit_store.py`)
+
+**Format:** SQL table `audit_log` in PostgreSQL. Metadata-only + command execution details (command, exit_code, duration_ms). No command output, no file content, no secrets.
+
+**Initialized at:** `app/main.py` lifespan — `state.audit_log_store` is created when `AUDIT_LOG_PERSIST_ENABLED=true` and `DATABASE_URL` is set. If PostgreSQL is unavailable, the gateway logs a warning and continues without it (JSONL logging unaffected).
+
+**Schema (Alembic revision `002_audit_log`):**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | String(36) PK | Row identifier |
+| `event_id` | String(64) | Source AuditEvent id |
+| `event_type` | String(64) | e.g. `command.execute`, `command.deny`, `command.job` |
+| `session_id` | String(36) | SSH session id (indexed) |
+| `actor_type` | String(64) | `api_key`, `agent_token`, ... |
+| `actor_name` | String(255) | Agent name |
+| `actor_fingerprint` | String(64) | SHA-256 fingerprint, never raw key |
+| `request_id` / `source_ip` / `route` | String | Request correlation fields |
+| `tool` / `action` / `target_type` / `target_id` | String | Generic event fields |
+| `policy` / `profile` / `decision` / `reason` / `error_code` | String | Policy decision fields |
+| `metadata_json` | JSON | Extra metadata |
+| `command` | Text | The executed command (never output) |
+| `exit_code` | Integer | Command exit code |
+| `duration_ms` | Integer | Execution duration |
+| `created_at` | DateTime(tz) | Event timestamp (indexed) |
+
+**Write path:** every `POST /api/ssh/execute` and `POST /api/ssh/execute-argv` call inserts a row (allowed, denied, and async-job variants). Write failures are logged but never break the caller.
+
+**Query:** `GET /api/audit` — master key required. See [Querying audit logs](#querying-audit-logs).
+
 ---
 
 ## What is intentionally NOT logged
@@ -89,6 +119,7 @@ The gateway has **two independent audit subsystems**. They serve different purpo
 |--------|-------------|--------|-----------|
 | Security Audit Logger | `logs/audit.log` | Plain text | Yes (file on disk) |
 | Workspace Audit Logger | Configurable (`log_path`) | JSONL | Only if `log_path` is set; in-memory otherwise |
+| Persistent audit log | `audit_log` table (PostgreSQL) | SQL | Yes — requires `AUDIT_LOG_PERSIST_ENABLED=true` + `DATABASE_URL` |
 
 In Docker, `logs/` is inside the container. Mount a volume to persist across restarts:
 ```yaml
@@ -102,12 +133,15 @@ For the workspace audit logger, set `log_path` to a path outside any project roo
 
 ## Retention knobs
 
-Three independent audit systems, each with its own configuration.
+Four audit systems, each with its own configuration.
 
 | System | Env var | Default | Controls |
 |--------|---------|---------|----------|
 | Structured audit (JSONL + ring buffer) | `AUDIT_LOG_PATH` | `./data/audit/events.jsonl` | JSONL file path on disk |
 | Structured audit (ring buffer) | `AUDIT_RECENT_LIMIT` | `500` | In-memory ring buffer size (`/api/admin/audit/recent` reads this) |
+| Persistent audit log | `AUDIT_LOG_PERSIST_ENABLED` | `false` | Master switch for the PostgreSQL `audit_log` table |
+| Persistent audit log retention | `AUDIT_LOG_RETENTION_DAYS` | `90` | Keep entries younger than N days (0 disables cleanup) |
+| Persistent audit cleanup cadence | `AUDIT_LOG_CLEANUP_INTERVAL_SECONDS` | `3600` | How often the retention cleanup task runs |
 | Security audit (plain text) | *(hardcoded)* | `logs/audit.log` | No env var — path set in `app/security.py:294` |
 | Workspace audit (JSONL) | *(per-call)* | `None` (in-memory only) | `log_path` passed to `WorkspaceAuditLogger()` constructor |
 
@@ -125,6 +159,7 @@ These would replace manual logrotate. Until implemented, use external rotation (
 |--------|-------|----------------------|
 | Structured audit JSONL | No built-in cap | Grows unbounded — rotate externally |
 | Structured audit ring buffer | `AUDIT_RECENT_LIMIT` (default 500) | Oldest events dropped (FIFO) |
+| Persistent audit log | `AUDIT_LOG_RETENTION_DAYS` (default 90) | Cleanup task deletes older rows on schedule |
 | Security audit (`logs/audit.log`) | No built-in cap | Grows unbounded — use logrotate |
 | Workspace audit JSONL | No built-in cap | Grows unbounded — rotate externally |
 | Workspace audit in-memory | 500 entries | Oldest entries dropped (FIFO) |
@@ -251,6 +286,61 @@ jq 'select(.decision == "denied")' data/audit/events.jsonl
 # Events in the last hour
 jq 'select(.timestamp > (now - 3600 | todate))' data/audit/events.jsonl
 ```
+
+### ✅ IMPLEMENTED: `GET /api/audit` — persistent audit query
+
+**Endpoint:** `GET /api/audit`
+**Auth:** master API key (`X-API-Key` header)
+**Requires:** `AUDIT_LOG_PERSIST_ENABLED=true` and `DATABASE_URL` (returns 503 otherwise)
+
+**Query params:**
+- `session_id` (str, optional) — filter by SSH session id
+- `event_type` (str, optional) — filter by event type (e.g. `command.execute`, `command.deny`)
+- `decision` (str, optional) — filter by decision (`allowed`, `denied`, `error`)
+- `since` (ISO datetime, optional) — only events at or after this timestamp
+- `until` (ISO datetime, optional) — only events at or before this timestamp
+- `limit` (int, default 100, max 1000) — page size
+- `offset` (int, default 0) — pagination offset
+
+**Response:**
+```json
+{
+  "events": [
+    {
+      "id": "row-abc123",
+      "event_id": "a1b2c3d4",
+      "event_type": "command.execute",
+      "session_id": "sess_abc123",
+      "actor_type": "api_key",
+      "actor_name": "agent-1",
+      "source_ip": "<ip-address>",
+      "route": "POST /api/ssh/execute",
+      "command": "ls -la",
+      "exit_code": 0,
+      "duration_ms": 150,
+      "decision": "allowed",
+      "created_at": "2026-08-01T12:00:00+00:00"
+    }
+  ],
+  "total": 42,
+  "limit": 100,
+  "offset": 0
+}
+```
+
+**Query examples:**
+```bash
+# All commands for one session
+curl -s -H "X-API-Key: $API_KEY" \
+  "http://localhost:8085/api/audit?session_id=sess_abc123" | jq .
+
+# Denied commands in the last 24h
+curl -s -H "X-API-Key: $API_KEY" \
+  "http://localhost:8085/api/audit?decision=denied&since=$(date -u -Iseconds -d '24 hours ago')" | jq .
+
+# Paginated — page 2
+curl -s -H "X-API-Key: $API_KEY" \
+  "http://localhost:8085/api/audit?limit=50&offset=50" | jq .
 
 ---
 
