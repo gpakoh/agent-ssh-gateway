@@ -55,6 +55,26 @@ async function checkAuth() {
     return false;
 }
 
+// Show the SSO button when the gateway has an OAuth provider configured
+async function initSsoButton() {
+    var ssoDiv = document.getElementById('ssoDiv');
+    var ssoBtn = document.getElementById('ssoBtn');
+    if (!ssoDiv || !ssoBtn) return;
+    try {
+        var res = await _origFetch('/api/auth/oauth/config');
+        if (!res.ok) return;
+        var data = await res.json();
+        if (!data.enabled) return;
+        var label = data.provider || 'SSO';
+        var cap = label.charAt(0).toUpperCase() + label.slice(1);
+        ssoBtn.innerHTML = '<i data-lucide="key-round" class="icon-14"></i><span>Sign in with ' + cap + '</span>';
+        ssoDiv.style.display = 'block';
+        ssoBtn.addEventListener('click', function() {
+            window.location.href = '/api/auth/oauth/authorize?provider=' + encodeURIComponent(data.provider);
+        });
+    } catch (e) {}
+}
+
 async function showAuthForm() {
     var overlay = document.getElementById('authOverlay');
     var shell = document.getElementById('appShell');
@@ -2527,6 +2547,7 @@ document.addEventListener('DOMContentLoaded', async function authInit() {
 
     // Not authenticated — show form
     await showAuthForm();
+    initSsoButton();
 
     // Login
     if (loginBtn) {

@@ -32,6 +32,7 @@ from app.models import (
 from app.project_analytics import ProjectAnalytics
 from app.redis_queue import RedisJobQueue
 from app.routers.auth import router as auth_identity_router
+from app.routers.oauth import router as oauth_router
 from app.search_replace import GlobalSearchReplace
 from app.security import (
     SECURITY_HEADERS,
@@ -1086,6 +1087,7 @@ app.include_router(logs_router)
 app.include_router(templates_router)
 app.include_router(event_hooks_router)
 app.include_router(auth_router)
+app.include_router(oauth_router)
 app.include_router(auth_identity_router)
 app.include_router(workspace_router)
 app.include_router(audit_router)
