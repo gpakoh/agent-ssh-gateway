@@ -167,6 +167,8 @@ class SessionInfo(BaseModel):
     idle_seconds: float = 0.0
     owner_type: str = "master"
     owner_name: str | None = None
+    status: str = "active"
+    created_at: str | None = None
 
 
 class SessionsResponse(BaseModel):

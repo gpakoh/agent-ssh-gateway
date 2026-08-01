@@ -833,20 +833,29 @@ async def ssh_sessions(
         records = [r for r in records if session_visible_to(r, _identity)]
 
     now = time.time()
-    sessions = [
-        SessionInfo(
-            session_id=r.session_id,
-            host=r.host,
-            port=r.port,
-            username=r.username,
-            connected_at=time_to_iso(r.connected_at),
-            last_command_at=time_to_iso(r.last_activity) if r.last_activity else None,
-            idle_seconds=round(now - r.last_activity, 1),
-            owner_type=r.owner_type,
-            owner_name=r.owner_name,
+    sessions = []
+    for r in records:
+        connected = r.is_connected()
+        idle = round(now - r.last_activity, 1)
+        if connected:
+            status = "active" if idle < 60 else "idle"
+        else:
+            status = "reconnecting"
+        sessions.append(
+            SessionInfo(
+                session_id=r.session_id,
+                host=r.host,
+                port=r.port,
+                username=r.username,
+                connected_at=time_to_iso(r.connected_at),
+                last_command_at=time_to_iso(r.last_activity) if r.last_activity else None,
+                idle_seconds=idle,
+                owner_type=r.owner_type,
+                owner_name=r.owner_name,
+                status=status,
+                created_at=time_to_iso(r.connected_at),
+            )
         )
-        for r in records
-    ]
     return SessionsResponse(sessions=sessions, count=len(sessions))
 
 

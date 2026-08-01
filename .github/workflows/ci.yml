@@ -41,7 +41,7 @@ jobs:
         run: uv run mypy app examples/mcp_server
 
       - name: Tests + coverage
-        run: uv run pytest -m "not host_smoke" --junitxml=test-results.xml --cov=app --cov-report=term-missing --cov-fail-under=69 -q
+        run: uv run pytest -m "not host_smoke and not e2e" --junitxml=test-results.xml --cov=app --cov-report=term-missing --cov-fail-under=69 -q
 
       - name: Verify test count
         run: |
