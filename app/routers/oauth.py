@@ -163,14 +163,16 @@ async def oauth_callback(request: Request, code: str = "", state: str = ""):
     if "application/json" in accept:
         return {"token": token, "username": userinfo.username, "provider": pending.provider}
 
+    import json
+
+    token_literal = json.dumps(token)
     return HTMLResponse(
         content=(
             "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
             "<title>Sign in complete</title></head><body>"
             "<p>Sign in complete. Redirecting…</p>"
             "<script>"
-            "try{localStorage.setItem('auth_token', decodeURIComponent("
-            "location.search.split('token=')[1].split('&')[0]));}catch(e){}"
+            "try{localStorage.setItem('auth_token', " + token_literal + ");}catch(e){}"
             "location.href = '/';"
             "</script></body></html>"
         ),
