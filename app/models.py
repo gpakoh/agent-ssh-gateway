@@ -329,6 +329,16 @@ class AgentTokenRequest(BaseModel):
         default_factory=lambda: ["ssh:connect", "ssh:execute"],
         description="Allowed scopes for this agent token",
     )
+    role: str | None = Field(
+        default=None,
+        description="RBAC role (admin/operator/viewer/custom). When set, "
+        "permissions override the scope list for endpoint access.",
+    )
+    labels: list[str] = Field(
+        default_factory=list,
+        description="Tenant labels (resource group) inherited by sessions "
+        "created with this token",
+    )
 
 
 class AgentTokenRefreshRequest(BaseModel):
@@ -345,6 +355,8 @@ class AgentTokenResponse(BaseModel):
     ttl: int
     expires_at: str
     scopes: list[str] = Field(default_factory=list)
+    role: str | None = Field(default=None, description="Resolved RBAC role")
+    labels: list[str] = Field(default_factory=list, description="Tenant labels")
     message: str = "Agent token generated"
 
 

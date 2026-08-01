@@ -168,6 +168,19 @@ async def agent_token_generate(
             detail=_err(400, f"Invalid scopes: {', '.join(invalid_scopes)}"),
         )
 
+    from app.rbac import VALID_ROLE_NAMES, default_role_for_scopes
+
+    role = req.role
+    if role is not None and role not in VALID_ROLE_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=_err(
+                400, f"Invalid role: {role}. Valid roles: {', '.join(sorted(VALID_ROLE_NAMES))}"
+            ),
+        )
+    if role is None:
+        role = default_role_for_scopes(req.scopes)
+
     import secrets as _secrets
     from datetime import timedelta
 
@@ -180,13 +193,20 @@ async def agent_token_generate(
     token = _secrets.token_urlsafe(32)
     ttl = req.ttl_seconds
     expires_at = datetime.now(UTC) + timedelta(seconds=ttl)
-    await _state.agent_token_store.set_token(token, ttl, scopes=req.scopes)
-    logger.info("Agent token generated (ttl=%ds, scopes=%s)", ttl, req.scopes)
+    await _state.agent_token_store.set_token(
+        token, ttl, scopes=req.scopes, role=role, labels=req.labels
+    )
+    logger.info(
+        "Agent token generated (ttl=%ds, scopes=%s, role=%s, labels=%s)",
+        ttl, req.scopes, role, req.labels,
+    )
     return AgentTokenResponse(
         token=token,
         ttl=ttl,
         expires_at=expires_at.isoformat(),
         scopes=req.scopes,
+        role=role,
+        labels=req.labels,
     )
 
 
@@ -212,8 +232,8 @@ async def agent_token_refresh(
             detail=_err(503, "Agent token store not available (Redis required)"),
         )
 
-    # Validate old token and preserve its scopes
-    old_valid, old_scopes = await _state.agent_token_store.validate_token(req.token)
+    # Validate old token and preserve its scopes, role and labels
+    old_valid, old_scopes, old_meta = await _state.agent_token_store.validate_token(req.token)
     if not old_valid:
         raise HTTPException(
             status_code=400,
@@ -223,7 +243,11 @@ async def agent_token_refresh(
     token = _secrets.token_urlsafe(32)
     ttl = req.ttl_seconds
     expires_at = datetime.now(UTC) + timedelta(seconds=ttl)
-    await _state.agent_token_store.set_token(token, ttl, scopes=old_scopes)
+    old_role = old_meta.get("role") if isinstance(old_meta, dict) else None
+    old_labels = old_meta.get("labels") if isinstance(old_meta, dict) else None
+    await _state.agent_token_store.set_token(
+        token, ttl, scopes=old_scopes, role=old_role, labels=old_labels
+    )
     logger.info("Agent token refreshed (ttl=%ds, scopes=%s)", ttl, old_scopes)
     return AgentTokenRefreshResponse(
         token=token,
@@ -327,6 +351,7 @@ async def ssh_connect(
         owner_name=_identity.name,
         owner_token_fingerprint=_identity.fingerprint,
         source_ip=source_ip,
+        tenant_labels=_identity.tenant_labels,
     )
 
     from app.audit import emit_session_lifecycle_event as _emit_session
@@ -796,17 +821,16 @@ async def ssh_sessions(
 ):
     """List active SSH sessions with details.
 
-    Master token sees all sessions.
-    Agent token sees only sessions it created.
+    Master token and admin role see all sessions.
+    Other agents see only sessions they created plus sessions whose
+    tenant labels intersect their own (cross-tenant grant).
     """
+    from app.rbac import session_visible_to
+
     records = await _state.manager.list_sessions()
 
-    if _identity.token_type != "master":
-        records = [
-            r
-            for r in records
-            if r.owner_type == "agent" and r.owner_token_fingerprint == _identity.fingerprint
-        ]
+    if _identity.token_type != "master" and _identity.role != "admin":
+        records = [r for r in records if session_visible_to(r, _identity)]
 
     now = time.time()
     sessions = [

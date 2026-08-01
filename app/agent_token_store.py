@@ -47,35 +47,43 @@ class AgentTokenStore:
     def _hash(self, token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
 
-    async def set_token(self, token: str, ttl: int, scopes: list[str] | None = None) -> None:
+    async def set_token(
+        self,
+        token: str,
+        ttl: int,
+        scopes: list[str] | None = None,
+        role: str | None = None,
+        labels: list[str] | None = None,
+    ) -> None:
         if self._redis is None:
             raise RuntimeError("AgentTokenStore not connected to Redis")
         key = self._hash(token)
+        meta = json.dumps({"scopes": scopes or [], "role": role, "labels": labels or []})
         if ttl > 0:
             await self._redis.set("agent_token:current", key, ex=ttl)
-            meta = json.dumps({"scopes": scopes or []})
             await self._redis.set("agent_token:meta", meta, ex=ttl)
         else:
             await self._redis.set("agent_token:current", key)
-            meta = json.dumps({"scopes": scopes or []})
             await self._redis.set("agent_token:meta", meta)
 
-    async def validate_token(self, token: str) -> tuple[bool, list[str] | None]:
+    async def validate_token(
+        self, token: str
+    ) -> tuple[bool, list[str] | None, dict | None]:
         if not token or self._redis is None:
-            return False, None
+            return False, None, None
         stored = await self._redis.get("agent_token:current")
         if stored is None:
-            return False, None
+            return False, None, None
         if stored != self._hash(token):
-            return False, None
+            return False, None, None
         meta_raw = await self._redis.get("agent_token:meta")
         if meta_raw:
             try:
                 meta = json.loads(meta_raw)
-                return True, meta.get("scopes", [])
+                return True, meta.get("scopes", []), meta
             except (json.JSONDecodeError, TypeError):
                 pass
-        return True, None
+        return True, None, None
 
     async def clear_token(self) -> None:
         if self._redis is None:

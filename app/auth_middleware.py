@@ -13,6 +13,11 @@ from fastapi import HTTPException, Request, WebSocket
 
 from app.agent_token_store import AgentTokenStore
 from app.config import Settings, settings
+from app.rbac import (
+    default_role_for_scopes,
+    labels_overlap,
+    role_allows_scope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +42,17 @@ class AuthIdentity:
 
     - ``master`` tokens (API_KEY) always have ``("*",)`` scopes — full access.
     - ``agent`` tokens have a restricted scope tuple.
+    - ``role`` (admin/operator/viewer/custom) sits on top of scopes and is
+      resolved by ``app.rbac``; ``tenant_labels`` enable cross-tenant grants.
     """
 
     token_type: str
     token: str
     name: str | None = None
     scopes: tuple[str, ...] = ()
+    role: str | None = None
+    role_permissions: frozenset[str] | None = None
+    tenant_labels: tuple[str, ...] = ()
 
     @property
     def fingerprint(self) -> str:
@@ -128,14 +138,24 @@ async def is_agent_token_valid(
     if not provided:
         return None
     if token_store is not None and token_store.connected:
-        valid, scopes = await token_store.validate_token(provided)
+        valid, scopes, meta = await token_store.validate_token(provided)
         if not valid:
             return None
+        role = None
+        tenant_labels: tuple[str, ...] = ()
+        if isinstance(meta, dict):
+            role = meta.get("role")
+            labels = meta.get("labels") or []
+            tenant_labels = tuple(labels) if isinstance(labels, list) else ()
+            if role is None:
+                role = default_role_for_scopes(scopes)
         return AuthIdentity(
             token_type="agent",
             token=provided,
             name="agent",
             scopes=tuple(scopes or ()),
+            role=role,
+            tenant_labels=tenant_labels,
         )
     if not settings.agent_token:
         return None
@@ -152,6 +172,7 @@ async def is_agent_token_valid(
         token=provided,
         name="agent",
         scopes=tuple(settings.agent_token_scopes),
+        role=default_role_for_scopes(settings.agent_token_scopes),
     )
 
 
@@ -386,6 +407,7 @@ async def auth_check(
                 token=auth_header[7:],
                 name=payload["sub"],
                 scopes=("*",),
+                role=payload.get("role", "admin"),
             )
             return None
 
@@ -477,7 +499,9 @@ async def ws_auth_check(
         return (CLOSE_POLICY_VIOLATION, "Invalid or missing API key")
 
     if required_scope and identity.token_type != "master" and "*" not in identity.scopes:
-        if required_scope not in identity.scopes:
+        if required_scope not in identity.scopes and not role_allows_scope(
+            identity.role, identity.role_permissions, required_scope
+        ):
             return (CLOSE_POLICY_VIOLATION, f"Missing required scope: {required_scope}")
 
     return identity
@@ -514,6 +538,8 @@ def require_scope(required: str) -> Callable[[Request], Awaitable[AuthIdentity]]
             return identity
         if "*" in identity.scopes or required in identity.scopes:
             return identity
+        if role_allows_scope(identity.role, identity.role_permissions, required):
+            return identity
         raise HTTPException(
             status_code=403,
             detail={
@@ -530,8 +556,14 @@ def require_scope(required: str) -> Callable[[Request], Awaitable[AuthIdentity]]
 
 
 def ensure_session_owner(session: Any, identity: AuthIdentity) -> None:
-    """Allow master to access any session, agent only its own sessions."""
+    """Allow master/admin to access any session, agent only its own sessions.
+
+    Non-admin agents may also access sessions whose tenant labels intersect
+    their own (cross-tenant grant).
+    """
     if identity.token_type == "master":
+        return
+    if identity.role == "admin":
         return
     if getattr(session, "owner_type", None) != "agent":
         raise HTTPException(
@@ -545,6 +577,10 @@ def ensure_session_owner(session: Any, identity: AuthIdentity) -> None:
             },
         )
     if getattr(session, "owner_token_fingerprint", None) != identity.fingerprint:
+        if labels_overlap(
+            identity.tenant_labels, getattr(session, "tenant_labels", ()) or ()
+        ):
+            return
         raise HTTPException(
             status_code=403,
             detail={

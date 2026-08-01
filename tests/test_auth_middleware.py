@@ -700,7 +700,9 @@ class TestAgentTokenWithScopes:
         store = MagicMock()
         store.connected = True
         store.set_token = AsyncMock()
-        store.validate_token = AsyncMock(return_value=(True, ["ssh:port-check"]))
+        store.validate_token = AsyncMock(
+            return_value=(True, ["ssh:port-check"], {"scopes": ["ssh:port-check"]})
+        )
         store.disconnect = AsyncMock()
         return store
 
