@@ -131,11 +131,13 @@ async def auth_check_users(request: Request):
         settings,
         token_store,
     )
+    users_count = await _count_users()
     if identity is not None:
         return {
             "valid": True,
             "auth_mode": "api_key",
             "key_name": identity.name or "default",
+            "users_count": users_count,
         }
     return JSONResponse(
         status_code=401,
@@ -145,8 +147,19 @@ async def auth_check_users(request: Request):
             "retryable": False,
             "hint": "Provide a valid X-API-Key header with your API key",
             "http_status": 401,
+            "users_count": users_count,
         },
     )
+
+
+async def _count_users() -> int:
+    try:
+        SessionLocal = get_auth_sessionmaker()
+        async with SessionLocal() as session:
+            result = await session.execute(select(func.count(User.id)))
+            return result.scalar() or 0
+    except Exception:
+        return 0
 
 
 @router.post("/api/auth/register", status_code=201)

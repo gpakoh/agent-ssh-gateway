@@ -516,6 +516,250 @@ function wsClose() {
 }
 
 // ============================================
+// Interactive PTY (xterm.js)
+// ============================================
+
+let ptyTerm = null;
+let ptyFit = null;
+let ptyWs = null;
+
+async function apiSessionHealth(sessionId) {
+    const res = await fetch(`/api/ssh/session/${encodeURIComponent(sessionId)}/health`);
+    if (!res.ok) return { connected: false };
+    return res.json();
+}
+
+function ptyWsUrl(sessionId) {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const token = getAuthToken();
+    const q = token ? `?token=${encodeURIComponent(token)}` : '';
+    return `${protocol}//${window.location.host}/api/ssh/pty/${encodeURIComponent(sessionId)}/stream${q}`;
+}
+
+function setPtyStatus(text, isError) {
+    const st = document.getElementById('ptyStatus');
+    if (!st) return;
+    if (text) {
+        st.textContent = text;
+        st.style.display = 'block';
+        st.className = 'pty-status' + (isError ? ' pty-status-error' : '');
+    } else {
+        st.style.display = 'none';
+    }
+}
+
+function openPty(sessionId, host, username) {
+    const container = document.getElementById('ptyContainer');
+    const termEl = document.getElementById('ptyTerminal');
+    const termSection = document.getElementById('terminalSection');
+    const label = document.getElementById('ptySessionLabel');
+    if (!container || !termEl || typeof Terminal === 'undefined') {
+        showToast('xterm.js not loaded — PTY unavailable', 'error');
+        return;
+    }
+
+    closePty();
+
+    container.style.display = 'flex';
+    if (termSection) termSection.classList.add('has-pty');
+    if (label) {
+        label.textContent = `PTY: ${username}@${host}`;
+        label.style.display = 'inline-flex';
+    }
+
+    ptyTerm = new Terminal({
+        cursorBlink: true,
+        fontSize: 13,
+        fontFamily: "'JetBrains Mono', monospace",
+        theme: {
+            background: '#0d1117',
+            foreground: '#e6edf3',
+            cursor: '#58a6ff',
+            selectionBackground: '#1f6feb',
+            black: '#161b22', red: '#ff7b72', green: '#3fb950', yellow: '#d29922',
+            blue: '#58a6ff', magenta: '#bc8cff', cyan: '#39c5cf', white: '#c9d1d9',
+            brightBlack: '#8b949e', brightRed: '#ffa198', brightGreen: '#56d364',
+            brightYellow: '#e3b341', brightBlue: '#79c0ff', brightMagenta: '#d2a8ff',
+            brightCyan: '#56d4dd', brightWhite: '#ffffff'
+        }
+    });
+    ptyFit = new FitAddon.FitAddon();
+    ptyTerm.loadAddon(ptyFit);
+    if (typeof WebLinksAddon !== 'undefined') {
+        ptyTerm.loadAddon(new WebLinksAddon.WebLinksAddon());
+    }
+    ptyTerm.open(termEl);
+    ptyFit.fit();
+    ptyTerm.focus();
+
+    ptyTerm.onData((data) => {
+        if (ptyWs && ptyWs.readyState === WebSocket.OPEN) {
+            ptyWs.send(JSON.stringify({ type: 'input', data }));
+        }
+    });
+
+    setPtyStatus('Connecting...', false);
+
+    ptyWs = new WebSocket(ptyWsUrl(sessionId));
+    ptyWs.onopen = () => {
+        setPtyStatus('', false);
+        ptyWs.send(JSON.stringify({ type: 'term', term: 'xterm-256color', rows: ptyTerm.rows, cols: ptyTerm.cols }));
+        ptyTerm.writeln('\x1b[32mConnected to interactive PTY. Type exit or press Ctrl+D to close.\x1b[0m');
+        ptyTerm.focus();
+    };
+    ptyWs.onmessage = (event) => {
+        try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'output') {
+                ptyTerm.write(msg.data);
+            } else if (msg.type === 'error') {
+                setPtyStatus(msg.data || 'PTY error', true);
+            }
+        } catch (e) {}
+    };
+    ptyWs.onerror = () => {
+        setPtyStatus('WebSocket error', true);
+    };
+    ptyWs.onclose = (ev) => {
+        ptyWs = null;
+        if (ev.code !== 1000) {
+            setPtyStatus('PTY closed (' + (ev.reason || ev.code) + ')', true);
+        }
+    };
+
+    const onResize = () => {
+        if (ptyFit) ptyFit.fit();
+        if (ptyWs && ptyWs.readyState === WebSocket.OPEN && ptyTerm) {
+            ptyWs.send(JSON.stringify({ type: 'resize', cols: ptyTerm.cols, rows: ptyTerm.rows }));
+        }
+    };
+    window.addEventListener('resize', onResize);
+    state.ptyResizeHandler = onResize;
+    state.ptySessionId = sessionId;
+}
+
+function closePty() {
+    if (ptyWs) {
+        try { ptyWs.send(JSON.stringify({ type: 'close' })); } catch (e) {}
+        try { ptyWs.close(); } catch (e) {}
+        ptyWs = null;
+    }
+    if (state.ptyResizeHandler) {
+        window.removeEventListener('resize', state.ptyResizeHandler);
+        state.ptyResizeHandler = null;
+    }
+    if (ptyTerm) {
+        try { ptyTerm.dispose(); } catch (e) {}
+        ptyTerm = null;
+        ptyFit = null;
+    }
+    state.ptySessionId = null;
+    const container = document.getElementById('ptyContainer');
+    const termSection = document.getElementById('terminalSection');
+    const label = document.getElementById('ptySessionLabel');
+    if (container) container.style.display = 'none';
+    if (termSection) termSection.classList.remove('has-pty');
+    if (label) label.style.display = 'none';
+    setPtyStatus('', false);
+}
+
+// ============================================
+// File Browser (remote directory listing)
+// ============================================
+
+let fbPath = '.';
+
+function fbCrumbFor(path) {
+    const parts = (path || '.').split('/').filter(Boolean);
+    let acc = '';
+    const crumbs = [{ name: '~', path: '.' }];
+    for (const p of parts) {
+        acc = acc ? `${acc}/${p}` : p;
+        crumbs.push({ name: p, path: acc });
+    }
+    return crumbs;
+}
+
+async function apiProjectTree(sessionId, path) {
+    const res = await fetch(`/api/project/tree?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path || '.')}&max_depth=1`);
+    if (!res.ok) throw new Error('Failed to list directory');
+    return res.json();
+}
+
+async function loadFBDir(path) {
+    if (!state.sessionId) {
+        showToast('No active session — connect to a server first', 'error');
+        return;
+    }
+    fbPath = path || '.';
+    try {
+        const data = await apiProjectTree(state.sessionId, fbPath);
+        renderFBBreadcrumb(fbPath);
+        renderFBList(data.items || []);
+    } catch (err) {
+        showToast(err.message, 'error');
+    }
+}
+
+function renderFBBreadcrumb(path) {
+    const bc = document.getElementById('fbBreadcrumb');
+    if (!bc) return;
+    bc.innerHTML = '';
+    for (const crumb of fbCrumbFor(path)) {
+        const el = document.createElement('span');
+        el.className = 'fb-crumb';
+        el.textContent = crumb.name;
+        el.dataset.path = crumb.path;
+        el.addEventListener('click', () => loadFBDir(crumb.path));
+        bc.appendChild(el);
+    }
+}
+
+function renderFBList(items) {
+    const list = document.getElementById('fbList');
+    const badge = document.getElementById('fbBadge');
+    if (badge) badge.textContent = items.length;
+    if (!list) return;
+    list.innerHTML = '';
+    if (!items.length) {
+        list.innerHTML = '<div class="empty-state"><i data-lucide="folder" class="icon-24"></i><p>Empty directory</p></div>';
+        if (typeof lucide !== 'undefined') lucide.createIcons();
+        return;
+    }
+    const dirs = items.filter((i) => i.type === 'dir');
+    const files = items.filter((i) => i.type !== 'dir');
+    const render = (item) => {
+        const row = document.createElement('div');
+        row.className = 'fb-item' + (item.type === 'dir' ? ' fb-item-dir' : ' fb-item-file');
+        const icon = item.type === 'dir' ? 'folder' : (item.size != null ? 'file' : 'file-text');
+        const size = item.type !== 'dir' && item.size != null ? ` · ${item.size} B` : '';
+        row.innerHTML = `<i data-lucide="${icon}" class="icon-14"></i><span class="fb-item-name">${escapeHtml(item.path.split('/').pop() || item.path)}</span><span class="fb-item-meta">${size}</span>`;
+        row.addEventListener('click', () => {
+            if (item.type === 'dir') {
+                loadFBDir(item.path);
+            } else {
+                openRemoteFile(item.path);
+            }
+        });
+        list.appendChild(row);
+    };
+    dirs.forEach(render);
+    files.forEach(render);
+    if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
+function openRemoteFile(path) {
+    // Reuse the existing Monaco-based file editor flow
+    const pathInput = document.getElementById('editorPathInput');
+    const openBtn = document.getElementById('openFileBtn');
+    const editBtn = document.getElementById('fileEditBtn');
+    if (pathInput) pathInput.value = path;
+    if (openBtn) openBtn.click();
+    if (editBtn) editBtn.click();
+    showToast(`Opened ${path}`, 'info');
+}
+
+// ============================================
 // Connection / Disconnection
 // ============================================
 
@@ -552,6 +796,7 @@ els.connectForm.addEventListener('submit', async (e) => {
         appendLine(`Connected to ${state.username}@${state.host}`, 'system');
         showToast('Connected successfully', 'success');
         refreshSessions();
+        loadFBDir('.');
 
     } catch (err) {
         showError(err.message);
@@ -576,6 +821,7 @@ els.disconnectBtn.addEventListener('click', async () => {
         state.sessionId = null;
         state.host = '';
         state.username = '';
+        closePty();
         setConnected(false);
         updatePrompt();
         refreshSessions();
@@ -1089,19 +1335,39 @@ async function refreshSessions() {
         for (const s of state.sessions) {
             const card = document.createElement('div');
             card.className = 'session-card';
+            const statusClass = s.status === 'active' ? 'status-active' : (s.status === 'idle' ? 'status-idle' : 'status-reconnecting');
+            const createdLabel = s.created_at ? formatTime(s.created_at) : formatTime(s.connected_at);
             card.innerHTML = `
-                <div class="session-host">${escapeHtml(s.host)}:${s.port}</div>
+                <div class="session-host">${escapeHtml(s.host)}:${s.port} <span class="session-status ${statusClass}">${escapeHtml(s.status || 'active')}</span></div>
                 <div class="session-user">${escapeHtml(s.username)}</div>
-                <div class="session-time">${formatTime(s.connected_at)}</div>
-                <button class="btn btn-danger" data-sid="${s.session_id}">Disconnect</button>
+                <div class="session-time">Created ${createdLabel} · idle ${s.idle_seconds}s</div>
+                <div class="session-actions">
+                    <button class="btn btn-outline btn-compact" data-pty="${s.session_id}">Terminal</button>
+                    <button class="btn btn-danger btn-compact" data-sid="${s.session_id}">Disconnect</button>
+                </div>
             `;
-            card.querySelector('button').addEventListener('click', async (e) => {
+            card.querySelector('[data-pty]').addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const sid = e.target.dataset.pty;
+                try {
+                    const health = await apiSessionHealth(sid);
+                    if (!health.connected) {
+                        showToast('Session is not connected, attempting reconnect...', 'info');
+                    }
+                } catch (err) {}
+                state.sessionId = sid;
+                state.host = s.host;
+                state.username = s.username;
+                openPty(sid, s.host, s.username);
+            });
+            card.querySelector('[data-sid]').addEventListener('click', async (e) => {
                 const sid = e.target.dataset.sid;
                 try {
                     await apiDisconnect(sid);
                     showToast('Session disconnected', 'info');
                     if (sid === state.sessionId) {
                         state.sessionId = null;
+                        closePty();
                         setConnected(false);
                         updatePrompt();
                     }
@@ -1539,6 +1805,38 @@ document.addEventListener('DOMContentLoaded', () => {
     els.editorPathInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') openFileByPath();
     });
+
+    // PTY buttons
+    const ptyBtn = document.getElementById('ptyBtn');
+    if (ptyBtn) {
+        ptyBtn.addEventListener('click', () => {
+            if (!state.sessionId) {
+                showToast('No active session — connect to a server first', 'error');
+                return;
+            }
+            const host = state.host || 'unknown';
+            const username = state.username || 'unknown';
+            openPty(state.sessionId, host, username);
+        });
+    }
+    const ptyCloseBtn = document.getElementById('ptyCloseBtn');
+    if (ptyCloseBtn) {
+        ptyCloseBtn.addEventListener('click', closePty);
+    }
+
+    // File Browser buttons
+    const fbUpBtn = document.getElementById('fbUpBtn');
+    if (fbUpBtn) {
+        fbUpBtn.addEventListener('click', () => {
+            const parts = fbPath.split('/').filter(Boolean);
+            parts.pop();
+            loadFBDir(parts.length ? parts.join('/') : '.');
+        });
+    }
+    const fbRefreshBtn = document.getElementById('fbRefreshBtn');
+    if (fbRefreshBtn) {
+        fbRefreshBtn.addEventListener('click', () => loadFBDir(fbPath));
+    }
 
     // Load servers on startup
     setTimeout(refreshServers, 500);

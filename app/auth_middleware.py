@@ -487,13 +487,29 @@ async def ws_auth_check(
         if auth_header.startswith("Bearer "):
             provided = auth_header[7:]
     if not provided:
+        # Browser WebSocket connections cannot send custom headers — accept the
+        # web-ui JWT via ?token= query parameter (same token as /api/auth/verify).
+        provided = websocket.query_params.get("token", "")
+    if not provided:
         return (CLOSE_POLICY_VIOLATION, "Invalid or missing API key")
 
     identity: AuthIdentity | None = None
     if secrets.compare_digest(provided, settings.api_key):
         identity = AuthIdentity(token_type="master", token=provided, name="master", scopes=("*",))
     else:
-        identity = await is_agent_token_valid(settings, provided, token_store)
+        from app.user_auth import verify_jwt
+
+        payload = verify_jwt(provided)
+        if payload is not None:
+            identity = AuthIdentity(
+                token_type="web-ui",
+                token=provided,
+                name=payload["sub"],
+                scopes=("*",),
+                role=payload.get("role", "admin"),
+            )
+        else:
+            identity = await is_agent_token_valid(settings, provided, token_store)
 
     if identity is None:
         return (CLOSE_POLICY_VIOLATION, "Invalid or missing API key")

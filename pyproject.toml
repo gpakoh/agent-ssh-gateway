@@ -79,6 +79,7 @@ testpaths = ["tests"]
 markers = [
   "host_smoke: tests requiring live infrastructure (SSH host, nginx, specific filesystem paths). Excluded from CI via -m 'not host_smoke'.",
   "integration: tests that exercise multiple components together (router + registry + policy).",
+  "e2e: full browser end-to-end tests (Selenium + headless Chromium). Excluded from CI via -m 'not host_smoke and not e2e'.",
 ]
 filterwarnings = [
   "error",

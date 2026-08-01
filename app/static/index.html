@@ -7,11 +7,15 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=10">
+    <link rel="stylesheet" href="/static/style.css?v=11">
     <link rel="icon" type="image/png" href="/static/favicon.png">
     <script>var require = { paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs' } };</script>
-    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs/loader.min.js"></script>
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+    <link rel="stylesheet" href="/static/vendor/xterm/xterm.min.css">
+    <script src="/static/vendor/xterm/xterm.min.js"></script>
+    <script src="/static/vendor/xterm/xterm-addon-fit.min.js"></script>
+    <script src="/static/vendor/xterm/xterm-addon-web-links.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs/loader.min.js"></script>
 </head>
 <body>
     <!-- ============================================ -->
@@ -539,6 +543,10 @@
                         <span class="panel-header-title">Terminal</span>
                     </div>
                     <div class="panel-header-right">
+                        <span class="pty-session-label" id="ptySessionLabel" style="display:none"></span>
+                        <button type="button" class="btn-icon btn-icon-sm" id="ptyBtn" aria-label="Open interactive terminal (PTY)" title="Open interactive terminal (PTY)">
+                            <i data-lucide="square-terminal" class="icon-16"></i>
+                        </button>
                         <button type="button" class="btn-icon btn-icon-sm" id="copyBtn" aria-label="Copy terminal output" title="Copy terminal output">
                             <i data-lucide="copy" class="icon-16"></i>
                         </button>
@@ -546,6 +554,20 @@
                             <i data-lucide="trash-2" class="icon-16"></i>
                         </button>
                     </div>
+                </div>
+
+                <!-- Interactive PTY (xterm.js) — shown when a session is attached -->
+                <div class="pty-container" id="ptyContainer" style="display:none">
+                    <div class="pty-toolbar">
+                        <i data-lucide="square-terminal" class="icon-14"></i>
+                        <span id="ptyTitle">Interactive terminal</span>
+                        <button type="button" class="btn btn-outline btn-compact pty-close-btn" id="ptyCloseBtn">
+                            <i data-lucide="x" class="icon-14"></i>
+                            <span>Close</span>
+                        </button>
+                    </div>
+                    <div id="ptyTerminal" class="pty-terminal"></div>
+                    <div class="pty-status" id="ptyStatus" style="display:none"></div>
                 </div>
 
                 <!-- Terminal Output -->
@@ -579,6 +601,37 @@
         <!-- RIGHT COLUMN (280px): Editor + Jobs/History  -->
         <!-- ============================================ -->
         <aside class="right-column" id="rightColumn">
+            <!-- File Browser Panel (breadcrumb + directory listing) -->
+            <section class="fb-section" id="fbSection">
+                <div class="panel-header fb-header">
+                    <div class="panel-header-left">
+                        <i data-lucide="folder-tree" class="icon-14"></i>
+                        <span class="panel-header-title">File Browser</span>
+                        <span class="count-badge" id="fbBadge"></span>
+                    </div>
+                    <div class="panel-header-right">
+                        <button type="button" class="btn-icon btn-icon-sm" id="fbUpBtn" aria-label="Up one directory" title="Up one directory">
+                            <i data-lucide="arrow-up" class="icon-16"></i>
+                        </button>
+                        <button type="button" class="btn-icon btn-icon-sm" id="fbRefreshBtn" aria-label="Refresh directory" title="Refresh directory">
+                            <i data-lucide="refresh-cw" class="icon-16"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="panel-body">
+                    <div class="fb-breadcrumb" id="fbBreadcrumb">
+                        <span class="fb-crumb fb-crumb-root" data-path=".">~</span>
+                    </div>
+                    <div class="fb-list" id="fbList">
+                        <div class="empty-state">
+                            <i data-lucide="folder-tree" class="icon-24"></i>
+                            <p>No directory loaded</p>
+                            <p class="empty-sub">Connect to a server, then open a directory from the terminal or session list</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
             <!-- File Editor Panel (auto-height) -->
             <section class="editor-section" id="editorSection">
                 <div class="panel-header editor-header">
@@ -684,7 +737,7 @@
     <div class="toast-container" id="toastContainer" aria-live="polite"></div>
 
 
-    <script src="/static/app.js?v=9"></script>
+    <script src="/static/app.js?v=10"></script>
     <script>
         document.addEventListener('DOMContentLoaded', function() {
             if (typeof lucide !== 'undefined') {

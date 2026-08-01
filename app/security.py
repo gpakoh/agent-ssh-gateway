@@ -526,7 +526,18 @@ def validate_target_host(
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
-    "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'",
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "script-src 'self' https://cdn.jsdelivr.net https://unpkg.com "
+        "'sha256-OcqmLSXiN5rOYFgWsWZwW/ngQ2qza6pmb5TmWFAKCiM=' "
+        "'sha256-U32kT3DNIBr8vSdBXBwQm3gyR6B+dVnvRwEKTvWxl74='; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com https://unpkg.com; "
+        "font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net; "
+        "img-src 'self' data:; "
+        "connect-src 'self' ws: wss:; "
+        "worker-src 'self' blob:; "
+        "frame-ancestors 'none'"
+    ),
     "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
     "Referrer-Policy": "strict-origin-when-cross-origin",
 }
