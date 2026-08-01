@@ -2,6 +2,7 @@
 
 ## ✅ Done
 
+- **Issue #1 — Audit log persistence в PostgreSQL** ✅ (`f9d60ee9`): `audit_log` таблица (Alembic `002_audit_log`) + `AuditLogEntry` модель + `AuditLogStore` (`app/audit_store.py`); каждый `POST /api/ssh/execute` и `execute-argv` пишет строку (allowed/denied/async-job) с command/exit_code/duration_ms; `GET /api/audit` — фильтры session_id/event_type/decision/since/until + пагинация (limit/offset); ретенция по расписанию (`AUDIT_LOG_RETENTION_DAYS` default 90, `AUDIT_LOG_CLEANUP_INTERVAL_SECONDS`); обратная совместимость — выключен по умолчанию (`AUDIT_LOG_PERSIST_ENABLED=false`), JSONL-аудит не тронут, create_tables идемпотентен. 23 новых теста, полный прогон 3768 passed, ruff+mypy clean.
 - Task tracking (old P1-P6, QoL, CI/DevOps) — все сделано и закоммичено
 - **P7 Context Detection** — `app/context.py`, 23 тестов, span-классификация команд, known-safe wrappers
 - **P8 AST Matching** — `app/ast_matcher.py`, 17 тестов, stdlib ast для Python, regex fallback
