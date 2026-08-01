@@ -61,3 +61,7 @@ examples/mcp_server/mcp_client.streamable-http.env
 # Agent context (contains operational details, not for public repo)
 AGENTS.md
 
+# Web UI debug artifacts (parallel-debug leftovers, not part of the app)
+/static/
+app/static/monaco-config.js
+
