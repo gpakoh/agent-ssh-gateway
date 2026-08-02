@@ -1083,9 +1083,9 @@ async def pty_stream(websocket: WebSocket, session_id: str):
     channel = None
     try:
         init_data = await asyncio.wait_for(websocket.receive_json(), timeout=600)
-        term = init_data.get("term", "xterm-256color")
-        rows = init_data.get("rows", 24)
-        cols = init_data.get("cols", 80)
+        term = str(init_data.get("term", "xterm-256color"))[:64]
+        rows = min(max(int(init_data.get("rows", 24)), 1), 500)
+        cols = min(max(int(init_data.get("cols", 80)), 1), 1000)
 
         channel = await _state.manager.create_pty_channel(session_id, term, rows, cols)
 
@@ -1107,11 +1107,14 @@ async def pty_stream(websocket: WebSocket, session_id: str):
                     msg = await websocket.receive_json()
                     msg_type = msg.get("type")
                     if msg_type == "input":
-                        channel.send(msg.get("data", ""))
+                        data = msg.get("data", "")
+                        if not isinstance(data, str):
+                            continue
+                        channel.send(data[:65536])
                     elif msg_type == "resize":
                         channel.resize_pty(
-                            width=msg.get("cols", 80),
-                            height=msg.get("rows", 24),
+                            width=min(max(int(msg.get("cols", 80)), 1), 1000),
+                            height=min(max(int(msg.get("rows", 24)), 1), 500),
                         )
                     elif msg_type == "close":
                         break
@@ -1136,7 +1139,9 @@ async def pty_stream(websocket: WebSocket, session_id: str):
 
 
 @router.get("/api/ssh/check-port")
+@rate_limit_mutation(60, "minute")
 async def check_port(
+    request: Request,
     host: str = Query(..., description="Target hostname or IP"),
     port: int = Query(22, ge=1, le=65535, description="Target port"),
     timeout: float = Query(5.0, ge=0.5, le=30.0, description="Connection timeout in seconds"),

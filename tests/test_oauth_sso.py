@@ -433,9 +433,12 @@ class TestSsoEndpoints:
             )
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
-        assert "auth_token" in resp.text
         assert "location.href = '/'" in resp.text
-        assert "eyJ" in resp.text
+        # T79.18: the JWT is delivered via an httpOnly cookie, not localStorage.
+        set_cookie = resp.headers.get("set-cookie", "")
+        assert "auth_token=" in set_cookie
+        assert "HttpOnly" in set_cookie
+        assert "SameSite=strict" in set_cookie
 
     def test_callback_email_not_allowed(self, monkeypatch):
         monkeypatch.setattr(settings, "oauth_allowed_emails", "team@example.com")

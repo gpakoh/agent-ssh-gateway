@@ -3,6 +3,7 @@
 Each test is explicit about which bug ID it guards against.
 """
 
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -11,6 +12,45 @@ from pydantic import ValidationError
 from app.auth_middleware import is_ip_allowed
 from app.models import BatchOperation, EventHookCreate, EventHookUpdate
 from app.security import validate_path
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# T79.10 – Access-log redaction of ?token= (web-ui JWT must not leak to logs)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestTokenLogRedaction:
+    def test_query_token_is_redacted(self):
+        from app.main import _RedactTokenFilter
+
+        record = logging.LogRecord(
+            "uvicorn.access",
+            logging.INFO,
+            "",
+            0,
+            'GET /api/ssh/ws/abc?token=eyJhbGciOiJIUzI1NiJ9.xxx HTTP/1.1 101',
+            (),
+            None,
+        )
+        _RedactTokenFilter().filter(record)
+        assert "token=[REDACTED]" in record.getMessage()
+        assert "eyJhbGciOiJIUzI1NiJ9" not in record.getMessage()
+
+    def test_request_without_token_unchanged(self):
+        from app.main import _RedactTokenFilter
+
+        record = logging.LogRecord(
+            "uvicorn.access",
+            logging.INFO,
+            "",
+            0,
+            "GET /health HTTP/1.1 200",
+            (),
+            None,
+        )
+        _RedactTokenFilter().filter(record)
+        assert record.getMessage() == "GET /health HTTP/1.1 200"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # C1 – Exception Handler: Raise → Return

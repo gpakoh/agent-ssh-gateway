@@ -33,15 +33,23 @@ def _rate_limit_key(request: Request) -> str:
 limiter = Limiter(key_func=_rate_limit_key)
 
 
-def rate_limit_mutation(requests: int = 30, period: str = "minute"):
+def rate_limit_mutation(requests: int | None = None, period: str | None = None):
     """Rate-limit decorator for mutation endpoints.
+
+    Limits default to settings.rate_limit_requests / settings.rate_limit_window
+    unless explicit values are passed (T79.11: config is no longer dead).
 
     Usage:
         @rate_limit_mutation(10, "minute")
         async def my_endpoint(req: SomeRequest, request: Request):
             ...
     """
-    return limiter.limit(f"{requests}/{period}")
+    reqs = settings.rate_limit_requests if requests is None else requests
+    if period is None:
+        period_str = f"{settings.rate_limit_window} seconds"
+    else:
+        period_str = period
+    return limiter.limit(f"{reqs}/{period_str}")
 
 
 # ---------------------------------------------------------------------------

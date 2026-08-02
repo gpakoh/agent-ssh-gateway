@@ -63,15 +63,29 @@ class TestSecurity:
         assert "description" in api_key_scheme
 
     PUBLIC_GET = frozenset({"/health", "/api/capabilities"})
+    PUBLIC_AUTH_PATHS = frozenset({
+        "/api/auth/check",
+        "/api/auth/register",
+        "/api/auth/login",
+        "/api/auth/verify",
+        "/api/auth/oauth/authorize",
+        "/api/auth/oauth/callback",
+        "/api/auth/oauth/config",
+    })
 
     def test_protected_endpoints_have_security(self, schema):
-        """Only /health and /api/capabilities are public; everything else requires X-API-Key."""
+        """Only /health, /api/capabilities and the auth endpoints are public."""
         for path, methods in schema["paths"].items():
             for method, op in methods.items():
                 key = (path, method.upper())
                 if key in (("/health", "GET"), ("/api/capabilities", "GET")):
                     assert "security" not in op or op["security"] == [], (
                         f"{path} GET should be public, got security={op.get('security')}"
+                    )
+                elif path in self.PUBLIC_AUTH_PATHS:
+                    assert "security" not in op or op["security"] == [], (
+                        f"{method.upper()} {path} should be public, "
+                        f"got security={op.get('security')}"
                     )
                 else:
                     assert "security" in op, f"{method.upper()} {path} missing security"

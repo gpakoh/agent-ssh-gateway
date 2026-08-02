@@ -21,6 +21,14 @@ from app.auth_middleware import verify_api_key
 from app.config import settings
 from app.security import rate_limit_mutation
 
+# T79.17: precomputed bcrypt hash of a fixed dummy string, used to equalize
+# login timing between existing and non-existing usernames.
+_DUMMY_HASH: bytes = bcrypt.hashpw(b"dummy-timing-equalizer", bcrypt.gensalt())
+
+# T79.18: web-ui JWT delivered via httpOnly cookie instead of localStorage.
+AUTH_COOKIE_NAME = "auth_token"
+AUTH_COOKIE_PATH = "/"
+
 logger = logging.getLogger(__name__)
 
 _register_lock = asyncio.Lock()
@@ -81,11 +89,6 @@ class LoginRequest(BaseModel):
     password: str = Field(..., min_length=1)
 
 
-class AuthResponse(BaseModel):
-    token: str
-    username: str
-
-
 def validate_password(password: str) -> tuple[bool, str]:
     if len(password) < 8:
         return False, "Password must be at least 8 characters"
@@ -122,6 +125,35 @@ def verify_jwt(token: str) -> dict | None:
         return None
     except jwt.InvalidTokenError:
         return None
+
+
+def set_auth_cookie(response, token: str) -> None:
+    """Attach the web-ui JWT as an httpOnly, SameSite=Strict cookie (T79.18).
+
+    httpOnly keeps the token out of localStorage (XSS cannot read it);
+    SameSite=Strict blocks cross-site sends (CSRF); the browser attaches the
+    cookie to same-origin fetch/WebSocket automatically.
+    """
+    max_age = settings.jwt_expires_minutes * 60
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=token,
+        max_age=max_age,
+        httponly=True,
+        samesite="strict",
+        path=AUTH_COOKIE_PATH,
+        secure=settings.jwt_cookie_secure,
+    )
+
+
+def clear_auth_cookie(response) -> None:
+    """Expire the web-ui auth cookie (logout)."""
+    response.delete_cookie(key=AUTH_COOKIE_NAME, path=AUTH_COOKIE_PATH)
+
+
+def auth_token_from_request(request: Request) -> str:
+    """Read the web-ui JWT from the auth cookie, or "" when absent."""
+    return request.cookies.get(AUTH_COOKIE_NAME, "")
 
 
 @router.get("/api/auth/check")
@@ -208,7 +240,12 @@ async def register(request: Request, req: RegisterRequest):
                 raise RuntimeError("Username was not assigned")
 
             token = create_jwt(username=user.username, user_id=user.id)
-            return AuthResponse(token=token, username=user.username)
+            response = JSONResponse(
+                status_code=201,
+                content={"token": token, "username": user.username},
+            )
+            set_auth_cookie(response, token)
+            return response
 
 
 @router.post("/api/auth/login")
@@ -219,6 +256,9 @@ async def login(request: Request, req: LoginRequest):
         result = await session.execute(select(User).where(User.username == req.username))
         user = result.scalar_one_or_none()
         if user is None:
+            # T79.17: burn the same bcrypt time as a real login so response
+            # timing cannot be used to enumerate usernames.
+            bcrypt.checkpw(req.password.encode("utf-8"), _DUMMY_HASH)
             raise HTTPException(status_code=401, detail="Invalid username or password")
 
         if not bcrypt.checkpw(req.password.encode("utf-8"), user.password_hash.encode("utf-8")):
@@ -228,16 +268,32 @@ async def login(request: Request, req: LoginRequest):
             raise RuntimeError("User record is incomplete")
 
         token = create_jwt(username=user.username, user_id=user.id)
-        return AuthResponse(token=token, username=user.username)
+        response = JSONResponse(
+            status_code=200,
+            content={"token": token, "username": user.username},
+        )
+        set_auth_cookie(response, token)
+        return response
 
 
 @router.get("/api/auth/verify")
 async def verify(request: Request):
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
+    token = auth_token_from_request(request)
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:]
+    if not token:
         raise HTTPException(status_code=401, detail="Missing or invalid token")
-    token = auth[7:]
     payload = verify_jwt(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return {"valid": True, "username": payload["sub"], "uid": payload["uid"]}
+
+
+@router.post("/api/auth/logout")
+async def logout():
+    """Expire the web-ui auth cookie."""
+    response = JSONResponse(status_code=200, content={"ok": True})
+    clear_auth_cookie(response)
+    return response

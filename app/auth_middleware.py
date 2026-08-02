@@ -54,6 +54,7 @@ class AuthIdentity:
     role: str | None = None
     role_permissions: frozenset[str] | None = None
     tenant_labels: tuple[str, ...] = ()
+    via_cookie: bool = False
 
     @property
     def fingerprint(self) -> str:
@@ -413,6 +414,34 @@ async def auth_check(
             )
             return None
 
+    # JWT fallback via httpOnly cookie (T79.18)
+    from app.user_auth import AUTH_COOKIE_NAME, verify_jwt
+
+    cookie_token = request.cookies.get(AUTH_COOKIE_NAME, "")
+    if cookie_token:
+        payload = verify_jwt(cookie_token)
+        if payload is not None:
+            role = payload.get("role", "admin")
+            if not _cookie_csrf_ok(request):
+                return HTTPException(
+                    status_code=403,
+                    detail={
+                        "message": "CSRF check failed: cross-origin state change rejected",
+                        "code": "CSRF_BLOCKED",
+                        "retryable": False,
+                        "http_status": 403,
+                    },
+                )
+            request.state.auth_identity = AuthIdentity(
+                token_type="web-ui",
+                token=cookie_token,
+                name=payload["sub"],
+                scopes=scopes_for_role(role),
+                role=role,
+                via_cookie=True,
+            )
+            return None
+
     return HTTPException(
         status_code=401,
         detail={
@@ -423,6 +452,28 @@ async def auth_check(
             "http_status": 401,
         },
     )
+
+
+def _cookie_csrf_ok(request: Request) -> bool:
+    """CSRF guard for cookie-authenticated state changes (T79.18).
+
+    SameSite=Strict already prevents the browser from sending the cookie on
+    cross-site requests; this is a defence-in-depth check for older clients
+    that ignore SameSite. Safe methods are always allowed; state-changing
+    requests must present an Origin/Referer matching the Host.
+    """
+    if request.method in {"GET", "HEAD", "OPTIONS", "TRACE"}:
+        return True
+    origin = request.headers.get("origin", "")
+    referer = request.headers.get("referer", "")
+    host = request.headers.get("host", "")
+    if not origin and not referer:
+        return True
+    candidate = origin or referer
+    from urllib.parse import urlparse
+
+    parsed = urlparse(candidate)
+    return bool(parsed.hostname) and parsed.netloc == host
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +534,18 @@ async def ws_auth_check(
         logger.warning("Blocked WebSocket from disallowed IP %s", client_ip)
         return (CLOSE_POLICY_VIOLATION, "Access denied: client IP not allowed")
 
+    origin = websocket.headers.get("origin", "")
+    if origin:
+        host = websocket.headers.get("host", "")
+        from urllib.parse import urlparse
+
+        origin_host = urlparse(origin).netloc
+        if origin_host and origin_host != host:
+            logger.warning(
+                "Blocked WebSocket with mismatched Origin %s vs Host %s", origin, host
+            )
+            return (CLOSE_POLICY_VIOLATION, "Access denied: cross-site WebSocket rejected")
+
     provided = websocket.headers.get("X-API-Key", "")
     if not provided:
         auth_header = websocket.headers.get("Authorization", "")
@@ -490,8 +553,13 @@ async def ws_auth_check(
             provided = auth_header[7:]
     if not provided:
         # Browser WebSocket connections cannot send custom headers — accept the
-        # web-ui JWT via ?token= query parameter (same token as /api/auth/verify).
+        # web-ui JWT via ?token= query parameter or the httpOnly auth cookie
+        # (T79.18: cookie is the primary channel for the Web UI).
         provided = websocket.query_params.get("token", "")
+    if not provided:
+        from app.user_auth import AUTH_COOKIE_NAME
+
+        provided = websocket.cookies.get(AUTH_COOKIE_NAME, "")
     if not provided:
         return (CLOSE_POLICY_VIOLATION, "Invalid or missing API key")
 
@@ -510,6 +578,7 @@ async def ws_auth_check(
                 name=payload["sub"],
                 scopes=scopes_for_role(role),
                 role=role,
+                via_cookie=True,
             )
         else:
             identity = await is_agent_token_valid(settings, provided, token_store)

@@ -146,16 +146,16 @@ Safe-паттерны (allow list для docker ps/logs/build...) — опцио
 
 ### MINOR (отложены, отдельные задачи)
 
-- **T79.9 [SEC-02] openapi-claim неточен**: `app/main.py:881-886` — «всё кроме /health+/api/capabilities требует X-API-Key», auth-эндпоинты публичны по дизайну. Фикс: уточнить описание.
-- **T79.10 [log-утечка] JWT в `?token=` WS-query**: `app/auth_middleware.py:492` — попадает в access-логи. Фикс: cookie/header вместо query.
-- **T79.11 [CON] rate_limit_requests/window — мёртвый конфиг**: `app/config.py:127-128` не читается (лимиты хардкожены в декораторах). Фикс: подключить конфиг или удалить.
-- **T79.12 [SEC-03-смеж.] command_output_redaction_enabled default False**: `app/config.py:62-64`, `app/output_redaction.py:10` — вывод команд с секретами не редактируется по умолчанию. Фикс: default True.
-- **T79.13 [CON] .env.example placeholder'ы без валидации**: `API_KEY=change-me-...`, `JWT_SECRET=change-me-...` — деплой с примером = известные секреты. Фикс: валидация в config (reject change-me).
-- **T79.14 [ERR] `str(exc)` в detail**: `app/main.py:980-994` (SSHManagerError), `app/routers/oauth.py:80/:136`; эхо `input_val` `app/main.py:1013-1014` — утечка внутренних деталей. Фикс: generic detail + полный текст в лог.
-- **T79.15 [DoS] check-port без rate-limit**: `app/routers/ssh.py:1137`. Фикс: rate_limit.
-- **T79.16 [DoS] PTY WS без лимитов input/size**: `app/routers/ssh.py:1103-1118`. Фикс: лимиты на размер сообщений.
-- **T79.17 [тайминг] Энмумерация логинов**: `app/user_auth.py:206-212` — bcrypt только для существующих юзеров. Фикс: dummy-bcrypt для несуществующих.
-- **T79.18 [SEC-03-смеж.] JWT в localStorage Web UI**: `app/routers/oauth.py:169-178`. Фикс: httpOnly-cookie (архитектурное изменение, отложить).
+- ✅ **T79.9 [SEC-02] openapi-claim неточен**: `app/main.py:881-886` — «всё кроме /health+/api/capabilities требует X-API-Key», auth-эндпоинты публичны по дизайну. Фикс: уточнить описание.
+- ✅ **T79.10 [log-утечка] JWT в `?token=` WS-query**: `app/auth_middleware.py:492` — попадает в access-логи. Фикс: cookie/header вместо query.
+- ✅ **T79.11 [CON] rate_limit_requests/window — мёртвый конфиг**: `app/config.py:127-128` не читается (лимиты хардкожены в декораторах). Фикс: подключить конфиг или удалить.
+- ✅ **T79.12 [SEC-03-смеж.] command_output_redaction_enabled default False**: `app/config.py:62-64`, `app/output_redaction.py:10` — вывод команд с секретами не редактируется по умолчанию. Фикс: default True.
+- ✅ **T79.13 [CON] .env.example placeholder'ы без валидации**: `API_KEY=change-me-...`, `JWT_SECRET=change-me-...` — деплой с примером = известные секреты. Фикс: валидация в config (reject change-me).
+- ✅ **T79.14 [ERR] `str(exc)` в detail**: `app/main.py:980-994` (SSHManagerError), `app/routers/oauth.py:80/:136`; эхо `input_val` `app/main.py:1013-1014` — утечка внутренних деталей. Фикс: generic detail + полный текст в лог.
+- ✅ **T79.15 [DoS] check-port без rate-limit**: `app/routers/ssh.py:1137`. Фикс: rate_limit.
+- ✅ **T79.16 [DoS] PTY WS без лимитов input/size**: `app/routers/ssh.py:1103-1118`. Фикс: лимиты на размер сообщений.
+- ✅ **T79.17 [тайминг] Энмумерация логинов**: `app/user_auth.py:206-212` — bcrypt только для существующих юзеров. Фикс: dummy-bcrypt для несуществующих.
+- ✅ **T79.18 [SEC-03-смеж.] JWT в localStorage Web UI**: `app/routers/oauth.py:169-178`. Фикс: httpOnly-cookie (архитектурное изменение, отложить).
 
 ### Подтверждено (PASS)
 

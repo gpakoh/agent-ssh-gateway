@@ -23,6 +23,23 @@ def test_rate_limit_mutation_import():
     assert callable(deco)
 
 
+def test_rate_limit_mutation_defaults_to_config(monkeypatch):
+    """T79.11: no-arg decorator uses rate_limit_requests/rate_limit_window."""
+    from app.security import limiter
+
+    monkeypatch.setattr(settings, "rate_limit_requests", 7)
+    monkeypatch.setattr(settings, "rate_limit_window", 30)
+
+    @rate_limit_mutation()
+    async def fake_endpoint(request):
+        return None
+
+    name = f"{fake_endpoint.__module__}.{fake_endpoint.__name__}"
+    limits = limiter._route_limits.get(name, [])
+    assert len(limits) == 1
+    assert str(limits[0].limit) == "7 per 30 second"
+
+
 @pytest.fixture(autouse=True)
 def _reset_rate_limiter():
     """Clear shared rate-limit storage before each test to avoid cross-test leaks."""
