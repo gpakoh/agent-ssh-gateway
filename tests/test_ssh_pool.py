@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
+import paramiko
 import pytest
 
+from app.config import settings
+from app.ssh_manager import SessionLimitError, SSHSessionManager
 from app.ssh_pool import ConnectionPool
 
 
@@ -204,6 +207,75 @@ async def test_manager_disconnect_releases_to_pool():
     # transport returned to pool, not closed
     assert manager._pool.idle_count() == 1
     pooled.close.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_session_enforces_max_sessions_per_ip(monkeypatch):
+    monkeypatch.setattr(settings, "max_sessions_per_ip", 1)
+
+    manager = SSHSessionManager(connection_pool_size=0)
+    existing = MagicMock()
+    existing.session_id = "s-existing"
+    existing.source_ip = "10.0.0.5"
+    manager._sessions["s-existing"] = existing
+
+    # Same source IP → rejected before any connection attempt.
+    with pytest.raises(SessionLimitError):
+        await manager.create_session(
+            host="h", port=22, username="u", password="pw", source_ip="10.0.0.5"
+        )
+
+    # Different source IP is not affected by the limit (mock the connect).
+    original = paramiko.SSHClient
+    calls = []
+
+    class FakeClient(original):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            calls.append(self)
+            self.set_missing_host_key_policy = MagicMock()
+
+        def connect(self, *a, **k):
+            self._connected = True
+
+    paramiko.SSHClient = FakeClient
+    try:
+        sid = await manager.create_session(
+            host="h", port=22, username="u", password="pw", source_ip="10.0.0.6"
+        )
+    finally:
+        paramiko.SSHClient = original
+
+    assert sid is not None
+    await manager.disconnect(sid)
+
+
+@pytest.mark.asyncio
+async def test_create_session_limit_skipped_when_no_source_ip(monkeypatch):
+    monkeypatch.setattr(settings, "max_sessions_per_ip", 1)
+
+    manager = SSHSessionManager(connection_pool_size=0)
+    original = paramiko.SSHClient
+    calls = []
+
+    class FakeClient(original):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            calls.append(self)
+            self.set_missing_host_key_policy = MagicMock()
+
+        def connect(self, *a, **k):
+            self._connected = True
+
+    paramiko.SSHClient = FakeClient
+    try:
+        # source_ip=None → limit check is skipped entirely.
+        sid = await manager.create_session(host="h", port=22, username="u", password="pw")
+    finally:
+        paramiko.SSHClient = original
+
+    assert sid is not None
+    await manager.disconnect(sid)
 
 
 @pytest.mark.asyncio

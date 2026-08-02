@@ -58,6 +58,7 @@ examples/mcp_server/mcp_client.streamable-http.env
 /docker-compose.workspace-rw.yml
 # Private live overlay (not for public repo)
 /docker/docker-compose.live.yml
+/docker/Caddyfile.live
 # Agent context (contains operational details, not for public repo)
 AGENTS.md
 

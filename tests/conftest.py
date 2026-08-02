@@ -5,6 +5,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 # MCP server uses bare `from command_policy import ...` which requires
 # examples/mcp_server/ on sys.path when imported as a package in tests.
 _mcp_dir = str(Path(__file__).resolve().parents[1] / "examples" / "mcp_server")
@@ -16,3 +18,13 @@ os.environ.setdefault("JWT_SECRET", "test-jwt-secret-for-testing-only")
 os.environ.setdefault("API_KEY", "test-api-key-12345")
 os.environ.setdefault("AGENT_TOKEN", "test-agent-token-12345")
 os.environ.setdefault("WORKSPACE_READONLY", "false")
+os.environ.setdefault("SETUP_TOKEN", "test-setup-token-12345")
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limits():
+    """Clear the shared in-memory rate-limit storage between tests."""
+    from app.security import limiter
+
+    limiter.reset()
+    yield

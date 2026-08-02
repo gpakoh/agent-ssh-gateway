@@ -1,0 +1,10 @@
+# Caddy TLS reverse proxy for the live deployment (T79.8).
+# Copy to docker/Caddyfile.live (gitignored) or keep the tracked example.
+#
+# Terminates HTTPS on the public macvlan interface and proxies to the
+# gateway over the private internal_net. WebSocket upgrades (PTY sessions,
+# ?token= auth) are handled transparently by Caddy.
+
+<YOUR_DOMAIN> {
+    reverse_proxy web-ssh-gateway:8085
+}

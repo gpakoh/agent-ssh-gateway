@@ -56,7 +56,7 @@ class ExecuteRequest(BaseModel):
     """Request body for executing a command."""
 
     session_id: str = Field(..., min_length=1)
-    command: str = Field(..., min_length=1)
+    command: str = Field(..., min_length=1, max_length=65536)
     timeout: int = Field(default=30, ge=1, le=3600)
     async_mode: bool = Field(
         default=False,

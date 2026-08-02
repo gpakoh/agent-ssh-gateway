@@ -89,6 +89,14 @@
                         <input type="password" id="regPasswordConfirm" placeholder="Repeat password" autocomplete="new-password">
                     </div>
                 </div>
+                <div class="auth-field">
+                    <label for="regSetupToken">Setup Token</label>
+                    <div class="auth-input-wrap">
+                        <i data-lucide="key-round" class="auth-input-icon"></i>
+                        <input type="password" id="regSetupToken" placeholder="Provided by your administrator" autocomplete="off" spellcheck="false">
+                    </div>
+                    <div class="auth-hint">One-time token required to create the first admin (SETUP_TOKEN)</div>
+                </div>
                 <div class="auth-error" id="regError"></div>
                 <button type="button" class="btn btn-primary auth-submit" id="registerBtn">
                     <i data-lucide="user-plus" class="icon-14"></i>

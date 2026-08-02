@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+import secrets
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from app import state as _state
 from app.auth_middleware import verify_api_key
 from app.config import settings
+from app.security import rate_limit_mutation
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,7 @@ class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=32, pattern=r"^[a-zA-Z0-9_.-]+$")
     password: str = Field(..., min_length=8, max_length=128)
     password_confirm: str = Field(..., min_length=8, max_length=128)
+    setup_token: str = Field(default="", max_length=256)
 
 
 class LoginRequest(BaseModel):
@@ -163,7 +166,8 @@ async def _count_users() -> int:
 
 
 @router.post("/api/auth/register", status_code=201)
-async def register(req: RegisterRequest):
+@rate_limit_mutation(5, "minute")
+async def register(request: Request, req: RegisterRequest):
     if req.password != req.password_confirm:
         raise HTTPException(status_code=400, detail="Passwords do not match")
     valid, err = validate_password(req.password)
@@ -179,6 +183,14 @@ async def register(req: RegisterRequest):
                 raise HTTPException(
                     status_code=403, detail="Registration disabled. An admin already exists."
                 )
+
+            if not settings.setup_token:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Registration disabled: SETUP_TOKEN is not configured on the server.",
+                )
+            if not secrets.compare_digest(req.setup_token, settings.setup_token):
+                raise HTTPException(status_code=403, detail="Invalid or missing setup token")
 
             existing = await session.execute(select(User).where(User.username == req.username))
             if existing.scalar_one_or_none():
@@ -200,7 +212,8 @@ async def register(req: RegisterRequest):
 
 
 @router.post("/api/auth/login")
-async def login(req: LoginRequest):
+@rate_limit_mutation(10, "minute")
+async def login(request: Request, req: LoginRequest):
     SessionLocal = get_auth_sessionmaker()
     async with SessionLocal() as session:
         result = await session.execute(select(User).where(User.username == req.username))

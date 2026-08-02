@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     jwt_secret: str = Field(default="", alias="JWT_SECRET")
     jwt_expires_minutes: int = Field(default=1440, alias="JWT_EXPIRES_MINUTES")
     auth_db_path: str = Field(default="/app/data/auth.sqlite3", alias="AUTH_DB_PATH")
+    setup_token: str = Field(
+        default="",
+        alias="SETUP_TOKEN",
+        description=(
+            "One-time token required to create the first admin account. "
+            "Empty = first-admin registration is disabled (fail-closed)."
+        ),
+    )
 
     # OAuth2/SSO (optional; "" = disabled)
     oauth_provider: str = Field(
@@ -88,7 +96,10 @@ class Settings(BaseSettings):
     oauth_allowed_emails: str = Field(
         default="",
         alias="OAUTH_ALLOWED_EMAILS",
-        description="Comma-separated allowlist of SSO emails. Empty = allow any authenticated identity.",
+        description=(
+            "Comma-separated allowlist of SSO emails. "
+            "Empty = deny all SSO sign-ins (fail-closed; must be set to enable SSO)."
+        ),
     )
 
     @property
@@ -109,7 +120,7 @@ class Settings(BaseSettings):
         alias="ALLOWED_CLIENT_CIDRS",
     )
     trusted_proxy_cidrs: str = Field(
-        default="127.0.0.1/32,172.16.0.0/12",
+        default="127.0.0.1/32,::1/128",
         alias="TRUSTED_PROXY_CIDRS",
     )
     allowed_target_cidrs: str = Field(

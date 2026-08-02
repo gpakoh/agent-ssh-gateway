@@ -62,6 +62,15 @@ class TestGetClientIp:
         trusted = parse_cidrs("10.0.0.0/8")
         assert get_client_ip(req, trusted) == "192.0.2.10"
 
+    def test_docker_bridge_default_not_trusted_for_xff(self):
+        """T79.6: default TRUSTED_PROXY_CIDRS no longer trusts 172.16.0.0/12."""
+        from app.config import settings
+
+        assert settings.trusted_proxy_cidrs == "127.0.0.1/32,::1/128"
+        req = _mock_request(client_host="172.17.0.2", xff="10.0.0.99")
+        trusted = parse_cidrs(settings.trusted_proxy_cidrs)
+        assert get_client_ip(req, trusted) == "172.17.0.2"
+
 
 class TestIsIpAllowed:
     def test_allowed_ip(self):

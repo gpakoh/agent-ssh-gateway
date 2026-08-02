@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from slowapi.errors import RateLimitExceeded
 
 import app.build_info as build_info
 import app.state as state
@@ -46,6 +47,7 @@ from app.ssh_manager import (
     AuthenticationError,
     ConnectionError,
     ExecutionError,
+    SessionLimitError,
     SessionNotFoundError,
     SSHManagerError,
     SSHSessionManager,
@@ -984,6 +986,7 @@ async def ssh_exception_handler(request, exc: SSHManagerError):
         ConnectionError: 502,
         AuthenticationError: 401,
         SessionNotFoundError: 404,
+        SessionLimitError: 429,
         TimeoutError: 504,
         ExecutionError: 500,
     }
@@ -991,6 +994,22 @@ async def ssh_exception_handler(request, exc: SSHManagerError):
     return JSONResponse(
         status_code=status_code,
         content=_err(status_code, str(exc)),
+    )
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
+    """Return a structured 429 with Retry-After instead of the bare default."""
+    retry_after = 60
+    try:
+        item = exc.limit.limit
+        retry_after = max(int(getattr(item, "GRANULARITY", 60)), 1)
+    except Exception:
+        pass
+    return JSONResponse(
+        status_code=429,
+        headers={"Retry-After": str(retry_after)},
+        content=_err(429, f"Rate limit exceeded: {exc.detail}"),
     )
 
 

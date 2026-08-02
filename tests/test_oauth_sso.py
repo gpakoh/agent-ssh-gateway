@@ -321,8 +321,8 @@ class TestExchangeAndUserinfo:
 
 
 class TestEmailAllowlist:
-    def test_empty_allowlist_allows_all(self):
-        assert is_email_allowed("anyone@example.com") is True
+    def test_empty_allowlist_denies_all(self):
+        assert is_email_allowed("anyone@example.com") is False
 
     def test_allowlist_allows_member(self, monkeypatch):
         monkeypatch.setattr(settings, "oauth_allowed_emails", "team@example.com, dev@example.com")
@@ -383,6 +383,7 @@ class TestSsoEndpoints:
 
     def test_callback_full_flow_issues_gateway_jwt(self, monkeypatch):
         monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
+        monkeypatch.setattr(settings, "oauth_allowed_emails", "octo@example.com")
 
         async def fake_exchange(client, cfg, code, verifier, redirect_uri):
             return "access-tok"
@@ -411,6 +412,8 @@ class TestSsoEndpoints:
         assert payload["type"] == "web-ui"
 
     def test_callback_browser_flow_returns_html(self, monkeypatch):
+        monkeypatch.setattr(settings, "oauth_allowed_emails", "octo@example.com")
+
         async def fake_exchange(client, cfg, code, verifier, redirect_uri):
             return "access-tok"
 
@@ -457,9 +460,34 @@ class TestSsoEndpoints:
         assert resp.status_code == 403
         assert resp.json()["detail"]["code"] == "OAUTH_EMAIL_NOT_ALLOWED"
 
+    def test_callback_email_denied_when_allowlist_empty(self, monkeypatch):
+        """Fail-closed: SSO is unusable until OAUTH_ALLOWED_EMAILS is set."""
+        monkeypatch.setattr(settings, "oauth_allowed_emails", "")
+
+        async def fake_exchange(client, cfg, code, verifier, redirect_uri):
+            return "access-tok"
+
+        async def fake_userinfo(client, cfg, token):
+            return OAuthUserInfo(username="octocat", email="octo@example.com", subject="42")
+
+        monkeypatch.setattr("app.routers.oauth.exchange_code", fake_exchange)
+        monkeypatch.setattr("app.routers.oauth.fetch_userinfo", fake_userinfo)
+
+        state = "st-failclosed"
+        state_store.put(state, PendingAuth(provider="github", code_verifier="verifier"))
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/api/auth/oauth/callback?code=abc&state=" + state,
+                headers={"X-API-Key": "test-key-oauth", "Accept": "application/json"},
+            )
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["code"] == "OAUTH_EMAIL_NOT_ALLOWED"
+
     def test_callback_oidc_provider_flow(self, monkeypatch):
         monkeypatch.setattr(settings, "oauth_provider", "oidc")
         monkeypatch.setattr(settings, "oauth_issuer_url", "https://idp.example.com")
+        monkeypatch.setattr(settings, "oauth_allowed_emails", "alice@corp.example.com")
 
         async def fake_discover(client, issuer):
             return OAuthProviderConfig(
@@ -526,6 +554,7 @@ class TestSsoEndpoints:
                     "username": "localadmin",
                     "password": "LocalPass123!",
                     "password_confirm": "LocalPass123!",
+                    "setup_token": "test-setup-token-12345",
                 },
             )
         assert reg.status_code == 201

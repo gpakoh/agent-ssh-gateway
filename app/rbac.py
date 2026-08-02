@@ -97,6 +97,23 @@ def default_role_for_scopes(scopes: list[str] | tuple[str, ...] | None) -> str |
     return None
 
 
+def scopes_for_role(role: str | None) -> tuple[str, ...]:
+    """Scopes granted by a role, for building AuthIdentity on role tokens.
+
+    ``admin`` keeps full access (``("*",)`` — master-equivalent by design).
+    Other built-in roles get exactly the scopes whose mapped permission is
+    in the role's permission set; unknown/None roles get no scopes.
+    """
+    if role == "admin":
+        return ("*",)
+    role_def = BUILTIN_ROLES.get(role or "")
+    if role_def is None:
+        return ()
+    return tuple(
+        scope for scope, perm in SCOPE_PERMISSIONS.items() if perm in role_def.permissions
+    )
+
+
 def role_allows_scope(
     role_name: str | None, custom_permissions: frozenset[str] | None, required_scope: str
 ) -> bool:

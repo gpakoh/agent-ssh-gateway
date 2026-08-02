@@ -98,6 +98,12 @@ class ExecutionError(SSHManagerError):
     pass
 
 
+class SessionLimitError(SSHManagerError):
+    """Too many active sessions from a single source IP."""
+
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Session Record
 # ---------------------------------------------------------------------------
@@ -298,6 +304,19 @@ class SSHSessionManager:
         """
         auth_method = "password" if password is not None else "key"
         pool_key = (host, port, username, auth_method)
+
+        if source_ip and settings.max_sessions_per_ip > 0:
+            async with self._lock:
+                active = sum(
+                    1
+                    for record in self._sessions.values()
+                    if record.source_ip == source_ip
+                )
+            if active >= settings.max_sessions_per_ip:
+                raise SessionLimitError(
+                    f"Too many active sessions from {source_ip} "
+                    f"(limit {settings.max_sessions_per_ip})"
+                )
 
         pooled_client = None
         if self._pool is not None:
