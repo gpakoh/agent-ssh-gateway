@@ -152,7 +152,7 @@ def admin_created(server):
 def _login(drv, base):
     drv.get(f"{base}/")
     wait = WebDriverWait(drv, 15)
-    # Already authenticated (token persisted in localStorage) → shell is visible.
+    # Already authenticated (httpOnly auth cookie present) → shell is visible.
     try:
         wait.until(EC.visibility_of_element_located((By.ID, "appShell")))
         return

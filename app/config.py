@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -60,11 +60,12 @@ class Settings(BaseSettings):
         description="JSON mapping agent name → policy mode (e.g. {\"chatgpt\":\"enforce\",\"claude-code\":\"audit\"})",
     )
     command_output_redaction_enabled: bool = Field(
-        default=False, alias="COMMAND_OUTPUT_REDACTION_ENABLED"
+        default=True, alias="COMMAND_OUTPUT_REDACTION_ENABLED"
     )
     # Web UI Auth
     jwt_secret: str = Field(default="", alias="JWT_SECRET")
     jwt_expires_minutes: int = Field(default=1440, alias="JWT_EXPIRES_MINUTES")
+    jwt_cookie_secure: bool = Field(default=False, alias="JWT_COOKIE_SECURE")
     auth_db_path: str = Field(default="/app/data/auth.sqlite3", alias="AUTH_DB_PATH")
     setup_token: str = Field(
         default="",
@@ -198,6 +199,24 @@ class Settings(BaseSettings):
             self.agent_token_expires_at = datetime.now(UTC) + timedelta(
                 seconds=self.agent_token_ttl
             )
+
+    @model_validator(mode="after")
+    def _reject_placeholder_secrets(self) -> "Settings":
+        """T79.13: refuse to boot with .env.example placeholder secrets."""
+        placeholders = {
+            "API_KEY": self.api_key,
+            "AGENT_TOKEN": self.agent_token,
+            "ENCRYPTION_KEY": self.encryption_key,
+            "JWT_SECRET": self.jwt_secret,
+            "SETUP_TOKEN": self.setup_token,
+        }
+        offenders = [name for name, val in placeholders.items() if "change-me" in val]
+        if offenders:
+            raise ValueError(
+                f"Placeholder secret values in use for: {', '.join(sorted(offenders))}. "
+                "Set real secrets in your environment before starting the gateway."
+            )
+        return self
 
 
 settings = Settings()

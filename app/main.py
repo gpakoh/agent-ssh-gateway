@@ -15,7 +15,12 @@ from slowapi.errors import RateLimitExceeded
 import app.build_info as build_info
 import app.state as state
 from app.agent_token_store import AgentTokenStore
-from app.auth_middleware import auth_check, is_ip_allowed, parse_cidrs
+from app.auth_middleware import (
+    PUBLIC_AUTH_PATHS,
+    auth_check,
+    is_ip_allowed,
+    parse_cidrs,
+)
 from app.batch_operations import BatchOperationsManager
 from app.bulk_operations_v2 import BulkOperationsManager
 from app.circuit_breaker import CircuitBreakerRegistry
@@ -65,6 +70,30 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+class _RedactTokenFilter(logging.Filter):
+    """Mask web-ui JWTs passed via ?token= in access-log messages (T79.10)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "token=" in msg:
+            try:
+                record.msg = self._redact(msg)
+            except Exception:  # pragma: no cover - defensive
+                pass
+        return True
+
+    @staticmethod
+    def _redact(msg: str) -> str:
+        import re
+
+        return re.sub(r"(?i)([?&]token=)[^&\s\"']+", r"\1[REDACTED]", msg)
+
+
+for _handler in logging.getLogger("uvicorn.access").handlers:
+    _handler.addFilter(_RedactTokenFilter())
+logging.getLogger("uvicorn.access").addFilter(_RedactTokenFilter())
 
 
 async def _audit_retention_loop(
@@ -880,10 +909,12 @@ def custom_openapi():
                 elif not param.get("description"):
                     param["description"] = name.replace("_", " ").title()
 
-    # Security: /health And /api/capabilities Are Public; Everything Else Requires X-api-key
+    # Security: /health, /api/capabilities and the auth endpoints are public;
+    # everything else requires X-API-Key.
+    public_paths = frozenset({"/health", "/api/capabilities"})
     for path, _methods in schema.get("paths", {}).items():
         for _, op in _methods.items():
-            if path in ("/health", "/api/capabilities"):
+            if path in public_paths or path in PUBLIC_AUTH_PATHS:
                 continue
             op["security"] = [{"ApiKeyHeader": []}]
 
@@ -991,9 +1022,10 @@ async def ssh_exception_handler(request, exc: SSHManagerError):
         ExecutionError: 500,
     }
     status_code = status_map.get(type(exc), 500)
+    logger.warning("SSH manager error %s: %s", type(exc).__name__, exc)
     return JSONResponse(
         status_code=status_code,
-        content=_err(status_code, str(exc)),
+        content=_err(status_code, "SSH operation failed"),
     )
 
 

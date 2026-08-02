@@ -11,7 +11,7 @@ import secrets
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from app.config import settings
 from app.oauth_sso import (
@@ -29,7 +29,7 @@ from app.oauth_sso import (
     normalize_provider_name,
     state_store,
 )
-from app.user_auth import create_jwt
+from app.user_auth import create_jwt, set_auth_cookie
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,10 @@ async def oauth_authorize(request: Request, provider: str = ""):
             provider_cfg = get_provider_config(name)
     except OAuthConfigError as exc:
         logger.warning("OAuth authorize failed: %s", exc)
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=503,
+            detail="OAuth provider configuration unavailable",
+        ) from exc
 
     state = secrets.token_urlsafe(24)
     code_verifier = generate_code_verifier()
@@ -133,7 +136,10 @@ async def oauth_callback(request: Request, code: str = "", state: str = ""):
                 userinfo = await fetch_userinfo(client, provider_cfg, access_token)
     except OAuthConfigError as exc:
         logger.warning("OAuth callback failed for provider %s: %s", pending.provider, exc)
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502,
+            detail="OAuth token exchange failed",
+        ) from exc
 
     if not is_email_allowed(userinfo.email):
         logger.warning("OAuth email not allowed: %s", userinfo.email)
@@ -158,23 +164,23 @@ async def oauth_callback(request: Request, code: str = "", state: str = ""):
         userinfo.username,
     )
 
-    # Browser flow: HTML page that stores the token and redirects to the UI.
+    # Browser flow: httpOnly cookie carries the JWT; the page then redirects.
     accept = request.headers.get("accept", "")
     if "application/json" in accept:
-        return {"token": token, "username": userinfo.username, "provider": pending.provider}
+        response = JSONResponse(
+            {"token": token, "username": userinfo.username, "provider": pending.provider}
+        )
+        set_auth_cookie(response, token)
+        return response
 
-    import json
-
-    token_literal = json.dumps(token)
-    return HTMLResponse(
+    response = HTMLResponse(
         content=(
             "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
             "<title>Sign in complete</title></head><body>"
             "<p>Sign in complete. Redirecting…</p>"
-            "<script>"
-            "try{localStorage.setItem('auth_token', " + token_literal + ");}catch(e){}"
-            "location.href = '/';"
-            "</script></body></html>"
+            "<script>location.href = '/';</script></body></html>"
         ),
         status_code=200,
     )
+    set_auth_cookie(response, token)
+    return response

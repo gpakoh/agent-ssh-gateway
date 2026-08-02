@@ -6,52 +6,26 @@
 // ============================================
 // Auth State & Helpers
 // ============================================
+// T79.18: the web-ui JWT lives in an httpOnly cookie (set by the server on
+// login/register/SSO). JS cannot read it — fetch and WebSocket attach the
+// cookie automatically on same-origin requests.
 
-const AUTH_TOKEN_KEY = 'auth_token';
-
-function getAuthToken() {
-    return localStorage.getItem(AUTH_TOKEN_KEY);
-}
-
-function setAuthToken(token) {
-    if (token) {
-        localStorage.setItem(AUTH_TOKEN_KEY, token);
-    } else {
-        localStorage.removeItem(AUTH_TOKEN_KEY);
-    }
-}
-
-// Override fetch to add JWT Bearer token to API calls
+// API calls are same-origin; the httpOnly cookie authenticates them.
 const _origFetch = window.fetch;
-window.fetch = function(url, opts) {
-    var token = getAuthToken();
-    if (token && typeof url === 'string' && url.indexOf('/api/') === 0) {
-        opts = opts || {};
-        var headers = new Headers(opts.headers || {});
-        if (!headers.has('Authorization')) {
-            headers.set('Authorization', 'Bearer ' + token);
-        }
-        opts.headers = headers;
-    }
-    return _origFetch.call(this, url, opts);
-};
 
 async function checkAuth() {
-    var token = getAuthToken();
-    if (token) {
-        try {
-            var res = await fetch('/api/auth/verify');
-            if (res.ok) {
-                var data = await res.json();
-                var badge = document.getElementById('authUserBadge');
-                var uname = document.getElementById('authUsername');
-                if (badge) badge.style.display = 'inline-flex';
-                if (uname) uname.textContent = data.username;
-                return true;
-            }
-        } catch (e) {}
-    }
-    setAuthToken(null);
+    // The httpOnly cookie authenticates the request automatically.
+    try {
+        var res = await fetch('/api/auth/verify');
+        if (res.ok) {
+            var data = await res.json();
+            var badge = document.getElementById('authUserBadge');
+            var uname = document.getElementById('authUsername');
+            if (badge) badge.style.display = 'inline-flex';
+            if (uname) uname.textContent = data.username;
+            return true;
+        }
+    } catch (e) {}
     return false;
 }
 
@@ -530,10 +504,10 @@ async function apiSessionHealth(sessionId) {
 }
 
 function ptyWsUrl(sessionId) {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const token = getAuthToken();
-    const q = token ? `?token=${encodeURIComponent(token)}` : '';
-    return `${protocol}//${window.location.host}/api/ssh/pty/${encodeURIComponent(sessionId)}/stream${q}`;
+    var proto = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+    // T79.18: httpOnly cookie authenticates the WebSocket (same-origin);
+    // no token query parameter needed.
+    return proto + window.location.host + '/api/ssh/pty?session_id=' + encodeURIComponent(sessionId);
 }
 
 function setPtyStatus(text, isError) {
@@ -2870,7 +2844,7 @@ document.addEventListener('DOMContentLoaded', async function authInit() {
                 });
                 var data = await res.json();
                 if (res.ok) {
-                    setAuthToken(data.token);
+                    // T79.18: the server set the httpOnly auth cookie.
                     var badge = document.getElementById('authUserBadge');
                     var uname = document.getElementById('authUsername');
                     if (badge) badge.style.display = 'inline-flex';
@@ -2918,7 +2892,7 @@ document.addEventListener('DOMContentLoaded', async function authInit() {
                 });
                 var data = await res.json();
                 if (res.ok) {
-                    setAuthToken(data.token);
+                    // T79.18: the server set the httpOnly auth cookie.
                     var badge = document.getElementById('authUserBadge');
                     var uname = document.getElementById('authUsername');
                     if (badge) badge.style.display = 'inline-flex';
@@ -2938,8 +2912,10 @@ document.addEventListener('DOMContentLoaded', async function authInit() {
     // Logout
     if (logoutBtn) {
         logoutBtn.addEventListener('click', function() {
-            setAuthToken(null);
-            location.reload();
+            // T79.18: ask the server to expire the httpOnly cookie, then reload.
+            fetch('/api/auth/logout', { method: 'POST' }).finally(function() {
+                location.reload();
+            });
         });
     }
 

@@ -187,11 +187,15 @@ class TestVerify:
         assert data["username"] == "admin"
 
     def test_verify_missing_token(self):
-        resp = client.get("/api/auth/verify")
+        # Fresh client: the shared TestClient persists the httpOnly cookie from
+        # register/login, and verify now accepts the cookie (T79.18).
+        fresh = TestClient(app)
+        resp = fresh.get("/api/auth/verify")
         assert resp.status_code == 401
 
     def test_verify_invalid_token(self):
-        resp = client.get("/api/auth/verify", headers={"Authorization": "Bearer invalid.jwt.token"})
+        fresh = TestClient(app)
+        resp = fresh.get("/api/auth/verify", headers={"Authorization": "Bearer invalid.jwt.token"})
         assert resp.status_code == 401
 
     def test_verify_expired_token(self):
@@ -210,7 +214,8 @@ class TestVerify:
             "test-jwt-secret-for-testing-only",
             algorithm="HS256",
         )
-        resp = client.get("/api/auth/verify", headers={"Authorization": f"Bearer {token}"})
+        fresh = TestClient(app)
+        resp = fresh.get("/api/auth/verify", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 401
 
 

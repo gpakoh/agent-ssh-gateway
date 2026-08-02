@@ -271,11 +271,12 @@ def ws_ip_deny_settings(monkeypatch):
 class TestWsAuthCheckUnit:
     """Direct unit tests for ws_auth_check() — no TestClient needed."""
 
-    def _mock_ws(self, host="127.0.0.1", headers=None, query=None):
+    def _mock_ws(self, host="127.0.0.1", headers=None, query=None, cookies=None):
         ws = MagicMock()
         ws.client.host = host
         ws.headers = headers or {}
         ws.query_params = query or {}
+        ws.cookies = cookies or {}
         return ws
 
     def test_no_key_returns_1008(self, ws_settings):
