@@ -1,24 +1,72 @@
 # Live overlay example — copy to docker-compose.live.yml and fill in real values.
 # This file is tracked as a template. The real docker-compose.live.yml is gitignored.
 #
+# SECURITY (T79.8): the gateway itself never binds a public interface.
+# All public traffic enters through the Caddy TLS reverse proxy, which
+# terminates HTTPS on the macvlan and proxies to the gateway over the
+# private internal_net. Plain-HTTP LAN exposure is intentionally removed.
+#
 # Usage:
 #   cp docker/docker-compose.live.example.yml docker/docker-compose.live.yml
-#   # Edit docker-compose.live.yml with real IPs/paths
+#   # Edit docker-compose.live.yml with real IPs/paths/domain
 #   docker compose -f docker/docker-compose.yml -f docker/docker-compose.live.yml up -d
+#
+# DNS/ACME: point <YOUR_DOMAIN> at <YOUR_GATEWAY_IP> before starting, or
+# replace the Caddyfile block with an internal CA / self-signed cert and
+# set TRUSTED_PROXY_CIDRS to the internal_net subnet so X-Forwarded-For
+# is honoured behind the proxy.
 
 name: web-ssh-gateway
 
 services:
-  web-ssh-gateway:
+  caddy:
+    image: caddy:2-alpine
+    container_name: ssh-gateway-caddy
+    hostname: ssh-gateway-caddy
     networks:
       <YOUR_MACVLAN_NETWORK>:
         ipv4_address: <YOUR_GATEWAY_IP>
       internal_net: {}
+    ports:
+      - "<YOUR_GATEWAY_IP>:80:80"
+      - "<YOUR_GATEWAY_IP>:443:443"
+    volumes:
+      - ./Caddyfile.live.example:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
+  web-ssh-gateway:
+    networks:
+      internal_net: {}
     volumes:
       - <YOUR_HOST_WORKSPACE_PATH>:<YOUR_CONTAINER_WORKSPACE_PATH>:ro
+    environment:
+      - TRUSTED_PROXY_CIDRS=<YOUR_INTERNAL_NET_SUBNET>
 
 networks:
   <YOUR_MACVLAN_NETWORK>:
     external: true
   internal_net:
     external: true
+
+volumes:
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local

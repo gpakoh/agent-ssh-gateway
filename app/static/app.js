@@ -2893,10 +2893,12 @@ document.addEventListener('DOMContentLoaded', async function authInit() {
             var username = document.getElementById('regUsername');
             var password = document.getElementById('regPassword');
             var confirm = document.getElementById('regPasswordConfirm');
+            var setupToken = document.getElementById('regSetupToken');
             if (!username || !password || !confirm) return;
             var u = username.value.trim();
             var p = password.value;
             var c = confirm.value;
+            var st = setupToken ? setupToken.value.trim() : '';
             if (!u || !p || !c) {
                 if (regError) { regError.textContent = 'Please fill in all fields'; regError.style.display = 'block'; }
                 return;
@@ -2912,7 +2914,7 @@ document.addEventListener('DOMContentLoaded', async function authInit() {
                 var res = await _origFetch('/api/auth/register', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: u, password: p, password_confirm: c }),
+                    body: JSON.stringify({ username: u, password: p, password_confirm: c, setup_token: st }),
                 });
                 var data = await res.json();
                 if (res.ok) {
@@ -2969,4 +2971,5 @@ document.addEventListener('DOMContentLoaded', async function authInit() {
     onEnter('regUsername', registerBtn);
     onEnter('regPassword', registerBtn);
     onEnter('regPasswordConfirm', registerBtn);
+    onEnter('regSetupToken', registerBtn);
 });

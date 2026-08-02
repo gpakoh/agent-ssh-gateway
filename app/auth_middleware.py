@@ -17,6 +17,7 @@ from app.rbac import (
     default_role_for_scopes,
     labels_overlap,
     role_allows_scope,
+    scopes_for_role,
 )
 
 logger = logging.getLogger(__name__)
@@ -402,12 +403,13 @@ async def auth_check(
 
         payload = verify_jwt(auth_header[7:])
         if payload is not None:
+            role = payload.get("role", "admin")
             request.state.auth_identity = AuthIdentity(
                 token_type="web-ui",
                 token=auth_header[7:],
                 name=payload["sub"],
-                scopes=("*",),
-                role=payload.get("role", "admin"),
+                scopes=scopes_for_role(role),
+                role=role,
             )
             return None
 
@@ -501,12 +503,13 @@ async def ws_auth_check(
 
         payload = verify_jwt(provided)
         if payload is not None:
+            role = payload.get("role", "admin")
             identity = AuthIdentity(
                 token_type="web-ui",
                 token=provided,
                 name=payload["sub"],
-                scopes=("*",),
-                role=payload.get("role", "admin"),
+                scopes=scopes_for_role(role),
+                role=role,
             )
         else:
             identity = await is_agent_token_valid(settings, provided, token_store)

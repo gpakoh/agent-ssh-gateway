@@ -175,3 +175,85 @@ class TestExecuteOutputRedaction:
         assert "admin123" not in data["stderr"]
         assert "[REDACTED]" in data["stdout"]
         assert "[REDACTED]" in data["stderr"]
+
+
+class TestExecuteOutputCap:
+    """POST /api/ssh/execute truncates oversized stdout/stderr (T79.5)."""
+
+    BIG_OUTPUT = "A" * (10 * 1024 * 1024 + 500)
+
+    @classmethod
+    def _base_manager_mock(cls):
+        mgr = MagicMock()
+        mgr.execute = AsyncMock(
+            return_value={
+                "stdout": cls.BIG_OUTPUT,
+                "stderr": cls.BIG_OUTPUT,
+                "exit_code": 0,
+                "duration": 0.1,
+            }
+        )
+        mgr.disconnect = AsyncMock()
+        mgr.stop_cleanup_task = AsyncMock()
+        mgr.list_sessions = AsyncMock(return_value=[])
+        mgr.start_cleanup_task = AsyncMock()
+        mgr.reconnect = AsyncMock(return_value=True)
+        return mgr
+
+    @classmethod
+    def _make_session_mock(cls):
+        mgr = cls._base_manager_mock()
+        mgr.get_session = AsyncMock(
+            return_value=MagicMock(
+                owner_type="master",
+                owner_token_fingerprint=token_fingerprint("secret-42"),
+                tenant_labels=(),
+            )
+        )
+        return mgr
+
+    def _setup_state(self):
+        from app import state as _app_state
+
+        _app_state.manager = self._make_session_mock()
+        _app_state.audit_logger = MagicMock()
+        _app_state.job_manager = AsyncMock()
+        _app_state.job_manager._jobs = {}
+        _app_state.job_manager.list_jobs = AsyncMock(return_value={"jobs": [], "count": 0})
+        _app_state.job_manager.get_job = AsyncMock(return_value=None)
+        _app_state.job_manager.stop_cleanup_task = AsyncMock()
+        _app_state.job_manager.wait_for_all_jobs = AsyncMock()
+
+    def test_execute_truncates_oversized_output(self, monkeypatch):
+        monkeypatch.setattr(settings, "api_auth_enabled", True)
+        monkeypatch.setattr(settings, "api_key", "secret-42")
+        monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
+        monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
+
+        with TestClient(app) as client:
+            self._setup_state()
+            resp = client.post(
+                "/api/ssh/execute",
+                headers={"X-API-Key": "secret-42"},
+                json={"session_id": "s-1", "command": "env"},
+            )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert len(data["stdout"]) == 10 * 1024 * 1024
+        assert len(data["stderr"]) == 10 * 1024 * 1024
+
+    def test_execute_rejects_oversized_command(self, monkeypatch):
+        monkeypatch.setattr(settings, "api_auth_enabled", True)
+        monkeypatch.setattr(settings, "api_key", "secret-42")
+        monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
+        monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
+
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/ssh/execute",
+                headers={"X-API-Key": "secret-42"},
+                json={"session_id": "s-1", "command": "echo " + "x" * 70000},
+            )
+        assert resp.status_code == 422, resp.text

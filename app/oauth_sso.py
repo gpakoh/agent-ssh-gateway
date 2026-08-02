@@ -274,8 +274,8 @@ def _split_allowlist(raw: str) -> set[str]:
 
 
 def is_email_allowed(email: str) -> bool:
-    """Enforce OAUTH_ALLOWED_EMAILS allowlist (empty = allow all)."""
+    """Enforce OAUTH_ALLOWED_EMAILS allowlist (empty = deny all, fail-closed)."""
     allowlist = _split_allowlist(settings.oauth_allowed_emails)
     if not allowlist:
-        return True
+        return False
     return (email or "").strip().lower() in allowlist

@@ -75,6 +75,7 @@ def server():
             "API_KEY": "e2e-master-key",
             "JWT_SECRET": "e2e-jwt-secret-not-for-prod",
             "API_AUTH_ENABLED": "true",
+            "SETUP_TOKEN": "e2e-setup-token-123",
         }
     )
     proc = subprocess.Popen(
@@ -132,6 +133,7 @@ def admin_created(server):
             "username": "e2e-admin",
             "password": "Str0ng!Pass123",
             "password_confirm": "Str0ng!Pass123",
+            "setup_token": "e2e-setup-token-123",
         }
     ).encode()
     req = urllib.request.Request(
@@ -172,6 +174,7 @@ def _register(drv, base):
     drv.find_element(By.ID, "regUsername").send_keys("e2e-admin")
     drv.find_element(By.ID, "regPassword").send_keys("Str0ng!Pass123")
     drv.find_element(By.ID, "regPasswordConfirm").send_keys("Str0ng!Pass123")
+    drv.find_element(By.ID, "regSetupToken").send_keys("e2e-setup-token-123")
     drv.find_element(By.ID, "registerBtn").click()
     wait.until(EC.presence_of_element_located((By.ID, "appShell")))
     assert drv.find_element(By.ID, "appShell").is_displayed()

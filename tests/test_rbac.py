@@ -17,6 +17,7 @@ from app.rbac import (
     get_role,
     labels_overlap,
     role_allows_scope,
+    scopes_for_role,
     session_visible_to,
 )
 
@@ -107,6 +108,30 @@ class TestDefaultRoleForScopes:
 
     def test_none_scopes_no_role(self):
         assert default_role_for_scopes(None) is None
+
+
+class TestScopesForRole:
+    def test_admin_gets_wildcard(self):
+        assert scopes_for_role("admin") == ("*",)
+
+    def test_operator_gets_execute_scopes(self):
+        scopes = scopes_for_role("operator")
+        assert "ssh:execute" in scopes
+        assert "ssh:connect" in scopes
+        assert "ssh:files" in scopes
+        assert "*" not in scopes
+
+    def test_viewer_gets_only_connect_scopes(self):
+        scopes = scopes_for_role("viewer")
+        assert "ssh:connect" in scopes
+        assert "ssh:execute" not in scopes
+        assert "*" not in scopes
+
+    def test_unknown_role_gets_nothing(self):
+        assert scopes_for_role("superadmin") == ()
+
+    def test_none_role_gets_nothing(self):
+        assert scopes_for_role(None) == ()
 
 
 class TestRoleAllowsScope:

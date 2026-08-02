@@ -629,8 +629,9 @@ async def ssh_execute(
         timeout=req.timeout,
     )
     record_allowed(profile=gate.effective_profile, command_root=gate.command_root)
-    stdout = result["stdout"]
-    stderr = result["stderr"]
+    max_output = 10 * 1024 * 1024
+    stdout = result["stdout"][:max_output]
+    stderr = result["stderr"][:max_output]
     if should_redact_command_output(req.redact_output):
         stdout = redact_secrets(stdout)
         stderr = redact_secrets(stderr)
