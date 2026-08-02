@@ -13,7 +13,6 @@ from app.auth_middleware import is_ip_allowed
 from app.models import BatchOperation, EventHookCreate, EventHookUpdate
 from app.security import validate_path
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # T79.10 – Access-log redaction of ?token= (web-ui JWT must not leak to logs)
 # ═══════════════════════════════════════════════════════════════════════════════
