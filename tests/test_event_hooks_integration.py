@@ -240,3 +240,55 @@ async def test_agent_token_cannot_manage_event_hooks(_setup_globals):
         # Verify master can still manage (sanity check)
         r = await client.get("/api/event-hooks", headers=master_headers)
         assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_delivery_refuses_hostname_that_resolves_to_loopback(_setup_globals):
+    """Regression: validate_webhook_url() only rejects a hostname when it is
+    ITSELF a literal blocked IP — ipaddress.ip_address() raises on any real
+    hostname like "localhost", so the check is silently skipped for it, and
+    nothing re-validated the resolved address before connecting. A hook
+    pointed at a hostname that resolves to 127.0.0.1/169.254.169.254/etc.
+    sailed straight through to a real outbound HTTP request.
+    """
+    store, ds = _setup_globals
+    await store.create_tables()
+    await ds.create_tables()
+
+    from unittest.mock import AsyncMock
+
+    ds._http_session = AsyncMock()
+    ds._http_session.post.side_effect = AssertionError(
+        "must never connect to a blocked destination"
+    )
+
+    delivery_id = await ds.enqueue(
+        event_id="evt1",
+        hook_id="hook1",
+        event_type="session.connected",
+        url="http://localhost:9/hook",
+        payload_json="{}",
+    )
+
+    from sqlalchemy import select as sel
+
+    from app.session_store import WebhookDelivery
+
+    async with ds._session_factory() as session:
+        result = await session.execute(
+            sel(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
+        )
+        delivery = result.scalar_one()
+        await ds._send_delivery(
+            delivery,
+            max_attempts=5,
+            retry_base_sec=1.0,
+            retry_max_sec=60.0,
+        )
+
+    ds._http_session.post.assert_not_called()
+
+    record = await ds._get_record(delivery_id)
+    assert record is not None
+    assert record.status == "failed"
+    assert "Blocked destination" in (record.last_error or "")
