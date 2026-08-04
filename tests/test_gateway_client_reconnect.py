@@ -225,11 +225,15 @@ class TestExecuteRestrictedReconnect:
 
 class TestExecuteProjectCommandReconnect:
     def test_reconnects_and_retries(self):
+        """Regression: WorkspaceRegistry.project_info() returns a plain
+        dict (see app/workspace/registry.py), never an object with a
+        `.root` attribute. This test used to mock an object with `.root`,
+        which matched the (buggy) production code instead of the real
+        contract — masking a live 'dict' object has no attribute 'root'
+        failure in execute_project_command.
+        """
         client = _client()
         call_count = 0
-
-        class _FakeInfo:
-            root = "/projects"
 
         def _post_side_effect(path, payload):
             nonlocal call_count
@@ -243,11 +247,37 @@ class TestExecuteProjectCommandReconnect:
             with patch.object(client, "_reconnect_session") as mock_reconnect:
                 with patch("app.workspace.registry.get_registry") as mock_get_reg:
                     mock_reg = mock_get_reg.return_value
-                    mock_reg.project_info.return_value = _FakeInfo()
+                    mock_reg.project_info.return_value = {"project_id": "myapp", "root": "/projects"}
                     result = client.execute_project_command("myapp", "pwd")
         assert result == {"job_id": "job-1"}
         assert call_count == 2
         mock_reconnect.assert_called_once()
+
+
+class TestExecuteProjectScriptResolvesRealDictContract:
+    """Regression: execute_project_script resolves the project root the
+    same way execute_project_command does (get_registry().project_info()
+    returns a plain dict), and used to crash with
+    "'dict' object has no attribute 'root'" on every call — this is the
+    method run_pytest/run_mypy's read-only-filesystem fallback path uses.
+    """
+
+    def test_writes_script_under_resolved_dict_root(self, tmp_path):
+        client = _client()
+
+        with patch.object(client, "execute_argv") as mock_execute_argv:
+            mock_execute_argv.return_value = {"exit_code": 0, "stdout": "ok", "stderr": ""}
+            with patch("app.workspace.registry.get_registry") as mock_get_reg:
+                mock_reg = mock_get_reg.return_value
+                mock_reg.project_info.return_value = {"project_id": "myapp", "root": str(tmp_path)}
+                result = client.execute_project_script("myapp", "echo hi")
+
+        assert result == {"exit_code": 0, "stdout": "ok", "stderr": ""}
+        mock_execute_argv.assert_called_once()
+        call_kwargs = mock_execute_argv.call_args.kwargs
+        assert call_kwargs["cwd"] == str(tmp_path)
+        # The temp script is cleaned up after execution — nothing left behind.
+        assert list((tmp_path / ".ai-bridge" / "tmp").iterdir()) == []
 
 
 # ── Decorator: read_file / write_file ──────────────────────────

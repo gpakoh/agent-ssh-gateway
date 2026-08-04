@@ -164,6 +164,22 @@ async def test_ssh_exception_handler(exc, expected_status):
     assert "http_status" in data
 
 
+@pytest.mark.asyncio
+async def test_session_not_found_gets_its_own_code_not_generic_internal_error():
+    """Regression: the handler's message is deliberately generic ("SSH
+    operation failed", to avoid echoing upstream SSH server details), so
+    _auto_code's keyword sniffing can't tell a missing session apart from
+    any other 404 — it silently fell back to INTERNAL_ERROR. A downstream
+    MCP client then had no reliable signal and misclassified it further
+    (see test_mcp_classify_gateway_error.py). SessionNotFoundError must get
+    its code passed explicitly instead of relying on message sniffing.
+    """
+    resp = await main_module.ssh_exception_handler(None, SessionNotFoundError("Session x not found"))
+    data = json.loads(resp.body)
+    assert data["code"] == "SESSION_NOT_FOUND"
+    assert data["http_status"] == 404
+
+
 # ---------------------------------------------------------------------------
 # Validation_exception_handler
 # ---------------------------------------------------------------------------

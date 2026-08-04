@@ -1021,11 +1021,15 @@ async def ssh_exception_handler(request, exc: SSHManagerError):
         TimeoutError: 504,
         ExecutionError: 500,
     }
+    # The response message stays generic (avoids echoing upstream SSH server
+    # details), so _auto_code's keyword sniffing can't tell SessionNotFoundError
+    # apart from a generic 404 — pass its code explicitly instead.
+    code_map: dict[type[SSHManagerError], str] = {SessionNotFoundError: "SESSION_NOT_FOUND"}
     status_code = status_map.get(type(exc), 500)
     logger.warning("SSH manager error %s: %s", type(exc).__name__, exc)
     return JSONResponse(
         status_code=status_code,
-        content=_err(status_code, "SSH operation failed"),
+        content=_err(status_code, "SSH operation failed", code=code_map.get(type(exc))),
     )
 
 
