@@ -9,18 +9,21 @@
 зоны, которые в этот аудит **не попали вообще**. Порядок — по риску/вероятности
 живых багов, иду сверху вниз.
 
-1. **Web UI (фронтенд)** — `app/static/*.js`, `index.html`. Не проверялся вообще
-   в этой сессии. Обработка auth-токена в браузере, XSS-поверхность (по аналогии
-   с найденным сегодня XSS на `/oauth/consent` — тот же класс риска), обработка
-   WS-соединения на клиенте.
-2. **SDK** (`sdk/ssh_gateway.py`, `sdk/session.py`) — уже видел живые ошибки mypy
-   мимоходом (`await` на не-awaitable, неверное использование возврата
-   `disconnect()`), но CI-инвокация mypy (`mypy app examples/mcp_server
-   examples/mcp_client_remote`) вообще не покрывает `sdk/` — эти ошибки никогда
-   не проверяются в CI.
-3. **`scripts/` в целом** — та же дыра в CI-покрытии mypy, что и у `sdk/`.
-   `scripts/mcp_client_runtime_preflight.py` уже показал реальную ошибку типов
-   мимоходом, не разбирался глубже.
+1. ✅ **Web UI (фронтенд)** — `appendLine(content, 'system')` рендерил через
+   unescaped `innerHTML` — self-XSS, тот же класс риска, что и `/oauth/consent`.
+   Исправлено (`escapeHtml()`), e2e-тест на реальном headless Chromium
+   (`test_append_line_system_type_escapes_html`), задеплоено. Commit `57a3b8a0`.
+2. ✅ **SDK** (`sdk/session.py`) — `AsyncGatewaySession` был гарантированным
+   `TypeError` с любым реальным клиентом (`await` на синхронный `GatewayClient`);
+   собственные тесты мокали `AsyncMock()`, скрывая ровно это несоответствие.
+   Исправлено через `asyncio.to_thread`, тесты переписаны на `MagicMock` +
+   добавлен end-to-end тест на настоящем `GatewayClient`. Commit `0e603e79`.
+3. ✅ **`scripts/` в целом** — `mcp_client_runtime_preflight.py`: лишняя запятая
+   превращала третий аргумент `check()` (detail-сообщение) в отдельное
+   отброшенное tuple-выражение — diagnostic detail (`value=...`/`missing`)
+   молча терялся. Существующий тест проверял только наличие label, не detail —
+   не поймал бы баг. Исправлено, добавлены 2 регрессионных теста (проверены на
+   падение против до-фикс кода). Commit `ee5c6d77`.
 4. **Непроверенные роутеры** — структурно тронуты в P19 (вынос в сервисы), но
    не seam-аудированы на реальные баги в этой сессии: `admin_access.py`,
    `admin_approval.py` (ASK-mode approval flow — auth-смежный риск),
