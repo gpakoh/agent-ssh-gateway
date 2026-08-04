@@ -175,6 +175,14 @@ Safe-паттерны (allow list для docker ps/logs/build...) — опцио
 
 - **T80.4 [AUTH] Коллизия OAuth uid между провайдерами**: `app/routers/oauth.py:157` (было) — `uid = sha256(subject)[:4]` без имени провайдера. Два разных провайдера с одинаковым raw `sub`/`id` (частое дело для маленьких/последовательных числовых id) схлопывались в один gateway uid — один реальный пользователь неотличим от другого. **Фикс** (`12e88541`): хэш `f"{provider}:{subject}"`. 1 regression-тест.
 
+### T80.5 — CI-флейк: WebSocketDisconnect в WS-тестах
+
+Обнаружено при разборе двух неожиданных провалов CI на несвязанных коммитах (один — чисто docs). История прогонов Gitea Actions за 30 июля — 4 августа показала 4 отдельных провала с одинаковой сигнатурой `starlette.websockets.WebSocketDisconnect` в трёх разных тестах (`test_websocket_authorization.py::test_readonly_policy_denies_systemctl`, `::test_execute_stream_allowed_with_correct_scope`, `test_c3_command_policy_contract.py::test_denied_command_returns_policy_denied_code`), на обеих версиях Python.
+
+**Расследование**: не воспроизводится локально (30/30 повторов конкретного теста, 5/5 прогонов всех WS-тестов вместе). Механизм очереди Starlette `WebSocketTestSession` (`anyio.create_memory_object_stream` с бесконечным буфером) гарантирует FIFO-порядок сообщений — гипотеза «гонка между send и close» не подтвердилась при разборе исходников testclient.py. `AuditEventLogger.append()` (вызывается перед отправкой ответа во всех трёх упавших тестах) — уже exception-safe (try/except OSError + catch-all). Похоже на ресурсно-зависимую нестабильность именно shared CI-раннера (2 CPU/6GB на джобу), не воспроизводимую на менее нагруженной машине; точный корневой механизм внутри Starlette/anyio не установлен с уверенностью.
+
+**Фикс — целевой retry, не общее подавление**: добавлен `pytest-rerunfailures` (dev-зависимость, `uv.lock` обновлён). CI: `--reruns 2 --reruns-delay 2 --only-rerun 'WebSocketDisconnect'` — повторяет **только** тесты, упавшие именно с этой сигнатурой; настоящая регрессия в любом другом тесте по-прежнему валит сборку с первой попытки.
+
 ### Отложено / не исправлено (сознательно)
 
 - **T79.10 остаточный риск**: WS `?token=` до сих пор проверяется раньше cookie (комментарий в коде вводил в заблуждение), но сама заявленная в T79.10 угроза (утечка в access-логи) уже покрыта `_RedactTokenFilter` (`app/main.py`) с собственным тестом. Полное удаление query-fallback сломало бы задокументированное поведение `tests/test_webui.py` (браузерный WS не может слать кастомные заголовки) — не тронуто.
