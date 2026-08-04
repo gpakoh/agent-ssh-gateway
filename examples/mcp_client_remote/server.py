@@ -339,17 +339,28 @@ CONSENT_HTML = """<!DOCTYPE html>
 
 
 async def consent_handler(request: Request):
+    import html as html_lib
     from urllib.parse import urlencode, urlparse, urlunparse
 
     if request.method == "GET":
-        client_id = request.query_params.get("client_id", "")
-        redirect_uri = request.query_params.get("redirect_uri", "")
-        scope = request.query_params.get("scope", "mcp:read mcp:project")
-        state = request.query_params.get("state", "")
-        code_challenge = request.query_params.get("code_challenge", "")
-        resource = request.query_params.get("resource", "")
-        error = request.query_params.get("error", "")
-        html = CONSENT_HTML.format(
+        # Reflected XSS: these come straight from attacker-controlled query
+        # params on a public, unauthenticated endpoint (/oauth/consent is
+        # always public — see OAUTH_PUBLIC_PREFIXES) and used to go straight
+        # into CONSENT_HTML.format() unescaped. `error` in particular renders
+        # in a plain text context (<div id="error-msg">{error}</div>), so
+        # e.g. ?error=<script>...</script> executed verbatim in the victim's
+        # browser on the real consent page they'd see while authorizing a
+        # real MCP client — a crafted link could exfiltrate the password
+        # they type into this exact form. html.escape() everything that
+        # goes into the template, not just the ones that looked risky.
+        client_id = html_lib.escape(request.query_params.get("client_id", ""))
+        redirect_uri = html_lib.escape(request.query_params.get("redirect_uri", ""))
+        scope = html_lib.escape(request.query_params.get("scope", "mcp:read mcp:project"))
+        state = html_lib.escape(request.query_params.get("state", ""))
+        code_challenge = html_lib.escape(request.query_params.get("code_challenge", ""))
+        resource = html_lib.escape(request.query_params.get("resource", ""))
+        error = html_lib.escape(request.query_params.get("error", ""))
+        page_html = CONSENT_HTML.format(
             client_id=client_id,
             redirect_uri=redirect_uri,
             scope=scope,
@@ -358,7 +369,7 @@ async def consent_handler(request: Request):
             resource=resource,
             error=error,
         )
-        return HTMLResponse(html, status_code=200)
+        return HTMLResponse(page_html, status_code=200)
 
     form = await request.form()
     password = form.get("password", "")
