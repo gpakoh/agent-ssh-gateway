@@ -88,10 +88,12 @@ async def set_access_decision(
     # Normalize: API accepts "allow"/"deny", store uses "allowed"/"denied"
     internal_decision = "allowed" if req.decision == "allow" else "denied"
 
-    if req.decision == "allow":
-        ttl: int = int(req.ttl_seconds or settings.access_control_allow_ttl)
+    if req.ttl_seconds is not None:
+        ttl: int = int(req.ttl_seconds)
+    elif req.decision == "allow":
+        ttl = int(settings.access_control_allow_ttl)
     else:
-        ttl = int(req.ttl_seconds or settings.access_control_deny_ttl)
+        ttl = int(settings.access_control_deny_ttl)
 
     entry = store.set(
         req.actor_fingerprint,
@@ -184,8 +186,6 @@ async def clear_access_decision(
         reason=req.reason,
         decided_by="operator",
     )
-
-    key_hash = entry.key_hash if entry else store.make_key_hash(req.actor_fingerprint, req.source_ip) if hasattr(store, "make_key_hash") else ""
 
     from app.access_control import make_access_key_hash
     key_hash = entry.key_hash if entry else make_access_key_hash(req.actor_fingerprint, req.source_ip)

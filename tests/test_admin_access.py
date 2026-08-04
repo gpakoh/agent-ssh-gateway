@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -134,6 +135,30 @@ class TestAdminEndpointAuth:
             entry = _state.access_control_store.get("fp_ttl", "10.0.0.1")
             assert entry is not None
             assert entry.decision == "allowed"
+
+    def test_ttl_seconds_zero_is_honored_not_ignored(self, monkeypatch):
+        """Regression: the router used `req.ttl_seconds or <default>`, so an
+        explicit ttl_seconds=0 (falsy) was silently replaced by the default
+        TTL instead of being honored — even though AccessControlStore.set()
+        itself correctly distinguishes None from 0 via `is not None`.
+        """
+        _patch_auth(monkeypatch)
+        with TestClient(_get_app(), raise_server_exceptions=False) as c:
+            resp = c.post(
+                "/api/admin/access-control/decision",
+                json={
+                    "actor_fingerprint": "fp_zero_ttl",
+                    "source_ip": "10.0.0.1",
+                    "decision": "allow",
+                    "ttl_seconds": 0,
+                },
+                headers=_headers(),
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            # requested ttl_seconds=0 must NOT fall back to the multi-hour
+            # access_control_allow_ttl default.
+            assert body["expires_at"] < time.time() + 5
 
     def test_decision_persists_in_store(self, monkeypatch):
         _patch_auth(monkeypatch)
