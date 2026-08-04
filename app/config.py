@@ -102,6 +102,17 @@ class Settings(BaseSettings):
             "Empty = deny all SSO sign-ins (fail-closed; must be set to enable SSO)."
         ),
     )
+    oauth_default_role: str = Field(
+        default="operator",
+        alias="OAUTH_DEFAULT_ROLE",
+        description=(
+            "RBAC role granted to every successful SSO login (admin/operator/viewer/custom). "
+            "SSO is inherently multi-user (anyone on OAUTH_ALLOWED_EMAILS), unlike local "
+            "register which is single-admin-only by construction — defaults to 'operator', "
+            "NOT 'admin', so allowlisting an email doesn't silently hand out master-equivalent "
+            "access. Invalid values fall back to 'operator' (fail-safe, not fail-open)."
+        ),
+    )
 
     @property
     def jwt_secret_required(self) -> str:

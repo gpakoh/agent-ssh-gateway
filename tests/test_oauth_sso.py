@@ -411,6 +411,140 @@ class TestSsoEndpoints:
         assert payload["sub"] == "octocat"
         assert payload["type"] == "web-ui"
 
+    def test_callback_defaults_to_operator_role_not_admin(self, monkeypatch):
+        """Regression: SSO logins used to silently default to create_jwt's
+        admin default because the callback never passed role= explicitly.
+        SSO is multi-user by construction (anyone matching
+        OAUTH_ALLOWED_EMAILS) — a safe non-admin default is required.
+        """
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
+        monkeypatch.setattr(settings, "oauth_allowed_emails", "octo@example.com")
+
+        async def fake_exchange(client, cfg, code, verifier, redirect_uri):
+            return "access-tok"
+
+        async def fake_userinfo(client, cfg, token):
+            return OAuthUserInfo(username="octocat", email="octo@example.com", subject="42")
+
+        monkeypatch.setattr("app.routers.oauth.exchange_code", fake_exchange)
+        monkeypatch.setattr("app.routers.oauth.fetch_userinfo", fake_userinfo)
+
+        state = "st-role-default"
+        state_store.put(state, PendingAuth(provider="github", code_verifier="verifier"))
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/api/auth/oauth/callback?code=abc&state=" + state,
+                headers={"X-API-Key": "test-key-oauth", "Accept": "application/json"},
+            )
+        assert resp.status_code == 200
+        payload = verify_jwt(resp.json()["token"])
+        assert payload is not None
+        assert payload["role"] == "operator"
+        assert payload["role"] != "admin"
+
+    def test_callback_honors_configured_oauth_default_role(self, monkeypatch):
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
+        monkeypatch.setattr(settings, "oauth_allowed_emails", "octo@example.com")
+        monkeypatch.setattr(settings, "oauth_default_role", "viewer")
+
+        async def fake_exchange(client, cfg, code, verifier, redirect_uri):
+            return "access-tok"
+
+        async def fake_userinfo(client, cfg, token):
+            return OAuthUserInfo(username="octocat", email="octo@example.com", subject="42")
+
+        monkeypatch.setattr("app.routers.oauth.exchange_code", fake_exchange)
+        monkeypatch.setattr("app.routers.oauth.fetch_userinfo", fake_userinfo)
+
+        state = "st-role-viewer"
+        state_store.put(state, PendingAuth(provider="github", code_verifier="verifier"))
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/api/auth/oauth/callback?code=abc&state=" + state,
+                headers={"X-API-Key": "test-key-oauth", "Accept": "application/json"},
+            )
+        assert resp.status_code == 200
+        payload = verify_jwt(resp.json()["token"])
+        assert payload is not None
+        assert payload["role"] == "viewer"
+
+    def test_callback_invalid_oauth_default_role_falls_back_safely(self, monkeypatch):
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
+        monkeypatch.setattr(settings, "oauth_allowed_emails", "octo@example.com")
+        monkeypatch.setattr(settings, "oauth_default_role", "super-root-god-mode")
+
+        async def fake_exchange(client, cfg, code, verifier, redirect_uri):
+            return "access-tok"
+
+        async def fake_userinfo(client, cfg, token):
+            return OAuthUserInfo(username="octocat", email="octo@example.com", subject="42")
+
+        monkeypatch.setattr("app.routers.oauth.exchange_code", fake_exchange)
+        monkeypatch.setattr("app.routers.oauth.fetch_userinfo", fake_userinfo)
+
+        state = "st-role-invalid"
+        state_store.put(state, PendingAuth(provider="github", code_verifier="verifier"))
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/api/auth/oauth/callback?code=abc&state=" + state,
+                headers={"X-API-Key": "test-key-oauth", "Accept": "application/json"},
+            )
+        assert resp.status_code == 200
+        payload = verify_jwt(resp.json()["token"])
+        assert payload is not None
+        assert payload["role"] == "operator"
+
+    def test_callback_uid_namespaced_by_provider_no_cross_provider_collision(self, monkeypatch):
+        """Regression: the gateway uid used to be sha256(subject) alone, so
+        two different providers handing out the same raw sub/id (common for
+        small/sequential numeric ids) collided into the identical uid,
+        letting one real user be treated as another.
+        """
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
+        monkeypatch.setattr(settings, "oauth_allowed_emails", "same-subject@example.com")
+
+        async def fake_exchange(client, cfg, code, verifier, redirect_uri):
+            return "access-tok"
+
+        async def fake_userinfo_github(client, cfg, token):
+            return OAuthUserInfo(
+                username="github-user", email="same-subject@example.com", subject="12345"
+            )
+
+        async def fake_userinfo_gitlab(client, cfg, token):
+            return OAuthUserInfo(
+                username="gitlab-user", email="same-subject@example.com", subject="12345"
+            )
+
+        monkeypatch.setattr("app.routers.oauth.exchange_code", fake_exchange)
+
+        state1 = "st-collision-github"
+        state_store.put(state1, PendingAuth(provider="github", code_verifier="verifier"))
+        monkeypatch.setattr("app.routers.oauth.fetch_userinfo", fake_userinfo_github)
+        with TestClient(app) as client:
+            resp1 = client.get(
+                "/api/auth/oauth/callback?code=abc&state=" + state1,
+                headers={"X-API-Key": "test-key-oauth", "Accept": "application/json"},
+            )
+        assert resp1.status_code == 200
+        uid1 = verify_jwt(resp1.json()["token"])["uid"]
+
+        state2 = "st-collision-gitlab"
+        state_store.put(state2, PendingAuth(provider="gitlab", code_verifier="verifier"))
+        monkeypatch.setattr("app.routers.oauth.fetch_userinfo", fake_userinfo_gitlab)
+        with TestClient(app) as client:
+            resp2 = client.get(
+                "/api/auth/oauth/callback?code=abc&state=" + state2,
+                headers={"X-API-Key": "test-key-oauth", "Accept": "application/json"},
+            )
+        assert resp2.status_code == 200
+        uid2 = verify_jwt(resp2.json()["token"])["uid"]
+
+        assert uid1 != uid2
+
     def test_callback_browser_flow_returns_html(self, monkeypatch):
         monkeypatch.setattr(settings, "oauth_allowed_emails", "octo@example.com")
 
