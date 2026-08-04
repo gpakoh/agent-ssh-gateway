@@ -260,6 +260,16 @@ class TestBuildAppIntegration:
         resp = client.get("/mcp")
         assert resp.status_code == 401
 
+    def test_healthz_does_not_require_token(self):
+        """The Docker HEALTHCHECK hits this path specifically so it never
+        has to send a bearer token — regression: it used to probe /mcp,
+        which always answered 401 and spammed the container's logs with a
+        misleading "unauthorized" line every 30s."""
+        app, _host, _port = self._build(token="secret-xyz")
+        client = TestClient(app)
+        resp = client.get("/healthz")
+        assert resp.status_code == 200
+
     def test_mcp_endpoint_rejects_wrong_token(self):
         app, _host, _port = self._build(token="secret-xyz")
         client = TestClient(app)

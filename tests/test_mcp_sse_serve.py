@@ -206,6 +206,41 @@ class TestBearerAuthMiddleware:
         assert resp.status_code == 401
         assert "some-leaked-looking-value" not in resp.text
 
+    def test_exempt_path_bypasses_auth(self):
+        """A liveness-probe path (e.g. Docker HEALTHCHECK) doesn't need the
+        bearer token — that's the whole point of exempting it."""
+        app = BearerAuthMiddleware(_trivial_app(), "real-token", exempt_paths=frozenset({"/healthz"}))
+        client = TestClient(app)
+        resp = client.get("/healthz")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+
+    def test_exempt_path_never_reaches_wrapped_app(self):
+        """The exempt response is fixed and minimal — it must not delegate
+        to the wrapped app even if a route happens to exist at that path,
+        so an exempt path can never become a way to smuggle real traffic
+        past auth."""
+        app = BearerAuthMiddleware(_trivial_app(), "real-token", exempt_paths=frozenset({"/probe"}))
+        client = TestClient(app)
+        resp = client.get("/probe")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+        assert resp.text != "ok"  # would be _trivial_app()'s own response if it leaked through
+
+    def test_non_exempt_paths_still_require_token(self):
+        """Adding an exemption must not weaken auth for every other path."""
+        app = BearerAuthMiddleware(_trivial_app(), "real-token", exempt_paths=frozenset({"/healthz"}))
+        client = TestClient(app)
+        resp = client.get("/probe")
+        assert resp.status_code == 401
+
+    def test_default_has_no_exemptions(self):
+        """Without exempt_paths, behavior must be identical to before —
+        no path is ever unauthenticated by default."""
+        client = self._client("real-token")
+        resp = client.get("/healthz")
+        assert resp.status_code == 401
+
 
 # ---------------------------------------------------------------------------
 # Route discovery + integration against the real FastMCP instance

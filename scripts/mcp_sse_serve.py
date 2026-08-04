@@ -233,15 +233,31 @@ class BearerAuthMiddleware:
     the same check before any MCP routing happens. Independent of
     MCP_AUTH_MODE / GatewayOAuthProvider — does not assume that wiring
     is correct.
+
+    exempt_paths (default: none) lets a caller carve out unauthenticated
+    liveness-probe paths — e.g. a Docker HEALTHCHECK that would otherwise
+    have to hit the real (bearer-protected) MCP endpoint and log a 401 on
+    every single check. An exempt path never reaches the wrapped app; it
+    always gets a fixed, minimal 200 response, so it can't become a way
+    to smuggle real traffic past auth by picking a path that happens to
+    exist in the wrapped app too.
     """
 
-    def __init__(self, app: Any, token: str) -> None:
+    def __init__(self, app: Any, token: str, *, exempt_paths: frozenset[str] = frozenset()) -> None:
         self.app = app
         self._token = token
+        self._exempt_paths = exempt_paths
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
+            return
+
+        if scope.get("path") in self._exempt_paths:
+            from starlette.responses import JSONResponse  # noqa: PLC0415
+
+            response = JSONResponse({"status": "ok"})
+            await response(scope, receive, send)
             return
 
         headers = dict(scope.get("headers") or [])

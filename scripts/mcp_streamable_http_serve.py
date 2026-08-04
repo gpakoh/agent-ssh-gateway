@@ -91,6 +91,7 @@ from scripts.mcp_streamable_http_route_probe import (  # noqa: E402
     build_streamable_http_app as _build_streamable_http_app,
 )
 
+HEALTH_CHECK_PATH = "/healthz"
 HOST_ENV_VAR = "MCP_STREAMABLE_HTTP_HOST"
 PORT_ENV_VAR = "MCP_STREAMABLE_HTTP_PORT"
 DEFAULT_PORT = 8087
@@ -153,7 +154,7 @@ def build_app() -> tuple[Any, str, int]:
     extra_allowed_origins = parse_allowed_origins()
 
     inner_app = build_inner_app(extra_allowed_origins)
-    app: Any = BearerAuthMiddleware(inner_app, token)
+    app: Any = BearerAuthMiddleware(inner_app, token, exempt_paths=frozenset({HEALTH_CHECK_PATH}))
     app = OriginValidationMiddleware(app, extra_allowed_origins)
     return app, host, port
 
