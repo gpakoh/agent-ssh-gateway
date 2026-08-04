@@ -7,12 +7,14 @@ import logging
 import random
 import uuid
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlparse
 
 import aiohttp
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import settings as _settings
+from app.event_hook_security import validate_destination_ip
 from app.metrics import metrics
 from app.session_store import Base, WebhookDelivery
 
@@ -258,6 +260,21 @@ class DeliveryService:
         d_id: str = delivery.delivery_id
         d_url: str = delivery.url
         d_event: str = delivery.event_type
+
+        blocked_reason = await self._blocked_destination_reason(d_url)
+        if blocked_reason:
+            await self.fail(
+                d_id,
+                f"Blocked destination ({blocked_reason})",
+                max_attempts,
+                retry_base_sec,
+                retry_max_sec,
+            )
+            metrics.record_event_hook_delivery(status="failed", event=d_event)
+            elapsed = (datetime.now(UTC) - start).total_seconds()
+            metrics.record_event_hook_latency(elapsed)
+            return
+
         try:
             async with self._http_session.post(
                 d_url,
@@ -298,6 +315,31 @@ class DeliveryService:
         finally:
             elapsed = (datetime.now(UTC) - start).total_seconds()
             metrics.record_event_hook_latency(elapsed)
+
+    async def _blocked_destination_reason(self, url: str) -> str | None:
+        """Resolve the delivery URL's hostname and check every resolved
+        address against the SSRF blocklist.
+
+        validate_webhook_url() (checked only at hook-creation time) rejects a
+        hostname only when it is itself a literal IP in a blocked range —
+        ipaddress.ip_address() raises on any real hostname, so validation is
+        silently skipped for it. A hook URL using a hostname that merely
+        *resolves* to 127.0.0.1 / 169.254.169.254 / an RFC1918 address was
+        never re-checked before this connected to it. Redirects are already
+        disabled (allow_redirects=False) so this is the one remaining gap.
+        """
+        host = urlparse(url).hostname
+        if not host:
+            return "no hostname"
+        try:
+            addrs = await asyncio.get_running_loop().getaddrinfo(host, None)
+        except OSError as exc:
+            return f"DNS resolution failed: {exc}"
+        for _family, _type, _proto, _canonname, sockaddr in addrs:
+            ip = sockaddr[0]
+            if not validate_destination_ip(ip).valid:
+                return f"resolves to blocked address {ip}"
+        return None
 
     async def _cleanup_loop(self, interval: float, sent_days: int, dead_days: int):
         while self._running:
