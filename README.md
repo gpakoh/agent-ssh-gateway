@@ -45,7 +45,7 @@ over credentials, targets, scopes, and execution policy.
 | Project workflows | Scoped file read/search/write, Git inspection, diffs, tests, linting, type checks, preview, hash verification, and patch application |
 | MCP integrations | Gateway tools plus GitHub, Gitea, Docker, PostgreSQL, and Context7 adapters |
 | Agent coordination | Structured task handoff, isolated worktrees, agent status/report artifacts, and controlled runner workflows |
-| Access control | Master and short-lived agent tokens, scopes, access profiles, session ownership, target allowlists, command policies, and confirmation flows |
+| Access control | Master and short-lived agent tokens, optional SSO login, scopes, access profiles, session ownership, target allowlists, command policies, and confirmation flows |
 
 Tool visibility depends on the selected MCP mode and access profile. The project
 ships minimal, standard, full, and ChatGPT-oriented modes, including a safe mode
@@ -77,6 +77,10 @@ execution inherently safe.
 - Commands can be evaluated against `readonly`, `testlint`,
   `project-automation`, `ops`, or other policy profiles.
 - Agent tokens are scoped, short-lived, and isolated by session ownership.
+- Optional SSO login (GitHub, GitLab, Google, or generic OIDC) is fail-closed
+  by default — no allowlisted email means no sign-ins, and a successful
+  login is granted the `operator` role, never `admin`, unless explicitly
+  reconfigured.
 - Project tools resolve paths under registered roots and reject traversal.
 - Dangerous Docker operations require an explicit confirmation flow.
 - Secret redaction can be enabled for returned command and job output.
@@ -232,7 +236,9 @@ Copy `.env.example` and review every security-sensitive value.
 | `WORKSPACE_READONLY` | Global gate for workspace mutation |
 | `COMMAND_OUTPUT_REDACTION_ENABLED` | Best-effort response redaction |
 | `SSH_STRICT_HOST_KEY_CHECKING` | SSH host identity verification — also set `KNOWN_HOSTS_STORE` (`file` or `postgres`), otherwise every connection is rejected with no way to ever trust a host |
+| `SSH_CONNECTION_POOL_SIZE` | Reuse SSH connections across sessions to the same target (0 = disabled, the default) |
 | `ENCRYPTION_KEY` | Encryption of persisted session credentials |
+| `OAUTH_PROVIDER` / `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` | Optional SSO login (`github`, `gitlab`, `google`, or `oidc`) — also set `OAUTH_ALLOWED_EMAILS` (empty = deny all) and `OAUTH_REDIRECT_URI` |
 
 `.env.example` is the canonical configuration reference. Never commit real
 tokens, private keys, infrastructure addresses, or deployment overlays.
