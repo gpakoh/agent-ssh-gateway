@@ -205,6 +205,26 @@ def test_restart_timeout_clamped():
     assert argv_low[idx + 1] == "1"
 
 
+@pytest.mark.asyncio
+async def test_stats_uses_longer_timeout_than_default():
+    """Regression: docker_stats was reported timing out at the default 30s
+    SUBPROCESS_TIMEOUT on a host with many running containers — `stats
+    --no-stream` samples live cgroup counters for every container, unlike
+    cheap metadata-only reads like `ps`/`images`. Must use the same 60s
+    budget as compose_ps, the other "enumerate everything" read.
+    """
+    c = _client()
+    seen: dict[str, object] = {}
+
+    async def _fake_run(argv, timeout=None, **kw):
+        seen["timeout"] = timeout
+        return "NAME\tCPU\n"
+
+    c._run = _fake_run
+    await c.stats()
+    assert seen["timeout"] == 60.0
+
+
 def test_stop_timeout_clamped():
     """stop clamps timeout to [1, 120]; does not raise."""
     c = _client()

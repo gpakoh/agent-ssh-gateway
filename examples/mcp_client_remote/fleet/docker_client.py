@@ -386,7 +386,13 @@ class DockerClient:
                     "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}",
                 ]
             )
-        result = await self._run(argv)
+        # Unlike `docker ps`/`docker images` (metadata-only), --no-stream
+        # still has to sample live cgroup counters for every running
+        # container once before returning — on a host running dozens of
+        # containers this can occasionally run past the default 30s
+        # SUBPROCESS_TIMEOUT under load. Same 60s budget as compose_ps,
+        # the other "enumerate everything" read.
+        result = await self._run(argv, timeout=60.0)
         return self._truncate_table_output(result, limit)
 
     async def compose_ps(
