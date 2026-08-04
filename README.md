@@ -231,7 +231,7 @@ Copy `.env.example` and review every security-sensitive value.
 | `COMMAND_POLICY_PROFILE` | Command capability profile |
 | `WORKSPACE_READONLY` | Global gate for workspace mutation |
 | `COMMAND_OUTPUT_REDACTION_ENABLED` | Best-effort response redaction |
-| `SSH_STRICT_HOST_KEY_CHECKING` | SSH host identity verification |
+| `SSH_STRICT_HOST_KEY_CHECKING` | SSH host identity verification — also set `KNOWN_HOSTS_STORE` (`file` or `postgres`), otherwise every connection is rejected with no way to ever trust a host |
 | `ENCRYPTION_KEY` | Encryption of persisted session credentials |
 
 `.env.example` is the canonical configuration reference. Never commit real
