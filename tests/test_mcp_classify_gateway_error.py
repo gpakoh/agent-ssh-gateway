@@ -160,3 +160,64 @@ def test_malformed_body_falls_back_to_status_heuristics():
     code, retryable = _classify(401, {"unexpected": "shape"})
     assert code == "AUTH_ERROR"
     assert retryable is False
+
+
+class TestRealGatewayResponseShapeSeam:
+    """End-to-end across the actual seam, not a re-description of it.
+
+    Regression: SSHManagerError's handler (session/connection/exec errors)
+    returns a flat {message, code, retryable, hint, http_status} body with
+    no "detail" wrapper — unlike most other gateway endpoints, which raise
+    HTTPException(detail={...}) and get FastAPI's automatic {"detail": {...}}
+    wrapping. Both sides were individually well-tested and correct in
+    isolation: app/main.py's ssh_exception_handler tests asserted the flat
+    shape, and this file's own tests asserted the nested shape — nobody fed
+    one real side's actual output into the other real side's input. A bare
+    404 with no "detail" key fell through to a blunt status-code heuristic
+    that mapped every unrecognized 404 to FILE_NOT_FOUND, turning "session
+    not found" into a misleading "file not found".
+
+    These tests call the *real* app.main.ssh_exception_handler to produce a
+    real HTTP response body, then feed that real body into the *real*
+    examples.mcp_server.server._classify_gateway_error — no hand-written
+    stand-in for either side's shape.
+    """
+
+    @staticmethod
+    async def _real_gateway_body(exc) -> tuple[int, dict]:
+        import json as _json
+
+        import app.main as main_module
+
+        resp = await main_module.ssh_exception_handler(None, exc)
+        return resp.status_code, _json.loads(resp.body)
+
+    @pytest.mark.asyncio
+    async def test_session_not_found_survives_the_real_round_trip(self):
+        from app.ssh_manager import SessionNotFoundError
+        from examples.mcp_server.gateway_client import GatewayClientError
+        from examples.mcp_server.server import _classify_gateway_error
+
+        status, body = await self._real_gateway_body(SessionNotFoundError("Session x not found"))
+        assert status == 404  # sanity: still the real handler's own status map
+
+        exc = GatewayClientError("boom", status_code=status, body=body)
+        code, retryable = _classify_gateway_error(exc)
+
+        assert code == "SESSION_NOT_FOUND"
+        assert retryable is False
+
+    @pytest.mark.asyncio
+    async def test_auth_error_survives_the_real_round_trip(self):
+        from app.ssh_manager import AuthenticationError
+        from examples.mcp_server.gateway_client import GatewayClientError
+        from examples.mcp_server.server import _classify_gateway_error
+
+        status, body = await self._real_gateway_body(AuthenticationError("bad credentials"))
+        assert status == 401
+
+        exc = GatewayClientError("boom", status_code=status, body=body)
+        code, retryable = _classify_gateway_error(exc)
+
+        assert code == "AUTH_ERROR"
+        assert retryable is False
