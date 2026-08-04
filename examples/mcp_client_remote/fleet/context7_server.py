@@ -37,11 +37,26 @@ _exit_stack: contextlib.AsyncExitStack | None = None
 _lock = asyncio.Lock()
 
 
-def _reset_session() -> None:
-    """Drop stale session so next call reconnects."""
+async def _reset_session() -> None:
+    """Close the stale session/subprocess, then drop references so the next
+    call reconnects.
+
+    Regression: this used to just nil out _session/_exit_stack without ever
+    closing the old one. _exit_stack holds a live `npx @upstash/context7-mcp`
+    child process (via stdio_client) — on every failure that triggers
+    _call_upstream's retry, the old process leaked as an orphan, never
+    terminated. Node subprocesses are far heavier than a dropped reference;
+    left unfixed, sustained transient-error rates accumulate zombie npx
+    processes indefinitely in a service that runs forever.
+    """
     global _session, _exit_stack
-    _session = None
-    _exit_stack = None
+    async with _lock:
+        old_stack = _exit_stack
+        _session = None
+        _exit_stack = None
+    if old_stack is not None:
+        with contextlib.suppress(Exception):
+            await old_stack.aclose()
 
 
 async def _get_session() -> ClientSession:
@@ -72,7 +87,7 @@ async def _call_upstream(name: str, args: dict) -> str:
             return result.content[0].text
         except Exception:
             if attempt == 0:
-                _reset_session()
+                await _reset_session()
                 continue
             raise
     raise RuntimeError("_call_upstream: unreachable")
