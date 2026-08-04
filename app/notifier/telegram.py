@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,11 @@ class TelegramClient:
         Dry-run mode reports success without touching the network.
         """
         if self._dry_run:
+            logger.info(
+                "notifier_dry_run_send chat_ids=%s text=%r",
+                list(self._chat_ids),
+                text if len(text) <= 500 else text[:500] + "...(truncated)",
+            )
             return [TelegramSendResult(chat_id=chat_id, ok=True, dry_run=True) for chat_id in self._chat_ids]
 
         if not self._token or not self._chat_ids:

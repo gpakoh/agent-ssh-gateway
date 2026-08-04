@@ -57,3 +57,17 @@ async def test_dry_run_does_not_touch_session_even_with_proxy():
 
     assert result[0].dry_run is True
     assert session.calls == []
+
+
+async def test_dry_run_send_is_logged(caplog):
+    """docs/operations/NOTIFIER.md promises dry-run sends are "logged, not
+    delivered" — verify that's actually true, not just a doc claim."""
+    import logging
+
+    client = TelegramClient(token="token", chat_ids=("chat-1", "chat-2"), dry_run=True)
+
+    with caplog.at_level(logging.INFO, logger="app.notifier.telegram"):
+        await client.send_message("hello world")
+
+    assert "notifier_dry_run_send" in caplog.text
+    assert "hello world" in caplog.text
