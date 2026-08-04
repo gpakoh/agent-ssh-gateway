@@ -240,6 +240,10 @@ class TestExecuteAsyncMode:
                 "duration": None,
             }
             _app_state.job_manager.get_job_status = AsyncMock(return_value=mock_status_data)
+            # get_job backs the ownership check in jobs_status; the request
+            # uses the master API key, which bypasses ownership regardless
+            # of owner_id, so any non-None job record satisfies the 404 gate.
+            _app_state.job_manager.get_job = AsyncMock(return_value=MagicMock(owner_id=""))
 
             # Step 3: GET job status
             resp2 = client.get(

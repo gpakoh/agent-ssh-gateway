@@ -764,6 +764,7 @@ class TestJobsBulkBatchCanonicalPolicy:
         monkeypatch.setattr(settings, "command_policy_profile", "readonly")
         state_module.audit_logger = MagicMock()
         state_module.manager = MagicMock()
+        state_module.manager.get_session = AsyncMock(return_value={"id": "s1"})
 
         transport = ASGITransport(app=main_app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:

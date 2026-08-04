@@ -15,6 +15,7 @@ from app.rbac import (
     UPLOAD,
     default_role_for_scopes,
     get_role,
+    job_visible_to,
     labels_overlap,
     role_allows_scope,
     scopes_for_role,
@@ -43,6 +44,13 @@ def _make_session(sid: str, owner_fp: str | None, labels: tuple[str, ...] = ()) 
     rec.owner_token_fingerprint = owner_fp
     rec.tenant_labels = labels
     return rec
+
+
+def _make_job(job_id: str, owner_id: str) -> MagicMock:
+    job = MagicMock()
+    job.job_id = job_id
+    job.owner_id = owner_id
+    return job
 
 
 def _identity(
@@ -214,6 +222,37 @@ class TestSessionVisibleTo:
         sess = _make_session("s-2", fp_other, ("team:b",))
         identity = _identity(labels=("team:a",))
         assert not session_visible_to(sess, identity)
+
+
+class TestJobVisibleTo:
+    """Regression coverage for the jobs IDOR fix: GET /api/jobs and friends
+    used to have zero per-owner authorization, letting any caller with
+    jobs:read/jobs:run see or act on every tenant's jobs.
+    """
+
+    def test_master_sees_everything(self):
+        job = _make_job("j-1", owner_id="someone-elses-fingerprint")
+        identity = _identity(token="", token_type="master")
+        assert job_visible_to(job, identity)
+
+    def test_admin_role_sees_everything(self):
+        job = _make_job("j-1", owner_id="someone-elses-fingerprint")
+        identity = _identity(role="admin")
+        assert job_visible_to(job, identity)
+
+    def test_owner_sees_own_job(self):
+        fp = token_fingerprint("agent-token-a")
+        job = _make_job("j-1", owner_id=fp)
+        assert job_visible_to(job, _identity())
+
+    def test_non_owner_hidden_from_foreign_job(self):
+        fp_other = token_fingerprint("agent-token-b")
+        job = _make_job("j-2", owner_id=fp_other)
+        assert not job_visible_to(job, _identity())
+
+    def test_job_with_no_owner_id_hidden_from_non_admin(self):
+        job = _make_job("j-3", owner_id="")
+        assert not job_visible_to(job, _identity())
 
 
 class TestEnsureSessionOwner:

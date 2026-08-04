@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import state as _state
-from app.auth_middleware import AuthIdentity, require_scope
+from app.auth_middleware import AuthIdentity, ensure_session_owner, require_scope
 from app.exceptions import JobNotFoundError, PermissionDeniedError
 from app.metrics import metrics
 from app.models import (
@@ -23,6 +23,7 @@ from app.models import (
     JobStatusResponse,
 )
 from app.output_redaction import should_redact_command_output
+from app.rbac import job_visible_to
 from app.security import rate_limit_mutation, redact_secrets
 from app.services.command_gate import (
     evaluate_with_access_gate,
@@ -49,6 +50,7 @@ async def jobs_run(
         raise HTTPException(
             status_code=404, detail=_err(404, f"Session {req.session_id} not found")
         )
+    ensure_session_owner(session, _identity)
 
     # Access control + command policy gate (single implementation, see services)
     gate = evaluate_with_access_gate(
@@ -84,9 +86,24 @@ async def jobs_run(
     return JobRunResponse(job_id=job_id)
 
 
+async def _get_owned_job(job_id: str, identity: AuthIdentity):
+    """Fetch a job, enforcing that ``identity`` is allowed to see it.
+
+    Raises 404 if the job doesn't exist, 403 if it belongs to a different
+    owner (master/admin bypass this check, matching session ownership).
+    """
+    job = await _state.job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=_err(404, f"Job {job_id} not found"))
+    if not job_visible_to(job, identity):
+        raise HTTPException(status_code=403, detail=_err(403, "Job belongs to a different owner"))
+    return job
+
+
 @router.get("/api/jobs/{job_id}/status", response_model=JobStatusResponse)
 async def jobs_status(job_id: str, _identity: AuthIdentity = Depends(require_scope("jobs:read"))):
     """Get job status."""
+    await _get_owned_job(job_id, _identity)
     status = await _state.job_manager.get_job_status(job_id)
     return JobStatusResponse(**status)
 
@@ -101,6 +118,7 @@ async def jobs_result(
     _identity: AuthIdentity = Depends(require_scope("jobs:read")),
 ):
     """Get full job result."""
+    await _get_owned_job(job_id, _identity)
     result = await _state.job_manager.get_job_result(job_id)
     stdout = result.get("stdout", "")
     stderr = result.get("stderr", "")
@@ -147,6 +165,13 @@ async def bulk_execute(
     _identity: AuthIdentity = Depends(require_scope("jobs:run")),
 ):
     """Execute multiple commands concurrently."""
+    session = await _state.manager.get_session(req.session_id)
+    if not session:
+        raise HTTPException(
+            status_code=404, detail=_err(404, f"Session {req.session_id} not found")
+        )
+    ensure_session_owner(session, _identity)
+
     # Access control + command policy gate for every command (single impl)
     for cmd in req.commands:
         evaluate_with_access_gate(
@@ -207,8 +232,9 @@ async def jobs_list(
     status: str | None = None,
     _identity: AuthIdentity = Depends(require_scope("jobs:read")),
 ):
-    """List background jobs."""
+    """List background jobs. Non-master/admin callers only see their own jobs."""
     jobs = await _state.job_manager.list_jobs(session_id=session_id, status=status)
+    jobs = [j for j in jobs if job_visible_to(j, _identity)]
     return JobListResponse(
         jobs=[JobResultResponse(**j.to_dict()) for j in jobs],
         count=len(jobs),
@@ -218,6 +244,7 @@ async def jobs_list(
 @router.post("/api/jobs/{job_id}/cancel")
 async def jobs_cancel(job_id: str, _identity: AuthIdentity = Depends(require_scope("jobs:run"))):
     """Cancel a running job."""
+    await _get_owned_job(job_id, _identity)
     await _state.job_manager.cancel_job(job_id)
     return {"status": "cancelled", "job_id": job_id}
 
@@ -276,9 +303,7 @@ async def jobs_stream(
     _identity: AuthIdentity = Depends(require_scope("jobs:read")),
 ):
     """Stream job output via Server-Sent Events."""
-    job = await _state.job_manager.get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail=_err(404, f"Job {job_id} not found"))
+    job = await _get_owned_job(job_id, _identity)
 
     queue: asyncio.Queue = asyncio.Queue()
     job.add_listener(queue)
@@ -353,4 +378,4 @@ async def jobs_events(
     _identity: AuthIdentity = Depends(require_scope("jobs:read")),
 ):
     """Alias for /api/jobs/{job_id}/stream — SSE job progress events."""
-    return await jobs_stream(job_id, request, redact_output)
+    return await jobs_stream(job_id, request, redact_output, _identity)
