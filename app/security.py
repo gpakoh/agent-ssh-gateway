@@ -141,14 +141,28 @@ FORBIDDEN_PATHS = {
     "/sys",
     "/dev",
     "/boot",
-    "..",
-    "../",
-    "/..",
 }
+# Note: ".."/"../"/"/.." traversal markers are NOT in this set — they're
+# already caught by validate_path's segment-exact ".." check above, which
+# (unlike this substring loop) doesn't also reject a filename that merely
+# *contains* ".." (e.g. "notes..txt").
 
 
 def validate_path(path: str, base_path: str | None = None) -> str:
     """Validate file path to prevent directory traversal.
+
+    These paths address files on the *remote* SSH target, not the local
+    gateway host — traversal detection is pure string checking (no
+    filesystem access), unlike pathlib's resolve(), which would resolve
+    against the wrong (local) filesystem entirely.
+
+    A literal ".." *path segment* (split on "/") means an attempt to climb
+    up — checked on every segment, not just via posixpath.normpath, since
+    normpath clamps a leading "/.." to "/" (POSIX: root has no parent),
+    which would wrongly let a bare "/.." pass. Segment-exact matching
+    (instead of a raw substring check) avoids rejecting a filename that
+    merely *contains* ".." (e.g. "notes..txt") while still catching every
+    multi-hop attempt a substring check would (e.g. "a/../../etc/passwd").
 
     Args:
         path: File path to validate
@@ -163,7 +177,7 @@ def validate_path(path: str, base_path: str | None = None) -> str:
     path = path.strip()
 
     # Check For Obvious Traversal Attempts
-    if ".." in path or "~" in path:
+    if "~" in path or ".." in path.split("/"):
         logger.warning("Blocked path with traversal: %s", path)
         raise ValueError("Path contains directory traversal characters")
 

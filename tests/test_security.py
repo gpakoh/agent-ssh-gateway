@@ -69,6 +69,43 @@ def test_validate_path_whitespace_stripped():
     assert validate_path("  /home/file.txt  ") == "/home/file.txt"
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "notes..txt",
+        "my..project/file.txt",
+        "/home/user/report..final.txt",
+        "a..b..c",
+    ],
+)
+def test_validate_path_allows_literal_dotdot_within_a_filename(path):
+    """T81.5: a filename that merely *contains* ".." (not as its own path
+    segment) is not a traversal attempt and must not be rejected — the
+    check is segment-exact, not a substring match.
+    """
+    assert validate_path(path) == path
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/..",
+        "..",
+        "../",
+        "foo/../bar",
+        "foo/..",
+        "../foo",
+    ],
+)
+def test_validate_path_still_blocks_dotdot_as_a_segment(path):
+    """Every ".." *segment* form must still be rejected, including the
+    posixpath.normpath("/..") == "/" clamping edge case — segment
+    splitting on the raw path (not normalized) catches it directly.
+    """
+    with pytest.raises(ValueError, match="directory traversal"):
+        validate_path(path)
+
+
 # ---------------------------------------------------------------------------
 # Sanitize_command — DANGEROUS_COMMANDS + DANGEROUS_PATTERNS
 # ---------------------------------------------------------------------------
