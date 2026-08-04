@@ -79,6 +79,30 @@ class TestChatGPTPreflight:
         assert result.returncode == 1
         assert "MCP_GATEWAY_TOOL_MODE" in result.stdout
 
+    def test_wrong_mode_reports_actual_value_in_detail(self):
+        """Regression: a stray comma turned the third `check()` arg into a
+        discarded tuple expression, so the detail suffix (e.g. value='standard')
+        was silently swallowed — the line printed the bare label with no
+        indication of what the misconfigured value actually was.
+        """
+        result = self._run_preflight({
+            "GATEWAY_URL": "http://localhost:8085",
+            "GATEWAY_AGENT_TOKEN": "dummy",
+            "MCP_GATEWAY_TOOL_MODE": "standard",
+            "MCP_CLIENT_SAFE_MODE": "true",
+        })
+        assert result.returncode == 1
+        assert "value='standard'" in result.stdout
+
+    def test_missing_mode_reports_missing_in_detail(self):
+        result = self._run_preflight({
+            "GATEWAY_URL": "http://localhost:8085",
+            "GATEWAY_AGENT_TOKEN": "dummy",
+            "MCP_CLIENT_SAFE_MODE": "true",
+        })
+        assert result.returncode == 1
+        assert "MCP_GATEWAY_TOOL_MODE=mcp_client — missing" in result.stdout
+
     def test_passes_with_correct_config(self):
         result = self._run_preflight({
             "GATEWAY_URL": "http://localhost:8085",
