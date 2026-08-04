@@ -19,7 +19,12 @@ logger = logging.getLogger(__name__)
 async def _main() -> None:
     settings = NotifierSettings.from_env()
     if not settings.enabled:
+        # Idle forever instead of exiting: under `restart: always` (the
+        # compose default for this sidecar) an immediate clean exit just
+        # produces an infinite, pointless restart loop — logging this once
+        # and staying up is the correct steady state for "feature disabled".
         logger.info("gateway_notifier_disabled")
+        await asyncio.Event().wait()
         return
 
     gateway = GatewayAuditClient(

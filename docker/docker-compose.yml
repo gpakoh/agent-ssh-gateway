@@ -77,6 +77,9 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.mcp-server
+      args:
+        BUILD_SHA: ${BUILD_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
     container_name: mcp-server
     hostname: mcp-server
     networks:
