@@ -526,8 +526,21 @@ _GATEWAY_ERROR_CODE_MAP: dict[str, str] = {
     "POLICY_DENIED": "PERMISSION_DENIED",
     "INVALID_INPUT": "INVALID_INPUT",
     "RATE_LIMITED": "RATE_LIMITED",
+    # Same systematic audit: the gateway's own name for this is
+    # RATE_LIMIT_EXCEEDED (both slowapi's 429 handler and SessionLimitError
+    # produce it via app/state.py's (429, "") entry) — not "RATE_LIMITED".
+    "RATE_LIMIT_EXCEEDED": "RATE_LIMITED",
     "TIMEOUT": "TIMEOUT",
+    # TimeoutError's handler produces GATEWAY_TIMEOUT (app/state.py's
+    # (504, "") entry), never the bare "TIMEOUT" this map already expected.
+    "GATEWAY_TIMEOUT": "TIMEOUT",
     "WRITE_PERMISSION_DENIED": "PERMISSION_DENIED",
+    # Reachable on every write-tool call against the gateway's own default
+    # (WORKSPACE_READONLY=true) — not an edge case. app/routers/workspace.py
+    # raises this via the normal HTTPException(detail=...) path (nested
+    # shape, not the flat-body case above), so it always reached this map's
+    # lookup, but the map itself just never had an entry for it.
+    "WORKSPACE_READONLY": "PERMISSION_DENIED",
 }
 
 

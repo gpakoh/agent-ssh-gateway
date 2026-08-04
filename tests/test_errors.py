@@ -12,6 +12,7 @@ from app.config import settings
 from app.ssh_manager import (
     AuthenticationError,
     ExecutionError,
+    SessionLimitError,
     SessionNotFoundError,
     SSHManagerError,
 )
@@ -178,6 +179,52 @@ async def test_session_not_found_gets_its_own_code_not_generic_internal_error():
     data = json.loads(resp.body)
     assert data["code"] == "SESSION_NOT_FOUND"
     assert data["http_status"] == 404
+
+
+@pytest.mark.asyncio
+async def test_session_limit_error_gets_rate_limit_exceeded_not_internal_error():
+    """Regression: SessionLimitError (429, too many active sessions from one
+    source IP) had no matching ERROR_CODE_MAP entry for status 429 at all —
+    _auto_code fell all the way through to its bare "INTERNAL_ERROR" default,
+    silently discarding the fact that a client hitting this should back off
+    and retry, not treat it as an unrelated failure.
+    """
+    resp = await main_module.ssh_exception_handler(None, SessionLimitError("too many sessions"))
+    data = json.loads(resp.body)
+    assert resp.status_code == 429
+    assert data["code"] == "RATE_LIMIT_EXCEEDED"
+    assert data["retryable"] is True
+
+
+def test_auto_code_429_maps_to_rate_limit_exceeded():
+    """Regression: this is also what slowapi's own rate_limit_exceeded_handler
+    relies on (it calls _err(429, ...) with no explicit code) — before this
+    fix, every real 429 from hitting a rate limit reported "INTERNAL_ERROR",
+    and RATE_LIMIT_EXCEEDED sat unused in RETRYABLE_CODES/HINTS despite never
+    being reachable from any real code path.
+    """
+    assert _auto_code(429, "Rate limit exceeded: 5 per 1 minute") == "RATE_LIMIT_EXCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_exceeded_handler_reports_its_own_code():
+    """The actual slowapi 429 handler — never exercised by any existing
+    test for its `code` field, only for the HTTP status/Retry-After header
+    elsewhere. It calls _err(429, ...) with no explicit code, relying
+    entirely on _auto_code's (429, "") entry.
+    """
+    from slowapi.errors import RateLimitExceeded
+
+    exc = RateLimitExceeded.__new__(RateLimitExceeded)
+    exc.detail = "5 per 1 minute"
+    exc.limit = MagicMock()
+    exc.limit.limit = MagicMock(GRANULARITY=60)
+
+    resp = await main_module.rate_limit_exceeded_handler(None, exc)
+    data = json.loads(resp.body)
+    assert resp.status_code == 429
+    assert data["code"] == "RATE_LIMIT_EXCEEDED"
+    assert data["retryable"] is True
 
 
 # ---------------------------------------------------------------------------

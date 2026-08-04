@@ -102,6 +102,7 @@ ERROR_CODE_MAP: dict[tuple[int, str], str] = {
     (502, "connection"): "UPSTREAM_CONNECTION_FAILED",
     (502, ""): "BAD_GATEWAY",
     (504, ""): "GATEWAY_TIMEOUT",
+    (429, ""): "RATE_LIMIT_EXCEEDED",
     (401, ""): "UNAUTHORIZED",
     (400, ""): "BAD_REQUEST",
     (500, ""): "INTERNAL_ERROR",
