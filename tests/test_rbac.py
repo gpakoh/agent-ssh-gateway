@@ -254,6 +254,28 @@ class TestJobVisibleTo:
         job = _make_job("j-3", owner_id="")
         assert not job_visible_to(job, _identity())
 
+    def test_dict_job_owner_sees_own(self):
+        """T81.4: Redis dead-letter entries are plain dicts, not JobRecord
+        attribute-access objects — job_visible_to must handle both.
+        """
+        fp = token_fingerprint("agent-token-a")
+        job = {"id": "j-dict-1", "owner_id": fp}
+        assert job_visible_to(job, _identity())
+
+    def test_dict_job_non_owner_hidden(self):
+        fp_other = token_fingerprint("agent-token-b")
+        job = {"id": "j-dict-2", "owner_id": fp_other}
+        assert not job_visible_to(job, _identity())
+
+    def test_dict_job_no_owner_id_key_hidden_from_non_admin(self):
+        job = {"id": "j-dict-3"}
+        assert not job_visible_to(job, _identity())
+
+    def test_dict_job_master_sees_everything(self):
+        job = {"id": "j-dict-4", "owner_id": "someone-else"}
+        identity = _identity(token="", token_type="master")
+        assert job_visible_to(job, identity)
+
 
 class TestEnsureSessionOwner:
     def test_foreign_session_raises(self):

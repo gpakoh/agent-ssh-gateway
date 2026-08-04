@@ -78,8 +78,15 @@ class RedisJobQueue:
         priority: int = 0,
         max_retries: int = 3,
         timeout: int = 3600,
+        owner_id: str = "",
     ) -> str:
         """Add job to queue.
+
+        ``owner_id`` (identity fingerprint) travels with the job through
+        retries into the dead letter queue, mirroring JobManager/JobRecord's
+        owner_id — see job_visible_to() / T80.2. Currently nothing in this
+        codebase calls enqueue() yet, but any future caller gets ownership
+        tracking for free instead of it being bolted on after the fact.
 
         Returns:
             Job ID
@@ -94,6 +101,7 @@ class RedisJobQueue:
             "max_retries": max_retries,
             "retry_count": 0,
             "timeout": timeout,
+            "owner_id": owner_id,
             "created_at": time.time(),
             "started_at": None,
             "completed_at": None,
