@@ -183,3 +183,17 @@ def session_visible_to(session, identity) -> bool:
     if labels_overlap(identity.tenant_labels, session_labels):
         return True
     return False
+
+
+def job_visible_to(job, identity) -> bool:
+    """Whether ``identity`` may see/act on ``job``.
+
+    - master / admin role → everything
+    - own jobs (created by this token fingerprint, i.e. ``job.owner_id``) → yes
+    - otherwise → no (jobs carry no tenant labels, unlike sessions)
+    """
+    if identity.token_type == "master":
+        return True
+    if identity.role == "admin":
+        return True
+    return bool(getattr(job, "owner_id", "")) and job.owner_id == identity.fingerprint
