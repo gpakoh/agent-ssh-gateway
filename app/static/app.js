@@ -251,7 +251,15 @@ function escapeAttr(s) {
 function appendLine(content, type = 'stdout') {
     const line = document.createElement('div');
     line.className = `terminal-line ${type}`;
-    line.innerHTML = type === 'system' ? content : parseAnsi(content);
+    // 'system' messages are plain-text templates built from values the user
+    // typed into the connect form or their own submitted command (host,
+    // username, job command) — none of the ~15 call sites in this file ever
+    // pass real HTML markup, so this used to be an unescaped innerHTML sink:
+    // a hostname/username containing e.g. <img src=x onerror=...> executed
+    // verbatim. Session/job cards elsewhere already escape these same
+    // fields (escapeHtml(s.host), escapeHtml(job.command)) — this was the
+    // one path that didn't.
+    line.innerHTML = type === 'system' ? escapeHtml(content) : parseAnsi(content);
     els.terminal.appendChild(line);
     els.terminal.scrollTop = els.terminal.scrollHeight;
 }

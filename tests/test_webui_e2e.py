@@ -210,3 +210,29 @@ class TestWebUiE2E:
         _login(driver, base)
         loaded = driver.execute_script("return typeof Terminal !== 'undefined'")
         assert loaded, "xterm.js global Terminal is not defined"
+
+    def test_append_line_system_type_escapes_html(self, server, driver, admin_created):
+        """Regression: appendLine(..., 'system') used to build its DOM node
+        via unescaped innerHTML. Every one of its ~15 call sites in app.js is
+        a plain-text template built from values the user typed into the
+        connect form or their own submitted command (host, username, job
+        command) — a hostname/username containing e.g.
+        <img src=x onerror=...> executed verbatim in the terminal view.
+        Session/job cards elsewhere already escaped these same fields
+        (escapeHtml(s.host), escapeHtml(job.command)) — this was the one
+        path that didn't. Drives the real function in a real browser rather
+        than re-simulating the DOM.
+        """
+        base, _ = server
+        _login(driver, base)
+        driver.execute_script(
+            "appendLine('Connected to <img src=x onerror=\"window.__xssFired=true\">@evil', 'system');"
+        )
+        line = driver.find_element(By.CSS_SELECTOR, ".terminal-line.system:last-child")
+        # The deterministic proof: if the markup were still live HTML, the
+        # <img> element would have been parsed out of textContent entirely
+        # (it isn't text, it's a child element) — its presence *as text*
+        # means the browser never parsed it as an element in the first
+        # place, i.e. it was actually escaped.
+        assert "<img" in line.text, "escaped markup should still render as literal text"
+        assert line.find_elements(By.TAG_NAME, "img") == [], "markup must not be parsed as a real element"
