@@ -513,6 +513,13 @@ def run_tool(
 _GATEWAY_ERROR_CODE_MAP: dict[str, str] = {
     "INVALID_API_KEY": "AUTH_ERROR",
     "MASTER_KEY_REQUIRED": "AUTH_ERROR",
+    # Generic 401 fallback from _auto_code (app/state.py's (401, "") entry) —
+    # what SSHManagerError's AuthenticationError actually produces, since its
+    # handler passes a deliberately generic message with no "api key"/"master
+    # key" keyword for _auto_code to match on. Found by feeding this handler's
+    # *real* response body through this *real* classifier (regression test),
+    # not by re-mocking either side's assumed shape.
+    "UNAUTHORIZED": "AUTH_ERROR",
     "SESSION_NOT_FOUND": "SESSION_NOT_FOUND",
     "FORBIDDEN": "PERMISSION_DENIED",
     "PROJECT_NOT_FOUND": "PROJECT_NOT_FOUND",
