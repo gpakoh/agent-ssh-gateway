@@ -149,11 +149,12 @@ async def jobs_queue_stats(_identity: AuthIdentity = Depends(require_scope("jobs
 async def jobs_dead_letter(
     limit: int = 100, _identity: AuthIdentity = Depends(require_scope("jobs:read"))
 ):
-    """Get dead letter queue jobs."""
+    """Get dead letter queue jobs. Non-master/admin callers only see their own."""
     if not _state.redis_queue or not _state.redis_queue._redis:
         return {"error": "Redis not available"}
 
     jobs = await _state.redis_queue.get_dead_letter_jobs(limit)
+    jobs = [j for j in jobs if job_visible_to(j, _identity)]
     return {"jobs": jobs, "count": len(jobs)}
 
 

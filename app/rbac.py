@@ -191,9 +191,13 @@ def job_visible_to(job, identity) -> bool:
     - master / admin role → everything
     - own jobs (created by this token fingerprint, i.e. ``job.owner_id``) → yes
     - otherwise → no (jobs carry no tenant labels, unlike sessions)
+
+    ``job`` may be a JobRecord (attribute access, in-memory JobManager) or a
+    plain dict (Redis-backed queue entries) — both carry ``owner_id``.
     """
     if identity.token_type == "master":
         return True
     if identity.role == "admin":
         return True
-    return bool(getattr(job, "owner_id", "")) and job.owner_id == identity.fingerprint
+    owner_id = job.get("owner_id", "") if isinstance(job, dict) else getattr(job, "owner_id", "")
+    return bool(owner_id) and owner_id == identity.fingerprint

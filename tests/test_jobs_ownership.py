@@ -183,3 +183,35 @@ class TestJobsRunAndBulkExecuteSessionOwnership:
         with pytest.raises(HTTPException) as exc:
             await jobs_router.bulk_execute(req, request, _identity(OWNER_TOKEN))
         assert exc.value.status_code == 403
+
+
+class TestJobsDeadLetterOwnership:
+    """T81.4: GET /api/jobs/queue/dead must filter Redis dead-letter
+    entries by owner, same as the in-memory JobManager (T80.2)."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_redis_queue(self, monkeypatch):
+        queue = MagicMock()
+        queue._redis = MagicMock()  # truthy — "Redis available" gate
+        queue.get_dead_letter_jobs = AsyncMock()
+        monkeypatch.setattr(_state, "redis_queue", queue)
+        return queue
+
+    @pytest.mark.asyncio
+    async def test_non_admin_only_sees_own_dead_letter_jobs(self, _mock_redis_queue):
+        mine = {"id": "j-mine", "owner_id": token_fingerprint(OWNER_TOKEN)}
+        foreign = {"id": "j-foreign", "owner_id": token_fingerprint(OTHER_TOKEN)}
+        _mock_redis_queue.get_dead_letter_jobs.return_value = [mine, foreign]
+
+        result = await jobs_router.jobs_dead_letter(100, _identity(OWNER_TOKEN))
+        assert result["count"] == 1
+        assert result["jobs"] == [mine]
+
+    @pytest.mark.asyncio
+    async def test_admin_sees_all_dead_letter_jobs(self, _mock_redis_queue):
+        mine = {"id": "j-mine", "owner_id": token_fingerprint(OWNER_TOKEN)}
+        foreign = {"id": "j-foreign", "owner_id": token_fingerprint(OTHER_TOKEN)}
+        _mock_redis_queue.get_dead_letter_jobs.return_value = [mine, foreign]
+
+        result = await jobs_router.jobs_dead_letter(100, _identity(OWNER_TOKEN, role="admin"))
+        assert result["count"] == 2
