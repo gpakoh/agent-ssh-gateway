@@ -47,7 +47,7 @@ def main() -> int:
     check("GATEWAY_AGENT_TOKEN not printed", True)
 
     # 2. Safe mode config
-    check("MCP_GATEWAY_TOOL_MODE=mcp_client", mode == "mcp_client"), f"value={mode!r}" if mode else "missing"
+    check("MCP_GATEWAY_TOOL_MODE=mcp_client", mode == "mcp_client", f"value={mode!r}" if mode else "missing")
     check("MCP_CLIENT_SAFE_MODE=true", safe.lower() in ("true", "1", "yes"), f"value={safe!r}" if safe else "missing")
     check("MCP_ACCESS_PROFILE=mcp_client_safe", profile == "mcp_client_safe" or not profile, f"value={profile!r}")
 
