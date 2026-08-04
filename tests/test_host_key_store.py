@@ -176,6 +176,45 @@ class TestFileHostKeyStore:
                 pass
 
     @pytest.mark.asyncio
+    async def test_store_and_check_match_on_non_default_port(self):
+        """A host trusted on a non-22 port must actually be found at check() time.
+
+        Regression test: check()/store() used to ignore `port` entirely, so a
+        real connection (which paramiko always looks up via the bracketed
+        "[host]:port" form for non-default ports) could never match an entry
+        added through the plain (host, port) API — every non-22-port host was
+        permanently "unknown" no matter how many times it was trusted.
+        """
+        store, path = self._make_store()
+        try:
+            key = paramiko.RSAKey.generate(2048)
+            await store.store("10.0.0.1", 2222, key)
+            assert await store.check("10.0.0.1", 2222, key) is True
+            # A different port for the same host must not match.
+            assert await store.check("10.0.0.1", 22, key) is None
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_list_keys_reports_non_default_port(self):
+        store, path = self._make_store()
+        try:
+            key = paramiko.RSAKey.generate(2048)
+            await store.store("10.0.0.1", 2222, key)
+            keys = await store.list_keys()
+            assert len(keys) == 1
+            assert keys[0]["host"] == "10.0.0.1"
+            assert keys[0]["port"] == 2222
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+    @pytest.mark.asyncio
     async def test_delete_host_by_port(self):
         store, path = self._make_store()
         try:
