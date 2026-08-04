@@ -68,7 +68,26 @@ class GiteaClient:
         if resp.status_code in (401, 403):
             detail = resp.json().get("message", "unauthorized")
             raise PermissionError(f"gitea api {path}: {detail}")
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # httpx.HTTPStatusError's own message embeds the fully-resolved
+            # absolute URL (scheme + internal host + port from API_BASE,
+            # e.g. http://192.168.1.103:3005/...) — FastMCP's tool-call
+            # error handler sends str(exception) straight to the external
+            # MCP client verbatim (mcp/server/lowlevel/server.py's
+            # `except Exception as e: return self._make_error_result(str(e))`),
+            # so any failed call (e.g. a 404 for a typo'd repo name — an
+            # everyday mistake, not a rare failure) leaked internal
+            # infrastructure topology that GITEA_FORWARDED_HOST/PROTO exist
+            # specifically to hide from *successful* responses. Re-raise
+            # with only the already-sanitized endpoint path, never the
+            # resolved base URL.
+            raise httpx.HTTPStatusError(
+                f"gitea api {path}: {resp.status_code} {resp.reason_phrase}",
+                request=exc.request,
+                response=exc.response,
+            ) from None
         return resp.json()
 
     async def get_repo(self, owner: str, repo: str) -> dict[str, Any]:

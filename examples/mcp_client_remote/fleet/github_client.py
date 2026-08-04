@@ -94,7 +94,20 @@ class GitHubClient:
             detail = resp.json().get("message", "unauthorized")
             raise PermissionError(f"github api {path}: {detail}")
 
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Same fix as gitea_client.py: httpx.HTTPStatusError's own
+            # message embeds the fully-resolved absolute URL, and FastMCP
+            # sends str(exception) straight to the external MCP client
+            # verbatim on any tool failure. API_BASE is public here, but
+            # sanitize anyway for consistency and to avoid ever depending
+            # on that staying true.
+            raise httpx.HTTPStatusError(
+                f"github api {path}: {resp.status_code} {resp.reason_phrase}",
+                request=exc.request,
+                response=exc.response,
+            ) from None
         return resp.json()
 
     async def get_repo(self, owner: str, repo: str) -> dict[str, Any]:
