@@ -1,3 +1,6 @@
+# DEPRECATED as a source of truth — see examples/mcp_client_remote/requirements.txt
+# for why. This module is always imported into the mcp_client_remote process
+# in production and runs on that shared, uv-managed venv.
 mcp>=1.28.1,<2.0.0
 httpx
 PyYAML>=6.0.1
