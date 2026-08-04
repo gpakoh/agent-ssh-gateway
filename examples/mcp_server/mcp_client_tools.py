@@ -514,6 +514,36 @@ def _build_readonly_fallback_script(
     return "\n".join(lines)
 
 
+def _fallback_result(tool_key: str, tool_name: str, r2: dict[str, Any]) -> dict[str, Any]:
+    """Build the tool_error/tool_success envelope for a fallback command's raw job result."""
+    outcome2, error_code2 = _map_uv_exit_code(tool_key, r2.get("exit_code", -1))
+    if error_code2 or outcome2 == "failed":
+        return tool_error(
+            code=error_code2 or "CHECK_FAILED",
+            message=f"{tool_key} exit code {r2.get('exit_code', -1)}",
+            result=build_command_result(
+                outcome=outcome2 or "error",
+                exit_code=r2.get("exit_code", -1),
+                stdout=r2.get("stdout") or r2.get("output", ""),
+                stderr=r2.get("stderr", ""),
+                execution_duration_ms=r2.get("execution_duration_ms"),
+                job_id=r2.get("job_id"),
+            ),
+            tool_name=tool_name,
+        )
+    return tool_success(
+        tool=tool_name,
+        result=build_command_result(
+            outcome=outcome2 or "passed",
+            exit_code=r2.get("exit_code", 0),
+            stdout=r2.get("stdout") or r2.get("output", ""),
+            stderr=r2.get("stderr", ""),
+            execution_duration_ms=r2.get("execution_duration_ms"),
+            job_id=r2.get("job_id"),
+        ),
+    )
+
+
 def _run_uv_tool(
     client: GatewayClient,
     project: str,
@@ -559,68 +589,45 @@ def _run_uv_tool(
         if tool_key in ("pytest", "mypy"):
             script = _build_readonly_fallback_script(tool_key, str(project_dir), targets)
             r2 = client.execute_project_script(project, script, timeout_s=300)
-            outcome2, error_code2 = _map_uv_exit_code(tool_key, r2.get("exit_code", -1))
-            if error_code2 or outcome2 == "failed":
-                return tool_error(
-                    code=error_code2 or "CHECK_FAILED",
-                    message=f"{tool_key} exit code {r2.get('exit_code', -1)}",
-                    result=build_command_result(
-                        outcome=outcome2 or "error",
-                        exit_code=r2.get("exit_code", -1),
-                        stdout=r2.get("stdout") or r2.get("output", ""),
-                        stderr=r2.get("stderr", ""),
-                        execution_duration_ms=r2.get("execution_duration_ms"),
-                        job_id=r2.get("job_id"),
-                    ),
-                    tool_name=tool_name,
-                )
-            return tool_success(
-                tool=tool_name,
-                result=build_command_result(
-                    outcome=outcome2 or "passed",
-                    exit_code=r2.get("exit_code", 0),
-                    stdout=r2.get("stdout") or r2.get("output", ""),
-                    stderr=r2.get("stderr", ""),
-                    execution_duration_ms=r2.get("execution_duration_ms"),
-                    job_id=r2.get("job_id"),
-                ),
+            return _fallback_result(tool_key, tool_name, r2)
+
+        if tool_key == "compileall":
+            # Regression: compileall is a stdlib module, not an installable
+            # PyPI tool like ruff/mypy/pytest — `uvx --from compileall ...`
+            # below has no package to resolve and always fails with
+            # "compileall was not found in the package registry", hiding the
+            # actual syntax error the caller needed. It also needs no
+            # project venv (`--no-project` skips lockfile/venv sync — the SSH
+            # target has no system `python3`, only the interpreter uv
+            # manages itself), just its bytecode-cache writes redirected off
+            # the read-only mount.
+            r2 = client.execute_argv(
+                [
+                    "env",
+                    "PYTHONPYCACHEPREFIX=/tmp/.mcp-pycache",
+                    "uv",
+                    "run",
+                    "--no-project",
+                    "python3",
+                    "-m",
+                    "compileall",
+                    "--",
+                    *targets,
+                ],
+                cwd=str(project_dir),
             )
-        else:
-            try:
-                uvx_argv = _build_uvx_argv(tool_key, targets)
-            except ValueError:
-                uvx_argv = None
-            if uvx_argv:
-                r2 = client.execute_argv(
-                    ["env", "RUFF_CACHE_DIR=/tmp/.mcp-ruff-cache"] + uvx_argv,
-                    cwd=str(project_dir),
-                )
-                outcome2, error_code2 = _map_uv_exit_code(tool_key, r2.get("exit_code", -1))
-                if error_code2 or outcome2 == "failed":
-                    return tool_error(
-                        code=error_code2 or "CHECK_FAILED",
-                        message=f"{tool_key} exit code {r2.get('exit_code', -1)}",
-                        result=build_command_result(
-                            outcome=outcome2 or "error",
-                            exit_code=r2.get("exit_code", -1),
-                            stdout=r2.get("stdout") or r2.get("output", ""),
-                            stderr=r2.get("stderr", ""),
-                            execution_duration_ms=r2.get("execution_duration_ms"),
-                            job_id=r2.get("job_id"),
-                        ),
-                        tool_name=tool_name,
-                    )
-                return tool_success(
-                    tool=tool_name,
-                    result=build_command_result(
-                        outcome=outcome2 or "passed",
-                        exit_code=r2.get("exit_code", 0),
-                        stdout=r2.get("stdout") or r2.get("output", ""),
-                        stderr=r2.get("stderr", ""),
-                        execution_duration_ms=r2.get("execution_duration_ms"),
-                        job_id=r2.get("job_id"),
-                    ),
-                )
+            return _fallback_result(tool_key, tool_name, r2)
+
+        try:
+            uvx_argv = _build_uvx_argv(tool_key, targets)
+        except ValueError:
+            uvx_argv = None
+        if uvx_argv:
+            r2 = client.execute_argv(
+                ["env", "RUFF_CACHE_DIR=/tmp/.mcp-ruff-cache"] + uvx_argv,
+                cwd=str(project_dir),
+            )
+            return _fallback_result(tool_key, tool_name, r2)
 
     outcome, error_code = _map_uv_exit_code(tool_key, raw.get("exit_code", -1))
     if error_code or outcome == "failed":
