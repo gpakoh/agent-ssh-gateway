@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from typing import Any, TypedDict
 
 from starlette.requests import Request
@@ -54,6 +55,34 @@ def normalize_list_response(
             result.update(meta)
         return result
     return {"items": [], "count": 0, "error": "unexpected response type"}
+
+
+def resolve_docker_host(hostname: str, network: str = "internal_net") -> str:
+    """Resolve a Docker container name to its current IP on a given network.
+
+    A static /etc/hosts entry for a container name drifts the moment that
+    container is ever recreated (new container = new IP on the same
+    network) — nothing re-writes it automatically. Resolving live via
+    `docker inspect` avoids depending on that file staying in sync. Falls
+    back to the hostname as-is when resolution fails (off-host, no Docker,
+    different network, already an IP, etc.) so this is safe to call
+    unconditionally.
+    """
+    try:
+        fmt = f"{{{{.NetworkSettings.Networks.{network}.IPAddress}}}}"
+        result = subprocess.run(
+            ["docker", "inspect", "-f", fmt, hostname],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            ip = result.stdout.strip()
+            if ip:
+                return ip
+    except Exception:
+        pass
+    return hostname
 
 
 def get_fleet_env() -> FleetEnv:
