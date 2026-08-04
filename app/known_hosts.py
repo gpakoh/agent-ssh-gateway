@@ -36,6 +36,21 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+_BRACKET_HOST_RE = re.compile(r"^\[(?P<host>.+)\]:(?P<port>\d+)$")
+
+
+def _format_host_port(host: str, port: int) -> str:
+    """Encode (host, port) the way OpenSSH/paramiko do: bracket only non-default ports."""
+    return host if port == 22 else f"[{host}]:{port}"
+
+
+def _parse_host_port(entry: str) -> tuple[str, int]:
+    """Reverse of `_format_host_port` — decode a stored known_hosts entry."""
+    match = _BRACKET_HOST_RE.match(entry)
+    if match:
+        return match.group("host"), int(match.group("port"))
+    return entry, 22
+
 
 class HostKeyStore(ABC):
     """Abstract host key store. check() returns:
@@ -112,7 +127,7 @@ class FileHostKeyStore(HostKeyStore):
     async def check(self, host: str, port: int, key: paramiko.PKey) -> bool | None:
         async with self._lock:
             await self._load()
-            host_key = self._hk.lookup(host)
+            host_key = self._hk.lookup(_format_host_port(host, port))
             if host_key is None:
                 return None
             for known_key in host_key.values():
@@ -123,7 +138,7 @@ class FileHostKeyStore(HostKeyStore):
     async def store(self, host: str, port: int, key: paramiko.PKey) -> None:
         async with self._lock:
             await self._load()
-            self._hk.add(host, key.get_name(), key)
+            self._hk.add(_format_host_port(host, port), key.get_name(), key)
             try:
                 await self._save()
             except Exception as exc:
@@ -133,12 +148,13 @@ class FileHostKeyStore(HostKeyStore):
         async with self._lock:
             await self._load()
             results = []
-            for host, entries in self._hk.items():
+            for entry, entries in self._hk.items():
+                bare_host, port = _parse_host_port(entry)
                 for key_type, known_key in entries.items():
                     results.append(
                         {
-                            "host": host,
-                            "port": 22,
+                            "host": bare_host,
+                            "port": port,
                             "key_type": key_type,
                             "fingerprint": hashlib.sha256(known_key.asbytes()).hexdigest(),
                         }
@@ -377,12 +393,19 @@ class KnownHostsPolicy(paramiko.MissingHostKeyPolicy):
         self._port = port
 
     def missing_host_key(self, client, hostname, key):
+        # Paramiko passes "[host]:port" for non-default ports (see SSHClient.connect's
+        # server_hostkey_name) but our stores key on bare host + an explicit port — so
+        # strip paramiko's own bracket decoration before it reaches the store, otherwise
+        # a host added via the known-hosts API (bare host, explicit port) never matches
+        # what a real connection looks up (bracketed), and every non-22 port is
+        # permanently "unknown" no matter how many times it's trusted.
+        bare_host, _ = _parse_host_port(hostname)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            asyncio.run(self._check_or_store(hostname, key))
+            asyncio.run(self._check_or_store(bare_host, key))
             return
-        future = asyncio.run_coroutine_threadsafe(self._check_or_store(hostname, key), loop)
+        future = asyncio.run_coroutine_threadsafe(self._check_or_store(bare_host, key), loop)
         future.result(timeout=5)
 
     async def _check_or_store(self, hostname, key):

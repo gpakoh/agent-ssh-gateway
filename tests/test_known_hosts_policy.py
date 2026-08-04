@@ -71,3 +71,25 @@ class TestKnownHostsPolicy:
         with pytest.raises(paramiko.SSHException, match="Unknown host"):
             await asyncio.to_thread(policy.missing_host_key, None, hostname, key)
         assert store._keys.get((hostname, 22)) is None
+
+    def test_non_default_port_key_matches_bare_host_trust(self):
+        """Paramiko passes "[host]:port" for non-22 ports (see SSHClient.connect's
+        server_hostkey_name); the known-hosts API stores by bare host + explicit
+        port. Without normalizing paramiko's bracket notation first, a host trusted
+        on a non-default port would be permanently "unknown" at connect time."""
+        store = InMemoryHostKeyStore()
+        policy = KnownHostsPolicy(store, port=2222)
+        key = paramiko.RSAKey.generate(2048)
+        # Simulates trusting the host via the /api/known-hosts endpoint, which
+        # always stores (bare_host, port) — never a bracketed string.
+        store._keys[("sshd.internal", 2222)] = base64.b64encode(key.asbytes()).decode()
+
+        # Simulates what paramiko actually passes for a non-default port.
+        policy.missing_host_key(None, "[sshd.internal]:2222", key)
+
+    def test_non_default_port_unknown_host_still_rejects(self):
+        store = InMemoryHostKeyStore()
+        policy = KnownHostsPolicy(store, port=2222)
+        key = paramiko.RSAKey.generate(2048)
+        with pytest.raises(paramiko.SSHException, match="Unknown host sshd.internal:2222"):
+            policy.missing_host_key(None, "[sshd.internal]:2222", key)
