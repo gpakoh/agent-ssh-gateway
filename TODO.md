@@ -160,3 +160,26 @@ Safe-паттерны (allow list для docker ps/logs/build...) — опцио
 ### Подтверждено (PASS)
 
 Пустой API_KEY → fail-closed 503 (auth_middleware.py:327-338); SSRF-защита (connect/prewarm/check-port); constant-time compare; командная граница command_gate+shlex; credentials SecretStr+Fernet; audit-log command_root-only; strict_host_key default True → RejectPolicy; docker-compose.yml ports 127.0.0.1-only + read_only+cap_drop ALL+no-new-privileges; event hooks HTTPS-only+HMAC+redact+64KB cap; upload_ssh_key master-only+64KB+resolve+chmod600; password policy 8+upper+digit+special; OAuth PKCE S256+state TTL600; **pip-audit `--strict` — 0 известных уязвимостей**.
+
+## 🔒 Аудит безопасности (T80, follow-up после 106 коммитов новых фич) — Aug 2026
+
+Независимый аудит новых подсистем, добавленных после T79 (RBAC, OAuth SSO, connection pooling, persistent audit log, Web UI, jobs API) — не покрытых T79. Формат тот же. Три параллельных под-аудита (Web UI; OAuth+RBAC; pooling+audit-log) + собственная проверка автора.
+
+### BLOCKER (исправлены)
+
+- **T80.1 [AUTH] SSH connection pool — обход аутентификации**: `app/ssh_manager.py:305-306` (было) — `pool_key = (host, port, username, auth_method)`, без материала credential. При pool hit (:334) весь блок проверки пароля/ключа (`client.connect(...)`) пропускался целиком. Любой вызывающий, знающий/угадавший host+port+username с уже запуленным соединением, получал чужую аутентифицированную сессию, предъявив **любой** пароль. Активно только при `SSH_CONNECTION_POOL_SIZE > 0` (default 0/выкл), но дыра реальна для любого включённого мульти-тенантного деплоя. **Фикс** (`b48df22a`): `pool_key` теперь включает one-way SHA-256 fingerprint предъявленного credential (`_credential_fingerprint`) — разный пароль/ключ = разный ключ пула = промах, обычная аутентификация. 2 regression-теста.
+- **T80.2 [IDOR] jobs.py — отсутствие per-owner авторизации**: только `jobs_wait` проверял владение (`identity_sub == job.owner_id`); `GET /api/jobs`, `GET/POST /api/jobs/{id}/{status,result,cancel,stream,events}` — только scope-проверка, без владения. Любой вызыватель с `jobs:read` видел **все** джобы всех тенантов (включая stdout/stderr с секретами), мог отменять чужие running-джобы (DoS), live-стримить чужой вывод. `POST /api/jobs/run` и `POST /api/bulk/execute` вообще не проверяли владение session_id — можно было выполнять команды в чужой SSH-сессии. **Фикс** (`e856dd1a`): новый `rbac.job_visible_to()` (по образцу `session_visible_to`) + `_get_owned_job()` во всех read/cancel/stream эндпоинтах, фильтрация `jobs_list`, `ensure_session_owner()` в `jobs_run`/`bulk_execute`. Попутно: `jobs_events`-алиас не передавал свою identity в `jobs_stream` (второй мелкий баг, тот же фикс). Юнит + router-level regression тесты.
+- **T80.3 [RBAC] OAuth SSO — все логины получают role=admin**: `app/routers/oauth.py:160` (было) — `create_jwt(username=..., user_id=uid)` без `role=`, наследует admin-дефолт `create_jwt()`. В отличие от local register() (fail-safe: только один админ по конструкции), SSO мультипользовательский по дизайну (любой email из allowlist) — вся система ролей RBAC (operator/viewer/custom) была недостижима через SSO, каждый allowlisted email получал master-эквивалент. **Фикс** (`12e88541`): новый `OAUTH_DEFAULT_ROLE` (default `operator`, НЕ `admin`), невалидные значения → fail-safe откат на `operator`. 3 regression-теста.
+
+### MAJOR (исправлено)
+
+- **T80.4 [AUTH] Коллизия OAuth uid между провайдерами**: `app/routers/oauth.py:157` (было) — `uid = sha256(subject)[:4]` без имени провайдера. Два разных провайдера с одинаковым raw `sub`/`id` (частое дело для маленьких/последовательных числовых id) схлопывались в один gateway uid — один реальный пользователь неотличим от другого. **Фикс** (`12e88541`): хэш `f"{provider}:{subject}"`. 1 regression-тест.
+
+### Отложено / не исправлено (сознательно)
+
+- **T79.10 остаточный риск**: WS `?token=` до сих пор проверяется раньше cookie (комментарий в коде вводил в заблуждение), но сама заявленная в T79.10 угроза (утечка в access-логи) уже покрыта `_RedactTokenFilter` (`app/main.py`) с собственным тестом. Полное удаление query-fallback сломало бы задокументированное поведение `tests/test_webui.py` (браузерный WS не может слать кастомные заголовки) — не тронуто.
+- **Redis dead-letter queue без owner-фильтрации** (`GET /api/jobs/queue/dead`) — нет концепции owner_id, но `redis_queue.enqueue()` не вызывается вообще ни из одного места в кодовой базе — очередь всегда пуста на практике, не активный вектор.
+
+### Метод
+
+3 параллельных суб-аудита (Web UI: session manager/file browser/terminal — чисто, кроме T80.2; OAuth+RBAC: T80.3+T80.4, остальное подтверждено PASS; pooling+audit log: T80.1, audit_store.py — чисто, SQLi/DoS/auth не найдено) + собственная проверка автора (uv sync --frozen, pytest 3915 passed, ruff+mypy clean, pip-audit --strict — 0 known vulnerabilities).
