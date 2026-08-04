@@ -294,6 +294,7 @@ class TestRunUvToolContract:
             def __init__(self):
                 self._n = 0
                 self.argv_calls: list[list[str]] = []
+                self.argv_kwargs: list[dict] = []
 
             def execute_raw(self, cmd, **kw):
                 self._n += 1
@@ -306,6 +307,7 @@ class TestRunUvToolContract:
 
             def execute_argv(self, argv, **kw):
                 self.argv_calls.append(argv)
+                self.argv_kwargs.append(kw)
                 return {
                     "exit_code": 1,
                     "stdout": "***   File \"broken.py\", line 1\nSyntaxError: '(' was never closed\n",
@@ -320,6 +322,10 @@ class TestRunUvToolContract:
         assert len(client.argv_calls) == 1
         argv = client.argv_calls[0]
         assert "uv" in argv and "run" in argv and "--no-project" in argv
+        # Regression: reported live as a 504 at ~30s — a cold uv interpreter
+        # cache needs more than execute_argv's bare 30s default to download
+        # and extract a full CPython build before compileall even starts.
+        assert client.argv_kwargs[0].get("timeout_s") == 300
         assert "python3" in argv
         assert "uvx" not in argv
         assert "--from" not in argv  # uvx's package-resolution flag never appears
