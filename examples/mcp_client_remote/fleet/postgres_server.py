@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import sys
 import threading
 
 import httpx
@@ -14,7 +16,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from .shared import extract_auth_token, get_fleet_env
+from .shared import extract_auth_token, get_fleet_env, resolve_docker_host
 
 INTERNAL_PORT = 8784
 HTTP_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
@@ -28,11 +30,36 @@ def _dsn() -> str:
     password = os.environ["PGPASSWORD"]
     sslmode = os.environ.get("PGSSLMODE", "disable")
     appname = os.environ.get("PGAPPNAME", "mcp_readonly")
-    return f"postgresql://{user}:{password}@{host}:{port}/{db}?sslmode={sslmode}&application_name={appname}"
+    # A static /etc/hosts entry for PGHOST drifts the moment mcp-postgres is
+    # ever recreated — resolve live instead of trusting it stayed in sync.
+    resolved_host = resolve_docker_host(host)
+    if resolved_host != host:
+        print(f"  resolved {host} -> {resolved_host} via docker inspect", file=sys.stderr)
+    return f"postgresql://{user}:{password}@{resolved_host}:{port}/{db}?sslmode={sslmode}&application_name={appname}"
 
 
-def _get_client() -> PostgresClient:
-    return PostgresClient(_dsn())
+_client: PostgresClient | None = None
+_client_lock = asyncio.Lock()
+
+
+async def _get_client() -> PostgresClient:
+    """Return the single shared PostgresClient for this process.
+
+    Regression: every tool call used to construct a brand new PostgresClient
+    (via `PostgresClient(_dsn())`), and PostgresClient._ensure_pool() always
+    creates a fresh asyncpg pool (min_size=1) since a new instance's _pool is
+    always None — nothing ever closed it. Confirmed live: 5 tool calls left 6
+    idle "mcp_readonly" connections in pg_stat_activity, growing without
+    bound on every subsequent call, in a service that runs indefinitely.
+    Left unfixed, sustained use exhausts Postgres's max_connections for
+    every client of that instance, not just this adapter.
+    """
+    global _client
+    if _client is None:
+        async with _client_lock:
+            if _client is None:
+                _client = PostgresClient(_dsn())
+    return _client
 
 
 mcp = FastMCP("postgres-readonly")
@@ -41,7 +68,7 @@ mcp = FastMCP("postgres-readonly")
 @mcp.tool()
 async def postgres_health() -> str:
     """Check Postgres connectivity. Returns DB name, user, version."""
-    client = _get_client()
+    client = await _get_client()
     try:
         info = await client.health()
         return f"ok | db={info['db']} user={info['user']} version={info['version']}"
@@ -52,7 +79,7 @@ async def postgres_health() -> str:
 @mcp.tool()
 async def postgres_list_schemas() -> str:
     """List non-system schemas in the database."""
-    client = _get_client()
+    client = await _get_client()
     schemas = await client.list_schemas()
     if not schemas:
         return "No user schemas found"
@@ -68,7 +95,7 @@ async def postgres_list_tables(
 
     schema: schema name (default: public).
     """
-    client = _get_client()
+    client = await _get_client()
     tables = await client.list_tables(schema=schema)
     if not tables:
         return f"No tables found in schema '{schema}'"
@@ -89,7 +116,7 @@ async def postgres_describe_table(
     table_name: name of the table (required).
     schema: schema name (default: public).
     """
-    client = _get_client()
+    client = await _get_client()
     columns = await client.describe_table(schema=schema, table_name=table_name)
     if not columns:
         return f"Table '{schema}.{table_name}' not found or has no columns"
@@ -107,7 +134,7 @@ async def postgres_select(sql: str) -> str:
     sql: SELECT or WITH query (multi-statement not allowed, DDL/DML blocked).
     Returns: JSON array of rows.
     """
-    client = _get_client()
+    client = await _get_client()
     try:
         rows = await client.execute(sql)
     except ValueError as e:
@@ -122,7 +149,7 @@ async def postgres_select(sql: str) -> str:
 @mcp.tool()
 async def postgres_vector_status() -> str:
     """Check if pgvector extension is installed and its version."""
-    client = _get_client()
+    client = await _get_client()
     info = await client.vector_status()
     if info["installed"]:
         return f"pgvector is installed (version {info['version']})"

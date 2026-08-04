@@ -1,11 +1,32 @@
-"""Tests for Postgres read-only MCP adapter."""
+"""Tests for Postgres read-only MCP adapter.
+
+Regression context: this file used to live under
+examples/mcp_client_remote/tests/, which pyproject.toml's
+testpaths = ["tests"] never collects — every test in it (all SQL
+guardrails: multi-statement ban, DDL blocklist, system-schema block, row
+limits) has never actually run in CI. It also imports `from fleet...`,
+which only resolves when pytest happens to be invoked from inside
+examples/mcp_client_remote/ — from the repo root (how CI and every other
+test in this suite runs) it fails with ModuleNotFoundError before a single
+assertion executes. Moved here and given the same sys.path bootstrap every
+other fleet test in this directory already uses.
+"""
 
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+_MCP_CLIENT_REMOTE = Path(__file__).resolve().parents[1] / "examples" / "mcp_client_remote"
+sys.path.insert(0, str(_MCP_CLIENT_REMOTE))
+# postgres_server.py does `from postgres_client import ...` (bare, not
+# relative) — mirrors run_postgres_server.py's own sys.path setup for the
+# real service, since fleet/ itself must be importable as a top-level dir.
+sys.path.insert(0, str(_MCP_CLIENT_REMOTE / "fleet"))
 
 os.environ.setdefault("PGHOST", "127.0.0.1")
 os.environ.setdefault("PGPORT", "5432")
@@ -231,3 +252,130 @@ class TestPostgresClient:
         client._pool = pool
         result = await client.vector_status()
         assert result["installed"] is False
+
+
+class TestGetClientIsASingleton:
+    """Regression: every postgres_* tool call used to build a brand new
+    PostgresClient via `PostgresClient(_dsn())`, and PostgresClient's
+    _ensure_pool() always creates a fresh asyncpg pool (min_size=1) because
+    a new instance's _pool is always None — nothing ever closed the old
+    one. Confirmed live against the real mcp-postgres container: 5 tool
+    calls left 6 idle "mcp_readonly" connections in pg_stat_activity,
+    growing without bound on every subsequent call, in a service that runs
+    indefinitely — eventually exhausts Postgres's max_connections for
+    every client of that instance, not just this adapter.
+    """
+
+    @pytest.mark.asyncio
+    async def test_repeated_calls_reuse_the_same_client(self, monkeypatch):
+        import fleet.postgres_server as pg_server
+
+        monkeypatch.setattr(pg_server, "_client", None)
+        created = []
+
+        class _FakeClient:
+            def __init__(self, dsn):
+                created.append(dsn)
+
+        monkeypatch.setattr(pg_server, "PostgresClient", _FakeClient)
+
+        first = await pg_server._get_client()
+        second = await pg_server._get_client()
+        third = await pg_server._get_client()
+
+        assert first is second is third
+        assert len(created) == 1
+
+    @pytest.mark.asyncio
+    async def test_concurrent_first_calls_still_create_only_one_client(self, monkeypatch):
+        """The lazy-init race: two tool calls landing before the first
+        PostgresClient() finishes constructing must not each create their
+        own pool.
+        """
+        import asyncio
+
+        import fleet.postgres_server as pg_server
+
+        monkeypatch.setattr(pg_server, "_client", None)
+        created = []
+
+        class _FakeClient:
+            def __init__(self, dsn):
+                created.append(dsn)
+
+        monkeypatch.setattr(pg_server, "PostgresClient", _FakeClient)
+
+        results = await asyncio.gather(
+            pg_server._get_client(),
+            pg_server._get_client(),
+            pg_server._get_client(),
+        )
+
+        assert results[0] is results[1] is results[2]
+        assert len(created) == 1
+
+
+class TestDsnResolvesDockerHostLive:
+    """Regression: PGHOST relied on a static /etc/hosts entry that drifts
+    the moment mcp-postgres is ever recreated — confirmed live, the real
+    running service had a stale entry and every tool call was failing with
+    ConnectionRefusedError. _dsn() must resolve the host the same way
+    examples/mcp_server/server.py already does for its own Postgres usage.
+    """
+
+    def test_dsn_uses_resolved_host_not_raw_pghost(self, monkeypatch):
+        import fleet.postgres_server as pg_server
+
+        monkeypatch.setenv("PGHOST", "mcp-postgres")
+        monkeypatch.setattr(pg_server, "resolve_docker_host", lambda host, **kw: "172.19.0.99")
+        dsn = pg_server._dsn()
+        assert "172.19.0.99" in dsn
+        assert "mcp-postgres" not in dsn
+
+    def test_dsn_falls_back_to_raw_host_when_resolution_is_a_noop(self, monkeypatch):
+        import fleet.postgres_server as pg_server
+
+        monkeypatch.setattr(pg_server, "resolve_docker_host", lambda host, **kw: host)
+        dsn = pg_server._dsn()
+        assert os.environ["PGHOST"] in dsn
+
+
+class TestResolveDockerHost:
+    """fleet/shared.py's resolve_docker_host — the same live-resolution
+    helper examples/mcp_server/server.py already had, now shared so the
+    Postgres fleet adapter doesn't depend on a static /etc/hosts entry
+    staying in sync with whatever IP mcp-postgres currently has.
+    """
+
+    def test_returns_resolved_ip_on_success(self, monkeypatch):
+        import subprocess
+
+        from fleet.shared import resolve_docker_host
+
+        def _fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout="172.19.0.28\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        assert resolve_docker_host("mcp-postgres") == "172.19.0.28"
+
+    def test_falls_back_to_hostname_on_failure(self, monkeypatch):
+        import subprocess
+
+        from fleet.shared import resolve_docker_host
+
+        def _fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="no such container")
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        assert resolve_docker_host("mcp-postgres") == "mcp-postgres"
+
+    def test_falls_back_to_hostname_on_exception(self, monkeypatch):
+        import subprocess
+
+        from fleet.shared import resolve_docker_host
+
+        def _raise(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="docker", timeout=5)
+
+        monkeypatch.setattr(subprocess, "run", _raise)
+        assert resolve_docker_host("mcp-postgres") == "mcp-postgres"
