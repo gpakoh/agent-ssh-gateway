@@ -601,6 +601,13 @@ def _run_uv_tool(
             # target has no system `python3`, only the interpreter uv
             # manages itself), just its bytecode-cache writes redirected off
             # the read-only mount.
+            #
+            # Regression: execute_argv's own default timeout_s is only 30s —
+            # fine once uv's managed interpreter is already cached locally,
+            # but a cold cache means uv has to download and extract a full
+            # CPython build first, which reported a 504 at ~30s in practice.
+            # Match execute_project_script's fallback budget (pytest/mypy)
+            # rather than relying on the bare default.
             r2 = client.execute_argv(
                 [
                     "env",
@@ -615,6 +622,7 @@ def _run_uv_tool(
                     *targets,
                 ],
                 cwd=str(project_dir),
+                timeout_s=300,
             )
             return _fallback_result(tool_key, tool_name, r2)
 
