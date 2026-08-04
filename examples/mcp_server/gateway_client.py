@@ -277,7 +277,7 @@ class GatewayClient:
         from app.workspace.registry import get_registry
 
         info = get_registry().project_info(project)
-        cwd = str(info.root)
+        cwd = str(info["root"])
         import shlex as _shlex
         argv = _shlex.split(command)
         return self._post(
@@ -362,7 +362,7 @@ class GatewayClient:
             from app.workspace.registry import get_registry
 
             info = get_registry().project_info(project)
-            cwd = str(info.root)
+            cwd = str(info["root"])
         except Exception:
             raise
 

@@ -76,6 +76,28 @@ def test_session_not_found_keeps_its_own_code():
     assert retryable is False
 
 
+def test_session_not_found_flat_body_not_reclassified_as_file_not_found():
+    """Regression: SSHManagerError's handler (session/connection/exec errors)
+    returns a flat {message, code, retryable, hint, http_status} body with
+    no "detail" wrapper — unlike most other endpoints. Before this fix, a
+    404 with no "detail" key fell through to the blunt status-code
+    heuristics and every bare 404 was reclassified as FILE_NOT_FOUND,
+    turning "session not found" into a misleading "file not found".
+    """
+    code, retryable = _classify(
+        404,
+        {
+            "message": "SSH operation failed",
+            "code": "SESSION_NOT_FOUND",
+            "retryable": False,
+            "hint": "Create a session first via POST /api/ssh/connect",
+            "http_status": 404,
+        },
+    )
+    assert code == "SESSION_NOT_FOUND"
+    assert retryable is False
+
+
 def test_unmapped_gateway_code_still_honors_body_retryable_true():
     """A gateway code this MCP layer doesn't have a specific mapping for
     must still respect the gateway's own retryable flag rather than

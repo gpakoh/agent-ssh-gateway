@@ -542,6 +542,14 @@ def _classify_gateway_error(exc: GatewayClientError) -> tuple[str, bool]:
         maybe_detail = exc.body.get("detail")
         if isinstance(maybe_detail, dict):
             detail = maybe_detail
+        elif isinstance(exc.body.get("retryable"), bool):
+            # Not every gateway handler wraps its error under "detail" — the
+            # SSHManagerError handler (session/connection/exec errors) returns
+            # a flat {message, code, retryable, hint, http_status} body. Use
+            # it directly rather than falling through to the blunt
+            # status-code-only heuristics below, which can't distinguish
+            # "session not found" from "file not found" on a bare 404.
+            detail = exc.body
 
         if detail is not None and isinstance(detail.get("retryable"), bool):
             gateway_retryable: bool = detail["retryable"]
