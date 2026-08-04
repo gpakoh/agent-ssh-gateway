@@ -1,3 +1,12 @@
+# DEPRECATED as a source of truth: the live systemd services (T81.1) now run
+# from the main project's uv-managed .venv (../../.venv), which already pins
+# every package listed here via pyproject.toml/uv.lock and is covered by CI's
+# ruff/mypy/pip-audit gates. This file is kept only for anyone who wants to
+# run this directory as a fully standalone install (`pip install -r
+# requirements.txt` in its own venv) — if you do, re-check these versions
+# against pyproject.toml first, since this file is NOT kept in sync
+# automatically and drifting here is exactly what caused T80.6 (9 CVEs went
+# unnoticed for months in a venv nothing ever audited).
 mcp>=1.28.1,<2.0.0
 httpx
 uvicorn
