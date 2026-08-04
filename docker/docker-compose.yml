@@ -98,6 +98,7 @@ services:
       - MCP_STREAMABLE_HTTP_BEARER_TOKEN=${MCP_STREAMABLE_HTTP_BEARER_TOKEN:?set MCP_STREAMABLE_HTTP_BEARER_TOKEN}
     volumes:
       - ../projects.yaml:/app/projects.yaml:ro
+      - mcp_server_tokens:/var/lib/agent-ssh-gateway
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -212,4 +213,6 @@ volumes:
   redis_data:
     driver: local
   known_hosts:
+    driver: local
+  mcp_server_tokens:
     driver: local
