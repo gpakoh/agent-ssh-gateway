@@ -552,14 +552,20 @@ async def ws_auth_check(
         if auth_header.startswith("Bearer "):
             provided = auth_header[7:]
     if not provided:
-        # Browser WebSocket connections cannot send custom headers — accept the
-        # web-ui JWT via ?token= query parameter or the httpOnly auth cookie
-        # (T79.18: cookie is the primary channel for the Web UI).
-        provided = websocket.query_params.get("token", "")
-    if not provided:
+        # The browser automatically attaches the httpOnly auth cookie to the
+        # WebSocket handshake (same-origin, like any other request) — this
+        # is what the shipped Web UI actually relies on (T79.18); check it
+        # before the query-param fallback so the common browser case never
+        # touches ?token= at all (T79.10 — a query-string token risks
+        # leaking into browser history / intermediate proxy logs beyond
+        # this app's own access logs, which _RedactTokenFilter covers).
         from app.user_auth import AUTH_COOKIE_NAME
 
         provided = websocket.cookies.get(AUTH_COOKIE_NAME, "")
+    if not provided:
+        # Fallback for non-browser WS clients that can't set custom headers
+        # or retain cookies (e.g. a bare websocket-client script).
+        provided = websocket.query_params.get("token", "")
     if not provided:
         return (CLOSE_POLICY_VIOLATION, "Invalid or missing API key")
 

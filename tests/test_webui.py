@@ -66,6 +66,30 @@ class TestWebSocketWebUiToken:
                     pass
             assert exc.value.code == 1008
 
+    def test_pty_stream_cookie_takes_priority_over_query_token(self, monkeypatch):
+        """T79.10 follow-up: the httpOnly cookie must be checked before the
+        ?token= query param, so a browser session (cookie set) isn't
+        derailed by a stray/garbage query token — and the common browser
+        case never even touches the query-string channel.
+        """
+        _patch_base(monkeypatch)
+        from app.user_auth import AUTH_COOKIE_NAME
+
+        good_token = create_jwt("tester", 1, role="admin")
+        with TestClient(app) as client:
+            client.cookies.set(AUTH_COOKIE_NAME, good_token)
+            with pytest.raises(WebSocketDisconnect) as exc:
+                with client.websocket_connect(
+                    "/api/ssh/pty/sess-webui/stream?token=garbage-not-a-jwt"
+                ):
+                    pass
+            # 4403 = auth passed (via cookie), rejected only by the
+            # business-level "session not found" check — proves the cookie
+            # won even though the query token was invalid.
+            assert exc.value.code == 4403, (
+                f"Expected 4403 (cookie auth passed), got {exc.value.code}: {exc.value.reason}"
+            )
+
     def test_execute_stream_accepts_webui_jwt_via_query(self, monkeypatch):
         _patch_base(monkeypatch)
         token = create_jwt("tester", 1, role="admin")
