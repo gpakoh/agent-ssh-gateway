@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import secrets
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -368,7 +369,7 @@ async def consent_handler(request: Request):
     code_challenge = form.get("code_challenge", "")
     resource = form.get("resource", "")
 
-    if not password or password != MCP_AUTHORIZE_PASSWORD:
+    if not password or not secrets.compare_digest(str(password), MCP_AUTHORIZE_PASSWORD):
         from urllib.parse import urlencode
 
         params = {
