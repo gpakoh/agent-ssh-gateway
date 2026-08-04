@@ -1,5 +1,7 @@
-mcp
+mcp>=1.28.1,<2.0.0
 httpx
 uvicorn
 starlette
 PyYAML>=6.0.1
+cryptography>=50.0.0
+pydantic-settings>=2.14.2
