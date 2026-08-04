@@ -47,9 +47,13 @@ USER appuser
 # Read-only filesystem (except /tmp and /app/data)
 VOLUME ["/tmp", "/app/data"]
 
-# Health check: /mcp answers 400/401 (not 405) without a valid session — curl exits 0 on any HTTP response
+# Health check: /healthz is exempted from bearer auth by BearerAuthMiddleware
+# specifically for this — a real 200/failure signal instead of probing the
+# bearer-protected /mcp endpoint, which always answered 401 without a token
+# and spammed the container's logs with a misleading "unauthorized" line
+# every 30s (curl -s without -f doesn't care about status either way).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -s -o /dev/null --max-time 4 http://localhost:8087/mcp || exit 1
+    CMD curl -sf --max-time 4 http://localhost:8087/healthz || exit 1
 
 # Expose streamable-http port
 EXPOSE 8087
