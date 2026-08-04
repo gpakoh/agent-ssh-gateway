@@ -279,6 +279,87 @@ class TestRunUvToolContract:
         assert result["result"]["stderr"] == "2 failed"
         assert result["error"]["code"] == "CHECK_FAILED"
 
+    def test_compileall_readonly_fallback_uses_uv_run_no_project_not_uvx(self, monkeypatch):
+        """Regression: compileall isn't an installable PyPI tool, so its
+        read-only fallback must not go through the uvx --from <tool> path
+        (that always fails with "compileall was not found in the package
+        registry", hiding the real syntax error) — it must run via
+        `uv run --no-project python3 -m compileall` instead, since the SSH
+        target has no system python3, only the interpreter uv manages.
+        """
+        from mcp_client_tools import _run_uv_tool
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+
+        class _FB:
+            def __init__(self):
+                self._n = 0
+                self.argv_calls: list[list[str]] = []
+
+            def execute_raw(self, cmd, **kw):
+                self._n += 1
+                return {"job_id": f"j{self._n}"}
+
+            def wait_job(self, job_id, **kw):
+                if job_id == "j1":
+                    return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+                return {"exit_code": 1, "stdout": "", "stderr": "Read-only file system (os error 30)"}
+
+            def execute_argv(self, argv, **kw):
+                self.argv_calls.append(argv)
+                return {
+                    "exit_code": 1,
+                    "stdout": "***   File \"broken.py\", line 1\nSyntaxError: '(' was never closed\n",
+                    "stderr": "",
+                    "execution_duration_ms": 12,
+                    "job_id": "j-fb",
+                }
+
+        client = _FB()
+        result = _run_uv_tool(client, "proj", "compileall", "run_compileall", target=["broken.py"])
+
+        assert len(client.argv_calls) == 1
+        argv = client.argv_calls[0]
+        assert "uv" in argv and "run" in argv and "--no-project" in argv
+        assert "python3" in argv
+        assert "uvx" not in argv
+        assert "--from" not in argv  # uvx's package-resolution flag never appears
+
+        assert result["ok"] is False
+        assert result["result"]["outcome"] == "failed"
+        assert "SyntaxError" in result["result"]["stdout"]
+        assert result["error"]["code"] == "CHECK_FAILED"
+
+    def test_compileall_readonly_fallback_success(self, monkeypatch):
+        from mcp_client_tools import _run_uv_tool
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+
+        class _FB:
+            def __init__(self):
+                self._n = 0
+
+            def execute_raw(self, cmd, **kw):
+                self._n += 1
+                return {"job_id": f"j{self._n}"}
+
+            def wait_job(self, job_id, **kw):
+                if job_id == "j1":
+                    return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+                return {"exit_code": 1, "stdout": "", "stderr": "Read-only file system (os error 30)"}
+
+            def execute_argv(self, argv, **kw):
+                return {
+                    "exit_code": 0,
+                    "stdout": "Compiling 'clean.py'...\n",
+                    "stderr": "",
+                    "execution_duration_ms": 8,
+                    "job_id": "j-fb",
+                }
+
+        result = _run_uv_tool(_FB(), "proj", "compileall", "run_compileall", target=["clean.py"])
+        assert result["ok"] is True
+        assert result["result"]["outcome"] == "passed"
+        assert result["result"]["exit_code"] == 0
+
     def test_run_tool_wraps_uv_failure_as_error_result(self, monkeypatch):
         """run_tool wrapper returns canonical error for _run_uv_tool failure."""
         from mcp_client_tools import _run_uv_tool
