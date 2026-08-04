@@ -153,6 +153,29 @@ def test_file_not_found_still_works_with_body_present():
     assert retryable is False
 
 
+def test_workspace_readonly_maps_to_permission_denied_not_internal_error():
+    """Regression: reachable on every write-tool call against the gateway's
+    own default (WORKSPACE_READONLY=true) — not an edge case. This code
+    goes through the normal HTTPException(detail=...) path (the nested
+    shape works fine here), but _GATEWAY_ERROR_CODE_MAP simply had no entry
+    for WORKSPACE_READONLY at all, so it fell through to INTERNAL_ERROR —
+    an agent attempting a write got no signal that the fix is "don't write,
+    or ask an operator to disable read-only mode", just a generic failure.
+    """
+    code, retryable = _classify(
+        403,
+        {
+            "detail": {
+                "message": "WORKSPACE_READONLY: write operations are disabled",
+                "code": "WORKSPACE_READONLY",
+                "retryable": False,
+            }
+        },
+    )
+    assert code == "PERMISSION_DENIED"
+    assert retryable is False
+
+
 def test_malformed_body_falls_back_to_status_heuristics():
     """body present but not the expected {"detail": {...}} shape must
     not crash, and must fall back to status-code heuristics.
@@ -221,3 +244,43 @@ class TestRealGatewayResponseShapeSeam:
 
         assert code == "AUTH_ERROR"
         assert retryable is False
+
+    @pytest.mark.asyncio
+    async def test_session_limit_survives_the_real_round_trip(self):
+        """Same systematic audit, found by running every SSHManagerError
+        subtype through both real sides: SessionLimitError's gateway code
+        (RATE_LIMIT_EXCEEDED) had no entry in _GATEWAY_ERROR_CODE_MAP either
+        — this map already had "RATE_LIMITED" for the MCP vocabulary, just
+        never wired to the gateway's actual name for it.
+        """
+        from app.ssh_manager import SessionLimitError
+        from examples.mcp_server.gateway_client import GatewayClientError
+        from examples.mcp_server.server import _classify_gateway_error
+
+        status, body = await self._real_gateway_body(SessionLimitError("too many sessions"))
+        assert status == 429
+
+        exc = GatewayClientError("boom", status_code=status, body=body)
+        code, retryable = _classify_gateway_error(exc)
+
+        assert code == "RATE_LIMITED"
+        assert retryable is True
+
+    @pytest.mark.asyncio
+    async def test_timeout_survives_the_real_round_trip(self):
+        """TimeoutError's gateway code is GATEWAY_TIMEOUT, not the bare
+        "TIMEOUT" this map already expected — a naming mismatch, not a
+        missing entry.
+        """
+        from app.ssh_manager import TimeoutError as SSHTimeoutError
+        from examples.mcp_server.gateway_client import GatewayClientError
+        from examples.mcp_server.server import _classify_gateway_error
+
+        status, body = await self._real_gateway_body(SSHTimeoutError("timed out"))
+        assert status == 504
+
+        exc = GatewayClientError("boom", status_code=status, body=body)
+        code, retryable = _classify_gateway_error(exc)
+
+        assert code == "TIMEOUT"
+        assert retryable is True
