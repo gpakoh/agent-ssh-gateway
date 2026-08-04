@@ -176,6 +176,47 @@ def test_workspace_readonly_maps_to_permission_denied_not_internal_error():
     assert retryable is False
 
 
+def test_validation_error_maps_to_invalid_input_not_internal_error():
+    """Regression: arguably the single most commonly hit gap of this whole
+    audit — a 422 from FastAPI's own request validation (missing field,
+    wrong type, invalid JSON body) fires on ordinary mistakes while
+    exploring a tool's parameters, not just rare failures. The gateway side
+    (validation_exception_handler) was always correct; this map just had
+    no entry for its code at all.
+    """
+    code, retryable = _classify(
+        422,
+        {
+            "message": "Request validation failed",
+            "code": "VALIDATION_ERROR",
+            "retryable": False,
+            "hint": "Check missing and invalid fields listed in errors[]",
+            "http_status": 422,
+            "errors": [{"field": "command", "error": "...", "type": "string_type"}],
+        },
+    )
+    assert code == "INVALID_INPUT"
+    assert retryable is False
+
+
+def test_bad_request_maps_to_invalid_input_not_internal_error():
+    """Same gap, different trigger — a guardrail-blocked command (e.g. a
+    dangerous pattern match) returns BAD_REQUEST/400, also flat-body.
+    """
+    code, retryable = _classify(
+        400,
+        {
+            "message": "Command contains dangerous pattern: rm -rf /",
+            "code": "BAD_REQUEST",
+            "retryable": False,
+            "hint": "Check request parameters and try again",
+            "http_status": 400,
+        },
+    )
+    assert code == "INVALID_INPUT"
+    assert retryable is False
+
+
 def test_malformed_body_falls_back_to_status_heuristics():
     """body present but not the expected {"detail": {...}} shape must
     not crash, and must fall back to status-code heuristics.

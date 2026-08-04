@@ -541,6 +541,17 @@ _GATEWAY_ERROR_CODE_MAP: dict[str, str] = {
     # shape, not the flat-body case above), so it always reached this map's
     # lookup, but the map itself just never had an entry for it.
     "WORKSPACE_READONLY": "PERMISSION_DENIED",
+    # Both reachable on almost any malformed call — a 422 from FastAPI's own
+    # request validation (missing/wrong-typed field, invalid JSON body) or a
+    # 400 from a guardrail check (e.g. a blocked dangerous command pattern).
+    # Both are flat-body responses (validation_exception_handler and several
+    # HTTPException(400, ...) call sites bypass the nested-detail
+    # convention the same way ssh_exception_handler does), so this was
+    # falling all the way through to INTERNAL_ERROR — arguably the single
+    # most commonly hit gap of this whole audit, since it fires on ordinary
+    # mistakes while exploring a tool's parameters, not just rare failures.
+    "VALIDATION_ERROR": "INVALID_INPUT",
+    "BAD_REQUEST": "INVALID_INPUT",
 }
 
 
