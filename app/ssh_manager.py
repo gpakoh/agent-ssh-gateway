@@ -2,6 +2,7 @@
 
 import asyncio
 import builtins
+import hashlib
 import io
 import logging
 import time
@@ -104,6 +105,25 @@ class SessionLimitError(SSHManagerError):
     pass
 
 
+def _credential_fingerprint(
+    auth_method: str,
+    password: str | None,
+    private_key: str | None,
+    key_passphrase: str | None,
+) -> str:
+    """One-way hash identifying the presented credential for pool-key use.
+
+    Never reversible, never logged — only used so that the connection
+    pool cannot hand out a transport authenticated under one credential
+    to a caller presenting a different one for the same host/port/user.
+    """
+    if auth_method == "password":
+        material = "pw:" + (password or "")
+    else:
+        material = "key:" + (private_key or "") + "\x00" + (key_passphrase or "")
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Session Record
 # ---------------------------------------------------------------------------
@@ -115,6 +135,9 @@ class SessionRecord:
 
     Credentials are used only for the initial connection and are not stored.
     Reconnect requires credentials to be provided again by the caller.
+    ``credential_fingerprint`` is a one-way SHA-256 hash (see
+    ``_credential_fingerprint``), not the credential itself — kept only so
+    the pool-release path can rebuild the same pool key used at acquire time.
     """
 
     session_id: str
@@ -131,6 +154,7 @@ class SessionRecord:
     owner_token_fingerprint: str | None = None
     source_ip: str | None = None
     auth_method: str = "password"
+    credential_fingerprint: str = ""
     tenant_labels: tuple[str, ...] = ()
 
     def touch(self) -> None:
@@ -297,13 +321,21 @@ class SSHSessionManager:
         """Create a new SSH session and return its session ID.
 
         When a connection pool is enabled, an idle transport matching
-        (host, port, username, auth_method) is reused instead of paying a
-        fresh TCP handshake. The optional ``session_id`` is used by the
-        pre-warm endpoint so the caller can learn the id before the
-        background connection finishes.
+        (host, port, username, auth_method, credential_fingerprint) is
+        reused instead of paying a fresh TCP handshake. The credential
+        fingerprint is a one-way hash of the presented password/key —
+        never stored or logged in reversible form — so a pool hit only
+        ever hands out a transport to a caller who has *already proven*
+        they know that exact credential; a different (or wrong)
+        password/key naturally misses the pool and goes through the
+        normal paramiko auth handshake below.
+        The optional ``session_id`` is used by the pre-warm endpoint so
+        the caller can learn the id before the background connection
+        finishes.
         """
         auth_method = "password" if password is not None else "key"
-        pool_key = (host, port, username, auth_method)
+        credential_fingerprint = _credential_fingerprint(auth_method, password, private_key, key_passphrase)
+        pool_key = (host, port, username, auth_method, credential_fingerprint)
 
         if source_ip and settings.max_sessions_per_ip > 0:
             async with self._lock:
@@ -398,6 +430,7 @@ class SSHSessionManager:
             owner_token_fingerprint=owner_token_fingerprint,
             source_ip=source_ip,
             auth_method=auth_method,
+            credential_fingerprint=credential_fingerprint,
             tenant_labels=tuple(tenant_labels or ()),
         )
 
@@ -804,7 +837,7 @@ class SSHSessionManager:
         if self._pool is not None and alive:
             # Return the idle transport to the pool for reuse instead of
             # tearing down the TCP connection.
-            pool_key = (host, port, username, record.auth_method)
+            pool_key = (host, port, username, record.auth_method, record.credential_fingerprint)
             await self._pool.release(pool_key, record.client)
         else:
             try:

@@ -1,9 +1,14 @@
 """Connection pooling for idle SSH transports.
 
-Reuses idle SSH connections per (host, port, username, auth_method) tuple
-instead of paying the TCP handshake cost on every connect. Optional — the
-pool is only created when SSH_CONNECTION_POOL_SIZE > 0, so existing
-deployments are unaffected.
+Reuses idle SSH connections per (host, port, username, auth_method,
+credential_fingerprint) tuple instead of paying the TCP handshake cost on
+every connect. The credential fingerprint (see
+app.ssh_manager._credential_fingerprint) is a one-way hash of the presented
+password/key — a caller who doesn't already know the exact credential that
+authenticated the pooled transport simply misses the pool and goes through
+a normal fresh authentication instead of being handed someone else's
+already-authenticated connection. Optional — the pool is only created when
+SSH_CONNECTION_POOL_SIZE > 0, so existing deployments are unaffected.
 """
 
 from __future__ import annotations
@@ -34,9 +39,13 @@ class PooledConnection:
 class ConnectionPool:
     """In-memory pool of idle SSH clients.
 
-    Key: (host, port, username, auth_method) where auth_method is
-    "password" or "key". Supports LRU eviction (oldest idle connection is
-    dropped when the pool exceeds its size) and TTL expiry.
+    Key: (host, port, username, auth_method, credential_fingerprint) where
+    auth_method is "password" or "key" and credential_fingerprint is a
+    one-way hash of the actual credential presented (see
+    app.ssh_manager._credential_fingerprint) — two different credentials
+    for the same host/port/username never share a pool entry. Supports LRU
+    eviction (oldest idle connection is dropped when the pool exceeds its
+    size) and TTL expiry.
 
     All operations are safe to call from the event loop; internal state is
     guarded by an asyncio.Lock.

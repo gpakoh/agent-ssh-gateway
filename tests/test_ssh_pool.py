@@ -9,8 +9,10 @@ import paramiko
 import pytest
 
 from app.config import settings
-from app.ssh_manager import SessionLimitError, SSHSessionManager
+from app.ssh_manager import SessionLimitError, SSHSessionManager, _credential_fingerprint
 from app.ssh_pool import ConnectionPool
+
+_PW_FINGERPRINT = _credential_fingerprint("password", "pw", None, None)
 
 
 def _mock_client(alive: bool = True):
@@ -161,7 +163,7 @@ async def test_manager_acquire_pooled_client_on_create():
     manager = SSHSessionManager(connection_pool_size=4)
     assert manager.pool_stats is not None
     pooled = _mock_client(alive=True)
-    await manager._pool.release(("h", 22, "u", "password"), pooled)
+    await manager._pool.release(("h", 22, "u", "password", _PW_FINGERPRINT), pooled)
 
     # Patch create so the fresh-connect path never runs (pooled path used).
     manager._load_private_key = MagicMock()
@@ -200,13 +202,74 @@ async def test_manager_disconnect_releases_to_pool():
 
     manager = SSHSessionManager(connection_pool_size=4)
     pooled = _mock_client(alive=True)
-    await manager._pool.release(("h", 22, "u", "password"), pooled)
+    await manager._pool.release(("h", 22, "u", "password", _PW_FINGERPRINT), pooled)
 
     sid = await manager.create_session(host="h", port=22, username="u", password="pw")
     await manager.disconnect(sid)
     # transport returned to pool, not closed
     assert manager._pool.idle_count() == 1
     pooled.close.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pool_key_isolated_by_credential_not_just_auth_method():
+    """Regression: a pooled transport must never be handed to a caller
+    presenting a *different* password/key for the same host/port/username —
+    the pool key must incorporate a credential fingerprint, not just the
+    auth method label. Without this, a caller could reuse someone else's
+    already-authenticated connection by guessing host/port/username alone.
+    """
+    pool = ConnectionPool(max_size=4)
+    client = _mock_client()
+    fp_correct = _credential_fingerprint("password", "correct-horse", None, None)
+    fp_wrong = _credential_fingerprint("password", "wrong-guess", None, None)
+    assert fp_correct != fp_wrong
+
+    await pool.release(("h", 22, "u", "password", fp_correct), client)
+    # Same host/port/username/auth_method, but a DIFFERENT credential — must miss.
+    assert await pool.acquire(("h", 22, "u", "password", fp_wrong)) is None
+    # The correct credential still hits.
+    assert await pool.acquire(("h", 22, "u", "password", fp_correct)) is client
+
+
+@pytest.mark.asyncio
+async def test_manager_create_session_does_not_reuse_pool_on_different_password():
+    """End-to-end regression at the SSHSessionManager level: a pooled
+    connection authenticated with one password must not be handed out to
+    create_session() called with a different password for the same
+    host/port/username — the fresh-connect (real auth) path must run instead.
+    """
+    manager = SSHSessionManager(connection_pool_size=4)
+    pooled = _mock_client(alive=True)
+    await manager._pool.release(("h", 22, "u", "password", _PW_FINGERPRINT), pooled)
+
+    import paramiko
+
+    original = paramiko.SSHClient
+    fresh = _mock_client(alive=True)
+    connect_calls = []
+
+    class FakeClient(original):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.set_missing_host_key_policy = MagicMock()
+            self.connect = MagicMock(side_effect=lambda **kw: connect_calls.append(kw))
+            self.get_transport = MagicMock(return_value=fresh.get_transport.return_value)
+
+    paramiko.SSHClient = FakeClient
+    try:
+        sid = await manager.create_session(
+            host="h", port=22, username="u", password="a-completely-different-password"
+        )
+    finally:
+        paramiko.SSHClient = original
+
+    # Fresh authentication actually ran — the pooled (differently-authenticated)
+    # client was NOT silently handed out.
+    assert len(connect_calls) == 1
+    record = await manager.get_session(sid)
+    assert record is not None
+    assert record.client is not pooled
 
 
 @pytest.mark.asyncio
@@ -304,9 +367,9 @@ async def test_manager_pool_ttl_applied_on_acquire():
 
     manager = SSHSessionManager(connection_pool_size=4, connection_pool_ttl_seconds=1)
     stale = _mock_client(alive=True)
-    await manager._pool.release(("h", 22, "u", "password"), stale)
+    await manager._pool.release(("h", 22, "u", "password", _PW_FINGERPRINT), stale)
     # make it stale
-    for conn in manager._pool._idle[("h", 22, "u", "password")]:
+    for conn in manager._pool._idle[("h", 22, "u", "password", _PW_FINGERPRINT)]:
         conn.last_used -= 10
 
     # fresh-connect path must not do real networking — mock SSHClient
