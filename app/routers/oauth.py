@@ -6,6 +6,7 @@ the provider's redirect with a code. After a successful exchange a
 gateway JWT (same sub/type model as local login) is issued.
 """
 
+import hashlib
 import logging
 import secrets
 
@@ -29,6 +30,7 @@ from app.oauth_sso import (
     normalize_provider_name,
     state_store,
 )
+from app.rbac import VALID_ROLE_NAMES
 from app.user_auth import create_jwt, set_auth_cookie
 
 logger = logging.getLogger(__name__)
@@ -153,11 +155,26 @@ async def oauth_callback(request: Request, code: str = "", state: str = ""):
             },
         )
 
+    # Namespace the hash with the provider name: two different providers can
+    # both hand out the same raw `sub`/`id` value (small/sequential numeric
+    # ids are common), and without the provider prefix those would collide
+    # into the same gateway uid — letting one user impersonate another.
+    identity_key = f"{pending.provider}:{userinfo.subject}"
     uid = int.from_bytes(
-        __import__("hashlib").sha256(userinfo.subject.encode("utf-8")).digest()[:4],
+        hashlib.sha256(identity_key.encode("utf-8")).digest()[:4],
         "big",
     )
-    token = create_jwt(username=userinfo.username, user_id=uid)
+    # SSO is inherently multi-user (anyone matching OAUTH_ALLOWED_EMAILS) —
+    # unlike local register(), which is fail-safe by being single-admin-only,
+    # every SSO login must get an explicit, deployer-configured role rather
+    # than falling back to create_jwt's admin default.
+    oauth_role = settings.oauth_default_role if settings.oauth_default_role in VALID_ROLE_NAMES else "operator"
+    if settings.oauth_default_role not in VALID_ROLE_NAMES:
+        logger.warning(
+            "Invalid OAUTH_DEFAULT_ROLE=%r, falling back to 'operator'",
+            settings.oauth_default_role,
+        )
+    token = create_jwt(username=userinfo.username, user_id=uid, role=oauth_role)
     logger.info(
         "OAuth login ok: provider=%s username=%s",
         pending.provider,
