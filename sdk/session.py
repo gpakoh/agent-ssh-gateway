@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -63,6 +64,19 @@ class GatewaySession:
 class AsyncGatewaySession:
     """Async context manager for SSH Gateway.
 
+    Regression: this used to `await` every call directly on `client`
+    (self.session_id = await self.client.connect(), etc.) as if GatewayClient
+    itself were async. It never was — every GatewayClient method
+    (examples/mcp_server/gateway_client.py) is a plain blocking `def`. Every
+    single method here was a guaranteed `TypeError: object str/dict/None
+    can't be used in 'await' expression` the moment anyone actually used it
+    with the real client. Its own test suite mocked `client` with
+    `AsyncMock()`, which matched this exact wrong assumption instead of the
+    real (synchronous) contract, so nothing ever caught it. Now runs the
+    real synchronous client in a worker thread via `asyncio.to_thread` —
+    genuinely async from the caller's perspective, without requiring
+    GatewayClient to be rewritten as async.
+
     Usage::
 
         async with AsyncGatewaySession(client) as gw:
@@ -74,7 +88,7 @@ class AsyncGatewaySession:
         self.session_id: str | None = None
 
     async def __aenter__(self) -> AsyncGatewaySession:
-        self.session_id = await self.client.connect()
+        self.session_id = await asyncio.to_thread(self.client.connect)
         return self
 
     async def __aexit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: Any) -> None:
@@ -83,30 +97,32 @@ class AsyncGatewaySession:
     async def _disconnect_best_effort(self) -> None:
         if self.session_id:
             try:
-                await self.client.disconnect(self.session_id)
+                await asyncio.to_thread(self.client.disconnect, self.session_id)
             except Exception:
                 pass
 
     async def run(self, command: str, timeout: int | None = None) -> dict:
         """Execute command and wait for completion. Returns job result dict."""
-        job = await self.client.execute_restricted(
-            session_id=self.session_id, command=command
+        job = await asyncio.to_thread(
+            self.client.execute_restricted, session_id=self.session_id, command=command
         )
-        return await self.client.wait_job(
-            job_id=job["job_id"], timeout_sec=timeout
+        return await asyncio.to_thread(
+            self.client.wait_job, job_id=job["job_id"], timeout_sec=timeout
         )
 
     async def read(self, path: str) -> str:
         """Read file content from remote host."""
-        result = await self.client.read_file(session_id=self.session_id, path=path)
+        result = await asyncio.to_thread(
+            self.client.read_file, session_id=self.session_id, path=path
+        )
         return result.get("content", "")
 
     async def write(self, path: str, content: str) -> dict:
         """Write file. Returns raw Gateway response — may contain pending_confirmation."""
-        return await self.client.write_file(
-            session_id=self.session_id, path=path, content=content
+        return await asyncio.to_thread(
+            self.client.write_file, session_id=self.session_id, path=path, content=content
         )
 
     async def session_health(self) -> dict:
         """Check SSH session health."""
-        return await self.client.session_health(session_id=self.session_id)
+        return await asyncio.to_thread(self.client.session_health, session_id=self.session_id)
