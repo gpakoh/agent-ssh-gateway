@@ -35,13 +35,18 @@ DOCKER_PATTERNS: tuple[DestructivePattern, ...] = (
         description="Container logs and filesystem layers are lost.",
         suggestions=(PatternSuggestion("docker ps -a -f status=exited", "List stopped containers first", kind=SuggestionKind.PREVIEW_FIRST),)),
     DestructivePattern(name="rm-force",
-        regex=r"docker\b.*?\brm\s+.*(?:-[a-zA-Z0-9]*f|--force)",
+        # The short-flag alternative requires proper token boundaries
+        # (lookbehind before the dash, \b after the run) so it matches a
+        # real -f/-rf/-fr-style flag token and never a substring inside a
+        # long option name like --format or --filter (both happen to
+        # contain "-f" as a substring of their own name).
+        regex=r"docker\b.*?\brm\s+.*(?:(?<![\w-])-[a-zA-Z0-9]*f[a-zA-Z0-9]*\b|--force)",
         reason="docker rm -f forcibly removes containers without graceful shutdown",
         severity=Severity.HIGH,
         description="Sends SIGKILL instead of SIGTERM.",
         suggestions=(PatternSuggestion("docker stop <c> && docker rm <c>", "Graceful shutdown", kind=SuggestionKind.SAFER_ALTERNATIVE),)),
     DestructivePattern(name="rmi-force",
-        regex=r"docker\b.*?\brmi\s+.*(?:-[a-zA-Z0-9]*f|--force)",
+        regex=r"docker\b.*?\brmi\s+.*(?:(?<![\w-])-[a-zA-Z0-9]*f[a-zA-Z0-9]*\b|--force)",
         reason="docker rmi -f forcibly removes images even if in use by containers",
         severity=Severity.HIGH,
         description="Forces image removal, potentially breaking running containers.",
