@@ -96,12 +96,18 @@ def find_opencode_bin(opencode_bin: str | None) -> str:
 
 
 def resolve_project_root(project: str) -> str:
+    if not project:
+        # Never fall back to os.getcwd(): confirmed live that an empty
+        # project param combined with a caller whose cwd was "/" (e.g. a
+        # bare SSH invocation with no explicit cd) makes opencode treat the
+        # real filesystem root as its workspace, scattering /app,
+        # agent-report.md, implementation-diff.patch etc. across the host
+        # disk instead of a real project directory.
+        raise ValueError("project is required -- refusing to fall back to the current working directory")
     base = os.environ.get("MCP_GATEWAY_PROJECT_ROOT", "")
     if not base:
         base = os.environ.get("HOME", "/root")
-    if project:
-        return os.path.join(base, project)
-    return os.getcwd()
+    return os.path.join(base, project)
 
 
 def read_task_file(project_root: str, task_id: str, filename: str) -> str | None:
@@ -232,8 +238,21 @@ def run_wrapper(
 ) -> dict[str, Any]:
     validate_task_id(task_id)
 
-    project_root = resolve_project_root(project)
     started_at = _now_iso()
+    try:
+        project_root = resolve_project_root(project)
+    except ValueError as e:
+        return {
+            "task_id": task_id,
+            "status": "failed",
+            "exit_code": None,
+            "stdout": "",
+            "stderr": str(e),
+            "log_file": "",
+            "result_file": "",
+            "started_at": started_at,
+            "finished_at": _now_iso(),
+        }
 
     if not os.path.isdir(project_root):
         return {
@@ -394,9 +413,24 @@ def self_test() -> dict[str, Any]:
         tests.append({"name": "find_opencode_bin_default", "passed": False, "error": str(e)})
         all_passed = False
 
+    # Regression test: an empty project must fail cleanly, never silently
+    # fall back to os.getcwd() (see resolve_project_root's docstring comment).
     result = run_wrapper(
         task_id="b23456789012",
         project="",
+        dry_run=True,
+    )
+    if result["status"] == "failed" and "project is required" in result["stderr"]:
+        tests.append({"name": "empty_project_rejected", "passed": True})
+    else:
+        tests.append(
+            {"name": "empty_project_rejected", "passed": False, "error": f"got {result['status']!r}: {result['stderr']!r}"}
+        )
+        all_passed = False
+
+    result = run_wrapper(
+        task_id="b23456789012",
+        project=".",
         dry_run=True,
     )
     if result["status"] == "dry-run":

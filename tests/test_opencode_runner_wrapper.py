@@ -62,9 +62,13 @@ class TestResolveProjectRoot:
         result = resolve_project_root("my-app")
         assert result == "/tmp/projects/my-app"
 
-    def test_falls_back_to_cwd_when_empty(self):
-        result = resolve_project_root("")
-        assert Path(result) == Path.cwd()
+    def test_raises_when_empty(self):
+        # Regression test: previously fell back to os.getcwd(), which
+        # scattered opencode's workspace files across the real filesystem
+        # root whenever the caller's cwd was "/" (e.g. a bare SSH
+        # invocation with no explicit cd). Must fail loudly instead.
+        with pytest.raises(ValueError, match="project is required"):
+            resolve_project_root("")
 
 
 class TestWriteTaskFile:
@@ -77,15 +81,29 @@ class TestWriteTaskFile:
 
 
 class TestRunWrapperDryRun:
-    def test_dry_run_does_not_execute(self):
+    def test_dry_run_does_not_execute(self, monkeypatch):
+        with tempfile.TemporaryDirectory() as tmp:
+            monkeypatch.setenv("MCP_GATEWAY_PROJECT_ROOT", tmp)
+            os.makedirs(os.path.join(tmp, "my-app"))
+            result = run_wrapper(
+                task_id="b23456789012",
+                project="my-app",
+                dry_run=True,
+            )
+        assert result["status"] == "dry-run"
+        assert result["exit_code"] is None
+        assert "[DRY-RUN]" in result["stdout"]
+
+    def test_empty_project_fails_cleanly(self):
+        # Regression test: never silently fall back to os.getcwd() -- see
+        # resolve_project_root's docstring comment.
         result = run_wrapper(
             task_id="b23456789012",
             project="",
             dry_run=True,
         )
-        assert result["status"] == "dry-run"
-        assert result["exit_code"] is None
-        assert "[DRY-RUN]" in result["stdout"]
+        assert result["status"] == "failed"
+        assert "project is required" in result["stderr"]
 
     def test_invalid_task_id_raises(self):
         with pytest.raises(ValueError):
