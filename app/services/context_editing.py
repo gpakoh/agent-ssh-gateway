@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 from dataclasses import dataclass
 
 from app.diff_generator import DiffGenerator
@@ -104,9 +105,11 @@ async def edit_file_with_context(
     if out.changed and _git_initialized(ctx):
         try:
             # Quick Check If File Is Tracked In Git
+            quoted_path = shlex.quote(path)
             check_result = await manager.execute(
                 ctx.session_id,
-                f"cd {ctx.path} && git ls-files --error-unmatch '{path}' 2>/dev/null || echo 'NOT_TRACKED'",
+                f"cd {shlex.quote(ctx.path)} && git ls-files --error-unmatch {quoted_path} "
+                f"2>/dev/null || echo 'NOT_TRACKED'",
                 timeout=2,
             )
 
@@ -114,7 +117,8 @@ async def edit_file_with_context(
                 # Read Old Content From Git (fast, File Is Tracked)
                 git_result = await manager.execute(
                     ctx.session_id,
-                    f"cd {ctx.path} && git show HEAD:'{path}' 2>/dev/null || echo ''",
+                    f"cd {shlex.quote(ctx.path)} && git show HEAD:{quoted_path} "
+                    f"2>/dev/null || echo ''",
                     timeout=2,
                 )
                 old_content = git_result["stdout"]

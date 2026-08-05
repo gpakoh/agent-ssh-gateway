@@ -6,6 +6,8 @@ POST /api/scaffold/python-class.
 
 from __future__ import annotations
 
+import shlex
+
 from app.models import ScaffoldResponse
 
 
@@ -51,7 +53,7 @@ async def scaffold_python_class(
     module_dir = module_path.rstrip("/")
 
     # Ensure Directory Exists
-    await manager.execute(session_id, f"mkdir -p '{module_dir}'", timeout=10)
+    await manager.execute(session_id, f"mkdir -p {shlex.quote(module_dir)}", timeout=10)
 
     class_path = f"{module_dir}/{class_name.lower()}.py"
     await file_editor.write_file(session_id, class_path, build_class_code(class_name, methods))
