@@ -1,6 +1,7 @@
 """Project analytics and metrics."""
 
 import logging
+import shlex
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,7 @@ class ProjectAnalytics:
     async def _get_file_stats(self, session_id: str, path: str) -> dict:
         """Get file statistics."""
         # Count files by extension
-        cmd = f"cd '{path}' && find . -type f -not -path './venv/*' -not -path './.git/*' -not -path './__pycache__/*' 2>/dev/null | sed 's/.*\\.//' | sort | uniq -c | sort -rn | head -20"
+        cmd = f"cd {shlex.quote(path)} && find . -type f -not -path './venv/*' -not -path './.git/*' -not -path './__pycache__/*' 2>/dev/null | sed 's/.*\\.//' | sort | uniq -c | sort -rn | head -20"
         result = await self._ssh.execute(session_id, cmd, timeout=15)
 
         extensions = {}
@@ -91,7 +92,7 @@ class ProjectAnalytics:
                         continue
 
         # Total files
-        total_cmd = f"cd '{path}' && find . -type f -not -path './venv/*' -not -path './.git/*' -not -path './__pycache__/*' 2>/dev/null | wc -l"
+        total_cmd = f"cd {shlex.quote(path)} && find . -type f -not -path './venv/*' -not -path './.git/*' -not -path './__pycache__/*' 2>/dev/null | wc -l"
         total_result = await self._ssh.execute(session_id, total_cmd, timeout=10)
         try:
             total_files = int(total_result["stdout"].strip() or 0)
@@ -99,7 +100,7 @@ class ProjectAnalytics:
             total_files = 0
 
         # Total directories
-        dir_cmd = f"cd '{path}' && find . -type d -not -path './venv/*' -not -path './.git/*' -not -path './__pycache__/*' 2>/dev/null | wc -l"
+        dir_cmd = f"cd {shlex.quote(path)} && find . -type d -not -path './venv/*' -not -path './.git/*' -not -path './__pycache__/*' 2>/dev/null | wc -l"
         dir_result = await self._ssh.execute(session_id, dir_cmd, timeout=10)
         try:
             total_dirs = int(dir_result["stdout"].strip() or 0)
@@ -115,7 +116,7 @@ class ProjectAnalytics:
     async def _get_code_stats(self, session_id: str, path: str) -> dict:
         """Get code statistics."""
         # Lines of code by language
-        loc_cmd = f"cd '{path}' && find . -name '*.py' -not -path './venv/*' -not -path './__pycache__/*' 2>/dev/null | xargs wc -l 2>/dev/null | tail -1"
+        loc_cmd = f"cd {shlex.quote(path)} && find . -name '*.py' -not -path './venv/*' -not -path './__pycache__/*' 2>/dev/null | xargs wc -l 2>/dev/null | tail -1"
         loc_result = await self._ssh.execute(session_id, loc_cmd, timeout=15)
 
         python_loc = 0
@@ -125,14 +126,14 @@ class ProjectAnalytics:
             pass
 
         # Count classes and functions
-        class_cmd = f"cd '{path}' && grep -r '^class ' --include='*.py' . 2>/dev/null | wc -l"
+        class_cmd = f"cd {shlex.quote(path)} && grep -r '^class ' --include='*.py' . 2>/dev/null | wc -l"
         class_result = await self._ssh.execute(session_id, class_cmd, timeout=10)
         try:
             class_count = int(class_result["stdout"].strip() or 0)
         except (ValueError, IndexError):
             class_count = 0
 
-        func_cmd = f"cd '{path}' && grep -r '^def ' --include='*.py' . 2>/dev/null | wc -l"
+        func_cmd = f"cd {shlex.quote(path)} && grep -r '^def ' --include='*.py' . 2>/dev/null | wc -l"
         func_result = await self._ssh.execute(session_id, func_cmd, timeout=10)
         try:
             func_count = int(func_result["stdout"].strip() or 0)
@@ -148,7 +149,7 @@ class ProjectAnalytics:
     async def _get_git_stats(self, session_id: str, path: str) -> dict:
         """Get git statistics."""
         # Check if git repo
-        is_git_cmd = f"cd '{path}' && test -d .git && echo 'yes' || echo 'no'"
+        is_git_cmd = f"cd {shlex.quote(path)} && test -d .git && echo 'yes' || echo 'no'"
         is_git_result = await self._ssh.execute(session_id, is_git_cmd, timeout=5)
         is_git = is_git_result["stdout"].strip() == "yes"
 
@@ -156,7 +157,7 @@ class ProjectAnalytics:
             return {"is_git_repo": False}
 
         # Commits count
-        commits_cmd = f"cd '{path}' && git log --oneline 2>/dev/null | wc -l"
+        commits_cmd = f"cd {shlex.quote(path)} && git log --oneline 2>/dev/null | wc -l"
         commits_result = await self._ssh.execute(session_id, commits_cmd, timeout=10)
         try:
             commits = int(commits_result["stdout"].strip() or 0)
@@ -164,7 +165,7 @@ class ProjectAnalytics:
             commits = 0
 
         # Branches
-        branches_cmd = f"cd '{path}' && git branch -a 2>/dev/null | wc -l"
+        branches_cmd = f"cd {shlex.quote(path)} && git branch -a 2>/dev/null | wc -l"
         branches_result = await self._ssh.execute(session_id, branches_cmd, timeout=10)
         try:
             branches = int(branches_result["stdout"].strip() or 0)
@@ -172,7 +173,7 @@ class ProjectAnalytics:
             branches = 0
 
         # Contributors
-        contrib_cmd = f"cd '{path}' && git log --format='%an' 2>/dev/null | sort -u | wc -l"
+        contrib_cmd = f"cd {shlex.quote(path)} && git log --format='%an' 2>/dev/null | sort -u | wc -l"
         contrib_result = await self._ssh.execute(session_id, contrib_cmd, timeout=10)
         try:
             contributors = int(contrib_result["stdout"].strip() or 0)
@@ -180,7 +181,7 @@ class ProjectAnalytics:
             contributors = 0
 
         # Last commit date
-        last_cmd = f"cd '{path}' && git log -1 --format='%ar' 2>/dev/null"
+        last_cmd = f"cd {shlex.quote(path)} && git log -1 --format='%ar' 2>/dev/null"
         last_result = await self._ssh.execute(session_id, last_cmd, timeout=10)
         last_commit = last_result["stdout"].strip()
 
@@ -196,7 +197,7 @@ class ProjectAnalytics:
         """Get test statistics."""
         # Check for test files
         test_cmd = (
-            f"cd '{path}' && find . -name 'test_*.py' -o -name '*_test.py' 2>/dev/null | wc -l"
+            f"cd {shlex.quote(path)} && find . -name 'test_*.py' -o -name '*_test.py' 2>/dev/null | wc -l"
         )
         test_result = await self._ssh.execute(session_id, test_cmd, timeout=10)
         try:
@@ -206,7 +207,7 @@ class ProjectAnalytics:
 
         # Run pytest to get test count
         pytest_cmd = (
-            f"cd '{path}' && python -m pytest --collect-only -q 2>/dev/null | tail -1 || echo '0'"
+            f"cd {shlex.quote(path)} && python -m pytest --collect-only -q 2>/dev/null | tail -1 || echo '0'"
         )
         pytest_result = await self._ssh.execute(session_id, pytest_cmd, timeout=30)
 
@@ -228,7 +229,7 @@ class ProjectAnalytics:
     async def _get_dependency_stats(self, session_id: str, path: str) -> dict:
         """Get dependency statistics."""
         # Parse requirements.txt
-        req_cmd = f"cd '{path}' && test -f requirements.txt && wc -l requirements.txt | awk '{{print $1}}' || echo '0'"
+        req_cmd = f"cd {shlex.quote(path)} && test -f requirements.txt && wc -l requirements.txt | awk '{{print $1}}' || echo '0'"
         req_result = await self._ssh.execute(session_id, req_cmd, timeout=5)
         try:
             req_count = int(req_result["stdout"].strip() or 0)
@@ -236,13 +237,13 @@ class ProjectAnalytics:
             req_count = 0
 
         # Parse pyproject.toml
-        pyproject_cmd = f"cd '{path}' && test -f pyproject.toml && echo 'yes' || echo 'no'"
+        pyproject_cmd = f"cd {shlex.quote(path)} && test -f pyproject.toml && echo 'yes' || echo 'no'"
         pyproject_result = await self._ssh.execute(session_id, pyproject_cmd, timeout=5)
         has_pyproject = pyproject_result["stdout"].strip() == "yes"
 
         # Check for outdated packages (if pip available)
         outdated_cmd = (
-            f"cd '{path}' && pip list --outdated --format=json 2>/dev/null | wc -l || echo '0'"
+            f"cd {shlex.quote(path)} && pip list --outdated --format=json 2>/dev/null | wc -l || echo '0'"
         )
         outdated_result = await self._ssh.execute(session_id, outdated_cmd, timeout=30)
         try:
