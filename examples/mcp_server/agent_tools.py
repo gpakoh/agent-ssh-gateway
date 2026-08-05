@@ -30,7 +30,9 @@ def _read_task_json(
     project: str,
     task_id: str,
 ) -> dict[str, Any]:
-    cmd = f"cat {TASKS_REL_DIR}/{task_id}/task.json"
+    import shlex
+
+    cmd = f"cat {shlex.quote(f'{TASKS_REL_DIR}/{task_id}/task.json')}"
     result = run_cmd(project, cmd)
     raw = result.get("stdout", "")
     if not raw.strip():
