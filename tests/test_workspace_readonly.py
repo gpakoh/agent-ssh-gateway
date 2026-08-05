@@ -446,6 +446,68 @@ class TestReadonlyAuditAttribution:
             assert evt.actor_fingerprint
             assert evt.route == "POST /api/workspace/projects/*/files/edit"
 
+    def test_recovery_backup_deny_includes_actor_fingerprint(self, client, monkeypatch):
+        """Regression: recovery_backup called assert_workspace_writable() with
+        no arguments at all, unlike every other route in git.py — the block
+        still fired (403 correct) but the audit event recorded actor_type
+        "system" with an empty fingerprint/route, discarding exactly the
+        attribution info an operator needs to know who tried the write.
+        """
+        monkeypatch.setattr(settings, "workspace_readonly", True)
+        from app import state as _app_state
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = str(Path(tmpdir) / "audit.jsonl")
+            _app_state.event_audit_logger = AuditEventLogger(
+                log_path=log_path, recent_limit=100
+            )
+
+            resp = client.post(
+                "/api/recovery/backup",
+                json={"context_id": "fake", "name": "test"},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
+            events = _app_state.event_audit_logger.recent()
+            readonly_events = [
+                e for e in events
+                if e.event_type == AuditEventType.WORKSPACE_READONLY_BLOCK
+            ]
+            assert len(readonly_events) >= 1
+            evt = readonly_events[0]
+            assert evt.actor_type == "master"
+            assert evt.actor_fingerprint
+            assert evt.route == "POST /api/recovery/backup"
+
+    def test_recovery_restore_deny_includes_actor_fingerprint(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "workspace_readonly", True)
+        from app import state as _app_state
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = str(Path(tmpdir) / "audit.jsonl")
+            _app_state.event_audit_logger = AuditEventLogger(
+                log_path=log_path, recent_limit=100
+            )
+
+            resp = client.post(
+                "/api/recovery/restore",
+                json={"context_id": "fake"},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
+            events = _app_state.event_audit_logger.recent()
+            readonly_events = [
+                e for e in events
+                if e.event_type == AuditEventType.WORKSPACE_READONLY_BLOCK
+            ]
+            assert len(readonly_events) >= 1
+            evt = readonly_events[0]
+            assert evt.actor_type == "master"
+            assert evt.actor_fingerprint
+            assert evt.route == "POST /api/recovery/restore"
+
     def test_fingerprint_is_not_raw_key(self, client, monkeypatch):
         monkeypatch.setattr(settings, "workspace_readonly", True)
         from app import state as _app_state
