@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{10,120}$")
+FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
 
 TASKS_REL_DIR = ".ai-bridge/tasks"
 ARCHIVE_REL_DIR = ".ai-bridge/archive"
@@ -19,17 +20,25 @@ def validate_task_id(task_id: str) -> None:
         raise ValueError(f"Invalid task_id: {task_id!r}. Must match {TASK_ID_RE.pattern}")
 
 
+def validate_filename(filename: str) -> None:
+    """Raise ValueError if filename is malformed.
+
+    Every current caller of read_agent_task_file() passes a hardcoded
+    literal, but the function interpolates filename directly into a shell
+    command with no escaping — this rejects path separators (path
+    traversal) and shell metacharacters (injection) so it stays safe if a
+    future caller ever passes anything less trusted.
+    """
+    if not FILENAME_RE.match(filename):
+        raise ValueError(f"Invalid filename: {filename!r}. Must match {FILENAME_RE.pattern}")
+
+
 def _task_dir(task_id: str) -> str:
     return f"{TASKS_REL_DIR}/{task_id}"
 
 
 def _archive_dir(task_id: str) -> str:
     return f"{ARCHIVE_REL_DIR}/{task_id}"
-
-
-def _shell_escape(text: str) -> str:
-    escaped = text.replace("'", "'\\''")
-    return f"'{escaped}'"
 
 
 def build_task_json(
@@ -147,6 +156,7 @@ def read_agent_task_file(run_cmd, *, project: str, task_id: str, filename: str) 
     and returns dict with at least {'stdout': str, 'stderr': str, 'exit_code': int}.
     """
     validate_task_id(task_id)
+    validate_filename(filename)
     result = run_cmd(project, f"cat {_task_dir(task_id)}/{filename}")
     if result.get("exit_code") != 0:
         return {"stdout": "(not found)", "stderr": "", "exit_code": 0}

