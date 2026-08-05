@@ -639,6 +639,7 @@ async def ast_analyze(
 
 @router.get("/api/project/tree")
 async def project_tree(
+    request: Request,
     session_id: str = Query(...),
     path: str = Query(default="."),
     max_depth: int = Query(default=3, ge=1, le=10),
@@ -648,6 +649,8 @@ async def project_tree(
 
     Returns flat list with type, path, size for quick introspection.
     """
+    await _check_session_ownership(session_id, request)
+
     try:
         validated = validate_path(path)
     except ValueError as exc:

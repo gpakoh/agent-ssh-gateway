@@ -27,7 +27,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Protocol
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -160,6 +160,46 @@ def probe_webhook_execute_deploy(marker: Path) -> str | None:
     return job_manager.create_job.call_args.kwargs["command"]
 
 
+# ── app/routers/context.py ──────────────────────────────────────────────
+
+
+def probe_context_render_template(marker: Path) -> str | None:
+    import asyncio
+
+    from app.models import TemplateRenderRequest
+    from app.routers.context import render_template
+
+    identity = MagicMock()
+    identity.token_type = "master"
+    identity.name = "test"
+    identity.fingerprint = "f" * 24
+
+    ctx = MagicMock()
+    ctx.session_id = "s1"
+
+    context_manager = AsyncMock()
+    context_manager.get_context = AsyncMock(return_value=ctx)
+
+    manager = AsyncMock()
+    manager.execute = AsyncMock(return_value={"stdout": "", "stderr": "", "exit_code": 0})
+
+    with (
+        patch("app.routers.context._state.context_manager", context_manager),
+        patch("app.routers.context._state.manager", manager),
+        patch("app.routers.context.assert_workspace_writable"),
+    ):
+        req = TemplateRenderRequest(
+            context_id="c1",
+            template_id="class",
+            params={},
+            target_path=_payload(marker),
+        )
+        asyncio.run(render_template(req, identity))
+    if not manager.execute.call_args_list:
+        return None
+    return manager.execute.call_args_list[0].args[1]
+
+
 # ── examples/mcp_server/agent_tools.py ──────────────────────────────────
 
 
@@ -209,6 +249,7 @@ PROBES: list[tuple[str, ShellInjectionProbe]] = [
     ("scaffolding.scaffold_python_class(module_path)", probe_scaffold_python_class),
     ("context_editing.edit_file_with_context(path)", probe_edit_file_with_context_git_diff),
     ("webhook_manager.execute_deploy(target_path)", probe_webhook_execute_deploy),
+    ("routers.context.render_template(target_path)", probe_context_render_template),
     ("agent_tools._read_task_json(task_id)", probe_agent_tools_read_task_json),
     ("agent_tasks.read_agent_task_file(filename)", probe_agent_tasks_read_agent_task_file),
 ]
