@@ -1,5 +1,54 @@
 # Agent SSH Gateway — TODO
 
+## 🧪 Тесты на стыках (seam-test matrices)
+
+Контекст: T82-T86 нашли один и тот же класс бага в РАЗНЫХ реализациях
+одной концептуальной операции по несколько раз подряд (symlink/glob
+escape — 4 раза; any()-vs-all() по multi-scope — 1 раз, но паттерн
+воспроизводим для любого будущего multi-scope tool; unescaped shell
+interpolation — 5 раз). Обычный regression-тест на конкретный найденный
+баг не ловит следующее похожее место — каждый раз нужен был отдельный
+аудиторский круг, чтобы заметить тот же паттерн снова. Эти три файла
+целятся не в конкретный баг, а в КЛАСС бага: набор "проб", каждая из
+которых дергает реальную функцию из кодовой базы, против одной и той же
+атакующей батареи — так что следующая функция того же семейства,
+добавленная кем угодно, попадает под тот же чек автоматически, если её
+добавить в соответствующий список проб.
+
+1. ✅ **`tests/test_seam_path_containment_matrix.py`** — symlink/glob escape
+   (6 проб: `workspace/search.py`, `workspace/scan_project.py`,
+   `services/project_search.py`, `mcp_client_tools.list_files`,
+   `mcp_client_tools._safe_glob` как control, `workspace/policy.py`'s
+   `validate_write`) + URL-path escape (3 пробы: `gitea_client.py`/
+   `github_client.py`). Проверено против pre-fix версий через `git checkout
+   <parent> -- <path>` — 5 из 10 тестов падали корректно на старом коде.
+2. ✅ **`tests/test_seam_scope_combinatorial_matrix.py`** — данные берутся
+   прямо из `TOOL_SCOPES` (не хардкод списка тулов), генерирует все partial-
+   overlap подмножества для каждого multi-scope tool. Проверено против
+   pre-fix `tool_scopes.py` — все 10 partial-overlap кейсов падали
+   корректно.
+3. ✅ **`tests/test_seam_shell_injection_matrix.py`** — 5 проб
+   (`scaffolding.scaffold_python_class`, `context_editing.edit_file_with_context`,
+   `webhook_manager.execute_deploy`, `agent_tools._read_task_json`,
+   `agent_tasks.read_agent_task_file`). Полезная нагрузка комбинирует ДВЕ
+   формы бага в одной строке — `$(touch marker_a)` для случая "вообще без
+   кавычек" (старый `webhook_manager.py`: `f"cd {target_path} && ..."`) и
+   `'; touch marker_b; echo '` для случая "обёрнуто в ручные одинарные
+   кавычки" (старый `scaffolding.py`: `f"mkdir -p '{module_dir}'"`) — первая
+   версия payload'а (только quote-breakout) давала ложноотрицательный
+   результат на `webhook_manager.py` и `agent_tasks.py`, пока не проверил
+   явно против pre-fix кода и не увидел, что они "проходят" даже с
+   незакрытой уязвимостью. После усиления payload — все 5 проб падают
+   корректно на своих pre-fix версиях (проверено через `git checkout
+   <parent-of-fix> -- <path>`), все проходят на текущем (исправленном) коде.
+
+Полный набор (4111 тестов) зелёный, `ruff`/`mypy` чистые (одна
+pre-existing mypy-ошибка в `event_hook_delivery.py:340`, не связана с этой
+работой — подтверждено на чистом `master` без изменений). Один Selenium
+E2E-тест (`test_append_line_system_type_escapes_html`) — таймингово
+нестабилен (2 из 3 прогонов в изоляции проходят), не связан с этой
+работой, не трогал.
+
 ## 🔍 T86 — Пятый круг: examples/mcp_client_remote
 
 Контекст: "fleet" MCP-сервер (Gitea/GitHub/Docker/Postgres/Context7),
