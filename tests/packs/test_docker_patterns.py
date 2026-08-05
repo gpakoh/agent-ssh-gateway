@@ -55,3 +55,45 @@ class TestDockerRmForceFlagBoundary:
         r = build_registry()
         matches = r.evaluate_pack("docker", "docker rmi -f x")
         assert "rmi-force" in [m.pattern_name for m in matches]
+
+
+class TestDockerForceEqualsValue:
+    """--force=false used to be treated as an active force flag because
+    the pattern matched the bare literal substring "--force" regardless
+    of what followed it. Only an explicit "=false" is now excluded;
+    bare --force, --force=true, and -f still count as forceful."""
+
+    def test_force_equals_false_is_not_force(self):
+        r = build_registry()
+        matches = r.evaluate_pack("docker", "docker rm --force=false x")
+        assert "rm-force" not in [m.pattern_name for m in matches]
+
+    def test_force_equals_true_is_force(self):
+        r = build_registry()
+        matches = r.evaluate_pack("docker", "docker rm --force=true x")
+        assert "rm-force" in [m.pattern_name for m in matches]
+
+    def test_force_bare_is_force(self):
+        r = build_registry()
+        matches = r.evaluate_pack("docker", "docker rm --force x")
+        assert "rm-force" in [m.pattern_name for m in matches]
+
+    def test_short_f_is_force(self):
+        r = build_registry()
+        matches = r.evaluate_pack("docker", "docker rm -f x")
+        assert "rm-force" in [m.pattern_name for m in matches]
+
+    def test_rmi_force_equals_false_is_not_force(self):
+        r = build_registry()
+        matches = r.evaluate_pack("docker", "docker rmi --force=false x")
+        assert "rmi-force" not in [m.pattern_name for m in matches]
+
+    def test_compose_rm_force_equals_false_is_not_force(self):
+        r = build_registry()
+        matches = r.evaluate_pack("docker", "docker-compose rm --force=false")
+        assert "compose-rm-force" not in [m.pattern_name for m in matches]
+
+    def test_compose_rm_force_equals_true_is_force(self):
+        r = build_registry()
+        matches = r.evaluate_pack("docker", "docker-compose rm --force=true")
+        assert "compose-rm-force" in [m.pattern_name for m in matches]

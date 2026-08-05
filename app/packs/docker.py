@@ -40,13 +40,13 @@ DOCKER_PATTERNS: tuple[DestructivePattern, ...] = (
         # real -f/-rf/-fr-style flag token and never a substring inside a
         # long option name like --format or --filter (both happen to
         # contain "-f" as a substring of their own name).
-        regex=r"docker\b.*?\brm\s+.*(?:(?<![\w-])-[a-zA-Z0-9]*f[a-zA-Z0-9]*\b|--force)",
+        regex=r"docker\b.*?\brm\s+.*(?:(?<![\w-])-[a-zA-Z0-9]*f[a-zA-Z0-9]*\b|--force(?!=false)\b)",
         reason="docker rm -f forcibly removes containers without graceful shutdown",
         severity=Severity.HIGH,
         description="Sends SIGKILL instead of SIGTERM.",
         suggestions=(PatternSuggestion("docker stop <c> && docker rm <c>", "Graceful shutdown", kind=SuggestionKind.SAFER_ALTERNATIVE),)),
     DestructivePattern(name="rmi-force",
-        regex=r"docker\b.*?\brmi\s+.*(?:(?<![\w-])-[a-zA-Z0-9]*f[a-zA-Z0-9]*\b|--force)",
+        regex=r"docker\b.*?\brmi\s+.*(?:(?<![\w-])-[a-zA-Z0-9]*f[a-zA-Z0-9]*\b|--force(?!=false)\b)",
         reason="docker rmi -f forcibly removes images even if in use by containers",
         severity=Severity.HIGH,
         description="Forces image removal, potentially breaking running containers.",
@@ -97,7 +97,7 @@ COMPOSE_PATTERNS: tuple[DestructivePattern, ...] = (
         description="Anonymous volumes attached to containers are lost.",
         suggestions=(PatternSuggestion("docker-compose rm", "Preserves volumes", kind=SuggestionKind.SAFER_ALTERNATIVE),)),
     DestructivePattern(name="compose-rm-force",
-        regex=r"(?:docker-compose|docker\s+compose)\s+rm\s+.*(?:-f\b|--force)",
+        regex=r"(?:docker-compose|docker\s+compose)\s+rm\s+.*(?:-f\b|--force(?!=false)\b)",
         reason="docker-compose rm -f forcibly removes containers without confirmation",
         severity=Severity.MEDIUM,
         description="Running containers are stopped abruptly (SIGKILL).",
