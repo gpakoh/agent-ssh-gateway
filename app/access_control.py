@@ -50,9 +50,6 @@ class AccessDeniedError(Exception):
     """Raised when an actor+IP tuple is explicitly denied."""
 
 
-class AccessPendingApprovalError(Exception):
-    """Raised when an operation requires operator approval first."""
-
 # ---------------------------------------------------------------------------
 # Key Hashing
 # ---------------------------------------------------------------------------

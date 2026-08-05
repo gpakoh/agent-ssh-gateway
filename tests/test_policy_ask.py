@@ -10,6 +10,7 @@ from app.policy_ask import (
     approve_request,
     create_approval_request,
     deny_request,
+    find_and_consume_approval,
     get_pending_requests,
     get_request,
 )
@@ -152,3 +153,87 @@ class TestApprovalStore:
             for _ in range(100)
         }
         assert len(ids) == 100  # all unique
+
+
+class TestFindAndConsumeApproval:
+    """Regression: approving a request used to do nothing observable —
+    nothing ever read the approved flag back to let the original command
+    through. evaluate_command_policy()'s ASK branch now calls this before
+    creating a new approval request, so a caller's retry of the identical
+    command is what actually consumes the approval.
+    """
+
+    def test_returns_none_when_no_matching_request(self):
+        assert find_and_consume_approval("nonexistent-cmd", "default") is None
+
+    def test_returns_none_for_pending_request(self):
+        create_approval_request("docker system prune -f", "docker-admin", "profile", "r")
+        assert find_and_consume_approval("docker system prune -f", "docker-admin") is None
+
+    def test_returns_none_for_denied_request(self):
+        req = create_approval_request("rm -rf /tmp/x", "default", "profile", "r")
+        deny_request(req.approval_id)
+        assert find_and_consume_approval("rm -rf /tmp/x", "default") is None
+
+    def test_returns_approved_request_and_consumes_it(self):
+        req = create_approval_request("docker system prune -f", "docker-admin", "profile", "r")
+        approve_request(req.approval_id, "operator3")
+
+        found = find_and_consume_approval("docker system prune -f", "docker-admin")
+        assert found is not None
+        assert found.approval_id == req.approval_id
+        assert found.approved_by == "operator3"
+
+        # Consumed — a second lookup for the same command must not replay it.
+        assert find_and_consume_approval("docker system prune -f", "docker-admin") is None
+        assert get_request(req.approval_id) is None
+
+    def test_profile_must_also_match(self):
+        req = create_approval_request("rm -rf /tmp/y", "default", "profile", "r")
+        approve_request(req.approval_id)
+        assert find_and_consume_approval("rm -rf /tmp/y", "docker-admin") is None
+
+
+class TestAskModeApprovalConsumedOnRetry:
+    """End-to-end: blocked in ASK mode -> operator approves -> the caller's
+    retry of the identical command is what actually lets it through.
+    """
+
+    def test_retry_after_approval_is_allowed(self):
+        command = "docker system prune -f"
+        first = evaluate_command_policy(command, mode="ask", profile="docker-admin")
+        assert not first.allowed
+        assert first.requires_approval
+        assert first.approval_id is not None
+
+        approve_request(first.approval_id, "operator4")
+
+        retry = evaluate_command_policy(command, mode="ask", profile="docker-admin")
+        assert retry.allowed
+        assert not retry.requires_approval
+        assert "operator4" in retry.reason
+
+    def test_retry_without_approval_creates_a_new_pending_request(self):
+        command = "docker system prune -af"
+        first = evaluate_command_policy(command, mode="ask", profile="docker-admin")
+        assert first.requires_approval
+
+        # Never approved — retrying just gets another pending request,
+        # not silently allowed.
+        retry = evaluate_command_policy(command, mode="ask", profile="docker-admin")
+        assert not retry.allowed
+        assert retry.requires_approval
+        assert retry.approval_id != first.approval_id
+
+    def test_approval_cannot_be_replayed_for_a_second_retry(self):
+        command = "docker system prune -f --volumes"
+        first = evaluate_command_policy(command, mode="ask", profile="docker-admin")
+        approve_request(first.approval_id, "operator5")
+
+        retry1 = evaluate_command_policy(command, mode="ask", profile="docker-admin")
+        assert retry1.allowed  # consumes the approval
+
+        retry2 = evaluate_command_policy(command, mode="ask", profile="docker-admin")
+        assert not retry2.allowed  # approval already consumed — blocked again
+        assert retry2.requires_approval
+        assert retry2.approval_id != first.approval_id

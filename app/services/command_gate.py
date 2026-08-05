@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from fastapi import HTTPException, Request
 
 from app import state as _state
-from app.access_control import AccessDeniedError, AccessPendingApprovalError
+from app.access_control import AccessDeniedError
 from app.auth_middleware import AuthIdentity, get_client_ip, parse_cidrs
 from app.command_policy import evaluate_command_policy, parse_key_profiles, profile_for_identity
 from app.config import settings
@@ -75,8 +75,6 @@ def resolve_effective_profile_with_access_gate(
             access_effective_profile = access.effective_profile
         except AccessDeniedError:
             raise HTTPException(status_code=403, detail=_err(403, "ACCESS_DENIED")) from None
-        except AccessPendingApprovalError:
-            pass
 
     return (
         access_effective_profile

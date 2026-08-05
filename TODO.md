@@ -1,5 +1,45 @@
 # Agent SSH Gateway — TODO
 
+## ✅ T89 follow-up: разобраны 3 найденных-но-не-исправленных пункта
+
+По запросу пользователя — все три пункта, оставленные открытыми в T89,
+закрыты.
+
+1. ✅ **Session-restore CIDR баг** (`app/main.py`). Использовал
+   `is_ip_allowed(creds["host"], parse_cidrs(settings.allowed_client_cidrs))`
+   — CIDR для КЛИЕНТСКИХ IP вместо `allowed_target_cidrs`/
+   `denied_target_cidrs` (политика для TARGET-хостов), и `is_ip_allowed()`
+   резолвит только литеральные IP — hostname-based таргеты тихо и
+   постоянно проваливали restore. Вынес цикл восстановления в отдельную
+   тестируемую `_restore_persisted_sessions()`, использует
+   `validate_target_host()` (резолвит hostname, правильные CIDR) + тот же
+   `pinned_ip` DNS-rebinding фикс, что и `ssh_connect`/`ssh_prewarm`.
+   3 новых теста в `test_regression.py`, 2 старых (C3/C4) переписаны с
+   inline-копии старой логики на вызов реальной функции.
+2. ✅ **Dead exception scaffolding `AccessPendingApprovalError`**
+   (`app/access_control.py`). Проверено через git-историю: не бросался
+   НИКОГДА, даже в самом первом коммите, вводившем систему access-control
+   (`213855ac`) — "pending" всегда означало allow+capped-profile с
+   первого дня, это не регресс. Удалён класс + 4 мёртвых `except`-блока
+   (`ssh.py` ×3, `command_gate.py` ×1) и неиспользуемые импорты.
+3. ✅ **ASK mode approval workflow — SERIOUS функциональный баг** (не
+   security, но полностью ломал заявленную фичу). `approve_request()`
+   только выставлял флаг, который никто не читал — `evaluate_command_policy()`
+   создавал НОВЫЙ `ApprovalRequest` (новый UUID) при каждой оценке
+   заблокированной команды, без проверки прежних решений. Одобрение
+   оператором никогда не давало вызывающему повторно выполнить именно ту
+   команду — retry всегда попадал на тот же блок и новый `approval_id`,
+   бесконечно. Добавлена `find_and_consume_approval()` в `policy_ask.py`:
+   ASK-ветка теперь сначала ищет уже одобренный запрос с ТЕМ ЖЕ command+
+   profile, потребляет его (удаляет из store, чтобы нельзя было
+   replay) и пропускает — иначе создаёт новый pending request как раньше.
+   9 новых тестов в `test_policy_ask.py` (unit на `find_and_consume_approval`
+   + end-to-end: заблокировано → approve → retry → allowed → повторный
+   retry снова блокируется).
+
+Все три регресс-теста проверены на падение против pre-fix кода. Полный
+набор (4139 тестов) зелёный, `ruff`/`mypy` чистые.
+
 ## 🔍 T89 — Восьмой круг: корневые модули app/
 
 Контекст: первый круг по корневым файлам `app/*.py` (не routers/services/

@@ -87,6 +87,30 @@ def get_pending_requests() -> list[ApprovalRequest]:
     return [r for r in _store.values() if r.approved is None]
 
 
+def find_and_consume_approval(command: str, profile: str) -> ApprovalRequest | None:
+    """Look up an already-approved request matching this exact command+profile.
+
+    Regression: approve_request() used to only flip a flag nothing ever
+    read back — evaluate_command_policy()'s ASK-mode branch created a
+    brand-new ApprovalRequest (a fresh UUID) on every single evaluation of
+    a blocked command, with no lookup of prior decisions at all, so an
+    operator approving a request never actually let the caller's retry of
+    the identical command through; it always hit the same block and
+    another 202 with a new approval_id, forever.
+
+    Consumes (removes) the matched request so it can't be replayed for a
+    later, unrelated call with the same command text. Returns None if no
+    matching, still-pending-to-consume approved request exists (denied,
+    expired, or never approved).
+    """
+    _expire_stale()
+    for aid, req in list(_store.items()):
+        if req.command == command and req.profile == profile and req.approved is True:
+            _store.pop(aid, None)
+            return req
+    return None
+
+
 def _expire_stale() -> None:
     """Remove expired requests from the store."""
     now = time.time()

@@ -23,7 +23,7 @@ from fastapi import (
 )
 
 from app import state as _state
-from app.access_control import AccessDeniedError, AccessPendingApprovalError
+from app.access_control import AccessDeniedError
 from app.auth_middleware import (
     VALID_AGENT_SCOPES,
     AuthIdentity,
@@ -319,8 +319,6 @@ async def ssh_connect(
             )
         except AccessDeniedError:
             raise HTTPException(status_code=403, detail=_err(403, "ACCESS_DENIED")) from None
-        except AccessPendingApprovalError:
-            pass  # pending: allow connect, just track
 
     try:
         validated_ips = validate_target_host(
@@ -438,8 +436,6 @@ async def ssh_prewarm(
             )
         except AccessDeniedError:
             raise HTTPException(status_code=403, detail=_err(403, "ACCESS_DENIED")) from None
-        except AccessPendingApprovalError:
-            pass  # pending: allow prewarm, just track
 
     try:
         validated_ips = validate_target_host(
@@ -1074,9 +1070,6 @@ async def pty_stream(websocket: WebSocket, session_id: str):
             )
         except AccessDeniedError:
             await websocket.close(code=4403, reason="ACCESS_DENIED")
-            return
-        except AccessPendingApprovalError:
-            await websocket.close(code=4403, reason="ACCESS_PENDING_APPROVAL")
             return
 
     await websocket.accept()
