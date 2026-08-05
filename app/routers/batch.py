@@ -11,10 +11,13 @@ from app.models import (
     BatchExecuteResponse,
     BatchOperationResultResponse,
 )
+from app.routers.workspace import assert_workspace_writable
 from app.services.command_gate import evaluate_with_access_gate, record_allowed
 from app.state import _err
 
 router = APIRouter()
+
+_MUTATING_BATCH_OP_TYPES = frozenset({"edit", "create", "delete", "rename", "copy"})
 
 
 @router.post("/api/batch/execute", tags=["files"], response_model=BatchExecuteResponse)
@@ -24,6 +27,13 @@ async def batch_execute(
     _identity: AuthIdentity = Depends(require_master_key),
 ):
     """Execute multiple file operations in a single transaction."""
+    if any(op.type in _MUTATING_BATCH_OP_TYPES for op in req.operations):
+        assert_workspace_writable(
+            actor_type=_identity.token_type,
+            actor_name=_identity.name or "",
+            actor_fingerprint=_identity.fingerprint[:12],
+            route="POST /api/batch/execute",
+        )
 
     # Command Policy Evaluation — check execute-type operations before execution
     source_ip = request.client.host if request.client else "unknown"

@@ -265,6 +265,96 @@ class TestBatchExecutePolicyEnforcement:
 
 
 # ---------------------------------------------------------------------------
+# /api/batch/execute — WORKSPACE_READONLY must block mutating operations
+# ---------------------------------------------------------------------------
+
+
+class TestBatchExecuteWorkspaceReadonly:
+    """Regression: batch.py never called assert_workspace_writable() at all —
+    unlike every other file-mutating router (workspace files, git, snapshots,
+    search/replace, code/insert). With WORKSPACE_READONLY=true, mutating
+    batch operations (edit/create/delete/rename/copy) went straight to
+    batch_manager.execute_batch() with no readonly gate whatsoever.
+    """
+
+    @pytest.mark.asyncio
+    async def test_create_op_blocked_when_readonly(self, monkeypatch):
+        monkeypatch.setattr(settings, "api_auth_enabled", False)
+        monkeypatch.setattr(settings, "workspace_readonly", True)
+
+        transport = ASGITransport(app=main_module.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                "/api/batch/execute",
+                json={
+                    "context_id": "ctx1",
+                    "operations": [
+                        {"type": "create", "path": "foo.py", "content": "x"}
+                    ],
+                },
+            )
+        assert r.status_code == 403
+        state_module.batch_manager.execute_batch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_delete_op_blocked_when_readonly(self, monkeypatch):
+        monkeypatch.setattr(settings, "api_auth_enabled", False)
+        monkeypatch.setattr(settings, "workspace_readonly", True)
+
+        transport = ASGITransport(app=main_module.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                "/api/batch/execute",
+                json={
+                    "context_id": "ctx1",
+                    "operations": [
+                        {"type": "delete", "path": "foo.py"}
+                    ],
+                },
+            )
+        assert r.status_code == 403
+        state_module.batch_manager.execute_batch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_read_op_allowed_when_readonly(self, monkeypatch):
+        """Non-mutating read ops must not be blocked by workspace_readonly."""
+        monkeypatch.setattr(settings, "api_auth_enabled", False)
+        monkeypatch.setattr(settings, "workspace_readonly", True)
+
+        transport = ASGITransport(app=main_module.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                "/api/batch/execute",
+                json={
+                    "context_id": "ctx1",
+                    "operations": [
+                        {"type": "read", "path": "/etc/hostname"}
+                    ],
+                },
+            )
+        assert r.status_code != 403
+
+    @pytest.mark.asyncio
+    async def test_create_op_allowed_when_not_readonly(self, monkeypatch):
+        monkeypatch.setattr(settings, "api_auth_enabled", False)
+        monkeypatch.setattr(settings, "workspace_readonly", False)
+
+        transport = ASGITransport(app=main_module.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                "/api/batch/execute",
+                json={
+                    "context_id": "ctx1",
+                    "operations": [
+                        {"type": "create", "path": "foo.py", "content": "x"}
+                    ],
+                },
+            )
+        assert r.status_code == 200
+        state_module.batch_manager.execute_batch.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # Audit mode — allowed but logged
 # ---------------------------------------------------------------------------
 
