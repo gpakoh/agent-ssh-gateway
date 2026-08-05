@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,10 @@ class CodeIntelligence:
         results: list[CodeSearchResult] = []
 
         # Use Grep To Find Matches
-        cmd = f"cd {path} && grep -rn -C {context_lines} '{query}' --include='*.{language}' 2>/dev/null || true"
+        cmd = (
+            f"cd {shlex.quote(path)} && grep -rn -C {context_lines} {shlex.quote(query)} "
+            f"--include={shlex.quote(f'*.{language}')} 2>/dev/null || true"
+        )
         result = await self._ssh.execute(session_id, cmd, timeout=30)
 
         if result["exit_code"] != 0:
