@@ -491,8 +491,10 @@ class WorkspaceAuditLogger:
         receipt_id, project_id, relative_path, operation,
         before_hash, after_hash, size, timestamp, identity, success, error
 
-    When log_path is None (in-memory only), entries are capped at
-    _DEFAULT_MAX_AUDIT_ENTRIES (500) to prevent unbounded growth.
+    The in-memory buffer is always capped at max_in_memory_entries (default
+    _DEFAULT_MAX_AUDIT_ENTRIES = 500) to prevent unbounded growth, whether
+    or not log_path is set — log_path controls persistence to disk, not
+    how much history is kept in memory for the `.entries` property.
     Oldest entries are dropped when the cap is hit.
 
     This is a helper — rollback does NOT depend on audit.
@@ -514,7 +516,7 @@ class WorkspaceAuditLogger:
         """
         self._log_path = Path(log_path) if log_path else None
         self._entries: list[dict[str, Any]] = []  # in-memory buffer
-        self._max_in_memory = max_in_memory_entries if not log_path else 0
+        self._max_in_memory = max_in_memory_entries
 
     def log(
         self,
