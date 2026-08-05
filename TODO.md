@@ -1,5 +1,26 @@
 # Agent SSH Gateway — TODO
 
+## 🔍 T84 — Третий круг: app/services повторно, с новым паттерном из T83
+
+Контекст: T83 нашёл паттерн "glob()/rglob() следует symlink, если паттерн
+явно называет symlink-сегмент" (`search.py`, `scan_project.py` в
+`app/workspace/`). Этого паттерна не было в голове во время T82's прохода
+по `app/services` — перепроверил все 7 файлов заново с этим паттерном.
+
+Найдено: ✅ **`project_search.py`** — `root_path.rglob(iter_pattern)`,
+тот же баг, что в `workspace/search.py`/`scan_project.py`. Эмпирически
+подтверждено (regression-тест падает до фикса). Не подключено ни к
+одному router (`search_text()` нигде не импортируется — живой search
+endpoint использует `workspace/search.py`, уже исправлен) — то же
+orphaned-feature, что и `scan_project.py`/`SnapshotStore`. Исправлено
+всё равно. Commit `237c517f`.
+
+Остальные 6 файлов (`file_editing.py`, `command_gate.py`,
+`project_structure.py`, `context_editing.py`, `scaffolding.py`,
+`project_patch.py`) — без новых находок. `project_structure.py` работает
+через SSH с `shlex.quote()`, локальный диск вообще не трогает — не
+подвержен этому классу бага структурно.
+
 ## 🔍 T83 — Второй круг: app/workspace/* и patch_apply.py
 
 Контекст: T82 нашёл path traversal в `project_patch.py` (`app/services/`) —
