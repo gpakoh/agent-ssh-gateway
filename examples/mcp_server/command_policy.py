@@ -43,6 +43,18 @@ DENIED_COMMAND_PARTS: tuple[str, ...] = (
     "|",
     ";",
     "&&",
+    # find's own primaries can delete/overwrite/run arbitrary commands —
+    # `find . -delete` or `find . -exec <anything> \;` both start with the
+    # allowed "find " prefix and matched none of the substrings above,
+    # since those only covered a few specific -exec targets (rm/mv/chmod/
+    # chown) rather than find's exec/write mechanism itself.
+    "-exec",
+    "-execdir",
+    "-ok",
+    "-okdir",
+    "-delete",
+    "-fprint",
+    "-fls",
 )
 
 
