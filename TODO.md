@@ -88,7 +88,43 @@
    - `handoff.py`, `mimo_tools.py`, `opencode_tools.py`: чисто, без новых
      находок (`resolve_file_path` уже блокирует traversal корректно; mimo/
      opencode tools — намеренно hard-blocked stubs).
-7. **`app/services/*.py`** (вынесены в P19.2: `file_editing.py`,
-   `project_patch.py`, `context_editing.py`, `scaffolding.py`,
-   `project_structure.py`) — рефакторены ради структуры, не seam-тестированы
-   на реальные баги с тех пор.
+7. ✅ **`app/services/*.py`** — прошёл все 7 файлов. Самая серьёзная находка
+   всей сессии T82:
+   - **`project_patch.py` — path traversal, реально эксплуатируемо БЕЗ
+     master key.** `full_path = project_root / f["path"]`, где `f["path"]`
+     берётся прямо из заголовка source-file unified-диффа (полностью
+     контролируется атакующим через тело патча), без какой-либо traversal-
+     фильтрации в `patch_apply.py`. `../../../etc/passwd` (или просто
+     абсолютный путь — pathlib's `/` тихо отбрасывает `project_root`
+     целиком для абсолютного операнда) резолвился за пределы project root,
+     и запись проходила безусловно. Эмпирически подтверждено: до фикса
+     traversal-патч применялся без единой ошибки, тестов на этот модуль не
+     было вообще. `POST /api/projects/{project}/apply-patch` требует только
+     scope `project:patch`, НЕ master key — то есть узко-скоуп agent-токен
+     мог выйти за пределы своего project-сэндбокса полностью. Добавлен
+     `_resolve_within_root()` (resolve + containment check), применён и в
+     dry-run, и в реальном apply. Commit `acf2b359`.
+   - `scaffolding.py` (`mkdir -p '{module_dir}'`) и `context_editing.py`
+     (`git ls-files/show '{path}'`) — тот же паттерн неэкранированного
+     single-quote — литеральная одинарная кавычка в module_path/path
+     выходит за пределы quote и инжектит произвольные shell-команды. Оба
+     endpoint'а сейчас требуют master key (уже полный доступ к командам
+     через другие роуты), поэтому эскалации привилегий сегодня нет, но тот
+     же паттерн выше оказался реальным scope bypass. Исправлено `shlex.quote()`,
+     консистентно с `git.py`/`logs.py`/`templates.py`/`project_structure.py`.
+     Commit `acf2b359`.
+   - `file_editing.py`, `project_search.py`, `project_structure.py`,
+     `command_gate.py`: чисто, без новых находок (`project_structure.py` уже
+     использует `shlex.quote()` корректно; `project_search.py` — чистый
+     Python без shell вообще).
+
+## Итог T82
+
+Все 7 пунктов пройдены. Реальных находок: 12 (XSS, broken async SDK,
+swallowed diagnostic detail, TTL bypass, SSRF, audit-attribution gap,
+cross-tenant session leak, readonly bypass, latent shell-injection ×3,
+**path traversal с обходом project-scope** — самая серьёзная). Все
+исправлены с regression-тестами, проверенными на падение до фикса; все,
+что живёт в `web-ssh-gateway`/`mcp-server` контейнерах, задеплоено.
+Не исправлено, оставлено на решение пользователя: `webhook_manager.py`
+(dead code, см. пункт 4).
