@@ -37,6 +37,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -118,6 +119,17 @@ def write_task_file(project_root: str, task_id: str, filename: str, content: str
     with open(path, "w") as f:
         f.write(content)
     return path
+
+
+def build_opencode_args(resolved_cmd: str) -> list[str]:
+    """Split a resolved command line into argv, dropping the leading program-name token.
+
+    resolved_cmd is composed as e.g. 'opencode run --never-ask "Read ... plan."' —
+    a quoted, multi-word prompt argument. Naive str.split() has no concept of
+    quoting and would shred that quoted argument into many disjoint whitespace
+    tokens instead of passing it through as one; shlex.split() parses it correctly.
+    """
+    return shlex.split(resolved_cmd)[1:]
 
 
 def run_opencode(
@@ -272,7 +284,7 @@ def run_wrapper(
     run_result = run_opencode(
         opencode_bin=opencode_bin_resolved,
         workdir=exec_workdir,
-        args=resolved_cmd.split()[1:] if " " in resolved_cmd else [resolved_cmd],
+        args=build_opencode_args(resolved_cmd),
         timeout_sec=timeout_sec,
     )
 
