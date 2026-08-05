@@ -357,7 +357,11 @@ def list_files(client: GatewayClient, project: str, pattern: str) -> dict[str, A
     return {
         "project": project,
         "pattern": pattern,
-        "root": str(project_dir),
+        # "." represents the project's own root in the client-facing,
+        # project-relative namespace — never the real host filesystem path.
+        # See _resolve_project()/project (the logical id) for the caller's
+        # own reference to "which project", without exposing server layout.
+        "root": ".",
         "files": files,
         "count": len(files),
     }
@@ -399,7 +403,11 @@ def list_tree(client: GatewayClient, project: str, depth: int = 2) -> dict[str, 
 
     return {
         "project": project,
-        "root": str(project_dir),
+        # "." represents the project's own root in the client-facing,
+        # project-relative namespace — never the real host filesystem path.
+        # See _resolve_project()/project (the logical id) for the caller's
+        # own reference to "which project", without exposing server layout.
+        "root": ".",
         "depth": depth,
         "entries": entries,
         "count": len(entries),
@@ -438,7 +446,11 @@ def tree(
 
     return {
         "project": project,
-        "root": str(project_dir),
+        # "." represents the project's own root in the client-facing,
+        # project-relative namespace — never the real host filesystem path.
+        # See _resolve_project()/project (the logical id) for the caller's
+        # own reference to "which project", without exposing server layout.
+        "root": ".",
         "depth": depth,
         "entries": entries,
         "count": len(entries),
@@ -864,8 +876,10 @@ def info(client: GatewayClient, project: str) -> dict[str, Any]:
     resolved = _resolve_project(project)
     return {
         "project": project,
-        "root": str(resolved),
-        "resolved_path": str(resolved),
+        # "." — project-relative namespace, never the real host path
+        # (see the "root" fields in list_tree()/tree()/list_files()).
+        "root": ".",
+        "resolved_path": ".",
         "exists": resolved.exists(),
         "is_dir": resolved.is_dir(),
         "is_git_repo": (resolved / ".git").exists(),
