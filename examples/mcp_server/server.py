@@ -322,12 +322,70 @@ def _get_pg_client() -> PostgresClient | None:
 _confirm_store: ConfirmStore = ConfirmStore()
 
 
+def _envelope_to_call_tool_result(envelope: dict[str, Any]):
+    """Convert a canonical {"ok": bool, ...} envelope into an explicit
+    mcp.types.CallToolResult with isError set from "ok".
+
+    FastMCP's own dict/tuple return-value handling (see
+    mcp.server.lowlevel.server.Server.call_tool()'s generic conversion,
+    and FunctionMetadata.convert_result()) ALWAYS reports isError=False
+    for a plain dict or (content, structured) tuple return, regardless of
+    what "ok" says inside it -- the framework has no notion of our own
+    envelope convention. Returning an actual CallToolResult is the one
+    shape both layers pass through completely unchanged (verified: only
+    `isinstance(result, CallToolResult)` bypasses the automatic
+    isError=False conversion), so this is the single place that needs to
+    intervene to make {"ok": false} tool results actually surface as
+    isError=True to the MCP client.
+    """
+    from mcp.types import CallToolResult, TextContent
+
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(envelope, indent=2))],
+        structuredContent=envelope,
+        isError=not envelope.get("ok", True),
+    )
+
+
 def register_tool(name: str):
-    """Decorator: register MCP tool only if visible in the active mode."""
+    """Decorator: register MCP tool only if visible in the active mode.
+
+    Registers an isError-converting wrapper (see
+    _envelope_to_call_tool_result) as the callable FastMCP actually
+    dispatches to for real MCP protocol calls, but returns the original,
+    unwrapped function to the caller -- so direct Python calls (other
+    module code, and the many tests that call gateway_* functions
+    directly and assert on the plain {"ok": ...} dict) keep seeing the
+    original return value, unaffected by this MCP-protocol-only fix.
+    """
 
     def decorator(func):
-        if should_register_tool(name):
-            return mcp.tool(name=name)(func)
+        if not should_register_tool(name):
+            return func
+
+        import asyncio
+        import functools
+
+        if asyncio.iscoroutinefunction(func):
+
+            @functools.wraps(func)
+            async def async_result_wrapper(*args, **kwargs):
+                result = await func(*args, **kwargs)
+                if isinstance(result, dict) and "ok" in result:
+                    return _envelope_to_call_tool_result(result)
+                return result
+
+            mcp.tool(name=name)(async_result_wrapper)
+            return func
+
+        @functools.wraps(func)
+        def sync_result_wrapper(*args, **kwargs):
+            result = func(*args, **kwargs)
+            if isinstance(result, dict) and "ok" in result:
+                return _envelope_to_call_tool_result(result)
+            return result
+
+        mcp.tool(name=name)(sync_result_wrapper)
         return func
 
     return decorator
