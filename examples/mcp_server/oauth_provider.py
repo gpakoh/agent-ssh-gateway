@@ -329,9 +329,11 @@ class GatewayOAuthProvider:
             raise ValueError("redirect_uri mismatch")
         if code_verifier:
             try:
-                _verify_pkce(code_verifier, stored.code_challenge)
+                verified = _verify_pkce(code_verifier, stored.code_challenge)
             except (ValueError, AssertionError):
                 raise ValueError("PKCE verification failed") from None
+            if not verified:
+                raise ValueError("PKCE verification failed")
         stored.used = True
         access_token = _generate_id("mcp_at_", 32)
         refresh_token = _generate_id("mcp_rt_", 32)

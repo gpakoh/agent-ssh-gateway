@@ -217,7 +217,9 @@ def test_code_reuse_rejected(provider):
         provider.exchange_code_for_token("cid", auth["code"], cv, "https://example.com/cb")
 
 
-def test_pkce_verification_rejects_wrong_verifier(provider):
+def test_pkce_verification_rejects_wrong_verifier_bad_length(provider):
+    """A verifier outside the 43-128 char range is rejected by length
+    validation before the challenge is even compared."""
     provider._clients["cid2"] = type(
         "S",
         (),
@@ -235,6 +237,39 @@ def test_pkce_verification_rejects_wrong_verifier(provider):
     with pytest.raises(ValueError, match="PKCE verification"):
         provider.exchange_code_for_token(
             "cid2", auth["code"], "wrong_verifier", "https://example.com/cb"
+        )
+
+
+def test_pkce_verification_rejects_wrong_verifier_correct_length(provider):
+    """Regression: exchange_code_for_token() called _verify_pkce() but
+    discarded its bool return value entirely, so any code_verifier of the
+    correct 43-128 char length was accepted regardless of whether it
+    actually matched the code_challenge — a full PKCE bypass. The old test
+    here used "wrong_verifier" (14 chars), which is rejected by the length
+    check alone, never reaching the actual challenge comparison — it looked
+    like it covered this security property but didn't. This uses a wrong
+    verifier of otherwise-valid length to exercise the real comparison.
+    """
+    provider._clients["cid2b"] = type(
+        "S",
+        (),
+        {
+            "client_id": "cid2b",
+            "redirect_uris": ["https://example.com/cb"],
+            "client_name": "T",
+        },
+    )()
+    real_verifier = secrets.token_urlsafe(64)
+    cc = _generate_code_challenge(real_verifier)
+    auth = provider.create_authorization_code(
+        "cid2b", "https://example.com/cb", cc, "s", ["mcp:read"]
+    )
+    wrong_verifier_same_length = "x" * len(real_verifier)
+    assert wrong_verifier_same_length != real_verifier
+    assert 43 <= len(wrong_verifier_same_length) <= 128
+    with pytest.raises(ValueError, match="PKCE verification"):
+        provider.exchange_code_for_token(
+            "cid2b", auth["code"], wrong_verifier_same_length, "https://example.com/cb"
         )
 
 
