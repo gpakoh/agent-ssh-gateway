@@ -211,9 +211,21 @@ def get_profile_scopes(profile: str) -> list[str]:
 
 
 def has_required_scope(token_scopes: list[str], tool_name: str) -> bool:
-    """Check if token scopes satisfy tool's requirements."""
+    """Check if token scopes satisfy tool's requirements.
+
+    A tool's entry in TOOL_SCOPES lists every scope it needs — e.g.
+    list_files: ["mcp:read", "mcp:project"] means both, not either.
+    Every profile that grants "mcp:project" also grants "mcp:read", so an
+    any()-based check here made the "mcp:project" half of any such
+    requirement meaningless: a token with only "mcp:read" (e.g. the
+    "viewer" profile, which explicitly excludes "mcp:project") satisfied
+    the check for every multi-scope tool through "mcp:read" alone.
+    Confirmed live: viewer could call list_files/info/scan_command despite
+    never being granted mcp:project. This is the real, active enforcement
+    path for the public ChatGPT-facing server (mcp_client_remote/server.py).
+    """
     required = get_required_scopes(tool_name)
-    return any(s in token_scopes for s in required)
+    return all(s in token_scopes for s in required)
 
 
 def check_fleet_route(path: str, token_scopes: list[str]) -> tuple[bool, str | None]:
