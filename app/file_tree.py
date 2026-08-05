@@ -1,6 +1,7 @@
 """File tree explorer for IDE-like directory navigation."""
 
 import logging
+import shlex
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ class FileTreeExplorer:
     ) -> FileNode:
         """Get directory tree."""
         # Get directory info
-        ls_cmd = f"ls -la '{path}'"
+        ls_cmd = f"ls -la {shlex.quote(path)}"
         result = await self._ssh.execute(session_id, ls_cmd, timeout=15)
 
         if result["exit_code"] != 0:
@@ -132,7 +133,7 @@ class FileTreeExplorer:
         children: list[FileNode] = []
         file_count = 0
 
-        ls_cmd = f"ls -la '{path}'"
+        ls_cmd = f"ls -la {shlex.quote(path)}"
         result = await self._ssh.execute(session_id, ls_cmd, timeout=10)
 
         if result["exit_code"] != 0:
