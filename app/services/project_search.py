@@ -68,6 +68,19 @@ def search_text(
             continue
 
         rel = p.relative_to(root_path)
+
+        # rglob() follows symlinks when the pattern explicitly names a
+        # symlinked path segment (e.g. glob="some_symlink/*"), even though
+        # it doesn't descend into them for bare "*"/"**" wildcards. The
+        # relative_to() call above is purely structural — it doesn't catch
+        # this, since the returned path still carries root_path's prefix
+        # textually while actually reading through the symlink to wherever
+        # it points.
+        try:
+            p.resolve().relative_to(root_path)
+        except (OSError, ValueError):
+            continue
+
         if any(part in _PRUNE_DIRS for part in rel.parts):
             continue
 
