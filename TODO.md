@@ -1,5 +1,93 @@
 # Agent SSH Gateway — TODO
 
+## 🔍 T85 — Четвёртый круг: examples/mcp_server
+
+Контекст: аудит всех 23 файлов `examples/mcp_server/` (~8300 строк) —
+MCP-сервер, отдельный от основного REST API. Найдено 5 реальных багов,
+включая самую серьёзную находку всей серии аудитов (T82-T85):
+**PKCE bypass в OAuth**.
+
+1. ✅ **`oauth_provider.py` — full PKCE bypass.** `exchange_code_for_token()`
+   вызывал `_verify_pkce()`, но НИКОГДА не проверял её bool return value —
+   только пойманное исключение (bad length). Любой `code_verifier`
+   ПРАВИЛЬНОЙ длины (43-128 симв.), независимо от того, совпадает ли он с
+   `code_challenge`, успешно завершал token exchange — полностью
+   уничтожая смысл PKCE (защита от authorization-code-interception).
+   Эмпирически подтверждено. Существующий тест использовал
+   `"wrong_verifier"` (14 символов) — отклонялся ДЛИНОЙ, реальная
+   сверка challenge никогда не выполнялась — тест выглядел как проверка
+   этого свойства, но не проверял. Единственный вызывающий
+   (`exchange_authorization_code`, реальный FastMCP-flow) передаёт
+   `code_verifier=""`, поэтому баг не был достижим через живой флоу
+   СЕГОДНЯ — но это публичный метод класса с прямым тестовым покрытием,
+   и молчаливо отброшенный результат security-проверки — ровно та мина,
+   что взрывается при любом будущем вызывающем. Commit `235a11d5`.
+2. ✅ **`tool_scopes.py` — full mcp:project bypass для "viewer" профиля,
+   живой баг.** `has_required_scope()` использовал `any()` по списку
+   required scopes инструмента. `list_files`/`info`/`scan_command`/
+   `list_tree` требуют `["mcp:read", "mcp:project"]` — по модели данных
+   это означает ОБА (mcp:project — отдельный scope, используется
+   самостоятельно у множества других инструментов). Так как ВСЕ профили
+   с `mcp:project` также имеют `mcp:read`, `any()` делал `mcp:project`
+   половину требования бессмысленной — токен профиля "viewer" (mcp:read,
+   mcp:repo, mcp:docs — mcp:project намеренно исключён) проходил ЛЮБОЙ
+   multi-scope инструмент через один `mcp:read`. Эмпирически подтверждено.
+   Это реальный, живой enforcement path для публичного ChatGPT-facing
+   сервера — `mcp_client_remote/server.py` импортирует и вызывает
+   `has_required_scope` на КАЖДЫЙ входящий `tools/call`. Исправлено:
+   `any()` → `all()`. Commit `0550fdf8`.
+3. ✅ **`command_policy.py` — `find` bypass, живой баг.** Denylist блокировал
+   несколько конкретных `-exec` целей (`rm`/`mv`/`chmod`/`chown` как literal
+   substrings), но не сами деструктивные примитивы `find`. `find . -delete`
+   не требует exec-цели вообще. `find . -exec <что угодно> +` (используя
+   `+`-терминатор вместо `\;`, обходя отдельную проверку на `;`) запускает
+   ПРОИЗВОЛЬНУЮ команду, которую find сам никогда не инспектирует — не
+   только rm/mv/chmod/chown. Оба начинаются с разрешённого префикса
+   `"find "` и не матчили ни один denied substring, несмотря на то, что
+   модуль сам себя называет "Read-only command policy". Живой путь:
+   `gateway_client.py`'s `execute_restricted()` — MCP-инструмент
+   "restricted"-исполнения — вызывает `validate_readonly_command()`
+   напрямую. Добавлены `-exec`/`-execdir`/`-ok`/`-okdir`/`-delete`/
+   `-fprint`/`-fls` в denylist. Commit `68440d48`.
+4. ✅ **`mcp_client_tools.py::list_files` — symlink-escape info leak,
+   живой баг.** Тот же паттерн, что в T83/T84: `project_dir.rglob(pattern)`
+   следует symlink, если паттерн явно называет symlink-сегмент, `_safe_glob`
+   (используется `find_files`) уже делает это правильно (resolve перед
+   containment check), `list_files` — нет. Живой MCP-инструмент
+   `list_files`. Commit `235a11d5`.
+5. ✅ **`agent_tools.py::_read_task_json`** — `task_id` интерполировался в
+   shell-команду без экранирования, в отличие от соседней
+   `_read_current_plan` (использует `shlex.quote`). Единственный
+   вызывающий уже валидирует `task_id` через `validate_task_id()` (safe-
+   charset regex) — не эксплуатируемо сегодня, исправлено для
+   консистентности/defense-in-depth. Commit `68440d48`.
+
+**Проверено, без находок**: `server.py` (3414 строк — в основном wiring,
+рискованные операции делегированы уже проверенным модулям), `git.py`
+(exemplary — fixed argv, shell=False), `agent_backend_router.py`
+(FAILED-статус не авто-восстанавливается по истечении cooldown — defensible
+design, не баг), `tool_modes.py` (перепроверил `MCP_CLIENT_BLOCKED_TOOLS`
+против полного `mcp_client` tool set — пробелов нет), `tool_results.py`
+(redaction regex не покрывает `/proc`/`/sys`/`/srv`/`/boot` — minor,
+не покрывает ничего реально используемого в этом деплойменте),
+`docker_confirm.py`, `mcp_audit.py` (ring buffer корректно bounded —
+не тот баг, что в T83's `WorkspaceAuditLogger`), `latency_metrics.py`,
+`tools_manifest.py`, `self_test.py`, `token_store.py`.
+
+**Orphaned (не подключено ни к чему живому)**: `project_registry.py`/
+`ProjectRegistry` — ноль вызывающих во всём `examples/mcp_server/`, тот
+же паттерн, что `RedisJobQueue`/`SnapshotStore`/`scan_project.py`. Не
+исправлял (dead code, нет живого пути).
+
+## Итог T85
+
+5 реальных багов, все с regression-тестами, проверенными на падение
+до фикса. `has_required_scope`'s AND/OR баг и `find`-bypass — оба живые,
+реально достижимые через публичный MCP-сервер. PKCE bypass — самая
+серьёзная находка по механизму (полностью уничтожает security-свойство),
+хоть и не достижима через СЕГОДНЯШНИЙ живой флоу конкретно этого
+деплоймента. Полный набор тестов (4033) зелёный.
+
 ## 🔍 T84 — Третий круг: app/services повторно, с новым паттерном из T83
 
 Контекст: T83 нашёл паттерн "glob()/rglob() следует symlink, если паттерн
