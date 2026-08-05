@@ -473,6 +473,7 @@ class DockerClient:
     ) -> str:
         """Start services. detach=True by default; set build=True to rebuild."""
         self._validate_project_dir(project_dir)
+        timeout = max(1, min(timeout, 900))
         argv = self._compose_base_argv(project_dir)
         argv.append("up")
         if detach:
@@ -493,6 +494,7 @@ class DockerClient:
     ) -> str:
         """Restart services in a compose project."""
         self._validate_project_dir(project_dir)
+        timeout = max(1, min(timeout, 300))
         argv = self._compose_base_argv(project_dir)
         argv.append("restart")
         if services:
@@ -510,6 +512,7 @@ class DockerClient:
     ) -> str:
         """Build (or rebuild) services. no_cache=True to ignore cache."""
         self._validate_project_dir(project_dir)
+        timeout = max(1, min(timeout, 1800))
         argv = self._compose_base_argv(project_dir)
         argv.append("build")
         if no_cache:
@@ -531,6 +534,7 @@ class DockerClient:
     ) -> str:
         """Fetch logs from compose services. tail: 1-1000 lines."""
         self._validate_project_dir(project_dir)
+        timeout = max(1, min(timeout, 300))
         argv = self._compose_base_argv(project_dir)
         argv.append("logs")
         tail = max(1, min(tail, 1000))
@@ -561,6 +565,7 @@ class DockerClient:
         volumes: bool = False,
     ) -> RunResult:
         self._validate_project_dir(project_dir)
+        timeout = max(1, min(timeout, 300))
         argv = self._compose_base_argv(project_dir)
         argv.append("down")
         if remove_orphans:

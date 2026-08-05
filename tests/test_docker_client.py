@@ -10,7 +10,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "mcp_c
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
-from fleet.docker_client import COMPOSE_FILE_RE, CONTAINER_NAME_RE, SERVICE_NAME_RE, DockerClient
+from fleet.docker_client import (
+    COMPOSE_FILE_RE,
+    CONTAINER_NAME_RE,
+    SERVICE_NAME_RE,
+    DockerClient,
+    RunResult,
+)
 
 
 def _client() -> DockerClient:
@@ -272,6 +278,103 @@ async def test_compose_logs_invalid_service_raises():
     c = _client()
     with pytest.raises(ValueError, match="Invalid service name"):
         await c.compose_logs(project_dir=None, services=["bad;name"])
+
+
+@pytest.mark.asyncio
+async def test_compose_up_timeout_clamped():
+    """Regression: compose_up's timeout flowed straight into the subprocess
+    wait with no clamp, unlike stop/restart (which clamp to [1, 120]) —
+    an absurd value hung the subprocess wait for that long. Same fix
+    pattern, clamped to [1, 900] (compose up can legitimately take longer
+    than a plain restart when --build is set).
+    """
+    c = _client()
+    seen: dict[str, object] = {}
+
+    async def _fake_run(argv, timeout=None, **kw):
+        seen["timeout"] = timeout
+        return ""
+
+    c._run = _fake_run
+    await c.compose_up(timeout=99999)
+    assert seen["timeout"] == 900.0
+    await c.compose_up(timeout=0)
+    assert seen["timeout"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_compose_restart_timeout_clamped():
+    c = _client()
+    seen: dict[str, object] = {}
+
+    async def _fake_run(argv, timeout=None, **kw):
+        seen["timeout"] = timeout
+        return ""
+
+    c._run = _fake_run
+    await c.compose_restart(timeout=99999)
+    assert seen["timeout"] == 300.0
+    await c.compose_restart(timeout=0)
+    assert seen["timeout"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_compose_build_timeout_clamped():
+    c = _client()
+    seen: dict[str, object] = {}
+
+    async def _fake_run(argv, timeout=None, **kw):
+        seen["timeout"] = timeout
+        return ""
+
+    c._run = _fake_run
+    await c.compose_build(timeout=99999)
+    assert seen["timeout"] == 1800.0
+    await c.compose_build(timeout=0)
+    assert seen["timeout"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_compose_logs_timeout_clamped():
+    c = _client()
+    seen: dict[str, object] = {}
+
+    async def _fake_run(argv, timeout=None, **kw):
+        seen["timeout"] = timeout
+        return ""
+
+    c._run = _fake_run
+    await c.compose_logs(timeout=99999)
+    assert seen["timeout"] == 300.0
+    await c.compose_logs(timeout=0)
+    assert seen["timeout"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_compose_down_timeout_clamped():
+    """compose_down's timeout also feeds the "docker compose down -t" argv
+    directly, not just the subprocess wait — both must reflect the clamp.
+    """
+    c = _client()
+    seen: dict[str, object] = {}
+
+    async def _fake_run_with_result(argv, timeout=None, **kw):
+        seen["timeout"] = timeout
+        seen["argv"] = argv
+        return RunResult(stdout="", stderr="", exit_code=0)
+
+    c._run_with_result = _fake_run_with_result
+    await c.compose_down(timeout=99999)
+    assert seen["timeout"] == 310.0  # 300 clamp + 10
+    argv = seen["argv"]
+    idx = argv.index("-t")
+    assert argv[idx + 1] == "300"
+
+    await c.compose_down(timeout=0)
+    assert seen["timeout"] == 11.0
+    argv = seen["argv"]
+    idx = argv.index("-t")
+    assert argv[idx + 1] == "1"
 
 
 # ── Compose argv construction ──
