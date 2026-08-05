@@ -100,6 +100,33 @@ class TestScopeChecking:
         assert not has_required_scope(viewer, "docker_ps")
         assert not has_required_scope(viewer, "postgres_select")
 
+    def test_has_required_scope_requires_all_listed_scopes_not_any(self):
+        """Regression: has_required_scope() used any() across a tool's
+        listed required scopes. list_files/info/scan_command/list_tree all
+        require ["mcp:read", "mcp:project"] — meaning both, per the data
+        model (mcp:project is a distinct, separately-enforced scope used
+        standalone by many other tools). Every profile that grants
+        mcp:project also grants mcp:read, so any() made the mcp:project
+        half of the requirement meaningless: the "viewer" profile (mcp:read,
+        mcp:repo, mcp:docs — mcp:project deliberately excluded) satisfied
+        these multi-scope tools through mcp:read alone. This is the real,
+        active enforcement path for the public ChatGPT-facing server
+        (mcp_client_remote/server.py imports has_required_scope directly).
+        """
+        viewer = get_profile_scopes("viewer")
+        assert "mcp:project" not in viewer
+        for tool_name in ("list_files", "info", "scan_command", "scan_file", "list_tree"):
+            assert TOOL_SCOPES[tool_name] == ["mcp:read", "mcp:project"]
+            assert not has_required_scope(viewer, tool_name), (
+                f"viewer (no mcp:project) must not satisfy {tool_name}'s "
+                f"requirement of {TOOL_SCOPES[tool_name]}"
+            )
+
+        operator = get_profile_scopes("operator")
+        assert "mcp:project" in operator and "mcp:read" in operator
+        for tool_name in ("list_files", "info", "scan_command", "scan_file", "list_tree"):
+            assert has_required_scope(operator, tool_name)
+
     def test_has_required_scope_agent_runner(self):
         ar = get_profile_scopes("agent-runner")
         assert has_required_scope(ar, "run_opencode")
