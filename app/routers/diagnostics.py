@@ -8,12 +8,17 @@ from fastapi.responses import JSONResponse
 from app import state as _state
 from app.auth_middleware import AuthIdentity, ensure_session_owner, require_scope
 from app.models import SessionCheckRequest
+from app.rbac import job_visible_to
 
 router = APIRouter(tags=["diagnostics"])
 
 
-def _compute_job_latency_breakdown() -> dict:
-    """Compute latency breakdown from completed jobs with mono timestamps."""
+def _compute_job_latency_breakdown(identity: AuthIdentity) -> dict:
+    """Compute latency breakdown from completed jobs with mono timestamps.
+
+    Only includes jobs visible to ``identity`` — matching GET /api/jobs —
+    since job timing/existence for other tenants is not this caller's to see.
+    """
     jobs_summary = []
     total_jobs = 0
 
@@ -21,6 +26,8 @@ def _compute_job_latency_breakdown() -> dict:
         return {"jobs": [], "total": 0}
 
     for job in _state.job_manager._jobs.values():
+        if not job_visible_to(job, identity):
+            continue
         total_jobs += 1
         if job.status not in ("completed", "failed", "cancelled"):
             continue
@@ -68,7 +75,7 @@ async def diagnostics_latency(
     _identity: AuthIdentity = Depends(require_scope("diagnostics:read")),
 ):
     """Latency breakdown for completed jobs and MCP process metrics."""
-    job_breakdown = _compute_job_latency_breakdown()
+    job_breakdown = _compute_job_latency_breakdown(_identity)
 
     return {
         "gateway": {

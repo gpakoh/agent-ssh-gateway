@@ -321,6 +321,49 @@ class TestSessionOwnershipHTTP:
             )
         assert resp.status_code == 403
 
+    def test_project_tree_ownership_agent_blocked(self, monkeypatch):
+        """Regression: GET /api/project/tree never called ensure_session_owner
+        at all — unlike its near-identical sibling POST
+        /api/project/files/structure, which does via
+        _check_session_ownership(). Any ssh:files-scoped agent token could
+        pass an arbitrary session_id belonging to a different agent/tenant
+        and get that tenant's directory listing.
+        """
+        self._patch_base(monkeypatch)
+        with TestClient(app) as client:
+            mock_mgr = self._make_cross_tenant_session_mock()
+            self._override_manager(client, mock_mgr)
+            resp = client.get(
+                "/api/project/tree",
+                headers={"Authorization": "Bearer agent-token-a"},
+                params={"session_id": "s-2", "path": "."},
+            )
+        assert resp.status_code == 403
+        assert "SESSION_OWNERSHIP" in resp.text or "cannot access" in resp.text
+        mock_mgr.execute.assert_not_called()
+
+    def test_project_tree_ownership_master_bypasses(self, monkeypatch):
+        self._patch_base(monkeypatch)
+        with TestClient(app) as client:
+            self._override_manager(client, self._make_cross_tenant_session_mock())
+            resp = client.get(
+                "/api/project/tree",
+                headers={"X-API-Key": "secret-42"},
+                params={"session_id": "s-2", "path": "."},
+            )
+        assert resp.status_code == 200
+
+    def test_project_tree_ownership_own_session_allowed(self, monkeypatch):
+        self._patch_base(monkeypatch)
+        with TestClient(app) as client:
+            self._override_manager(client, self._make_session_mock())
+            resp = client.get(
+                "/api/project/tree",
+                headers={"Authorization": "Bearer agent-token-a"},
+                params={"session_id": "s-1", "path": "."},
+            )
+        assert resp.status_code == 200
+
     def test_heartbeat_ownership_agent_blocked(self, monkeypatch):
         self._patch_base(monkeypatch)
         with TestClient(app) as client:

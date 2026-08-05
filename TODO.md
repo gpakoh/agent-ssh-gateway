@@ -1,5 +1,58 @@
 # Agent SSH Gateway — TODO
 
+## 🔍 T87 — Шестой круг: app/routers
+
+Контекст: все 24 файла `app/routers/` (~6200 строк) — первый круг, который
+целится именно в роутеры целиком, а не только в отдельные файлы, задетые
+попутно другими кругами. Приоритет отдавался эндпоинтам на `require_scope`
+(доступны agent-токенам), а не только `require_master_key` (там privilege
+escalation не работает, т.к. master key уже имеет полный доступ).
+
+1. ✅ **`files.py` — SERIOUS, живая кросс-тенантная утечка.** `GET
+   /api/project/tree` вообще не вызывал `ensure_session_owner`/
+   `_check_session_ownership` — в отличие от почти идентичного соседа `POST
+   /api/project/files/structure`, который эту проверку делает. Любой
+   `ssh:files`-scoped agent-токен мог передать чужой `session_id` и получить
+   листинг файлов ЧУЖОЙ SSH-сессии. Добавлен `request: Request` параметр +
+   `await _check_session_ownership(session_id, request)`.
+2. ✅ **`diagnostics.py` — SERIOUS, живая кросс-тенантная утечка в файле,
+   который T82 уже частично чинил.** `GET /api/diagnostics/latency`
+   итерировался по ВСЕМ джобам в `job_manager._jobs` без вообще какой-либо
+   фильтрации по владельцу — в отличие от `GET /api/jobs`, который
+   фильтрует через `job_visible_to()`. Любой `diagnostics:read`-scoped
+   agent-токен видел `job_id`/тайминги ВСЕХ джобов всех тенантов. Добавлена
+   фильтрация через `job_visible_to()`, консистентно с `jobs.py`.
+3. ✅ **`context.py` — тот же паттерн unescaped shell interpolation, что
+   чинился по всей кодовой базе весь этот сеанс.** `POST
+   /api/templates/render` строил `f"cat > '{req.target_path}' << ..."` без
+   `shlex.quote()` — литеральная одинарная кавычка в `target_path` выходит
+   за пределы quote и инжектит произвольные shell-команды. Endpoint
+   `require_master_key`-only (эскалации привилегий сегодня нет), но тот же
+   паттерн в других местах этого сеанса (scaffolding.py, context_editing.py)
+   оказался реальным scope bypass — исправлено для консистентности.
+   Добавлена проба в `test_seam_shell_injection_matrix.py`.
+4. ✅ **Проверено без новых находок**: `auth.py`, `admin_approval.py`,
+   `admin_access.py` (уже T82), `project_inspection.py`, `logs.py`,
+   `search_replace.py`, `servers.py`, `templates.py` (unescaped
+   `command.replace()` в `run_template`, но `require_master_key`-only —
+   не новая привилегия), `known_hosts.py`, `oauth.py`, `system.py`,
+   `code.py`, `event_hooks.py`, `snapshots.py`, `git.py` (уже T82),
+   `batch.py` (уже T82), `webhooks.py` (уже T82), `audit.py`, `jobs.py`
+   (`job_visible_to`/`_get_owned_job` консистентно применены),
+   `workspace.py` (scope-based `registry_for_identity()` корректно
+   применяется к write/preview роутам; read-роуты намеренно
+   `require_master_key`-only), `ssh.py` (весь файл, 1256 строк —
+   `ensure_session_owner` консистентно применён везде, включая оба
+   WebSocket-эндпоинта).
+
+Regression-тесты: `test_session_ownership.py` (3 новых теста для
+`/api/project/tree`), `test_diagnostics_latency.py` (2 новых теста для
+кросс-тенантной фильтрации), `test_seam_shell_injection_matrix.py`
+(новая проба для `render_template`). Все три находки проверены на падение
+против pre-fix кода через `git stash`. Полный набор (4116 тестов) зелёный,
+`ruff`/`mypy` чистые (та же pre-existing mypy-ошибка в
+`event_hook_delivery.py:340`, не связана с этой работой).
+
 ## 🧪 Тесты на стыках (seam-test matrices)
 
 Контекст: T82-T86 нашли один и тот же класс бага в РАЗНЫХ реализациях

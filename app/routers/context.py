@@ -1,6 +1,7 @@
 """Context management, validation, templates, and project structure routes."""
 
 import logging
+import shlex
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -427,7 +428,7 @@ async def render_template(
     # Create File With Rendered Code
     result = await _state.manager.execute(
         ctx.session_id,
-        f"cat > '{req.target_path}' << 'TEMPLATE_EOF'\n{code}\nTEMPLATE_EOF",
+        f"cat > {shlex.quote(req.target_path)} << 'TEMPLATE_EOF'\n{code}\nTEMPLATE_EOF",
         timeout=10,
     )
 
