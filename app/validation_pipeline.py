@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import shlex
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -109,7 +110,8 @@ class ValidationPipeline:
 
         result = await self._ssh.execute(
             session_id,
-            f"cd {path} && python -m py_compile $(find . -name '*.py' -not -path './venv/*' -not -path './__pycache__/*' | head -20)",
+            f"cd {shlex.quote(path)} && python -m py_compile "
+            "$(find . -name '*.py' -not -path './venv/*' -not -path './__pycache__/*' | head -20)",
             timeout=30,
         )
 
@@ -146,9 +148,10 @@ class ValidationPipeline:
         has_tests = False
 
         for file, check_path in checks:
+            target = shlex.quote(f"{check_path}/{file}")
             result = await self._ssh.execute(
                 session_id,
-                f"test -f {check_path}/{file} || test -d {check_path}/{file} && echo 'FOUND' || echo 'NOT_FOUND'",
+                f"test -f {target} || test -d {target} && echo 'FOUND' || echo 'NOT_FOUND'",
                 timeout=10,
             )
             if "FOUND" in result["stdout"]:
@@ -163,9 +166,10 @@ class ValidationPipeline:
 
         # Check for app/ or src/ directory
         for subdir in ("app", "src", project_root.split("/")[-1]):
+            candidate = shlex.quote(f"{project_root}/{subdir}")
             result = await self._ssh.execute(
                 session_id,
-                f"test -d {project_root}/{subdir} && echo 'FOUND' || echo 'NOT_FOUND'",
+                f"test -d {candidate} && echo 'FOUND' || echo 'NOT_FOUND'",
                 timeout=10,
             )
             if "FOUND" in result["stdout"]:
@@ -184,7 +188,10 @@ class ValidationPipeline:
         start = asyncio.get_event_loop().time()
 
         strict_flag = " --strict" if strict else ""
-        cmd = f"cd {path} && python -m mypy .{strict_flag} --ignore-missing-imports --no-error-summary 2>&1 || true"
+        cmd = (
+            f"cd {shlex.quote(path)} && python -m mypy .{strict_flag} "
+            "--ignore-missing-imports --no-error-summary 2>&1 || true"
+        )
 
         result = await self._ssh.execute(session_id, cmd, timeout=120)
 
@@ -225,7 +232,7 @@ class ValidationPipeline:
         """Run pytest."""
         start = asyncio.get_event_loop().time()
 
-        cmd = f"cd {test_path} && python -m pytest -x -q --tb=short 2>&1 || true"
+        cmd = f"cd {shlex.quote(test_path)} && python -m pytest -x -q --tb=short 2>&1 || true"
 
         result = await self._ssh.execute(session_id, cmd, timeout=300)
 
