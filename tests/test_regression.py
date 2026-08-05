@@ -126,25 +126,38 @@ class TestC3_CidrCheck:
         assert is_ip_allowed("127.0.0.1", []) is False
 
     @pytest.mark.asyncio
-    async def test_restore_skips_outside_cidr(self):
-        """Verify the restore flow would skip creating session for out-of-CIDR host."""
-        import app.state as state_module
-        from app.auth_middleware import parse_cidrs
+    async def test_restore_skips_outside_cidr(self, monkeypatch):
+        """Verify the real restore flow skips creating a session for a
+        target host outside the policy CIDRs.
 
-        state_module.manager = AsyncMock()
-        state_module.manager.create_session = AsyncMock()
-        state_module.manager.deactivate_session = AsyncMock()
+        Regression (T89 follow-up): this used to check the host against
+        allowed_nets = parse_cidrs(settings.allowed_client_cidrs) — the
+        CIDR that controls who may call this API, not which target hosts
+        a session may point at. _restore_persisted_sessions() now runs
+        the same allowed_target_cidrs/denied_target_cidrs check (and
+        pinned_ip dial) a fresh POST /api/ssh/connect goes through.
+        """
+        from app.config import settings
+        from app.main import _restore_persisted_sessions
 
-        # In The Real Code (main.py:314), The Condition Is:
-        # If Creds And Is_ip_allowed(creds.get("host", ""), Allowed_nets):
-        allowed_nets = parse_cidrs("10.0.0.0/8")
-        creds = {"host": "172.16.0.99", "port": 22, "username": "test"}
-        if creds and is_ip_allowed(creds["host"], allowed_nets):
-            session_id = "would-create"
-        else:
-            session_id = None
+        monkeypatch.setattr(settings, "allowed_target_cidrs", "10.0.0.0/8")
+        monkeypatch.setattr(settings, "denied_target_cidrs", "")
 
-        assert session_id is None  # outside CIDR → skip
+        manager = AsyncMock()
+        session_store = AsyncMock()
+        session_store.list_active_sessions = AsyncMock(
+            return_value=[{"session_id": "s-1"}]
+        )
+        session_store.get_session_credentials = AsyncMock(
+            return_value={"host": "172.16.0.99", "port": 22, "username": "test"}
+        )
+
+        restored, failed = await _restore_persisted_sessions(session_store, manager)
+
+        assert restored == 0
+        assert failed == 1
+        manager.create_session.assert_not_called()
+        session_store.deactivate_session.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -177,31 +190,79 @@ class TestC4_AgentTokenStore:
         assert state_module.agent_token_store is None
 
     @pytest.mark.asyncio
-    async def test_restore_session_bug_was_fixed(self):
-        """C4 regression: main.py used restore_session() which didn't exist."""
-        import app.state as state_module
+    async def test_restore_session_bug_was_fixed(self, monkeypatch):
+        """C4 regression: main.py used restore_session() which didn't exist.
 
-        state_module.manager = AsyncMock()
-        state_module.manager.create_session = AsyncMock(return_value="mock-session")
-        state_module.manager.deactivate_session = AsyncMock()
-
-        creds = {"host": "127.0.0.1", "port": 22, "username": "test", "password": "test"}
-        from app.auth_middleware import is_ip_allowed, parse_cidrs
+        Now exercises the real _restore_persisted_sessions() (extracted
+        from main.py's lifespan during the T89 follow-up fix) rather than
+        an inline copy of the old logic, so this test tracks the actual
+        production code path instead of a snapshot of it.
+        """
         from app.config import settings
+        from app.main import _restore_persisted_sessions
 
-        allowed = parse_cidrs(settings.allowed_client_cidrs)
-        if creds and is_ip_allowed(creds.get("host", ""), allowed):
-            session_id = await state_module.manager.create_session(
-                host=creds["host"],
-                port=creds["port"],
-                username=creds.get("username"),
-                password=creds.get("password"),
-            )
-        else:
-            session_id = None
-            await state_module.manager.deactivate_session("")
+        monkeypatch.setattr(settings, "allowed_target_cidrs", "127.0.0.0/8")
+        monkeypatch.setattr(settings, "denied_target_cidrs", "")
 
-        assert session_id is not None  # 127.0.0.1 should be in the default CIDR
+        manager = AsyncMock()
+        manager.create_session = AsyncMock(return_value="mock-session")
+        session_store = AsyncMock()
+        session_store.list_active_sessions = AsyncMock(
+            return_value=[{"session_id": "s-1"}]
+        )
+        session_store.get_session_credentials = AsyncMock(
+            return_value={
+                "host": "127.0.0.1", "port": 22, "username": "test", "password": "test",
+            }
+        )
+
+        restored, failed = await _restore_persisted_sessions(session_store, manager)
+
+        assert restored == 1  # 127.0.0.1 is in the allowed target CIDR
+        assert failed == 0
+        manager.create_session.assert_awaited_once()
+        session_store.deactivate_session.assert_awaited_once_with("s-1")
+
+    @pytest.mark.asyncio
+    async def test_restore_resolves_hostname_targets(self, monkeypatch):
+        """Regression: the old is_ip_allowed() check only ever matched a
+        literal IP (via ipaddress.ip_address(), which raises on a real
+        hostname) — restoring any hostname-based session silently and
+        permanently failed, forever, regardless of CIDR settings.
+        validate_target_host() resolves the hostname first.
+        """
+        import ipaddress
+
+        from app.config import settings
+        from app.main import _restore_persisted_sessions
+
+        monkeypatch.setattr(settings, "allowed_target_cidrs", "127.0.0.0/8")
+        monkeypatch.setattr(settings, "denied_target_cidrs", "")
+        monkeypatch.setattr(
+            "app.security.resolve_host_ips",
+            lambda host: [ipaddress.ip_address("127.0.0.1")],
+        )
+
+        manager = AsyncMock()
+        manager.create_session = AsyncMock(return_value="mock-session")
+        session_store = AsyncMock()
+        session_store.list_active_sessions = AsyncMock(
+            return_value=[{"session_id": "s-1"}]
+        )
+        session_store.get_session_credentials = AsyncMock(
+            return_value={
+                "host": "gateway-target.internal", "port": 22, "username": "test",
+            }
+        )
+
+        restored, failed = await _restore_persisted_sessions(session_store, manager)
+
+        assert restored == 1
+        assert failed == 0
+        # pinned_ip must be threaded through from the resolved IP, not the
+        # hostname — same DNS-rebinding fix as ssh_connect/ssh_prewarm.
+        assert manager.create_session.call_args.kwargs["pinned_ip"] == "127.0.0.1"
+        assert manager.create_session.call_args.kwargs["host"] == "gateway-target.internal"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

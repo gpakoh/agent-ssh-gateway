@@ -5,7 +5,10 @@ Modes (CommandPolicyMode):
     audit   — policy evaluates and logs decisions but does not block
     enforce — policy blocks commands not matching the selected profile
     ask     — policy creates ApprovalRequest for blocked commands (operator
-              approves/denies via API, 300s TTL)
+              approves/denies via API, 300s TTL). The caller must retry the
+              identical command; the retry is what actually consumes the
+              approval and lets it through (see find_and_consume_approval)
+              — approving a request does not itself execute anything.
 
 Profiles:
     readonly             — read-only inspection only (cat, ls, git status, ...)
@@ -882,8 +885,10 @@ def evaluate_command_policy(
     callers can observe what *would* have happened.
 
     Ask mode: gates 1 (metachar) and 2 (argument_shape) still block;
-    gates 2b (heredoc) and 3 (profile) create a pending approval request
-    instead of blocking.
+    gates 2b (heredoc) and 3 (profile) first check for an already-approved
+    request matching this exact command+profile (consuming it and
+    allowing through if found), otherwise create a new pending approval
+    request instead of blocking.
 
     The allowlist (agent > project > user > system) is checked before any
     gates — if matched, the command is allowed immediately.
@@ -963,8 +968,21 @@ def evaluate_command_policy(
                 suggestion=_get_suggestion(command),
                 suggestions=_get_suggestions(command),
             )
+        # Already approved by an operator? Consume that approval and let
+        # this (re-)evaluation through instead of creating yet another
+        # pending request the caller has no way to ever collect on.
+        from app.policy_ask import create_approval_request, find_and_consume_approval
+        approved = find_and_consume_approval(command, profile_value)
+        if approved is not None:
+            return CommandPolicyDecision(
+                allowed=True,
+                reason=f"Approved by operator ({approved.approved_by}), approval_id={approved.approval_id}",
+                profile=profile_value,
+                mode=mode_value,
+                command_root=root,
+            )
+
         # Gates 2b (heredoc) and 3 (profile) → ask for approval
-        from app.policy_ask import create_approval_request
         approval = create_approval_request(
             command=command,
             profile=profile_value,

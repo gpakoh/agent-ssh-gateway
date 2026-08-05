@@ -18,8 +18,6 @@ from app.agent_token_store import AgentTokenStore
 from app.auth_middleware import (
     PUBLIC_AUTH_PATHS,
     auth_check,
-    is_ip_allowed,
-    parse_cidrs,
 )
 from app.batch_operations import BatchOperationsManager
 from app.bulk_operations_v2 import BulkOperationsManager
@@ -44,6 +42,7 @@ from app.security import (
     SECURITY_HEADERS,
     AuditLogger,
     limiter,
+    validate_target_host,
 )
 from app.server_manager import ServerManager
 from app.session_store import SessionStore
@@ -94,6 +93,57 @@ class _RedactTokenFilter(logging.Filter):
 for _handler in logging.getLogger("uvicorn.access").handlers:
     _handler.addFilter(_RedactTokenFilter())
 logging.getLogger("uvicorn.access").addFilter(_RedactTokenFilter())
+
+
+async def _restore_persisted_sessions(
+    session_store: SessionStore, manager: SSHSessionManager
+) -> tuple[int, int]:
+    """Reconnect sessions saved before the last gateway restart.
+
+    Returns (restored, failed).
+
+    Each host goes through the same allowed_target_cidrs/denied_target_cidrs
+    policy check (and the same DNS-rebinding-safe pinned_ip dial) a fresh
+    POST /api/ssh/connect goes through — restoring a session must not be a
+    way to reach a host a live connect attempt would have refused.
+    """
+    active_sessions = await session_store.list_active_sessions()
+    restored = 0
+    failed = 0
+    for sess in active_sessions:
+        try:
+            creds = await session_store.get_session_credentials(sess["session_id"])
+            if not creds:
+                continue
+            host = creds.get("host", "")
+            try:
+                validated_ips = validate_target_host(
+                    host,
+                    settings.allowed_target_cidrs,
+                    settings.denied_target_cidrs,
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "Refusing to restore session %s: target host %s failed policy: %s",
+                    sess["session_id"], host, exc,
+                )
+                failed += 1
+                continue
+            _ = await manager.create_session(
+                host=host,
+                port=creds.get("port", 22),
+                username=creds["username"],
+                password=creds.get("password"),
+                private_key=creds.get("private_key"),
+                key_passphrase=creds.get("key_passphrase"),
+                pinned_ip=validated_ips[0],
+            )
+            await session_store.deactivate_session(sess["session_id"])
+            restored += 1
+        except Exception as exc:
+            logger.warning("Failed to restore session %s: %s", sess["session_id"], exc)
+            failed += 1
+    return restored, failed
 
 
 async def _audit_retention_loop(
@@ -250,28 +300,9 @@ async def lifespan(app: FastAPI):
             logger.info("Persistent Session Store Connected")
 
             # Restore Active Sessions From Previous Run
-            allowed_nets = parse_cidrs(settings.allowed_client_cidrs)
-            active_sessions = await state.session_store.list_active_sessions()
-            restored = 0
-            failed = 0
-            for sess in active_sessions:
-                try:
-                    creds = await state.session_store.get_session_credentials(sess["session_id"])
-                    if creds and is_ip_allowed(creds.get("host", ""), allowed_nets):
-                        _ = await state.manager.create_session(
-                            host=creds["host"],
-                            port=creds.get("port", 22),
-                            username=creds["username"],
-                            password=creds.get("password"),
-                            private_key=creds.get("private_key"),
-                            key_passphrase=creds.get("key_passphrase"),
-                        )
-
-                        await state.session_store.deactivate_session(sess["session_id"])
-                        restored += 1
-                except Exception as exc:
-                    logger.warning("Failed to restore session %s: %s", sess["session_id"], exc)
-                    failed += 1
+            restored, failed = await _restore_persisted_sessions(
+                state.session_store, state.manager
+            )
             if restored:
                 logger.info(
                     "Restored %d sessions from persistent storage (%d failed)", restored, failed
