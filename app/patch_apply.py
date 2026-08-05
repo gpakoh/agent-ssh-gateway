@@ -140,6 +140,33 @@ class PatchApplier:
                 f"Hash mismatch for '{path}': expected {expected}, got {actual}"
             )
 
+    def _check_line_matches(
+        self, path: str, lines: list[str], source_idx: int, expected: str
+    ) -> None:
+        """Verify the file's actual line at source_idx matches the hunk's
+        expected context/removed line before consuming it.
+
+        Without this, a context/removed line that doesn't match the real
+        file content (a stale patch, a race with another writer, wrong
+        line-number assumptions) was silently accepted — the wrong line
+        got deleted/kept and the intended edit landed in the wrong place,
+        with no error at all. expected_hashes (passed by the caller) is
+        optional and whole-file-only; this is the only check that catches
+        a mismatch at the individual hunk-line level, every time, not just
+        when the caller opts in.
+        """
+        if source_idx >= len(lines):
+            raise PatchValidationError(
+                f"Hunk for '{path}' references line {source_idx + 1}, "
+                f"but the file only has {len(lines)} lines"
+            )
+        actual = lines[source_idx]
+        if actual.rstrip("\n") != expected.rstrip("\n"):
+            raise PatchValidationError(
+                f"Hunk context mismatch for '{path}' at line {source_idx + 1}: "
+                f"expected {expected.rstrip(chr(10))!r}, got {actual.rstrip(chr(10))!r}"
+            )
+
     def _apply_in_memory(self, original: str, file_info: dict) -> str:
         """Apply hunks to original content in memory, return new content."""
         lines = original.splitlines(keepends=True)
@@ -165,8 +192,10 @@ class PatchApplier:
                 if line.is_added:
                     result_lines.append(line.value)
                 elif line.is_removed:
+                    self._check_line_matches(file_info["path"], lines, source_idx, line.value)
                     source_idx += 1
                 elif line.is_context:
+                    self._check_line_matches(file_info["path"], lines, source_idx, line.value)
                     result_lines.append(line.value)
                     source_idx += 1
 
