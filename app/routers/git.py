@@ -202,7 +202,12 @@ async def recovery_backup(
     req: CreateBackupRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Create a backup before making changes."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/recovery/backup",
+    )
     await _get_context_or_404(req.context_id)
 
     result = await _state.context_manager.create_backup(req.context_id, req.name)
@@ -219,7 +224,12 @@ async def recovery_restore(
     req: RestoreBackupRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Restore from backup."""
-    assert_workspace_writable()
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/recovery/restore",
+    )
     await _get_context_or_404(req.context_id)
 
     result = await _state.context_manager.restore_backup(req.context_id)
