@@ -216,6 +216,10 @@ async def lifespan(app: FastAPI):
     state.redis_queue = RedisJobQueue(settings.redis_url)
     state.dist_lock = DistributedLock(settings.redis_url)
     state.bulk_ops = BulkOperationsManager(max_concurrency=50)
+    # JobManager is constructed before RedisJobQueue exists — wire it in
+    # now so terminal job state survives a gateway restart (see
+    # JobManager._persist_terminal_job / RedisJobQueue.save_terminal_job).
+    state.job_manager.redis_queue = state.redis_queue
 
     try:
         await state.redis_queue.connect()

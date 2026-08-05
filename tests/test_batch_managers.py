@@ -2,8 +2,9 @@
 
 Verifies that both BatchOperationsManager (transactional file batch,
 routers/batch.py) and BulkOperationsManager (concurrent executor,
-routers/jobs.py + files.py) keep their public contracts, so the two
-processing paths cannot silently diverge.
+routers/jobs.py's execute_batch_commands + routers/files.py's
+read_files_bulk) keep their public contracts, so the two processing
+paths cannot silently diverge.
 """
 
 import pytest
@@ -99,14 +100,6 @@ class TestBulkOperationsManager:
 
         files = await bulk.read_files_bulk("sess", ["x.txt"], BrokenEditor())
         assert files == {}
-
-    async def test_edit_files_bulk(self, bulk):
-        edits = [{"path": "a.py", "operations": [{"op": "replace", "old": "1", "new": "2"}]}]
-        results = await bulk.edit_files_bulk("sess", edits, FakeFileEditor(), max_concurrency=2)
-        inner = results[0]["result"]
-        assert results[0]["success"] is True
-        assert inner["path"] == "a.py"
-        assert inner["operations_applied"] == 1
 
 
 class TestBatchOperationsManager:

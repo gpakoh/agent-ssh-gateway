@@ -71,6 +71,58 @@ class RedisJobQueue:
             await close_redis_client(self._redis)
             logger.info("Disconnected From Redis")
 
+    async def save_terminal_job(
+        self,
+        job_id: str,
+        *,
+        session_id: str,
+        command: str,
+        owner_id: str,
+        status: str,
+        stdout: str = "",
+        stderr: str = "",
+        exit_code: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Persist a finished JobManager job so it survives a gateway restart.
+
+        JobManager runs jobs immediately in-process (asyncio task per job) —
+        it does not pull from this queue's pending/processing zsets, so
+        enqueue()/dequeue() are the wrong fit for mirroring its lifecycle.
+        This writes a snapshot directly under the same storage the rest of
+        this class reads (_get_job, get_dead_letter_jobs, get_queue_stats),
+        and records failed jobs in the dead-letter zset — the closest
+        faithful mapping given JobManager has no retry concept of its own.
+        No-op if Redis isn't connected; failures here must never affect the
+        in-process job outcome, so callers should treat this as best-effort.
+        """
+        if not self._redis:
+            return
+        job_data = {
+            "id": job_id,
+            "session_id": session_id,
+            "command": command,
+            "status": status,
+            "owner_id": owner_id,
+            "completed_at": time.time(),
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": exit_code,
+            "error": error,
+        }
+        is_failure = status not in ("completed",)
+        ttl = 86400 * 7 if is_failure else 86400
+        await self._redis.set(
+            f"{self._job_prefix}{job_id}",
+            json.dumps(job_data, default=str),
+            ex=ttl,
+        )
+        if is_failure:
+            await self._redis.zadd(self._dead_letter_key, {job_id: time.time()})
+        else:
+            await self._redis.zadd(self._completed_key, {job_id: time.time()})
+        await self._update_queue_depth_metrics()
+
     async def enqueue(
         self,
         session_id: str,
@@ -84,9 +136,14 @@ class RedisJobQueue:
 
         ``owner_id`` (identity fingerprint) travels with the job through
         retries into the dead letter queue, mirroring JobManager/JobRecord's
-        owner_id — see job_visible_to() / T80.2. Currently nothing in this
-        codebase calls enqueue() yet, but any future caller gets ownership
-        tracking for free instead of it being bolted on after the fact.
+        owner_id — see job_visible_to() / T80.2. This pending/processing
+        pull model (enqueue/dequeue/heartbeat/retry_job/recover_orphans) is
+        for a genuine distributed worker pool and has no caller in this
+        codebase yet — JobManager runs jobs immediately in-process rather
+        than pulling from a queue, so it uses save_terminal_job() instead to
+        mirror its own push-based lifecycle. Any future distributed-worker
+        caller gets ownership tracking for free instead of it being bolted
+        on after the fact.
 
         Returns:
             Job ID
