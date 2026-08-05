@@ -318,7 +318,16 @@ def list_files(client: GatewayClient, project: str, pattern: str) -> dict[str, A
 
     files: list[str] = []
     for p in project_dir.rglob(pattern):
-        if any(part in exclude_dirs for part in p.relative_to(project_dir).parts):
+        # rglob() follows symlinks when the pattern explicitly names a
+        # symlinked path segment (e.g. pattern="some_symlink/*"), even
+        # though it doesn't descend into them for bare "*"/"**" wildcards.
+        # relative_to() on the unresolved path is purely structural and
+        # doesn't catch this — resolve first and check real containment.
+        try:
+            rel = p.resolve().relative_to(project_dir)
+        except (OSError, ValueError):
+            continue
+        if any(part in exclude_dirs for part in rel.parts):
             continue
         if p.is_file():
             files.append(str(p.relative_to(project_dir)))
