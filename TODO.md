@@ -1,5 +1,24 @@
 # Agent SSH Gateway — TODO
 
+## 🔍 T83 — Второй круг: app/workspace/* и patch_apply.py
+
+Контекст: T82 нашёл path traversal в `project_patch.py` (`app/services/`) —
+`f["path"]` из тела патча резолвился за пределы project root без проверки,
+доступно со scope `project:patch` (не master key). `app/workspace/*` —
+пакет, который РЕЗОЛВИТ project root и project:read/write scope для всей
+остальной системы (`policy.py`, `registry.py`), то есть ровно тот же класс
+риска, только на уровень выше. Не аудирован вообще. Плюс сам алгоритм
+применения патчей (`patch_apply.py`) — раньше проверялись только
+traversal/forbidden-ops, не корректность хуnков.
+
+1. **`app/workspace/policy.py`** — приоритет №1, ядро path/scope resolution.
+2. **`app/workspace/registry.py`** — резолвит project roots, кормит policy.py.
+3. **`app/workspace/edit.py` + `files.py`** — запись/редактирование файлов.
+4. **`app/workspace/git.py` + `snapshot.py`** — git-операции и снапшоты.
+5. **`app/workspace/search.py` + `preview.py` + `receipts.py`**.
+6. **`app/workspace/scan_project.py` + `tools.py` + `models.py` + `__init__.py`**.
+7. **`app/patch_apply.py`** — корректность самого алгоритма применения хуnков.
+
 ## 🔍 T82 — Аудит зон, не пройденных сегодняшним seam-аудитом
 
 Контекст: сессия seam-аудита (после T79/T80/T81) нашла реальные, часто серьёзные
