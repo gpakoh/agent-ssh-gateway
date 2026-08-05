@@ -1,5 +1,65 @@
 # Agent SSH Gateway — TODO
 
+## 🔍 T86 — Пятый круг: examples/mcp_client_remote
+
+Контекст: "fleet" MCP-сервер (Gitea/GitHub/Docker/Postgres/Context7),
+частично аудирован в более ранней сессии (SSRF, connection leaks,
+URL-leak sanitization, XSS на /oauth/consent — все уже исправлены). Этот
+круг — все 14 файлов (~2900 строк) заново, с паттернами, накопленными за
+T83-T85.
+
+1. ✅ **`gitea_client.py`/`github_client.py` — SERIOUS, живой path traversal
+   мимо `ALLOWED_ENDPOINTS`.** Оба клиента строили путь запроса через
+   `"/repos/{owner}/{repo}/...".format(owner=owner, repo=repo)` без вообще
+   какой-либо валидации `owner`/`repo`/`path` (MCP tool signature — голый
+   `str`, никаких паттернов). httpx нормализует `..`-сегменты в итоговом
+   пути ОТНОСИТЕЛЬНО ВСЕГО URL (включая путь самого `base_url`) —
+   эмпирически подтверждено: `client.build_request("GET",
+   "/repos/foo/../../admin/x/branches")` при `base_url="https://host/api/v1"`
+   резолвится в `"https://host/api/v1/admin/x/branches"`. `owner =
+   "foo/../../admin"` полностью убегал из намеченной структуры
+   `/repos/{owner}/{repo}/...` и попадал на ПРОИЗВОЛЬНЫЕ другие endpoint'ы
+   API — включая реальный `/api/v1/admin/*` у Gitea — используя собственный
+   `GITEA_TOKEN`/`GITHUB_TOKEN` адаптера. Проверка `ALLOWED_ENDPOINTS`
+   валидирует только фиксированный TEMPLATE, никогда не финальный,
+   подставленный путь. Добавлены `validate_repo_owner_or_name()`/
+   `validate_repo_path()` в `shared.py`, применены централизованно в
+   `_get()` обоих клиентов. Commit `b755e25e`.
+2. ✅ **`docker_client.py`** — `compose_up`/`compose_restart`/`compose_build`/
+   `compose_logs`/`compose_down` не клэмпили `timeout`, в отличие от
+   `stop`/`restart` (уже клэмпят к `[1, 120]`). Неограниченный
+   caller-supplied timeout уходил прямо в `asyncio.wait_for()`, а для
+   `compose_down` — ещё и в саму `-t` argv. Тот же паттерн, что уже
+   применялся к `stop`/`restart`, просто непоследовательно. Commit
+   `cb490999`.
+3. ✅ **`server.py`** — главный entry point, публичный OAuth-прокси. Уже
+   выигрывает от фикса `has_required_scope` (T85 п.2) — это ИМЕННО тот
+   живой enforcement path, который его использует
+   (`_check_tool_scope` → `has_required_scope`). Fail-open путь для
+   не-`tools/call` тел (в т.ч. гипотетический JSON-RPC batch-массив)
+   проверен — не эксплуатируем, т.к. `mcp` SDK's `JSONRPCMessage.model_validate()`
+   отклоняет list-shaped тела до того, как что-либо выполнится — корректный
+   backstop на уровне транспорта.
+4. ✅ **Проверено без новых находок**: `postgres_client.py` (SQL guardrails
+   подкреплены `default_transaction_read_only=on` на уровне соединения —
+   даже пробел в regex-blocklist перехватывается самим Postgres для
+   любого DML/DDL; comment-based bypass не работает, т.к. Postgres
+   токенизирует комментарии как разделители, а не склеивает соседние
+   идентификаторы), `postgres_server.py` (уже пользуется исправленным
+   connection-pool-leak фиксом), `docker_server.py`/`gitea_server.py`/
+   `github_server.py` (только регистрация уже проверенных клиентов),
+   `context7_server.py` (уже пользуется исправленным subprocess-leak
+   фиксом), `gitea_mcp_stdio.py`, `run_docker_server.py`,
+   `run_postgres_server.py` (тривиальные launcher-скрипты).
+
+## Итог T86
+
+2 реальных бага, оба с regression-тестами, проверенными на падение до
+фикса. Path traversal в gitea/github клиентах — самая серьёзная находка
+этого круга: живой, реально эксплуатируемый уход за пределы
+`ALLOWED_ENDPOINTS` с использованием собственного токена адаптера.
+Полный набор тестов (4047) зелёный.
+
 ## 🔍 T85 — Четвёртый круг: examples/mcp_server
 
 Контекст: аудит всех 23 файлов `examples/mcp_server/` (~8300 строк) —
