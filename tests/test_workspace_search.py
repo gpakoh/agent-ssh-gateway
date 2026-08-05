@@ -203,3 +203,67 @@ class TestSearchTextRelativePath:
             project_search_text(
                 "test-project", "content", relative_path="file.txt", registry=reg
             )
+
+
+class TestSearchTextSymlinkEscape:
+    """Regression: Path.glob() follows symlinks when the pattern explicitly
+    names a symlinked path segment (e.g. file_glob="escape_link/*"), even
+    though it doesn't descend into them for "**" wildcards. The old code's
+    only containment check was `file_path.relative_to(project_root)`, a
+    purely structural/string check that always succeeds for a path built by
+    joining project_root with matched glob components — it never resolved
+    the path to see where the symlink actually points. Any project:read
+    caller with an existing symlink anywhere in their project (a common,
+    ordinary artifact — node_modules/.bin, a venv symlink, a deploy
+    "current" link) could exfiltrate file content from anywhere on the
+    gateway host the process can read, via a crafted file_glob.
+    """
+
+    def test_glob_naming_symlink_directly_does_not_leak_content(self, tmp_path: Path) -> None:
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("TOP SECRET password=hunter2\n")
+
+        (project_root / "escape_link").symlink_to(outside)
+
+        reg = _make_registry(tmp_path, projects={"test-project": project_root})
+
+        result = project_search_text(
+            "test-project", "SECRET", file_glob="escape_link/*", registry=reg
+        )
+        assert result["matches"] == []
+
+    def test_glob_naming_symlink_directly_star_star_does_not_leak_content(
+        self, tmp_path: Path
+    ) -> None:
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("TOP SECRET password=hunter2\n")
+
+        (project_root / "escape_link").symlink_to(outside)
+
+        reg = _make_registry(tmp_path, projects={"test-project": project_root})
+
+        result = project_search_text(
+            "test-project", "SECRET", file_glob="escape_link/**/*", registry=reg
+        )
+        assert result["matches"] == []
+
+    def test_normal_search_through_real_subdir_still_works(self, tmp_path: Path) -> None:
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        sub = project_root / "sub"
+        sub.mkdir()
+        (sub / "a.txt").write_text("findme here\n")
+
+        reg = _make_registry(tmp_path, projects={"test-project": project_root})
+
+        result = project_search_text(
+            "test-project", "findme", file_glob="sub/*", registry=reg
+        )
+        assert len(result["matches"]) == 1
+        assert result["matches"][0]["path"] == "sub/a.txt"
