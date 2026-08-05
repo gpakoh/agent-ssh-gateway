@@ -60,3 +60,74 @@ jobs:
 
       - name: pip-audit
         run: uv run pip-audit --strict --progress-spinner=off .
+
+  build-and-push:
+    # Only ever builds images from a commit that already passed every
+    # other job, and only on a real push to master — never on a PR run.
+    # This is what actually lets "what's in prod" be proven equal to
+    # "what passed CI" — before this job, every deploy rebuilt from
+    # whatever source happened to be checked out on the deploy host at
+    # that moment. Mirrors quart-core's ci-cd.yml build-and-push job.
+    needs: [test]
+    if: github.ref_name == 'master' && github.event_name == 'push'
+    runs-on: docker-e2e-ci
+    env:
+      REGISTRY: 192.168.1.103:3005
+    steps:
+      - uses: actions/checkout@v7
+      - name: Log in to the Gitea container registry
+        run: |
+          echo "${{ secrets.REGISTRY_TOKEN }}" | docker login "$REGISTRY" -u gpakoh --password-stdin
+      - name: Build and push web-ssh-gateway image
+        run: |
+          docker build -f docker/Dockerfile \
+            --build-arg BUILD_SHA=${{ github.sha }} \
+            --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            -t "$REGISTRY/gpakoh/agent-ssh-gateway:${{ github.sha }}" \
+            -t "$REGISTRY/gpakoh/agent-ssh-gateway:latest" \
+            .
+          docker push "$REGISTRY/gpakoh/agent-ssh-gateway:${{ github.sha }}"
+          docker push "$REGISTRY/gpakoh/agent-ssh-gateway:latest"
+      - name: Build and push mcp-server image
+        run: |
+          docker build -f docker/Dockerfile.mcp-server \
+            --build-arg BUILD_SHA=${{ github.sha }} \
+            --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            -t "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}" \
+            -t "$REGISTRY/gpakoh/mcp-server:latest" \
+            .
+          docker push "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}"
+          docker push "$REGISTRY/gpakoh/mcp-server:latest"
+
+  deploy:
+    # Runs right after real images are pushed — pulls them, redeploys
+    # web-ssh-gateway + mcp-server, smoke-tests, and rolls back to the
+    # last known-good digest if the smoke check fails. The bind mount
+    # below is this same repo's real checkout on the host (not a fresh
+    # clone) — it's the only way to reach the real docker-compose.yml and
+    # its gitignored docker/.env (real API_KEY/JWT_SECRET/ENCRYPTION_KEY
+    # etc. aren't in git, so a fresh checkout here would silently fall
+    # back to missing/placeholder credentials, and docker-compose.yml
+    # requires them via `:?`). Mirrors quart-core's deploy job — see
+    # scripts/deploy-from-registry.sh for the actual rollout+rollback
+    # logic and its own notes on the runner's `valid_volumes: ["**"]`
+    # config and why the smoke check can't curl "localhost" from inside
+    # this job's container.
+    needs: [build-and-push]
+    if: github.ref_name == 'master' && github.event_name == 'push'
+    runs-on: docker-e2e-ci
+    container:
+      volumes:
+        - /media/1TB/Python/web_ssh/web-ssh-gateway:/deploy/web-ssh-gateway
+    env:
+      REGISTRY: 192.168.1.103:3005
+    steps:
+      # Each job gets its own fresh container — build-and-push's docker
+      # login doesn't carry over, even on the same runner.
+      - name: Log in to the Gitea container registry
+        run: |
+          echo "${{ secrets.REGISTRY_TOKEN }}" | docker login "$REGISTRY" -u gpakoh --password-stdin
+      - name: Deploy, smoke-test, roll back on failure
+        run: |
+          cd /deploy/web-ssh-gateway
+          bash scripts/deploy-from-registry.sh

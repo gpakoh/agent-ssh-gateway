@@ -74,6 +74,11 @@ services:
       retries: 3
 
   mcp-server:
+    # `image:` names the CI-built, git-SHA-tagged artifact (see
+    # .github/workflows/ci.yml's build-and-push job) — `docker compose
+    # pull && up` deploys exactly what passed CI. `build:` stays for local
+    # dev iteration (`up --build`); it is NOT how a real deploy works.
+    image: ${MCP_SERVER_IMAGE:-192.168.1.103:3005/gpakoh/mcp-server:latest}
     build:
       context: ..
       dockerfile: docker/Dockerfile.mcp-server
@@ -121,6 +126,11 @@ services:
         condition: service_healthy
 
   web-ssh-gateway:
+    # `image:` names the CI-built, git-SHA-tagged artifact (see
+    # .github/workflows/ci.yml's build-and-push job) — `docker compose
+    # pull && up` deploys exactly what passed CI. `build:` stays for local
+    # dev iteration (`up --build`); it is NOT how a real deploy works.
+    image: ${WEB_SSH_GATEWAY_IMAGE:-192.168.1.103:3005/gpakoh/agent-ssh-gateway:latest}
     build:
       context: ..
       dockerfile: docker/Dockerfile
