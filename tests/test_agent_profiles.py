@@ -10,6 +10,7 @@ from app.agent_profiles import (
     TrustLevel,
     detect_agent,
     detect_agent_from_env,
+    detect_agent_from_proc,
     effective_packs,
     get_agent_profile,
 )
@@ -75,6 +76,35 @@ class TestAgentDetection:
         """detect_agent should return at least 'unknown'."""
         agent = detect_agent()
         assert isinstance(agent, str)
+
+    def test_detect_from_proc_uses_parent_pid_not_own_pid(self, monkeypatch):
+        """Regression: detect_agent_from_proc() read /proc/{os.getpid()}/comm
+        — its own PID — instead of /proc/{os.getppid()}/comm, despite the
+        docstring ("parent process name") and the local variable itself
+        being named `ppid`. It always read the gateway's own process name
+        (never one of _PROC_NAME_MAP's entries), so this fallback silently
+        always returned "unknown" no matter what actually launched it.
+        """
+        own_pid = 111
+        parent_pid = 222
+        monkeypatch.setattr(os, "getpid", lambda: own_pid)
+        monkeypatch.setattr(os, "getppid", lambda: parent_pid)
+
+        def fake_isfile(path):
+            if path == f"/proc/{own_pid}/comm":
+                raise AssertionError("must read the PARENT pid's comm, not our own")
+            return path == f"/proc/{parent_pid}/comm"
+
+        monkeypatch.setattr(os.path, "isfile", fake_isfile)
+
+        from unittest.mock import mock_open, patch
+
+        m = mock_open(read_data="claude\n")
+        with patch("builtins.open", m):
+            result = detect_agent_from_proc()
+
+        m.assert_called_once_with(f"/proc/{parent_pid}/comm")
+        assert result == "claude-code"
 
     def test_get_profile_known(self):
         p = get_agent_profile("chatgpt")
