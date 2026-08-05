@@ -6,6 +6,8 @@ from typing import Any
 
 import httpx
 
+from .shared import validate_repo_owner_or_name, validate_repo_path
+
 # ── Guardrails ────────────────────────────────────────────────────────
 MAX_PER_PAGE = 50
 MAX_FILE_SIZE = 256 * 1024  # 256 KB
@@ -86,6 +88,17 @@ class GitHubClient:
         """Build URL, validate endpoint, perform GET, parse JSON."""
         if endpoint not in ALLOWED_ENDPOINTS:
             raise ValueError(f"Endpoint not allowed: {endpoint}")
+
+        # Validate every path-template placeholder centrally — owner/repo
+        # must never contain "/" (path-segment injection past the intended
+        # /repos/{owner}/{repo}/... structure — see shared.py's docstring),
+        # {path} legitimately contains "/" but never "..".
+        if "owner" in path_params:
+            validate_repo_owner_or_name(path_params["owner"], label="owner")
+        if "repo" in path_params:
+            validate_repo_owner_or_name(path_params["repo"], label="repo")
+        if "path" in path_params:
+            validate_repo_path(path_params["path"])
 
         path = endpoint.format(**path_params)
         resp = await self._client.get(path, params=params)

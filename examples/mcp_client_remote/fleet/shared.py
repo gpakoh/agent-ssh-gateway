@@ -3,10 +3,52 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from typing import Any, TypedDict
 
 from starlette.requests import Request
+
+# Gitea/GitHub owner and repo names never legitimately contain "/" — this is
+# also what stops path-segment injection: gitea_client.py/github_client.py
+# build request paths via "/repos/{owner}/{repo}/...".format(owner=owner,
+# repo=repo) against an httpx client with a base_url. httpx normalizes ".."
+# segments in the resulting path against the FULL URL (base_url's path
+# included), so an unvalidated owner like "foo/../../admin" reached
+# {api_base}/admin/... instead of {api_base}/repos/foo/.../admin/... — a
+# real endpoint escape past ALLOWED_ENDPOINTS, using the fleet adapter's own
+# GITEA_TOKEN/GITHUB_TOKEN credential. Confirmed empirically via httpx's own
+# request-building.
+_REPO_OWNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+
+
+def validate_repo_owner_or_name(value: str, *, label: str = "value") -> str:
+    """Validate a Gitea/GitHub owner or repo name — no "/", no traversal.
+
+    Raises ValueError if value is empty, contains a path separator, or
+    doesn't match the conservative safe-charset every real owner/repo name
+    satisfies.
+    """
+    if not _REPO_OWNER_RE.match(value):
+        raise ValueError(f"Invalid {label}: {value!r}")
+    return value
+
+
+def validate_repo_path(path: str) -> str:
+    """Validate a repository-relative file path used in a contents API call.
+
+    Unlike owner/repo, a real path legitimately contains "/" for
+    subdirectories — but must never contain a ".." segment, a leading "/"
+    (absolute), or be empty, all of which let it escape the intended
+    /repos/{owner}/{repo}/contents/{path} URL structure the same way an
+    unvalidated owner/repo does.
+    """
+    if not path or path.startswith("/"):
+        raise ValueError(f"Invalid path: {path!r}")
+    parts = path.split("/")
+    if any(p in ("", "..", ".") for p in parts):
+        raise ValueError(f"Invalid path: {path!r}")
+    return path
 
 
 class FleetEnv(TypedDict):
