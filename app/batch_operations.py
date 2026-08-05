@@ -1,7 +1,9 @@
 """Batch operations for multi-file editing and refactoring."""
 
 import asyncio
+import base64
 import logging
+import shlex
 from dataclasses import dataclass
 from enum import Enum
 
@@ -225,8 +227,11 @@ class BatchOperationsManager:
         self, session_id: str, path: str, content: str
     ) -> BatchOperationResult:
         """Create new file."""
-        # Use echo to create file
-        cmd = f"cat > '{path}' << 'EOF_BATCH'\n{content}\nEOF_BATCH"
+        # Base64-encode the payload so arbitrary file content (including a
+        # line that happens to match the heredoc terminator) can never
+        # break out of the heredoc and be interpreted as shell commands.
+        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        cmd = f"base64 -d << 'EOF_BATCH' > {shlex.quote(path)}\n{encoded}\nEOF_BATCH"
 
         result = await self._ssh.execute(session_id, cmd, timeout=30)
 
@@ -240,7 +245,7 @@ class BatchOperationsManager:
 
     async def _execute_delete(self, session_id: str, path: str) -> BatchOperationResult:
         """Delete file."""
-        result = await self._ssh.execute(session_id, f"rm -f '{path}'", timeout=10)
+        result = await self._ssh.execute(session_id, f"rm -f {shlex.quote(path)}", timeout=10)
 
         return BatchOperationResult(
             operation="delete",
@@ -253,7 +258,9 @@ class BatchOperationsManager:
         self, session_id: str, old_path: str, new_path: str
     ) -> BatchOperationResult:
         """Rename file."""
-        result = await self._ssh.execute(session_id, f"mv '{old_path}' '{new_path}'", timeout=10)
+        result = await self._ssh.execute(
+            session_id, f"mv {shlex.quote(old_path)} {shlex.quote(new_path)}", timeout=10
+        )
 
         return BatchOperationResult(
             operation="rename",
@@ -266,7 +273,9 @@ class BatchOperationsManager:
         self, session_id: str, src_path: str, dest_path: str
     ) -> BatchOperationResult:
         """Copy file."""
-        result = await self._ssh.execute(session_id, f"cp '{src_path}' '{dest_path}'", timeout=10)
+        result = await self._ssh.execute(
+            session_id, f"cp {shlex.quote(src_path)} {shlex.quote(dest_path)}", timeout=10
+        )
 
         return BatchOperationResult(
             operation="copy",
@@ -293,7 +302,9 @@ class BatchOperationsManager:
                 error=f"Command denied by policy: {decision.reason}",
             )
 
-        result = await self._ssh.execute(session_id, f"cd {cwd} && {command}", timeout=60)
+        result = await self._ssh.execute(
+            session_id, f"cd {shlex.quote(cwd)} && {command}", timeout=60
+        )
 
         return BatchOperationResult(
             operation="execute",
