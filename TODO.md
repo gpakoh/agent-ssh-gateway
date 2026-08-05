@@ -24,13 +24,38 @@
    молча терялся. Существующий тест проверял только наличие label, не detail —
    не поймал бы баг. Исправлено, добавлены 2 регрессионных теста (проверены на
    падение против до-фикс кода). Commit `ee5c6d77`.
-4. **Непроверенные роутеры** — структурно тронуты в P19 (вынос в сервисы), но
-   не seam-аудированы на реальные баги в этой сессии: `admin_access.py`,
-   `admin_approval.py` (ASK-mode approval flow — auth-смежный риск),
-   `event_hooks.py` (доставка вебхуков, HMAC-подпись — тот же класс, что утечка
-   URL у Gitea/GitHub), `git.py`, `servers.py`, `snapshots.py`, `templates.py`,
-   `system.py`, `diagnostics.py`, `logs.py`, `code.py`, `project_inspection.py`,
-   `search_replace.py`, `batch.py`, `webhooks.py`.
+4. ✅ **Непроверенные роутеры** — прошёл все 15. Реальные баги, все исправлены
+   с regression-тестами (проверены на падение до фикса), задеплоено:
+   - `admin_access.py`: `ttl_seconds=0` в decision endpoint тихо заменялся
+     дефолтным TTL (`or` вместо `is not None`). Commit `e6ed8bf5`.
+   - `event_hooks.py`/`event_hook_delivery.py`: SSRF — `validate_webhook_url()`
+     проверяет только literal-IP хосты, хостнейм, резолвящийся в
+     127.0.0.1/169.254.169.254/RFC1918, никогда не перепроверялся перед
+     реальным исходящим запросом. `validate_destination_ip()` существовал,
+     но был dead code. Commit `846d07b8`.
+   - `git.py`: `recovery_backup`/`recovery_restore` звали
+     `assert_workspace_writable()` без аргументов — блок работал, но аудит-
+     событие терял actor_fingerprint/route. Commit `ef0d0510`.
+   - `diagnostics.py`: `POST /api/session/check` вообще не звал
+     `ensure_session_owner` (в отличие от идентичного по смыслу
+     `GET /api/ssh/session/{id}/health`) — любой agent-токен с
+     `diagnostics:read` мог узнать статус ЧУЖОЙ сессии по id. Commit `bbb40637`.
+   - `batch.py`: `/api/batch/execute` вообще не звал
+     `assert_workspace_writable()` — mutating-операции (edit/create/delete/
+     rename/copy) полностью игнорировали `WORKSPACE_READONLY=true`.
+     Commit `97e6d133`.
+   - `servers.py`, `snapshots.py`, `templates.py`, `system.py`, `logs.py`,
+     `code.py`, `project_inspection.py`, `search_replace.py`,
+     `admin_approval.py`: чисто, без новых находок.
+   - **Не исправлено, требует решения пользователя**: `webhook_manager.py`
+     (роутер `webhooks.py`, отдельная от `event_hooks.py` старая система
+     "webhook → auto-deploy") — `handle_webhook()` содержит комментарий
+     "Verify Secret (simple Check) — In Production, Use HMAC Signature
+     Verification" и **никогда фактически не проверяет secret**. Сейчас не
+     эксплуатируемо: `handle_webhook()` не подключён ни к одному роутеру
+     (dead code — нет входящего endpoint'а для приёма реального GitHub/Gitea
+     webhook). Решить: реализовать нормальную HMAC-проверку и подключить
+     receiver, или убрать функциональность целиком, если не используется.
 5. **Redis job queue / dead-letter** — T81.4 добавил owner-фильтрацию в
    предположении, что `redis_queue.enqueue()` нигде не вызывается (очередь
    всегда пуста на практике). Проверить, что это предположение всё ещё верно;
