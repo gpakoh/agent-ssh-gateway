@@ -98,3 +98,30 @@ class TestScanProject:
         parsed = json.loads(result)
         for r in parsed["runs"][0]["results"]:
             assert r["level"] in ("error", "warning", "note")
+
+
+class TestScanProjectSymlinkEscape:
+    """Regression: root.rglob(pattern) follows symlinks when the pattern
+    explicitly names a symlinked path segment (e.g. pattern="escape_link/*"),
+    even though it doesn't descend into them for bare "*"/"**" wildcards.
+    The only containment check was path.relative_to(root), purely
+    structural — it never resolved the path to see where the symlink
+    actually points. A dangerous-command line from outside the project
+    root would get read, pattern-matched, and echoed back verbatim in the
+    findings' "content" field.
+    """
+
+    def test_glob_naming_symlink_directly_does_not_leak_findings(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "evil.sh").write_text("rm -rf /\n")
+
+        (project / "escape_link").symlink_to(outside)
+
+        result = scan_project(
+            "test", pattern="escape_link/*", max_files=10, _root_override=project
+        )
+        assert result["total_findings"] == 0
+        assert result["findings"] == {}

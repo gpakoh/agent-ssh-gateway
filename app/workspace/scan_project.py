@@ -126,6 +126,17 @@ def _scan(
         except ValueError:
             continue
 
+        # rglob() follows symlinks when the pattern explicitly names a
+        # symlinked path segment (e.g. pattern="some_symlink/*"), even
+        # though it doesn't descend into them for bare "**"/"*" wildcards.
+        # relative_to() above is purely structural — it doesn't catch this,
+        # since the returned path still carries the root prefix textually
+        # while actually reading through the symlink to wherever it points.
+        try:
+            path.resolve().relative_to(root)
+        except (OSError, ValueError):
+            continue
+
         if any(part in EXCLUDE_DIRS for part in rel.parts):
             continue
         if not path.is_file():
