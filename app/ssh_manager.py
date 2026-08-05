@@ -5,6 +5,7 @@ import builtins
 import hashlib
 import io
 import logging
+import socket
 import time
 import uuid
 from collections.abc import Callable
@@ -317,6 +318,7 @@ class SSHSessionManager:
         source_ip: str | None = None,
         tenant_labels: tuple[str, ...] = (),
         session_id: str | None = None,
+        pinned_ip: str | None = None,
     ) -> str:
         """Create a new SSH session and return its session ID.
 
@@ -332,6 +334,19 @@ class SSHSessionManager:
         The optional ``session_id`` is used by the pre-warm endpoint so
         the caller can learn the id before the background connection
         finishes.
+
+        ``pinned_ip``, when given, must be an IP address the caller has
+        already validated (e.g. via security.validate_target_host) against
+        the allowed/denied CIDR policy. We dial that exact IP via a raw
+        socket and hand it to paramiko as ``sock=`` instead of letting
+        paramiko resolve ``host`` itself — otherwise the CIDR check and the
+        actual TCP connect are two separate DNS lookups moments apart, and
+        an attacker controlling DNS for the target hostname (low-TTL
+        record) can return an allowed IP for the first lookup and an
+        internal/metadata IP for the second, bypassing the policy entirely
+        (DNS rebinding). ``hostname=host`` is still passed to paramiko
+        unchanged so host-key policy/known-hosts lookups keep working by
+        the name the caller and operator actually recognize.
         """
         auth_method = "password" if password is not None else "key"
         credential_fingerprint = _credential_fingerprint(auth_method, password, private_key, key_passphrase)
@@ -378,21 +393,30 @@ class SSHSessionManager:
             if private_key:
                 pkey = await self._load_private_key(private_key, key_passphrase)
 
+            def _connect() -> None:
+                sock = None
+                if pinned_ip is not None:
+                    # Dial the pre-validated IP directly — see pinned_ip
+                    # docstring above for why this must not re-resolve host.
+                    sock = socket.create_connection((pinned_ip, port), timeout=30)
+                client.connect(
+                    hostname=host,
+                    port=port,
+                    username=username,
+                    password=password,
+                    pkey=pkey,
+                    sock=sock,
+                    timeout=30,
+                    banner_timeout=30,
+                    auth_timeout=30,
+                    look_for_keys=False,
+                )
+
             try:
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(
                     None,
-                    lambda: client.connect(
-                        hostname=host,
-                        port=port,
-                        username=username,
-                        password=password,
-                        pkey=pkey,
-                        timeout=30,
-                        banner_timeout=30,
-                        auth_timeout=30,
-                        look_for_keys=False,
-                    ),
+                    _connect,
                 )
             except AuthenticationException as exc:
                 # Host is reachable, credentials are wrong — not a circuit-breaker
