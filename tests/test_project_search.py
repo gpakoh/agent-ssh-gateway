@@ -200,3 +200,30 @@ class TestSearchText:
         )
         assert match is not None
         assert match["line_number"] == 5  # 5th line in main.py
+
+
+class TestSearchTextSymlinkEscape:
+    """Regression: root_path.rglob(iter_pattern) follows symlinks when the
+    pattern explicitly names a symlinked path segment (e.g.
+    glob="escape_link/*"), even though it doesn't descend into them for
+    bare "*"/"**" wildcards. The only containment check was
+    p.relative_to(root_path) — purely structural, it never resolved the
+    path to see where the symlink actually points. Same bug, same fix, as
+    app/workspace/search.py and app/workspace/scan_project.py found
+    earlier this session.
+    """
+
+    def test_glob_naming_symlink_directly_does_not_leak_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "secret.txt").write_text("TOP SECRET password=hunter2\n")
+
+            (project / "escape_link").symlink_to(outside)
+
+            result = search_text(project, "SECRET", glob="escape_link/*")
+            assert result["count"] == 0
+            assert result["matches"] == []
