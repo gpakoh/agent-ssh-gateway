@@ -336,7 +336,7 @@ class DeliveryService:
         except OSError as exc:
             return f"DNS resolution failed: {exc}"
         for _family, _type, _proto, _canonname, sockaddr in addrs:
-            ip = sockaddr[0]
+            ip = str(sockaddr[0])
             if not validate_destination_ip(ip).valid:
                 return f"resolves to blocked address {ip}"
         return None
