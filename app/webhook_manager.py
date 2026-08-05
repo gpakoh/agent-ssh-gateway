@@ -1,6 +1,14 @@
-"""CI/CD Webhook integration for auto-deployment."""
+"""CI/CD Webhook integration for auto-deployment.
+
+Deploys are triggered explicitly via POST /api/webhooks/{id}/deploy — an
+authenticated API call, not an unauthenticated incoming receiver. There is
+no endpoint that accepts a raw GitHub/Gitea webhook POST; api_help.py only
+ever documents the explicit-trigger flow, consistent with this project's
+API-first, no-raw-internet-exposure security posture.
+"""
 
 import logging
+import time
 from dataclasses import dataclass
 from enum import Enum
 
@@ -31,7 +39,6 @@ class WebhookConfig:
     id: str
     name: str
     webhook_type: WebhookType
-    secret: str
     target_path: str
     deploy_command: str
     context_id: str
@@ -52,7 +59,6 @@ class WebhookManager:
         self,
         name: str,
         webhook_type: str,
-        secret: str,
         target_path: str,
         deploy_command: str,
         context_id: str,
@@ -67,7 +73,6 @@ class WebhookManager:
             id=webhook_id,
             name=name,
             webhook_type=WebhookType(webhook_type),
-            secret=secret,
             target_path=target_path,
             deploy_command=deploy_command,
             context_id=context_id,
@@ -92,43 +97,6 @@ class WebhookManager:
             return True
         return False
 
-    async def handle_webhook(
-        self,
-        webhook_id: str,
-        payload: dict,
-        headers: dict,
-    ) -> dict:
-        """Handle incoming webhook."""
-        config = self._webhooks.get(webhook_id)
-        if not config:
-            return {"status": "error", "message": "Webhook not found"}
-
-        if not config.enabled:
-            return {"status": "error", "message": "Webhook disabled"}
-
-        # Verify Secret (simple Check)
-        # In Production, Use HMAC Signature Verification
-
-        # Trigger Deployment
-        deploy_id = f"deploy_{len(self._deployments)}"
-
-        # Log Deployment
-        deployment = {
-            "id": deploy_id,
-            "webhook_id": webhook_id,
-            "webhook_name": config.name,
-            "status": DeployStatus.PENDING.value,
-            "timestamp": logging.time.time() if hasattr(logging, "time") else 0,
-            "payload": payload,
-        }
-        self._deployments.append(deployment)
-
-        return {
-            "status": "accepted",
-            "deploy_id": deploy_id,
-            "message": f"Deployment queued for {config.name}",
-        }
-
     def get_deployments(self, webhook_id: str | None = None) -> list[dict]:
         """Get deployment history."""
         if webhook_id:
@@ -141,6 +109,8 @@ class WebhookManager:
         webhook_id: str,
     ) -> dict:
         """Execute deployment manually."""
+        import shlex
+
         config = self._webhooks.get(webhook_id)
         if not config:
             return {"status": "error", "message": "Webhook not found"}
@@ -148,12 +118,23 @@ class WebhookManager:
         # Run Deploy Command As Background Job
         job_id = await self._job.create_job(
             session_id=session_id,
-            command=f"cd {config.target_path} && {config.deploy_command}",
+            command=f"cd {shlex.quote(config.target_path)} && {config.deploy_command}",
             timeout=600,
         )
 
+        deploy_id = f"deploy_{len(self._deployments)}"
+        self._deployments.append({
+            "id": deploy_id,
+            "webhook_id": webhook_id,
+            "webhook_name": config.name,
+            "status": DeployStatus.RUNNING.value,
+            "timestamp": time.time(),
+            "job_id": job_id,
+        })
+
         return {
             "status": "started",
+            "deploy_id": deploy_id,
             "job_id": job_id,
             "command": config.deploy_command,
         }

@@ -1279,7 +1279,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                         {
                             "endpoint": "POST /api/webhooks",
                             "scope": "master_key",
-                            "description": "Create a new webhook. Input: {name, target_path, deploy_command, context_id, webhook_type?, secret?, notify_url?}. Returns the created webhook config.",
+                            "description": "Create a new webhook. Input: {name, target_path, deploy_command, context_id, webhook_type?, notify_url?}. Returns the created webhook config.",
                         },
                         {
                             "endpoint": "POST /api/webhooks/{webhook_id}/deploy",

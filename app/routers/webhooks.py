@@ -23,7 +23,6 @@ async def create_webhook(
     config = _state.webhook_manager.add_webhook(
         name=req.name,
         webhook_type=req.webhook_type,
-        secret=req.secret,
         target_path=req.target_path,
         deploy_command=req.deploy_command,
         context_id=req.context_id,

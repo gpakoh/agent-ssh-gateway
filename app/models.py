@@ -1504,7 +1504,6 @@ class CreateWebhookRequest(BaseModel):
 
     name: str = Field(..., min_length=1)
     webhook_type: str = Field(default="generic")
-    secret: str = Field(default="")
     target_path: str = Field(..., min_length=1)
     deploy_command: str = Field(..., min_length=1)
     context_id: str = Field(..., min_length=1)
