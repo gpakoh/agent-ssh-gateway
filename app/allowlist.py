@@ -17,6 +17,25 @@ SELECTOR_TYPES = ("rule_id", "exact", "prefix", "regex")
 ALLOWLIST_TTL_S = 3600
 
 
+def _matches_prefix(command: str, prefix: str) -> bool:
+    """Prefix match with a word-boundary check after the prefix.
+
+    A bare command.startswith(prefix) lets an entry meant to cover one
+    command family also cover an unrelated one that merely happens to
+    share the same leading characters — a "docker" prefix entry would
+    also match "dockerize-evil.sh", not just "docker ps"/"docker-compose"
+    style invocations of the actual docker family. The character right
+    after the prefix must be whitespace or end-of-string; anything else
+    (including a bare word-continuation letter/digit) means it's a
+    different command that only looks similar as a string.
+    """
+    if not command.startswith(prefix):
+        return False
+    if len(command) == len(prefix):
+        return True
+    return command[len(prefix)] in (" ", "\t")
+
+
 @dataclass(frozen=True)
 class AllowlistEntry:
     id: str
@@ -121,7 +140,7 @@ class Allowlist:
         if entry.selector_type == "exact":
             return command == entry.selector_value
         if entry.selector_type == "prefix":
-            return command.startswith(entry.selector_value)
+            return _matches_prefix(command, entry.selector_value)
         if entry.selector_type == "regex":
             return bool(re.search(entry.selector_value, command))
         if entry.selector_type == "rule_id":

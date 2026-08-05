@@ -1,5 +1,95 @@
 # Agent SSH Gateway — TODO
 
+## 🔍 T89 — Восьмой круг: корневые модули app/
+
+Контекст: первый круг по корневым файлам `app/*.py` (не routers/services/
+workspace — те уже пройдены). ~21000 строк, 60+ файлов; приоритет отдавался
+auth/access-control/command-policy модулям.
+
+1. ✅ **`app/ssh_manager.py` — SERIOUS, живой DNS rebinding TOCTOU.**
+   `validate_target_host()` резолвит хост и проверяет IP против allowed/
+   denied CIDR, но реальное SSH-подключение (`client.connect(hostname=host)`)
+   резолвит хост ЗАНОВО, отдельно, через несколько миллисекунд —
+   атакующий с контролем DNS (low-TTL запись) может вернуть разрешённый IP
+   на момент проверки и internal/metadata IP (169.254.169.254, 127.0.0.1,
+   10.x) на момент реального коннекта, полностью обходя allowed/
+   denied_target_cidrs. Тот же паттерн уже был в `event_hook_delivery.py`
+   (T82), там задокументирован как принятый остаточный риск — здесь решили
+   исправить. Фикс: `create_session()` получил параметр `pinned_ip` — сокет
+   открывается напрямую на уже провалидированный IP (`socket.create_connection`)
+   и передаётся paramiko через `sock=`, так что paramiko никогда не резолвит
+   `host` самостоятельно; `hostname=host` остаётся неизменным для host-key/
+   known-hosts lookup (иначе сломался бы trust model для нестрогого
+   host-key policy). Применено во всех трёх местах, вызывающих
+   `validate_target_host()` перед `create_session()`
+   (`ssh_connect`, `ssh_prewarm`, `servers.py`'s `connect_server`), плюс
+   `check-port` эндпоинт (тот же паттерн, ниже severity — просто TCP-probe).
+   3 новых теста в `test_ssh_manager_pinned_ip.py`, проверены на падение
+   против pre-fix кода.
+2. ✅ **`app/allowlist.py` — bug fix + подключение (было полностью инертно).**
+   `selector_type="prefix"` использовал наивный `command.startswith(value)`
+   без проверки границы слова — запись `"docker"` заматчила бы
+   `"dockerize-evil-script.sh"`. НО: нигде в живом коде не было ни одного
+   вызова `Allowlist.add()` — ни один REST endpoint или MCP tool не давал
+   добавить запись, только `evaluate_command_policy()`'s Gate 0 читал через
+   `.check()` — allowlist был всегда пуст, баг был непроявляем. Исправлено:
+   `_matches_prefix()` теперь требует, чтобы символ сразу после префикса был
+   whitespace или концом строки. Плюс добавлен admin-router
+   `app/routers/allowlist.py`: `POST/GET/DELETE /api/admin/allowlist`,
+   `DELETE /api/admin/allowlist/{entry_id}` — master-key-only (запись здесь
+   обходит ВСЕ остальные gate'ы command policy). 1 regression-тест на баг
+   (падает на pre-fix коде), 12 новых тестов на роутер.
+3. ✅ **Проверено без новых находок (пока)**: `auth_middleware.py` (687
+   строк — `require_scope`/`ws_auth_check`'s дублированная, но логически
+   эквивалентная scope-проверка verified truth-table by hand; CSRF/Origin
+   checks задокументированы как намеренные trade-off'ы), `rbac.py`
+   (единичный permission per scope, не multi-value AND/OR как в
+   examples/mcp_server — тот класс бага здесь структурно невозможен),
+   `security.py` (path/secret-redaction/target-host — весь файл),
+   `access_control.py` (весь файл — `AccessPendingApprovalError` НИГДЕ не
+   `raise`'ится, dead exception scaffolding в 4+ местах, но функционально
+   безвредно: "pending" всегда означает "allow с capped profile", никогда
+   truly-block; не стал трогать без отдельного решения), `user_auth.py`
+   (весь файл — timing-safe login, single-admin registration lock, все
+   корректно), `policy_ask.py` (обнаружен функциональный, не security,
+   баг: approve_request() ничего не делает с фактическим выполнением
+   команды — ASK mode не даёт повторно выполнить одобренную команду; не
+   security exposure, т.к. fail-safe в сторону блокировки, не в сторону
+   bypass; не чинил без отдельного решения), начало `command_policy.py`
+   (1071 строка, evaluate_command_policy + profile_for_identity — чисто).
+
+**Не исследовано ещё** (~40 файлов): `oauth_sso.py`, `agent_token_store.py`,
+`agent_profiles.py`, `heredoc_scanner.py`, `known_hosts.py`,
+`session_store.py`, `context_manager.py`, `git_manager.py`,
+`snapshot_manager.py`, `history.py`, `smart_context.py`, `audit.py`,
+`audit_store.py`, `distributed_lock.py`, `circuit_breaker.py`,
+`ssh_pool.py`, `code_intelligence.py`, `ast_refactor.py`, `ast_matcher.py`,
+`diff_generator.py`, `file_tree.py`, `file_editor.py`,
+`template_library.py`, `validation_pipeline.py`, `batch_operations.py`,
+`project_analytics.py`, `search_replace.py`, `confidence.py`,
+`simulate.py`, `suggest.py`, `metrics.py`, остальная часть
+`command_policy.py` (gates 1-4, heredoc recursion), `models.py`,
+`api_help.py` и мелкие utility-модули.
+
+**Побочная находка (не в scope этого круга)**: `app/main.py`'s session-
+restore-on-startup (строка ~260) проверяет восстанавливаемый host через
+`is_ip_allowed(creds["host"], allowed_client_cidrs)` — использует CIDR
+настройку для КЛИЕНТСКИХ IP вместо `allowed_target_cidrs`/
+`denied_target_cidrs` (настройка для TARGET-хостов), и `is_ip_allowed()`
+не резолвит hostname (только литеральные IP) — restore для
+hostname-based таргетов эффективно всегда молча падает. Не исправлено,
+требует отдельного решения.
+
+**Также найдено, не относится к этому кругу**: `scripts/
+opencode_runner_wrapper.py`'s `resolve_project_root("")` падал обратно на
+`os.getcwd()` — реальный баг (пустой project + cwd="/" от голого SSH-
+вызова = opencode работает с корнем хоста как workspace). Уже исправлено
+и оттестировано в рабочем дереве (не закоммичено на момент начала этого
+круга — похоже, осталось от более раннего прохода в этой же сессии).
+
+Regression-тесты всех находок этого круга проверены на падение против
+pre-fix кода. Полный набор (4130 тестов) зелёный, `ruff`/`mypy` чистые.
+
 ## 🧹 Решение по мёртвому коду: RedisJobQueue подключён, остальное удалено
 
 По итогам предыдущего разбора мёртвого кода — пользователь решил:
