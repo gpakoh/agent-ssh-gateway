@@ -93,7 +93,7 @@ def detect_agent_from_env() -> str:
 def detect_agent_from_proc() -> str:
     """Detect agent identity from parent process name (Linux)."""
     try:
-        ppid = os.getpid()
+        ppid = os.getppid()
         comm_path = f"/proc/{ppid}/comm"
         if os.path.isfile(comm_path):
             with open(comm_path) as f:
