@@ -873,8 +873,15 @@ class TestAuditLogger:
         assert logger.entries[0]["receipt_id"] == "snap_3"
         assert logger.entries[4]["receipt_id"] == "snap_7"
 
-    def test_no_cap_when_log_path_set(self):
-        """When log_path is set, no in-memory cap is enforced."""
+    def test_cap_enforced_when_log_path_set(self):
+        """Regression: max_in_memory was silently set to 0 (disabling the
+        cap check entirely, since `if self._max_in_memory and ...` is
+        falsy for 0) whenever log_path was provided — meaning the in-memory
+        buffer grew without bound for the life of the process on any
+        long-running gateway with persistent audit logging configured.
+        log_path controls disk persistence; it must not affect how much
+        history is kept in memory for the `.entries` property.
+        """
         import tempfile
 
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
@@ -891,8 +898,15 @@ class TestAuditLogger:
                     after_hash="",
                     size=0,
                 )
-            # All entries kept in memory (cap disabled when log_path set)
-            assert len(logger.entries) == 5
+            # Cap enforced even though log_path is set — full history still
+            # lands on disk (verified by test_writes_jsonl_lines), only the
+            # in-memory buffer is bounded.
+            assert len(logger.entries) == 3
+            assert logger.entries[0]["receipt_id"] == "snap_2"
+            assert logger.entries[-1]["receipt_id"] == "snap_4"
+
+            lines = Path(log_path).read_text().strip().split("\n")
+            assert len(lines) == 5, "disk log must keep full history regardless of the in-memory cap"
         finally:
             Path(log_path).unlink(missing_ok=True)
 
