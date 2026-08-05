@@ -502,7 +502,27 @@ def run_tool(
             meta = data.get("meta", {})
             meta["duration_ms"] = round(_elapsed(), 1)
         return data
-    return tool_success(tool=tool, result=success_text, duration_ms=_elapsed())
+    # fn() returned a raw (non-canonical) dict -- e.g. build_command_result()'s
+    # {"outcome", "exit_code", "stdout", "stderr", ...} with no "ok" key.
+    # Preserve it as the actual result instead of discarding it in favor of
+    # the human-readable success_text (which was silently replacing real
+    # stdout/stderr/exit_code with a static message like "Collected project
+    # git status."). A non-zero exit_code is still surfaced as an error,
+    # not silently reported as success.
+    if isinstance(data, dict) and isinstance(data.get("exit_code"), int) and data["exit_code"] != 0:
+        return tool_error(
+            tool=tool,
+            code="TOOL_EXECUTION_FAILED",
+            message=f"Command exited with code {data['exit_code']}",
+            result=data,
+            duration_ms=_elapsed(),
+        )
+    return tool_success(
+        tool=tool,
+        result=data,
+        duration_ms=_elapsed(),
+        success_text=success_text,
+    )
 
 
 # Maps the gateway's own error `code` values (from its structured
