@@ -56,11 +56,16 @@
      (dead code — нет входящего endpoint'а для приёма реального GitHub/Gitea
      webhook). Решить: реализовать нормальную HMAC-проверку и подключить
      receiver, или убрать функциональность целиком, если не используется.
-5. **Redis job queue / dead-letter** — T81.4 добавил owner-фильтрацию в
-   предположении, что `redis_queue.enqueue()` нигде не вызывается (очередь
-   всегда пуста на практике). Проверить, что это предположение всё ещё верно;
-   если что-то теперь реально кладёт туда джобы — весь dead-letter путь нужно
-   заново проверить живьём.
+5. ✅ **Redis job queue / dead-letter** — перепроверено: `RedisJobQueue.enqueue()`
+   до сих пор нигде не вызывается в production-коде (`grep -rn "\.enqueue("` по
+   `app/` находит только `event_hook_emitter.py`'s `ds.enqueue()` —
+   `DeliveryService` из `event_hooks.py`, не связанный класс). T81.4's
+   предположение подтверждено, всё ещё верно. `jobs.py`'s
+   `get_queue_stats()`/`get_dead_letter_jobs()` — read-only, всегда пусто на
+   практике; сам `RedisJobQueue` построен полностью (persist/retry/dead-letter),
+   но никогда не подключён к реальному пути исполнения джобов
+   (`_state.job_manager` — другой, отдельный in-process менеджер). Не баг,
+   просто неиспользуемая фича — как и `webhook_manager.py` (см. пункт 4).
 6. **Agent handoff / worktree** (`examples/mcp_server/handoff.py`,
    `agent_tasks.py`, `opencode_runner_wrapper.py`, `mimo_tools.py`,
    `opencode_tools.py`) — не тронуто в этой сессии вообще.
