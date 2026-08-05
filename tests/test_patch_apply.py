@@ -150,3 +150,35 @@ def test_apply_in_memory():
     result = applier._apply_in_memory(original, files[0])
     assert "added" in result
     assert "line1" in result
+
+
+def test_apply_in_memory_rejects_drifted_content_instead_of_corrupting():
+    """Regression: _apply_in_memory() never checked that a hunk's context/
+    removed lines actually matched the real file content at that position —
+    it just trusted hunk.source_start to seek forward, then for a removed
+    line it deleted whatever was actually there (right or wrong) and for a
+    context line it inserted the PATCH's version of the line rather than
+    verifying it against the real one. expected_hashes (passed by the
+    caller of apply_project_patch) is optional and whole-file-only, so
+    without it a stale patch silently corrupted the file instead of erroring.
+
+    Here the patch expects line 2 to be "bbb" but the real file has "ZZZ" —
+    proven earlier (before this fix) to silently produce
+    "aaa\\nBBB_NEW\\nccc\\n", deleting the real "ZZZ" line without any error.
+    """
+    from app.patch_apply import PatchApplier, PatchValidationError
+
+    applier = PatchApplier.__new__(PatchApplier)
+    original = "aaa\nZZZ\nccc\n"
+    patch_text = textwrap.dedent("""\
+        --- a/file.py
+        +++ b/file.py
+        @@ -1,3 +1,3 @@
+         aaa
+        -bbb
+        +BBB_NEW
+         ccc
+    """)
+    files = applier._parse_patch(patch_text, strip=1)
+    with pytest.raises(PatchValidationError, match="context mismatch"):
+        applier._apply_in_memory(original, files[0])
