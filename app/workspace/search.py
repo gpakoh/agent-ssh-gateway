@@ -89,6 +89,19 @@ def project_search_text(
             except ValueError:
                 continue
 
+            # Path.glob() follows symlinks when the pattern explicitly names
+            # a symlinked path segment (e.g. file_glob="some_symlink/*"),
+            # even though it doesn't descend into them for "**" wildcards.
+            # The relative_to() check above is purely structural/string-based
+            # — it does not catch this, since the returned path still
+            # carries the project_root prefix textually while actually
+            # reading through the symlink to wherever it points. Resolve and
+            # check real containment before ever reading file content.
+            try:
+                file_path.resolve().relative_to(project_root)
+            except (OSError, ValueError):
+                continue
+
             if _is_excluded(rel, file_path, project_root, policy):
                 continue
 
