@@ -11,13 +11,74 @@
 применения патчей (`patch_apply.py`) — раньше проверялись только
 traversal/forbidden-ops, не корректность хуnков.
 
-1. **`app/workspace/policy.py`** — приоритет №1, ядро path/scope resolution.
-2. **`app/workspace/registry.py`** — резолвит project roots, кормит policy.py.
-3. **`app/workspace/edit.py` + `files.py`** — запись/редактирование файлов.
-4. **`app/workspace/git.py` + `snapshot.py`** — git-операции и снапшоты.
-5. **`app/workspace/search.py` + `preview.py` + `receipts.py`**.
-6. **`app/workspace/scan_project.py` + `tools.py` + `models.py` + `__init__.py`**.
-7. **`app/patch_apply.py`** — корректность самого алгоритма применения хуnков.
+1. ✅ **`app/workspace/policy.py`** — `validate_write()` сама по себе (без
+   парной `_symlink_safe_preflight()`, которую каждый текущий вызывающий
+   добавляет отдельно) пропускала symlink-escape через ещё-не-существующий
+   промежуточный путь (symlink не непосредственный parent, а предок выше).
+   Сейчас не эксплуатируемо (все реальные вызывающие уже парят обе
+   проверки), но собственный docstring модуля заявляет symlink-safety,
+   которой не было при использовании класса отдельно — тот же паттерн,
+   что обернулся реальным багом ниже. Консолидировано в
+   `_check_no_symlink_components()`. Заодно: `SECRET_FILE_PATTERNS` для
+   `id_rsa`/`id_ed25519`/`id_ecdsa` — точное совпадение без wildcard
+   (в отличие от `*.pem`/`*.key`) — `id_rsa.bak` проходил незамеченным.
+   Commit `c43eaa8c`.
+2. ✅ **`app/workspace/registry.py`** — чисто. `validate_read` (используется
+   для tree browsing) уже symlink-safe; `_build_tree` явно не рекурсирует
+   в symlink-директории.
+3. ✅ **`app/workspace/edit.py` + `files.py`** — чисто. Оба правильно парят
+   `validate_write`/`validate_read` с `_symlink_safe_preflight`;
+   `project_apply_patch` берёт путь из явного параметра, а не из тела
+   патча (в отличие от `services/project_patch.py`), избегая всего класса
+   traversal-бага структурно.
+4. ✅ **`git.py`** — чисто, эталонно (fixed argv, `shell=False`, `--`
+   separator). **`snapshot.py`** — `WorkspaceAuditLogger`'s in-memory cap
+   (`_max_in_memory`) тихо становился `0` при заданном `log_path`, отключая
+   cap-check вовсе (`if 0 and ...` всегда falsy) — unbounded memory growth
+   для long-running процесса. Не подключено ни к одному REST endpoint
+   (как `RedisJobQueue`), но баг реальный и дёшево чинится. Commit `b3d203bb`.
+5. ✅ **`search.py` — SERIOUS, живой, эксплуатируемый info-disclosure.**
+   `Path.glob()` следует symlink, когда паттерn явно называет
+   symlink-сегмент (`file_glob="escape_link/*"`), даже не спускаясь в них
+   для `**`. Единственная проверка (`relative_to(project_root)`) чисто
+   строковая — не ловит это. Подтверждено живьём: `GET
+   /api/workspace/projects/{id}/search` с `file_glob`, называющим
+   существующий symlink, возвращал реальный контент (с previews) СНАРУЖИ
+   project root. Обычный symlink в проекте (node_modules/.bin, venv,
+   deploy "current" — не экзотика) + `project:read` scope = exfiltration
+   произвольных файлов, которые может прочитать процесс. Исправлено —
+   resolve + containment check перед чтением контента. Commit `d4e1175b`.
+   `preview.py`, `receipts.py` — чисто (read-only, уже symlink-safe).
+6. ✅ **`scan_project.py`** — тот же баг, что в `search.py` (`root.rglob(pattern)`).
+   Не подключено ни к одному router/tool (orphaned, как и `SnapshotStore`),
+   но тот же баг, тот же двухстрочный фикс — исправлено. Commit `8d4f5055`.
+   `tools.py`, `models.py`, `__init__.py` — чисто (чистые re-export/data
+   structures).
+7. ✅ **`app/patch_apply.py` — silent data corruption, живой endpoint.**
+   `_apply_in_memory()` никогда не проверял, что context/removed строки
+   хуnка реально совпадают с текущим содержимым файла — просто доверял
+   `hunk.source_start` и слепо удалял/вставлял. `expected_hashes` —
+   опционален и только на уровне всего файла. Эмпирически подтверждено:
+   patch, ожидающий "bbb" на строке 2 при реальном "ZZZ", молча произвёл
+   "aaa\nBBB_NEW\nccc\n" — удалив реальный контент без единой ошибки. Это
+   transactional-write путь за `POST /api/projects/{project}/apply-patch`
+   (scope `project:patch`, не master key) — живой, достижимый endpoint.
+   Добавлен `_check_line_matches()`, вызывается для каждой context/removed
+   строки. Commit `b156c44d`.
+
+## Итог T83
+
+Все 7 пунктов закрыты. Самая серьёзная находка — **живой symlink-escape
+info-disclosure в `project_search_text`** (не требует привилегий выше
+`project:read`, эксплуатируется через самый обычный symlink в проекте).
+Второй по значимости — silent data corruption в `patch_apply.py`
+(живой `project:patch`-scoped endpoint). Плюс defense-in-depth фикс в
+`policy.py` (предотвращает regression того же класса, что уже дал
+реальный баг в T82) и три orphaned-feature бага (не эксплуатируемы
+сейчас, исправлены всё равно — дёшево и корректно). Все фиксы — с
+regression-тестами, проверенными на падение до фикса (в т.ч. эмпирически,
+через реальный subprocess/filesystem, не только сравнение строк). Всё,
+что живёт в `web-ssh-gateway` контейнере, задеплоено.
 
 ## 🔍 T82 — Аудит зон, не пройденных сегодняшним seam-аудитом
 
