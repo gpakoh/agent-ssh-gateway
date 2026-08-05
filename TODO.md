@@ -47,15 +47,23 @@
    - `servers.py`, `snapshots.py`, `templates.py`, `system.py`, `logs.py`,
      `code.py`, `project_inspection.py`, `search_replace.py`,
      `admin_approval.py`: чисто, без новых находок.
-   - **Не исправлено, требует решения пользователя**: `webhook_manager.py`
-     (роутер `webhooks.py`, отдельная от `event_hooks.py` старая система
-     "webhook → auto-deploy") — `handle_webhook()` содержит комментарий
-     "Verify Secret (simple Check) — In Production, Use HMAC Signature
-     Verification" и **никогда фактически не проверяет secret**. Сейчас не
-     эксплуатируемо: `handle_webhook()` не подключён ни к одному роутеру
-     (dead code — нет входящего endpoint'а для приёма реального GitHub/Gitea
-     webhook). Решить: реализовать нормальную HMAC-проверку и подключить
-     receiver, или убрать функциональность целиком, если не используется.
+   - ✅ **`webhook_manager.py` — решено: удалить, не достраивать.**
+     `api_help.py` документирует только явный `POST /api/webhooks/{id}/deploy`
+     (authenticated API call), README вообще не упоминает webhooks —
+     несуществующий incoming-receiver никогда не был частью заявленного API.
+     Достраивать его (raw-body HMAC per-provider, новый authless-by-design
+     endpoint) — это новая фича, а не багфикс, и противоречит позиционированию
+     проекта (API-first, не raw internet exposure). Удалены `handle_webhook()`
+     и теперь полностью мёртвое поле `secret` (`WebhookConfig`, `add_webhook()`,
+     `CreateWebhookRequest`, `api_help.py`). Попутно нашёлся второй, реально
+     достижимый баг, который `handle_webhook()` маскировал: `execute_deploy()`
+     (единственный реальный путь триггера) никогда не писал в `_deployments` —
+     `GET /api/webhooks/{id}/deployments` (документирован, достижим) всегда
+     возвращал пустой список для ЛЮБОГО реального деплоя. Исправлено —
+     `execute_deploy()` теперь пишет историю. Заодно `shlex.quote()` для
+     `target_path` в той же shell-команде (тот же паттерн, что в
+     scaffolding.py/context_editing.py). Тестов на модуль не было вообще.
+     Commit `9f1be72e`.
 5. ✅ **Redis job queue / dead-letter** — перепроверено: `RedisJobQueue.enqueue()`
    до сих пор нигде не вызывается в production-коде (`grep -rn "\.enqueue("` по
    `app/` находит только `event_hook_emitter.py`'s `ds.enqueue()` —
@@ -65,7 +73,7 @@
    практике; сам `RedisJobQueue` построен полностью (persist/retry/dead-letter),
    но никогда не подключён к реальному пути исполнения джобов
    (`_state.job_manager` — другой, отдельный in-process менеджер). Не баг,
-   просто неиспользуемая фича — как и `webhook_manager.py` (см. пункт 4).
+   просто неиспользуемая фича.
 6. ✅ **Agent handoff / worktree** — прошёл все 5 файлов. Реальные баги
    исправлены с regression-тестами:
    - `agent_tasks.py`: `read_agent_task_file()`'s `filename` интерполировался
@@ -120,11 +128,12 @@
 
 ## Итог T82
 
-Все 7 пунктов пройдены. Реальных находок: 12 (XSS, broken async SDK,
-swallowed diagnostic detail, TTL bypass, SSRF, audit-attribution gap,
-cross-tenant session leak, readonly bypass, latent shell-injection ×3,
-**path traversal с обходом project-scope** — самая серьёзная). Все
-исправлены с regression-тестами, проверенными на падение до фикса; все,
-что живёт в `web-ssh-gateway`/`mcp-server` контейнерах, задеплоено.
-Не исправлено, оставлено на решение пользователя: `webhook_manager.py`
-(dead code, см. пункт 4).
+Все 7 пунктов полностью закрыты, ничего не оставлено на потом. Реальных
+находок: 14 (XSS, broken async SDK, swallowed diagnostic detail, TTL
+bypass, SSRF, audit-attribution gap, cross-tenant session leak, readonly
+bypass, latent shell-injection ×3, **path traversal с обходом
+project-scope** — самая серьёзная, dead unauthenticated-webhook-receiver
+stub, broken deployment history). Все исправлены с regression-тестами,
+проверенными на падение до фикса; всё, что живёт в
+`web-ssh-gateway`/`mcp-server` контейнерах, задеплоено и подтверждено
+healthy.
