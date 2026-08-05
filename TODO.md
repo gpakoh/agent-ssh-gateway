@@ -1,5 +1,43 @@
 # Agent SSH Gateway — TODO
 
+## 🔍 T88 — Седьмой круг: app/services
+
+Контекст: T84 уже перепроверял `app/services` с паттерном symlink-escape,
+найденным в T83 (`project_search.py`). Этот круг — полный свежий проход по
+всем 7 файлам (~1050 строк) с накопленными за T82-T87 паттернами
+(discarded-validation, sibling-endpoint divergence).
+
+1. ✅ **`file_editing.py` — SERIOUS, живой guardrail bypass.** `edit_many()`
+   принимал `validate: bool = False` — `PATCH /api/batch/edit` вызывал его
+   с `validate=True`, а `POST /api/bulk/edit` (тот же `ssh:files` scope,
+   не master key) — вообще без аргумента, т.е. `validate=False`. Это
+   полностью пропускало `validate_path()`, единственный guardrail против
+   FORBIDDEN_PATHS (`/etc/shadow`, `/root/.ssh`, ...) и traversal-сегментов
+   на remote-таргете, т.к. `FileEditor.edit_file()` сам никакой валидации
+   не делает. Тот же паттерн — сестринский `POST /api/bulk/read` (routers/
+   files.py) делегирует в `BulkOperationsManager.read_files_bulk()`
+   (app/bulk_operations_v2.py), который тоже вызывал `file_editor.read_file()`
+   без вообще какой-либо валидации. Убран параметр `validate` — теперь
+   `edit_many()` всегда валидирует; добавлен `validate_path()` в
+   `read_files_bulk()` и (заодно, хоть и мёртвый код) в `edit_files_bulk()`.
+2. ✅ **Проверено без новых находок**: `command_gate.py`, `project_search.py`
+   (уже T84 — symlink-check на месте), `project_structure.py` (`shlex.quote()`
+   передаётся напрямую в `{path}`-плейсхолдер без дополнительного
+   ручного оборачивания в кавычки — корректно), `context_editing.py`
+   (уже T82, `shlex.quote()` везде; `context_file_read`/`context_file_edit`
+   роуты master-key-only, поэтому отсутствие `validate_path()` там — не
+   privilege escalation, т.к. master key и так имеет полный доступ),
+   `project_patch.py` (уже T82, `_resolve_within_root()` полностью
+   резолвит symlinks перед containment-check — надёжно), `scaffolding.py`
+   (уже T82, `shlex.quote()` корректно).
+
+Regression: 4 новых теста в `test_files_path_validation.py`
+(`TestBulkReadForbiddenPathsRejected`, `TestBulkEditForbiddenPathsRejected`)
+— оба bulk-эндпоинта теперь корректно отклоняют `/etc/shadow`/
+`/root/.ssh/authorized_keys`. Проверено на падение против pre-fix кода
+через `git stash`. Полный набор (4120 тестов) зелёный, `ruff`/`mypy`
+чистые.
+
 ## 🔍 T87 — Шестой круг: app/routers
 
 Контекст: все 24 файла `app/routers/` (~6200 строк) — первый круг, который

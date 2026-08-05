@@ -4,6 +4,8 @@ import asyncio
 import logging
 from typing import Any
 
+from app.security import validate_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -96,6 +98,7 @@ class BulkOperationsManager:
 
         async def read_file(path):
             try:
+                validate_path(path)
                 content = await file_editor.read_file(session_id, path)
                 return path, content
             except Exception as exc:
@@ -138,6 +141,7 @@ class BulkOperationsManager:
 
         async def edit_file(edit):
             try:
+                validate_path(edit["path"])
                 result = await file_editor.edit_file(
                     session_id,
                     edit["path"],
