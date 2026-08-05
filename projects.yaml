@@ -45,3 +45,129 @@ projects:
     type: aiogram
     description: "Telegram audio processing bot"
     tags: [bot, telegram, audio]
+
+  deep-researcher:
+    root: quart-platform/deep-researcher
+    parent: quart-platform
+    type: unknown
+    description: "deep-researcher"
+    tags: []
+
+  document-parser-service:
+    root: quart-platform/document-parser-service
+    parent: quart-platform
+    type: python-service
+    description: "document-parser-service"
+    tags: []
+
+  fds-nginx:
+    root: quart-platform/fds-nginx
+    parent: quart-platform
+    type: unknown
+    description: "File distribution service (nginx) for bot database/widget delivery"
+    tags: []
+
+  federation-file-service:
+    root: quart-platform/federation-file-service
+    parent: quart-platform
+    type: python-service
+    description: "federation-file-service"
+    tags: []
+
+  file-security-service:
+    root: quart-platform/file-security-service
+    parent: quart-platform
+    type: python-service
+    description: "File security scanning service"
+    tags: []
+
+  gateway_client:
+    root: NOD_gateway/gateway_client
+    parent: nod-gateway
+    type: service
+    description: "gateway_client"
+    tags: []
+
+  infinity:
+    root: quart-platform/infinity
+    parent: quart-platform
+    type: unknown
+    description: "infinity"
+    tags: []
+
+  infra-quart:
+    root: quart-platform/infra-quart
+    parent: quart-platform
+    type: unknown
+    description: "Orchestration entry point for quart ecosystem — vendor services, submodules, compose profiles"
+    tags: []
+
+  lebo-coffee:
+    root: quart-platform/lebo-coffee
+    parent: quart-platform
+    type: unknown
+    description: "lebo-coffee"
+    tags: []
+
+  markdown-formatter-service:
+    root: quart-platform/markdown-formatter-service
+    parent: quart-platform
+    type: python-service
+    description: "Internal Markdown/LLM formatter service for Telegram HTML rendering"
+    tags: []
+
+  marx-mind:
+    root: quart-platform/marx-mind
+    parent: quart-platform
+    type: python-service
+    description: "marx-mind"
+    tags: []
+
+  ollama:
+    root: quart-platform/ollama
+    parent: quart-platform
+    type: unknown
+    description: "ollama"
+    tags: []
+
+  opencode-adapter:
+    root: quart-platform/opencode-adapter
+    parent: quart-platform
+    type: python-service
+    description: "Adapter for opencode LLM server integration"
+    tags: []
+
+  rag-federation-slave:
+    root: quart-platform/rag-federation-slave
+    parent: quart-platform
+    type: unknown
+    description: "RAG Federation Slave — GPU и CPU ноды для распределённой RAG-индексации"
+    tags: []
+
+  rag-integration-service:
+    root: quart-platform/rag-integration-service
+    parent: quart-platform
+    type: unknown
+    description: "Integration services: CDEK, Yandex Delivery, PayKeeper, Telegram webhooks"
+    tags: []
+
+  rag-library-service:
+    root: quart-platform/rag-library-service
+    parent: quart-platform
+    type: python-service
+    description: "rag-library-service"
+    tags: []
+
+  telegram-storage-service:
+    root: quart-platform/telegram-storage-service
+    parent: quart-platform
+    type: python-service
+    description: "Telegram-backed durable file storage: bot upload, background sync, ref verification"
+    tags: []
+
+  zep:
+    root: quart-platform/zep
+    parent: quart-platform
+    type: service
+    description: "zep"
+    tags: []
