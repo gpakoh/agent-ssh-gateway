@@ -2,6 +2,7 @@
 
 import json
 import logging
+import shlex
 import time
 from dataclasses import dataclass, field
 
@@ -46,14 +47,16 @@ class SnapshotManager:
 
         snapshot_id = f"snap_{int(time.time())}"
         snapshot_dir = f"{ctx.path}/{self.SNAPSHOTS_DIR}/{snapshot_id}"
+        escaped_path = shlex.quote(ctx.path)
+        escaped_snapshot_dir = shlex.quote(snapshot_dir)
 
         # Create snapshot directory
-        await self._ssh.execute(session_id, f"mkdir -p '{snapshot_dir}'", timeout=10)
+        await self._ssh.execute(session_id, f"mkdir -p {escaped_snapshot_dir}", timeout=10)
 
         # Get list of tracked files (modified + staged)
         result = await self._ssh.execute(
             session_id,
-            f"cd {ctx.path} && git status --short 2>/dev/null | awk '{{print $2}}'",
+            f"cd {escaped_path} && git status --short 2>/dev/null | awk '{{print $2}}'",
             timeout=10,
         )
         modified_files = [f.strip() for f in result["stdout"].strip().split("\n") if f.strip()]
@@ -61,7 +64,7 @@ class SnapshotManager:
         # Get current git commit
         commit_result = await self._ssh.execute(
             session_id,
-            f"cd {ctx.path} && git rev-parse HEAD 2>/dev/null || echo 'none'",
+            f"cd {escaped_path} && git rev-parse HEAD 2>/dev/null || echo 'none'",
             timeout=10,
         )
         git_commit_before = commit_result["stdout"].strip()
@@ -69,9 +72,11 @@ class SnapshotManager:
         # Copy modified files to snapshot
         for file_path in modified_files:
             dest_dir = f"{snapshot_dir}/{file_path.rsplit('/', 1)[0] if '/' in file_path else ''}"
-            await self._ssh.execute(session_id, f"mkdir -p '{dest_dir}'", timeout=5)
+            await self._ssh.execute(session_id, f"mkdir -p {shlex.quote(dest_dir)}", timeout=5)
             await self._ssh.execute(
-                session_id, f"cp '{ctx.path}/{file_path}' '{snapshot_dir}/{file_path}'", timeout=5
+                session_id,
+                f"cp {shlex.quote(f'{ctx.path}/{file_path}')} {shlex.quote(f'{snapshot_dir}/{file_path}')}",
+                timeout=5,
             )
 
         # Create snapshot metadata
@@ -101,13 +106,13 @@ class SnapshotManager:
 
         await self._ssh.execute(
             session_id,
-            f"cat > '{snapshot_dir}/.snapshot-meta.json' << 'EOF'\n{meta_content}\nEOF",
+            f"cat > {shlex.quote(f'{snapshot_dir}/.snapshot-meta.json')} << 'EOF'\n{meta_content}\nEOF",
             timeout=10,
         )
 
         # Calculate size
         size_result = await self._ssh.execute(
-            session_id, f"du -sb '{snapshot_dir}' | cut -f1", timeout=10
+            session_id, f"du -sb {escaped_snapshot_dir} | cut -f1", timeout=10
         )
         snapshot.size_bytes = int(size_result["stdout"].strip() or 0)
 
@@ -126,10 +131,13 @@ class SnapshotManager:
             raise ValueError(f"Context {context_id} not found")
 
         snapshot_dir = f"{ctx.path}/{self.SNAPSHOTS_DIR}/{snapshot_id}"
+        escaped_snapshot_dir = shlex.quote(snapshot_dir)
 
         # Check if snapshot exists
         check_result = await self._ssh.execute(
-            session_id, f"test -d '{snapshot_dir}' && echo 'exists' || echo 'not_found'", timeout=5
+            session_id,
+            f"test -d {escaped_snapshot_dir} && echo 'exists' || echo 'not_found'",
+            timeout=5,
         )
 
         if check_result["stdout"].strip() != "exists":
@@ -137,7 +145,7 @@ class SnapshotManager:
 
         # Read metadata
         meta_result = await self._ssh.execute(
-            session_id, f"cat '{snapshot_dir}/.snapshot-meta.json'", timeout=5
+            session_id, f"cat {shlex.quote(f'{snapshot_dir}/.snapshot-meta.json')}", timeout=5
         )
 
         try:
@@ -153,10 +161,12 @@ class SnapshotManager:
 
             # Ensure destination directory exists
             dest_dir = dest.rsplit("/", 1)[0] if "/" in dest else ctx.path
-            await self._ssh.execute(session_id, f"mkdir -p '{dest_dir}'", timeout=5)
+            await self._ssh.execute(session_id, f"mkdir -p {shlex.quote(dest_dir)}", timeout=5)
 
             # Copy file
-            result = await self._ssh.execute(session_id, f"cp '{src}' '{dest}'", timeout=5)
+            result = await self._ssh.execute(
+                session_id, f"cp {shlex.quote(src)} {shlex.quote(dest)}", timeout=5
+            )
 
             if result["exit_code"] == 0:
                 restored_files.append(file_path)
@@ -180,17 +190,20 @@ class SnapshotManager:
             raise ValueError(f"Context {context_id} not found")
 
         snapshots_dir = f"{ctx.path}/{self.SNAPSHOTS_DIR}"
+        escaped_snapshots_dir = shlex.quote(snapshots_dir)
 
         # Check if snapshots directory exists
         check_result = await self._ssh.execute(
-            session_id, f"test -d '{snapshots_dir}' && echo 'exists' || echo 'not_found'", timeout=5
+            session_id,
+            f"test -d {escaped_snapshots_dir} && echo 'exists' || echo 'not_found'",
+            timeout=5,
         )
 
         if check_result["stdout"].strip() != "exists":
             return []
 
         # List snapshots
-        result = await self._ssh.execute(session_id, f"ls -1 '{snapshots_dir}'", timeout=10)
+        result = await self._ssh.execute(session_id, f"ls -1 {escaped_snapshots_dir}", timeout=10)
 
         snapshots = []
         for line in result["stdout"].strip().split("\n"):
@@ -199,9 +212,10 @@ class SnapshotManager:
                 continue
 
             # Read metadata
+            meta_path = shlex.quote(f"{snapshots_dir}/{snapshot_id}/.snapshot-meta.json")
             meta_result = await self._ssh.execute(
                 session_id,
-                f"cat '{snapshots_dir}/{snapshot_id}/.snapshot-meta.json' 2>/dev/null || echo '{{}}'",
+                f"cat {meta_path} 2>/dev/null || echo '{{}}'",
                 timeout=5,
             )
 
@@ -237,6 +251,8 @@ class SnapshotManager:
 
         snapshot_dir = f"{ctx.path}/{self.SNAPSHOTS_DIR}/{snapshot_id}"
 
-        result = await self._ssh.execute(session_id, f"rm -rf '{snapshot_dir}'", timeout=10)
+        result = await self._ssh.execute(
+            session_id, f"rm -rf {shlex.quote(snapshot_dir)}", timeout=10
+        )
 
         return result["exit_code"] == 0
