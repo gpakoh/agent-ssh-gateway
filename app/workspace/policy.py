@@ -58,9 +58,9 @@ SECRET_FILE_PATTERNS: tuple[str, ...] = (
     "*.p12",
     "*.pfx",
     "*.jks",
-    "id_rsa",
-    "id_ed25519",
-    "id_ecdsa",
+    "id_rsa*",
+    "id_ed25519*",
+    "id_ecdsa*",
     "*.kdbx",
     "*.keychain",
 )
@@ -177,6 +177,35 @@ class WorkspacePolicy:
             f"Path {resolved} is outside allowed roots: {[str(r) for r in self._allowed_roots]}"
         )
 
+    def _check_no_symlink_components(self, path: Path, project_root: Path) -> None:
+        """Reject the write if any existing path component is a symlink.
+
+        _check_symlink_escape() alone is only reliable when *path* itself
+        already exists: Path.resolve() follows every symlink, including
+        intermediate directory ones, and the final containment check catches
+        an escape. For a write target that doesn't exist yet, only its
+        nearest existing ancestor gets resolved+checked — an existing
+        symlinked directory further up the chain (e.g. project_root/a is a
+        symlink, and the write is to a/b/newfile.txt, where a/b doesn't
+        exist yet) was never checked at all, and the write would silently
+        land wherever that symlink actually points, outside project_root.
+        Walking every component and rejecting on the first existing symlink
+        closes that gap regardless of how much of the target path exists.
+        """
+        try:
+            relative = path.relative_to(project_root)
+        except ValueError as exc:
+            raise WorkspacePolicyError("Path is not under project root") from exc
+
+        partial = project_root
+        for part in relative.parts:
+            partial = partial / part
+            if partial.exists() and partial.is_symlink():
+                raise SymlinkEscapeError(
+                    f"Symlink component rejected: {path} has a symlinked "
+                    f"ancestor at {partial}"
+                )
+
     def _check_symlink_escape(self, path: Path, project_root: Path) -> Path:
         """Resolve symlinks and verify the final target is inside project_root.
 
@@ -248,6 +277,10 @@ class WorkspacePolicy:
 
         root = self._resolve_project_root(project_id)
         full = root / relative_path
+
+        # Reject any existing symlink component regardless of whether the
+        # final target itself exists yet.
+        self._check_no_symlink_components(full, root)
 
         # If the file exists, check symlinks
         if full.exists():
