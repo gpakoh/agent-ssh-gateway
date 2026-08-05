@@ -143,6 +143,28 @@ class TestSymlinkEscape:
         with pytest.raises(SymlinkEscapeError):
             full_access_policy.validate_write("project-a", "escape_link/secret.txt")
 
+    def test_reject_write_through_symlinked_ancestor_with_nonexistent_child(
+        self, full_access_policy, workspace
+    ):
+        """Regression: validate_write() only checked the immediate parent
+        directory, and only when that parent already exists. A symlinked
+        directory further up the chain (not the immediate parent) with a
+        not-yet-existing child path was never checked at all — the write
+        would resolve, at the OS level, through the symlink to wherever it
+        actually points, outside project_root, with no error ever raised.
+        Every real caller (edit.py, snapshot.py) happens to pair
+        validate_write() with a separate _symlink_safe_preflight() call that
+        catches this — this test exercises WorkspacePolicy standalone, the
+        way it's documented to be usable, to prove it's safe on its own.
+        """
+        # escape_link/newdir doesn't exist yet — only escape_link itself does.
+        with pytest.raises(SymlinkEscapeError):
+            full_access_policy.validate_write("project-a", "escape_link/newdir/secret.txt")
+
+        # Confirm nothing was ever written through the escape.
+        leaked = workspace["project_b"] / "newdir" / "secret.txt"
+        assert not leaked.exists()
+
 
 # ── Hidden / Secret Path Tests ───────────────────────────────────
 
@@ -171,6 +193,19 @@ class TestHiddenPaths:
     def test_accept_normal_file(self, full_access_policy):
         path = full_access_policy.validate_read("project-a", "README.md")
         assert path.exists()
+
+    def test_reject_read_private_key_with_suffix(self, full_access_policy, workspace):
+        """Regression: SECRET_FILE_PATTERNS used an exact "id_rsa" pattern
+        with no wildcard (unlike *.pem/*.key), so any suffixed copy —
+        id_rsa.bak, id_rsa_backup, a renamed backup of the same key
+        material — sailed straight through the secret-file check.
+        """
+        (workspace["project_a"] / "id_rsa.bak").write_text("private-key-data")
+        (workspace["project_a"] / "id_rsa_backup").write_text("private-key-data")
+        with pytest.raises(HiddenPathError):
+            full_access_policy.validate_read("project-a", "id_rsa.bak")
+        with pytest.raises(HiddenPathError):
+            full_access_policy.validate_read("project-a", "id_rsa_backup")
 
 
 # ── Scope Tests ──────────────────────────────────────────────────
