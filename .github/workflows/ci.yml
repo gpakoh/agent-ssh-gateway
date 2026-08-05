@@ -72,7 +72,7 @@ jobs:
     if: github.ref_name == 'master' && github.event_name == 'push'
     runs-on: docker-e2e-ci
     env:
-      REGISTRY: 192.168.1.103:3005
+      REGISTRY: ${{ secrets.REGISTRY_HOST }}
     steps:
       - uses: actions/checkout@v7
       - name: Log in to the Gitea container registry
@@ -120,7 +120,7 @@ jobs:
       volumes:
         - /media/1TB/Python/web_ssh/web-ssh-gateway:/deploy/web-ssh-gateway
     env:
-      REGISTRY: 192.168.1.103:3005
+      REGISTRY: ${{ secrets.REGISTRY_HOST }}
     steps:
       # Each job gets its own fresh container — build-and-push's docker
       # login doesn't carry over, even on the same runner.

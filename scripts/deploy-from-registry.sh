@@ -17,9 +17,22 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# WEB_SSH_GATEWAY_REPO / MCP_SERVER_REPO name the real registry host —
+# never hardcoded here (this script is tracked in a public repo). Real
+# values live in the gitignored docker/.env, same place
+# docker-compose.yml's own real secrets (API_KEY, JWT_SECRET, ...) live;
+# `set -a` exports everything .env defines so both this script's own
+# variables and the `docker compose` calls below see them.
+if [ -f docker/.env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source docker/.env
+  set +a
+fi
+
 COMPOSE="${COMPOSE:-docker compose -p web-ssh-gateway -f docker/docker-compose.yml}"
-GATEWAY_REPO="${WEB_SSH_GATEWAY_REPO:-192.168.1.103:3005/gpakoh/agent-ssh-gateway}"
-MCP_REPO="${MCP_SERVER_REPO:-192.168.1.103:3005/gpakoh/mcp-server}"
+GATEWAY_REPO="${WEB_SSH_GATEWAY_REPO:?set WEB_SSH_GATEWAY_REPO in docker/.env}"
+MCP_REPO="${MCP_SERVER_REPO:?set MCP_SERVER_REPO in docker/.env}"
 STATE_DIR="$ROOT/.state"
 STATE_FILE="$STATE_DIR/web-ssh-gateway-deploy.json"
 mkdir -p "$STATE_DIR"
