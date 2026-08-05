@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from app.command_policy import evaluate_command_policy
 from app.config import settings
 from app.exceptions import JobNotFoundError, PermissionDeniedError
+from app.redis_queue import RedisJobQueue
 from app.ssh_manager import (
     ExecutionError,
     SessionNotFoundError,
@@ -136,6 +137,7 @@ class JobManager:
         ssh_manager: SSHSessionManager,
         max_jobs: int = 100,
         job_timeout: int = 3600,
+        redis_queue: RedisJobQueue | None = None,
     ) -> None:
         self._ssh_manager = ssh_manager
         self._jobs: dict[str, JobRecord] = {}
@@ -143,6 +145,10 @@ class JobManager:
         self._max_jobs = max_jobs
         self._job_timeout = job_timeout
         self._cleanup_task: asyncio.Task | None = None
+        # Set post-construction in main.py's lifespan — RedisJobQueue is
+        # created after JobManager. Mirrors terminal job state so job
+        # history/results survive a gateway restart; see save_terminal_job().
+        self.redis_queue = redis_queue
         self._job_tasks: dict[str, asyncio.Task] = {}
 
     async def start_cleanup_task(self) -> None:
@@ -233,6 +239,29 @@ class JobManager:
         task.add_done_callback(lambda _: self._job_tasks.pop(job_id, None))
         return job_id
 
+    async def _persist_terminal_job(self, job: JobRecord) -> None:
+        """Mirror a finished job to Redis, best-effort.
+
+        Must never raise — a Redis hiccup is not allowed to affect the
+        in-process job outcome that's already been decided.
+        """
+        if self.redis_queue is None:
+            return
+        try:
+            await self.redis_queue.save_terminal_job(
+                job.job_id,
+                session_id=job.session_id,
+                command=job.command,
+                owner_id=job.owner_id,
+                status=job.status,
+                stdout=job.stdout,
+                stderr=job.stderr,
+                exit_code=job.exit_code,
+                error=job.error_message,
+            )
+        except Exception:
+            logger.warning("Failed to persist job %s to Redis", job.job_id, exc_info=True)
+
     async def _run_job(self, job_id: str) -> None:
         """Execute a command in the background."""
         async with self._lock:
@@ -280,6 +309,7 @@ class JobManager:
                     "exit_code": -1,
                 }
             )
+            await self._persist_terminal_job(job)
             return
 
         try:
@@ -357,6 +387,7 @@ class JobManager:
                     "exit_code": job.exit_code,
                 }
             )
+            await self._persist_terminal_job(job)
 
     # ------------------------------------------------------------------
     # Get Job

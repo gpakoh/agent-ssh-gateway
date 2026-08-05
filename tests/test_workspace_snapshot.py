@@ -1,4 +1,4 @@
-"""Tests for workspace snapshot store and audit logger.
+"""Tests for workspace snapshot store.
 
 Covers:
     - Snapshot capture and retrieval (existing, new, empty files)
@@ -10,13 +10,10 @@ Covers:
     - Memory cap eviction (per-project and global)
     - Receipt ID can be supplied externally
     - Restart-loss model (documented behavior)
-    - Audit logger metadata-only (no content leaks)
-    - Audit logger in-memory cap
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -30,10 +27,8 @@ from app.workspace.policy import (
     WorkspacePolicyError,
 )
 from app.workspace.snapshot import (
-    AuditLogger,
     SnapshotStore,
     StaleSnapshotError,
-    WorkspaceAuditLogger,
     _compute_hash,
     _file_hash,
 )
@@ -729,192 +724,6 @@ class TestRestartLossModel:
             store.rollback(project.name, "hello.txt", registry)
 
 
-# ── WorkspaceAuditLogger ─────────────────────────────────────────
-
-
-class TestAuditLogger:
-    """Test audit logger metadata-only behavior."""
-
-    def test_log_creates_entry(self):
-        logger = WorkspaceAuditLogger()
-        entry = logger.log(
-            receipt_id="snap_abc123",
-            project_id="proj",
-            relative_path="src/main.py",
-            operation="write",
-            before_hash="sha256:aaa",
-            after_hash="sha256:bbb",
-            size=100,
-            identity="agent-1",
-            success=True,
-        )
-        assert entry.receipt_id == "snap_abc123"
-        assert entry.operation == "write"
-        assert len(logger.entries) == 1
-
-    def test_log_failure_records_error(self):
-        logger = WorkspaceAuditLogger()
-        entry = logger.log(
-            receipt_id="snap_fail",
-            project_id="proj",
-            relative_path="bad.txt",
-            operation="write",
-            before_hash="",
-            after_hash="",
-            size=0,
-            success=False,
-            error="TraversalError",
-        )
-        assert entry.success is False
-        assert entry.error == "TraversalError"
-
-    def test_log_to_jsonl_file(self, tmp_path):
-        log_path = tmp_path / "audit.jsonl"
-        logger = WorkspaceAuditLogger(log_path)
-
-        logger.log(
-            receipt_id="snap_1",
-            project_id="proj",
-            relative_path="a.txt",
-            operation="write",
-            before_hash="sha256:aaa",
-            after_hash="sha256:bbb",
-            size=50,
-        )
-
-        lines = log_path.read_text().strip().split("\n")
-        assert len(lines) == 1
-        data = json.loads(lines[0])
-        assert data["receipt_id"] == "snap_1"
-        assert data["project_id"] == "proj"
-        assert "content" not in data
-        assert "patch" not in data
-        assert "old_string" not in data
-        assert "new_string" not in data
-
-    def test_audit_no_content_leak(self, tmp_path):
-        """Audit entries must never contain file content."""
-        logger = WorkspaceAuditLogger(tmp_path / "audit.jsonl")
-        logger.log(
-            receipt_id="snap_x",
-            project_id="proj",
-            relative_path="secret.txt",
-            operation="write",
-            before_hash="sha256:aaa",
-            after_hash="sha256:bbb",
-            size=1024,
-        )
-
-        entry = logger.entries[0]
-        # These keys must NEVER appear in audit entries
-        forbidden_keys = {"content", "patch", "old_string", "new_string", "raw"}
-        assert not forbidden_keys.intersection(entry.keys())
-
-    def test_audit_no_absolute_paths(self, tmp_path):
-        """Audit entries must not contain absolute host paths."""
-        logger = WorkspaceAuditLogger()
-        logger.log(
-            receipt_id="snap_y",
-            project_id="proj",
-            relative_path="src/main.py",
-            operation="write",
-            before_hash="sha256:aaa",
-            after_hash="sha256:bbb",
-            size=100,
-        )
-
-        entry = logger.entries[0]
-        assert entry["relative_path"] == "src/main.py"
-        assert "/" not in entry["relative_path"] or entry["relative_path"].startswith("src/")
-
-    def test_clear_resets_entries(self):
-        logger = WorkspaceAuditLogger()
-        logger.log(
-            receipt_id="snap_z",
-            project_id="proj",
-            relative_path="a.txt",
-            operation="write",
-            before_hash="",
-            after_hash="",
-            size=0,
-        )
-        logger.clear()
-        assert len(logger.entries) == 0
-
-    def test_no_file_when_log_path_none(self):
-        """If log_path is None, entries are in-memory only."""
-        logger = WorkspaceAuditLogger(log_path=None)
-        logger.log(
-            receipt_id="snap_n",
-            project_id="proj",
-            relative_path="a.txt",
-            operation="write",
-            before_hash="",
-            after_hash="",
-            size=0,
-        )
-        assert len(logger.entries) == 1
-
-    def test_in_memory_cap_enforced(self):
-        """In-memory entries are capped at max_in_memory_entries."""
-        logger = WorkspaceAuditLogger(log_path=None, max_in_memory_entries=5)
-        for i in range(8):
-            logger.log(
-                receipt_id=f"snap_{i}",
-                project_id="proj",
-                relative_path=f"f{i}.txt",
-                operation="write",
-                before_hash="",
-                after_hash="",
-                size=0,
-            )
-        # Only the last 5 should remain
-        assert len(logger.entries) == 5
-        assert logger.entries[0]["receipt_id"] == "snap_3"
-        assert logger.entries[4]["receipt_id"] == "snap_7"
-
-    def test_cap_enforced_when_log_path_set(self):
-        """Regression: max_in_memory was silently set to 0 (disabling the
-        cap check entirely, since `if self._max_in_memory and ...` is
-        falsy for 0) whenever log_path was provided — meaning the in-memory
-        buffer grew without bound for the life of the process on any
-        long-running gateway with persistent audit logging configured.
-        log_path controls disk persistence; it must not affect how much
-        history is kept in memory for the `.entries` property.
-        """
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
-            log_path = f.name
-        try:
-            logger = WorkspaceAuditLogger(log_path=log_path, max_in_memory_entries=3)
-            for i in range(5):
-                logger.log(
-                    receipt_id=f"snap_{i}",
-                    project_id="proj",
-                    relative_path=f"f{i}.txt",
-                    operation="write",
-                    before_hash="",
-                    after_hash="",
-                    size=0,
-                )
-            # Cap enforced even though log_path is set — full history still
-            # lands on disk (verified by test_writes_jsonl_lines), only the
-            # in-memory buffer is bounded.
-            assert len(logger.entries) == 3
-            assert logger.entries[0]["receipt_id"] == "snap_2"
-            assert logger.entries[-1]["receipt_id"] == "snap_4"
-
-            lines = Path(log_path).read_text().strip().split("\n")
-            assert len(lines) == 5, "disk log must keep full history regardless of the in-memory cap"
-        finally:
-            Path(log_path).unlink(missing_ok=True)
-
-    def test_backward_compatible_alias(self):
-        """AuditLogger is an alias for WorkspaceAuditLogger."""
-        assert AuditLogger is WorkspaceAuditLogger
-
-
 # ── Integration: capture + rollback cycle ────────────────────────
 
 
@@ -1019,48 +828,3 @@ class TestSnapshotIntegration:
         assert (project / "a.txt").read_bytes() == content_a
         # B still has original content (was never modified)
         assert (project / "b.txt").read_bytes() == content_b
-
-    def test_rollback_with_audit_logging(self, tmp_path):
-        """Audit logger works alongside rollback (independent)."""
-        project = _make_project(tmp_path)
-        original = (project / "hello.txt").read_bytes()
-
-        store = SnapshotStore()
-        audit = WorkspaceAuditLogger()
-
-        # Capture
-        snap = store.capture(
-            project.name, "hello.txt", original, "write",
-            file_hash=_compute_hash(original),
-        )
-        audit.log(
-            receipt_id=snap.receipt_id,
-            project_id=project.name,
-            relative_path="hello.txt",
-            operation="write",
-            before_hash=snap.before_hash or "",
-            after_hash="",
-            size=snap.size,
-        )
-
-        # Rollback (file unchanged)
-        registry = _mock_registry(project)
-        result = store.rollback(project.name, "hello.txt", registry)
-
-        # Log rollback
-        audit.log(
-            receipt_id=result.receipt_id,
-            project_id=project.name,
-            relative_path="hello.txt",
-            operation="rollback",
-            before_hash=result.before_hash or "",
-            after_hash=result.after_hash or "",
-            size=result.size,
-        )
-
-        assert len(audit.entries) == 2
-        assert audit.entries[0]["operation"] == "write"
-        assert audit.entries[1]["operation"] == "rollback"
-        # No content in audit
-        for e in audit.entries:
-            assert "content" not in e

@@ -1,5 +1,51 @@
 # Agent SSH Gateway — TODO
 
+## 🧹 Решение по мёртвому коду: RedisJobQueue подключён, остальное удалено
+
+По итогам предыдущего разбора мёртвого кода — пользователь решил:
+RedisJobQueue подключить, остальное (genuinely dead) удалить вместе с
+тестами.
+
+1. ✅ **`RedisJobQueue` подключён.** JobManager выполняет джобы сразу
+   in-process (asyncio task на джобу), а не через pending/processing
+   zset-модель `enqueue()`/`dequeue()` — поэтому подключение
+   одностороннее: на каждом терминальном переходе (completed/failed/
+   policy-denied) `JobManager._persist_terminal_job()` best-effort
+   зеркалирует джобу в Redis через новый `RedisJobQueue.save_terminal_job()`
+   (пишет напрямую в то же хранилище, что читает `_get_job`/
+   `get_dead_letter_jobs`/`get_queue_stats`, минуя очередь). Redis ошибка
+   никогда не влияет на исход джобы (try/except, best-effort). Честные
+   границы: сама джоба НЕ переживает рестарт (asyncio task/SSE-listeners
+   физически не могут) — переживает только её история/результат,
+   плюс `GET /api/jobs/queue/stats`/`GET /api/jobs/queue/dead` теперь
+   показывают реальные данные вместо вечного нуля. `enqueue`/`dequeue`/
+   `heartbeat`/`retry_job`/`recover_orphans` (pull-модель для гипотетического
+   распределённого worker pool) оставлены нетронутыми — ими до сих пор
+   никто не пользуется, это осознанно отдельная, не реализованная фича.
+   9 новых тестов (`test_job_manager_redis_persistence.py`,
+   `test_redis_queue_save_terminal_job.py`).
+2. ✅ **`WorkspaceAuditLogger`/`AuditLogger`/`AuditEntry`** (app/workspace/
+   snapshot.py) — удалены полностью (класс, dataclass, backward-compat
+   alias, весь `TestAuditLogger` + `test_rollback_with_audit_logging` в
+   tests/test_workspace_snapshot.py — 12 тестов). Ноль вызывающих нигде
+   в кодовой базе.
+3. ✅ **`ProjectRegistry`** (examples/mcp_server/project_registry.py) —
+   файл удалён целиком вместе с `tests/test_project_registry.py`.
+   Заодно удалена конфигурация, существовавшая только ради него:
+   `PROJECT_MAP`/`_load_project_map()`/`_PROJECT_MAP_DEFAULT` и
+   поддержка `MCP_PROJECT_MAP_JSON`/legacy `MCP_GATEWAY_PROJECT_ROOT` в
+   `examples/mcp_server/config.py` (`ALLOWED_PROJECT_ROOTS` осталась —
+   её использует `docker_client.py`).
+4. ✅ **`edit_files_bulk()`** (app/bulk_operations_v2.py) — метод удалён;
+   реальный роут `/api/bulk/edit` всегда использовал отдельную
+   реализацию (`edit_many()`). Удалён `test_edit_files_bulk` из
+   `test_batch_managers.py`, уточнён docstring модуля (сноска на
+   files.py была неточной).
+
+Полный набор (4113 тестов, было 4120 — минус 16 мёртвых, плюс 9 новых)
+зелёный, `ruff`/`mypy` чистые (та же pre-existing ошибка в
+`event_hook_delivery.py:340`).
+
 ## ⚠️ Коррекция: два "orphaned"-фикса были на самом деле live
 
 По запросу пользователя перепроверил все находки этой сессии, помеченные

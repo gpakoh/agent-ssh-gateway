@@ -1,8 +1,7 @@
-"""In-memory snapshot store for workspace rollback + JSONL audit helper.
+"""In-memory snapshot store for workspace rollback.
 
 Provides session-scoped rollback for write/edit/patch operations.
 Snapshots are stored in a bounded in-memory ring buffer per project.
-Audit logs are metadata-only (no file content, no patch text).
 
 Rollback is secure: runs through validate_write + _symlink_safe_preflight
 + _atomic_write, the same path validation as the original write.
@@ -20,14 +19,12 @@ Both auto-generate IDs when not supplied (snapshot: r_, receipt: rcpt_).
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from app.workspace.edit import (
     _atomic_write,
@@ -43,7 +40,6 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_PER_PROJECT = 10
 _DEFAULT_MAX_TOTAL_BYTES = 10_000_000  # 10 MB
-_DEFAULT_MAX_AUDIT_ENTRIES = 500  # in-memory audit cap (when no log_path)
 
 
 # ── Errors ───────────────────────────────────────────────────────
@@ -113,23 +109,6 @@ class RollbackResult:
     rolled_back: bool
     receipt_id: str
     stale_detected: bool = False
-
-
-@dataclass
-class AuditEntry:
-    """Metadata-only audit record (no file content)."""
-
-    receipt_id: str
-    project_id: str
-    relative_path: str
-    operation: str
-    before_hash: str
-    after_hash: str
-    size: int
-    timestamp: float
-    identity: str  # caller fingerprint (opaque string)
-    success: bool
-    error: str = ""
 
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -472,138 +451,3 @@ class SnapshotStore:
         else:
             self._stores.clear()
             self._total_bytes = 0
-
-
-# ── JSONL Audit Logger ───────────────────────────────────────────
-
-
-class WorkspaceAuditLogger:
-    """Append-only JSONL audit logger for workspace mutations.
-
-    Writes metadata-only records (no file content, no patch text,
-    no old_string/new_string, no absolute host paths).
-
-    IMPORTANT: log_path must NOT be inside any project root.
-    The caller is responsible for choosing a safe audit path
-    (e.g., /var/log/web-ssh-gateway/audit.jsonl or a temp dir).
-
-    Each line is a JSON object with fields:
-        receipt_id, project_id, relative_path, operation,
-        before_hash, after_hash, size, timestamp, identity, success, error
-
-    The in-memory buffer is always capped at max_in_memory_entries (default
-    _DEFAULT_MAX_AUDIT_ENTRIES = 500) to prevent unbounded growth, whether
-    or not log_path is set — log_path controls persistence to disk, not
-    how much history is kept in memory for the `.entries` property.
-    Oldest entries are dropped when the cap is hit.
-
-    This is a helper — rollback does NOT depend on audit.
-    """
-
-    def __init__(
-        self,
-        log_path: str | Path | None = None,
-        max_in_memory_entries: int = _DEFAULT_MAX_AUDIT_ENTRIES,
-    ):
-        """Initialize the audit logger.
-
-        Args:
-            log_path: path to the JSONL log file. If None, logging is disabled
-                     (entries are in-memory only). Must NOT be inside any
-                     project root to avoid polluting workspace directories.
-            max_in_memory_entries: max entries to keep when log_path is None.
-                Prevents unbounded memory growth. Default 500.
-        """
-        self._log_path = Path(log_path) if log_path else None
-        self._entries: list[dict[str, Any]] = []  # in-memory buffer
-        self._max_in_memory = max_in_memory_entries
-
-    def log(
-        self,
-        receipt_id: str,
-        project_id: str,
-        relative_path: str,
-        operation: str,
-        before_hash: str,
-        after_hash: str,
-        size: int,
-        identity: str = "",
-        success: bool = True,
-        error: str = "",
-    ) -> AuditEntry:
-        """Append an audit entry.
-
-        Args:
-            receipt_id: snapshot/receipt identifier.
-            project_id: registered project identifier.
-            relative_path: project-relative path (never absolute).
-            operation: operation type (write/edit/patch/rollback).
-            before_hash: SHA-256 of content before operation.
-            after_hash: SHA-256 of content after operation.
-            size: content size in bytes.
-            identity: caller fingerprint (opaque string, no secrets).
-            success: whether the operation succeeded.
-            error: error message if failed.
-
-        Returns:
-            The created AuditEntry.
-        """
-        entry = AuditEntry(
-            receipt_id=receipt_id,
-            project_id=project_id,
-            relative_path=relative_path,
-            operation=operation,
-            before_hash=before_hash,
-            after_hash=after_hash,
-            size=size,
-            timestamp=time.time(),
-            identity=identity,
-            success=success,
-            error=error,
-        )
-
-        self._entries.append(
-            {
-                "receipt_id": entry.receipt_id,
-                "project_id": entry.project_id,
-                "relative_path": entry.relative_path,
-                "operation": entry.operation,
-                "before_hash": entry.before_hash,
-                "after_hash": entry.after_hash,
-                "size": entry.size,
-                "timestamp": entry.timestamp,
-                "identity": entry.identity,
-                "success": entry.success,
-                "error": entry.error,
-            }
-        )
-
-        # Enforce memory cap when no log_path
-        if self._max_in_memory and len(self._entries) > self._max_in_memory:
-            self._entries = self._entries[-self._max_in_memory :]
-
-        # Write to file if configured
-        if self._log_path:
-            try:
-                line = json.dumps(
-                    self._entries[-1], ensure_ascii=False, separators=(",", ":")
-                )
-                with open(self._log_path, "a", encoding="utf-8") as f:
-                    f.write(line + "\n")
-            except OSError as exc:
-                logger.warning("Failed to write audit log: %s", exc)
-
-        return entry
-
-    @property
-    def entries(self) -> list[dict[str, Any]]:
-        """In-memory audit entries (read-only copy)."""
-        return list(self._entries)
-
-    def clear(self) -> None:
-        """Clear in-memory entries."""
-        self._entries.clear()
-
-
-# Backward-compatible alias
-AuditLogger = WorkspaceAuditLogger
