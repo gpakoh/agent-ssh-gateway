@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import shlex
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -372,16 +373,21 @@ class ContextManager:
 
     async def _checkout_branch(self, session_id: str, path: str, branch: str) -> None:
         """Checkout or create branch."""
+        escaped_path = shlex.quote(path)
+        escaped_branch = shlex.quote(branch)
+
         # Check if branch exists
         result = await self._ssh.execute(
-            session_id, f"cd {path} && git branch --list {branch}", timeout=10
+            session_id, f"cd {escaped_path} && git branch --list {escaped_branch}", timeout=10
         )
 
         if result["stdout"].strip():
             # Branch exists, checkout
-            await self._ssh.execute(session_id, f"cd {path} && git checkout {branch}", timeout=10)
+            await self._ssh.execute(
+                session_id, f"cd {escaped_path} && git checkout {escaped_branch}", timeout=10
+            )
         else:
             # Create new branch
             await self._ssh.execute(
-                session_id, f"cd {path} && git checkout -b {branch}", timeout=10
+                session_id, f"cd {escaped_path} && git checkout -b {escaped_branch}", timeout=10
             )
