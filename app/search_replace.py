@@ -2,6 +2,7 @@
 
 import logging
 import re
+import shlex
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -63,11 +64,16 @@ class GlobalSearchReplace:
             grep_flags += " -E"
 
         # Escape Query For Shell
-        escaped_query = query.replace("'", "'\"'\"'")
+        escaped_query = shlex.quote(query)
+        escaped_path = shlex.quote(path)
 
         # Find Matching Files
         if file_pattern != "*":
-            find_cmd = f"cd {path} && find . -type f -name '{file_pattern}' -not -path './venv/*' -not -path './.git/*' -not -path './__pycache__/*' | head -100"
+            find_cmd = (
+                f"cd {escaped_path} && find . -type f -name {shlex.quote(file_pattern)} "
+                "-not -path './venv/*' -not -path './.git/*' -not -path './__pycache__/*' "
+                "| head -100"
+            )
             find_result = await self._ssh.execute(session_id, find_cmd, timeout=15)
             files = [f.strip() for f in find_result["stdout"].strip().split("\n") if f.strip()]
 
@@ -75,11 +81,17 @@ class GlobalSearchReplace:
                 return results
 
             # Search In Specific Files
-            files_arg = " ".join(files)
-            cmd = f"cd {path} && grep {grep_flags} -C {context_lines} '{escaped_query}' {files_arg} 2>/dev/null || true"
+            files_arg = " ".join(shlex.quote(f) for f in files)
+            cmd = (
+                f"cd {escaped_path} && grep {grep_flags} -C {context_lines} "
+                f"{escaped_query} {files_arg} 2>/dev/null || true"
+            )
         else:
             # Search In All Files
-            cmd = f"cd {path} && grep {grep_flags} -C {context_lines} --include='*' '{escaped_query}' . 2>/dev/null || true"
+            cmd = (
+                f"cd {escaped_path} && grep {grep_flags} -C {context_lines} --include='*' "
+                f"{escaped_query} . 2>/dev/null || true"
+            )
 
         result = await self._ssh.execute(session_id, cmd, timeout=30)
 
