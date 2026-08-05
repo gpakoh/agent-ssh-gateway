@@ -73,7 +73,7 @@ async def connect_server(
         raise HTTPException(status_code=404, detail=_err(404, f"Server {server_id} not found"))
 
     try:
-        validate_target_host(
+        validated_ips = validate_target_host(
             server.host,
             settings.allowed_target_cidrs,
             settings.denied_target_cidrs,
@@ -90,6 +90,7 @@ async def connect_server(
             username=server.username,
             password=_password,
             private_key=_private_key,
+            pinned_ip=validated_ips[0],
         )
 
         _state.server_manager.update_server_status(

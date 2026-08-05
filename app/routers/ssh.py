@@ -323,7 +323,7 @@ async def ssh_connect(
             pass  # pending: allow connect, just track
 
     try:
-        validate_target_host(
+        validated_ips = validate_target_host(
             req.host,
             settings.allowed_target_cidrs,
             settings.denied_target_cidrs,
@@ -352,6 +352,7 @@ async def ssh_connect(
         owner_token_fingerprint=_identity.fingerprint,
         source_ip=source_ip,
         tenant_labels=_identity.tenant_labels,
+        pinned_ip=validated_ips[0],
     )
 
     from app.audit import emit_session_lifecycle_event as _emit_session
@@ -441,7 +442,7 @@ async def ssh_prewarm(
             pass  # pending: allow prewarm, just track
 
     try:
-        validate_target_host(
+        validated_ips = validate_target_host(
             req.host,
             settings.allowed_target_cidrs,
             settings.denied_target_cidrs,
@@ -473,6 +474,7 @@ async def ssh_prewarm(
                 owner_token_fingerprint=_identity.fingerprint,
                 source_ip=source_ip,
                 session_id=session_id,
+                pinned_ip=validated_ips[0],
             )
             if _state.session_store:
                 try:
@@ -1149,7 +1151,7 @@ async def check_port(
 ):
     """Check if a remote TCP port is reachable. Requires API authentication."""
     try:
-        validate_target_host(
+        validated_ips = validate_target_host(
             host,
             settings.allowed_target_cidrs,
             settings.denied_target_cidrs,
@@ -1159,8 +1161,12 @@ async def check_port(
 
     start = time.monotonic()
     try:
+        # Connect to the already-validated IP, not `host` — otherwise this
+        # is a second, independent DNS lookup a low-TTL record could answer
+        # differently from the one validate_target_host just checked
+        # (DNS rebinding bypassing the allowed/denied CIDR policy).
         _reader, _writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port),
+            asyncio.open_connection(validated_ips[0], port),
             timeout=timeout,
         )
         _writer.close()
