@@ -105,6 +105,19 @@ class TestSelectorMatching:
         assert a.check("docker exec web-ssh-gateway ls") is not None
         assert a.check("docker ps") is None
 
+    def test_prefix_match_requires_word_boundary(self):
+        """Regression: a bare command.startswith(prefix) let an entry meant
+        for one command family also cover an unrelated command that merely
+        shares the same leading characters — a "docker" prefix entry would
+        also match "dockerize-evil.sh", not just real docker invocations.
+        """
+        a = Allowlist()
+        a.add("system", "prefix", "docker")
+        assert a.check("docker ps") is not None
+        assert a.check("docker") is not None
+        assert a.check("dockerize-evil.sh") is None
+        assert a.check("docker-compose up") is None
+
     def test_regex_match(self):
         a = Allowlist()
         a.add("system", "regex", r"rm\s+-rf\s+/\s*$")
