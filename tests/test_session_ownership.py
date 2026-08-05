@@ -209,7 +209,10 @@ class TestSessionOwnershipHTTP:
                     token_type="agent",
                     token=provided,
                     name="agent",
-                    scopes=("ssh:connect", "ssh:execute", "ssh:disconnect", "ssh:files"),
+                    scopes=(
+                        "ssh:connect", "ssh:execute", "ssh:disconnect", "ssh:files",
+                        "diagnostics:read",
+                    ),
                 )
             return None
 
@@ -361,6 +364,49 @@ class TestSessionOwnershipHTTP:
                 headers={"X-API-Key": "secret-42"},
             )
         assert resp.status_code == 200
+
+    def test_session_check_ownership_agent_blocked(self, monkeypatch):
+        """Regression: POST /api/session/check (diagnostics.py) never called
+        ensure_session_owner at all — unlike the near-identical GET
+        /api/ssh/session/{id}/health, which does. Any diagnostics:read-scoped
+        agent token could probe an arbitrary session_id belonging to a
+        different agent/tenant and learn whether it exists and whether it's
+        connected — a cross-tenant status oracle.
+        """
+        self._patch_base(monkeypatch)
+        with TestClient(app) as client:
+            self._override_manager(client, self._make_cross_tenant_session_mock())
+            resp = client.post(
+                "/api/session/check",
+                headers={"Authorization": "Bearer agent-token-a"},
+                json={"session_id": "s-2"},
+            )
+        assert resp.status_code == 403
+        assert "SESSION_OWNERSHIP" in resp.text or "cannot access" in resp.text
+
+    def test_session_check_ownership_master_bypasses(self, monkeypatch):
+        self._patch_base(monkeypatch)
+        with TestClient(app) as client:
+            self._override_manager(client, self._make_cross_tenant_session_mock())
+            resp = client.post(
+                "/api/session/check",
+                headers={"X-API-Key": "secret-42"},
+                json={"session_id": "s-2"},
+            )
+        assert resp.status_code == 200
+        assert resp.json()["valid"] is True
+
+    def test_session_check_ownership_own_session_allowed(self, monkeypatch):
+        self._patch_base(monkeypatch)
+        with TestClient(app) as client:
+            self._override_manager(client, self._make_session_mock())
+            resp = client.post(
+                "/api/session/check",
+                headers={"Authorization": "Bearer agent-token-a"},
+                json={"session_id": "s-1"},
+            )
+        assert resp.status_code == 200
+        assert resp.json()["valid"] is True
 
     def test_session_env_ownership_agent_blocked(self, monkeypatch):
         self._patch_base(monkeypatch)

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
 from app import state as _state
-from app.auth_middleware import AuthIdentity, require_scope
+from app.auth_middleware import AuthIdentity, ensure_session_owner, require_scope
 from app.models import SessionCheckRequest
 
 router = APIRouter(tags=["diagnostics"])
@@ -111,6 +111,7 @@ async def session_check(
             "code": "SESSION_NOT_FOUND",
             "hint": "Create a session via POST /api/ssh/connect",
         }
+    ensure_session_owner(record, _identity)
 
     status = "connected" if record.is_connected() else "disconnected"
     return {
