@@ -66,9 +66,28 @@
    но никогда не подключён к реальному пути исполнения джобов
    (`_state.job_manager` — другой, отдельный in-process менеджер). Не баг,
    просто неиспользуемая фича — как и `webhook_manager.py` (см. пункт 4).
-6. **Agent handoff / worktree** (`examples/mcp_server/handoff.py`,
-   `agent_tasks.py`, `opencode_runner_wrapper.py`, `mimo_tools.py`,
-   `opencode_tools.py`) — не тронуто в этой сессии вообще.
+6. ✅ **Agent handoff / worktree** — прошёл все 5 файлов. Реальные баги
+   исправлены с regression-тестами:
+   - `agent_tasks.py`: `read_agent_task_file()`'s `filename` интерполировался
+     в shell-команду без вообще какой-либо валидации/escaping — рядом лежал
+     неиспользуемый `_shell_escape()` helper, явно предназначенный для этого,
+     но никогда не применённый. Все текущие вызовы (`server.py`) передают
+     hardcoded literal, поэтому сейчас не эксплуатируемо, но сама функция
+     была минным полем для любого будущего вызывающего. Добавлен
+     `validate_filename()`. Commit `ed9de99f`.
+   - `scripts/opencode_runner_wrapper.py`: `resolved_cmd.split()[1:]` —
+     наивный split по пробелам без понятия о кавычках — дефолтная
+     авто-сгенерированная команда содержит quoted multi-word prompt-аргумент,
+     который наивный split разбивал на десятки отдельных токенов вместо
+     одного аргумента. Заменено на `shlex.split()` (вынесено в
+     `build_opencode_args()`). Не было покрыто тестами: весь файл тестов
+     skip'ается без реального opencode-бинаря, а единственные проходящие
+     тесты используют dry_run, который возвращается раньше, чем код с багом
+     вообще выполняется — новый тест лежит в отдельном файле без skip.
+     Commit `ed9de99f`.
+   - `handoff.py`, `mimo_tools.py`, `opencode_tools.py`: чисто, без новых
+     находок (`resolve_file_path` уже блокирует traversal корректно; mimo/
+     opencode tools — намеренно hard-blocked stubs).
 7. **`app/services/*.py`** (вынесены в P19.2: `file_editing.py`,
    `project_patch.py`, `context_editing.py`, `scaffolding.py`,
    `project_structure.py`) — рефакторены ради структуры, не seam-тестированы
