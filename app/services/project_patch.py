@@ -13,6 +13,7 @@ import logging
 import os
 import shutil
 import uuid
+from pathlib import Path
 
 from app.models import ProjectPatchApplyResponse, ProjectPatchFileResult
 from app.patch_apply import (
@@ -26,6 +27,26 @@ logger = logging.getLogger(__name__)
 
 class ProjectNotFoundError(Exception):
     """Requested project is not registered in the workspace registry."""
+
+
+def _resolve_within_root(project_root: Path, rel_path: str) -> Path:
+    """Resolve rel_path against project_root and reject any escape.
+
+    f["path"] comes straight from the unified diff's source-file header —
+    fully attacker-controlled via the raw patch text, with no traversal
+    filtering anywhere in patch_apply.py. A path like "../../../etc/passwd"
+    (or even a plain absolute path — `Path(root) / "/etc/passwd"` silently
+    discards `root` entirely, a well-known pathlib pitfall) would resolve
+    outside project_root, and the caller only needs the "project:patch"
+    scope, not the master key, to reach this. Resolve first, then check
+    containment on the resolved path — this catches both cases regardless
+    of how the escape was constructed.
+    """
+    full_path = (project_root / rel_path).resolve()
+    resolved_root = project_root.resolve()
+    if full_path != resolved_root and resolved_root not in full_path.parents:
+        raise PatchValidationError(f"Path escapes project root: {rel_path!r}")
+    return full_path
 
 
 async def apply_project_patch(
@@ -69,7 +90,7 @@ async def apply_project_patch(
     if dry_run:
         preview_parts = []
         for f in files:
-            full_path = project_root / f["path"]
+            full_path = _resolve_within_root(project_root, f["path"])
             if full_path.exists():
                 original = full_path.read_text(encoding="utf-8", errors="replace")
             else:
@@ -97,7 +118,7 @@ async def apply_project_patch(
     prepared: list[tuple[object, str, str, int]] = []
 
     for f in files:
-        full_path = project_root / f["path"]
+        full_path = _resolve_within_root(project_root, f["path"])
 
         # Check file size
         if full_path.exists():
