@@ -38,6 +38,25 @@ def _validate_project(project: str) -> str:
     return project.strip("/")
 
 
+# Valid inclusive range for list_tree()/tree()'s depth argument.
+DEPTH_MIN = 1
+DEPTH_MAX = 5
+
+
+def _validate_depth(depth: int) -> int:
+    """Validate depth is an int in [DEPTH_MIN, DEPTH_MAX]. Raises ValueError otherwise.
+
+    Never silently clamps out-of-range input — a caller passing depth=0 or
+    depth=-1 gets a clear validation error instead of a silently substituted
+    depth=1, which would otherwise look like a successful call at the wrong depth.
+    """
+    if isinstance(depth, bool) or not isinstance(depth, int):
+        raise ValueError(f"depth must be an integer between {DEPTH_MIN} and {DEPTH_MAX}, got {depth!r}")
+    if not (DEPTH_MIN <= depth <= DEPTH_MAX):
+        raise ValueError(f"depth must be between {DEPTH_MIN} and {DEPTH_MAX}, got {depth}")
+    return depth
+
+
 # ── Safety helpers ──────────────────────────────────────────────
 
 _OUTPUT_LINE_LIMIT = 2000
@@ -359,9 +378,13 @@ _EXCLUDE_DIRS = frozenset(
 
 
 def list_tree(client: GatewayClient, project: str, depth: int = 2) -> dict[str, Any]:
-    """List project directory tree using Python pathlib — no shell execution."""
+    """List project directory tree using Python pathlib — no shell execution.
+
+    depth must be an integer between DEPTH_MIN and DEPTH_MAX (inclusive);
+    out-of-range values raise ValueError rather than being silently clamped.
+    """
+    depth = _validate_depth(depth)
     project = _validate_project(project)
-    depth = min(max(depth, 1), 5)
     project_dir = _resolve_project(project)
 
     entries: list[str] = []
@@ -389,11 +412,15 @@ def tree(
     depth: int = 2,
     glob: str | None = None,
 ) -> dict[str, Any]:
-    """List project directory tree using Python pathlib — no shell execution."""
+    """List project directory tree using Python pathlib — no shell execution.
+
+    depth must be an integer between DEPTH_MIN and DEPTH_MAX (inclusive);
+    out-of-range values raise ValueError rather than being silently clamped.
+    """
     if glob and not _ALLOWED_PATH_RE.match(glob):
         raise ValueError(f"invalid glob: {glob!r}")
+    depth = _validate_depth(depth)
     project = _validate_project(project)
-    depth = min(max(depth, 1), 5)
     project_dir = _resolve_project(project)
 
     entries: list[str] = []
