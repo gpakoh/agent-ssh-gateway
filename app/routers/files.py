@@ -718,7 +718,7 @@ async def batch_edit(
     )
     await _check_session_ownership(req.session_id, request)
 
-    return await edit_many(_state.file_editor, req.session_id, req.files, validate=True)
+    return await edit_many(_state.file_editor, req.session_id, req.files)
 
 
 # ---------------------------------------------------------------------------

@@ -15,34 +15,34 @@ async def edit_many(
     file_editor,
     session_id: str,
     files,
-    *,
-    validate: bool = False,
 ) -> BatchEditResponse:
     """Edit multiple files, collecting per-file results.
 
-    With validate=True each path is checked via validate_path first and
-    invalid paths are reported as per-file errors (batch_edit behavior);
-    bulk_edit passes validate=False.
+    Every path is checked via validate_path first — this is the only
+    guardrail against a caller reaching FORBIDDEN_PATHS (/etc/shadow,
+    /root/.ssh, ...) or a traversal segment on the remote target, since
+    FileEditor.edit_file() does no path validation of its own and trusts
+    the caller. Invalid paths are reported as per-file errors rather than
+    failing the whole batch.
     """
     results = []
     files_changed = 0
     total_operations = 0
 
     for file_op in files:
-        if validate:
-            try:
-                validate_path(file_op.path)
-            except ValueError as exc:
-                results.append(
-                    BatchEditResult(
-                        path=file_op.path,
-                        success=False,
-                        operations_applied=0,
-                        changed=False,
-                        error=str(exc),
-                    )
+        try:
+            validate_path(file_op.path)
+        except ValueError as exc:
+            results.append(
+                BatchEditResult(
+                    path=file_op.path,
+                    success=False,
+                    operations_applied=0,
+                    changed=False,
+                    error=str(exc),
                 )
-                continue
+            )
+            continue
 
         try:
             result = await file_editor.edit_file(
