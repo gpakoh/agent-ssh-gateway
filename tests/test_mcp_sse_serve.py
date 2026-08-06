@@ -161,6 +161,26 @@ class TestRequireSafeMode:
         with patch.dict(os.environ, SAFE_MODE_ENV):
             require_safe_mode()  # must not raise
 
+    def test_mcp_client_write_mode_passes_without_safe_mode_flag(self):
+        """mcp_client_write's tool set is fixed regardless of
+        MCP_CLIENT_SAFE_MODE (should_register_tool() only consults that
+        flag for mode=="mcp_client") -- the mode name itself is the
+        deliberate opt-in, so it must not additionally require
+        MCP_CLIENT_SAFE_MODE=true."""
+        with patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False):
+            os.environ.pop("MCP_CLIENT_SAFE_MODE", None)
+            require_safe_mode()  # must not raise
+
+    @pytest.mark.parametrize("mode", ["standard", "full", "minimal"])
+    def test_write_capable_infra_modes_still_rejected(self, mode):
+        """standard/full/minimal expose Docker/Postgres/agent-launch tools
+        with no restriction -- neither private HTTP entrypoint may ever
+        start in one of these, mcp_client_write's existence must not
+        loosen this."""
+        with patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": mode, "MCP_CLIENT_SAFE_MODE": "true"}):
+            with pytest.raises(ConfigError, match="MCP_GATEWAY_TOOL_MODE"):
+                require_safe_mode()
+
 
 # ---------------------------------------------------------------------------
 # Bearer auth middleware (isolated trivial app — fast, no gateway import)

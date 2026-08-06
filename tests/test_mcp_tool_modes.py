@@ -9,9 +9,11 @@ import pytest
 from examples.mcp_server.tool_modes import (
     DEFAULT_TOOL_MODE,
     MCP_CLIENT_BLOCKED_TOOLS,
+    MCP_CLIENT_WRITE_BLOCKED_TOOLS,
     TOOL_NAMES_BY_MODE,
     ToolModeError,
     get_mcp_client_safe_tools,
+    get_mcp_client_write_tools,
     get_tool_mode,
     is_mcp_client_safe_mode,
     should_register_tool,
@@ -190,3 +192,95 @@ class TestChatGPTSafeMode:
         assert not should_register_tool("workspace_file_write")
         assert not should_register_tool("workspace_file_edit")
         assert not should_register_tool("workspace_apply_patch")
+
+
+# ---------------------------------------------------------------------------
+# mcp_client_write mode -- project read/write + git commit/push,
+# still no Docker admin / agent-launch / handoff-plan write.
+# ---------------------------------------------------------------------------
+
+
+class TestMcpClientWriteMode:
+    def test_git_write_tools_present(self):
+        write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
+        assert "git_add" in write_tools
+        assert "git_commit" in write_tools
+        assert "git_push" in write_tools
+
+    def test_git_write_tools_absent_from_every_other_mode(self):
+        """git_add/git_commit/git_push must never leak into any other
+        mode -- they exist in tool_scopes.py's TOOL_SCOPES map (defining
+        what scope *would* be required if ever registered) but were never
+        actually wired into any TOOL_NAMES_BY_MODE entry until this mode."""
+        for mode, names in TOOL_NAMES_BY_MODE.items():
+            if mode == "mcp_client_write":
+                continue
+            assert "git_add" not in names, mode
+            assert "git_commit" not in names, mode
+            assert "git_push" not in names, mode
+
+    def test_workspace_write_tools_present(self):
+        write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
+        for name in (
+            "workspace_file_write",
+            "workspace_file_edit",
+            "workspace_apply_patch",
+            "workspace_preview_write",
+            "workspace_preview_edit",
+            "workspace_preview_patch",
+            "workspace_verify",
+            "apply_patch",
+        ):
+            assert name in write_tools
+
+    def test_project_inspection_and_tests_still_present(self):
+        write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
+        for name in ("health", "read_file", "repo_status", "run_tests", "run_lint", "git_status", "git_diff"):
+            assert name in write_tools
+
+    def test_docker_admin_still_blocked(self):
+        write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
+        for name in (
+            "docker_exec", "docker_run", "docker_rmi", "docker_volume_rm",
+            "docker_start", "docker_stop", "docker_restart",
+            "docker_compose_up", "docker_compose_down", "docker_prune",
+        ):
+            assert name not in write_tools
+
+    def test_agent_launch_still_blocked(self):
+        write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
+        assert "run_opencode" not in write_tools
+        assert "run_mimo" not in write_tools
+        assert "run_agent" not in write_tools
+
+    def test_handoff_and_agent_task_write_still_blocked(self):
+        write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
+        assert "write_handoff_plan" not in write_tools
+        assert "write_agent_task" not in write_tools
+        assert "archive_agent_task" not in write_tools
+
+    def test_get_mcp_client_write_tools_matches_mode_entry(self):
+        assert get_mcp_client_write_tools() == frozenset(TOOL_NAMES_BY_MODE["mcp_client_write"])
+
+    def test_write_blocked_tools_disjoint_from_write_mode(self):
+        write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
+        assert len(write_tools & MCP_CLIENT_WRITE_BLOCKED_TOOLS) == 0
+
+    def test_registration_via_should_register_tool(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client_write")
+        assert should_register_tool("git_push")
+        assert should_register_tool("git_commit")
+        assert should_register_tool("workspace_file_write")
+        assert should_register_tool("read_file")
+        assert not should_register_tool("docker_exec")
+        assert not should_register_tool("run_agent")
+
+    def test_plain_mcp_client_mode_is_unaffected(self):
+        """The new mode must not change plain "mcp_client" mode's own
+        tool set or safe-mode filtering in any way."""
+        mcp_client_tools = TOOL_NAMES_BY_MODE["mcp_client"]
+        assert "git_add" not in mcp_client_tools
+        assert "git_commit" not in mcp_client_tools
+        assert "git_push" not in mcp_client_tools
+        safe = get_mcp_client_safe_tools()
+        assert len(safe & MCP_CLIENT_BLOCKED_TOOLS) == 0
