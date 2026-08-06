@@ -42,15 +42,25 @@ def test_git_commit_message_is_argument():
 
 
 def test_bash_c_is_inline_code():
+    """Regression: the payload of `bash -c '...'` is emitted by the
+    tokenizer as a single-quoted DATA token before the classifier's
+    inline-flag tracking ever sees it, so INLINE_CODE was never actually
+    reachable -- it silently fell back to DATA, which carries a low
+    confidence weight (0.1) instead of INLINE_CODE's 1.0. The "or DATA"
+    escape hatch in the old version of this assertion is exactly what let
+    that regression through unnoticed.
+    """
     spans = classify_command("bash -c 'rm -rf /'")
     kinds = [s.kind for s in spans]
-    assert SpanKind.INLINE_CODE in kinds or SpanKind.DATA in kinds
+    assert SpanKind.INLINE_CODE in kinds
+    assert SpanKind.DATA not in kinds
 
 
 def test_python_c_is_inline_code():
     spans = classify_command("python -c \"import os; os.remove('/tmp/x')\"")
     kinds = [s.kind for s in spans]
-    assert SpanKind.INLINE_CODE in kinds or SpanKind.ARGUMENT in kinds or SpanKind.DATA in kinds
+    assert SpanKind.INLINE_CODE in kinds
+    assert SpanKind.ARGUMENT not in kinds
 
 
 def test_double_quoted():
