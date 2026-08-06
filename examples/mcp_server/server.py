@@ -2025,45 +2025,80 @@ async def github_get_pull_request(owner: str, repo: str, pull_number: int) -> di
 
 
 @register_tool("docker_ps")
-async def docker_ps(all: bool = False, format: str | None = None, limit: int = 50) -> str:
-    """List running containers. Use all=True to include stopped containers. limit: max rows (default 50)."""
-    return await DockerClient().ps(all=all, format=format, limit=limit)
+async def docker_ps(all: bool = False, format: str | None = None, limit: int = 50) -> dict[str, Any]:
+    """List running containers as structured rows. Use all=True to include
+    stopped containers. limit: max rows (default 50)."""
+    try:
+        rows = await DockerClient().ps(all=all, format=format, limit=limit)
+    except (ValueError, RuntimeError) as exc:
+        return tool_error(tool="docker_ps", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
+    if isinstance(rows, str):
+        return tool_success("docker_ps", result=rows, source="docker")
+    return tool_success("docker_ps", result={"containers": rows, "count": len(rows)}, source="docker")
 
 
 @register_tool("docker_images")
-async def docker_images(format: str | None = None, limit: int = 50) -> str:
-    """List Docker images on the host. limit: max rows (default 50)."""
-    return await DockerClient().images(format=format, limit=limit)
+async def docker_images(format: str | None = None, limit: int = 50) -> dict[str, Any]:
+    """List Docker images on the host as structured rows. limit: max rows (default 50)."""
+    try:
+        rows = await DockerClient().images(format=format, limit=limit)
+    except RuntimeError as exc:
+        return tool_error(tool="docker_images", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
+    if isinstance(rows, str):
+        return tool_success("docker_images", result=rows, source="docker")
+    return tool_success("docker_images", result={"images": rows, "count": len(rows)}, source="docker")
 
 
 @register_tool("docker_inspect")
-async def docker_inspect(name: str) -> str:
-    """Inspect a container by name or ID. Returns JSON metadata (first 500 lines)."""
-    return await DockerClient().inspect(name, max_lines=500)
+async def docker_inspect(name: str) -> dict[str, Any]:
+    """Inspect a container by name or ID. Returns sanitized structured
+    metadata (first 500 entries)."""
+    try:
+        data = await DockerClient().inspect(name, max_lines=500)
+    except (ValueError, RuntimeError) as exc:
+        return tool_error(tool="docker_inspect", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
+    return tool_success("docker_inspect", result=data, source="docker")
 
 
 @register_tool("docker_logs")
-async def docker_logs(container: str, tail: int = 200) -> str:
+async def docker_logs(container: str, tail: int = 200) -> dict[str, Any]:
     """Fetch logs from a running container. tail: number of recent lines (1-1000, default 200)."""
-    return await DockerClient().logs(container, tail=tail)
+    try:
+        result = await DockerClient().logs(container, tail=tail)
+    except (ValueError, RuntimeError) as exc:
+        return tool_error(tool="docker_logs", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
+    return tool_success("docker_logs", result=result, source="docker")
 
 
 @register_tool("docker_stats")
-async def docker_stats(format: str | None = None, limit: int = 50) -> str:
-    """Show live resource usage statistics for all running containers. limit: max rows (default 50)."""
-    return await DockerClient().stats(format=format, limit=limit)
+async def docker_stats(format: str | None = None, limit: int = 50) -> dict[str, Any]:
+    """Show live resource usage statistics for all running containers as
+    structured rows. limit: max rows (default 50)."""
+    try:
+        rows = await DockerClient().stats(format=format, limit=limit)
+    except RuntimeError as exc:
+        return tool_error(tool="docker_stats", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
+    if isinstance(rows, str):
+        return tool_success("docker_stats", result=rows, source="docker")
+    return tool_success("docker_stats", result={"stats": rows, "count": len(rows)}, source="docker")
 
 
 @register_tool("docker_compose_ps")
 async def docker_compose_ps(
     project_dir: str | None = None, limit: int = 50
 ) -> dict[str, Any]:
-    """List containers in a Docker Compose project. limit: max rows (default 50)."""
+    """List containers in a Docker Compose project as structured rows. limit: max rows (default 50)."""
     try:
-        result = await DockerClient().compose_ps(project_dir=project_dir, limit=limit)
-        return tool_success("docker_compose_ps", result)
+        rows = await DockerClient().compose_ps(project_dir=project_dir, limit=limit)
     except ValueError as exc:
-        return tool_error(tool="docker_compose_ps", code="INVALID_INPUT", message=str(exc))
+        return tool_error(tool="docker_compose_ps", code="INVALID_INPUT", message=str(exc), source="docker")
+    except RuntimeError as exc:
+        return tool_error(tool="docker_compose_ps", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
+    if isinstance(rows, str):
+        return tool_success("docker_compose_ps", result=rows, source="docker")
+    return tool_success(
+        "docker_compose_ps", result={"containers": rows, "count": len(rows)}, source="docker"
+    )
 
 
 @register_tool("docker_compose_services")
@@ -2073,9 +2108,15 @@ async def docker_compose_services(
     """List service names defined in a Docker Compose project."""
     try:
         result = await DockerClient().compose_services(project_dir=project_dir)
-        return tool_success("docker_compose_services", result)
     except ValueError as exc:
-        return tool_error(tool="docker_compose_services", code="INVALID_INPUT", message=str(exc))
+        return tool_error(
+            tool="docker_compose_services", code="INVALID_INPUT", message=str(exc), source="docker"
+        )
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_compose_services", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker"
+        )
+    return tool_success("docker_compose_services", result=result, source="docker")
 
 
 @register_tool("docker_compose_logs")
@@ -2095,9 +2136,15 @@ async def docker_compose_logs(
             follow=follow,
             timestamps=timestamps,
         )
-        return tool_success("docker_compose_logs", result)
     except ValueError as exc:
-        return tool_error(tool="docker_compose_logs", code="INVALID_INPUT", message=str(exc))
+        return tool_error(
+            tool="docker_compose_logs", code="INVALID_INPUT", message=str(exc), source="docker"
+        )
+    except RuntimeError as exc:
+        return tool_error(
+            tool="docker_compose_logs", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker"
+        )
+    return tool_success("docker_compose_logs", result=result, source="docker")
 
 
 @register_tool("docker_stop")
@@ -2782,92 +2829,130 @@ async def docker_pending_actions() -> dict[str, Any]:
 # ── Postgres tools ────────────────────────────────────────────────
 
 
+def _json_safe(value: Any) -> Any:
+    """Round-trip through json.dumps(default=str) to coerce driver-native
+    types (datetime, Decimal, UUID, ...) into JSON-safe primitives, while
+    keeping the result a real structure (dict/list/etc.) rather than a
+    JSON string -- callers still get structured data, not a second
+    parsing step."""
+    return json.loads(json.dumps(value, default=str, ensure_ascii=False))
+
+
+def _postgres_not_configured(tool: str) -> dict[str, Any]:
+    return tool_error(
+        tool=tool,
+        code="DEPENDENCY_MISSING",
+        message="Postgres not configured (PG DSN missing)",
+        retryable=False,
+        source="postgres",
+    )
+
+
 @register_tool("postgres_health")
-async def postgres_health() -> str:
+async def postgres_health() -> dict[str, Any]:
     """Check Postgres connectivity. Returns DB name, user, version."""
     client = _get_pg_client()
     if client is None:
-        return "error: Postgres not configured (PG DSN missing)"
+        return _postgres_not_configured("postgres_health")
     try:
         info = await client.health()
-        return f"ok | db={info['db']} user={info['user']} version={info['version']}"
     except Exception as e:
-        return f"error: {e}"
+        return tool_error(
+            tool="postgres_health", code="INTERNAL_ERROR", message=str(e), source="postgres"
+        )
+    return tool_success("postgres_health", result=_json_safe(info), source="postgres")
 
 
 @register_tool("postgres_list_schemas")
-async def postgres_list_schemas() -> str:
+async def postgres_list_schemas() -> dict[str, Any]:
     """List non-system schemas in the database."""
     client = _get_pg_client()
     if client is None:
-        return "error: Postgres not configured"
+        return _postgres_not_configured("postgres_list_schemas")
     schemas = await client.list_schemas()
-    if not schemas:
-        return "No user schemas found"
-    lines = "\n".join(f"  {s}" for s in schemas)
-    return f"Schemas ({len(schemas)}):\n{lines}"
+    return tool_success(
+        "postgres_list_schemas",
+        result={"schemas": schemas, "count": len(schemas)},
+        source="postgres",
+    )
 
 
 @register_tool("postgres_list_tables")
-async def postgres_list_tables(schema: str = "public") -> str:
+async def postgres_list_tables(schema: str = "public") -> dict[str, Any]:
     """List tables in a schema with type and row estimate."""
     client = _get_pg_client()
     if client is None:
-        return "error: Postgres not configured"
+        return _postgres_not_configured("postgres_list_tables")
     tables = await client.list_tables(schema=schema)
-    if not tables:
-        return f"No tables found in schema '{schema}'"
-    lines = "\n".join(
-        f"  {t['table_name']:30s} {t['table_type']:15s} rows={t.get('row_estimate', '?')}"
-        for t in tables
+    return tool_success(
+        "postgres_list_tables",
+        result={"schema": schema, "tables": _json_safe(tables), "count": len(tables)},
+        source="postgres",
     )
-    return f"Tables in '{schema}' ({len(tables)}):\n{lines}"
 
 
 @register_tool("postgres_describe_table")
-async def postgres_describe_table(table_name: str, schema: str = "public") -> str:
+async def postgres_describe_table(table_name: str, schema: str = "public") -> dict[str, Any]:
     """Describe columns of a table."""
     client = _get_pg_client()
     if client is None:
-        return "error: Postgres not configured"
+        return _postgres_not_configured("postgres_describe_table")
     columns = await client.describe_table(schema=schema, table_name=table_name)
     if not columns:
-        return f"Table '{schema}.{table_name}' not found or has no columns"
-    lines = "\n".join(
-        f"  {c['column_name']:30s} {c['data_type']:20s} nullable={c['is_nullable']:5s} default={c.get('column_default', 'NULL')}"
-        for c in columns
+        return tool_error(
+            tool="postgres_describe_table",
+            code="TOOL_NOT_FOUND",
+            message=f"Table '{schema}.{table_name}' not found or has no columns",
+            retryable=False,
+            source="postgres",
+        )
+    return tool_success(
+        "postgres_describe_table",
+        result={
+            "schema": schema,
+            "table_name": table_name,
+            "columns": _json_safe(columns),
+            "count": len(columns),
+        },
+        source="postgres",
     )
-    return f"Columns of '{schema}.{table_name}' ({len(columns)}):\n{lines}"
 
 
 @register_tool("postgres_select")
-async def postgres_select(sql: str) -> str:
+async def postgres_select(sql: str) -> dict[str, Any]:
     """Execute a read-only SELECT or WITH query with enforced LIMIT 1000.
     Multi-statement not allowed, DDL/DML blocked."""
     client = _get_pg_client()
     if client is None:
-        return "error: Postgres not configured"
+        return _postgres_not_configured("postgres_select")
     try:
         rows = await client.execute(sql)
     except ValueError as e:
-        return f"error: {e}"
+        return tool_error(
+            tool="postgres_select", code="INVALID_INPUT", message=str(e), source="postgres"
+        )
     except Exception as e:
-        return f"error: query failed: {e}"
-    import json
-
-    return json.dumps(rows, default=str, ensure_ascii=False)
+        return tool_error(
+            tool="postgres_select",
+            code="INTERNAL_ERROR",
+            message=f"query failed: {e}",
+            source="postgres",
+        )
+    return tool_success(
+        "postgres_select",
+        result={"rows": _json_safe(rows), "row_count": len(rows)},
+        source="postgres",
+    )
 
 
 @register_tool("postgres_vector_status")
-async def postgres_vector_status() -> str:
+async def postgres_vector_status() -> dict[str, Any]:
     """Check if pgvector extension is installed and its version."""
     client = _get_pg_client()
     if client is None:
-        return "error: Postgres not configured"
+        return _postgres_not_configured("postgres_vector_status")
     info = await client.vector_status()
-    if info["installed"]:
-        return f"pgvector is installed (version {info['version']})"
-    return "pgvector is NOT installed"
+    return tool_success("postgres_vector_status", result=info, source="postgres")
 
 
 # ── Context7 tools ────────────────────────────────────────────────

@@ -13,6 +13,7 @@ import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 DOCKER_BIN = "/usr/bin/docker"
 SUBPROCESS_TIMEOUT = 30.0
@@ -212,84 +213,92 @@ class DockerClient:
             raise ValueError(f"shell launcher blocked: {shlex.quote(argv[0])} -c")
 
     @staticmethod
-    def _truncate_table_output(output: str, limit: int) -> str:
-        """Truncate tabular docker output to *limit* data rows, preserving the header.
+    def _parse_json_lines(output: str) -> list[dict]:
+        """Parse `docker ... --format json` output: one JSON object per
+        line (JSON Lines), not a single JSON array. A line that fails to
+        parse is skipped rather than raising -- a single malformed row
+        (e.g. a warning line docker sometimes interleaves on stdout)
+        should not blow up the whole listing."""
+        rows: list[dict] = []
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                rows.append(parsed)
+        return rows
 
-        Docker ``--format "table ..."`` prints a header line followed by data
-        rows (NO dash-separator).  The first line is always the header when
-        ``table`` format is used; for plain ``--format`` without ``table`` the
-        entire output is data.
+    @staticmethod
+    def _truncate_rows(rows: list[dict], limit: int) -> tuple[list[dict], int]:
+        """Truncate a structured row list to *limit* entries.
+
+        Returns (truncated_rows, total_count) so the caller can report
+        both how many rows are returned and how many exist in total.
         """
-        lines = output.splitlines()
-        if len(lines) <= 1:
-            return output
-        header = lines[0]
-        data = lines[1:]
-        if len(data) <= limit:
-            return output
-        truncated = data[:limit]
-        total = len(data)
-        return "\n".join([header] + truncated) + (
-            f"\n[showing {limit} of {total} results — use limit or filter to narrow]"
-        )
+        total = len(rows)
+        return rows[:limit], total
 
     async def ps(
         self,
         all: bool = False,
         format: str | None = None,
         limit: int = 50,
-    ) -> str:
+    ) -> list[dict] | str:
+        """List containers as structured rows (docker's native --format json,
+        one object per line). `format` overrides with a raw Go template and
+        returns the raw string instead, for callers that need a specific
+        legacy shape."""
         argv = [DOCKER_BIN, "ps"]
         if all:
             argv.append("--all")
         if format:
             argv.extend(["--format", format])
-        else:
-            argv.extend(
-                [
-                    "--format",
-                    "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}",
-                ]
-            )
+            return await self._run(argv)
+        argv.extend(["--format", "json"])
         result = await self._run(argv)
-        return self._truncate_table_output(result, limit)
+        rows, _total = self._truncate_rows(self._parse_json_lines(result), limit)
+        return rows
 
     async def images(
         self,
         format: str | None = None,
         limit: int = 50,
-    ) -> str:
+    ) -> list[dict] | str:
         argv = [DOCKER_BIN, "images"]
         if format:
             argv.extend(["--format", format])
-        else:
-            argv.extend(
-                [
-                    "--format",
-                    "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}",
-                ]
-            )
+            return await self._run(argv)
+        argv.extend(["--format", "json"])
         result = await self._run(argv)
-        return self._truncate_table_output(result, limit)
+        rows, _total = self._truncate_rows(self._parse_json_lines(result), limit)
+        return rows
 
     async def inspect(
         self,
         name: str,
         max_lines: int | None = 500,
-    ) -> str:
+    ) -> list[dict] | dict:
+        """Inspect a container, returning the sanitized structure directly
+        (docker inspect already prints JSON; this used to re-serialize it
+        back to a string for no reason). `max_lines` is now interpreted as
+        a cap on the number of top-level entries (docker inspect returns a
+        list even for a single name) rather than text lines, since there
+        is no longer a string to truncate."""
         self._validate_container_name(name)
         argv = [DOCKER_BIN, "inspect", name]
         result = await self._run(argv)
-        result = self._sanitize_inspect_output(result)
-        if max_lines:
-            lines = result.split("\n")
-            if len(lines) > max_lines:
-                lines = lines[:max_lines]
-                result = "\n".join(lines) + f"\n[output truncated at {max_lines} lines]"
-        return result
+        data = self._sanitize_inspect_output(result)
+        if max_lines and isinstance(data, list) and len(data) > max_lines:
+            return data[:max_lines]
+        return data
 
-    def _sanitize_inspect_output(self, raw: str) -> str:
-        """Redact secrets from docker inspect JSON output.
+    def _sanitize_inspect_output(self, raw: str) -> list | dict:
+        """Redact secrets from docker inspect JSON output and return the
+        parsed, sanitized structure (not a re-serialized string).
 
         Strips Config.Env entirely (lists all env vars with values) and hides
         host source paths in Mounts.  Also applies key-level redaction as a
@@ -298,10 +307,14 @@ class DockerClient:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
-            return raw
+            return {"raw": raw}
         data = self._strip_container_secrets(data)
-        data = self._sanitize_value(data)
-        return json.dumps(data, indent=2, ensure_ascii=False)
+        # _sanitize_value(x: object) -> object is intentionally generic for
+        # its own recursion (it walks into arbitrary nested values), but at
+        # this top level `data` is always the list/dict json.loads() just
+        # produced, and _sanitize_value preserves dict/list-ness for
+        # dict/list inputs -- cast narrows what mypy can't infer structurally.
+        return cast("list | dict", self._sanitize_value(data))
 
     def _strip_container_secrets(self, data: object) -> object:
         """Strip secrets from top-level container inspect entries.
@@ -365,65 +378,65 @@ class DockerClient:
         self,
         container: str,
         tail: int = 200,
-    ) -> str:
+    ) -> dict:
+        """Fetch recent log lines as a structured {"lines": [...], "count": N}
+        instead of one giant text blob -- log text itself has no schema, but
+        splitting it into an array at least gives a caller a stable shape to
+        iterate instead of a string to further parse."""
         self._validate_container_name(container)
         tail = max(1, min(tail, 1000))
         argv = [DOCKER_BIN, "logs", "--tail", str(tail), container]
-        return await self._run(argv)
+        result = await self._run(argv)
+        lines = result.splitlines()
+        return {"lines": lines, "count": len(lines)}
 
     async def stats(
         self,
         format: str | None = None,
         limit: int = 50,
-    ) -> str:
+    ) -> list[dict] | str:
         argv = [DOCKER_BIN, "stats", "--no-stream"]
         if format:
             argv.extend(["--format", format])
-        else:
-            argv.extend(
-                [
-                    "--format",
-                    "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}",
-                ]
-            )
-        # Unlike `docker ps`/`docker images` (metadata-only), --no-stream
-        # still has to sample live cgroup counters for every running
-        # container once before returning — on a host running dozens of
-        # containers this can occasionally run past the default 30s
-        # SUBPROCESS_TIMEOUT under load. Same 60s budget as compose_ps,
-        # the other "enumerate everything" read.
+            # Unlike `docker ps`/`docker images` (metadata-only), --no-stream
+            # still has to sample live cgroup counters for every running
+            # container once before returning — on a host running dozens of
+            # containers this can occasionally run past the default 30s
+            # SUBPROCESS_TIMEOUT under load. Same 60s budget as compose_ps,
+            # the other "enumerate everything" read.
+            return await self._run(argv, timeout=60.0)
+        argv.extend(["--format", "json"])
         result = await self._run(argv, timeout=60.0)
-        return self._truncate_table_output(result, limit)
+        rows, _total = self._truncate_rows(self._parse_json_lines(result), limit)
+        return rows
 
     async def compose_ps(
         self,
         project_dir: str | None = None,
         format: str | None = None,
         limit: int = 50,
-    ) -> str:
+    ) -> list[dict] | str:
         self._validate_project_dir(project_dir)
         argv = self._compose_base_argv(project_dir)
         argv.append("ps")
         if format:
             argv.extend(["--format", format])
-        else:
-            argv.extend(
-                [
-                    "--format",
-                    "table {{.Name}}\t{{.Status}}",
-                ]
-            )
+            return await self._run(argv, timeout=60.0)
+        argv.extend(["--format", "json"])
         result = await self._run(argv, timeout=60.0)
-        return self._truncate_table_output(result, limit)
+        rows, _total = self._truncate_rows(self._parse_json_lines(result), limit)
+        return rows
 
     async def compose_services(
         self,
         project_dir: str | None = None,
-    ) -> str:
+    ) -> dict:
         self._validate_project_dir(project_dir)
         argv = self._compose_base_argv(project_dir)
         argv.extend(["config", "--services"])
-        return await self._run(argv, timeout=60.0)
+        result = await self._run(argv, timeout=60.0)
+        services = [line.strip() for line in result.splitlines() if line.strip()]
+        return {"services": services, "count": len(services)}
 
     # ── Write operations (Session 160) ──────────────────────────────
 
@@ -531,7 +544,7 @@ class DockerClient:
         follow: bool = False,
         timestamps: bool = False,
         timeout: int = 30,
-    ) -> str:
+    ) -> dict:
         """Fetch logs from compose services. tail: 1-1000 lines."""
         self._validate_project_dir(project_dir)
         timeout = max(1, min(timeout, 300))
@@ -547,7 +560,9 @@ class DockerClient:
             for s in services:
                 self._validate_service_name(s)
             argv.extend(services)
-        return await self._run(argv, timeout=float(timeout))
+        result = await self._run(argv, timeout=float(timeout))
+        lines = result.splitlines()
+        return {"lines": lines, "count": len(lines)}
 
     async def rm(self, container: str, force: bool = False) -> RunResult:
         self._validate_container_name(container)
