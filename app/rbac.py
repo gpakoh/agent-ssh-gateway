@@ -61,6 +61,13 @@ SCOPE_PERMISSIONS: dict[str, str] = {
     "ssh:connect": CONNECT,
     "ssh:execute": EXECUTE,
     "ssh:execute:argv": EXECUTE,
+    # "ssh:pty" is deliberately absent here. The interactive PTY channel
+    # (WS /api/ssh/pty/*) has no command_policy filtering at all -- raw
+    # keystrokes can't be pattern-matched the way a single command string
+    # can -- so unlike every other capability, it must never be reachable
+    # just by holding the EXECUTE permission via a role. Only role="admin"
+    # (which role_allows_scope() grants unconditionally) or an identity
+    # holding the raw "ssh:pty" scope explicitly can open a PTY.
     "ssh:disconnect": EXECUTE,
     "ssh:files": UPLOAD,
     "ssh:port-check": CONNECT,
