@@ -59,31 +59,51 @@ jobs:
           echo "OK: $count tests >= 3500"
 
       - name: pip-audit
-        # pip-audit queries pypi.org's vulnerability feed over the network on
-        # every run -- a transient timeout reaching pypi.org (observed
-        # repeatedly from this runner pool, unrelated to the actual audit
-        # result) must not block a deploy the same way a real finding would.
-        # Retries ONLY on the network-exception signature (an uncaught
-        # ReadTimeout/ConnectionError traceback); a real vulnerability
-        # finding is a clean, structured pip-audit failure with no such
-        # traceback and still fails on the first attempt, no retry.
+        # Two separate problems compounded here, both against pypi.org
+        # specifically (not the Fastly CDN generally: plain HTTP to the same
+        # IP, and HTTPS to files.pythonhosted.org, both work fine from these
+        # containers; api.osv.dev works fine too) -- almost certainly this
+        # runner pool's Docker network egressing through a different uplink
+        # than the host itself via the LAN router's multi-WAN flow-based
+        # load balancing, with one uplink currently unable to complete a TLS
+        # handshake to pypi.org:
+        #   1. Passing a project_path ('.') makes pip-audit do a FRESH
+        #      dependency resolution (shelling out to pip), which itself
+        #      talks to pypi.org's package INDEX independent of the
+        #      vulnerability lookup -- this hung with ZERO output even with
+        #      --dry-run (collection only, no vulnerability queries at all)
+        #      and even with -s osv, since -s only changes where the
+        #      vulnerability *lookup* goes, not dependency collection.
+        #   2. The default vulnerability service (pypi) queries pypi.org's
+        #      JSON API once per dependency; with dozens of dependencies
+        #      each hitting the broken path, a single invocation could spend
+        #      minutes in urllib3's own retry/backoff before failing even
+        #      once.
+        # Fix for both: -l/--local audits the already-installed venv (from
+        # the "Install package" step above) directly, with no project_path
+        # and no fresh pip-based resolution; -s osv sends the vulnerability
+        # lookups to Google's OSV API instead of pypi.org's. Still retries
+        # on a network-exception signature as a backstop; a real
+        # vulnerability finding is a clean, structured pip-audit failure
+        # with no such traceback and still fails on the first attempt, no
+        # retry.
         run: |
           set +e
           for attempt in 1 2 3; do
-            output=$(uv run pip-audit --strict --progress-spinner=off . 2>&1)
+            output=$(uv run pip-audit -l -s osv --strict --timeout 20 --progress-spinner=off 2>&1)
             status=$?
             echo "$output"
             if [ $status -eq 0 ]; then
               exit 0
             fi
             if echo "$output" | grep -qE "ReadTimeout|ConnectTimeout|ConnectionError|Read timed out|Connection reset|Temporary failure in name resolution|Network is unreachable"; then
-              echo "::warning::pip-audit attempt ${attempt} failed with a network error reaching pypi.org, retrying..."
+              echo "::warning::pip-audit attempt ${attempt} failed with a network error, retrying..."
               sleep 5
               continue
             fi
             exit $status
           done
-          echo "::error::pip-audit failed after 3 attempts due to persistent network errors reaching pypi.org"
+          echo "::error::pip-audit failed after 3 attempts due to persistent network errors"
           exit 1
 
   build-and-push:
