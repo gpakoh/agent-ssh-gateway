@@ -874,6 +874,26 @@ def working_directory(client: GatewayClient, project: str) -> dict[str, Any]:
     return result
 
 
+def _is_real_git_repo(path: Path) -> bool:
+    """Check for an actual git worktree, not just a path named ".git".
+
+    A worktree/submodule's ".git" is a FILE containing "gitdir: <path>" --
+    that alone is a real marker. A normal repo's ".git" is a directory
+    that always contains a HEAD file. Checking existence of ".git" alone
+    (the previous behavior) reported is_git_repo=True for any directory
+    happening to contain a ".git"-named path for unrelated reasons -- e.g.
+    quart-platform/.git is a scratch metadata directory left by another
+    tool (contains only "info/" and "mimocode-project-id", no HEAD/objects/
+    refs), which made every registered project under an umbrella root with
+    such a stray ".git" report as a git repo when git itself, correctly,
+    says "fatal: not a git repository".
+    """
+    git_marker = path / ".git"
+    if git_marker.is_file():
+        return True
+    return (git_marker / "HEAD").is_file()
+
+
 def info(client: GatewayClient, project: str) -> dict[str, Any]:
     """Resolve project path metadata — no shell execution."""
     project = _validate_project(project)
@@ -886,7 +906,7 @@ def info(client: GatewayClient, project: str) -> dict[str, Any]:
         "resolved_path": ".",
         "exists": resolved.exists(),
         "is_dir": resolved.is_dir(),
-        "is_git_repo": (resolved / ".git").exists(),
+        "is_git_repo": _is_real_git_repo(resolved),
     }
 
 
