@@ -31,10 +31,12 @@ async def docker_ps(
     all: bool = False,
     format: str | None = None,
     limit: int = 50,
-) -> str:
+) -> list[dict] | str:
     """List running containers. Use all=True to include stopped containers.
 
-    format: Go template string for docker ps --format (default: table with Names/Image/Status/Ports).
+    Returns structured rows (docker's native --format json) by default.
+    format: Go template string for docker ps --format overrides this and
+    returns the raw string instead, for callers that need a specific shape.
     limit: max containers to return (default 50, set higher for full list).
     """
     client = _get_client()
@@ -45,10 +47,11 @@ async def docker_ps(
 async def docker_images(
     format: str | None = None,
     limit: int = 50,
-) -> str:
+) -> list[dict] | str:
     """List Docker images on the host.
 
-    format: Go template string for docker images --format (default: table with Repository/Tag/ID/Size).
+    Returns structured rows by default. format: Go template string for
+    docker images --format overrides this and returns the raw string.
     limit: max images to return (default 50, set higher for full list).
     """
     client = _get_client()
@@ -56,15 +59,15 @@ async def docker_images(
 
 
 @mcp.tool()
-async def docker_inspect(name: str) -> str:
-    """Inspect a container by name or ID. Returns JSON metadata (first 500 lines)."""
+async def docker_inspect(name: str) -> list[dict] | dict:
+    """Inspect a container by name or ID. Returns structured metadata (first 500 entries)."""
     client = _get_client()
     return await client.inspect(name, max_lines=500)
 
 
 @mcp.tool()
-async def docker_logs(container: str, tail: int = 200) -> str:
-    """Fetch logs from a running container.
+async def docker_logs(container: str, tail: int = 200) -> dict:
+    """Fetch logs from a running container as {"lines": [...], "count": N}.
 
     container: container name or ID.
     tail: number of recent lines (1-1000, default 200).
@@ -77,10 +80,11 @@ async def docker_logs(container: str, tail: int = 200) -> str:
 async def docker_stats(
     format: str | None = None,
     limit: int = 50,
-) -> str:
+) -> list[dict] | str:
     """Show live resource usage statistics for all running containers (CPU, memory, network, block I/O).
 
-    format: Go template string (default: table with Name/CPUPerc/MemUsage/NetIO/BlockIO).
+    Returns structured rows by default. format: Go template string overrides
+    this and returns the raw string.
     limit: max containers to return (default 50, set higher for full list).
     """
     client = _get_client()
@@ -91,9 +95,10 @@ async def docker_stats(
 async def docker_compose_ps(
     project_dir: str | None = None,
     limit: int = 50,
-) -> str:
+) -> list[dict] | str:
     """List containers in a Docker Compose project.
 
+    Returns structured rows by default.
     project_dir: path to directory containing compose file (e.g. /media/1TB/Python/web_ssh/web-ssh-gateway/docker).
     limit: max services to return (default 50).
     """
@@ -104,7 +109,7 @@ async def docker_compose_ps(
 @mcp.tool()
 async def docker_compose_services(
     project_dir: str | None = None,
-) -> str:
+) -> dict:
     """List service names defined in a Docker Compose project (uses compose config --services).
 
     project_dir: path to directory containing compose file.
