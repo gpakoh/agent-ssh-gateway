@@ -163,3 +163,71 @@ def test_alert_matrix_formats_supported_events_safely(event_type: str, title: st
     assert "raw-source-ip" in text
     assert "raw-session-id" not in text
     assert "raw-actor-name" not in text
+
+
+# ---------------------------------------------------------------------------
+# HTML injection (Telegram sendMessage is called with parse_mode="HTML")
+# ---------------------------------------------------------------------------
+#
+# `reason` and metadata.command_root both echo back attacker-controlled text:
+# evaluate_command_policy()'s denial reasons interpolate the caller's own
+# parsed command root verbatim (e.g. "Root command '{root}' not in {profile}
+# allowlist"), and root is shlex.split(command)[0] -- entirely caller-chosen.
+# Any identity holding just ssh:execute can get a command denied (trivial --
+# any command outside the active profile's allowlist) and have crafted HTML
+# land unescaped inside a parse_mode="HTML" Telegram message, breaking out of
+# its <code> tag to render arbitrary tags -- including a clickable <a href>
+# phishing link -- in front of the human operator who also holds Allow/Deny
+# button power over other requests in the same chat.
+
+
+def test_reason_html_is_escaped_not_rendered():
+    text = format_audit_event(
+        {
+            "event_type": "command.deny",
+            "reason": "Root command '</code><a href=\"http://evil.example/phish\">click</a><code>' not in allowlist",
+        }
+    )
+
+    assert text is not None
+    assert "<a href" not in text
+    assert "</code><a" not in text
+    assert "&lt;a href=" in text
+
+
+def test_command_root_html_is_escaped_not_rendered():
+    text = format_audit_event(
+        {
+            "event_type": "command.deny",
+            "metadata": {"command_root": "</code><b>PWNED</b><code>"},
+        }
+    )
+
+    assert text is not None
+    assert "<b>PWNED</b>" not in text
+    assert "&lt;b&gt;PWNED&lt;/b&gt;" in text
+
+
+def test_source_ip_html_is_escaped_not_rendered():
+    text = format_audit_event(
+        {
+            "event_type": "session.connect",
+            "source_ip": '"><script>alert(1)</script>',
+        }
+    )
+
+    assert text is not None
+    assert "<script>" not in text
+    assert "&lt;script&gt;" in text
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["decision", "route", "profile", "error_code", "request_id", "actor_fingerprint"],
+)
+def test_every_clipped_field_escapes_html(field: str):
+    payload = '</code><a href="http://evil.example">x</a><code>'
+    text = format_audit_event({"event_type": "command.deny", field: payload})
+
+    assert text is not None
+    assert "<a href" not in text
