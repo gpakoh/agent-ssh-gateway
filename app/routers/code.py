@@ -19,6 +19,7 @@ from app.models import (
     CodeSearchResultItem,
 )
 from app.routers.workspace import assert_workspace_writable
+from app.security import validate_path
 from app.state import _err
 
 logger = logging.getLogger(__name__)
@@ -31,9 +32,14 @@ async def code_search(
     req: CodeSearchRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Search for code pattern in project."""
+    try:
+        validated_path = validate_path(req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
+
     results = await _state.code_intelligence.search_code(
         session_id=req.session_id,
-        path=req.path,
+        path=validated_path,
         query=req.query,
         language=req.language,
         context_lines=req.context_lines,
@@ -59,6 +65,11 @@ async def code_insert(
     req: CodeInsertRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Intelligently insert code based on natural language instruction."""
+    try:
+        validated_path = validate_path(req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
+
     assert_workspace_writable(
         actor_type=_identity.token_type,
         actor_name=_identity.name or "",
@@ -71,7 +82,7 @@ async def code_insert(
 
     suggestion = await _state.code_intelligence.find_insertion_point(
         session_id=ctx.session_id,
-        path=req.path,
+        path=validated_path,
         instruction=req.instruction,
         language=req.language,
     )
@@ -82,7 +93,7 @@ async def code_insert(
     try:
         result = await _state.file_editor.edit_file(
             ctx.session_id,
-            req.path,
+            validated_path,
             [{"type": "insert_after", "after": suggestion.insert_after, "text": suggestion.code}],
         )
 
