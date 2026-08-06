@@ -445,7 +445,28 @@ DOCKER_ADMIN_ROOTS: set[str] = OPS_ROOTS | {
 DENIED_ROOTS: set[str] = {
     "mkfs", "fdisk", "parted", "shutdown", "reboot", "halt", "poweroff",
     "dd", "tee", "cp", "mv", "rm", "rmdir",
+    "powershell", "pwsh", "cmd",
 }
+
+# Root-command prefixes that are always denied regardless of suffix, e.g.
+# the real-world `mkfs.ext4` / `mkfs.xfs` / `mkfs.vfat` wrapper binaries
+# (bare `mkfs -t <type>` is rare in practice; the `mkfs.<fstype>` form is
+# the one actually shipped on most distros and must be denied the same way).
+DENIED_ROOT_PREFIXES: tuple[str, ...] = ("mkfs.",)
+
+
+def _normalize_root(root: str) -> str:
+    """Lowercase and strip a Windows-style ``.exe`` suffix for denylist checks.
+
+    Root-command comparisons must not be case-sensitive: on case-insensitive
+    targets (macOS, Windows-via-OpenSSH) ``Shutdown``/``REBOOT``/``Mv`` run
+    identically to their lowercase form, so a case-sensitive ``in`` check is
+    a trivial denylist bypass.
+    """
+    lowered = root.lower()
+    if lowered.endswith(".exe"):
+        lowered = lowered[: -len(".exe")]
+    return lowered
 
 
 # ---------------------------------------------------------------------------
@@ -758,7 +779,8 @@ def evaluate_default(command: str, root: str | None) -> tuple[bool, str]:
     if root is None:
         return False, "Command cannot be parsed"
 
-    if root in DENIED_ROOTS:
+    normalized_root = _normalize_root(root)
+    if normalized_root in DENIED_ROOTS or normalized_root.startswith(DENIED_ROOT_PREFIXES):
         return False, f"Root command '{root}' denied (defense-in-depth)"
 
     dangerous = contains_dangerous_token(command)

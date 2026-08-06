@@ -17,6 +17,7 @@ from app.command_policy import (
     evaluate_project_automation,
     evaluate_readonly,
     evaluate_testlint,
+    get_command_root,
     parse_agent_modes,
 )
 
@@ -261,6 +262,47 @@ class TestProfileDefault:
     def test_rm_blocked(self):
         ok, reason = evaluate_default("rm file.txt", "rm")
         assert ok is False
+
+    # -- regression: root must be derived the same way real callers derive
+    # it (get_command_root), not hand-fed a value that happens to already
+    # match DENIED_ROOTS. `mkfs.ext4 /dev/sda` parses to root "mkfs.ext4",
+    # not "mkfs" -- the real-world mkfs wrapper binary was never covered.
+    def test_real_mkfs_ext4_root_is_blocked(self):
+        cmd = "mkfs.ext4 /dev/sda"
+        root = get_command_root(cmd)
+        assert root == "mkfs.ext4"
+        ok, reason = evaluate_default(cmd, root)
+        assert ok is False
+        assert "denied" in reason
+
+    def test_real_mkfs_xfs_root_is_blocked(self):
+        cmd = "mkfs.xfs /dev/sdb1"
+        root = get_command_root(cmd)
+        ok, reason = evaluate_default(cmd, root)
+        assert ok is False
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "Shutdown -h now",
+            "REBOOT",
+            "Mv /etc/passwd /tmp/x",
+            "Cp /dev/null /etc/shadow",
+            "Tee /etc/passwd",
+            "Fdisk /dev/sda",
+            "RM file.txt",
+        ],
+    )
+    def test_denied_root_bypass_via_case_is_blocked(self, cmd):
+        root = get_command_root(cmd)
+        ok, reason = evaluate_default(cmd, root)
+        assert ok is False, f"{cmd!r} bypassed DENIED_ROOTS via case ({root!r})"
+
+    @pytest.mark.parametrize("cmd", ["powershell -Command whoami", "pwsh -c whoami", "cmd /c whoami"])
+    def test_windows_shell_interpreters_denied(self, cmd):
+        root = get_command_root(cmd)
+        ok, reason = evaluate_default(cmd, root)
+        assert ok is False, f"{cmd!r} should be denied by default profile"
 
 
 # ---------------------------------------------------------------------------
