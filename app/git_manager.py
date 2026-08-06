@@ -159,6 +159,41 @@ class GitManager:
             "hash": result["stdout"].strip()[:7],
         }
 
+    async def push(
+        self, session_id: str, path: str, remote: str = "origin", branch: str | None = None
+    ) -> dict:
+        """Push committed changes to a remote.
+
+        remote/branch are rejected if they start with "-": git parses
+        push args as options before positional refspecs, so a value like
+        "--upload-pack=touch pwned" would be interpreted as a flag rather
+        than a remote/branch name (the same class of argument-injection
+        risk shlex.quote alone doesn't cover, since it's about shell-safe
+        quoting, not git's own option parsing).
+        """
+        if remote.startswith("-"):
+            return {"success": False, "error": f"Invalid remote name: {remote!r}"}
+        if branch is not None and branch.startswith("-"):
+            return {"success": False, "error": f"Invalid branch name: {branch!r}"}
+
+        escaped_path = shlex.quote(path)
+        escaped_remote = shlex.quote(remote)
+
+        if branch:
+            push_cmd = f"cd {escaped_path} && git push {escaped_remote} {shlex.quote(branch)}"
+        else:
+            push_cmd = f"cd {escaped_path} && git push {escaped_remote}"
+
+        result = await self._ssh.execute(session_id, push_cmd, timeout=60)
+        if result["exit_code"] != 0:
+            return {"success": False, "error": result["stderr"] or result["stdout"]}
+
+        target = f"{remote}/{branch}" if branch else remote
+        return {
+            "success": True,
+            "message": f"✅ Push выполнен: {target}",
+        }
+
     async def create_backup(self, session_id: str, path: str, backup_name: str) -> dict:
         """Create a git stash as backup."""
         escaped_path = shlex.quote(path)

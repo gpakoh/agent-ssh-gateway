@@ -245,6 +245,27 @@ class ContextManager:
 
         return result
 
+    async def push_changes(
+        self, context_id: str, remote: str = "origin", branch: str | None = None
+    ) -> dict:
+        """Push committed changes for context to a remote."""
+        ctx = await self.get_context(context_id)
+        if not ctx:
+            return {"success": False, "error": "Context not found"}
+
+        if not ctx.git_info or ctx.git_info.status == GitStatus.NOT_INITIALIZED:
+            return {"success": False, "error": "Git not initialized. Use /api/git/init first."}
+
+        result = await self._git.push(ctx.session_id, ctx.path, remote, branch)
+
+        if result["success"]:
+            ctx.git_info = await self._git.check_git_status(ctx.session_id, ctx.path)
+            ctx.edit_history.append(
+                {"type": "push", "remote": remote, "branch": branch, "timestamp": time.time()}
+            )
+
+        return result
+
     async def create_backup(self, context_id: str, backup_name: str) -> dict:
         """Create backup stash."""
         ctx = await self.get_context(context_id)

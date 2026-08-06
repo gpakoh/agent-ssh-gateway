@@ -345,6 +345,15 @@ class TestReadonlyBlocksGitOps:
             )
             assert resp.status_code == 403
 
+    def test_git_push_blocked(self, client):
+        with patch.object(settings, "workspace_readonly", True):
+            resp = client.post(
+                "/api/git/push",
+                json={"context_id": "fake"},
+                headers={"X-API-Key": settings.api_key},
+            )
+            assert resp.status_code == 403
+
     def test_git_backup_blocked(self, client):
         with patch.object(settings, "workspace_readonly", True):
             resp = client.post(
