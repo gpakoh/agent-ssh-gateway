@@ -38,6 +38,7 @@ from app.models import (
     ValidationStepResult,
 )
 from app.routers.workspace import assert_workspace_writable
+from app.security import validate_path
 from app.services.context_editing import ContextEditError, edit_file_with_context
 from app.services.project_structure import scan_project_structure
 from app.services.scaffolding import scaffold_python_class as scaffold_python_class_service
@@ -181,13 +182,18 @@ async def context_file_read(
     req: FileReadRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Read a file using context (session_id extracted from context)."""
+    try:
+        validated_path = validate_path(req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
+
     ctx = await _state.context_manager.get_context(req.session_id)
     if not ctx:
         raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
 
-    content = await _state.file_editor.read_file(ctx.session_id, req.path)
-    await _state.context_manager.add_file_to_context(req.session_id, req.path)
-    return FileReadResponse(path=req.path, content=content)
+    content = await _state.file_editor.read_file(ctx.session_id, validated_path)
+    await _state.context_manager.add_file_to_context(req.session_id, validated_path)
+    return FileReadResponse(path=validated_path, content=content)
 
 
 @router.patch("/api/context/file/edit", response_model=FileEditWithContextResponse)
@@ -195,6 +201,11 @@ async def context_file_edit(
     req: FileEditWithContextRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Edit a file with context awareness (auto-commit, validation)."""
+    try:
+        validated_path = validate_path(req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
+
     assert_workspace_writable(
         actor_type=_identity.token_type,
         actor_name=_identity.name or "",
@@ -205,7 +216,7 @@ async def context_file_edit(
     if not ctx:
         raise HTTPException(status_code=404, detail=_err(404, "Context not found"))
 
-    logger.info(f"Context edit: ctx={req.context_id}, path={req.path}, ops={len(req.operations)}")
+    logger.info(f"Context edit: ctx={req.context_id}, path={validated_path}, ops={len(req.operations)}")
 
     try:
         result = await edit_file_with_context(
@@ -213,7 +224,7 @@ async def context_file_edit(
             _state.context_manager,
             _state.file_editor,
             _state.manager,
-            path=req.path,
+            path=validated_path,
             operations=[op.model_dump() for op in req.operations],
             commit_message=req.commit_message,
             run_validation=req.run_validation,
