@@ -469,6 +469,7 @@ async def ssh_prewarm(
                 owner_name=_identity.name,
                 owner_token_fingerprint=_identity.fingerprint,
                 source_ip=source_ip,
+                tenant_labels=_identity.tenant_labels,
                 session_id=session_id,
                 pinned_ip=validated_ips[0],
             )
@@ -1038,9 +1039,16 @@ async def ssh_execute_stream(websocket: WebSocket):
 
 @router.websocket("/api/ssh/pty/{session_id}/stream")
 async def pty_stream(websocket: WebSocket, session_id: str):
-    """Interactive PTY via WebSocket."""
+    """Interactive PTY via WebSocket.
+
+    Requires the "ssh:pty" scope, separate from "ssh:execute" -- raw PTY
+    keystrokes are never filtered through command_policy the way a single
+    /api/ssh/execute command string is, so holding "ssh:execute" alone
+    (or the EXECUTE role permission it maps to) must not be enough to
+    open an unfiltered interactive shell. See rbac.SCOPE_PERMISSIONS.
+    """
     identity = await ws_auth_check(
-        websocket, settings, _state.agent_token_store, required_scope="ssh:execute"
+        websocket, settings, _state.agent_token_store, required_scope="ssh:pty"
     )
     if isinstance(identity, tuple):
         await websocket.close(code=identity[0], reason=identity[1])
