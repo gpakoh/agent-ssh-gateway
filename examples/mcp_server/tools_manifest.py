@@ -21,6 +21,12 @@ def build_manifest(
     scope_enforcement: str = "audit",
     *,
     mode_override: str | None = None,
+    scope: str | None = None,
+    mode: str | None = None,
+    name_prefix: str | None = None,
+    include_descriptions: bool = True,
+    offset: int = 0,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """Build the tools manifest from registries.
 
@@ -30,9 +36,26 @@ def build_manifest(
                           have ``.name`` and ``.description`` attributes.
         scope_enforcement: Current scope enforcement mode
                            (``"off" | "audit" | "enforce"``).
-        mode_override: Optional explicit mode (bypasses env lookup).
+        mode_override: Optional explicit mode (bypasses env lookup) --
+                       controls ``active_mode`` and each tool entry's own
+                       ``mode`` field.
+        scope: Optional filter -- only include tools that require this
+              scope (e.g. ``"ssh:execute"``).
+        mode: Optional filter -- only include tools that belong to this
+             mode (e.g. ``"mcp_client"``), and narrow ``modes`` to just
+             that one entry. Distinct from mode_override: this filters
+             *which tools/modes are reported*, not which mode is "active".
+        name_prefix: Optional filter -- only include tools whose name
+                    starts with this prefix (e.g. ``"docker_"``).
+        include_descriptions: When False, omit each tool's (often long)
+                             description -- the manifest otherwise returns
+                             every registered tool's full description
+                             unconditionally, which is expensive context
+                             for an agent that just wants names/scopes.
+        offset: Pagination offset into the filtered tools list.
+        limit: Pagination page size. None returns all (post-filter) tools.
     """
-    mode = mode_override or get_tool_mode()
+    active_mode = mode_override or get_tool_mode()
     registered_names = {t.name for t in registered_tools}
     name_to_tool = {t.name: t for t in registered_tools}
 
@@ -43,19 +66,31 @@ def build_manifest(
             tool_to_modes.setdefault(name, []).append(m)
 
     # Build tools list (only registered — active in current mode)
-    tools_list: list[dict[str, Any]] = []
+    all_tools_list: list[dict[str, Any]] = []
     for name in sorted(registered_names):
         tool = name_to_tool.get(name)
-        tools_list.append(
-            {
-                "name": name,
-                "mode": mode,
-                "modes": tool_to_modes.get(name, [mode]),
-                "scopes": get_required_scopes(name),
-                "enabled": True,
-                "description": tool.description if tool else "",
-            }
-        )
+        entry: dict[str, Any] = {
+            "name": name,
+            "mode": active_mode,
+            "modes": tool_to_modes.get(name, [active_mode]),
+            "scopes": get_required_scopes(name),
+            "enabled": True,
+        }
+        if include_descriptions:
+            entry["description"] = tool.description if tool else ""
+        all_tools_list.append(entry)
+
+    # Apply scope/mode/name_prefix filters (all optional, all AND-combined).
+    tools_list = all_tools_list
+    if scope is not None:
+        tools_list = [t for t in tools_list if scope in t["scopes"]]
+    if mode is not None:
+        tools_list = [t for t in tools_list if mode in t["modes"]]
+    if name_prefix is not None:
+        tools_list = [t for t in tools_list if t["name"].startswith(name_prefix)]
+
+    filtered_count = len(tools_list)
+    paged_tools_list = tools_list[offset:] if limit is None else tools_list[offset : offset + limit]
 
     # Build mode details. "mcp_client" gets a second, env-dependent filter
     # on top of TOOL_NAMES_BY_MODE["mcp_client"] -- should_register_tool()
@@ -68,6 +103,8 @@ def build_manifest(
     safe_mode_on = is_mcp_client_safe_mode()
     modes_dict: dict[str, dict[str, Any]] = {}
     for m, tool_set in TOOL_NAMES_BY_MODE.items():
+        if mode is not None and m != mode:
+            continue
         effective_set = tool_set
         if m == "mcp_client" and safe_mode_on:
             effective_set = tool_set - MCP_CLIENT_BLOCKED_TOOLS
@@ -82,10 +119,14 @@ def build_manifest(
     }
 
     return {
-        "active_mode": mode,
+        "active_mode": active_mode,
         "scope_enforcement": scope_enforcement,
-        "tool_count": len(tools_list),
-        "tools": tools_list,
+        "tool_count": len(all_tools_list),
+        "filtered_count": filtered_count,
+        "returned_count": len(paged_tools_list),
+        "offset": offset,
+        "limit": limit,
+        "tools": paged_tools_list,
         "modes": modes_dict,
         "access_profiles": profiles_dict,
     }

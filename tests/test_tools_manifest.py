@@ -276,3 +276,75 @@ class TestDockerStartNotPhantom:
 
         for name in ("docker_stop", "docker_restart", "docker_rm"):
             assert name in TOOL_NAMES_BY_MODE["mcp_client"]
+
+
+class TestManifestFilteringAndPagination:
+    """Regression coverage: before this fix, tools_manifest had no way to
+    ask for a subset -- every call returned all ~100 tools' full
+    descriptions unconditionally, an expensive and usually unnecessary
+    amount of context for an agent that just wants e.g. the docker_* tool
+    names or a single tool's scopes.
+    """
+
+    def test_name_prefix_filters_tools(self, sample_tools: list[FakeTool]) -> None:
+        result = build_manifest(
+            sample_tools, mode_override="mcp_client", name_prefix="docker_"
+        )
+        names = {t["name"] for t in result["tools"]}
+        assert names == {"docker_restart", "docker_compose_up"}
+        assert result["returned_count"] == 2
+        # tool_count stays the *total* registered count, unaffected by filters.
+        assert result["tool_count"] == len(sample_tools)
+        assert result["filtered_count"] == 2
+
+    def test_scope_filters_tools(self, sample_tools: list[FakeTool]) -> None:
+        result = build_manifest(sample_tools, mode_override="mcp_client")
+        # Pick a real scope from an unfiltered tool to filter by.
+        target = next(t for t in result["tools"] if t["scopes"])
+        scoped = build_manifest(
+            sample_tools, mode_override="mcp_client", scope=target["scopes"][0]
+        )
+        assert all(target["scopes"][0] in t["scopes"] for t in scoped["tools"])
+        assert len(scoped["tools"]) <= len(sample_tools)
+
+    def test_mode_filter_narrows_tools_and_modes_dict(
+        self, sample_tools: list[FakeTool]
+    ) -> None:
+        result = build_manifest(sample_tools, mode_override="mcp_client", mode="minimal")
+        assert set(result["modes"].keys()) == {"minimal"}
+        for t in result["tools"]:
+            assert "minimal" in t["modes"]
+
+    def test_include_descriptions_false_omits_description_field(
+        self, sample_tools: list[FakeTool]
+    ) -> None:
+        result = build_manifest(
+            sample_tools, mode_override="mcp_client", include_descriptions=False
+        )
+        for t in result["tools"]:
+            assert "description" not in t
+
+    def test_include_descriptions_true_by_default(
+        self, sample_tools: list[FakeTool]
+    ) -> None:
+        result = build_manifest(sample_tools, mode_override="mcp_client")
+        for t in result["tools"]:
+            assert "description" in t
+
+    def test_offset_and_limit_paginate(self, sample_tools: list[FakeTool]) -> None:
+        full = build_manifest(sample_tools, mode_override="mcp_client")
+        all_names = [t["name"] for t in full["tools"]]
+
+        page = build_manifest(sample_tools, mode_override="mcp_client", offset=1, limit=2)
+        assert [t["name"] for t in page["tools"]] == all_names[1:3]
+        assert page["returned_count"] == 2
+        assert page["offset"] == 1
+        assert page["limit"] == 2
+        assert page["tool_count"] == len(sample_tools)
+
+    def test_limit_none_returns_all_after_offset(self, sample_tools: list[FakeTool]) -> None:
+        full = build_manifest(sample_tools, mode_override="mcp_client")
+        all_names = [t["name"] for t in full["tools"]]
+
+        page = build_manifest(sample_tools, mode_override="mcp_client", offset=2)
+        assert [t["name"] for t in page["tools"]] == all_names[2:]
