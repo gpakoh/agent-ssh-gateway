@@ -144,3 +144,56 @@ class TestBatchOperationsManager:
             commit_message="batch",
         )
         assert result.git_commit == "abc123"
+
+
+class TestBatchOperationsManagerPathTraversal:
+    """path/new_path/dest_path in a batch op are unconstrained request
+    fields (POST /api/batch/execute's BatchOperationItem). An absolute
+    path overrides base_path entirely (see execute_batch()'s
+    `f"{base_path}/{path}" if not path.startswith("/") else path`), and
+    none of read/edit/create/delete/rename/copy validated the resulting
+    full_path/full_new_path/full_dest_path before touching the filesystem
+    -- delete in particular runs a raw `rm -f {path}` with no
+    command_policy gate either, since it's a structured operation, not a
+    submitted command string.
+    """
+
+    @pytest.mark.parametrize("op_type", ["read", "edit", "create", "delete"])
+    async def test_forbidden_absolute_path_rejected(self, batch, op_type):
+        op: dict = {"type": op_type, "path": "/etc/passwd"}
+        if op_type == "edit":
+            op["operations"] = []
+        if op_type == "create":
+            op["content"] = "pwned"
+        result = await batch.execute_batch("sess", "ctx", [op])
+        assert result.overall_success is False
+        assert "forbidden" in result.operations[0].error.lower()
+
+    async def test_forbidden_new_path_rejected_on_rename(self, batch):
+        result = await batch.execute_batch(
+            "sess", "ctx", [{"type": "rename", "path": "a.txt", "new_path": "/etc/passwd"}]
+        )
+        assert result.overall_success is False
+        assert "forbidden" in result.operations[0].error.lower()
+
+    async def test_forbidden_dest_path_rejected_on_copy(self, batch):
+        result = await batch.execute_batch(
+            "sess", "ctx", [{"type": "copy", "path": "a.txt", "dest_path": "/etc/passwd"}]
+        )
+        assert result.overall_success is False
+        assert "forbidden" in result.operations[0].error.lower()
+
+    async def test_traversal_path_rejected(self, batch):
+        result = await batch.execute_batch(
+            "sess", "ctx", [{"type": "delete", "path": "../../../etc/passwd"}]
+        )
+        assert result.overall_success is False
+        assert "traversal" in result.operations[0].error.lower()
+
+    async def test_well_formed_relative_path_still_works(self, batch):
+        """The fix must not break the ordinary case: a plain relative path
+        under base_path."""
+        result = await batch.execute_batch(
+            "sess", "ctx", [{"type": "read", "path": "a.txt"}]
+        )
+        assert result.overall_success is True
