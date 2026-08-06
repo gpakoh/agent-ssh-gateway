@@ -775,7 +775,21 @@ def evaluate_docker_admin(command: str, root: str | None) -> tuple[bool, str]:
 
 
 def evaluate_default(command: str, root: str | None) -> tuple[bool, str]:
-    """Default profile: deny known dangerous roots + defense-in-depth denylist."""
+    """Default profile: deny known dangerous roots + defense-in-depth denylist.
+
+    Every other profile (readonly/testlint/project-automation/ops/docker-admin)
+    is an allowlist keyed on root command, so a root like kubectl/terraform/aws/
+    mysql/psql/iptables is already rejected outright by "not in allowlist" --
+    default is the *only* profile that can reach those roots at all. Without
+    also consulting the pack registry here, none of the kubernetes/cloud/
+    database/firewall/... destructive-pattern packs were ever checked for a
+    plain top-level command -- only for content nested inside heredocs/inline
+    scripts (heredoc_scanner.check_nested_commands) and for docker specifically
+    (_validate_docker_action, ops/docker-admin only). A bare
+    `kubectl delete namespace prod --force` or `terraform destroy -auto-approve`
+    passed default clean despite matching patterns that exist precisely to
+    catch them.
+    """
     if root is None:
         return False, "Command cannot be parsed"
 
@@ -786,6 +800,11 @@ def evaluate_default(command: str, root: str | None) -> tuple[bool, str]:
     dangerous = contains_dangerous_token(command)
     if dangerous:
         return False, f"Dangerous token detected: {dangerous}"
+
+    destructive = _check_all_destructive(command)
+    if destructive:
+        m = destructive[0]
+        return False, f"Destructive pattern blocked: {m.reason}"
 
     return True, "Allowed by default profile"
 

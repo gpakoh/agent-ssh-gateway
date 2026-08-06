@@ -305,6 +305,43 @@ class TestProfileDefault:
         assert ok is False, f"{cmd!r} should be denied by default profile"
 
 
+class TestProfileDefaultConsultsPackRegistry:
+    """default has no root allowlist, so it's the only profile that can
+    reach roots like kubectl/terraform/aws/gcloud/docker at all -- every
+    other profile (readonly/testlint/project-automation/ops/docker-admin)
+    already rejects those roots outright for not being in its allowlist.
+    Without also consulting the pack registry here, none of the
+    kubernetes/cloud/database/firewall/... destructive-pattern packs were
+    ever checked for a plain top-level command under default.
+    """
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "kubectl delete namespace production --force --grace-period=0",
+            "aws s3 rm s3://mybucket --recursive",
+            "gcloud sql instances delete mydb",
+            "docker system prune -f",
+            "terraform destroy -auto-approve",
+            "terraform destroy",
+        ],
+    )
+    def test_destructive_pattern_blocked_under_default(self, cmd):
+        root = get_command_root(cmd)
+        ok, reason = evaluate_default(cmd, root)
+        assert ok is False, f"{cmd!r} should be blocked by default's pack check"
+        assert "destructive" in reason.lower()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        ["kubectl get pods", "aws s3 ls s3://mybucket", "terraform plan", "docker ps"],
+    )
+    def test_safe_commands_still_allowed_under_default(self, cmd):
+        root = get_command_root(cmd)
+        ok, reason = evaluate_default(cmd, root)
+        assert ok is True, f"{cmd!r} should still pass default: {reason}"
+
+
 # ---------------------------------------------------------------------------
 # E2E policy evaluation tests
 # ---------------------------------------------------------------------------
