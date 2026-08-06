@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import uuid
@@ -91,7 +92,13 @@ class DeliveryService:
     # ------------------------------------------------------------------
 
     async def enqueue(
-        self, event_id: str, hook_id: str, event_type: str, url: str, payload_json: str
+        self,
+        event_id: str,
+        hook_id: str,
+        event_type: str,
+        url: str,
+        payload_json: str,
+        headers_json: str | None = None,
     ) -> str:
         delivery_id = uuid.uuid4().hex
         delivery = WebhookDelivery(
@@ -101,6 +108,7 @@ class DeliveryService:
             event_type=event_type,
             url=url,
             payload_json=payload_json,
+            headers_json=headers_json,
             status="pending",
             attempts=0,
         )
@@ -275,11 +283,18 @@ class DeliveryService:
             metrics.record_event_hook_latency(elapsed)
             return
 
+        headers = {"Content-Type": "application/json"}
+        if delivery.headers_json:
+            try:
+                headers = json.loads(delivery.headers_json)
+            except (TypeError, ValueError):
+                logger.warning("Delivery %s has invalid headers_json, using defaults", d_id)
+
         try:
             async with self._http_session.post(
                 d_url,
                 data=delivery.payload_json,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 allow_redirects=False,
             ) as resp:
                 if 200 <= resp.status < 300:
