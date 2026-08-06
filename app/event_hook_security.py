@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import ipaddress
 import logging
+import socket
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -55,16 +56,37 @@ def validate_webhook_url(url: str, allow_http: bool = False) -> UrlValidationRes
     if parsed.scheme not in ("http", "https"):
         return UrlValidationResult(False, f"Scheme not allowed: {parsed.scheme}")
 
+    host = parsed.hostname
+    if host is None:
+        return UrlValidationResult(False, "No hostname in URL")
+
     try:
-        host = parsed.hostname
-        if host is None:
-            return UrlValidationResult(False, "No hostname in URL")
-        addr = ipaddress.ip_address(host)
+        addrs = [ipaddress.ip_address(host)]
+    except ValueError:
+        # Not a literal IP -- resolve it, since a hostname like "localhost"
+        # or one that merely *resolves* to 127.0.0.1/169.254.169.254/an
+        # RFC1918 address must be blocked exactly like the literal IP would
+        # be (see event_hook_delivery._blocked_destination_reason, which
+        # re-checks this at every delivery attempt for the same reason).
+        try:
+            infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            return UrlValidationResult(False, f"Could not resolve hostname: {exc}")
+        seen: set[str] = set()
+        addrs = []
+        for info in infos:
+            ip_raw = str(info[4][0])
+            if ip_raw in seen:
+                continue
+            seen.add(ip_raw)
+            addrs.append(ipaddress.ip_address(ip_raw))
+        if not addrs:
+            return UrlValidationResult(False, f"Could not resolve hostname: {host}")
+
+    for addr in addrs:
         for net in BLOCKED_NETWORKS:
             if addr in net:
                 return UrlValidationResult(False, f"Blocked IP range: {net}")
-    except ValueError:
-        pass
 
     return UrlValidationResult(True)
 
