@@ -141,6 +141,49 @@ class TestSplitBrain:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+class TestReleaseTokenMismatch:
+    @pytest.mark.asyncio
+    async def test_release_with_wrong_token_does_not_kill_legit_watchdog(self, lock):
+        """Regression: release() cancelled and popped the resource's
+        watchdog task UNCONDITIONALLY, before checking whether the given
+        token actually matched the current holder. A release() call with a
+        stale or wrong token (a caller bug, a duplicate/delayed release) left
+        the Redis lock itself correctly held (the Lua script does check the
+        token) but silently killed the legitimate holder's lease-renewal
+        watchdog -- the lock would then simply expire under the real holder
+        after its TTL, with no error raised anywhere. This defeats the
+        entire point of the class ("Includes automatic lease renewal
+        (watchdog) to prevent split-brain").
+        """
+        real_token = await lock.acquire("file1", ttl=30, blocking=False)
+        assert real_token is not None
+        assert "file1" in lock._renewal_tasks
+        watchdog_task = lock._renewal_tasks["file1"]
+
+        released = await lock.release("file1", "not-the-real-token")
+
+        assert released is False
+        assert await lock.is_locked("file1") is True, (
+            "the actual Redis lock must still be held by the real token"
+        )
+        assert "file1" in lock._renewal_tasks, (
+            "a failed release (wrong token) must not remove the legitimate "
+            "holder's watchdog task"
+        )
+        assert not watchdog_task.cancelled() and not watchdog_task.done()
+
+    @pytest.mark.asyncio
+    async def test_release_with_correct_token_does_cancel_watchdog(self, lock):
+        token = await lock.acquire("file1", ttl=30, blocking=False)
+        assert token is not None
+
+        released = await lock.release("file1", token)
+
+        assert released is True
+        assert "file1" not in lock._renewal_tasks
+        assert await lock.is_locked("file1") is False
+
+
 class TestDisconnect:
     @pytest.mark.asyncio
     async def test_disconnect_cancels_watchdog(self, lock):

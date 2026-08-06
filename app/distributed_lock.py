@@ -111,11 +111,6 @@ class DistributedLock:
         """
         lock_key = f"{self._lock_prefix}{resource}"
 
-        # Cancel Watchdog
-        task = self._renewal_tasks.pop(resource, None)
-        if task is not None and not task.done():
-            task.cancel()
-
         lua_script = """
         if redis.call("get", KEYS[1]) == ARGV[1] then
             return redis.call("del", KEYS[1])
@@ -127,6 +122,12 @@ class DistributedLock:
         result = await self._redis.eval(lua_script, 1, lock_key, token)  # type: ignore[misc,arg-type]
 
         if result:
+            # Only cancel the watchdog once we've confirmed THIS token
+            # actually owned the lock -- a stale/wrong-token release must
+            # never touch the real holder's renewal task.
+            task = self._renewal_tasks.pop(resource, None)
+            if task is not None and not task.done():
+                task.cancel()
             logger.debug("Lock released for %s", resource)
             return True
         else:
