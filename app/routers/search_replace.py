@@ -1,6 +1,6 @@
 """Global search and replace routes."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_master_key
@@ -13,6 +13,8 @@ from app.models import (
     SearchMatchItem,
 )
 from app.routers.workspace import assert_workspace_writable
+from app.security import validate_path
+from app.state import _err
 
 router = APIRouter()
 
@@ -22,9 +24,14 @@ async def global_search(
     req: GlobalSearchRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Search across all project files."""
+    try:
+        validated_path = validate_path(req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
+
     matches = await _state.search_replace.search(
         session_id=req.session_id,
-        path=req.path,
+        path=validated_path,
         query=req.query,
         file_pattern=req.file_pattern,
         use_regex=req.use_regex,
@@ -55,6 +62,11 @@ async def global_replace(
     req: GlobalReplaceRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Replace across all project files."""
+    try:
+        validated_path = validate_path(req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
+
     if not req.dry_run:
         assert_workspace_writable(
             actor_type=_identity.token_type,
@@ -64,7 +76,7 @@ async def global_replace(
         )
     results = await _state.search_replace.replace(
         session_id=req.session_id,
-        path=req.path,
+        path=validated_path,
         search_query=req.search,
         replace_with=req.replace,
         file_pattern=req.file_pattern,
