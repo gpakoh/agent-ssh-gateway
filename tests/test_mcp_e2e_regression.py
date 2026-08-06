@@ -458,16 +458,19 @@ class TestExecuteRestrictedBlocked:
         d = evaluate_command_policy("echo test && rm -rf /", **enforce_testlint)
         assert not d.allowed
 
-    def test_docker_prune_allowed_by_default(self, enforce_default):
-        """'docker system prune -f' → allowed by default profile (only DENIED_ROOTS checked).
+    def test_docker_prune_blocked_by_default(self, enforce_default):
+        """'docker system prune -f' → blocked by default profile.
 
-        The default profile is permissive — it only blocks root commands in
-        DENIED_ROOTS (rm, mv, dd, etc.).  docker is NOT in DENIED_ROOTS,
-        so it passes default.  This is expected: default is defense-in-depth,
-        not a comprehensive deny list.
+        default is an allowlist-free (blocklist) profile, so it's the only
+        profile that can reach a root command like docker/kubectl/terraform/aws
+        at all -- every other profile already rejects those roots outright for
+        not being in its allowlist. default now also consults the pack
+        registry (app/packs/) as defense-in-depth, the same way ops/docker-admin
+        already did via _validate_docker_action -- so pattern-covered destructive
+        operations are blocked under default too, not just DENIED_ROOTS.
         """
         d = evaluate_command_policy("docker system prune -f", **enforce_default)
-        assert d.allowed, f"docker system prune blocked by default: {d.reason}"
+        assert not d.allowed, "docker system prune should be blocked by default's pack check"
 
     def test_docker_prune_blocked_by_readonly(self):
         """'docker system prune -f' → blocked under readonly (docker not in READONLY_ROOTS)."""

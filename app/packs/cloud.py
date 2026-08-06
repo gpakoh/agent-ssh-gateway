@@ -583,11 +583,37 @@ CLOUD_PATTERNS: tuple[DestructivePattern, ...] = (
             PatternSuggestion(command="az network dns record-set list --zone-name {zone}", description="Export record sets first", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
+    # ---- Terraform (bare) ----
+    # dns.py and monitoring.py already carry narrow, resource-targeted
+    # `terraform destroy -target=...` patterns for their own domains; this
+    # is the generic whole-stack case (no -target at all, or the plan/apply
+    # equivalents) that didn't exist anywhere in the pack library.
+    DestructivePattern(
+        name="terraform-destroy-bare",
+        regex=r"terraform\b(?!\s+plan\b)[\s\S]*?\bdestroy\b(?!\s*-h)",
+        reason="terraform destroy tears down all resources managed by the current state/workspace",
+        severity=Severity.CRITICAL,
+        description="Without -target, every resource tracked in the Terraform state is destroyed.",
+        suggestions=(
+            PatternSuggestion(command="terraform plan -destroy", description="Preview what would be destroyed first", kind=SuggestionKind.PREVIEW_FIRST),
+            PatternSuggestion(command="terraform destroy -target={resource}", description="Scope destruction to a specific resource", kind=SuggestionKind.SAFER_ALTERNATIVE),
+        ),
+    ),
+    DestructivePattern(
+        name="terraform-apply-auto-approve",
+        regex=r"terraform\b.*?\bapply\b.*?(?:-auto-approve|--auto-approve)",
+        reason="terraform apply -auto-approve applies infrastructure changes without a review step",
+        severity=Severity.HIGH,
+        description="Skips the interactive plan confirmation — any destructive change in the plan runs unreviewed.",
+        suggestions=(
+            PatternSuggestion(command="terraform plan", description="Review the plan before applying", kind=SuggestionKind.PREVIEW_FIRST),
+        ),
+    ),
 )
 
 
 def build_cloud_pack() -> Pack:
     return Pack(id="cloud", name="Cloud CLI patterns",
         destructive_patterns=CLOUD_PATTERNS,
-        keywords=("aws", "gcloud", "az", "gsutil", "bq"),
+        keywords=("aws", "gcloud", "az", "gsutil", "bq", "terraform"),
     )
