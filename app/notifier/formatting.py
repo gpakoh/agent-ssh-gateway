@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 from collections.abc import Mapping
 from typing import Any
 
@@ -29,16 +30,16 @@ _SEVERITY_PREFIX = {
 
 def _clip_ip(value: Any) -> str:
     text = str(redact_secrets(value) or "").replace("\n", " ").strip()
-    if len(text) <= _IP_CLIP_LEN:
-        return text
-    return text[: _IP_CLIP_LEN - 3] + "..."
+    if len(text) > _IP_CLIP_LEN:
+        text = text[: _IP_CLIP_LEN - 3] + "..."
+    return html.escape(text)
 
 
 def _clip(value: Any, *, limit: int = _MAX_FIELD_LEN) -> str:
     text = str(redact_secrets(value) or "").replace("\n", " ").strip()
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3] + "..."
+    if len(text) > limit:
+        text = text[: limit - 3] + "..."
+    return html.escape(text)
 
 
 def _metadata_value(event: Mapping[str, Any], key: str) -> str:
