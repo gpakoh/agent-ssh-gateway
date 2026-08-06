@@ -747,11 +747,11 @@ def remotes(
     result = run_project_command(client, project, "git remote -v")
     if "stdout" in result:
         import re
-        output = result["stdout"]
+        original = result["stdout"]
         output = re.sub(
             r"(https?://)[^@/]+:[^@/]+@",
             r"\1***:***@",
-            output,
+            original,
         )
         output = re.sub(
             r"(https?://)[A-Za-z0-9_]+@",
@@ -759,6 +759,10 @@ def remotes(
             output,
         )
         result["stdout"] = output
+        # Signal to run_tool() whether a credential was actually stripped,
+        # so the reported envelope's meta.redacted reflects reality instead
+        # of always defaulting to False regardless of what happened here.
+        result["redacted"] = output != original
     return result
 
 
