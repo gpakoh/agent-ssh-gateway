@@ -15,7 +15,13 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from .github_client import GitHubClient, normalize_list_response
-from .shared import extract_auth_token, get_fleet_env
+from .shared import (
+    extract_auth_token,
+    get_fleet_env,
+    minimize_repo_payload,
+    remote_api_error,
+    tool_success,
+)
 
 # ── Config ────────────────────────────────────────────────────────────
 INTERNAL_PORT = 8781  # FastMCP streamable-http (no auth, localhost only)
@@ -37,8 +43,12 @@ mcp = FastMCP("github-remote")
 @mcp.tool()
 async def github_get_repo(owner: str, repo: str) -> dict[str, Any]:
     """Get repository metadata including description, stars, forks, language, topics."""
-    async with _get_client() as client:
-        return await client.get_repo(owner, repo)
+    try:
+        async with _get_client() as client:
+            data = await client.get_repo(owner, repo)
+    except Exception as exc:
+        return remote_api_error("github_get_repo", "github", exc)
+    return tool_success("github_get_repo", minimize_repo_payload(data, provider="github"), source="github")
 
 
 @mcp.tool()
@@ -48,9 +58,12 @@ async def github_list_branches(
     per_page: int = 30,
 ) -> dict[str, Any]:
     """List branches in a repository. Returns branch names and commit SHAs."""
-    async with _get_client() as client:
-        data = await client.list_branches(owner, repo, per_page=per_page)
-    return normalize_list_response(data)
+    try:
+        async with _get_client() as client:
+            data = normalize_list_response(await client.list_branches(owner, repo, per_page=per_page))
+    except Exception as exc:
+        return remote_api_error("github_list_branches", "github", exc)
+    return tool_success("github_list_branches", data, source="github")
 
 
 @mcp.tool()
@@ -61,14 +74,14 @@ async def github_list_commits(
     per_page: int = 30,
 ) -> dict[str, Any]:
     """List commits in a repository. Optionally filter by branch SHA."""
-    async with _get_client() as client:
-        data = await client.list_commits(
-            owner,
-            repo,
-            sha=sha,
-            per_page=per_page,
-        )
-    return normalize_list_response(data)
+    try:
+        async with _get_client() as client:
+            data = normalize_list_response(
+                await client.list_commits(owner, repo, sha=sha, per_page=per_page)
+            )
+    except Exception as exc:
+        return remote_api_error("github_list_commits", "github", exc)
+    return tool_success("github_list_commits", data, source="github")
 
 
 @mcp.tool()
@@ -79,8 +92,12 @@ async def github_get_file(
     branch: str | None = None,
 ) -> dict[str, Any]:
     """Get a file or directory contents from a repository. Returns base64-encoded content or directory listing."""
-    async with _get_client() as client:
-        return await client.get_file(owner, repo, path, branch=branch)
+    try:
+        async with _get_client() as client:
+            data = await client.get_file(owner, repo, path, branch=branch)
+    except Exception as exc:
+        return remote_api_error("github_get_file", "github", exc)
+    return tool_success("github_get_file", data, source="github")
 
 
 @mcp.tool()
@@ -91,14 +108,14 @@ async def github_list_issues(
     per_page: int = 30,
 ) -> dict[str, Any]:
     """List issues in a repository. State: open, closed, all."""
-    async with _get_client() as client:
-        data = await client.list_issues(
-            owner,
-            repo,
-            state=state,
-            per_page=per_page,
-        )
-    return normalize_list_response(data)
+    try:
+        async with _get_client() as client:
+            data = normalize_list_response(
+                await client.list_issues(owner, repo, state=state, per_page=per_page)
+            )
+    except Exception as exc:
+        return remote_api_error("github_list_issues", "github", exc)
+    return tool_success("github_list_issues", data, source="github")
 
 
 @mcp.tool()
@@ -108,8 +125,12 @@ async def github_get_issue(
     issue_number: int,
 ) -> dict[str, Any]:
     """Get details of a specific issue by number."""
-    async with _get_client() as client:
-        return await client.get_issue(owner, repo, issue_number)
+    try:
+        async with _get_client() as client:
+            data = await client.get_issue(owner, repo, issue_number)
+    except Exception as exc:
+        return remote_api_error("github_get_issue", "github", exc)
+    return tool_success("github_get_issue", data, source="github")
 
 
 @mcp.tool()
@@ -120,14 +141,14 @@ async def github_list_pull_requests(
     per_page: int = 30,
 ) -> dict[str, Any]:
     """List pull requests in a repository. State: open, closed, all."""
-    async with _get_client() as client:
-        data = await client.list_pull_requests(
-            owner,
-            repo,
-            state=state,
-            per_page=per_page,
-        )
-    return normalize_list_response(data)
+    try:
+        async with _get_client() as client:
+            data = normalize_list_response(
+                await client.list_pull_requests(owner, repo, state=state, per_page=per_page)
+            )
+    except Exception as exc:
+        return remote_api_error("github_list_pull_requests", "github", exc)
+    return tool_success("github_list_pull_requests", data, source="github")
 
 
 @mcp.tool()
@@ -137,8 +158,12 @@ async def github_get_pull_request(
     pull_number: int,
 ) -> dict[str, Any]:
     """Get details of a specific pull request by number."""
-    async with _get_client() as client:
-        return await client.get_pull_request(owner, repo, pull_number)
+    try:
+        async with _get_client() as client:
+            data = await client.get_pull_request(owner, repo, pull_number)
+    except Exception as exc:
+        return remote_api_error("github_get_pull_request", "github", exc)
+    return tool_success("github_get_pull_request", data, source="github")
 
 
 # ── Auth proxy ────────────────────────────────────────────────────
