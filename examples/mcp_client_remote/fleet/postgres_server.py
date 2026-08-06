@@ -16,7 +16,14 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from .shared import extract_auth_token, get_fleet_env, resolve_docker_host
+from .shared import (
+    extract_auth_token,
+    get_fleet_env,
+    json_safe,
+    resolve_docker_host,
+    tool_error,
+    tool_success,
+)
 
 INTERNAL_PORT = 8784
 HTTP_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
@@ -66,94 +73,159 @@ mcp = FastMCP("postgres-readonly")
 
 
 @mcp.tool()
-async def postgres_health() -> str:
+async def postgres_health() -> dict:
     """Check Postgres connectivity. Returns DB name, user, version."""
     client = await _get_client()
     try:
         info = await client.health()
-        return f"ok | db={info['db']} user={info['user']} version={info['version']}"
-    except Exception as e:
-        return f"error: {e}"
+    except Exception as exc:
+        return tool_error(
+            "postgres_health",
+            "POSTGRES_ERROR",
+            str(exc),
+            source="postgres",
+            retryable=True,
+        )
+    return tool_success("postgres_health", json_safe(info), source="postgres")
 
 
 @mcp.tool()
-async def postgres_list_schemas() -> str:
+async def postgres_list_schemas() -> dict:
     """List non-system schemas in the database."""
     client = await _get_client()
-    schemas = await client.list_schemas()
-    if not schemas:
-        return "No user schemas found"
-    lines = "\n".join(f"  {s}" for s in schemas)
-    return f"Schemas ({len(schemas)}):\n{lines}"
+    try:
+        schemas = await client.list_schemas()
+    except Exception as exc:
+        return tool_error(
+            "postgres_list_schemas",
+            "POSTGRES_ERROR",
+            str(exc),
+            source="postgres",
+            retryable=True,
+        )
+    return tool_success(
+        "postgres_list_schemas",
+        {"schemas": schemas, "count": len(schemas)},
+        source="postgres",
+    )
 
 
 @mcp.tool()
 async def postgres_list_tables(
     schema: str = "public",
-) -> str:
-    """List tables in a schema with type and row estimate.
-
-    schema: schema name (default: public).
-    """
+) -> dict:
+    """List tables in a schema with type and row estimate."""
     client = await _get_client()
-    tables = await client.list_tables(schema=schema)
-    if not tables:
-        return f"No tables found in schema '{schema}'"
-    lines = "\n".join(
-        f"  {t['table_name']:30s} {t['table_type']:15s} rows={t.get('row_estimate', '?')}"
-        for t in tables
+    try:
+        tables = await client.list_tables(schema=schema)
+    except ValueError as exc:
+        return tool_error(
+            "postgres_list_tables",
+            "INVALID_INPUT",
+            str(exc),
+            source="postgres",
+        )
+    except Exception as exc:
+        return tool_error(
+            "postgres_list_tables",
+            "POSTGRES_ERROR",
+            str(exc),
+            source="postgres",
+            retryable=True,
+        )
+    return tool_success(
+        "postgres_list_tables",
+        {"schema": schema, "tables": json_safe(tables), "count": len(tables)},
+        source="postgres",
     )
-    return f"Tables in '{schema}' ({len(tables)}):\n{lines}"
 
 
 @mcp.tool()
 async def postgres_describe_table(
     table_name: str,
     schema: str = "public",
-) -> str:
-    """Describe columns of a table.
-
-    table_name: name of the table (required).
-    schema: schema name (default: public).
-    """
+) -> dict:
+    """Describe columns of a table."""
     client = await _get_client()
-    columns = await client.describe_table(schema=schema, table_name=table_name)
+    try:
+        columns = await client.describe_table(schema=schema, table_name=table_name)
+    except ValueError as exc:
+        return tool_error(
+            "postgres_describe_table",
+            "INVALID_INPUT",
+            str(exc),
+            source="postgres",
+        )
+    except Exception as exc:
+        return tool_error(
+            "postgres_describe_table",
+            "POSTGRES_ERROR",
+            str(exc),
+            source="postgres",
+            retryable=True,
+        )
     if not columns:
-        return f"Table '{schema}.{table_name}' not found or has no columns"
-    lines = "\n".join(
-        f"  {c['column_name']:30s} {c['data_type']:20s} nullable={c['is_nullable']:5s} default={c.get('column_default', 'NULL')}"
-        for c in columns
+        return tool_error(
+            "postgres_describe_table",
+            "TABLE_NOT_FOUND",
+            f"Table '{schema}.{table_name}' not found or has no columns",
+            source="postgres",
+        )
+    return tool_success(
+        "postgres_describe_table",
+        {
+            "schema": schema,
+            "table_name": table_name,
+            "columns": json_safe(columns),
+            "count": len(columns),
+        },
+        source="postgres",
     )
-    return f"Columns of '{schema}.{table_name}' ({len(columns)}):\n{lines}"
 
 
 @mcp.tool()
-async def postgres_select(sql: str) -> str:
-    """Execute a read-only SELECT or WITH query with enforced LIMIT 1000.
-
-    sql: SELECT or WITH query (multi-statement not allowed, DDL/DML blocked).
-    Returns: JSON array of rows.
-    """
+async def postgres_select(sql: str) -> dict:
+    """Execute a read-only SELECT or WITH query with enforced LIMIT 1000."""
     client = await _get_client()
     try:
         rows = await client.execute(sql)
-    except ValueError as e:
-        return f"error: {e}"
-    except Exception as e:
-        return f"error: query failed: {e}"
-    import json
-
-    return json.dumps(rows, default=str, ensure_ascii=False)
+    except ValueError as exc:
+        return tool_error(
+            "postgres_select",
+            "INVALID_INPUT",
+            str(exc),
+            source="postgres",
+        )
+    except Exception as exc:
+        return tool_error(
+            "postgres_select",
+            "POSTGRES_ERROR",
+            f"query failed: {exc}",
+            source="postgres",
+            retryable=True,
+        )
+    return tool_success(
+        "postgres_select",
+        {"rows": json_safe(rows), "row_count": len(rows)},
+        source="postgres",
+    )
 
 
 @mcp.tool()
-async def postgres_vector_status() -> str:
+async def postgres_vector_status() -> dict:
     """Check if pgvector extension is installed and its version."""
     client = await _get_client()
-    info = await client.vector_status()
-    if info["installed"]:
-        return f"pgvector is installed (version {info['version']})"
-    return "pgvector is NOT installed"
+    try:
+        info = await client.vector_status()
+    except Exception as exc:
+        return tool_error(
+            "postgres_vector_status",
+            "POSTGRES_ERROR",
+            str(exc),
+            source="postgres",
+            retryable=True,
+        )
+    return tool_success("postgres_vector_status", json_safe(info), source="postgres")
 
 
 def create_auth_proxy(*, upstream_port: int, valid_tokens: set[str]) -> Starlette:

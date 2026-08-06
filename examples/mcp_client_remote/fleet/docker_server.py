@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from typing import Any
 
 import httpx
 import uvicorn
@@ -13,7 +14,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from .docker_client import DockerClient
-from .shared import extract_auth_token, get_fleet_env
+from .shared import extract_auth_token, get_fleet_env, tool_error, tool_success
 
 INTERNAL_PORT = 8793
 HTTP_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
@@ -26,12 +27,16 @@ def _get_client() -> DockerClient:
 mcp = FastMCP("docker-remote")
 
 
+def _docker_error(tool: str, exc: Exception) -> dict[str, Any]:
+    return tool_error(tool, "DOCKER_COMMAND_FAILED", str(exc), source="docker")
+
+
 @mcp.tool()
 async def docker_ps(
     all: bool = False,
     format: str | None = None,
     limit: int = 50,
-) -> list[dict] | str:
+) -> dict:
     """List running containers. Use all=True to include stopped containers.
 
     Returns structured rows (docker's native --format json) by default.
@@ -40,14 +45,20 @@ async def docker_ps(
     limit: max containers to return (default 50, set higher for full list).
     """
     client = _get_client()
-    return await client.ps(all=all, format=format or None, limit=limit)
+    try:
+        rows = await client.ps(all=all, format=format or None, limit=limit)
+    except (ValueError, RuntimeError) as exc:
+        return _docker_error("docker_ps", exc)
+    if isinstance(rows, str):
+        return tool_success("docker_ps", {"output": rows, "format": format}, source="docker")
+    return tool_success("docker_ps", {"containers": rows, "count": len(rows)}, source="docker")
 
 
 @mcp.tool()
 async def docker_images(
     format: str | None = None,
     limit: int = 50,
-) -> list[dict] | str:
+) -> dict:
     """List Docker images on the host.
 
     Returns structured rows by default. format: Go template string for
@@ -55,14 +66,24 @@ async def docker_images(
     limit: max images to return (default 50, set higher for full list).
     """
     client = _get_client()
-    return await client.images(format=format or None, limit=limit)
+    try:
+        rows = await client.images(format=format or None, limit=limit)
+    except (ValueError, RuntimeError) as exc:
+        return _docker_error("docker_images", exc)
+    if isinstance(rows, str):
+        return tool_success("docker_images", {"output": rows, "format": format}, source="docker")
+    return tool_success("docker_images", {"images": rows, "count": len(rows)}, source="docker")
 
 
 @mcp.tool()
-async def docker_inspect(name: str) -> list[dict] | dict:
+async def docker_inspect(name: str) -> dict:
     """Inspect a container by name or ID. Returns structured metadata (first 500 entries)."""
     client = _get_client()
-    return await client.inspect(name, max_lines=500)
+    try:
+        data = await client.inspect(name, max_lines=500)
+    except (ValueError, RuntimeError) as exc:
+        return _docker_error("docker_inspect", exc)
+    return tool_success("docker_inspect", data, source="docker")
 
 
 @mcp.tool()
@@ -73,14 +94,18 @@ async def docker_logs(container: str, tail: int = 200) -> dict:
     tail: number of recent lines (1-1000, default 200).
     """
     client = _get_client()
-    return await client.logs(container, tail=tail)
+    try:
+        data = await client.logs(container, tail=tail)
+    except (ValueError, RuntimeError) as exc:
+        return _docker_error("docker_logs", exc)
+    return tool_success("docker_logs", data, source="docker")
 
 
 @mcp.tool()
 async def docker_stats(
     format: str | None = None,
     limit: int = 50,
-) -> list[dict] | str:
+) -> dict:
     """Show live resource usage statistics for all running containers (CPU, memory, network, block I/O).
 
     Returns structured rows by default. format: Go template string overrides
@@ -88,14 +113,20 @@ async def docker_stats(
     limit: max containers to return (default 50, set higher for full list).
     """
     client = _get_client()
-    return await client.stats(format=format or None, limit=limit)
+    try:
+        rows = await client.stats(format=format or None, limit=limit)
+    except (ValueError, RuntimeError) as exc:
+        return _docker_error("docker_stats", exc)
+    if isinstance(rows, str):
+        return tool_success("docker_stats", {"output": rows, "format": format}, source="docker")
+    return tool_success("docker_stats", {"stats": rows, "count": len(rows)}, source="docker")
 
 
 @mcp.tool()
 async def docker_compose_ps(
     project_dir: str | None = None,
     limit: int = 50,
-) -> list[dict] | str:
+) -> dict:
     """List containers in a Docker Compose project.
 
     Returns structured rows by default.
@@ -103,7 +134,13 @@ async def docker_compose_ps(
     limit: max services to return (default 50).
     """
     client = _get_client()
-    return await client.compose_ps(project_dir=project_dir, limit=limit)
+    try:
+        rows = await client.compose_ps(project_dir=project_dir, limit=limit)
+    except (ValueError, RuntimeError) as exc:
+        return _docker_error("docker_compose_ps", exc)
+    if isinstance(rows, str):
+        return tool_success("docker_compose_ps", {"output": rows}, source="docker")
+    return tool_success("docker_compose_ps", {"containers": rows, "count": len(rows)}, source="docker")
 
 
 @mcp.tool()
@@ -115,7 +152,11 @@ async def docker_compose_services(
     project_dir: path to directory containing compose file.
     """
     client = _get_client()
-    return await client.compose_services(project_dir=project_dir)
+    try:
+        data = await client.compose_services(project_dir=project_dir)
+    except (ValueError, RuntimeError) as exc:
+        return _docker_error("docker_compose_services", exc)
+    return tool_success("docker_compose_services", data, source="docker")
 
 
 def create_auth_proxy(*, upstream_port: int, valid_tokens: set[str]) -> Starlette:
