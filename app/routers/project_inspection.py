@@ -1,6 +1,6 @@
 """Project inspection routes: analytics and file tree."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, require_master_key
@@ -16,6 +16,8 @@ from app.models import (
     ProjectAnalyticsResponse,
     TestStats,
 )
+from app.security import validate_path
+from app.state import _err
 
 router = APIRouter()
 
@@ -25,9 +27,14 @@ async def run_analytics(
     req: ProjectAnalyticsRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Analyze project and return metrics."""
+    try:
+        validated_path = validate_path(req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
+
     metrics_data = await _state.analytics.analyze_project(
         session_id=req.session_id,
-        path=req.path,
+        path=validated_path,
     )
 
     return ProjectAnalyticsResponse(
@@ -45,9 +52,14 @@ async def get_file_tree_v2(
     req: FileTreeRequest, _identity: AuthIdentity = Depends(require_master_key)
 ):
     """Get directory tree structure."""
+    try:
+        validated_path = validate_path(req.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
+
     tree = await _state.file_tree.get_tree(
         session_id=req.session_id,
-        path=req.path,
+        path=validated_path,
         depth=req.depth,
         show_hidden=req.show_hidden,
         max_files=req.max_files,
