@@ -139,18 +139,17 @@ async def apply_project_patch(
         prepared.append((full_path, original, new_content, f["hunk_count"]))
 
     # Transactional write with rollback
-    completed: list[tuple[object, object]] = []
+    completed: list[tuple[object, object, bool]] = []
 
     for full_path, _original, new_content, _hunk_count in prepared:
         backup = full_path.parent / f".{full_path.name}.mcp-patch-{rid}.bak"
         tmp = full_path.parent / f".{full_path.name}.mcp-patch-{rid}.tmp"
+        existed_before = full_path.exists()
 
         try:
             # Backup
-            if full_path.exists():
+            if existed_before:
                 shutil.copy2(str(full_path), str(backup))
-            else:
-                backup.write_text("", encoding="utf-8")
 
             # Write temp file
             tmp.write_text(new_content, encoding="utf-8")
@@ -165,21 +164,24 @@ async def apply_project_patch(
             # Atomic rename
             os.rename(str(tmp), str(full_path))
 
-            completed.append((full_path, backup))
+            completed.append((full_path, backup, existed_before))
 
         except Exception as exc:
             logger.error("Patch write failed for %s: %s", full_path, exc)
             # Rollback completed files
             rollback_errors = []
-            for rb_path, rb_backup in completed:
+            for rb_path, rb_backup, rb_existed_before in completed:
                 try:
-                    os.rename(str(rb_backup), str(rb_path))
+                    if rb_existed_before:
+                        os.rename(str(rb_backup), str(rb_path))
+                    else:
+                        os.remove(str(rb_path))
                 except Exception as rb_exc:
                     rollback_errors.append(f"{rb_path}: {rb_exc}")
                     logger.error("Rollback failed for %s: %s", rb_path, rb_exc)
 
             # Cleanup temp files
-            for rb_path, _ in completed:
+            for rb_path, _, _ in completed:
                 tmp_rb = rb_path.parent / f".{rb_path.name}.mcp-patch-{rid}.tmp"
                 try:
                     tmp_rb.unlink(missing_ok=True)
@@ -209,7 +211,7 @@ async def apply_project_patch(
             )
 
     # Cleanup backups on success
-    for rb_path, rb_backup in completed:
+    for rb_path, rb_backup, _rb_existed_before in completed:
         try:
             rb_backup.unlink(missing_ok=True)
         except Exception:

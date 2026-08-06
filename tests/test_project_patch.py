@@ -116,6 +116,69 @@ async def test_normal_patch_within_project_still_applies(tmp_path, monkeypatch):
     assert target.read_text(encoding="utf-8") == "updated content\n"
 
 
+def _new_file_patch(rel_path: str, lines: list[str]) -> str:
+    body = "".join(f"+{line}\n" for line in lines)
+    return (
+        f"--- a/{rel_path}\n"
+        f"+++ b/{rel_path}\n"
+        f"@@ -0,0 +1,{len(lines)} @@\n"
+        f"{body}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_rollback_removes_newly_created_file_not_leaves_it_empty(tmp_path, monkeypatch):
+    """Regression: when a patch creates a brand-new file (didn't exist
+    before) and a LATER file in the same batch fails to write, rollback
+    is supposed to restore every already-completed file to its pre-patch
+    state. For a new file, "backup" was just an empty placeholder written
+    so the same rename-based rollback code path could be reused -- but
+    rollback unconditionally renamed that empty placeholder back over the
+    target, leaving an empty file behind where, before the patch, no file
+    existed at all. A partially-failed multi-file patch must not leave
+    new junk files around.
+    """
+    import os as os_module
+    from pathlib import Path as PathCls
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+
+    registry = _make_registry(tmp_path, project_root)
+    monkeypatch.setattr("app.workspace.registry.get_registry", lambda *a, **k: registry)
+
+    patch = "\n".join(
+        [
+            _new_file_patch("first.txt", ["hello"]).rstrip("\n"),
+            _new_file_patch("second.txt", ["world"]).rstrip("\n"),
+        ]
+    ) + "\n"
+
+    real_rename = os_module.rename
+
+    def _flaky_rename(src, dst):
+        if str(src).endswith(".tmp") and PathCls(dst).name == "second.txt":
+            raise OSError("simulated write failure for second.txt")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr("app.services.project_patch.os.rename", _flaky_rename)
+
+    result = await apply_project_patch(
+        "myproj",
+        patch=patch,
+        strip=0,
+        dry_run=False,
+    )
+
+    assert result.success is False
+    first_path = project_root / "first.txt"
+    assert not first_path.exists(), (
+        f"rollback must remove a newly-created file, not leave it as an empty file "
+        f"(exists={first_path.exists()})"
+    )
+    assert not (project_root / "second.txt").exists()
+
+
 @pytest.mark.asyncio
 async def test_unknown_project_raises(monkeypatch):
     registry = WorkspaceRegistry({}, [], granted_scopes={"project:patch"})
