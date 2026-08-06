@@ -468,3 +468,30 @@ class TestApplyPatch:
                 patch,
                 registry=edit_workspace["registry"],
             )
+
+    def test_insertion_hunk_out_of_range_rejected(self, edit_workspace):
+        """Regression: _apply_hunks() only bounds-checked old_start against
+        result's length INSIDE the per-context-line loop -- a zero-context,
+        pure-insertion hunk (only "+" lines, no "-"/context lines at all,
+        which -U0-style diffs and hand-built agent patches can both
+        produce) has old_lines_hunk == [], so that loop never runs and
+        old_start was never validated at all. A hunk claiming to insert at
+        line 1000 of a 3-line file silently landed at the END of the file
+        instead of raising -- the caller got applied=True with no
+        indication the line number was garbage.
+        """
+        patch = """\
+--- a/src/main.py
++++ b/src/main.py
+@@ -1000,0 +1001,1 @@
++INJECTED
+"""
+        with pytest.raises(PatchError, match="out of range"):
+            project_apply_patch(
+                "edit-project",
+                "src/main.py",
+                patch,
+                registry=edit_workspace["registry"],
+            )
+        content = (edit_workspace["project"] / "src" / "main.py").read_text()
+        assert "INJECTED" not in content

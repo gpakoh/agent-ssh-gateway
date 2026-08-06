@@ -443,6 +443,14 @@ def _apply_hunks(old_lines: list[str], hunks: list[dict[str, Any]]) -> list[str]
         old_lines_hunk = hunk["old_lines"]
         new_lines_hunk = hunk["new_lines"]
 
+        # A zero-context, pure-insertion hunk has old_lines_hunk == [], so
+        # the per-line loop below never runs and never validates old_start
+        # on its own -- check it explicitly first.
+        if old_start < 0 or old_start > len(result):
+            raise PatchError(
+                f"Hunk {i + 1}: start line {hunk['old_start']} out of range"
+            )
+
         # Validate context lines match
         for j, expected in enumerate(old_lines_hunk):
             idx = old_start + j
