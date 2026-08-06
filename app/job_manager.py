@@ -269,6 +269,17 @@ class JobManager:
         if not job:
             return
 
+        if job.cancel_event.is_set():
+            # Cancelled while still pending -- the Task was already
+            # scheduled by create_job() before cancel_job() ran, but the
+            # command must never actually reach the remote host.
+            job.status = "cancelled"
+            job.completed_at = job.completed_at or time.time()
+            job.completed_at_mono = job.completed_at_mono or time.monotonic()
+            job.completed_event.set()
+            await self._persist_terminal_job(job)
+            return
+
         job.status = "running"
         job.started_at = time.time()
         job.acquired_at_mono = time.monotonic()
