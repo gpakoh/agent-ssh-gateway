@@ -115,7 +115,72 @@ class TestCreateSnapshotShellInjection:
         )
 
 
+class TestSnapshotIdPathTraversal:
+    """snapshot_id is server-generated as "snap_<timestamp>", but
+    restore_snapshot()/delete_snapshot() take it back from the caller with
+    no format check. shlex.quote() stops it from breaking out of its shell
+    quotes (see TestSnapshotIdShellInjection above) but does nothing to
+    stop "../../etc" from being a validly-quoted path segment that the
+    remote shell still resolves outside SNAPSHOTS_DIR -- letting a caller
+    rm -rf / read / overwrite an arbitrary path on the target host via a
+    class that builds its own shell commands directly, bypassing
+    command_policy entirely.
+    """
+
+    @pytest.mark.asyncio
+    async def test_delete_snapshot_id_rejects_path_traversal(self, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "important.txt").write_text("do not delete me")
+        project = tmp_path / "project"
+        project.mkdir()
+
+        ctx = _FakeCtx(path=str(project))
+        cm = _make_ctx_manager(ctx)
+        ssh = AsyncMock()
+        ssh.execute = AsyncMock(return_value={"stdout": "", "stderr": "", "exit_code": 0})
+        sm = SnapshotManager(ssh, cm)
+
+        with pytest.raises(ValueError):
+            await sm.delete_snapshot("s1", "ctx1", "../outside")
+
+        ssh.execute.assert_not_awaited()
+        assert (outside / "important.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_restore_snapshot_id_rejects_path_traversal(self, tmp_path):
+        ctx = _FakeCtx(path=str(tmp_path))
+        cm = _make_ctx_manager(ctx)
+        ssh = AsyncMock()
+        ssh.execute = AsyncMock(return_value={"stdout": "exists", "stderr": "", "exit_code": 0})
+        sm = SnapshotManager(ssh, cm)
+
+        with pytest.raises(ValueError):
+            await sm.restore_snapshot("s1", "ctx1", "../../etc/nginx")
+
+        ssh.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_well_formed_snapshot_id_still_accepted(self, tmp_path):
+        ctx = _FakeCtx(path=str(tmp_path))
+        cm = _make_ctx_manager(ctx)
+        ssh = AsyncMock()
+        ssh.execute = AsyncMock(return_value={"stdout": "not_found", "stderr": "", "exit_code": 0})
+        sm = SnapshotManager(ssh, cm)
+
+        with pytest.raises(ValueError, match="not found"):
+            await sm.restore_snapshot("s1", "ctx1", "snap_1234567890")
+
+        assert ssh.execute.await_count >= 1
+
+
 class TestSnapshotIdShellInjection:
+    """These predate the snap_<timestamp> format validation added for
+    TestSnapshotIdPathTraversal above. The injection payload doesn't match
+    that format either, so it's now rejected outright before any shell
+    command is built -- a strictly stronger guarantee than "safely quoted".
+    """
+
     @pytest.mark.asyncio
     async def test_delete_snapshot_id_escaped_in_rm_command(self, tmp_path):
         marker = tmp_path / "pwned"
@@ -127,13 +192,11 @@ class TestSnapshotIdShellInjection:
         ssh.execute = AsyncMock(return_value={"stdout": "", "stderr": "", "exit_code": 0})
         sm = SnapshotManager(ssh, cm)
 
-        await sm.delete_snapshot("s1", "ctx1", payload)
+        with pytest.raises(ValueError):
+            await sm.delete_snapshot("s1", "ctx1", payload)
 
-        command = ssh.execute.call_args_list[0].args[1]
-        subprocess.run(["sh", "-c", command], check=False)
-        assert not _marker_hit(marker), (
-            f"delete_snapshot() let snapshot_id break out of shell quoting: {command!r}"
-        )
+        ssh.execute.assert_not_awaited()
+        assert not _marker_hit(marker)
 
     @pytest.mark.asyncio
     async def test_restore_snapshot_id_escaped_in_test_dir_command(self, tmp_path):
@@ -154,10 +217,8 @@ class TestSnapshotIdShellInjection:
         ssh.execute = AsyncMock(side_effect=side_effect)
         sm = SnapshotManager(ssh, cm)
 
-        await sm.restore_snapshot("s1", "ctx1", payload)
+        with pytest.raises(ValueError):
+            await sm.restore_snapshot("s1", "ctx1", payload)
 
-        call = next(c for c in ssh.execute.call_args_list if c.args[1].startswith("test -d"))
-        subprocess.run(["sh", "-c", call.args[1]], check=False)
-        assert not _marker_hit(marker), (
-            f"restore_snapshot()'s existence check let snapshot_id break out of shell quoting: {call.args[1]!r}"
-        )
+        ssh.execute.assert_not_awaited()
+        assert not _marker_hit(marker)

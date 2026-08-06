@@ -2,11 +2,29 @@
 
 import json
 import logging
+import re
 import shlex
 import time
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+# snapshot_id is always server-generated as "snap_<unix-timestamp>" (see
+# create_snapshot below). restore_snapshot()/delete_snapshot() take it back
+# from the caller (request body / URL path segment) and splice it into a
+# filesystem path that is shell-quoted before being sent over SSH.
+# shlex.quote() only prevents the value from breaking out of its quotes —
+# it does nothing to stop "../../etc" from being a valid, quoted path
+# segment that the remote shell still resolves outside SNAPSHOTS_DIR. Any
+# caller controlling snapshot_id could therefore `rm -rf`/read/overwrite an
+# arbitrary path on the target host, entirely bypassing command_policy
+# (this class builds and runs its own shell commands directly).
+_SNAPSHOT_ID_RE = re.compile(r"^snap_[0-9]+$")
+
+
+def _validate_snapshot_id(snapshot_id: str) -> None:
+    if not _SNAPSHOT_ID_RE.match(snapshot_id):
+        raise ValueError(f"Invalid snapshot id: {snapshot_id!r}")
 
 
 @dataclass
@@ -126,6 +144,7 @@ class SnapshotManager:
         snapshot_id: str,
     ) -> dict:
         """Restore project from snapshot."""
+        _validate_snapshot_id(snapshot_id)
         ctx = await self._context.get_context(context_id)
         if not ctx:
             raise ValueError(f"Context {context_id} not found")
@@ -245,6 +264,7 @@ class SnapshotManager:
         snapshot_id: str,
     ) -> bool:
         """Delete a snapshot."""
+        _validate_snapshot_id(snapshot_id)
         ctx = await self._context.get_context(context_id)
         if not ctx:
             raise ValueError(f"Context {context_id} not found")
