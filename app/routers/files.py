@@ -464,15 +464,15 @@ async def ast_rename(
     await _check_session_ownership(req.session_id, request)
 
     # Validate All Paths First
+    validated_files: list[str] = []
+    single_path: str | None = None
     try:
         if req.files:
-            for file_path in req.files:
-                validate_path(file_path)
+            validated_files = [validate_path(p) for p in req.files]
         else:
-            single_path = req.path
-            if single_path is None:
+            if req.path is None:
                 raise HTTPException(status_code=400, detail=_err(400, "Path is required"))
-            validate_path(single_path)
+            single_path = validate_path(req.path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=_err(400, str(exc))) from exc
 
@@ -481,7 +481,7 @@ async def ast_rename(
         total_replacements = 0
         files_changed = 0
 
-        for file_path in req.files:
+        for file_path in validated_files:
             try:
                 code = await _state.file_editor.read_file(req.session_id, file_path)
                 refactored, count = ASTRefactor.rename_symbol(code, req.old_name, req.new_name)
@@ -524,9 +524,7 @@ async def ast_rename(
             files_changed=files_changed,
         )
     else:
-        single_path = req.path
-        if single_path is None:
-            raise HTTPException(status_code=400, detail=_err(400, "Path is required"))
+        assert single_path is not None
         try:
             code = await _state.file_editor.read_file(req.session_id, single_path)
             refactored, count = ASTRefactor.rename_symbol(code, req.old_name, req.new_name)

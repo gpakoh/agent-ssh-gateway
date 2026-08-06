@@ -133,6 +133,39 @@ class TestFileAnalysisOwnership:
     # AST extract — agent blocked
     # ------------------------------------------------------------------
 
+    def test_ast_rename_uses_validated_path_not_raw_input(self, monkeypatch):
+        """Regression: validate_path() strips whitespace and returns the
+        stripped path (`path = path.strip(); ... return path`), but
+        ast_rename()'s multi-file branch called validate_path(file_path)
+        and discarded the return value, then used the RAW, unstripped
+        file_path for the actual read_file()/write_file() calls -- unlike
+        every other handler in this file (file_read, file_edit, file_patch,
+        ast_extract, ast_analyze, ...), which all capture and use
+        `validated = validate_path(...)`. A path with incidental leading/
+        trailing whitespace would pass validation on its stripped form but
+        then be looked up on the remote host using the un-stripped form,
+        silently failing to find the file that was actually validated.
+        """
+        self._patch_base(monkeypatch)
+        with TestClient(app) as client:
+            self._override_manager(client, self._make_cross_tenant_session_mock())
+            from app import state as _app_state
+
+            fe = self._make_file_editor_mock()
+            _app_state.file_editor = fe
+            resp = client.post(
+                "/api/ast/rename",
+                headers={"X-API-Key": "secret-42"},
+                json={
+                    "session_id": "s-2",
+                    "old_name": "foo",
+                    "new_name": "bar",
+                    "files": [" /tmp/test.py "],
+                },
+            )
+        assert resp.status_code == 200, resp.text
+        fe.read_file.assert_awaited_once_with("s-2", "/tmp/test.py")
+
     def test_ast_extract_ownership_agent_blocked(self, monkeypatch):
         self._patch_base(monkeypatch)
         with TestClient(app) as client:
