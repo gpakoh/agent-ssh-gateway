@@ -196,6 +196,34 @@ async def test_session_limit_error_gets_rate_limit_exceeded_not_internal_error()
     assert data["retryable"] is True
 
 
+def test_auto_code_project_not_found_maps_to_project_not_found():
+    """Regression: nine GET /api/workspace/projects/{project_id}/... routes
+    all raise _err(404, f"Project not found: {project_id}") with no
+    explicit code, and ERROR_CODE_MAP had no "project" keyword entry at
+    all -- every one of them silently reported code="INTERNAL_ERROR" with
+    retryable=True for what is unambiguously a 404 lookup miss, the same
+    class of bug already fixed for SessionNotFoundError/SessionLimitError
+    above. An AI-agent client (this gateway's primary audience) reading
+    retryable=True off a permanently-nonexistent project id has no reason
+    to ever stop retrying.
+    """
+    assert _auto_code(404, "Project not found: myproj") == "PROJECT_NOT_FOUND"
+
+
+def test_err_project_not_found_is_not_retryable():
+    result = _err(404, "Project not found: myproj")
+    assert result["code"] == "PROJECT_NOT_FOUND"
+    assert result["retryable"] is False
+
+
+def test_auto_code_allowlist_entry_not_found():
+    """Regression: same bug for DELETE/GET /api/admin/allowlist/{entry_id}
+    -- _err(404, f"Allowlist entry not found: {entry_id}") had no matching
+    keyword entry either.
+    """
+    assert _auto_code(404, "Allowlist entry not found: abc123") == "ALLOWLIST_ENTRY_NOT_FOUND"
+
+
 def test_auto_code_429_maps_to_rate_limit_exceeded():
     """Regression: this is also what slowapi's own rate_limit_exceeded_handler
     relies on (it calls _err(429, ...) with no explicit code) — before this
