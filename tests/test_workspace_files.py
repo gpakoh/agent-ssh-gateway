@@ -127,6 +127,33 @@ class TestProjectFileRead:
         assert out["size"] == 6
         assert out["truncated"] is True
 
+    def test_file_read_truncation_does_not_split_multibyte_char(self, tmp_project):
+        """Regression: raw bytes were truncated to exactly max_bytes with a
+        blind slice, with no regard for UTF-8 character boundaries. A file
+        whose max_bytes'th byte fell in the MIDDLE of a multi-byte UTF-8
+        character (any non-ASCII text has this risk) raised
+        "Cannot decode file as UTF-8" for a file that unquestionably IS
+        valid UTF-8 -- the decode failure was an artifact of the naive
+        byte-offset cut, not a real encoding problem.
+        """
+        from app.workspace.files import project_file_read
+
+        registry = _make_registry(tmp_project.root)
+        # 'ф' is 2 bytes in UTF-8 (0xD0 0xA4) -- landing max_bytes exactly
+        # between those two bytes reproduces the split deterministically.
+        text = "a" * 9 + "ф" * 5
+        target = tmp_project.src / "multibyte.txt"
+        target.write_text(text, encoding="utf-8")
+
+        out = project_file_read(
+            "test-project",
+            "src/multibyte.txt",
+            max_bytes=10,
+            registry=registry,
+        )
+        assert out["content"] == "a" * 9
+        assert out["truncated"] is True
+
     def test_file_read_hidden_secret_rejected(self, tmp_project):
         from app.workspace.files import project_file_read
 

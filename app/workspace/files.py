@@ -116,12 +116,29 @@ def project_file_read(
     truncated = len(raw) > max_bytes or file_size > max_bytes
     raw = raw[:max_bytes]
 
-    try:
-        content = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise WorkspacePolicyError(
-            f"Cannot decode file as UTF-8: {relative_path}"
-        ) from exc
+    if truncated:
+        # The byte-offset cut above may have landed in the middle of a
+        # multi-byte UTF-8 character -- back off up to 3 bytes (the
+        # widest UTF-8 encoding minus one) to the nearest valid boundary
+        # instead of misreporting a genuinely valid UTF-8 file as
+        # undecodable just because of where the cap fell.
+        for _ in range(4):
+            try:
+                content = raw.decode("utf-8")
+                break
+            except UnicodeDecodeError:
+                raw = raw[:-1]
+        else:
+            raise WorkspacePolicyError(
+                f"Cannot decode file as UTF-8: {relative_path}"
+            )
+    else:
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise WorkspacePolicyError(
+                f"Cannot decode file as UTF-8: {relative_path}"
+            ) from exc
 
     # Apply optional line slicing
     lines = content.splitlines()
