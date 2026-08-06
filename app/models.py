@@ -708,6 +708,14 @@ class GitCommitRequest(BaseModel):
     files: list[str] | None = Field(default=None, description="Specific files to commit")
 
 
+class GitPushRequest(BaseModel):
+    """Request to push committed changes to a remote."""
+
+    context_id: str = Field(..., min_length=1)
+    remote: str = Field(default="origin", min_length=1)
+    branch: str | None = Field(default=None, description="Branch to push; defaults to current branch")
+
+
 class GitActionResponse(BaseModel):
     """Response for git actions."""
 

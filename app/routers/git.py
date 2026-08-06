@@ -16,6 +16,7 @@ from app.models import (
     GitDiffResponse,
     GitInfoResponse,
     GitInitRequest,
+    GitPushRequest,
     GitStatusResponse,
     ListBackupsResponse,
     RecoveryActionResponse,
@@ -63,6 +64,19 @@ async def git_commit(req: GitCommitRequest, _identity: AuthIdentity = Depends(re
         route="POST /api/git/commit",
     )
     result = await _state.context_manager.commit_changes(req.context_id, req.message, req.files)
+    return GitActionResponse(**result)
+
+
+@router.post("/api/git/push", response_model=GitActionResponse)
+async def git_push(req: GitPushRequest, _identity: AuthIdentity = Depends(require_master_key)):
+    """Push committed changes for context to a remote."""
+    assert_workspace_writable(
+        actor_type=_identity.token_type,
+        actor_name=_identity.name or "",
+        actor_fingerprint=_identity.fingerprint[:12],
+        route="POST /api/git/push",
+    )
+    result = await _state.context_manager.push_changes(req.context_id, req.remote, req.branch)
     return GitActionResponse(**result)
 
 

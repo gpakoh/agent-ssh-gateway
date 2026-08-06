@@ -119,3 +119,74 @@ class TestGitManagerShellInjection:
         assert not _marker_hit(marker), (
             f"check_git_status()'s path let it break out of shell quoting: {command!r}"
         )
+
+    @pytest.mark.asyncio
+    async def test_push_remote_is_escaped(self, tmp_path):
+        marker = tmp_path / "pwned"
+        ssh = _make_ssh()
+        gm = GitManager(ssh)
+
+        await gm.push("s1", str(tmp_path), remote=_payload(marker))
+
+        command = ssh.execute.call_args_list[0].args[1]
+        subprocess.run(["sh", "-c", command], check=False)
+        assert not _marker_hit(marker), (
+            f"push()'s remote let it break out of shell quoting: {command!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_push_branch_is_escaped(self, tmp_path):
+        marker = tmp_path / "pwned"
+        ssh = _make_ssh()
+        gm = GitManager(ssh)
+
+        await gm.push("s1", str(tmp_path), remote="origin", branch=_payload(marker))
+
+        command = ssh.execute.call_args_list[0].args[1]
+        subprocess.run(["sh", "-c", command], check=False)
+        assert not _marker_hit(marker), (
+            f"push()'s branch let it break out of shell quoting: {command!r}"
+        )
+
+
+class TestGitManagerPushArgumentInjection:
+    """git parses leading "-" in a push arg as an option, not a positional
+    remote/branch -- shell-quoting alone (shlex.quote) does not stop this,
+    since it's git's own arg parser, not the shell, that misinterprets it.
+    A value like "--upload-pack=touch pwned" reaching git as an argument
+    would run as an arbitrary command via git's upload-pack mechanism.
+    """
+
+    @pytest.mark.asyncio
+    async def test_remote_starting_with_dash_rejected(self, tmp_path):
+        ssh = AsyncMock()
+        ssh.execute = AsyncMock(return_value={"stdout": "", "stderr": "", "exit_code": 0})
+        gm = GitManager(ssh)
+
+        result = await gm.push("s1", str(tmp_path), remote="--upload-pack=touch pwned")
+
+        assert result["success"] is False
+        ssh.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_branch_starting_with_dash_rejected(self, tmp_path):
+        ssh = AsyncMock()
+        ssh.execute = AsyncMock(return_value={"stdout": "", "stderr": "", "exit_code": 0})
+        gm = GitManager(ssh)
+
+        result = await gm.push("s1", str(tmp_path), remote="origin", branch="--exec=touch pwned")
+
+        assert result["success"] is False
+        ssh.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_well_formed_push_still_works(self, tmp_path):
+        ssh = AsyncMock()
+        ssh.execute = AsyncMock(return_value={"stdout": "", "stderr": "", "exit_code": 0})
+        gm = GitManager(ssh)
+
+        result = await gm.push("s1", str(tmp_path), remote="origin", branch="main")
+
+        assert result["success"] is True
+        command = ssh.execute.call_args_list[0].args[1]
+        assert "git push origin main" in command
