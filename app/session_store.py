@@ -101,6 +101,7 @@ class WebhookDelivery(Base):
     event_type = Column(String(64), nullable=False)
     url = Column(String(2048), nullable=False)
     payload_json = Column(Text, nullable=False)
+    headers_json = Column(Text, nullable=True)
     status = Column(String(16), default="pending", index=True)
     attempts = Column(Integer, default=0)
     next_retry_at = Column(DateTime(timezone=True), nullable=True)

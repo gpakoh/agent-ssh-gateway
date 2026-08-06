@@ -137,6 +137,7 @@ async def emit_event(
                     event_type=event,
                     url=hook_url,
                     payload_json=payload_json,
+                    headers_json=json.dumps(delivery_headers),
                 )
             except Exception:
                 logger.exception("Failed to enqueue delivery for hook %s", hook.id)
