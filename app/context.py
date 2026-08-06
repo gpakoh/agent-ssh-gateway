@@ -244,10 +244,22 @@ def _classify_tokens(
     # ("-m",) = safe, only args after these flags are data
     safe_flags: tuple[str, ...] | None = ()
     inline_flags: tuple[str, ...] = ()
+    # True right after an inline-code flag (-c/-e/-p) — the NEXT token is
+    # the code payload regardless of its own tokenizer-assigned kind (a
+    # quoted payload like 'rm -rf /' or "..." already arrives as
+    # DATA/ARGUMENT straight from the tokenizer, bypassing the kind-check
+    # below entirely, so this must be checked before it).
+    pending_inline = False
     i = 0
 
     while i < len(tokens):
         text, start, kind = tokens[i]
+
+        if pending_inline:
+            pending_inline = False
+            spans.append(Span(SpanKind.INLINE_CODE, text, start))
+            i += 1
+            continue
 
         if kind != SpanKind.PENDING:
             spans.append(Span(kind, text, start))
@@ -297,8 +309,9 @@ def _classify_tokens(
         elif word.startswith("-") and not word.startswith("--"):
             flag = word[:2].rstrip()
             if flag in inline_flags:
-                # Next non-flag arg is INLINE_CODE
+                # Next token (regardless of tokenizer kind) is INLINE_CODE
                 inline_flags = ()
+                pending_inline = True
                 spans.append(Span(SpanKind.EXECUTED, text, start))
             elif safe_flags is not None and flag in safe_flags:
                 # Next arg is safe data
