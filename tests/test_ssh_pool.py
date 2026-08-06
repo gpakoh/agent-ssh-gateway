@@ -489,3 +489,78 @@ def test_prewarm_endpoint_returns_session_id_immediately(monkeypatch):
     task = st.prewarm_tasks.pop(body["session_id"], None)
     if task:
         task.cancel()
+
+
+def test_prewarm_passes_tenant_labels_to_create_session(monkeypatch):
+    """Regression: POST /api/ssh/connect passes tenant_labels=_identity.
+    tenant_labels through to create_session(), but POST /api/ssh/prewarm's
+    background _prewarm_connect() closure omitted the kwarg entirely --
+    every session created via prewarm silently got the default empty
+    tenant_labels=() regardless of the caller's actual tenant_labels,
+    breaking session_visible_to()'s cross-tenant resource_selector/
+    tenant_labels grant path for any session that happened to go through
+    prewarm instead of connect (owner-fingerprint access is unaffected,
+    since that check doesn't look at tenant_labels at all -- this is a
+    visibility gap, not a leak).
+    """
+    import time
+
+    from starlette.testclient import TestClient
+
+    from app.config import settings
+    from app.main import app
+
+    monkeypatch.setattr(settings, "api_auth_enabled", True)
+    monkeypatch.setattr(settings, "api_key", "secret-42")
+    monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
+    monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+    monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
+
+    from app import state as st
+    from app.auth_middleware import AuthIdentity
+
+    # Master auth normally carries no tenant_labels of its own, so patch
+    # the identity verify_api_key() resolves to carry some -- proves the
+    # kwarg is threaded through regardless of what the value actually is.
+    identity_with_labels = AuthIdentity(
+        token_type="master", token="secret-42", tenant_labels=("team-a",)
+    )
+
+    async def _fake_verify_api_key(*args, **kwargs):
+        return identity_with_labels
+
+    monkeypatch.setattr("app.auth_middleware.verify_api_key", _fake_verify_api_key)
+
+    with TestClient(app) as client:
+        # Assigned AFTER entering the `with` block: app lifespan startup
+        # (triggered by TestClient's __enter__) sets its own real
+        # _state.manager, which would clobber an assignment made earlier.
+        st.manager = AsyncMock()
+        st.audit_logger = MagicMock()
+        st.event_audit_logger = MagicMock()
+        st.session_store = None
+        st.access_control_store = None
+        st.prewarm_tasks.clear()
+        st.manager.create_session = AsyncMock(return_value="sess-prewarmed-2")
+
+        resp = client.post(
+            "/api/ssh/prewarm",
+            headers={"X-API-Key": "secret-42"},
+            json={"host": "10.0.0.1", "port": 22, "username": "root", "password": "pw"},
+        )
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+
+        # The background task runs on TestClient's own event loop thread;
+        # poll (still inside the `with` block, so that loop is alive)
+        # until the mocked create_session has actually been invoked.
+        for _ in range(200):
+            if st.manager.create_session.called:
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("create_session was never called by the prewarm task")
+
+    assert "tenant_labels" in st.manager.create_session.call_args.kwargs, (
+        "prewarm's create_session() call is missing tenant_labels entirely"
+    )
+    assert st.manager.create_session.call_args.kwargs["tenant_labels"] == ("team-a",)
