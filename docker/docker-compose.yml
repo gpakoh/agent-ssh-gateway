@@ -94,9 +94,15 @@ services:
     environment:
       - GATEWAY_BASE_URL=http://web-ssh-gateway:8085
       - GATEWAY_API_KEY=${MCP_GATEWAY_API_KEY:?set MCP_GATEWAY_API_KEY}
-      - MCP_GATEWAY_TOOL_MODE=mcp_client
-      - MCP_CLIENT_SAFE_MODE=true
-      - MCP_ACCESS_PROFILE=mcp_client_safe
+      # Default stays "mcp_client" (fully read-only) -- override via
+      # docker/.env to "mcp_client_write" for project file write/edit/patch
+      # + git add/commit/push. require_safe_mode() (scripts/mcp_sse_serve.py,
+      # reused by the streamable-http entrypoint this service runs) hard-fails
+      # at startup on any other value -- Docker admin, agent-launch, and
+      # postgres tools are never reachable through either private mode.
+      - MCP_GATEWAY_TOOL_MODE=${MCP_GATEWAY_TOOL_MODE:-mcp_client}
+      - MCP_CLIENT_SAFE_MODE=${MCP_CLIENT_SAFE_MODE:-true}
+      - MCP_ACCESS_PROFILE=${MCP_ACCESS_PROFILE:-mcp_client_safe}
       - MCP_STREAMABLE_HTTP_HOST=0.0.0.0
       - MCP_STREAMABLE_HTTP_PORT=8087
       - MCP_STREAMABLE_HTTP_ALLOW_NON_LOOPBACK=true
@@ -150,7 +156,12 @@ services:
       - API_KEY=${API_KEY:?set API_KEY}
       - AGENT_TOKEN=${AGENT_TOKEN:?set AGENT_TOKEN}
       - AGENT_TOKEN_TTL=${AGENT_TOKEN_TTL:-0}
-      - AGENT_TOKEN_SCOPES=["ssh:connect","ssh:execute","ssh:files","ssh:disconnect","ssh:port-check","jobs:read"]
+      # ssh:execute:argv (execute_argv MCP tool / /api/ssh/execute-argv),
+      # project:read + project:write (workspace read/write/edit/patch MCP
+      # tools -- project:write implies project:read), diagnostics:read
+      # and auth:read added for mcp_client_write mode (git add/commit/push
+      # run through /api/ssh/execute-argv, not a scope of their own).
+      - AGENT_TOKEN_SCOPES=["ssh:connect","ssh:execute","ssh:execute:argv","ssh:files","ssh:disconnect","ssh:port-check","jobs:read","jobs:run","project:read","project:write","diagnostics:read","auth:read"]
       - SSH_STRICT_HOST_KEY_CHECKING=true
       - KNOWN_HOSTS_STORE=file
       - KNOWN_HOSTS_FILE=/app/data/known_hosts

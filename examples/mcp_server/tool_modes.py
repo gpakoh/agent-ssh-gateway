@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Literal, cast
 
-ToolMode = Literal["minimal", "standard", "full", "mcp_client"]
+ToolMode = Literal["minimal", "standard", "full", "mcp_client", "mcp_client_write"]
 
 DEFAULT_TOOL_MODE: ToolMode = "standard"
 
@@ -222,6 +222,46 @@ MCP_CLIENT_BLOCKED_TOOLS: frozenset[str] = frozenset({
 })
 
 
+# Tools still blocked in "mcp_client_write" mode: agent launch, Docker
+# write/admin, and handoff/agent-task-plan writes remain off-limits.
+# Unlike MCP_CLIENT_BLOCKED_TOOLS, project file write/edit/patch tools and
+# git_add/git_commit/git_push are deliberately NOT in this set -- that is
+# the entire point of this mode: project read/write + git commit/push,
+# still with no infrastructure control (no Docker, no agent-launch).
+MCP_CLIENT_WRITE_BLOCKED_TOOLS: frozenset[str] = frozenset({
+    "run_opencode",
+    "run_mimo",
+    "run_agent",
+    "write_handoff_plan",
+    "docker_start",
+    "docker_stop",
+    "docker_restart",
+    "docker_compose_up",
+    "docker_compose_restart",
+    "docker_compose_build",
+    "docker_rm",
+    "docker_compose_down",
+    "docker_prune",
+    "confirm_operation",
+    "docker_pending_actions",
+    "docker_exec",
+    "docker_run",
+    "docker_rmi",
+    "docker_volume_rm",
+    "write_agent_task",
+    "archive_agent_task",
+})
+
+# "mcp_client_write" starts from the same broad "mcp_client" tool set
+# (project inspection, read-only git, gitea/github, tests/lint, workspace
+# write/patch, docker/agent-launch/handoff-write) and removes only
+# MCP_CLIENT_WRITE_BLOCKED_TOOLS, then adds git_add/git_commit/git_push
+# (never present in any other mode's list).
+TOOL_NAMES_BY_MODE["mcp_client_write"] = (
+    TOOL_NAMES_BY_MODE["mcp_client"] - MCP_CLIENT_WRITE_BLOCKED_TOOLS
+) | {"git_add", "git_commit", "git_push"}
+
+
 def is_mcp_client_safe_mode() -> bool:
     """Return True when MCP_CLIENT_SAFE_MODE is enabled."""
     return os.environ.get("MCP_CLIENT_SAFE_MODE", "false").strip().lower() in {"1", "true", "yes"}
@@ -233,6 +273,11 @@ def get_mcp_client_safe_tools() -> frozenset[str]:
     Starts from the full mcp_client mode set, removes blocked tools.
     """
     return frozenset(TOOL_NAMES_BY_MODE["mcp_client"] - MCP_CLIENT_BLOCKED_TOOLS)
+
+
+def get_mcp_client_write_tools() -> frozenset[str]:
+    """Return the set of tools allowed in "mcp_client_write" mode."""
+    return frozenset(TOOL_NAMES_BY_MODE["mcp_client_write"])
 
 
 def get_tool_mode() -> ToolMode:

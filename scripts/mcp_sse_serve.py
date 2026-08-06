@@ -123,24 +123,41 @@ def is_non_loopback_allowed(env_var: str = "MCP_HTTP_ALLOW_NON_LOOPBACK") -> boo
     return os.environ.get(env_var, "").strip().lower() == "true"
 
 
+_SAFE_HTTP_ENTRYPOINT_MODES = ("mcp_client", "mcp_client_write")
+
+
 def require_safe_mode() -> None:
-    """Fail fast unless the server is configured for ChatGPT safe mode.
+    """Fail fast unless the server is configured for a known-safe ChatGPT mode.
 
     Reuses examples.mcp_server.tool_modes as the single source of truth
     instead of re-implementing the env var parsing here.
+
+    Two modes are accepted:
+      - "mcp_client": fully read-only/safe (requires MCP_CLIENT_SAFE_MODE=true).
+      - "mcp_client_write": adds project file write/edit/patch and git
+        add/commit/push, but still excludes Docker admin, agent-launch,
+        and handoff/agent-task-plan writes (MCP_CLIENT_WRITE_BLOCKED_TOOLS
+        in tool_modes.py) -- a deliberate, narrower opt-in, not a relaxation
+        of "mcp_client" itself.
+
+    Any other mode (standard/full/minimal) exposes Docker/Postgres/agent-
+    launch tools with no restriction at all and must never reach either
+    private HTTP entrypoint.
     """
     _ensure_import_paths()
     from tool_modes import get_tool_mode, is_mcp_client_safe_mode  # noqa: PLC0415
 
     mode = get_tool_mode()
-    if mode != "mcp_client":
+    if mode not in _SAFE_HTTP_ENTRYPOINT_MODES:
+        allowed = " or ".join(repr(m) for m in _SAFE_HTTP_ENTRYPOINT_MODES)
         raise ConfigError(
-            f"MCP_GATEWAY_TOOL_MODE must be 'mcp_client' for the private SSE "
+            f"MCP_GATEWAY_TOOL_MODE must be {allowed} for the private SSE "
             f"entrypoint, got {mode!r}."
         )
-    if not is_mcp_client_safe_mode():
+    if mode == "mcp_client" and not is_mcp_client_safe_mode():
         raise ConfigError(
-            "MCP_CLIENT_SAFE_MODE must be true for the private SSE entrypoint."
+            "MCP_CLIENT_SAFE_MODE must be true for the private SSE entrypoint "
+            "when MCP_GATEWAY_TOOL_MODE=mcp_client."
         )
 
 
