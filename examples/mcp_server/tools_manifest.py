@@ -7,7 +7,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from tool_modes import TOOL_NAMES_BY_MODE, get_tool_mode
+from tool_modes import (
+    MCP_CLIENT_BLOCKED_TOOLS,
+    TOOL_NAMES_BY_MODE,
+    get_tool_mode,
+    is_mcp_client_safe_mode,
+)
 from tool_scopes import ACCESS_PROFILES, get_required_scopes
 
 
@@ -52,12 +57,23 @@ def build_manifest(
             }
         )
 
-    # Build mode details
+    # Build mode details. "mcp_client" gets a second, env-dependent filter
+    # on top of TOOL_NAMES_BY_MODE["mcp_client"] -- should_register_tool()
+    # additionally subtracts MCP_CLIENT_BLOCKED_TOOLS whenever
+    # MCP_CLIENT_SAFE_MODE=true (the recommended, and here the actually
+    # configured, setting). Reporting the raw, unfiltered set here made
+    # this section advertise tools (e.g. docker admin/agent-launch) that
+    # are never actually registered in the real deployment and never
+    # appear in `tools`/`tool_count` above.
+    safe_mode_on = is_mcp_client_safe_mode()
     modes_dict: dict[str, dict[str, Any]] = {}
     for m, tool_set in TOOL_NAMES_BY_MODE.items():
+        effective_set = tool_set
+        if m == "mcp_client" and safe_mode_on:
+            effective_set = tool_set - MCP_CLIENT_BLOCKED_TOOLS
         modes_dict[m] = {
-            "tool_count": len(tool_set),
-            "tools": sorted(tool_set),
+            "tool_count": len(effective_set),
+            "tools": sorted(effective_set),
         }
 
     # Build access profiles (scope lists only — no token values)
