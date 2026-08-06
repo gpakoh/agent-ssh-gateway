@@ -59,12 +59,11 @@ class AgentTokenStore:
             raise RuntimeError("AgentTokenStore not connected to Redis")
         key = self._hash(token)
         meta = json.dumps({"scopes": scopes or [], "role": role, "labels": labels or []})
-        if ttl > 0:
-            await self._redis.set("agent_token:current", key, ex=ttl)
-            await self._redis.set("agent_token:meta", meta, ex=ttl)
-        else:
-            await self._redis.set("agent_token:current", key)
-            await self._redis.set("agent_token:meta", meta)
+        ex = ttl if ttl > 0 else None
+        async with self._redis.pipeline(transaction=True) as pipe:
+            pipe.set("agent_token:current", key, ex=ex)
+            pipe.set("agent_token:meta", meta, ex=ex)
+            await pipe.execute()
 
     async def validate_token(
         self, token: str
