@@ -1,5 +1,7 @@
 """Tests for event hook system."""
 
+import json
+import socket
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -171,6 +173,20 @@ async def test_find_matching_hooks(store):
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def _stub_public_dns(monkeypatch):
+    """validate_webhook_url() resolves hostnames via socket.getaddrinfo --
+    stub it to a fixed public IP so these tests don't depend on real
+    network access or real DNS records for "example.com"."""
+
+    def _fake_getaddrinfo(host, *_a, **_kw):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr(
+        "app.event_hook_security.socket.getaddrinfo", _fake_getaddrinfo
+    )
+
+
 @pytest.mark.parametrize(
     "url,ok",
     [
@@ -186,7 +202,7 @@ async def test_find_matching_hooks(store):
         ("", False),
     ],
 )
-def test_validate_url(url, ok):
+def test_validate_url(url, ok, _stub_public_dns):
     result = validate_webhook_url(url, allow_http=False)
     assert result.valid is ok, f"{url}: expected valid={ok}, got {result.reason}"
 
@@ -198,9 +214,33 @@ def test_validate_url(url, ok):
         ("https://example.com/hook", True),
     ],
 )
-def test_validate_url_allow_http(url, ok):
+def test_validate_url_allow_http(url, ok, _stub_public_dns):
     result = validate_webhook_url(url, allow_http=True)
     assert result.valid is ok
+
+
+def test_validate_url_rejects_hostname_that_resolves_to_loopback():
+    """Regression: validate_webhook_url() used to reject a blocked
+    destination only when the URL contained a literal IP -- ipaddress.
+    ip_address() raises ValueError for any real hostname (including
+    "localhost"), and that ValueError was silently swallowed, falling
+    through to an unconditional valid=True. "localhost" always resolves
+    via /etc/hosts without needing network access, so this exercises the
+    real resolution path deterministically.
+    """
+    result = validate_webhook_url("http://localhost:9/hook", allow_http=True)
+    assert result.valid is False, f"expected localhost to be rejected, got {result.reason}"
+
+
+def test_validate_url_fails_closed_on_unresolvable_hostname(monkeypatch):
+    def _fake_getaddrinfo(host, *_a, **_kw):
+        raise socket.gaierror("Name or service not known")
+
+    monkeypatch.setattr(
+        "app.event_hook_security.socket.getaddrinfo", _fake_getaddrinfo
+    )
+    result = validate_webhook_url("https://does-not-resolve.invalid/hook")
+    assert result.valid is False
 
 
 def test_validate_destination_ip_loopback():
@@ -283,6 +323,56 @@ async def test_delivery_enqueue(delivery_service):
         payload_json='{"event":"command.completed"}',
     )
     assert delivery_id is not None
+
+
+@pytest.mark.asyncio
+async def test_delivery_sends_stored_headers(delivery_service):
+    """Regression: emit_event() computes an HMAC signature, timestamp,
+    event-id, delivery-id, and custom headers into a `delivery_headers`
+    dict, but enqueue()/WebhookDelivery had no column to carry it to the
+    worker -- _send_delivery() always POSTed with only a bare
+    Content-Type header, silently discarding the signature and any
+    user-configured custom headers on every single delivery.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    sent_headers = {
+        "Content-Type": "application/json",
+        "X-Webhook-Signature": "sha256=deadbeef",
+        "X-Webhook-Timestamp": "1700000000",
+        "X-Event-Id": "evt-abc",
+        "X-Delivery-Id": "del-abc",
+        "X-Custom": "user-configured",
+    }
+    delivery_id = await delivery_service.enqueue(
+        event_id="evt-3",
+        hook_id="hook-3",
+        event_type="command.completed",
+        url="http://example.com/hook",
+        payload_json="{}",
+        headers_json=json.dumps(sent_headers),
+    )
+
+    resp = MagicMock()
+    resp.status = 200
+    resp.__aenter__ = AsyncMock(return_value=resp)
+    resp.__aexit__ = AsyncMock(return_value=False)
+    delivery_service._http_session = AsyncMock()
+    delivery_service._http_session.post = MagicMock(return_value=resp)
+
+    from sqlalchemy import select as sel
+
+    async with delivery_service._session_factory() as session:
+        result = await session.execute(
+            sel(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
+        )
+        record = result.scalar_one()
+        await delivery_service._send_delivery(
+            record, max_attempts=5, retry_base_sec=1.0, retry_max_sec=60.0
+        )
+
+    _args, kwargs = delivery_service._http_session.post.call_args
+    assert kwargs["headers"] == sent_headers
 
 
 @pytest.mark.asyncio
