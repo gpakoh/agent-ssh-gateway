@@ -1,4 +1,9 @@
-"""Tests for docker inspect output redaction."""
+"""Tests for docker inspect output redaction.
+
+_sanitize_inspect_output() now returns the parsed, sanitized structure
+directly (a list/dict) instead of re-serializing it back into a JSON
+string for the caller to parse a second time.
+"""
 
 from __future__ import annotations
 
@@ -46,23 +51,20 @@ SAMPLE_INSPECT = {
 
 def test_strips_config_env_entirely():
     """Config.Env is stripped entirely from docker inspect output."""
-    sanitized = _client()._sanitize_inspect_output(json.dumps(SAMPLE_INSPECT))
-    data = json.loads(sanitized)
+    data = _client()._sanitize_inspect_output(json.dumps(SAMPLE_INSPECT))
     assert "Env" not in data.get("Config", {})
 
 
 def test_redacts_hostconfig_binds():
     """HostConfig.Binds should be redacted (host paths exposed)."""
-    sanitized = _client()._sanitize_inspect_output(json.dumps(SAMPLE_INSPECT))
-    data = json.loads(sanitized)
+    data = _client()._sanitize_inspect_output(json.dumps(SAMPLE_INSPECT))
     assert data["HostConfig"]["Binds"] == ["<redacted>"]
-    assert "/host/path" not in sanitized
+    assert "/host/path" not in json.dumps(data)
 
 
 def test_keeps_other_config_fields():
     """Non-secret config fields survive sanitization."""
-    sanitized = _client()._sanitize_inspect_output(json.dumps(SAMPLE_INSPECT))
-    data = json.loads(sanitized)
+    data = _client()._sanitize_inspect_output(json.dumps(SAMPLE_INSPECT))
     assert data["Id"] == "abc123"
     assert data["Name"] == "/test-container"
     assert data["NetworkSettings"]["Ports"]["80/tcp"] is None
@@ -70,8 +72,7 @@ def test_keeps_other_config_fields():
 
 def test_redacts_sensitive_dict_keys():
     payload = {"Labels": {"TOKEN": "abc", "safe_label": "visible"}}
-    sanitized = _client()._sanitize_inspect_output(json.dumps(payload))
-    data = json.loads(sanitized)
+    data = _client()._sanitize_inspect_output(json.dumps(payload))
     assert data["Labels"]["TOKEN"] == REDACTED
     assert data["Labels"]["safe_label"] == "visible"
 
@@ -82,22 +83,24 @@ def test_redacts_nested_dict():
             "safe_group": {"API_KEY": "super-secret", "URL": "http://example.com"},
         }
     }
-    sanitized = _client()._sanitize_inspect_output(json.dumps(payload))
-    data = json.loads(sanitized)
+    data = _client()._sanitize_inspect_output(json.dumps(payload))
     assert data["Config"]["safe_group"]["API_KEY"] == REDACTED
     assert data["Config"]["safe_group"]["URL"] == "http://example.com"
 
 
 def test_does_not_leak_original_value():
     payload = {"Env": ["SECRET=my_original_value"]}
-    sanitized = _client()._sanitize_inspect_output(json.dumps(payload))
-    assert "my_original_value" not in sanitized
+    data = _client()._sanitize_inspect_output(json.dumps(payload))
+    assert "my_original_value" not in json.dumps(data)
 
 
 def test_handles_non_json_output():
+    """Malformed/non-JSON docker output (e.g. "docker: command not found"
+    on stderr-as-stdout) is wrapped as {"raw": ...} rather than raising --
+    the return type is now always a structure, never a bare string."""
     raw = "docker: command not found"
     result = _client()._sanitize_inspect_output(raw)
-    assert result == raw
+    assert result == {"raw": raw}
 
 
 def test_redacts_hostconfig_labels():
@@ -109,8 +112,7 @@ def test_redacts_hostconfig_labels():
             }
         }
     }
-    sanitized = _client()._sanitize_inspect_output(json.dumps(payload))
-    data = json.loads(sanitized)
+    data = _client()._sanitize_inspect_output(json.dumps(payload))
     assert data["HostConfig"]["Labels"]["token"] == REDACTED
     assert data["HostConfig"]["Labels"]["description"] == "safe-label"
 
@@ -134,10 +136,9 @@ def test_redacts_encryption_key_env():
     explicitly, not a bare '...KEY' suffix.
     """
     payload = {"Env": ["ENCRYPTION_KEY=cGxhaW50ZXh0LWZlcm5ldC1rZXk="]}
-    sanitized = _client()._sanitize_inspect_output(json.dumps(payload))
-    data = json.loads(sanitized)
+    data = _client()._sanitize_inspect_output(json.dumps(payload))
     assert data["Env"][0] == "ENCRYPTION_KEY=<redacted>"
-    assert "cGxhaW50ZXh0LWZlcm5ldC1rZXk=" not in sanitized
+    assert "cGxhaW50ZXh0LWZlcm5ldC1rZXk=" not in json.dumps(data)
 
 
 def test_redacts_password_in_database_url_env():
@@ -151,9 +152,8 @@ def test_redacts_password_in_database_url_env():
             "REDIS_URL=redis://:hunter2@redishost:6379/0",
         ]
     }
-    sanitized = _client()._sanitize_inspect_output(json.dumps(payload))
-    data = json.loads(sanitized)
-    assert "hunter2" not in sanitized
+    data = _client()._sanitize_inspect_output(json.dumps(payload))
+    assert "hunter2" not in json.dumps(data)
     # Whole value redacted since the key name itself is URL-shaped.
     assert data["Env"][0] == "DATABASE_URL=<redacted>"
     assert data["Env"][1] == "REDIS_URL=<redacted>"

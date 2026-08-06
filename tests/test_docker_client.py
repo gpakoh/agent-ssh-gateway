@@ -576,56 +576,149 @@ def test_compose_down_volumes_argv():
     assert "--volumes" in argv
 
 
-# ── _truncate_table_output ──
-
-_HEADER = "NAMES\tIMAGE\tSTATUS\tPORTS"
-
-
-def _table(lines: list[str]) -> str:
-    """Docker ``--format "table ..."`` does NOT print a separator — just header + data."""
-    return "\n".join([_HEADER] + lines)
-
-
-def test_truncate_no_truncation_needed():
-    output = _table(["web\nginx:alpine\traunning", "db\tpostgres:16\traunning"])
-    result = DockerClient._truncate_table_output(output, limit=50)
-    assert result == output
-    assert "showing" not in result
+# ── _parse_json_lines / _truncate_rows ──
+#
+# Docker ``--format json`` prints one JSON object per line (JSON Lines),
+# not a wrapping array and not a "table" with a header row -- ps/images/
+# stats/compose_ps now request this instead of a Go-template table string,
+# so results come back as real structured rows instead of tab-separated
+# text a client has to parse a second time.
 
 
-def test_truncate_limits_data_rows():
-    rows = [f"app{i}\tnginx:{i}\traunning" for i in range(100)]
-    output = _table(rows)
-    result = DockerClient._truncate_table_output(output, limit=10)
-    lines = result.splitlines()
-    assert len(lines) == 1 + 10 + 1  # header + 10 data rows + truncation notice
-    assert "showing 10 of 100 results" in lines[-1]
-    assert "use limit or filter" in lines[-1]
+def _jsonl(rows: list[dict]) -> str:
+    import json as _json
+
+    return "\n".join(_json.dumps(r) for r in rows)
 
 
-def test_truncate_empty_output():
-    result = DockerClient._truncate_table_output("", limit=10)
-    assert result == ""
+def test_parse_json_lines_basic():
+    output = _jsonl([{"Names": "web", "Image": "nginx"}, {"Names": "db", "Image": "postgres"}])
+    result = DockerClient._parse_json_lines(output)
+    assert result == [{"Names": "web", "Image": "nginx"}, {"Names": "db", "Image": "postgres"}]
 
 
-def test_truncate_header_only():
-    result = DockerClient._truncate_table_output(_HEADER, limit=10)
-    lines = result.splitlines()
-    assert len(lines) == 1
-    assert "showing" not in result
+def test_parse_json_lines_empty_output():
+    assert DockerClient._parse_json_lines("") == []
 
 
-def test_truncate_exact_boundary():
-    rows = [f"app{i}\tnginx\traunning" for i in range(5)]
-    output = _table(rows)
-    result = DockerClient._truncate_table_output(output, limit=5)
-    assert result == output
-    assert "showing" not in result
+def test_parse_json_lines_skips_blank_lines():
+    output = "\n" + _jsonl([{"a": 1}]) + "\n\n"
+    assert DockerClient._parse_json_lines(output) == [{"a": 1}]
 
 
-def test_truncate_preserves_header_format():
-    rows = [f"app{i}\tnginx\traunning" for i in range(30)]
-    output = _table(rows)
-    result = DockerClient._truncate_table_output(output, limit=5)
-    lines = result.splitlines()
-    assert lines[0] == _HEADER
+def test_parse_json_lines_skips_malformed_line():
+    """A single interleaved non-JSON line (e.g. a docker warning on
+    stdout) must not blow up the whole listing -- it's dropped, the rest
+    parses normally."""
+    output = "not json at all\n" + _jsonl([{"a": 1}])
+    assert DockerClient._parse_json_lines(output) == [{"a": 1}]
+
+
+def test_parse_json_lines_skips_non_dict_json():
+    output = "42\n" + _jsonl([{"a": 1}])
+    assert DockerClient._parse_json_lines(output) == [{"a": 1}]
+
+
+def test_truncate_rows_no_truncation_needed():
+    rows = [{"i": i} for i in range(2)]
+    truncated, total = DockerClient._truncate_rows(rows, limit=50)
+    assert truncated == rows
+    assert total == 2
+
+
+def test_truncate_rows_limits_and_reports_total():
+    rows = [{"i": i} for i in range(100)]
+    truncated, total = DockerClient._truncate_rows(rows, limit=10)
+    assert len(truncated) == 10
+    assert truncated == rows[:10]
+    assert total == 100
+
+
+def test_truncate_rows_empty():
+    truncated, total = DockerClient._truncate_rows([], limit=10)
+    assert truncated == []
+    assert total == 0
+
+
+def test_truncate_rows_exact_boundary():
+    rows = [{"i": i} for i in range(5)]
+    truncated, total = DockerClient._truncate_rows(rows, limit=5)
+    assert truncated == rows
+    assert total == 5
+
+
+@pytest.mark.asyncio
+async def test_ps_returns_structured_rows():
+    c = _client()
+
+    async def _fake_run(argv, timeout=None, **kw):
+        assert "--format" in argv
+        assert argv[argv.index("--format") + 1] == "json"
+        return _jsonl([{"Names": "web", "Image": "nginx:alpine", "Status": "Up"}])
+
+    c._run = _fake_run
+    result = await c.ps()
+    assert result == [{"Names": "web", "Image": "nginx:alpine", "Status": "Up"}]
+
+
+@pytest.mark.asyncio
+async def test_ps_custom_format_returns_raw_string():
+    """An explicit `format` override still returns the raw docker output
+    as a string -- callers relying on a specific legacy Go-template shape
+    are unaffected."""
+    c = _client()
+
+    async def _fake_run(argv, timeout=None, **kw):
+        return "custom-output"
+
+    c._run = _fake_run
+    result = await c.ps(format="{{.Names}}")
+    assert result == "custom-output"
+
+
+@pytest.mark.asyncio
+async def test_images_returns_structured_rows():
+    c = _client()
+
+    async def _fake_run(argv, timeout=None, **kw):
+        return _jsonl([{"Repository": "nginx", "Tag": "alpine"}])
+
+    c._run = _fake_run
+    result = await c.images()
+    assert result == [{"Repository": "nginx", "Tag": "alpine"}]
+
+
+@pytest.mark.asyncio
+async def test_logs_returns_structured_lines():
+    c = _client()
+
+    async def _fake_run(argv, timeout=None, **kw):
+        return "line one\nline two\nline three"
+
+    c._run = _fake_run
+    result = await c.logs("web")
+    assert result == {"lines": ["line one", "line two", "line three"], "count": 3}
+
+
+@pytest.mark.asyncio
+async def test_compose_services_returns_structured_list():
+    c = _client()
+
+    async def _fake_run(argv, timeout=None, **kw):
+        return "web\ndb\nredis\n"
+
+    c._run = _fake_run
+    result = await c.compose_services()
+    assert result == {"services": ["web", "db", "redis"], "count": 3}
+
+
+@pytest.mark.asyncio
+async def test_compose_logs_returns_structured_lines():
+    c = _client()
+
+    async def _fake_run(argv, timeout=None, **kw):
+        return "web  | starting\ndb   | ready"
+
+    c._run = _fake_run
+    result = await c.compose_logs()
+    assert result == {"lines": ["web  | starting", "db   | ready"], "count": 2}
