@@ -69,7 +69,7 @@ def resolve_effective_profile_with_access_gate(
                 actor_fingerprint=identity.fingerprint if identity else "",
                 token_type=identity.token_type if identity else "unknown",
                 source_ip=source_ip,
-                requested_profile=settings.command_policy_profile,
+                requested_profile=resolve_effective_profile(identity),
                 enforce_master=settings.access_control_enforce_master,
             )
             access_effective_profile = access.effective_profile
