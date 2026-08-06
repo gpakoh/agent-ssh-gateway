@@ -9,6 +9,7 @@ from enum import Enum
 
 from app.command_policy import evaluate_command_policy
 from app.config import settings
+from app.security import validate_path
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,17 @@ class BatchOperationsManager:
             result = None
 
             try:
+                # Every op type except "execute" (which uses base_path as a cwd,
+                # not a file path) touches the filesystem via full_path/full_new_path/
+                # full_dest_path -- validate them the same way every other
+                # file-editing route in this codebase does (traversal + forbidden
+                # paths). Without this, an absolute path/new_path/dest_path
+                # bypasses base_path entirely (see the full_path/full_new_path/
+                # full_dest_path computations above and below) and reaches
+                # _execute_delete's raw `rm -f` with no command_policy gate either.
+                if op_type in ("read", "edit", "create", "delete", "rename", "copy"):
+                    full_path = validate_path(full_path)
+
                 if op_type == "read":
                     result = await self._execute_read(session_id, full_path)
 
@@ -114,6 +126,7 @@ class BatchOperationsManager:
                     full_new_path = (
                         f"{base_path}/{new_path}" if not new_path.startswith("/") else new_path
                     )
+                    full_new_path = validate_path(full_new_path)
                     result = await self._execute_rename(session_id, full_path, full_new_path)
 
                 elif op_type == "copy":
@@ -121,6 +134,7 @@ class BatchOperationsManager:
                     full_dest_path = (
                         f"{base_path}/{dest_path}" if not dest_path.startswith("/") else dest_path
                     )
+                    full_dest_path = validate_path(full_dest_path)
                     result = await self._execute_copy(session_id, full_path, full_dest_path)
 
                 elif op_type == "execute":
