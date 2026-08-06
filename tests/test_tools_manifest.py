@@ -200,3 +200,79 @@ class TestBuildManifest:
         for tool in result["tools"]:
             assert "mode" in tool
             assert isinstance(tool["mode"], str)
+
+
+class TestManifestModesReflectSafeModeFiltering:
+    """modes["mcp_client"] must describe what should_register_tool() would
+    actually register, not the raw TOOL_NAMES_BY_MODE["mcp_client"] set --
+    the two diverge whenever MCP_CLIENT_SAFE_MODE=true (the recommended
+    and, in the real deployment, the actually-configured setting), since
+    should_register_tool() additionally subtracts MCP_CLIENT_BLOCKED_TOOLS
+    in that case. Before this fix, the manifest advertised e.g.
+    docker_start/docker_exec/workspace_file_write under "mcp_client" even
+    though none of them are ever actually registered when safe mode is on.
+    """
+
+    def test_safe_mode_on_excludes_blocked_tools_from_mode_listing(
+        self, sample_tools: list[FakeTool], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
+        mcp_client_tools = result["modes"]["mcp_client"]["tools"]
+        assert "docker_exec" not in mcp_client_tools
+        assert "workspace_file_write" not in mcp_client_tools
+        assert "run_opencode" not in mcp_client_tools
+
+    def test_safe_mode_off_includes_full_raw_set(
+        self, sample_tools: list[FakeTool], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MCP_CLIENT_SAFE_MODE", raising=False)
+        result = build_manifest(sample_tools, mode_override="mcp_client")
+        mcp_client_tools = result["modes"]["mcp_client"]["tools"]
+        assert "docker_exec" in mcp_client_tools
+        assert "workspace_file_write" in mcp_client_tools
+
+    def test_safe_mode_on_tool_count_matches_safe_tools(
+        self, sample_tools: list[FakeTool], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tool_modes import get_mcp_client_safe_tools
+
+        monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
+        assert result["modes"]["mcp_client"]["tool_count"] == len(get_mcp_client_safe_tools())
+
+    def test_other_modes_unaffected_by_safe_mode_flag(
+        self, sample_tools: list[FakeTool], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tool_modes import TOOL_NAMES_BY_MODE
+
+        monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
+        result = build_manifest(sample_tools, mode_override="mcp_client")
+        for mode in ("minimal", "standard", "full", "mcp_client_write"):
+            assert result["modes"][mode]["tool_count"] == len(TOOL_NAMES_BY_MODE[mode])
+
+
+class TestDockerStartNotPhantom:
+    """docker_start has an impl function and a _CONFIRM_HANDLERS entry in
+    server.py, but no @register_tool() ever wraps it -- there is no way
+    to reach it through MCP. It must not be listed in any mode's tool set
+    (which would make should_register_tool()/tools_manifest lie about its
+    availability), matching every other mode that never listed it."""
+
+    def test_docker_start_absent_from_mcp_client_mode(self) -> None:
+        from tool_modes import TOOL_NAMES_BY_MODE
+
+        assert "docker_start" not in TOOL_NAMES_BY_MODE["mcp_client"]
+
+    def test_docker_start_absent_from_every_mode(self) -> None:
+        from tool_modes import TOOL_NAMES_BY_MODE
+
+        for mode, names in TOOL_NAMES_BY_MODE.items():
+            assert "docker_start" not in names, mode
+
+    def test_docker_start_sibling_actions_still_present(self) -> None:
+        """Confirms the fix removed only docker_start, not its siblings."""
+        from tool_modes import TOOL_NAMES_BY_MODE
+
+        for name in ("docker_stop", "docker_restart", "docker_rm"):
+            assert name in TOOL_NAMES_BY_MODE["mcp_client"]

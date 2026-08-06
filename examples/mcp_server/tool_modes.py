@@ -134,7 +134,13 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "docker_stats",
         "docker_compose_ps",
         "docker_compose_services",
-        "docker_start",
+        # "docker_start" deliberately absent: it has an impl function
+        # (_docker_start_impl) and a _CONFIRM_HANDLERS entry in server.py,
+        # but unlike every other docker_* action here, no @register_tool()
+        # ever wraps it to actually create the pending confirmation --
+        # there is no way to reach it through MCP at all. Listing it here
+        # made both should_register_tool("docker_start", "mcp_client") and
+        # the tools_manifest "modes" section lie about its availability.
         "docker_stop",
         "docker_restart",
         "docker_compose_up",
