@@ -65,6 +65,25 @@ class TestWebSocketScopeEnforcement:
             headers={"X-API-Key": "agent-no-scope"},
         )
 
+    # -- Agent with the ssh:pty scope passes PTY auth ------------------------
+
+    def test_pty_stream_allowed_with_pty_scope(self, monkeypatch):
+        monkeypatch.setattr(settings, "api_auth_enabled", True)
+        monkeypatch.setattr(settings, "api_key", "master-key-99")
+        monkeypatch.setattr(settings, "agent_token", "agent-pty")
+        monkeypatch.setattr(settings, "agent_token_scopes", ["ssh:pty"])
+        monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
+        monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+        monkeypatch.setattr("app.auth_middleware.is_ip_allowed", lambda ip, nets: True)
+        # Auth passes; the session doesn't exist so the handler closes the
+        # socket itself right after -- what matters here is that it's not
+        # rejected at the scope-check stage (code 1008).
+        with TestClient(app) as client:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                with client.websocket_connect(WS_PTY, headers={"X-API-Key": "agent-pty"}):
+                    pass
+            assert exc.value.code != 1008
+
     # -- Agent without scope cannot use file watch --------------------------
 
     def test_file_watch_denied_without_scope(self, agent_no_scope):
@@ -80,6 +99,22 @@ class TestWebSocketScopeEnforcement:
             WS_EXECUTE,
             headers={"X-API-Key": "agent-exec"},
             request={"session_id": "", "command": ""},
+        )
+
+    # -- ssh:execute alone must NOT grant PTY --------------------------------
+
+    def test_pty_stream_denied_with_only_execute_scope(self, agent_with_execute):
+        """Regression: PTY input is never filtered through command_policy
+        (raw keystrokes can't be pattern-matched the way a single command
+        string can), so an identity holding only "ssh:execute" -- enough
+        to run policy-checked commands via /api/ssh/execute -- must not be
+        able to open an unfiltered interactive shell via PTY and run
+        anything command_policy would have denied. PTY requires its own
+        "ssh:pty" scope, deliberately separate from "ssh:execute".
+        """
+        self._expect_reject(
+            WS_PTY,
+            headers={"X-API-Key": "agent-exec"},
         )
 
     # -- Master token bypasses scope checks ---------------------------------
