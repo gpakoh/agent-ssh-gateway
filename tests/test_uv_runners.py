@@ -93,6 +93,47 @@ class TestReadOnlyFallbackNoPathTraversal:
         script = _build_readonly_fallback_script("mypy", "/project", ["/etc/shadow"])
         assert "/project/etc/shadow" in script
 
+    def test_readonly_fallback_copies_uv_lock_and_syncs_frozen(self):
+        """Regression: the fallback script copied only pyproject.toml, so
+        `uv sync --extra dev` re-resolved dependencies on every first sync
+        instead of honoring the project's uv.lock — non-deterministic
+        versions, and the temp project could drift from what the real
+        project pins. uv.lock must be copied alongside pyproject.toml and
+        the sync must use --frozen so the lockfile semantics hold.
+        """
+        from mcp_client_tools import _build_readonly_fallback_script
+
+        script = _build_readonly_fallback_script("pytest", "/project", ["tests"])
+
+        sync_lines = [ln for ln in script.splitlines() if "uv sync" in ln]
+        assert sync_lines, "expected a uv sync invocation"
+        frozen_assign = [
+            ln
+            for ln in script.splitlines()
+            if "uv.lock" in ln and "FROZEN=--frozen" in ln
+        ]
+        assert frozen_assign, (
+            "uv sync must honor the project lockfile: when uv.lock exists "
+            f"FROZEN must be --frozen; got {sync_lines}"
+        )
+        assert any("$FROZEN" in ln for ln in sync_lines), (
+            f"uv sync must consume $FROZEN; got {sync_lines}"
+        )
+        assert "uv.lock" in script, "script must reference uv.lock"
+
+    def test_readonly_fallback_uv_lock_change_triggers_resync(self):
+        """The stamp diff-check must also cover uv.lock: a lockfile change
+        (e.g. after `uv lock`/`uv add`) must invalidate the cached venv even
+        when pyproject.toml is untouched.
+        """
+        from mcp_client_tools import _build_readonly_fallback_script
+
+        script = _build_readonly_fallback_script("pytest", "/project", ["tests"])
+        assert "uv.lock" in script
+        assert "NEED_SYNC=1" in script
+        lock_check = [ln for ln in script.splitlines() if "uv.lock" in ln and "diff" in ln]
+        assert lock_check, "uv.lock must participate in the NEED_SYNC diff check"
+
     def test_run_uv_tool_validates_targets_early(self, monkeypatch):
         """_run_uv_tool must validate targets before any SSH call."""
         from mcp_client_tools import _run_uv_tool
