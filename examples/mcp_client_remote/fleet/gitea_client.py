@@ -7,7 +7,11 @@ from typing import Any
 
 import httpx
 
-from .shared import validate_repo_owner_or_name, validate_repo_path
+from .shared import (
+    minimize_action_run_payload,
+    validate_repo_owner_or_name,
+    validate_repo_path,
+)
 
 MAX_LIMIT = 50
 MAX_FILE_SIZE = 256 * 1024
@@ -232,12 +236,15 @@ class GiteaClient:
         params: dict[str, Any] = {"limit": limit}
         if status:
             params["status"] = status
-        return await self._get(
+        data = await self._get(
             "/repos/{owner}/{repo}/actions/runs",
             params=params,
             owner=owner,
             repo=repo,
         )
+        runs = data.get("workflow_runs") or []
+        data["workflow_runs"] = [minimize_action_run_payload(r) for r in runs]
+        return data
 
     async def get_action_run(
         self,
