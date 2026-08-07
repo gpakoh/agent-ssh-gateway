@@ -124,3 +124,89 @@ def test_token_store_enforces_permissions(store_path):
     os.chmod(store_path, 0o666)
     with pytest.raises(PermissionError, match="world-writable"):
         TokenStore(store_path).load()
+
+
+def test_token_store_add_revoke_race_no_resurrection(store_path):
+    """Regression: add() and revoke() must run under the same lock.
+
+    A stale read-modify-write cycle previously let add() overwrite a
+    revoke() that landed between its load and save, resurrecting the
+    revoked entry after a restart.
+
+    The test forces the interleaving deterministically: the add worker
+    reads the store, then blocks; the parent revokes the entry; only
+    then is the add worker released. On the fixed code add() still
+    holds the lock while reading, so the revoke lands *after* the
+    add's read and the final store keeps the entry revoked. On the
+    pre-fix code the add worker holds no lock while reading, revoke
+    succeeds, and the stale add write resurrects the entry.
+    """
+    import multiprocessing
+
+    def worker_add(store_path, released, proceed):
+        store = TokenStore(store_path)
+        entry = StoredTokenEntry(
+            id="tok_add_race",
+            token_hash="sha256:race2",
+            name="added",
+            profile="operator",
+            scopes=["mcp:read"],
+            created_at="2026-06-26T12:00:00Z",
+            expires_at=None,
+            revoked_at=None,
+            last_used_at=None,
+        )
+        orig_load = TokenStore.load
+
+        def slow_load(self):
+            data = orig_load(self)
+            released.set()
+            if not proceed.wait(timeout=15):
+                raise TimeoutError("add barrier timeout")
+            return data
+
+        TokenStore.load = slow_load
+        store.add(entry)
+
+    def worker_revoke(store_path):
+        TokenStore(store_path).revoke("tok_revoke_race")
+
+    store = TokenStore(store_path)
+    revocable = StoredTokenEntry(
+        id="tok_revoke_race",
+        token_hash="sha256:race1",
+        name="revocable",
+        profile="operator",
+        scopes=["mcp:read"],
+        created_at="2026-06-26T12:00:00Z",
+        expires_at=None,
+        revoked_at=None,
+        last_used_at=None,
+    )
+    store.add(revocable)
+
+    released = multiprocessing.Event()
+    proceed = multiprocessing.Event()
+    p_add = multiprocessing.Process(
+        target=worker_add, args=(store_path, released, proceed)
+    )
+    p_add.start()
+    assert released.wait(timeout=15), "add worker never read the store"
+
+    # Revoke races the add worker while it is paused between load and save.
+    p_revoke = multiprocessing.Process(target=worker_revoke, args=(store_path,))
+    p_revoke.start()
+    proceed.set()
+    p_add.join(timeout=15)
+    p_revoke.join(timeout=15)
+    assert p_add.exitcode == 0
+    assert p_revoke.exitcode == 0
+
+    # Fresh instance reads the persisted truth: the revoked entry must
+    # stay revoked and the concurrently added entry must be present.
+    store2 = TokenStore(store_path)
+    loaded = store2.load()
+    revoked = [e for e in loaded if e.id == "tok_revoke_race"]
+    assert len(revoked) == 1
+    assert revoked[0].revoked_at is not None
+    assert any(e.id == "tok_add_race" for e in loaded)

@@ -110,20 +110,27 @@ class TokenStore:
         return [_dict_to_entry(e) for e in entries]
 
     def add(self, entry: StoredTokenEntry) -> None:
-        """Append an entry and persist."""
-        entries = self.load()
-        entries.append(entry)
-        self._save(entries)
+        """Append an entry and persist atomically (locked read-modify-write)."""
+        with self._locked():
+            entries = self.load()
+            entries.append(entry)
+            self._write(entries)
 
     def revoke(self, token_id: str) -> StoredTokenEntry | None:
-        """Mark a token as revoked by id. Returns the entry or None."""
-        entries = self.load()
-        for e in entries:
-            if e.id == token_id and e.revoked_at is None:
-                e.revoked_at = _iso_now()
-                self._save(entries)
-                return e
-        return None
+        """Mark a token as revoked by id. Returns the entry or None.
+
+        The read-modify-write cycle runs under the same exclusive lock
+        as ``add``, so a concurrently added token cannot be overwritten
+        by a stale copy that would resurrect the revoked entry.
+        """
+        with self._locked():
+            entries = self.load()
+            for e in entries:
+                if e.id == token_id and e.revoked_at is None:
+                    e.revoked_at = _iso_now()
+                    self._write(entries)
+                    return e
+            return None
 
     def find_by_hash(self, token_hash: str) -> StoredTokenEntry | None:
         """Find an entry by its hash (exact match)."""
@@ -132,32 +139,61 @@ class TokenStore:
                 return e
         return None
 
-    def _save(self, entries: list[StoredTokenEntry]) -> None:
-        """Atomically write entries to the store file.
+    def _locked(self) -> _LockedStore:
+        """Acquire an exclusive lock over the whole read-modify-write cycle.
 
-        Uses a tempfile in the same directory + os.replace for atomic
-        replacement, guarded by fcntl.flock on a .lock file.
+        Used by mutating operations so the load + write transaction is
+        atomic across processes (flock on the companion .lock file).
         """
+        return _LockedStore(self)
+
+    def _write(self, entries: list[StoredTokenEntry]) -> None:
+        """Atomically write entries. Caller must hold the store lock."""
         payload: dict[str, Any] = {
             "version": 1,
             "tokens": [_entry_to_dict(e) for e in entries],
         }
         raw = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
 
-        with open(self._lock_path, "w") as lf:
-            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
-            try:
-                fd, tmp = tempfile.mkstemp(
-                    dir=os.path.dirname(self._path) or ".",
-                    prefix=".mcp_tokens_",
-                    suffix=".tmp",
-                )
-                try:
-                    os.write(fd, raw.encode())
-                    os.fsync(fd)
-                finally:
-                    os.close(fd)
-                os.replace(tmp, self._path)
-                os.chmod(self._path, stat.S_IRUSR | stat.S_IWUSR)
-            finally:
-                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+        fd, tmp = tempfile.mkstemp(
+            dir=os.path.dirname(self._path) or ".",
+            prefix=".mcp_tokens_",
+            suffix=".tmp",
+        )
+        try:
+            os.write(fd, raw.encode())
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, self._path)
+        os.chmod(self._path, stat.S_IRUSR | stat.S_IWUSR)
+
+    def _save(self, entries: list[StoredTokenEntry]) -> None:
+        """Atomically write entries to the store file.
+
+        Backwards-compatible wrapper: acquires the exclusive lock itself,
+        then delegates to ``_write``.
+        """
+        with self._locked():
+            self._write(entries)
+
+
+class _LockedStore:
+    """Context manager holding an exclusive flock on the store lock file.
+
+    Ensures mutating operations (add/revoke) are atomic across processes.
+    """
+
+    def __init__(self, store: TokenStore) -> None:
+        self._store = store
+
+    def __enter__(self) -> _LockedStore:
+        self._lf = open(self._store._lock_path, "w")
+        fcntl.flock(self._lf.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        try:
+            fcntl.flock(self._lf.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._lf.close()
