@@ -524,12 +524,18 @@ def run_tool(
             )
         if isinstance(exc, GatewayClientError):
             code, retryable = _classify_gateway_error(exc)
+            details = (
+                {"job_id": exc.body["job_id"]}
+                if isinstance(exc.body, dict) and exc.body.get("job_id")
+                else None
+            )
             return tool_error(
                 tool=tool,
                 code=code,
                 message=_gateway_error_message(exc),
                 retryable=retryable,
                 hint=_gateway_error_hint(exc, code),
+                details=details,
                 duration_ms=_elapsed(),
                 source="gateway",
             )
@@ -667,6 +673,8 @@ def _gateway_error_hint(exc: GatewayClientError, code: str) -> str | None:
             return detail["hint"]
     if code == "FILE_NOT_FOUND":
         return "The requested file does not exist at the specified path"
+    if code == "WAIT_TIMEOUT":
+        return "The command is still running server-side; call job_status/job_result with error.details.job_id to check on it or retrieve the final result once it completes."
     return None
 
 
@@ -682,6 +690,9 @@ def _classify_gateway_error(exc: GatewayClientError) -> tuple[str, bool]:
     """
     status = exc.status_code
     msg = str(exc).lower()
+
+    if isinstance(exc.body, dict) and exc.body.get("wait_timed_out"):
+        return "WAIT_TIMEOUT", True
 
     detail: dict[str, Any] | None = None
     if isinstance(exc.body, dict):
