@@ -345,6 +345,8 @@ class DockerClient:
         both how many rows are returned and how many exist in total.
         """
         total = len(rows)
+        if limit <= 0:
+            return [], total
         return rows[:limit], total
 
     async def ps(

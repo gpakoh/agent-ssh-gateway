@@ -10,6 +10,7 @@ from app.workspace.policy import (  # noqa: F401
     SCOPE_IMPLIES,
     SECRET_FILE_PATTERNS,
     SYSTEM_FORBIDDEN,
+    FileNotFoundInWorkspaceError,
     HiddenPathError,
     ScopeDeniedError,
     SymlinkEscapeError,

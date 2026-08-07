@@ -110,6 +110,16 @@ class TestToolError:
         result = tool_error("tool", "UNKNOWN_CODE", "something broke")
         assert result["error"]["code"] == "INTERNAL_ERROR"
 
+    def test_error_workspace_codes_not_degraded(self):
+        """Regression: SECRET_PATH_DENIED / FILE_READ_ERROR /
+        WORKSPACE_READONLY are used by real tools but were missing from
+        ERROR_CODES, so tool_error silently downgraded them to
+        INTERNAL_ERROR and clients could not distinguish a denied secret
+        path from a crash."""
+        for code in ("SECRET_PATH_DENIED", "FILE_READ_ERROR", "WORKSPACE_READONLY"):
+            result = tool_error("read_file", code, "nope")
+            assert result["error"]["code"] == code, code
+
     def test_error_with_result(self):
         result = tool_error("tool", "INVALID_INPUT", "bad param", result={"param": "x"})
         assert result["result"] == {"param": "x"}

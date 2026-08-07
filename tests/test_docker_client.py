@@ -649,6 +649,15 @@ def test_truncate_rows_exact_boundary():
     assert total == 5
 
 
+def test_truncate_rows_negative_limit_returns_nothing():
+    """Regression: a negative limit used to slice from the end
+    (rows[:-1]) and return almost every row instead of limiting."""
+    rows = [{"i": i} for i in range(5)]
+    truncated, total = DockerClient._truncate_rows(rows, limit=-1)
+    assert truncated == []
+    assert total == 5
+
+
 @pytest.mark.asyncio
 async def test_ps_returns_structured_rows():
     c = _client()
