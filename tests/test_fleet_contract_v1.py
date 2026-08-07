@@ -227,6 +227,24 @@ async def test_docker_stats_rejects_custom_go_template_format() -> None:
         await server.docker_stats(format="{{.Labels}}")
 
 
+@pytest.mark.asyncio
+async def test_main_server_docker_tools_reject_custom_go_template_format() -> None:
+    """Audit P0-1 also applied to examples/mcp_server/server.py, which had
+    its own docker_ps/images/stats tools forwarding an arbitrary Go-template
+    format to the client. The main server must not expose it either."""
+    from examples.mcp_server import server as main_server
+
+    assert "format" not in inspect.signature(main_server.docker_ps).parameters
+    assert "format" not in inspect.signature(main_server.docker_images).parameters
+    assert "format" not in inspect.signature(main_server.docker_stats).parameters
+    with pytest.raises(TypeError):
+        await main_server.docker_ps(all=False, format="{{.Labels}}", limit=3)
+    with pytest.raises(TypeError):
+        await main_server.docker_images(format="{{.Labels}}")
+    with pytest.raises(TypeError):
+        await main_server.docker_stats(format="{{.Labels}}")
+
+
 GITEA_RAW_ISSUE = {
     "id": 42,
     "number": 42,
