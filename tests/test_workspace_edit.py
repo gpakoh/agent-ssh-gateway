@@ -535,3 +535,30 @@ class TestApplyPatch:
                 patch,
                 registry=edit_workspace["registry"],
             )
+
+    def test_dev_null_substring_not_treated_as_deletion(self, edit_workspace):
+        """Regression: only an exact `+++ /dev/null` target means deletion.
+
+        A rename to a path that merely contains the substring "/dev/null"
+        (e.g. `+++ b/docs/dev/null-guide.md`) must NOT delete the file.
+        The old detector used `"/dev/null" in line`, which matched
+        "docs/dev/null-guide.md" and wiped the file.
+        """
+        patch = """\
+--- a/README.md
++++ b/docs/dev/null-guide.md
+@@ -1 +1 @@
+-# Edit Project
++# Renamed
+"""
+        result = project_apply_patch(
+            "edit-project",
+            "README.md",
+            patch,
+            registry=edit_workspace["registry"],
+        )
+        assert result["applied"] is True
+        assert result.get("deleted") is not True
+        target = edit_workspace["project"] / "README.md"
+        assert target.exists()
+        assert target.read_text().rstrip("\n") == "# Renamed"

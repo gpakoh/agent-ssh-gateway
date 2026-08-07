@@ -488,8 +488,10 @@ def _is_deletion_patch(patch_text: str) -> bool:
     """
     for line in patch_text.splitlines():
         stripped = line.rstrip("\r")
-        if stripped.startswith("+++") and "/dev/null" in stripped:
-            return True
+        if stripped.startswith("+++"):
+            rest = stripped[3:].strip()
+            if rest == "/dev/null":
+                return True
     return False
 
 
