@@ -663,18 +663,34 @@ async def test_ps_returns_structured_rows():
 
 
 @pytest.mark.asyncio
-async def test_ps_custom_format_returns_raw_string():
-    """An explicit `format` override still returns the raw docker output
-    as a string -- callers relying on a specific legacy Go-template shape
-    are unaffected."""
+async def test_ps_rejects_custom_go_template_format():
+    """Regression (audit P0-1): arbitrary Go templates must not be accepted.
+
+    docker_ps(format="{{.Labels}}") used to return raw docker output with
+    unredacted absolute host paths, bypassing _sanitize_ps_row() and
+    _truncate_rows(). The format param is gone from the client API, so a
+    template can no longer reach docker at all.
+    """
+    c = _client()
+    with pytest.raises(TypeError):
+        await c.ps(format="{{.Labels}}")
+
+
+@pytest.mark.asyncio
+async def test_ps_always_requests_format_json():
+    """The raw-return bypass branch is gone: ps() only ever asks docker for
+    --format json output, which the sanitizer/truncator then process."""
     c = _client()
 
     async def _fake_run(argv, timeout=None, **kw):
-        return "custom-output"
+        assert "--format" in argv
+        assert argv[argv.index("--format") + 1] == "json"
+        assert "--format" not in [a for a in argv[argv.index("--format") + 1 :]]
+        return _jsonl([{"Names": "web", "Image": "nginx:alpine", "Status": "Up"}])
 
     c._run = _fake_run
-    result = await c.ps(format="{{.Names}}")
-    assert result == "custom-output"
+    result = await c.ps()
+    assert result == [{"Names": "web", "Image": "nginx:alpine", "Status": "Up"}]
 
 
 # ── last_truncated (pagination honesty) ──

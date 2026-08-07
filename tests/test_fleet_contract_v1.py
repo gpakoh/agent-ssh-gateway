@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 from pathlib import Path
@@ -189,6 +190,41 @@ async def test_docker_ps_command_failure_is_docker_command_failed(
 
     assert result["ok"] is False
     assert result["error"]["code"] == "DOCKER_COMMAND_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_docker_ps_rejects_custom_go_template_format() -> None:
+    """Regression (audit P0-1): the MCP docker_ps tool must not accept an
+    arbitrary Go-template format. docker_ps(format="{{.Labels}}") used to
+    return raw docker output with unredacted absolute host paths, bypassing
+    the row sanitizer, the limit and the truncation metadata entirely."""
+    import fleet.docker_server as server
+
+    assert "format" not in inspect.signature(server.docker_ps).parameters
+    with pytest.raises(TypeError):
+        await server.docker_ps(all=False, format="{{.Labels}}", limit=3)
+
+
+@pytest.mark.asyncio
+async def test_docker_images_rejects_custom_go_template_format() -> None:
+    """Same bypass existed on docker images --format; the tool must not
+    expose it either."""
+    import fleet.docker_server as server
+
+    assert "format" not in inspect.signature(server.docker_images).parameters
+    with pytest.raises(TypeError):
+        await server.docker_images(format="{{.Labels}}")
+
+
+@pytest.mark.asyncio
+async def test_docker_stats_rejects_custom_go_template_format() -> None:
+    """Same bypass existed on docker stats --format; the tool must not
+    expose it either."""
+    import fleet.docker_server as server
+
+    assert "format" not in inspect.signature(server.docker_stats).parameters
+    with pytest.raises(TypeError):
+        await server.docker_stats(format="{{.Labels}}")
 
 
 GITEA_RAW_ISSUE = {
