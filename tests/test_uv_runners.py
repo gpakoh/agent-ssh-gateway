@@ -686,3 +686,131 @@ class TestExecutionDurationMsConversion:
 
         assert result["ok"] is False
         assert result["result"]["execution_duration_ms"] == 1250
+
+
+class TestAsyncRunTestsReadonlyFallback:
+    """Regression (run_tests exit 2): async run_tests on a read-only
+    workspace must detect the broken venv upfront and submit the writable
+    temp-project script asynchronously instead of returning the job_id of a
+    plain `uv run --frozen` that dies before pytest (failed to remove
+    .venv/.lock on a read-only FS).
+    """
+
+    def _client(self, venv_ok: bool, fallback_job: str = "j-fallback"):
+        calls: list[tuple[str, str]] = []
+
+        class FakeClient:
+            def execute_raw(self, cmd, **kw):
+                calls.append(("execute_raw", cmd))
+                if cmd == "command -v uv":
+                    return {"job_id": "j-check"}
+                if cmd.startswith("test -x "):
+                    return {"job_id": "j-probe"}
+                return {"job_id": "j-run"}
+
+            def wait_job(self, job_id, **kw):
+                if job_id == "j-check":
+                    return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+                if job_id == "j-probe":
+                    return {
+                        "exit_code": 0 if venv_ok else 1,
+                        "stdout": "",
+                        "stderr": "",
+                    }
+                return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+            def execute_project_script_async(self, project, script):
+                calls.append(("execute_project_script_async", project))
+                return {"job_id": fallback_job}
+
+        return FakeClient(), calls
+
+    def test_broken_venv_submits_fallback_script_async(self, monkeypatch):
+        from mcp_client_tools import _run_uv_tool
+
+        monkeypatch.setattr(
+            "mcp_client_tools._resolve_project",
+            lambda _: Path("/project"),
+        )
+        client, calls = self._client(venv_ok=False)
+        result = _run_uv_tool(
+            client,
+            "proj",
+            "pytest",
+            "run_tests",
+            target=["."],
+            async_submit=True,
+        )
+
+        assert result["ok"] is True
+        assert result["result"]["status"] == "running"
+        assert result["result"]["job_id"] == "j-fallback"
+        assert any(
+            kind == "execute_project_script_async" for kind, _ in calls
+        ), "broken venv must submit the fallback script"
+        assert any(
+            "Read-only workspace detected" in w for w in result["meta"].get("warnings", [])
+        )
+
+    def test_broken_venv_fallback_script_contains_pytest(self, monkeypatch):
+        from mcp_client_tools import _run_uv_tool
+
+        monkeypatch.setattr(
+            "mcp_client_tools._resolve_project",
+            lambda _: Path("/project"),
+        )
+        captured: dict[str, str] = {}
+
+        class CapturingClient:
+            def execute_raw(self, cmd, **kw):
+                if cmd == "command -v uv":
+                    return {"job_id": "j-check"}
+                if cmd.startswith("test -x "):
+                    return {"job_id": "j-probe"}
+                return {"job_id": "j-run"}
+
+            def wait_job(self, job_id, **kw):
+                if job_id == "j-check":
+                    return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+                if job_id == "j-probe":
+                    return {"exit_code": 1, "stdout": "", "stderr": ""}
+                return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+            def execute_project_script_async(self, project, script):
+                captured["script"] = script
+                return {"job_id": "j-fallback"}
+
+        result = _run_uv_tool(
+            CapturingClient(),
+            "proj",
+            "pytest",
+            "run_tests",
+            target=["."],
+            async_submit=True,
+        )
+
+        assert result["result"]["job_id"] == "j-fallback"
+        assert "uv run pytest" in captured["script"]
+        assert "/tmp/.mcp-test" in captured["script"]
+
+    def test_healthy_venv_still_returns_plain_job_id(self, monkeypatch):
+        from mcp_client_tools import _run_uv_tool
+
+        monkeypatch.setattr(
+            "mcp_client_tools._resolve_project",
+            lambda _: Path("/project"),
+        )
+        client, calls = self._client(venv_ok=True)
+        result = _run_uv_tool(
+            client,
+            "proj",
+            "pytest",
+            "run_tests",
+            target=["."],
+            async_submit=True,
+        )
+
+        assert result["result"]["job_id"] == "j-run"
+        assert not any(
+            kind == "execute_project_script_async" for kind, _ in calls
+        ), "healthy venv must keep the plain uv run path"

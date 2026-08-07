@@ -190,10 +190,13 @@ class TestRunTestsAsyncSubmit:
             return {"job_id": f"j{calls['n']}"}
 
         def _wait_job(job_id, **kw):
-            # only the quick "command -v uv" probe may be waited on; the
-            # pytest job must never be synchronously waited on by run_tests
+            # only the quick "command -v uv" probe and the venv usability
+            # probe may be waited on; the pytest job must never be
+            # synchronously waited on by run_tests
             if job_id == "j1":
                 return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+            if job_id == "j2":
+                return {"exit_code": 0, "stdout": "", "stderr": ""}
             raise AssertionError(f"run_tests must not wait_job on {job_id}")
 
         monkeypatch.setattr(mcp_server_mod.client, "execute_raw", _execute_raw)
@@ -202,7 +205,7 @@ class TestRunTestsAsyncSubmit:
         result = mcp_server_mod.gateway_run_tests("proj")
 
         assert result["ok"] is True
-        assert result["result"]["job_id"] == "j2"
+        assert result["result"]["job_id"] == "j3"
         assert result["result"]["status"] == "running"
         assert "job_status" in result["meta"]["warnings"][0]
 
