@@ -34,6 +34,7 @@ class TestJobsOutputRedaction:
         from app import state as _app_state
 
         _app_state.job_manager = AsyncMock()
+        _app_state.job_manager.get_job = AsyncMock(return_value=dict(MOCK_JOB_RESULT))
         _app_state.job_manager.get_job_result = AsyncMock(return_value=dict(MOCK_JOB_RESULT))
         _app_state.job_manager.get_job_status = AsyncMock(return_value={})
         _app_state.job_manager.list_jobs = AsyncMock(return_value={"jobs": [], "count": 0})

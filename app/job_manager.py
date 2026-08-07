@@ -9,7 +9,9 @@ from dataclasses import dataclass, field
 from app.command_policy import evaluate_command_policy
 from app.config import settings
 from app.exceptions import JobNotFoundError, PermissionDeniedError
+from app.output_redaction import should_redact_command_output
 from app.redis_queue import RedisJobQueue
+from app.security import redact_secrets
 from app.ssh_manager import (
     ExecutionError,
     SessionNotFoundError,
@@ -283,11 +285,16 @@ class JobManager:
         job.status = "running"
         job.started_at = time.time()
         job.acquired_at_mono = time.monotonic()
+        _started_command = (
+            redact_secrets(job.command)
+            if should_redact_command_output(None)
+            else job.command
+        )
         await job.notify_listeners(
             {
                 "type": "status",
                 "status": "running",
-                "message": f"Started: {job.command}",
+                "message": f"Started: {_started_command}",
             }
         )
 

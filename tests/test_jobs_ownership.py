@@ -205,7 +205,10 @@ class TestJobsDeadLetterOwnership:
 
         result = await jobs_router.jobs_dead_letter(100, _identity(OWNER_TOKEN))
         assert result["count"] == 1
-        assert result["jobs"] == [mine]
+        # serialize_job normalizes Redis "id" to "job_id" (JobRecord shape)
+        assert result["jobs"] == [
+            {"job_id": "j-mine", "owner_id": token_fingerprint(OWNER_TOKEN)}
+        ]
 
     @pytest.mark.asyncio
     async def test_admin_sees_all_dead_letter_jobs(self, _mock_redis_queue):
