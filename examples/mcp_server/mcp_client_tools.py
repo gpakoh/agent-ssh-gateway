@@ -304,7 +304,11 @@ def read_file(
     """Read a UTF-8 text file inside a registered project with secret/hidden path filtering."""
     from app.workspace.files import project_file_read
     from app.workspace.registry import get_registry
-    from app.workspace_policy import HiddenPathError, WorkspacePolicyError
+    from app.workspace_policy import (
+        FileNotFoundInWorkspaceError,
+        HiddenPathError,
+        WorkspacePolicyError,
+    )
 
     safe = _safe_relpath(path)
     try:
@@ -318,6 +322,13 @@ def read_file(
         return tool_error(
             tool="read_file",
             code="SECRET_PATH_DENIED",
+            message=str(exc),
+            retryable=False,
+        )
+    except FileNotFoundInWorkspaceError as exc:
+        return tool_error(
+            tool="read_file",
+            code="FILE_NOT_FOUND",
             message=str(exc),
             retryable=False,
         )

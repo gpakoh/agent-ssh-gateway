@@ -94,6 +94,11 @@ class ScopeDeniedError(WorkspacePolicyError):
     """Raised when the required scope is not granted."""
 
 
+class FileNotFoundInWorkspaceError(WorkspacePolicyError):
+    """Raised when a workspace path does not exist (distinct from a policy
+    denial so callers can map it to a not-found error code)."""
+
+
 class TraversalError(WorkspacePolicyError):
     """Raised when a path traversal (../) is detected."""
 

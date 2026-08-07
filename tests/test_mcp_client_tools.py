@@ -123,3 +123,55 @@ class TestWorkingDirectoryNoHostPaths:
         result = mod.working_directory(_Probe(), "web-ssh-gateway")
         assert result["stdout"] == "."
         assert called == []
+
+
+class TestReadFileErrorCodes:
+    """T25: read_file must distinguish a missing file (FILE_NOT_FOUND)
+    from a policy denial (POLICY_DENIED) and preserve the secret-path
+    and read-error codes instead of degrading them to INTERNAL_ERROR."""
+
+    def test_read_file_missing_returns_file_not_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+
+        def _raise_missing(*args, **kwargs):
+            from app.workspace.policy import FileNotFoundInWorkspaceError
+
+            raise FileNotFoundInWorkspaceError("File not found: nope.txt")
+
+        monkeypatch.setattr(
+            "app.workspace.files.project_file_read", _raise_missing
+        )
+        result = mod.read_file(_FakeClient(), "web-ssh-gateway", "nope.txt")
+        assert result["error"]["code"] == "FILE_NOT_FOUND"
+
+    def test_read_file_hidden_path_preserves_secret_code(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+
+        def _raise_hidden(*args, **kwargs):
+            from app.workspace.policy import HiddenPathError
+
+            raise HiddenPathError("Denied: .env.local")
+
+        monkeypatch.setattr(
+            "app.workspace.files.project_file_read", _raise_hidden
+        )
+        result = mod.read_file(_FakeClient(), "web-ssh-gateway", ".env.local")
+        assert result["error"]["code"] == "SECRET_PATH_DENIED"
+
+    def test_read_file_generic_failure_preserves_read_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+
+        def _raise_boom(*args, **kwargs):
+            raise OSError("disk exploded")
+
+        monkeypatch.setattr(
+            "app.workspace.files.project_file_read", _raise_boom
+        )
+        result = mod.read_file(_FakeClient(), "web-ssh-gateway", "main.py")
+        assert result["error"]["code"] == "FILE_READ_ERROR"

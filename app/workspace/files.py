@@ -15,6 +15,7 @@ from typing import Any
 from app.workspace.policy import (
     HIDDEN_DIR_PATTERNS,
     SECRET_FILE_PATTERNS,
+    FileNotFoundInWorkspaceError,
     WorkspacePolicyError,
 )
 from app.workspace.registry import VENDOR_CACHE_PATTERNS, WorkspaceRegistry, get_registry
@@ -99,7 +100,7 @@ def project_file_read(
     full = r._policy.validate_read(project_id, relative_path)
 
     if not full.exists():
-        raise WorkspacePolicyError(f"File not found: {relative_path}")
+        raise FileNotFoundInWorkspaceError(f"File not found: {relative_path}")
     if full.is_dir():
         raise WorkspacePolicyError(f"Path is a directory, not a file: {relative_path}")
 
