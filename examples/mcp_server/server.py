@@ -165,11 +165,11 @@ if MCP_AUTH_MODE == "oauth":
     if _extra_tokens_all:
         from examples.mcp_server.oauth_provider import StoredToken as _StoredToken
         from examples.mcp_server.oauth_provider import hash_token as _hash_tok
-        from examples.mcp_server.tool_scopes import ACCESS_PROFILES as _ACCESS_PROFILES
+        from examples.mcp_server.tool_scopes import get_profile_scopes as _get_profile_scopes
 
         for _token_str, _profile in _extra_tokens_all.items():
             _at_hash = _hash_tok(_token_str)
-            _profile_scopes = _ACCESS_PROFILES.get(_profile, list(SUPPORTED_SCOPES))
+            _profile_scopes = _get_profile_scopes(_profile)
             _auth_provider._tokens[_at_hash] = _StoredToken(
                 token=_at_hash,
                 client_id=f"mcp_extras_{_profile}",
