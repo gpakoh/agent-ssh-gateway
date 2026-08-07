@@ -335,7 +335,79 @@ def test_scope_validation():
     full = _parse_scopes(None)
     assert "mcp:read" in full
     assert "mcp:project" in full
-    assert "mcp:handoff" in full
+    assert "mcp:handoff" not in full
+    assert "mcp:admin" not in full
+    assert set(full) <= set(DEFAULT_SCOPES)
     assert _parse_scopes("") is _parse_scopes(None) or _parse_scopes("") == full
     with pytest.raises(ValueError, match="Unsupported scope"):
         _parse_scopes("mcp:invalid")
+
+
+def test_create_authorization_code_rejects_scope_escalation(provider):
+    """Regression: consent must not grant scopes beyond the client's grants.
+
+    A client registered with only mcp:read must not receive mcp:admin
+    by posting a broader scope in the consent form.
+    """
+    provider._clients["cid_limited"] = type(
+        "S",
+        (),
+        {
+            "client_id": "cid_limited",
+            "redirect_uris": ["https://example.com/cb"],
+            "client_name": "T",
+            "scopes": ["mcp:read"],
+        },
+    )()
+    cv = secrets.token_urlsafe(64)
+    cc = _generate_code_challenge(cv)
+    with pytest.raises(ValueError, match="exceed client grants"):
+        provider.create_authorization_code(
+            "cid_limited", "https://example.com/cb", cc, "s",
+            ["mcp:read", "mcp:admin"],
+        )
+
+
+def test_create_authorization_code_allows_subset_scopes(provider):
+    """Regression: requesting scopes within the client's grants succeeds."""
+    provider._clients["cid_subset"] = type(
+        "S",
+        (),
+        {
+            "client_id": "cid_subset",
+            "redirect_uris": ["https://example.com/cb"],
+            "client_name": "T",
+            "scopes": ["mcp:read", "mcp:project"],
+        },
+    )()
+    cv = secrets.token_urlsafe(64)
+    cc = _generate_code_challenge(cv)
+    auth = provider.create_authorization_code(
+        "cid_subset", "https://example.com/cb", cc, "s", ["mcp:read"]
+    )
+    assert "code" in auth
+    stored = provider._auth_codes[auth["code"]]
+    assert stored.scopes == ["mcp:read"]
+
+
+def test_dcr_registration_defaults_to_safe_scopes(provider):
+    """Regression: DCR without a scope must yield DEFAULT_SCOPES,
+    not the full SUPPORTED_SCOPES set."""
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    client_info = OAuthClientInformationFull(
+        redirect_uris=["https://chatgpt.com/callback"],
+        client_name="No Scope Client",
+        token_endpoint_auth_method="none",
+    )
+    provider._clients.clear()
+    import anyio
+
+    async def _run():
+        await provider.register_client(client_info)
+
+    anyio.run(_run)
+    stored = provider._clients[client_info.client_id]
+    assert set(stored.scopes) <= set(DEFAULT_SCOPES)
+    assert "mcp:admin" not in stored.scopes
+    assert "mcp:docker" not in stored.scopes
