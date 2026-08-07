@@ -178,6 +178,10 @@ class DockerClient:
         # returned rows were cut short of the full set. The tool wrappers
         # read it back into meta.truncated.
         self.last_truncated: bool = False
+        # Set by the sanitizing row methods (ps/compose_ps): True when at
+        # least one returned row actually had a host path redacted. The
+        # tool wrappers read it back into meta.redacted.
+        self.last_redacted: bool = False
 
     async def _run(
         self,
@@ -361,7 +365,9 @@ class DockerClient:
         result = await self._run(argv)
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
         self.last_truncated = total > len(rows)
-        return [self._sanitize_ps_row(r) for r in rows]
+        sanitized = [self._sanitize_ps_row(r) for r in rows]
+        self.last_redacted = sanitized != rows
+        return sanitized
 
     async def images(
         self,
@@ -389,6 +395,9 @@ class DockerClient:
         argv = [DOCKER_BIN, "inspect", name]
         result = await self._run(argv)
         data = self._sanitize_inspect_output(result)
+        self.last_truncated = bool(
+            max_lines and isinstance(data, list) and len(data) > max_lines
+        )
         if max_lines and isinstance(data, list) and len(data) > max_lines:
             return data[:max_lines]
         return data
@@ -491,15 +500,25 @@ class DockerClient:
 
         `docker ps --format json` renders Labels as one comma-separated
         "k=v" string; compose values like project.config_files=/media/...
-        would otherwise leak host paths.
+        would otherwise leak host paths. A single value can itself contain
+        commas (multiple compose files, e.g.
+        config_files=/a.yml,/b.yml) — the continuation chunks carry no
+        '=' and must be redacted together with the leading path, not
+        passed through as-is.
         """
         parts: list[str] = []
+        prev_was_path = False
         for chunk in labels.split(","):
             if "=" in chunk:
                 key, _, value = chunk.partition("=")
                 if value.startswith("/"):
-                    value = REDACTED
-                parts.append(f"{key}={value}")
+                    parts.append(f"{key}={REDACTED}")
+                    prev_was_path = True
+                else:
+                    parts.append(chunk)
+                    prev_was_path = False
+            elif prev_was_path:
+                parts.append(REDACTED)
             else:
                 parts.append(chunk)
         return ",".join(parts)
@@ -598,7 +617,9 @@ class DockerClient:
         result = await self._run(argv, timeout=60.0)
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
         self.last_truncated = total > len(rows)
-        return [self._sanitize_ps_row(r) for r in rows]
+        sanitized = [self._sanitize_ps_row(r) for r in rows]
+        self.last_redacted = sanitized != rows
+        return sanitized
 
     async def compose_services(
         self,

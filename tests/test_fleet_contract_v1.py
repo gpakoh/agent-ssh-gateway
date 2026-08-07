@@ -99,6 +99,46 @@ async def test_docker_ps_has_named_collection(monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.asyncio
+async def test_docker_ps_meta_reports_redaction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """meta.redacted/truncated must reflect what ps() actually did: rows are
+    sanitized (last_redacted) and possibly cut (last_truncated)."""
+    import fleet.docker_server as server
+
+    rows = [{"Names": "web", "Status": "Up"}]
+    client = _AsyncClient(ps=rows)
+    client.last_redacted = True
+    client.last_truncated = False
+    monkeypatch.setattr(server, "_get_client", lambda: client)
+
+    result = await server.docker_ps()
+
+    assert result["meta"]["redacted"] is True
+    assert result["meta"]["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_main_server_docker_ps_meta_reports_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import server as main_server
+
+    class _FakeDC:
+        last_redacted = True
+        last_truncated = False
+
+        async def ps(self, all: bool = False, limit: int = 50) -> list[dict]:
+            return [{"Names": "web"}]
+
+    monkeypatch.setattr(main_server, "DockerClient", lambda: _FakeDC())
+
+    result = await main_server.docker_ps()
+
+    assert result["ok"] is True
+    assert result["meta"]["redacted"] is True
+    assert result["meta"]["truncated"] is False
+
+
+@pytest.mark.asyncio
 async def test_postgres_select_returns_rows_not_json_string(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
