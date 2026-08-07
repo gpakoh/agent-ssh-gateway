@@ -1263,6 +1263,68 @@ class TestScanTool:
         assert all(" — " in s for s in d.suggestions)
 
 
+class TestScanToolObfuscation:
+    """Regression tests for scan_command() against shell obfuscation.
+
+    Audit finding P1: ``bash -c 'x=rm; $x -rf /'`` returned zero findings —
+    the regex scanner only saw the literal ``rm -rf /``, while the variable
+    ``$x`` is expanded by the shell after scanning. The scanner must resolve
+    ``VAR=value`` assignments and scan nested inline scripts so the
+    informational tool is not silently "clean" for commands the enforcement
+    gates would block.
+    """
+
+    def test_variable_indirection_inside_bash_c(self):
+        from app.command_policy import scan_command
+
+        r = scan_command('bash -c "x=rm; $x -rf /"')
+        names = {f.pattern_name for f in r.findings}
+        assert r.total > 0, f"no findings for obfuscated command: {r.findings}"
+        assert "rm-rf-root" in names, f"rm-rf-root not in {names}"
+
+    def test_variable_indirection_bare(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("x=rm; $x -rf /")
+        names = {f.pattern_name for f in r.findings}
+        assert "rm-rf-root" in names, f"rm-rf-root not in {names}"
+
+    def test_braced_variable_indirection(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("x=rm; ${x} -rf /")
+        names = {f.pattern_name for f in r.findings}
+        assert "rm-rf-root" in names, f"rm-rf-root not in {names}"
+
+    def test_quoted_value_indirection(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("cmd='rm -rf /'; bash -c \"$cmd\"")
+        names = {f.pattern_name for f in r.findings}
+        assert "rm-rf-root" in names, f"rm-rf-root not in {names}"
+
+    def test_nested_inline_script_detected(self):
+        from app.command_policy import scan_command
+
+        r = scan_command('bash -c "rm -rf /"')
+        names = {f.pattern_name for f in r.findings}
+        assert "rm-rf-root" in names, f"rm-rf-root not in {names}"
+
+    def test_obfuscation_findings_not_duplicated(self):
+        from app.command_policy import scan_command
+
+        r = scan_command('bash -c "x=rm; $x -rf /"')
+        names = [f.pattern_name for f in r.findings]
+        assert len(names) == len(set(names)), f"duplicate findings: {names}"
+
+    def test_clean_variable_command_still_empty(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("x=echo; $x hello world")
+        assert r.total == 0
+        assert r.findings == ()
+
+
 # ---------------------------------------------------------------------------
 # Phase 3 — filesystem destructive pattern tests
 # ---------------------------------------------------------------------------

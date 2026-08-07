@@ -90,7 +90,12 @@ def test_gateway_error_hint_prefers_structured_detail_hint():
     from examples.mcp_server.server import _gateway_error_hint
 
     exc = _make_job_not_found_exc()
-    assert _gateway_error_hint(exc, "JOB_NOT_FOUND") == "Use GET /api/jobs to list active jobs"
+    # Regression: the gateway's REST hint ("Use GET /api/jobs...") must NOT
+    # leak into the MCP surface — there is no such MCP command. JOB_NOT_FOUND
+    # gets an MCP-native hint instead.
+    hint = _gateway_error_hint(exc, "JOB_NOT_FOUND")
+    assert "GET /api/jobs" not in hint
+    assert "job_status" in hint
 
 
 def test_gateway_error_hint_falls_back_for_file_not_found_with_no_body_hint():
@@ -149,25 +154,27 @@ class TestJobStatusEndToEnd:
         assert result["ok"] is False
         assert result["error"]["code"] == "JOB_NOT_FOUND"
         assert result["error"]["message"] == "Job xyz not found"
-        assert result["error"]["hint"] == "Use GET /api/jobs to list active jobs"
+        # Regression: MCP hint must not leak the REST endpoint (no such MCP
+        # command exists).
+        assert result["error"]["hint"] != "Use GET /api/jobs to list active jobs"
+        assert "job_status" in result["error"]["hint"]
         assert result["error"]["retryable"] is False
         # Regression: no transport garbage (raw JSON blob, [API] placeholder).
         assert "detail" not in result["error"]["message"]
         assert "[API]" not in result["error"]["message"]
 
 
-class TestRunTestsWaitTimeoutEndToEnd:
-    """A long test suite (run_tests -> _run_uv_tool -> wait_job) that
-    outlives the wait window used to surface neither a result nor a job_id
-    -- wait_job() silently returned the gateway's {"wait_timed_out": True}
-    dict as if it were a finished job, which _run_uv_tool read as
-    exit_code=-1 and reported as a generic, misleading failure, with no
-    reliable way for the caller to find the job_id and check on it later.
-    Feeds a realistic timeout through the real run_tool()/gateway_run_tests
-    path (not just the two helper functions in isolation).
+class TestRunTestsAsyncSubmit:
+    """run_tests must submit the pytest job and return its job_id
+    immediately (async) instead of synchronously waiting out the full
+    suite (audit finding: run_tests unusable for a full suite — it
+    blocks and times out with neither result nor job_id). The caller
+    then polls with gateway_job_status / gateway_job_result. The
+    targeted run_pytest path keeps its synchronous wait; run_tests is
+    the full-suite tool.
     """
 
-    def test_run_tests_timeout_surfaces_job_id_and_wait_timeout_code(self, monkeypatch):
+    def test_run_tests_returns_job_id_immediately(self, monkeypatch):
         from pathlib import Path
 
         import mcp_client_tools
@@ -183,9 +190,43 @@ class TestRunTestsWaitTimeoutEndToEnd:
             return {"job_id": f"j{calls['n']}"}
 
         def _wait_job(job_id, **kw):
-            if job_id == "j1":  # the "command -v uv" check
+            # only the quick "command -v uv" probe may be waited on; the
+            # pytest job must never be synchronously waited on by run_tests
+            if job_id == "j1":
                 return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
-            # the real pytest run outlives the wait window
+            raise AssertionError(f"run_tests must not wait_job on {job_id}")
+
+        monkeypatch.setattr(mcp_server_mod.client, "execute_raw", _execute_raw)
+        monkeypatch.setattr(mcp_server_mod.client, "wait_job", _wait_job)
+
+        result = mcp_server_mod.gateway_run_tests("proj")
+
+        assert result["ok"] is True
+        assert result["result"]["job_id"] == "j2"
+        assert result["result"]["status"] == "running"
+        assert "job_status" in result["meta"]["warnings"][0]
+
+    def test_run_pytest_keeps_sync_wait_timeout_surface(self, monkeypatch):
+        """The targeted run_pytest path keeps waiting; a suite that
+        outlives the window still surfaces a job_id-bearing WAIT_TIMEOUT
+        error (regression guard for the previous fix)."""
+        from pathlib import Path
+
+        import mcp_client_tools
+
+        from examples.mcp_server import server as mcp_server_mod
+
+        monkeypatch.setattr(mcp_client_tools, "_resolve_project", lambda _: Path("/project"))
+
+        calls = {"n": 0}
+
+        def _execute_raw(cmd):
+            calls["n"] += 1
+            return {"job_id": f"j{calls['n']}"}
+
+        def _wait_job(job_id, **kw):
+            if job_id == "j1":
+                return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
             raise mcp_server_mod.GatewayClientError(
                 f"Job {job_id} did not finish before timeout",
                 body={"job_id": job_id, "status": "running", "wait_timed_out": True},
@@ -194,7 +235,7 @@ class TestRunTestsWaitTimeoutEndToEnd:
         monkeypatch.setattr(mcp_server_mod.client, "execute_raw", _execute_raw)
         monkeypatch.setattr(mcp_server_mod.client, "wait_job", _wait_job)
 
-        result = mcp_server_mod.gateway_run_tests("proj")
+        result = mcp_server_mod.gateway_run_pytest("proj", "tests/test_x.py")
 
         assert result["ok"] is False
         assert result["error"]["code"] == "WAIT_TIMEOUT"

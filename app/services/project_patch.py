@@ -95,9 +95,12 @@ async def apply_project_patch(
                 original = full_path.read_text(encoding="utf-8", errors="replace")
             else:
                 original = ""
-            new_content = applier._apply_in_memory(original, f)
-            if original != new_content:
-                preview_parts.append(f"--- {f['path']}\n+++ {f['path']}\n{new_content}")
+            if f.get("is_delete"):
+                preview_parts.append(f"--- {f['path']}\n+++ /dev/null\n{original}")
+            else:
+                new_content = applier._apply_in_memory(original, f)
+                if original != new_content:
+                    preview_parts.append(f"--- {f['path']}\n+++ {f['path']}\n{new_content}")
             file_results.append(
                 ProjectPatchFileResult(
                     path=f["path"],
@@ -115,7 +118,7 @@ async def apply_project_patch(
         )
 
     # Apply: read, verify hashes, apply in memory
-    prepared: list[tuple[object, str, str, int]] = []
+    prepared: list[tuple[object, str, str, int, bool]] = []
 
     for f in files:
         full_path = _resolve_within_root(project_root, f["path"])
@@ -135,13 +138,19 @@ async def apply_project_patch(
         if full_path.exists() and expected_hashes and f["path"] in expected_hashes:
             applier._check_hash(f["path"], original, expected_hashes[f["path"]])
 
+        is_delete = bool(f.get("is_delete"))
+        if is_delete and not full_path.exists():
+            raise PatchValidationError(
+                f"Cannot delete '{f['path']}': file not found"
+            )
+
         new_content = applier._apply_in_memory(original, f)
-        prepared.append((full_path, original, new_content, f["hunk_count"]))
+        prepared.append((full_path, original, new_content, f["hunk_count"], is_delete))
 
     # Transactional write with rollback
     completed: list[tuple[object, object, bool]] = []
 
-    for full_path, _original, new_content, _hunk_count in prepared:
+    for full_path, _original, new_content, _hunk_count, is_delete in prepared:
         backup = full_path.parent / f".{full_path.name}.mcp-patch-{rid}.bak"
         tmp = full_path.parent / f".{full_path.name}.mcp-patch-{rid}.tmp"
         existed_before = full_path.exists()
@@ -151,18 +160,25 @@ async def apply_project_patch(
             if existed_before:
                 shutil.copy2(str(full_path), str(backup))
 
-            # Write temp file
-            tmp.write_text(new_content, encoding="utf-8")
+            if is_delete:
+                # /dev/null target means "delete this file" — remove it
+                # instead of writing (a 0-byte/1-byte leftover is not a
+                # deletion). Backup above + rename-based rollback below
+                # restore the file if a later write in the batch fails.
+                os.remove(str(full_path))
+            else:
+                # Write temp file
+                tmp.write_text(new_content, encoding="utf-8")
 
-            # fsync
-            fd = os.open(str(tmp), os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+                # fsync
+                fd = os.open(str(tmp), os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
 
-            # Atomic rename
-            os.rename(str(tmp), str(full_path))
+                # Atomic rename
+                os.rename(str(tmp), str(full_path))
 
             completed.append((full_path, backup, existed_before))
 
@@ -228,13 +244,13 @@ async def apply_project_patch(
             status="applied",
             hunks_applied=h,
         )
-        for p, _, _, h in prepared
+        for p, _, _, h, _ in prepared
     ]
 
     return ProjectPatchApplyResponse(
         success=True,
         files_applied=len(prepared),
         files_failed=0,
-        hunks_applied=sum(h for _, _, _, h in prepared),
+        hunks_applied=sum(h for _, _, _, h, _ in prepared),
         files=file_results,
     )

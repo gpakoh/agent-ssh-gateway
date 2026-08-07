@@ -261,3 +261,75 @@ def check_nested_commands(command: str) -> list[DestructiveMatch]:
             ))
 
     return findings
+
+
+# ---------------------------------------------------------------------------
+# Obfuscation normalization (variable resolution + scan candidates)
+# ---------------------------------------------------------------------------
+
+_VAR_ASSIGN_RE = re.compile(
+    r"(?:^|[\s;|&()])([A-Za-z_][A-Za-z0-9_]*)=(?:([\"'])(.*?)\2|(\S+?))(?=[\s;|&()]|$)"
+)
+_VAR_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)\b")
+
+
+def resolve_shell_variables(command: str) -> str:
+    """Heuristically resolve ``VAR=value`` assignments against variable
+    references (``$VAR``/``${VAR}``) in a command string.
+
+    String-based approximation of shell expansion: standalone ``VAR=value``
+    assignments (word or quoted values) are collected, then every matching
+    reference is substituted. Resolution runs to a small fixed point so
+    chained indirection (``x=rm; y=$x; $y -rf /``) is also expanded.
+
+    This is deliberately conservative — it never invokes a shell and never
+    rejects input. It exists so the regex-based scan_command can see through
+    variable obfuscation like ``x=rm; $x -rf /``; the policy enforcement
+    gates (metachar / interpreter shape / heredoc) remain the real control.
+    """
+    assignments: dict[str, str] = {}
+    for m in _VAR_ASSIGN_RE.finditer(command):
+        name = m.group(1)
+        value = m.group(3) if m.group(3) is not None else m.group(4)
+        if value is not None:
+            assignments.setdefault(name, value)
+    if not assignments:
+        return command
+
+    resolved = command
+    for _ in range(3):
+        prev = resolved
+        for name, value in assignments.items():
+            def _replace(match: re.Match[str], n: str = name, v: str = value) -> str:
+                return v if match.group(1) == n or match.group(2) == n else match.group(0)
+            resolved = _VAR_REF_RE.sub(_replace, resolved)
+        if resolved == prev:
+            break
+    return resolved
+
+
+def normalize_scan_candidates(command: str) -> list[str]:
+    """Return deduplicated command variants that should be pattern-scanned.
+
+    Variants: the raw command, its variable-resolved form, and nested inline
+    scripts (``bash -c '...'``, heredocs, ``$(...)``, backticks, ``eval``)
+    with their resolved forms. Used by ``scan_command`` so the informational
+    scanner sees through shell obfuscation the same way the enforcement gates
+    do.
+    """
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _add(text: str) -> None:
+        text = text.strip()
+        if text and text not in seen:
+            seen.add(text)
+            candidates.append(text)
+
+    _add(command)
+    _add(resolve_shell_variables(command))
+    for base in list(candidates):
+        for ec in extract_all(base):
+            _add(ec.script)
+            _add(resolve_shell_variables(ec.script))
+    return candidates

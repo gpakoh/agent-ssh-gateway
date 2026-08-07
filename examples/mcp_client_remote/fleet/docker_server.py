@@ -51,7 +51,12 @@ async def docker_ps(
         return _docker_error("docker_ps", exc)
     if isinstance(rows, str):
         return tool_success("docker_ps", {"output": rows, "format": format}, source="docker")
-    return tool_success("docker_ps", {"containers": rows, "count": len(rows)}, source="docker")
+    return tool_success(
+        "docker_ps",
+        {"containers": rows, "count": len(rows)},
+        source="docker",
+        truncated=getattr(client, "last_truncated", False),
+    )
 
 
 @mcp.tool()
@@ -72,18 +77,25 @@ async def docker_images(
         return _docker_error("docker_images", exc)
     if isinstance(rows, str):
         return tool_success("docker_images", {"output": rows, "format": format}, source="docker")
-    return tool_success("docker_images", {"images": rows, "count": len(rows)}, source="docker")
+    return tool_success(
+        "docker_images",
+        {"images": rows, "count": len(rows)},
+        source="docker",
+        truncated=getattr(client, "last_truncated", False),
+    )
 
 
 @mcp.tool()
 async def docker_inspect(name: str) -> dict:
-    """Inspect a container by name or ID. Returns structured metadata (first 500 entries)."""
+    """Inspect a container by name or ID. Returns structured metadata
+    reduced to a strict allowlist (host paths, PID, IPs, network/endpoint
+    IDs and compose working dirs are dropped)."""
     client = _get_client()
     try:
         data = await client.inspect(name, max_lines=500)
     except (ValueError, RuntimeError) as exc:
         return _docker_error("docker_inspect", exc)
-    return tool_success("docker_inspect", data, source="docker")
+    return tool_success("docker_inspect", data, source="docker", redacted=True)
 
 
 @mcp.tool()
@@ -119,7 +131,12 @@ async def docker_stats(
         return _docker_error("docker_stats", exc)
     if isinstance(rows, str):
         return tool_success("docker_stats", {"output": rows, "format": format}, source="docker")
-    return tool_success("docker_stats", {"stats": rows, "count": len(rows)}, source="docker")
+    return tool_success(
+        "docker_stats",
+        {"stats": rows, "count": len(rows)},
+        source="docker",
+        truncated=getattr(client, "last_truncated", False),
+    )
 
 
 @mcp.tool()
@@ -140,7 +157,12 @@ async def docker_compose_ps(
         return _docker_error("docker_compose_ps", exc)
     if isinstance(rows, str):
         return tool_success("docker_compose_ps", {"output": rows}, source="docker")
-    return tool_success("docker_compose_ps", {"containers": rows, "count": len(rows)}, source="docker")
+    return tool_success(
+        "docker_compose_ps",
+        {"containers": rows, "count": len(rows)},
+        source="docker",
+        truncated=getattr(client, "last_truncated", False),
+    )
 
 
 @mcp.tool()

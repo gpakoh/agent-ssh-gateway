@@ -230,6 +230,32 @@ class TestPreviewPatch:
                 registry=preview_workspace["registry"],
             )
 
+    def test_dev_null_preview_shows_deletion(self, preview_workspace):
+        """Regression: a deletion patch (target `/dev/null`) must preview as
+        a deletion (file will be removed), not as a no-op/edit leaving a
+        1-byte file. Before the fix the preview computed new_content "" and
+        preserved the trailing newline, so the diff claimed the file would
+        survive as "\n".
+        """
+        patch = """\
+--- a/README.md
++++ /dev/null
+@@ -1 +0,0 @@
+-# Preview Project
+"""
+        result = project_file_preview_patch(
+            "preview-project",
+            "README.md",
+            patch,
+            registry=preview_workspace["registry"],
+        )
+        assert result["file_exists_before"] is True
+        assert result["changed"] is True
+        assert result["applied"] is True
+        assert result["deleted"] is True
+        # Verify file unchanged
+        assert (preview_workspace["project"] / "README.md").exists()
+
 
 # ── Verify tests ─────────────────────────────────────────────────
 

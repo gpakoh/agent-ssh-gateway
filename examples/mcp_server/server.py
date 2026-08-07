@@ -100,6 +100,7 @@ from examples.mcp_client_remote.fleet.github_client import (
     normalize_list_response,
 )
 from examples.mcp_client_remote.fleet.postgres_client import PostgresClient
+from examples.mcp_client_remote.fleet.shared import list_pagination_meta, minimize_issue_payload
 
 # OAuth provider and settings
 from examples.mcp_server.latency_metrics import get_tracker
@@ -666,7 +667,15 @@ def _gateway_error_message(exc: GatewayClientError) -> str:
 
 
 def _gateway_error_hint(exc: GatewayClientError, code: str) -> str | None:
-    """Extract the gateway's own per-error hint, when present."""
+    """Extract the gateway's own per-error hint, when present.
+
+    The gateway's per-error hints are written for the REST API surface
+    (e.g. JOB_NOT_FOUND says "Use GET /api/jobs to list active jobs").
+    There is no such MCP command, so job errors get an MCP-native hint
+    instead of leaking a REST endpoint the caller cannot use.
+    """
+    if code == "JOB_NOT_FOUND":
+        return "The job no longer exists (it may have expired); re-run the tool to start a new job, or call job_status/job_result with the id of a job returned by this run"
     if isinstance(exc.body, dict):
         detail = exc.body.get("detail")
         if isinstance(detail, dict) and isinstance(detail.get("hint"), str) and detail["hint"]:
@@ -880,9 +889,11 @@ def gateway_scan_command(command: str) -> dict[str, Any]:
 
     Unlike the policy engine (which returns allow/block based on profile),
     scan_command returns ALL matching destructive patterns regardless of
-    profile — for introspection, debugging, and CI use.
-
-    Currently checks Docker and Docker Compose destructive patterns.
+    profile — for introspection, debugging, and CI use. The scan is
+    informational: enforcement happens in the policy gates. Commands are
+    normalized first (shell variable assignments resolved, nested inline
+    scripts like ``bash -c '...'`` extracted) so obfuscated destructive
+    commands are not silently reported as clean.
     """
     from app.command_policy import scan_command as _scan
 
@@ -1434,12 +1445,17 @@ def gateway_git_push(
 
 @register_tool("run_tests")
 def gateway_run_tests(project: str) -> dict[str, Any]:
-    """Run test suite within a project (pytest -q)."""
+    """Submit the project's full test suite (pytest -q) as a background job.
+
+    Returns immediately with the job_id (status running); poll with
+    gateway_job_status / gateway_job_result. Use run_pytest for a targeted
+    synchronous run.
+    """
     return run_tool(
         tool="run_tests",
         title="run tests",
         fn=lambda: run_tests(client, project),
-        success_text="Ran project test suite.",
+        success_text="Submitted project test suite.",
     )
 
 
@@ -1564,8 +1580,12 @@ def gateway_show_file_diff(project: str, path: str) -> dict[str, Any]:
 
 
 @register_tool("run_pytest")
-def gateway_run_pytest(project: str, target: str) -> dict[str, Any]:
-    """Run pytest on a specific target within the project."""
+def gateway_run_pytest(project: str, target: list[str] | str | None = None) -> dict[str, Any]:
+    """Run pytest on one or more targets within the project.
+
+    ``target`` may be a single file/dir string or a list of targets.
+    Omitting it runs the whole suite.
+    """
     return run_tool(
         tool="run_pytest",
         title="run pytest",
@@ -1575,19 +1595,19 @@ def gateway_run_pytest(project: str, target: str) -> dict[str, Any]:
 
 
 @register_tool("run_ruff")
-def gateway_run_ruff(project: str, target: str) -> dict[str, Any]:
-    """Run ruff linter on a specific target within the project."""
+def gateway_run_ruff(project: str, target: list[str] | str | None = None) -> dict[str, Any]:
+    """Run ruff linter on one or more targets within the project."""
     return run_tool(
         tool="run_ruff",
         title="run ruff",
         fn=lambda: run_ruff(client, project, target),
-        success_text="Ran project ruff check.",
+        success_text="Ran project ruff.",
     )
 
 
 @register_tool("run_mypy")
-def gateway_run_mypy(project: str, target: str) -> dict[str, Any]:
-    """Run mypy type checker on a specific target within the project."""
+def gateway_run_mypy(project: str, target: list[str] | str | None = None) -> dict[str, Any]:
+    """Run mypy type checks on one or more targets within the project."""
     return run_tool(
         tool="run_mypy",
         title="run mypy",
@@ -1823,7 +1843,8 @@ async def gitea_list_branches(owner: str, repo: str, limit: int = 30) -> dict[st
         )
     try:
         async with GiteaClient(token) as client:
-            data = normalize_list_response(await client.list_branches(owner, repo, limit=limit))
+            raw = await client.list_branches(owner, repo, limit=limit)
+            data = normalize_list_response(raw, meta=list_pagination_meta(len(raw), limit))
     except Exception as exc:
         return _remote_api_error("gitea_list_branches", "gitea", exc)
     return tool_success("gitea_list_branches", result=data, source="gitea")
@@ -1844,9 +1865,8 @@ async def gitea_list_commits(
         )
     try:
         async with GiteaClient(token) as client:
-            data = normalize_list_response(
-                await client.list_commits(owner, repo, sha=sha, limit=limit)
-            )
+            raw = await client.list_commits(owner, repo, sha=sha, limit=limit)
+            data = normalize_list_response(raw, meta=list_pagination_meta(len(raw), limit))
     except Exception as exc:
         return _remote_api_error("gitea_list_commits", "gitea", exc)
     return tool_success("gitea_list_commits", result=data, source="gitea")
@@ -1888,8 +1908,10 @@ async def gitea_list_issues(
         )
     try:
         async with GiteaClient(token) as client:
+            raw = await client.list_issues(owner, repo, state=state, limit=limit)
             data = normalize_list_response(
-                await client.list_issues(owner, repo, state=state, limit=limit)
+                [minimize_issue_payload(i, provider="gitea") for i in raw],
+                meta=list_pagination_meta(len(raw), limit),
             )
     except Exception as exc:
         return _remote_api_error("gitea_list_issues", "gitea", exc)
@@ -1909,7 +1931,8 @@ async def gitea_get_issue(owner: str, repo: str, issue_number: int) -> dict[str,
         )
     try:
         async with GiteaClient(token) as client:
-            data = await client.get_issue(owner, repo, issue_number)
+            raw = await client.get_issue(owner, repo, issue_number)
+            data = minimize_issue_payload(raw, provider="gitea")
     except Exception as exc:
         return _remote_api_error("gitea_get_issue", "gitea", exc)
     return tool_success("gitea_get_issue", result=data, source="gitea")
@@ -1930,8 +1953,10 @@ async def gitea_list_pull_requests(
         )
     try:
         async with GiteaClient(token) as client:
+            raw = await client.list_pull_requests(owner, repo, state=state, limit=limit)
             data = normalize_list_response(
-                await client.list_pull_requests(owner, repo, state=state, limit=limit)
+                [minimize_issue_payload(i, provider="gitea") for i in raw],
+                meta=list_pagination_meta(len(raw), limit),
             )
     except Exception as exc:
         return _remote_api_error("gitea_list_pull_requests", "gitea", exc)
@@ -1951,7 +1976,8 @@ async def gitea_get_pull_request(owner: str, repo: str, pull_number: int) -> dic
         )
     try:
         async with GiteaClient(token) as client:
-            data = await client.get_pull_request(owner, repo, pull_number)
+            raw = await client.get_pull_request(owner, repo, pull_number)
+            data = minimize_issue_payload(raw, provider="gitea")
     except Exception as exc:
         return _remote_api_error("gitea_get_pull_request", "gitea", exc)
     return tool_success("gitea_get_pull_request", result=data, source="gitea")
@@ -2070,8 +2096,10 @@ async def github_list_branches(owner: str, repo: str, per_page: int = 30) -> dic
         )
     try:
         async with GitHubClient(token) as client:
+            raw = await client.list_branches(owner, repo, per_page=per_page)
             data = normalize_list_response(
-                await client.list_branches(owner, repo, per_page=per_page),
+                raw,
+                meta=list_pagination_meta(len(raw), per_page),
             )
     except Exception as exc:
         return _remote_api_error("github_list_branches", "github", exc)
@@ -2093,8 +2121,10 @@ async def github_list_commits(
         )
     try:
         async with GitHubClient(token) as client:
+            raw = await client.list_commits(owner, repo, sha=sha, per_page=per_page)
             data = normalize_list_response(
-                await client.list_commits(owner, repo, sha=sha, per_page=per_page),
+                raw,
+                meta=list_pagination_meta(len(raw), per_page),
             )
     except Exception as exc:
         return _remote_api_error("github_list_commits", "github", exc)
@@ -2137,8 +2167,10 @@ async def github_list_issues(
         )
     try:
         async with GitHubClient(token) as client:
+            raw = await client.list_issues(owner, repo, state=state, per_page=per_page)
             data = normalize_list_response(
-                await client.list_issues(owner, repo, state=state, per_page=per_page),
+                [minimize_issue_payload(i, provider="github") for i in raw],
+                meta=list_pagination_meta(len(raw), per_page),
             )
     except Exception as exc:
         return _remote_api_error("github_list_issues", "github", exc)
@@ -2158,7 +2190,8 @@ async def github_get_issue(owner: str, repo: str, issue_number: int) -> dict[str
         )
     try:
         async with GitHubClient(token) as client:
-            data = await client.get_issue(owner, repo, issue_number)
+            raw = await client.get_issue(owner, repo, issue_number)
+            data = minimize_issue_payload(raw, provider="github")
     except Exception as exc:
         return _remote_api_error("github_get_issue", "github", exc)
     return tool_success("github_get_issue", result=data, source="github")
@@ -2179,8 +2212,10 @@ async def github_list_pull_requests(
         )
     try:
         async with GitHubClient(token) as client:
+            raw = await client.list_pull_requests(owner, repo, state=state, per_page=per_page)
             data = normalize_list_response(
-                await client.list_pull_requests(owner, repo, state=state, per_page=per_page),
+                [minimize_issue_payload(i, provider="github") for i in raw],
+                meta=list_pagination_meta(len(raw), per_page),
             )
     except Exception as exc:
         return _remote_api_error("github_list_pull_requests", "github", exc)
@@ -2200,7 +2235,8 @@ async def github_get_pull_request(owner: str, repo: str, pull_number: int) -> di
         )
     try:
         async with GitHubClient(token) as client:
-            data = await client.get_pull_request(owner, repo, pull_number)
+            raw = await client.get_pull_request(owner, repo, pull_number)
+            data = minimize_issue_payload(raw, provider="github")
     except Exception as exc:
         return _remote_api_error("github_get_pull_request", "github", exc)
     return tool_success("github_get_pull_request", result=data, source="github")
@@ -2213,36 +2249,50 @@ async def github_get_pull_request(owner: str, repo: str, pull_number: int) -> di
 async def docker_ps(all: bool = False, format: str | None = None, limit: int = 50) -> dict[str, Any]:
     """List running containers as structured rows. Use all=True to include
     stopped containers. limit: max rows (default 50)."""
+    client = DockerClient()
     try:
-        rows = await DockerClient().ps(all=all, format=format, limit=limit)
+        rows = await client.ps(all=all, format=format, limit=limit)
     except (ValueError, RuntimeError) as exc:
         return tool_error(tool="docker_ps", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
     if isinstance(rows, str):
         return tool_success("docker_ps", result=rows, source="docker")
-    return tool_success("docker_ps", result={"containers": rows, "count": len(rows)}, source="docker")
+    return tool_success(
+        "docker_ps",
+        result={"containers": rows, "count": len(rows)},
+        truncated=client.last_truncated,
+        source="docker",
+    )
 
 
 @register_tool("docker_images")
 async def docker_images(format: str | None = None, limit: int = 50) -> dict[str, Any]:
     """List Docker images on the host as structured rows. limit: max rows (default 50)."""
+    client = DockerClient()
     try:
-        rows = await DockerClient().images(format=format, limit=limit)
+        rows = await client.images(format=format, limit=limit)
     except RuntimeError as exc:
         return tool_error(tool="docker_images", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
     if isinstance(rows, str):
         return tool_success("docker_images", result=rows, source="docker")
-    return tool_success("docker_images", result={"images": rows, "count": len(rows)}, source="docker")
+    return tool_success(
+        "docker_images",
+        result={"images": rows, "count": len(rows)},
+        truncated=client.last_truncated,
+        source="docker",
+    )
 
 
 @register_tool("docker_inspect")
 async def docker_inspect(name: str) -> dict[str, Any]:
-    """Inspect a container by name or ID. Returns sanitized structured
-    metadata (first 500 entries)."""
+    """Inspect a container by name or ID. Returns structured metadata
+    reduced to a strict allowlist (host paths, PID, IPs, network/endpoint
+    IDs and compose working dirs are dropped)."""
+    client = DockerClient()
     try:
-        data = await DockerClient().inspect(name, max_lines=500)
+        data = await client.inspect(name, max_lines=500)
     except (ValueError, RuntimeError) as exc:
         return tool_error(tool="docker_inspect", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
-    return tool_success("docker_inspect", result=data, source="docker")
+    return tool_success("docker_inspect", result=data, redacted=True, source="docker")
 
 
 @register_tool("docker_logs")
@@ -2259,13 +2309,19 @@ async def docker_logs(container: str, tail: int = 200) -> dict[str, Any]:
 async def docker_stats(format: str | None = None, limit: int = 50) -> dict[str, Any]:
     """Show live resource usage statistics for all running containers as
     structured rows. limit: max rows (default 50)."""
+    client = DockerClient()
     try:
-        rows = await DockerClient().stats(format=format, limit=limit)
+        rows = await client.stats(format=format, limit=limit)
     except RuntimeError as exc:
         return tool_error(tool="docker_stats", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
     if isinstance(rows, str):
         return tool_success("docker_stats", result=rows, source="docker")
-    return tool_success("docker_stats", result={"stats": rows, "count": len(rows)}, source="docker")
+    return tool_success(
+        "docker_stats",
+        result={"stats": rows, "count": len(rows)},
+        truncated=client.last_truncated,
+        source="docker",
+    )
 
 
 @register_tool("docker_compose_ps")
@@ -2273,8 +2329,9 @@ async def docker_compose_ps(
     project_dir: str | None = None, limit: int = 50
 ) -> dict[str, Any]:
     """List containers in a Docker Compose project as structured rows. limit: max rows (default 50)."""
+    client = DockerClient()
     try:
-        rows = await DockerClient().compose_ps(project_dir=project_dir, limit=limit)
+        rows = await client.compose_ps(project_dir=project_dir, limit=limit)
     except ValueError as exc:
         return tool_error(tool="docker_compose_ps", code="INVALID_INPUT", message=str(exc), source="docker")
     except RuntimeError as exc:
@@ -2282,7 +2339,10 @@ async def docker_compose_ps(
     if isinstance(rows, str):
         return tool_success("docker_compose_ps", result=rows, source="docker")
     return tool_success(
-        "docker_compose_ps", result={"containers": rows, "count": len(rows)}, source="docker"
+        "docker_compose_ps",
+        result={"containers": rows, "count": len(rows)},
+        truncated=client.last_truncated,
+        source="docker",
     )
 
 
@@ -3144,17 +3204,37 @@ async def postgres_vector_status() -> dict[str, Any]:
 
 
 @register_tool("resolve_library_id")
-async def resolve_library_id(query: str, libraryName: str) -> str:
+async def resolve_library_id(query: str, libraryName: str) -> dict[str, Any]:
     """Resolve a package/product name to a Context7-compatible library ID."""
-    return await _call_context7_upstream(
-        "resolve-library-id", {"query": query, "libraryName": libraryName}
-    )
+    try:
+        text = await _call_context7_upstream(
+            "resolve-library-id", {"query": query, "libraryName": libraryName}
+        )
+    except Exception as exc:
+        return tool_error(
+            tool="resolve_library_id",
+            code="REMOTE_API_ERROR",
+            message=str(exc),
+            source="context7",
+        )
+    return tool_success("resolve_library_id", result=text, source="context7")
 
 
 @register_tool("query_docs")
-async def query_docs(libraryId: str, query: str) -> str:
+async def query_docs(libraryId: str, query: str) -> dict[str, Any]:
     """Query Context7 for documentation on a resolved library."""
-    return await _call_context7_upstream("query-docs", {"libraryId": libraryId, "query": query})
+    try:
+        text = await _call_context7_upstream(
+            "query-docs", {"libraryId": libraryId, "query": query}
+        )
+    except Exception as exc:
+        return tool_error(
+            tool="query_docs",
+            code="REMOTE_API_ERROR",
+            message=str(exc),
+            source="context7",
+        )
+    return tool_success("query_docs", result=text, source="context7")
 
 
 # ── Agent Handoff v2 tools ──────────────────────────────────────────
@@ -3404,51 +3484,29 @@ _workspace_registry_cache = None
 def _get_workspace_registry():
     """Get or create the workspace registry, resolving projects.yaml path.
 
-    Uses a lazy cache to avoid re-parsing YAML on every call.
+    Uses a lazy cache to avoid re-parsing YAML on every call. The root is
+    resolved by the shared resolve_registry_root() — the exact same
+    deterministic resolution the REST app pins at startup — so MCP and
+    REST can never drift apart again.
     """
     global _workspace_registry_cache
     if _workspace_registry_cache is not None:
         return _workspace_registry_cache
 
     from app.workspace.policy import ALL_SCOPES
-    from app.workspace.registry import WorkspaceRegistry, set_registry_root
+    from app.workspace.registry import WorkspaceRegistry, resolve_registry_root, set_registry_root
 
-    # Try to find projects.yaml relative to this file's location
-    # or use the repo root as fallback
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    projects_yaml = repo_root / "projects.yaml"
-
-    if projects_yaml.exists():
-        set_registry_root(repo_root)
-        _workspace_registry_cache = WorkspaceRegistry.load(
-            projects_yaml, granted_scopes=ALL_SCOPES
+    root = resolve_registry_root()
+    if not (root / "projects.yaml").exists():
+        raise RuntimeError(
+            "Cannot find projects.yaml. Set WORKSPACE_REGISTRY_ROOT or "
+            "ensure projects.yaml exists in the repo root."
         )
-        return _workspace_registry_cache
-
-    # Fallback: try environment variable
-    env_root = os.environ.get("WORKSPACE_REGISTRY_ROOT", "")
-    if env_root:
-        env_path = Path(env_root)
-        if env_path.is_dir():
-            set_registry_root(env_path)
-            _workspace_registry_cache = WorkspaceRegistry.load(
-                env_path / "projects.yaml", granted_scopes=ALL_SCOPES
-            )
-            return _workspace_registry_cache
-
-    # Last resort: use current working directory
-    cwd = Path.cwd()
-    if (cwd / "projects.yaml").exists():
-        set_registry_root(cwd)
-        _workspace_registry_cache = WorkspaceRegistry.load(
-            cwd / "projects.yaml", granted_scopes=ALL_SCOPES
-        )
-        return _workspace_registry_cache
-
-    raise RuntimeError(
-        "Cannot find projects.yaml. Set WORKSPACE_REGISTRY_ROOT or "
-        "ensure projects.yaml exists in the repo root."
+    set_registry_root(root)
+    _workspace_registry_cache = WorkspaceRegistry.load(
+        root / "projects.yaml", granted_scopes=ALL_SCOPES
     )
+    return _workspace_registry_cache
 
 
 @register_tool("workspace_file_write")

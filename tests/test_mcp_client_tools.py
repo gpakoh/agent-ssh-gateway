@@ -94,3 +94,27 @@ class _FakeClient:
             "stdout": "ok",
             "stderr": "",
         }
+
+
+class TestWorkingDirectoryNoHostPaths:
+    """T2.3: working_directory must not return absolute host paths."""
+
+    def test_returns_project_relative_dot(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        result = mod.working_directory(_FakeClient(), "web-ssh-gateway")
+        assert result["stdout"] == "."
+        assert result["exit_code"] == 0
+        assert result["outcome"] == "passed"
+
+    def test_never_shells_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        called: list[str] = []
+
+        class _Probe:
+            def execute_project_command(self, project: str, command: str) -> dict:
+                called.append(command)
+                return {"exit_code": 0, "stdout": "/media/1TB/Python/web-ssh-gateway\n"}
+
+        result = mod.working_directory(_Probe(), "web-ssh-gateway")
+        assert result["stdout"] == "."
+        assert called == []

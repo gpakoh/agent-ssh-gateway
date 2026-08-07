@@ -17,6 +17,7 @@ from app.workspace.edit import (
     _apply_hunks,
     _compute_backup_hash,
     _exact_read,
+    _is_deletion_patch,
     _make_diff,
     _parse_unified_diff,
     _symlink_safe_preflight,
@@ -234,6 +235,26 @@ def project_file_preview_patch(
         raise WorkspacePolicyError(f"Path is a directory: {relative_path}")
 
     old_content, old_size = _exact_read(full, max_bytes, label=relative_path)
+
+    # A unified diff targeting /dev/null means "delete this file" — the
+    # preview must reflect a deletion (file will be gone), not an edit that
+    # leaves a 1-byte newline behind.
+    if _is_deletion_patch(patch):
+        diff = _make_diff(old_content, "", relative_path)
+        return {
+            "project_id": project_id,
+            "path": relative_path,
+            "file_exists_before": True,
+            "before_hash": _compute_backup_hash(old_content),
+            "after_hash": "",
+            "size_before": old_size,
+            "size_after": 0,
+            "diff": diff,
+            "changed": True,
+            "applied": True,
+            "deleted": True,
+            "encoding": "utf-8",
+        }
 
     hunks = _parse_unified_diff(patch)
     if not hunks:

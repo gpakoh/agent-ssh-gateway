@@ -19,7 +19,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from .shared import extract_auth_token, get_fleet_env
+from .shared import extract_auth_token, get_fleet_env, tool_error, tool_success
 
 HTTP_TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 
@@ -96,13 +96,29 @@ async def _call_upstream(name: str, args: dict) -> str:
 @mcp.tool()
 async def resolve_library_id(query: str, libraryName: str) -> Any:
     """Resolve a package/product name to a Context7-compatible library ID."""
-    return await _call_upstream("resolve-library-id", {"query": query, "libraryName": libraryName})
+    try:
+        text = await _call_upstream(
+            "resolve-library-id", {"query": query, "libraryName": libraryName}
+        )
+    except Exception as exc:
+        return tool_error(
+            "resolve_library_id", "REMOTE_API_ERROR", str(exc), source="context7"
+        )
+    return tool_success("resolve_library_id", text, source="context7")
 
 
 @mcp.tool()
 async def query_docs(libraryId: str, query: str) -> Any:
     """Query Context7 for documentation on a resolved library."""
-    return await _call_upstream("query-docs", {"libraryId": libraryId, "query": query})
+    try:
+        text = await _call_upstream(
+            "query-docs", {"libraryId": libraryId, "query": query}
+        )
+    except Exception as exc:
+        return tool_error(
+            "query_docs", "REMOTE_API_ERROR", str(exc), source="context7"
+        )
+    return tool_success("query_docs", text, source="context7")
 
 
 # ── Auth proxy ────────────────────────────────────────────────────

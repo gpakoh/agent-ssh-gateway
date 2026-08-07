@@ -34,13 +34,35 @@ def set_registry_root(path: str | Path) -> None:
     _registry_root = Path(path).resolve()
 
 
-def get_registry_root() -> Path:
-    if _registry_root is not None:
-        return _registry_root
+def resolve_registry_root() -> Path:
+    """Deterministic workspace registry root, shared by REST and MCP.
+
+    The REST API previously fell back to ``Path.cwd()`` while the MCP
+    server resolved ``<repo>/projects.yaml`` explicitly — two processes
+    launched from different directories silently loaded different (or
+    empty) project registries, so ``apply_patch`` answered
+    PROJECT_NOT_FOUND for a project the MCP workspace tools could see.
+
+    Resolution order:
+      1. ``WORKSPACE_REGISTRY_ROOT`` env var — explicit override.
+      2. Repo-root ``projects.yaml`` (this module lives at
+         ``<repo>/app/workspace/registry.py``) — the same file the MCP
+         server uses, so both surfaces always agree.
+      3. Current working directory — dev fallback.
+    """
     env_root = os.environ.get("WORKSPACE_REGISTRY_ROOT", "")
     if env_root:
         return Path(env_root).resolve()
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    if (repo_root / "projects.yaml").exists():
+        return repo_root
     return Path.cwd()
+
+
+def get_registry_root() -> Path:
+    if _registry_root is not None:
+        return _registry_root
+    return resolve_registry_root()
 
 
 # ── Default hidden / vendor / cache patterns ──────────────────────

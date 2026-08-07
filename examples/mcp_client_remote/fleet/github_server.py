@@ -18,6 +18,8 @@ from .github_client import GitHubClient, normalize_list_response
 from .shared import (
     extract_auth_token,
     get_fleet_env,
+    list_pagination_meta,
+    minimize_issue_payload,
     minimize_repo_payload,
     remote_api_error,
     tool_success,
@@ -60,7 +62,11 @@ async def github_list_branches(
     """List branches in a repository. Returns branch names and commit SHAs."""
     try:
         async with _get_client() as client:
-            data = normalize_list_response(await client.list_branches(owner, repo, per_page=per_page))
+            raw = await client.list_branches(owner, repo, per_page=per_page)
+            data = normalize_list_response(
+                raw,
+                meta=list_pagination_meta(len(raw), per_page),
+            )
     except Exception as exc:
         return remote_api_error("github_list_branches", "github", exc)
     return tool_success("github_list_branches", data, source="github")
@@ -76,9 +82,8 @@ async def github_list_commits(
     """List commits in a repository. Optionally filter by branch SHA."""
     try:
         async with _get_client() as client:
-            data = normalize_list_response(
-                await client.list_commits(owner, repo, sha=sha, per_page=per_page)
-            )
+            raw = await client.list_commits(owner, repo, sha=sha, per_page=per_page)
+            data = normalize_list_response(raw, meta=list_pagination_meta(len(raw), per_page))
     except Exception as exc:
         return remote_api_error("github_list_commits", "github", exc)
     return tool_success("github_list_commits", data, source="github")
@@ -110,8 +115,10 @@ async def github_list_issues(
     """List issues in a repository. State: open, closed, all."""
     try:
         async with _get_client() as client:
+            raw = await client.list_issues(owner, repo, state=state, per_page=per_page)
             data = normalize_list_response(
-                await client.list_issues(owner, repo, state=state, per_page=per_page)
+                [minimize_issue_payload(i, provider="github") for i in raw],
+                meta=list_pagination_meta(len(raw), per_page),
             )
     except Exception as exc:
         return remote_api_error("github_list_issues", "github", exc)
@@ -127,7 +134,8 @@ async def github_get_issue(
     """Get details of a specific issue by number."""
     try:
         async with _get_client() as client:
-            data = await client.get_issue(owner, repo, issue_number)
+            raw = await client.get_issue(owner, repo, issue_number)
+            data = minimize_issue_payload(raw, provider="github")
     except Exception as exc:
         return remote_api_error("github_get_issue", "github", exc)
     return tool_success("github_get_issue", data, source="github")
@@ -143,8 +151,10 @@ async def github_list_pull_requests(
     """List pull requests in a repository. State: open, closed, all."""
     try:
         async with _get_client() as client:
+            raw = await client.list_pull_requests(owner, repo, state=state, per_page=per_page)
             data = normalize_list_response(
-                await client.list_pull_requests(owner, repo, state=state, per_page=per_page)
+                [minimize_issue_payload(i, provider="github") for i in raw],
+                meta=list_pagination_meta(len(raw), per_page),
             )
     except Exception as exc:
         return remote_api_error("github_list_pull_requests", "github", exc)
@@ -160,7 +170,8 @@ async def github_get_pull_request(
     """Get details of a specific pull request by number."""
     try:
         async with _get_client() as client:
-            data = await client.get_pull_request(owner, repo, pull_number)
+            raw = await client.get_pull_request(owner, repo, pull_number)
+            data = minimize_issue_payload(raw, provider="github")
     except Exception as exc:
         return remote_api_error("github_get_pull_request", "github", exc)
     return tool_success("github_get_pull_request", data, source="github")

@@ -573,8 +573,27 @@ def scan_command(command: str) -> ScanReport:
     Unlike the policy engine (which returns ALLOW/BLOCK based on profile),
     scan_command returns ALL matching destructive patterns regardless of
     profile — for introspection, debugging, and CI.
+
+    The scanner is INFORMATIONAL, not an enforcement control: enforcement
+    happens in the policy gates (metachar, interpreter-shape, heredoc gates
+    in evaluate_command_policy). To reduce blind spots from shell obfuscation
+    (e.g. ``bash -c 'x=rm; $x -rf /'`` where the regex sees no literal
+    ``rm -rf /``), the command is normalized before matching: ``VAR=value``
+    assignments are resolved against ``$VAR``/``${VAR}`` references and
+    nested inline scripts (``bash -c '...'``, heredocs, ``$(...)``) are
+    extracted and scanned as separate candidates. Findings are deduplicated
+    by pattern name so the same pattern matched in multiple variants is
+    reported once.
     """
-    matches = _check_all_destructive(command)
+    from app.heredoc_scanner import normalize_scan_candidates
+
+    matches: list[DestructiveMatch] = []
+    seen_patterns: set[str] = set()
+    for candidate in normalize_scan_candidates(command):
+        for m in _check_all_destructive(candidate):
+            if m.pattern_name not in seen_patterns:
+                seen_patterns.add(m.pattern_name)
+                matches.append(m)
 
     findings = [
         ScanFinding(

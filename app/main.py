@@ -167,6 +167,14 @@ async def _audit_retention_loop(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
+    # Pin the workspace registry root to the same deterministic resolution
+    # the MCP server uses (WORKSPACE_REGISTRY_ROOT -> repo projects.yaml ->
+    # cwd). Without this the REST process silently fell back to
+    # Path.cwd(), which desynced it from the MCP registry (apply_patch ->
+    # PROJECT_NOT_FOUND for a project MCP tools could see).
+    from app.workspace.registry import resolve_registry_root, set_registry_root
+
+    set_registry_root(resolve_registry_root())
     build_info.set_started_at()
     await init_auth_db()
     state.host_key_store = create_host_key_store(settings)
@@ -1058,13 +1066,22 @@ async def ssh_exception_handler(request, exc: SSHManagerError):
     }
     # The response message stays generic (avoids echoing upstream SSH server
     # details), so _auto_code's keyword sniffing can't tell SessionNotFoundError
-    # apart from a generic 404 — pass its code explicitly instead.
+    # apart from a generic 404 — pass its code explicitly instead. The message
+    # itself is still made specific for the one case where the cause is local
+    # and unambiguous (a missing session), without leaking anything upstream.
     code_map: dict[type[SSHManagerError], str] = {SessionNotFoundError: "SESSION_NOT_FOUND"}
+    message_map: dict[type[SSHManagerError], str] = {
+        SessionNotFoundError: "SSH session not found or expired; create a new session first",
+    }
     status_code = status_map.get(type(exc), 500)
     logger.warning("SSH manager error %s: %s", type(exc).__name__, exc)
     return JSONResponse(
         status_code=status_code,
-        content=_err(status_code, "SSH operation failed", code=code_map.get(type(exc))),
+        content=_err(
+            status_code,
+            message_map.get(type(exc), "SSH operation failed"),
+            code=code_map.get(type(exc)),
+        ),
     )
 
 

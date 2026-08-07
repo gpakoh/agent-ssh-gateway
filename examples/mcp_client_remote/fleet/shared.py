@@ -58,7 +58,14 @@ class FleetEnv(TypedDict):
     port: int
 
 
-def tool_success(tool: str, result: Any, *, source: str) -> dict[str, Any]:
+def tool_success(
+    tool: str,
+    result: Any,
+    *,
+    source: str,
+    truncated: bool = False,
+    redacted: bool = False,
+) -> dict[str, Any]:
     """Return the canonical Contract v1 success envelope used by fleet tools."""
     return {
         "ok": True,
@@ -68,6 +75,8 @@ def tool_success(tool: str, result: Any, *, source: str) -> dict[str, Any]:
         "meta": {
             "contract_version": "1",
             "source": source,
+            "truncated": bool(truncated),
+            "redacted": bool(redacted),
         },
     }
 
@@ -143,10 +152,106 @@ def minimize_repo_payload(data: dict[str, Any], *, provider: str) -> dict[str, A
     }
 
 
-def remote_api_error(tool: str, source: str, exc: Exception) -> dict[str, Any]:
-    """Map a fleet adapter's client exception to a Contract v1 error.
+def minimize_user_payload(user: Any) -> dict[str, Any] | None:
+    """Return compact user metadata with no account PII.
 
-    Mirrors examples/mcp_server/server.py's _remote_api_error for the same
+    Raw Gitea issue payloads embed the full user object (email, is_admin,
+    last_login, created, restricted, active, location, website, ...); GitHub
+    embeds extensive profile/URL fields. Only login (+ full_name when
+    present) is needed to triage an issue or PR.
+    """
+    if not isinstance(user, dict):
+        return None
+    result: dict[str, Any] = {"login": user.get("login") or user.get("username")}
+    full_name = user.get("full_name")
+    if full_name:
+        result["full_name"] = full_name
+    return result
+
+
+MAX_ISSUE_BODY_CHARS = 4000
+
+
+def _truncate_body(body: str) -> tuple[str, bool]:
+    """Cap an issue/PR body to MAX_ISSUE_BODY_CHARS, returning (text, truncated).
+
+    Dependabot PR bodies can reach tens of kilobytes; dumping them whole
+    into a tool result floods the agent context (audit finding: unlimited
+    GitHub/Gitea responses). The head of the body is kept so the actual
+    change description survives; a marker notes the truncation.
+    """
+    if len(body) <= MAX_ISSUE_BODY_CHARS:
+        return body, False
+    head = body[:MAX_ISSUE_BODY_CHARS]
+    marker = f"\n\n[... truncated: {len(body)} chars > {MAX_ISSUE_BODY_CHARS} limit]"
+    return head + marker, True
+
+
+def minimize_issue_payload(data: dict[str, Any], *, provider: str) -> dict[str, Any]:
+    """Return compact issue/PR metadata without embedded user PII or noise.
+
+    Raw upstream issue/PR objects embed full user objects (email,
+    is_admin, last_login for Gitea), nested repo/milestone/label
+    structures and API URLs — a context-flooding and PII leak. This
+    allowlist keeps only what an agent needs to triage, and caps oversized
+    bodies. ``provider`` is accepted for parity with
+    ``minimize_repo_payload``; both providers share the same output shape.
+    """
+    result: dict[str, Any] = {
+        "number": data.get("number"),
+        "title": data.get("title"),
+        "state": data.get("state"),
+        "user": minimize_user_payload(data.get("user")),
+        "labels": [
+            {"name": label.get("name"), "color": label.get("color")}
+            for label in (data.get("labels") or [])
+            if isinstance(label, dict)
+        ],
+        "created_at": data.get("created_at"),
+        "updated_at": data.get("updated_at"),
+    }
+    body = data.get("body")
+    if body:
+        result["body"], result["body_truncated"] = _truncate_body(body)
+    else:
+        result["body_truncated"] = False
+    closed_at = data.get("closed_at")
+    if closed_at:
+        result["closed_at"] = closed_at
+    if data.get("comments") is not None:
+        result["comments"] = data["comments"]
+    milestone = data.get("milestone")
+    if isinstance(milestone, dict):
+        m: dict[str, Any] = {"title": milestone.get("title")}
+        if milestone.get("state"):
+            m["state"] = milestone["state"]
+        if milestone.get("due_on"):
+            m["due_on"] = milestone["due_on"]
+        result["milestone"] = m
+    assignees = data.get("assignees")
+    if isinstance(assignees, list):
+        result["assignees"] = [minimize_user_payload(a) for a in assignees]
+    elif isinstance(data.get("assignee"), dict):
+        result["assignees"] = [minimize_user_payload(data.get("assignee"))]
+    if data.get("html_url"):
+        result["html_url"] = data["html_url"]
+    if isinstance(data.get("pull_request"), dict):
+        result["pull_request"] = True
+    if data.get("draft") is not None:
+        result["draft"] = bool(data["draft"])
+    for ref_key in ("head", "base"):
+        ref = data.get(ref_key)
+        if isinstance(ref, dict):
+            result[ref_key] = {
+                "label": ref.get("label"),
+                "ref": ref.get("ref"),
+                "sha": ref.get("sha"),
+            }
+    return result
+
+
+def remote_api_error(tool: str, source: str, exc: Exception) -> dict[str, Any]:
+    """Mirrors examples/mcp_server/server.py's _remote_api_error for the same
     GiteaClient/GitHubClient exception vocabulary (ValueError for bad
     input, PermissionError for 401/403, httpx.HTTPStatusError for any
     other non-2xx e.g. a 404 on a typo'd repo/issue number -- none of
@@ -206,6 +311,21 @@ def normalize_list_response(
             result.update(meta)
         return result
     return {"items": [], "count": 0, "error": "unexpected response type"}
+
+
+def list_pagination_meta(count: int, per_page: int) -> dict[str, Any]:
+    """Pagination metadata for a single-page list result.
+
+    ``truncated`` is computed from what was actually fetched: a page that
+    came back with fewer than ``per_page`` items is reliably the last one,
+    while a full page may have a successor. Always includes ``page`` so a
+    client that later adds page-based navigation can rely on the shape.
+    """
+    return {
+        "page": 1,
+        "per_page": per_page,
+        "truncated": count >= per_page,
+    }
 
 
 def resolve_docker_host(hostname: str, network: str = "internal_net") -> str:

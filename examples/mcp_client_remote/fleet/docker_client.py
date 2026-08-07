@@ -74,9 +74,110 @@ _SECRET_DICT_KEY_RE = re.compile(
 # doesn't look secret-ish (e.g. DATABASE_URL, REDIS_URL).
 _DSN_CREDENTIAL_RE = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^:/\s@]+:)([^@\s]+)(@)")
 
+# Strict allowlist for `docker inspect` output. Everything not listed here is
+# dropped, so host topology (GraphDriver paths, ResolvConfPath/HostsPath/
+# LogPath, PID, internal IPs/MACs, network/endpoint IDs, compose working
+# dirs) can never leak through a field the sanitizer simply forgot about —
+# a blacklist approach has to enumerate every leaky field, an allowlist
+# only has to enumerate what an agent legitimately needs.
+_INSPECT_TOP_LEVEL_ALLOW: frozenset[str] = frozenset(
+    {
+        "Id",
+        "Name",
+        "Created",
+        "Image",
+        "RestartCount",
+        "Driver",
+        "Platform",
+        "State",
+        "Config",
+        "HostConfig",
+        "Mounts",
+        "NetworkSettings",
+    }
+)
+
+_INSPECT_STATE_ALLOW: frozenset[str] = frozenset(
+    {
+        "Status",
+        "Running",
+        "ExitCode",
+        "Error",
+        "StartedAt",
+        "FinishedAt",
+        "Health",
+    }
+)
+_INSPECT_HEALTH_ALLOW: frozenset[str] = frozenset({"Status", "FailingStreak"})
+
+_INSPECT_CONFIG_ALLOW: frozenset[str] = frozenset(
+    {
+        "Image",
+        "Cmd",
+        "Entrypoint",
+        "WorkingDir",
+        "ExposedPorts",
+        "User",
+        "Tty",
+        "OpenStdin",
+        "StopSignal",
+        "StopTimeout",
+        "Labels",
+    }
+)
+
+_INSPECT_HOSTCONFIG_ALLOW: frozenset[str] = frozenset(
+    {
+        "RestartPolicy",
+        "NetworkMode",
+        "PortBindings",
+        "PublishAllPorts",
+        "Privileged",
+        "ReadonlyRootfs",
+        "AutoRemove",
+        "Init",
+        "Runtime",
+        "UsernsMode",
+        "Memory",
+        "NanoCpus",
+        "CpuShares",
+        "CpuQuota",
+        "CpusetCpus",
+        "MemorySwap",
+        "MemoryReservation",
+        "LogConfig",
+        "Binds",
+        "CapAdd",
+        "CapDrop",
+        "Devices",
+    }
+)
+
+_INSPECT_MOUNT_ALLOW: frozenset[str] = frozenset(
+    {
+        "Type",
+        "Name",
+        "Destination",
+        "RW",
+        "Mode",
+        "Propagation",
+        "Source",
+    }
+)
+
+# NetworkSettings.Networks carries NetworkID/EndpointID/IPAddress/MacAddress/
+# Gateway per network — host topology. Only the published-port map survives.
+_INSPECT_NETWORK_ALLOW: frozenset[str] = frozenset({"Ports"})
+
 
 class DockerClient:
     """Read-only async subprocess wrapper for /usr/bin/docker."""
+
+    def __init__(self) -> None:
+        # Set by the row-list methods after _truncate_rows: True when the
+        # returned rows were cut short of the full set. The tool wrappers
+        # read it back into meta.truncated.
+        self.last_truncated: bool = False
 
     async def _run(
         self,
@@ -251,7 +352,9 @@ class DockerClient:
         """List containers as structured rows (docker's native --format json,
         one object per line). `format` overrides with a raw Go template and
         returns the raw string instead, for callers that need a specific
-        legacy shape."""
+        legacy shape. Host paths inside Labels/Mounts are redacted; when
+        *limit* cuts the list short, `self.last_truncated` is set so the
+        wrapper can report it."""
         argv = [DOCKER_BIN, "ps"]
         if all:
             argv.append("--all")
@@ -260,8 +363,9 @@ class DockerClient:
             return await self._run(argv)
         argv.extend(["--format", "json"])
         result = await self._run(argv)
-        rows, _total = self._truncate_rows(self._parse_json_lines(result), limit)
-        return rows
+        rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
+        self.last_truncated = total > len(rows)
+        return [self._sanitize_ps_row(r) for r in rows]
 
     async def images(
         self,
@@ -274,7 +378,8 @@ class DockerClient:
             return await self._run(argv)
         argv.extend(["--format", "json"])
         result = await self._run(argv)
-        rows, _total = self._truncate_rows(self._parse_json_lines(result), limit)
+        rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
+        self.last_truncated = total > len(rows)
         return rows
 
     async def inspect(
@@ -297,18 +402,22 @@ class DockerClient:
         return data
 
     def _sanitize_inspect_output(self, raw: str) -> list | dict:
-        """Redact secrets from docker inspect JSON output and return the
-        parsed, sanitized structure (not a re-serialized string).
+        """Parse docker inspect JSON and reduce it to a strict allowlist.
 
-        Strips Config.Env entirely (lists all env vars with values) and hides
-        host source paths in Mounts.  Also applies key-level redaction as a
-        defense-in-depth measure for any remaining sensitive keys.
+        The raw structure carries host topology the sanitizer has no
+        business exposing: GraphDriver overlay paths, ResolvConfPath/
+        HostnamePath/HostsPath/LogPath, State.Pid, NetworkSettings
+        IPs/MACs/NetworkIDs/EndpointIDs and compose working-dir labels.
+        Rather than blacklisting each known leaky field, every top-level
+        and nested section keeps only the explicitly allowed keys and
+        drops the rest. Remaining values still pass through the generic
+        key-level secret redaction as defense-in-depth.
         """
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
             return {"raw": raw}
-        data = self._strip_container_secrets(data)
+        data = self._apply_inspect_allowlist(data)
         # _sanitize_value(x: object) -> object is intentionally generic for
         # its own recursion (it walks into arbitrary nested values), but at
         # this top level `data` is always the list/dict json.loads() just
@@ -316,31 +425,110 @@ class DockerClient:
         # dict/list inputs -- cast narrows what mypy can't infer structurally.
         return cast("list | dict", self._sanitize_value(data))
 
-    def _strip_container_secrets(self, data: object) -> object:
-        """Strip secrets from top-level container inspect entries.
+    @staticmethod
+    def _subset(value: object, allowed: frozenset[str]) -> dict[str, object]:
+        """Keep only *allowed* keys of a dict; non-dicts come back empty."""
+        if not isinstance(value, dict):
+            return {}
+        return {k: v for k, v in value.items() if k in allowed}
 
-        Walks the docker inspect result list (or single object) and:
-          - removes Config.Env entirely
-          - replaces Mounts[*].Source with '<redacted>'
+    @staticmethod
+    def _redact_path_labels(labels: dict[str, object]) -> dict[str, object]:
+        """Redact label values that are absolute host paths.
+
+        Compose stamps labels like com.docker.compose.project.config_files
+        and com.docker.compose.project.working_dir with absolute host
+        paths; keep the label (its name is useful) but hide the path.
         """
-        entries = data if isinstance(data, list) else [data]
-        for entry in entries:
-            if not isinstance(entry, dict):
+        return {
+            k: (REDACTED if isinstance(v, str) and v.startswith("/") else v)
+            for k, v in labels.items()
+        }
+
+    def _allowlist_entry(self, entry: dict) -> dict:
+        """Reduce one docker inspect container entry to the allowlist."""
+        out: dict = {}
+        for key in _INSPECT_TOP_LEVEL_ALLOW:
+            if key not in entry:
                 continue
-            config = entry.get("Config")
-            if isinstance(config, dict):
-                config.pop("Env", None)
-            mounts = entry.get("Mounts")
-            if isinstance(mounts, list):
-                for m in mounts:
-                    if isinstance(m, dict) and "Source" in m:
-                        m["Source"] = REDACTED
-            host_config = entry.get("HostConfig")
-            if isinstance(host_config, dict):
-                binds = host_config.get("Binds")
-                if isinstance(binds, list):
+            value = entry[key]
+            if key == "State":
+                state = self._subset(value, _INSPECT_STATE_ALLOW)
+                health = state.get("Health")
+                if isinstance(health, dict):
+                    state["Health"] = self._subset(health, _INSPECT_HEALTH_ALLOW)
+                out["State"] = state
+            elif key == "Config":
+                config = self._subset(value, _INSPECT_CONFIG_ALLOW)
+                labels = config.get("Labels")
+                if isinstance(labels, dict):
+                    config["Labels"] = self._redact_path_labels(labels)
+                out["Config"] = config
+            elif key == "HostConfig":
+                host_config = self._subset(value, _INSPECT_HOSTCONFIG_ALLOW)
+                if "Binds" in host_config:
                     host_config["Binds"] = [REDACTED]
-        return data
+                out["HostConfig"] = host_config
+            elif key == "Mounts":
+                mounts = value if isinstance(value, list) else []
+                out["Mounts"] = [self._allowlist_mount(m) for m in mounts if isinstance(m, dict)]
+            elif key == "NetworkSettings":
+                out["NetworkSettings"] = self._subset(value, _INSPECT_NETWORK_ALLOW)
+            else:
+                out[key] = value
+        return out
+
+    def _allowlist_mount(self, mount: dict) -> dict:
+        """Keep mount metadata but redact the host-side Source path."""
+        out = self._subset(mount, _INSPECT_MOUNT_ALLOW)
+        if "Source" in out:
+            out["Source"] = REDACTED
+        return out
+
+    def _apply_inspect_allowlist(self, data: object) -> object:
+        """Apply the strict allowlist to a full inspect result (list or single dict)."""
+        entries = data if isinstance(data, list) else [data]
+        cleaned = [self._allowlist_entry(e) for e in entries if isinstance(e, dict)]
+        if isinstance(data, list):
+            return cleaned
+        return cleaned[0] if cleaned else {}
+
+    @staticmethod
+    def _sanitize_labels_string(labels: str) -> str:
+        """Redact absolute-path values inside a docker ps Labels string.
+
+        `docker ps --format json` renders Labels as one comma-separated
+        "k=v" string; compose values like project.config_files=/media/...
+        would otherwise leak host paths.
+        """
+        parts: list[str] = []
+        for chunk in labels.split(","):
+            if "=" in chunk:
+                key, _, value = chunk.partition("=")
+                if value.startswith("/"):
+                    value = REDACTED
+                parts.append(f"{key}={value}")
+            else:
+                parts.append(chunk)
+        return ",".join(parts)
+
+    @staticmethod
+    def _sanitize_ps_row(row: dict) -> dict:
+        """Reduce one `docker ps --format json` row to safe fields.
+
+        Drops nothing structural but redacts host paths that ride along in
+        the Labels string (compose config_files/working_dir) and bind-mount
+        sources in the Mounts string — the same topology leak the inspect
+        allowlist kills structurally.
+        """
+        out = dict(row)
+        labels = out.get("Labels")
+        if isinstance(labels, str) and labels:
+            out["Labels"] = DockerClient._sanitize_labels_string(labels)
+        mounts = out.get("Mounts")
+        if isinstance(mounts, str) and mounts.startswith("/"):
+            out["Mounts"] = REDACTED
+        return out
 
     def _sanitize_value(self, value: object) -> object:
         """Recursively sanitize a JSON value, redacting secrets."""
@@ -407,7 +595,8 @@ class DockerClient:
             return await self._run(argv, timeout=60.0)
         argv.extend(["--format", "json"])
         result = await self._run(argv, timeout=60.0)
-        rows, _total = self._truncate_rows(self._parse_json_lines(result), limit)
+        rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
+        self.last_truncated = total > len(rows)
         return rows
 
     async def compose_ps(
@@ -424,8 +613,9 @@ class DockerClient:
             return await self._run(argv, timeout=60.0)
         argv.extend(["--format", "json"])
         result = await self._run(argv, timeout=60.0)
-        rows, _total = self._truncate_rows(self._parse_json_lines(result), limit)
-        return rows
+        rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
+        self.last_truncated = total > len(rows)
+        return [self._sanitize_ps_row(r) for r in rows]
 
     async def compose_services(
         self,

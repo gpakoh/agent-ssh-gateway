@@ -47,7 +47,7 @@ def search_text(
     max_file_size_bytes: int = _MAX_FILE_SIZE_BYTES_DEFAULT,
 ) -> dict[str, Any]:
     if not query:
-        return _empty_result(query, root)
+        return _empty_result(query)
 
     root_path = Path(root).resolve()
 
@@ -123,7 +123,6 @@ def search_text(
 
     result: dict[str, Any] = {
         "query": query,
-        "root": str(root_path),
         "count": len(matches),
         "matches": matches,
         "truncated": truncated,
@@ -136,10 +135,9 @@ def search_text(
     return result
 
 
-def _empty_result(query: str, root: str | Path) -> dict[str, Any]:
+def _empty_result(query: str) -> dict[str, Any]:
     result: dict[str, Any] = {
         "query": query,
-        "root": str(Path(root).resolve()) if root else "",
         "count": 0,
         "matches": [],
         "truncated": False,

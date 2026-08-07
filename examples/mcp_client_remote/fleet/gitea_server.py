@@ -18,6 +18,8 @@ from .gitea_client import GiteaClient
 from .shared import (
     extract_auth_token,
     get_fleet_env,
+    list_pagination_meta,
+    minimize_issue_payload,
     minimize_repo_payload,
     normalize_list_response,
     remote_api_error,
@@ -59,7 +61,8 @@ async def gitea_list_branches(
     """List branches in a repository. Returns branch names and commit SHAs."""
     try:
         async with _get_client() as client:
-            data = normalize_list_response(await client.list_branches(owner, repo, limit=limit))
+            raw = await client.list_branches(owner, repo, limit=limit)
+            data = normalize_list_response(raw, meta=list_pagination_meta(len(raw), limit))
     except Exception as exc:
         return remote_api_error("gitea_list_branches", "gitea", exc)
     return tool_success("gitea_list_branches", data, source="gitea")
@@ -75,9 +78,8 @@ async def gitea_list_commits(
     """List commits in a repository. Optionally filter by branch SHA."""
     try:
         async with _get_client() as client:
-            data = normalize_list_response(
-                await client.list_commits(owner, repo, sha=sha, limit=limit)
-            )
+            raw = await client.list_commits(owner, repo, sha=sha, limit=limit)
+            data = normalize_list_response(raw, meta=list_pagination_meta(len(raw), limit))
     except Exception as exc:
         return remote_api_error("gitea_list_commits", "gitea", exc)
     return tool_success("gitea_list_commits", data, source="gitea")
@@ -109,8 +111,10 @@ async def gitea_list_issues(
     """List issues in a repository. State: open, closed, all."""
     try:
         async with _get_client() as client:
+            raw = await client.list_issues(owner, repo, state=state, limit=limit)
             data = normalize_list_response(
-                await client.list_issues(owner, repo, state=state, limit=limit)
+                [minimize_issue_payload(i, provider="gitea") for i in raw],
+                meta=list_pagination_meta(len(raw), limit),
             )
     except Exception as exc:
         return remote_api_error("gitea_list_issues", "gitea", exc)
@@ -126,7 +130,8 @@ async def gitea_get_issue(
     """Get details of a specific issue by number."""
     try:
         async with _get_client() as client:
-            data = await client.get_issue(owner, repo, issue_number)
+            raw = await client.get_issue(owner, repo, issue_number)
+            data = minimize_issue_payload(raw, provider="gitea")
     except Exception as exc:
         return remote_api_error("gitea_get_issue", "gitea", exc)
     return tool_success("gitea_get_issue", data, source="gitea")
@@ -142,8 +147,10 @@ async def gitea_list_pull_requests(
     """List pull requests in a repository. State: open, closed, all."""
     try:
         async with _get_client() as client:
+            raw = await client.list_pull_requests(owner, repo, state=state, limit=limit)
             data = normalize_list_response(
-                await client.list_pull_requests(owner, repo, state=state, limit=limit)
+                [minimize_issue_payload(i, provider="gitea") for i in raw],
+                meta=list_pagination_meta(len(raw), limit),
             )
     except Exception as exc:
         return remote_api_error("gitea_list_pull_requests", "gitea", exc)
@@ -159,7 +166,8 @@ async def gitea_get_pull_request(
     """Get details of a specific pull request by number."""
     try:
         async with _get_client() as client:
-            data = await client.get_pull_request(owner, repo, pull_number)
+            raw = await client.get_pull_request(owner, repo, pull_number)
+            data = minimize_issue_payload(raw, provider="gitea")
     except Exception as exc:
         return remote_api_error("gitea_get_pull_request", "gitea", exc)
     return tool_success("gitea_get_pull_request", data, source="gitea")

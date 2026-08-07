@@ -126,6 +126,16 @@ def _new_file_patch(rel_path: str, lines: list[str]) -> str:
     )
 
 
+def _delete_patch(rel_path: str, lines: list[str]) -> str:
+    body = "".join(f"-{line}\n" for line in lines)
+    return (
+        f"--- a/{rel_path}\n"
+        f"+++ /dev/null\n"
+        f"@@ -1,{len(lines)} +0,0 @@\n"
+        f"{body}"
+    )
+
+
 @pytest.mark.asyncio
 async def test_rollback_removes_newly_created_file_not_leaves_it_empty(tmp_path, monkeypatch):
     """Regression: when a patch creates a brand-new file (didn't exist
@@ -191,3 +201,82 @@ async def test_unknown_project_raises(monkeypatch):
             strip=0,
             dry_run=True,
         )
+
+
+@pytest.mark.asyncio
+async def test_dev_null_deletes_file(tmp_path, monkeypatch):
+    """Regression: a unified diff whose target is `/dev/null` (git's
+    convention for "file deleted") must DELETE the file. Before the fix the
+    REST surface applied the patch in memory to an empty string and wrote a
+    0-byte file instead of deleting anything.
+    """
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    target = project_root / "victim.txt"
+    target.write_text("line1\nline2\nline3\n", encoding="utf-8")
+
+    registry = _make_registry(tmp_path, project_root)
+    monkeypatch.setattr("app.workspace.registry.get_registry", lambda *a, **k: registry)
+
+    patch = _delete_patch("victim.txt", ["line1", "line2", "line3"])
+
+    result = await apply_project_patch(
+        "myproj",
+        patch=patch,
+        strip=0,
+        dry_run=False,
+    )
+
+    assert result.success is True
+    assert not target.exists(), (
+        f"deletion patch must remove the file, not leave a 0-byte one "
+        f"(exists={target.exists()})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_dev_null_delete_rollback_restores_deleted_file(tmp_path, monkeypatch):
+    """Regression: when a patch deletes file A and a LATER file B in the
+    same batch fails to write, rollback must restore A from its backup.
+    Before the fix, deletion was not supported at all, so this scenario
+    (delete + failing sibling) never produced a restored file.
+    """
+    import os as os_module
+    from pathlib import Path as PathCls
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    victim = project_root / "victim.txt"
+    victim.write_text("line1\nline2\nline3\n", encoding="utf-8")
+
+    registry = _make_registry(tmp_path, project_root)
+    monkeypatch.setattr("app.workspace.registry.get_registry", lambda *a, **k: registry)
+
+    patch = "\n".join(
+        [
+            _delete_patch("victim.txt", ["line1", "line2", "line3"]).rstrip("\n"),
+            _new_file_patch("second.txt", ["world"]).rstrip("\n"),
+        ]
+    ) + "\n"
+
+    real_rename = os_module.rename
+
+    def _flaky_rename(src, dst):
+        if str(src).endswith(".tmp") and PathCls(dst).name == "second.txt":
+            raise OSError("simulated write failure for second.txt")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr("app.services.project_patch.os.rename", _flaky_rename)
+
+    result = await apply_project_patch(
+        "myproj",
+        patch=patch,
+        strip=0,
+        dry_run=False,
+    )
+
+    assert result.success is False
+    assert victim.read_text(encoding="utf-8") == "line1\nline2\nline3\n", (
+        "rollback must restore a deleted file from its backup"
+    )
+    assert not (project_root / "second.txt").exists()
