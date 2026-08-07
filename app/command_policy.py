@@ -585,7 +585,8 @@ def scan_command(command: str) -> ScanReport:
     by pattern name so the same pattern matched in multiple variants is
     reported once.
     """
-    from app.heredoc_scanner import normalize_scan_candidates
+    from app.ast_matcher import check_ast
+    from app.heredoc_scanner import extract_python_scripts, normalize_scan_candidates
 
     matches: list[DestructiveMatch] = []
     seen_patterns: set[str] = set()
@@ -594,6 +595,21 @@ def scan_command(command: str) -> ScanReport:
             if m.pattern_name not in seen_patterns:
                 seen_patterns.add(m.pattern_name)
                 matches.append(m)
+
+    # AST pass over extracted Python bodies: regex packs cannot see
+    # ``shutil.rmtree`` behind an import, the AST matcher can.
+    for script in extract_python_scripts(command):
+        for m in check_ast(script, "python"):
+            if m.rule_id not in seen_patterns:
+                seen_patterns.add(m.rule_id)
+                matches.append(
+                    DestructiveMatch(
+                        pattern_name=m.rule_id,
+                        reason=m.reason,
+                        severity=Severity(m.severity.value),
+                        suggestion=m.suggestion,
+                    )
+                )
 
     findings = [
         ScanFinding(

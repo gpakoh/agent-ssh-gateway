@@ -235,6 +235,25 @@ def extract_all(command: str) -> list[ExtractedCommand]:
     return deduped
 
 
+def extract_python_scripts(command: str) -> list[str]:
+    """Return deduplicated Python script bodies extracted from a command.
+
+    Pulls ``python -c '...'`` inline scripts (and any other extractor that
+    tagged a body as ``language == "python"``) so callers can run the AST
+    matcher over them — regex packs cannot see ``shutil.rmtree`` behind an
+    import.
+    """
+    seen: set[str] = set()
+    scripts: list[str] = []
+    for ec in extract_all(command):
+        if ec.language != "python":
+            continue
+        if ec.script not in seen:
+            seen.add(ec.script)
+            scripts.append(ec.script)
+    return scripts
+
+
 # ---------------------------------------------------------------------------
 # Recursive scanning
 # ---------------------------------------------------------------------------
