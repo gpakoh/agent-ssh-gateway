@@ -560,12 +560,23 @@ def _build_readonly_fallback_script(
 ) -> str:
     """Build a script that sets up a writable temp project for read-only mounts.
 
-    Reuses a cached venv in /tmp/.mcp-test/<name>-<hash>/ if it already exists
-    and pyproject.toml hasn't changed (by comparing a stamp file).  Only runs
-    ``uv sync`` on first call or when deps change.
+    Reuses a cached venv in /tmp/.mcp-test/<name>-<hash>-u<uid>-<user>/ if it
+    already exists and pyproject.toml hasn't changed (by comparing a stamp
+    file).  Only runs ``uv sync`` on first call or when deps change.
+
+    The cache key is scoped by the remote UID/user identity (not just the
+    project path hash): two SSH identities sharing the same read-only
+    project path must not share a writable venv, or one user's chmod'd
+    interpreter breaks the other's run.  A stale/broken .venv (dangling
+    interpreter symlink, unreadable base python, partial sync) is detected
+    by a probe and removed before the next sync, so a poisoned cache never
+    persists past the following invocation.
     """
     project_hash = hashlib.sha1(project_dir.encode("utf-8")).hexdigest()[:8]
-    tmp_root = f"/tmp/.mcp-test/{Path(project_dir).name}-{project_hash}"
+    tmp_root = (
+        f"/tmp/.mcp-test/{Path(project_dir).name}-{project_hash}"
+        f"-u${{_MCP_UID}}-${{_MCP_USER}}"
+    )
     abs_targets = []
     for t in targets:
         p = Path(t)
@@ -576,6 +587,8 @@ def _build_readonly_fallback_script(
 
     lines = [
         "set -eu",
+        '_MCP_UID="$(id -u)"',
+        '_MCP_USER="$(id -un)"',
         f"export WORKSPACE_REGISTRY_ROOT={shlex.quote(project_dir)}",
         f"mkdir -p {tmp_root}",
         f"cp {project_dir}/pyproject.toml {tmp_root}/pyproject.toml.new",
@@ -585,6 +598,14 @@ def _build_readonly_fallback_script(
         "if [ ! -f $STAMP ]; then NEED_SYNC=1; fi",
         f"if ! diff -q {tmp_root}/pyproject.toml.new {tmp_root}/pyproject.toml >/dev/null 2>&1; then NEED_SYNC=1; fi",
         f"if [ -f {project_dir}/uv.lock ] && ! diff -q {project_dir}/uv.lock {tmp_root}/uv.lock >/dev/null 2>&1; then NEED_SYNC=1; fi",
+        # Stale/broken venv (dangling interpreter symlink, unreadable base
+        # python, partial sync from a killed run) must not be reused: probe
+        # the interpreter and, when broken, drop the whole cache and resync.
+        f"if [ ! -x {tmp_root}/.venv/bin/python3 ] || [ ! -r {tmp_root}/.venv/bin/python3 ]; then",
+        "  NEED_SYNC=1",
+        f"  if [ -e {tmp_root}/.venv ]; then rm -rf {tmp_root}/.venv; fi",
+        "  rm -f $STAMP",
+        "fi",
         "if [ $NEED_SYNC -eq 1 ]; then",
         f"  cp {tmp_root}/pyproject.toml.new {tmp_root}/pyproject.toml",
         f"  test -f {project_dir}/setup.cfg && cp {project_dir}/setup.cfg {tmp_root}/ || true",

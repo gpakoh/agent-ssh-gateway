@@ -158,6 +158,44 @@ class TestReadOnlyFallbackNoPathTraversal:
         assert "proj" in root_a1, "tmp_root should stay human-readable"
         assert root_a1.startswith("/tmp/.mcp-test/")
 
+    def test_readonly_fallback_tmp_root_scoped_by_remote_identity(self):
+        """Regression (audit P0-3): the cache key must include the remote
+        UID/user identity. Two SSH identities sharing the same project path
+        (e.g. the read-only sshd container) previously reused one shared
+        /tmp/.mcp-test/<name>-<hash> venv — a chmod'd/foreign interpreter
+        then killed the other user's run_tests with Permission denied. The
+        script must derive the identity on the target and embed it in
+        tmp_root.
+        """
+        from mcp_client_tools import _build_readonly_fallback_script
+
+        script = _build_readonly_fallback_script("pytest", "/project", ["tests"])
+        assert '_MCP_UID="$(id -u)"' in script
+        assert '_MCP_USER="$(id -un)"' in script
+        root_lines = [
+            ln for ln in script.splitlines() if ln.startswith("mkdir -p /tmp/.mcp-test/")
+        ]
+        assert root_lines, "expected tmp_root mkdir"
+        root = root_lines[0].split()[-1]
+        assert "-u${_MCP_UID}-${_MCP_USER}" in root
+
+    def test_readonly_fallback_rebuilds_broken_venv(self):
+        """Regression (audit P0-3): a stale/broken cached venv (dangling
+        interpreter symlink, unreadable base python, partial sync from a
+        killed run) must be detected and dropped before resync — the poison
+        must not persist past the next invocation.
+        """
+        from mcp_client_tools import _build_readonly_fallback_script
+
+        script = _build_readonly_fallback_script("pytest", "/project", ["tests"])
+        probe = [
+            ln for ln in script.splitlines() if ".venv/bin/python3" in ln and "! -x" in ln
+        ]
+        assert probe, "expected interpreter health probe"
+        cleanup = [ln for ln in script.splitlines() if "rm -rf" in ln and ".venv" in ln]
+        assert cleanup, "broken .venv must be removed before resync"
+        assert "rm -f $STAMP" in script, "stamp must be cleared with a broken venv"
+
     def test_readonly_fallback_symlinks_use_scoped_tmp_root(self):
         """The app/tests symlinks must be created inside the scoped tmp_root
         so a project never links the previous tenant's code from a
