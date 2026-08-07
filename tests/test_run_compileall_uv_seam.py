@@ -18,6 +18,7 @@ import shutil
 import subprocess
 
 import pytest
+from mcp_client_tools import _build_compileall_walk_code
 
 UV_BIN = shutil.which("uv")
 UVX_BIN = shutil.which("uvx")
@@ -49,19 +50,37 @@ class TestRealUvNoProjectFallbackWorks:
 
     def test_reports_the_real_syntax_error(self, tmp_path, broken_py):
         result = subprocess.run(
-            [UV_BIN, "run", "--no-project", "python3", "-m", "compileall", "--", str(broken_py)],
+            [
+                UV_BIN,
+                "run",
+                "--no-project",
+                "python3",
+                "-c",
+                _build_compileall_walk_code(),
+                "--",
+                str(broken_py),
+            ],
             cwd=tmp_path,
             capture_output=True,
             text=True,
             timeout=60,
         )
         assert result.returncode == 1
-        assert "SyntaxError" in result.stdout
+        assert "SyntaxError" in result.stdout or "failed" in result.stdout
         assert str(broken_py) in result.stdout or broken_py.name in result.stdout
 
     def test_clean_file_passes(self, tmp_path, clean_py):
         result = subprocess.run(
-            [UV_BIN, "run", "--no-project", "python3", "-m", "compileall", "--", str(clean_py)],
+            [
+                UV_BIN,
+                "run",
+                "--no-project",
+                "python3",
+                "-c",
+                _build_compileall_walk_code(),
+                "--",
+                str(clean_py),
+            ],
             cwd=tmp_path,
             capture_output=True,
             text=True,

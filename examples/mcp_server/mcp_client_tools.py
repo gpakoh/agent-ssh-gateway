@@ -109,31 +109,103 @@ def _execution_duration_ms(raw: dict[str, Any]) -> int | None:
     return None
 
 
-def _limit_output(output: str) -> str:
-    lines = output.splitlines()
-    if len(lines) > _OUTPUT_LINE_LIMIT:
-        lines = lines[:_OUTPUT_LINE_LIMIT]
-        lines.append(f"[... truncated to {_OUTPUT_LINE_LIMIT} lines]")
-    return "\n".join(lines)
-
-
 # ── uv runner helpers ───────────────────────────────────────────
 
 _UV_TOOL_MAP: dict[str, list[str]] = {
     "ruff": ["ruff", "check"],
     "mypy": ["mypy"],
     "pytest": ["pytest"],
-    "compileall": ["python", "-m", "compileall"],
 }
 
-# compileall -x regex: skip service dirs when walking a tree. Without it,
-# "run_compileall" with no explicit target walks .git, .venv (and nested
-# venvs), caches and __pycache__ — tens of seconds of useless work and a
-# huge useless stdout. The regex anchors on path segments.
-COMPILEALL_EXCLUDE_RE = (
-    r"(^|/)(\.git|\.venv|venv|node_modules|__pycache__|\.mypy_cache|"
-    r"\.pytest_cache|\.ruff_cache|\.tox|\.benchmarks)(/|$)"
-)
+# compileall is not uvx-installable, so it is handled separately (Python
+# walk below) instead of living in _UV_TOOL_MAP.
+
+# Directories pruned at the walk level when compiling a tree. The stdlib
+# compileall -x regex only filters files — it still descends into .git,
+# .venv (and nested venvs), caches and node_modules, wasting I/O on
+# thousands of files. Pruning the dirs list avoids the descent entirely.
+_COMPILEALL_EXCLUDED_DIRS = frozenset({
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".benchmarks",
+})
+
+_COMPILEALL_WALK_TEMPLATE = """\
+import compileall
+import os
+import py_compile
+import sys
+
+_EXCLUDED = {excluded}
+_LIMIT = {limit}
+
+def _compile_one(path):
+    try:
+        ok = compileall.compile_file(path, quiet=1)
+    except compileall.PyCompileError:
+        ok = False
+    if not ok:
+        try:
+            py_compile.compile(path, doraise=True)
+        except py_compile.PyCompileError as exc:
+            return False, "%s: %s" % (path, exc)
+        return False, "%s: failed to compile" % path
+    return True, "Compiling '%s'..." % path
+
+def _main() -> int:
+    out = []
+    failed = 0
+    for root in sys.argv[1:]:
+        if os.path.isfile(root):
+            ok, line = _compile_one(root)
+            if not ok:
+                failed += 1
+            if len(out) < _LIMIT:
+                out.append(line)
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(d for d in dirnames if d not in _EXCLUDED)
+            for name in sorted(filenames):
+                if not name.endswith(".py"):
+                    continue
+                path = os.path.join(dirpath, name)
+                ok, line = _compile_one(path)
+                if not ok:
+                    failed += 1
+                if len(out) < _LIMIT:
+                    out.append(line)
+    if len(out) > _LIMIT:
+        out = out[:_LIMIT] + ["[... output truncated to %d lines]" % _LIMIT]
+    if out:
+        sys.stdout.write("\\n".join(out) + "\\n")
+    return 1 if failed else 0
+
+sys.exit(_main())
+"""
+
+
+def _build_compileall_walk_code() -> str:
+    """Inline Python that walks targets pruning service dirs and caps output.
+
+    Runs on the SSH target via ``python -c`` (compileall is stdlib, no
+    uvx package), so the excluded-dir list and the line limit are baked in
+    at build time.
+    """
+    return _COMPILEALL_WALK_TEMPLATE.format(
+        excluded=repr(sorted(_COMPILEALL_EXCLUDED_DIRS)),
+        limit=_OUTPUT_LINE_LIMIT,
+    )
+
+
+def _compileall_command() -> list[str]:
+    return ["python", "-c", _build_compileall_walk_code()]
 
 
 def _validate_targets(project_dir: str, targets: list[str]) -> list[str]:
@@ -159,14 +231,12 @@ def _validate_targets(project_dir: str, targets: list[str]) -> list[str]:
 
 def _build_uv_argv(tool: str, project_dir: str, targets: list[str]) -> list[str]:
     """Build argv list for ``uv run <tool>``. Validates targets first."""
-    if tool not in _UV_TOOL_MAP:
+    if tool not in _UV_TOOL_MAP and tool != "compileall":
         raise ValueError(f"INVALID_INPUT: unknown tool '{tool}'")
     if not targets:
         raise ValueError("INVALID_INPUT: at least one target required")
     validated = _validate_targets(project_dir, targets)
-    cmd = _UV_TOOL_MAP[tool]
-    if tool == "compileall":
-        cmd = cmd + ["-x", COMPILEALL_EXCLUDE_RE]
+    cmd = _compileall_command() if tool == "compileall" else _UV_TOOL_MAP[tool]
     return ["uv", "run", "--frozen", "--directory", project_dir, "--"] + cmd + ["--"] + validated
 
 
@@ -806,10 +876,8 @@ def _run_uv_tool(
                     "run",
                     "--no-project",
                     "python3",
-                    "-m",
-                    "compileall",
-                    "-x",
-                    COMPILEALL_EXCLUDE_RE,
+                    "-c",
+                    _build_compileall_walk_code(),
                     "--",
                     *targets,
                 ],
