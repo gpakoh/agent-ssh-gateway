@@ -495,3 +495,43 @@ class TestApplyPatch:
             )
         content = (edit_workspace["project"] / "src" / "main.py").read_text()
         assert "INJECTED" not in content
+
+    def test_dev_null_deletes_file(self, edit_workspace):
+        """Regression: a unified diff whose target is `/dev/null` (the git
+        convention for "file deleted") must DELETE the file, not write it as
+        a 1-byte newline. Before the fix, _apply_hunks() left the file
+        present with content "\n" (trailing-newline preservation on an
+        empty result).
+        """
+        patch = """\
+--- a/README.md
++++ /dev/null
+@@ -1 +0,0 @@
+-# Edit Project
+"""
+        result = project_apply_patch(
+            "edit-project",
+            "README.md",
+            patch,
+            registry=edit_workspace["registry"],
+        )
+        assert result["applied"] is True
+        assert not (edit_workspace["project"] / "README.md").exists()
+
+    def test_dev_null_missing_file_rejected(self, edit_workspace):
+        """Deleting a file that does not exist must raise, not silently
+        succeed.
+        """
+        patch = """\
+--- a/ghost.py
++++ /dev/null
+@@ -1 +0,0 @@
+-anything
+"""
+        with pytest.raises(WorkspacePolicyError, match="not found"):
+            project_apply_patch(
+                "edit-project",
+                "ghost.py",
+                patch,
+                registry=edit_workspace["registry"],
+            )

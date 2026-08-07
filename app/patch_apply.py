@@ -85,6 +85,7 @@ class PatchApplier:
                 "hunk_count": len(hunks),
                 "is_rename": patched_file.is_rename,
                 "is_copy": getattr(patched_file, "is_copy", False),
+                "is_delete": patched_file.target_file == "/dev/null",
                 "is_device_file": getattr(patched_file, "is_device_file", False),
                 "added": patched_file.added,
                 "removed": patched_file.removed,

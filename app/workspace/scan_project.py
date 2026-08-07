@@ -36,7 +36,6 @@ _SARIF_LEVEL_MAP = {
 
 def _build_sarif(
     project_id: str,
-    root: str,
     files_scanned: int,
     findings_by_file: dict[str, list[dict]],
     total_findings: int,
@@ -179,7 +178,6 @@ def _scan(
     elapsed = (time.monotonic() - start) * 1000
     return {
         "project_id": project_id,
-        "root": str(root),
         "files_scanned": files_scanned,
         "findings": findings_by_file,
         "total_findings": total_findings,
@@ -219,7 +217,6 @@ def scan_project(
     if fmt == "sarif":
         return _build_sarif(
             project_id=data["project_id"],
-            root=data["root"],
             files_scanned=data["files_scanned"],
             findings_by_file=data["findings"],
             total_findings=data["total_findings"],

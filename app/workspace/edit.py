@@ -476,6 +476,23 @@ def _compute_backup_hash(content: str) -> str:
     return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _is_deletion_patch(patch_text: str) -> bool:
+    """Detect a unified diff whose new-side file is ``/dev/null``.
+
+    Git's convention for "file deleted" is a diff whose target is
+    ``/dev/null`` (``+++ /dev/null``). ``_parse_unified_diff`` ignores
+    ``---``/``+++`` header lines entirely and only consumes ``@@`` hunks,
+    so without this check a deletion patch applied the hunks in memory
+    (all lines removed) and the trailing-newline preservation wrote the
+    file back as a 1-byte "\n" — the file survived as empty garbage.
+    """
+    for line in patch_text.splitlines():
+        stripped = line.rstrip("\r")
+        if stripped.startswith("+++") and "/dev/null" in stripped:
+            return True
+    return False
+
+
 # ── Public tool ──────────────────────────────────────────────────
 
 
@@ -518,6 +535,33 @@ def project_apply_patch(
     # Compute backup hash before any mutation
     backup_hash = _compute_backup_hash(old_content)
 
+    # A unified diff targeting /dev/null means "delete this file".
+    if _is_deletion_patch(patch):
+        full.unlink()
+        result: dict[str, Any] = {
+            "project_id": project_id,
+            "path": relative_path,
+            "size": 0,
+            "encoding": "utf-8",
+            "applied": True,
+            "deleted": True,
+            "backup_hash": backup_hash,
+        }
+        if safe:
+            from app.workspace.receipts import make_receipt
+
+            receipt = make_receipt(
+                project_id=project_id,
+                relative_path=relative_path,
+                operation="patch",
+                file_path=full,
+                before_content=old_content,
+                after_content="",
+                deleted=True,
+            )
+            result["receipt"] = receipt.to_dict()
+        return result
+
     # Parse the patch
     hunks = _parse_unified_diff(patch)
     if not hunks:
@@ -546,7 +590,7 @@ def project_apply_patch(
 
     _atomic_write(full, new_bytes)
 
-    result: dict[str, Any] = {
+    result = {
         "project_id": project_id,
         "path": relative_path,
         "size": len(new_bytes),

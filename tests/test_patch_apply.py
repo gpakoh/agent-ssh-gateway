@@ -152,6 +152,28 @@ def test_apply_in_memory():
     assert "line1" in result
 
 
+def test_parse_patch_marks_dev_null_target_as_delete():
+    """A unified diff whose target is /dev/null (git's "file deleted"
+    convention) must be parsed with is_delete=True so the caller can delete
+    the file instead of writing an empty one.
+    """
+    from app.patch_apply import PatchApplier
+
+    applier = PatchApplier.__new__(PatchApplier)
+    patch_text = textwrap.dedent("""\
+        --- a/victim.txt
+        +++ /dev/null
+        @@ -1,3 +0,0 @@
+        -line1
+        -line2
+        -line3
+    """)
+    files = applier._parse_patch(patch_text, strip=1)
+    assert len(files) == 1
+    assert files[0]["is_delete"] is True
+    assert files[0]["path"] == "victim.txt"
+
+
 def test_apply_in_memory_rejects_drifted_content_instead_of_corrupting():
     """Regression: _apply_in_memory() never checked that a hunk's context/
     removed lines actually matched the real file content at that position —

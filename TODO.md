@@ -751,3 +751,60 @@ stub, broken deployment history). Все исправлены с regression-те
 проверенными на падение до фикса; всё, что живёт в
 `web-ssh-gateway`/`mcp-server` контейнерах, задеплоено и подтверждено
 healthy.
+
+## ✅ Аудит v0.1.61a0 (commit 0e795e8b) — круг T2: 16 дефектов + 2 риска закрыты
+
+По отчёту внешнего аудита (103 MCP-инструмента, режим `mcp_client`).
+Все фиксы реализованы с regression-тестами, проверенными на падение на
+pre-fix коде; полный pytest зелёный на каждом шаге. НЕ закоммичено —
+коммит по явной просьбе.
+
+1. ✅ **P0 docker_inspect — host-topology leak.** Строгий allowlist полей
+   (не blacklist) в `fleet/docker_client.py`; `last_truncated` для
+   пагинации. Regression: redaction/allowlist-тесты.
+2. ✅ **P1 docker_ps — host paths в Labels.** Убраны host paths из Labels.
+3. ✅ **P1 единообразие redaction host-путей** (search_text /
+   working_directory / scan_project root).
+4. ✅ **P1 apply_patch не видит проект.** Рассинхрон реестров MCP/REST →
+   `resolve_registry_root` + lifespan-pin (механизм двух реестров).
+5. ✅ **P1 scan_command обход через переменные** (`x=rm; $x -rf /`) →
+   нормализация входа `normalize_scan_candidates`.
+6. ✅ **P1 gitea_list_issues — утечка email/is_admin/last_login.**
+   DTO-минимизация `minimize_issue_payload` (issue + PR, обе поверхности).
+7. ✅ **P1 лимиты размеров ответов GitHub/Gitea.**
+   `MAX_ISSUE_BODY_CHARS` + `_truncate_body`.
+8. ✅ **P1 run_tests — sync-wait.** `async_submit` на границе
+   `_run_uv_tool` → job_id возвращается мгновенно.
+9. ✅ **MED workspace patch `+++ /dev/null` не удалял файл.** Реальное
+   удаление на обеих patch-поверхностях (workspace + REST) с rollback,
+   receipts `deleted=True`, preview. 5 prod-файлов + 6 тестов.
+10. ✅ **MED run_pytest схема — одна строка.** `target: list[str] | str |
+    None` в 3 MCP-подписях; удалён дубликат-блок тулов (server.py:1611-1630).
+11. ✅ **MED run_compileall сканирует .git/.venv/кэши.**
+    `COMPILEALL_EXCLUDE_RE` + `-x` в обоих путях.
+12. ✅ **MED docker_ps пагинация** — `truncated=true` при обрезке.
+13. ✅ **MED docs-инструменты (context7) вне Contract v1.** Обе поверхности
+    обёрнуты в tool_success/tool_error source="context7"; pre-fix 8 failed /
+    5 passed; 8 regression-тестов.
+14. ✅ **LOW receipt diff_summary +0/-0.** `difflib.SequenceMatcher`
+    вместо разницы длин — замена 1→1 теперь «edit: +1/-1 lines».
+15. ✅ **LOW execution_duration_ms=null.** `/wait` отдаёт duration в
+    СЕКУНДАХ без ms; хелпер `_execution_duration_ms` в 6 call sites
+    (pre-fix 5 failed; тест-мок починен — двухфазный FakeClient).
+16. ✅ **LOW `.git/config` → FILE_READ_ERROR.** read_file классифицирует:
+    HiddenPathError → SECRET_PATH_DENIED, WorkspacePolicyError →
+    POLICY_DENIED, Exception → FILE_READ_ERROR.
+17. ✅ **LOW job-хинт «Use GET /api/jobs» протекал в MCP.**
+    `_gateway_error_hint` — JOB_NOT_FOUND переопределяется над detail.hint
+    (REST-советы пишутся для REST-поверхности).
+18. ✅ **LOW SESSION_NOT_FOUND — generic «SSH operation failed».**
+    `message_map` в `ssh_exception_handler`: специфичное сообщение только
+    там, где причина локальна и однозначна.
+19. ✅ **LOW pagination metadata в GitHub/Gitea list-тулах.**
+    `list_pagination_meta(count, per_page)` → {page, per_page, truncated}
+    (truncated достоверен: страница < per_page — последняя); применён в
+    16 list-тулах обеих поверхностей.
+
+Итоговое состояние: полный pytest **4486 passed, 1 skipped, 28
+deselected (203s)**; `ruff check` full CI scope — All checks passed;
+mypy — Success.

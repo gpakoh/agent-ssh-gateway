@@ -489,3 +489,50 @@ def test_parent_child_relationship(tmp_path):
     assert projects["quart-platform"].parent is None
     assert projects["quart-core"].parent == "quart-platform"
     assert projects["kojo-bot-service"].parent == "quart-platform"
+
+
+# ── T2.4: deterministic registry root (REST == MCP) ────────────────
+
+
+class TestResolveRegistryRoot:
+    """REST and MCP must resolve the workspace registry from the same
+    deterministic root. Previously REST fell back to Path.cwd() while MCP
+    resolved <repo>/projects.yaml — two processes launched from different
+    directories loaded different registries, so apply_patch answered
+    PROJECT_NOT_FOUND for a project MCP workspace tools could see."""
+
+    def test_env_var_wins(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+        from app.workspace.registry import resolve_registry_root
+
+        monkeypatch.setenv("WORKSPACE_REGISTRY_ROOT", str(tmp_path))
+        assert resolve_registry_root() == tmp_path.resolve()
+
+    def test_prefers_repo_root_projects_yaml_over_cwd(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        from app.workspace.registry import resolve_registry_root
+
+        monkeypatch.delenv("WORKSPACE_REGISTRY_ROOT", raising=False)
+        monkeypatch.chdir(tmp_path)  # cwd has no projects.yaml
+        repo_root = Path(__file__).resolve().parents[1]
+        assert (repo_root / "projects.yaml").exists()
+        assert resolve_registry_root() == repo_root
+
+    def test_registry_from_resolved_root_contains_web_ssh_gateway(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The project apply_patch resolves must be visible after startup
+        pins the root the same way the MCP server does."""
+        from app.workspace.registry import (
+            get_registry,
+            resolve_registry_root,
+            set_registry_root,
+        )
+
+        monkeypatch.delenv("WORKSPACE_REGISTRY_ROOT", raising=False)
+        set_registry_root(resolve_registry_root())
+        reset_registry()
+        registry = get_registry()
+        assert "web-ssh-gateway" in registry
+        root = registry._policy._resolve_project_root("web-ssh-gateway")
+        assert root.exists()

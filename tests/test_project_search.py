@@ -185,6 +185,14 @@ class TestSearchText:
         result = search_text(sample_project, "")
         assert result["count"] == 0
 
+    def test_result_has_no_absolute_host_paths(self, sample_project: Path) -> None:
+        """T2.3: search_text result must not echo the absolute host root."""
+        result = search_text(sample_project, "SESSION_NOT_FOUND")
+        assert "root" not in result
+        root_str = str(sample_project.resolve())
+        assert root_str not in repr(result)
+        assert not any(m["path"].startswith("/") for m in result["matches"])
+
     def test_glob_subdirectory_pattern(self, sample_project: Path) -> None:
         """Glob pattern matching files in subdirectories."""
         result = search_text(sample_project, "SESSION_NOT_FOUND", glob="nested/**/*.txt")

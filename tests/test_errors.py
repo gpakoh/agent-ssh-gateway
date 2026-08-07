@@ -179,6 +179,11 @@ async def test_session_not_found_gets_its_own_code_not_generic_internal_error():
     data = json.loads(resp.body)
     assert data["code"] == "SESSION_NOT_FOUND"
     assert data["http_status"] == 404
+    # Regression: the message must be specific ("session not found or
+    # expired"), not the generic "SSH operation failed" — a downstream MCP
+    # client relies on the message to tell the caller what to do next.
+    assert "session not found" in data["message"].lower()
+    assert "create a new session" in data["message"].lower()
 
 
 @pytest.mark.asyncio

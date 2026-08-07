@@ -159,10 +159,22 @@ def make_diff_summary(old_content: str | None, new_content: str, operation: str)
     if old_content is None:
         lines = new_content.count("\n") + (1 if new_content and not new_content.endswith("\n") else 0)
         return f"created ({lines} lines)"
+    import difflib
+
     old_lines = old_content.splitlines()
     new_lines = new_content.splitlines()
-    added = max(0, len(new_lines) - len(old_lines))
-    removed = max(0, len(old_lines) - len(new_lines))
+    added = 0
+    removed = 0
+    for tag, _i1, _i2, _j1, _j2 in difflib.SequenceMatcher(
+        None, old_lines, new_lines, autojunk=False
+    ).get_opcodes():
+        if tag == "delete":
+            removed += _i2 - _i1
+        elif tag == "insert":
+            added += _j2 - _j1
+        elif tag == "replace":
+            removed += _i2 - _i1
+            added += _j2 - _j1
     return f"{operation}: +{added}/-{removed} lines"
 
 
@@ -174,6 +186,7 @@ def make_receipt(
     before_content: str | None,
     after_content: str,
     verify: bool = True,
+    deleted: bool = False,
 ) -> ChangeReceipt:
     """Create a ChangeReceipt after a write operation.
 
@@ -185,10 +198,40 @@ def make_receipt(
         before_content: Content before mutation (None if new file).
         after_content: Content after mutation.
         verify: Whether to read-back and verify hash.
+        deleted: Whether the operation removed the file (e.g. a patch
+            targeting /dev/null). The read-back check is inverted: the
+            operation is verified when the file is gone.
     """
     file_exists_before = before_content is not None
     before_hash = compute_hash(before_content) if before_content is not None else None
     before_size = len(before_content.encode("utf-8")) if before_content is not None else 0
+
+    if deleted:
+        after_hash = ""
+        after_size = 0
+        changed = before_content is not None
+        diff_summary = make_diff_summary(before_content, "", operation)
+        verified = True
+        error = None
+        if verify and changed:
+            if file_path.exists():
+                verified = False
+                error = "File still exists after delete"
+        return ChangeReceipt(
+            receipt_id=_generate_receipt_id(),
+            project_id=project_id,
+            relative_path=relative_path,
+            operation=operation,
+            file_exists_before=file_exists_before,
+            before_hash=before_hash,
+            after_hash=after_hash,
+            size_before=before_size,
+            size_after=after_size,
+            changed=changed,
+            verified=verified,
+            diff_summary=diff_summary,
+            error=error,
+        )
 
     after_hash = compute_hash(after_content)
     after_size = len(after_content.encode("utf-8"))

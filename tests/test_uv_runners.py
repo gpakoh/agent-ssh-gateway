@@ -37,10 +37,32 @@ def test_build_pytest_argv():
 
 def test_build_compileall_argv():
     argv = _build_uv_argv("compileall", "/project", ["src/"])
-    assert argv == [
+    assert argv[:7] == [
         "uv", "run", "--frozen", "--directory", "/project", "--",
-        "python", "-m", "compileall", "--", "src/",
+        "python",
     ]
+    assert argv[7:10] == ["-m", "compileall", "-x"]
+    assert argv[-2:] == ["--", "src/"]
+
+
+def test_build_compileall_argv_excludes_service_dirs():
+    from mcp_client_tools import COMPILEALL_EXCLUDE_RE
+
+    argv = _build_uv_argv("compileall", "/project", ["."])
+    exclude = argv[argv.index("-x") + 1]
+    assert exclude == COMPILEALL_EXCLUDE_RE
+    import re
+
+    for path in (
+        ".venv/lib/python3.11/site-packages/foo.py",
+        ".git/objects/ab",
+        "__pycache__/x.cpython-311.pyc",
+        ".pytest_cache/README.md",
+        "node_modules/pkg/index.js",
+    ):
+        assert re.search(exclude, path), path
+    for path in ("src/app.py", "tests/test_x.py", "app/main.py"):
+        assert not re.search(exclude, path), path
 
 
 def test_invalid_target_with_traversal():
@@ -552,3 +574,115 @@ class TestProjectNotFound:
         code, retryable = self._classify(exc_no_body)
         assert code == "INTERNAL_ERROR"
         assert retryable is True
+
+
+class TestRunPytestMcpSchemaTargetArray:
+    """Regression: the MCP schema for run_pytest/run_ruff/run_mypy must
+    accept an array of targets, matching the implementation's
+    ``target: list[str] | str | None``. Before the fix the schema only
+    allowed a single string, so an agent passing several files got
+    ``pytest exit code 4`` (multiple paths packed into one argument).
+    """
+
+    def _schema(self, tool_name: str) -> dict:
+        import importlib
+        import os
+        from unittest.mock import patch
+
+        import examples.mcp_server.server as srv
+
+        env = dict(os.environ)
+        env["MCP_GATEWAY_TOOL_MODE"] = "mcp_client"
+        env.pop("MCP_CLIENT_SAFE_MODE", None)
+        with patch.dict(os.environ, env):
+            importlib.reload(srv)
+        params = srv.mcp._tool_manager._tools[tool_name].parameters
+        return params.get("properties", {}).get("target", {})
+
+    def test_run_pytest_target_accepts_array(self):
+        target = self._schema("run_pytest")
+        assert "array" in str(target.get("anyOf", [])) or target.get("type") == "array"
+
+    def test_run_ruff_target_accepts_array(self):
+        target = self._schema("run_ruff")
+        assert "array" in str(target.get("anyOf", [])) or target.get("type") == "array"
+
+    def test_run_mypy_target_accepts_array(self):
+        target = self._schema("run_mypy")
+        assert "array" in str(target.get("anyOf", [])) or target.get("type") == "array"
+
+
+class TestExecutionDurationMsConversion:
+    """Regression (audit item 2): run_pytest/run_ruff/run_mypy reported
+    execution_duration_ms=null because the gateway's /wait endpoint returns
+    job.to_dict() with ``duration`` in seconds and no
+    ``execution_duration_ms`` key — only the client's polling fallback
+    converted units. All build_command_result call sites must convert.
+    """
+
+    def test_helper_prefers_explicit_ms(self):
+        from mcp_client_tools import _execution_duration_ms
+
+        assert _execution_duration_ms({"execution_duration_ms": 123, "duration": 9.9}) == 123
+
+    def test_helper_converts_seconds_to_ms(self):
+        from mcp_client_tools import _execution_duration_ms
+
+        assert _execution_duration_ms({"duration": 12.345}) == 12345
+
+    def test_helper_returns_none_without_duration(self):
+        from mcp_client_tools import _execution_duration_ms
+
+        assert _execution_duration_ms({"stdout": ""}) is None
+
+    def test_run_uv_tool_success_carries_execution_duration_ms(self, monkeypatch):
+        """wait_job returns only seconds-valued duration — the envelope's
+        build_command_result must still expose execution_duration_ms."""
+        from mcp_client_tools import _run_uv_tool
+
+        class FakeClient:
+            def execute_raw(self, cmd, **kw):
+                return {"job_id": "j1"}
+
+            def wait_job(self, job_id, **kw):
+                return {"exit_code": 0, "stdout": "", "stderr": "", "duration": 2.5}
+
+        monkeypatch.setattr(
+            "mcp_client_tools._resolve_project",
+            lambda _: Path("/project"),
+        )
+        monkeypatch.setattr(
+            "mcp_client_tools._validate_targets",
+            lambda proj, targets: targets,
+        )
+        result = _run_uv_tool(FakeClient(), "proj", "pytest", "run_pytest", target=["tests/"])
+
+        assert result["ok"] is True
+        assert result["result"]["execution_duration_ms"] == 2500
+
+    def test_run_uv_tool_failure_carries_execution_duration_ms(self, monkeypatch):
+        from mcp_client_tools import _run_uv_tool
+
+        class FakeClient:
+            def execute_raw(self, cmd, **kw):
+                if "command -v uv" in cmd:
+                    return {"job_id": "check1"}
+                return {"job_id": "j1"}
+
+            def wait_job(self, job_id, **kw):
+                if job_id == "check1":
+                    return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+                return {"exit_code": 4, "stdout": "", "stderr": "2 failed", "duration": 1.25}
+
+        monkeypatch.setattr(
+            "mcp_client_tools._resolve_project",
+            lambda _: Path("/project"),
+        )
+        monkeypatch.setattr(
+            "mcp_client_tools._validate_targets",
+            lambda proj, targets: targets,
+        )
+        result = _run_uv_tool(FakeClient(), "proj", "pytest", "run_pytest", target=["tests/"])
+
+        assert result["ok"] is False
+        assert result["result"]["execution_duration_ms"] == 1250

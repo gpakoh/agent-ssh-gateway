@@ -222,8 +222,15 @@ class TestMakeDiffSummary:
     def test_existing_file(self):
         summary = make_diff_summary("old\n", "new\nline2\n", "edit")
         assert "edit" in summary
-        assert "+1" in summary
-        assert "-0" in summary
+        assert "+2" in summary
+        assert "-1" in summary
+
+    def test_inline_replacement_counts_one_added_one_removed(self):
+        """Regression: a 1-line replacement (hello -> world) must report
+        +1/-1, not +0/-0 — the old implementation subtracted line counts
+        and could not see replaced lines at all."""
+        summary = make_diff_summary("print(hello)\n", "print(world)\n", "edit")
+        assert summary == "edit: +1/-1 lines"
 
 
 class TestMakeReceipt:

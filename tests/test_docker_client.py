@@ -13,6 +13,7 @@ import pytest
 from fleet.docker_client import (
     COMPOSE_FILE_RE,
     CONTAINER_NAME_RE,
+    REDACTED,
     SERVICE_NAME_RE,
     DockerClient,
     RunResult,
@@ -674,6 +675,62 @@ async def test_ps_custom_format_returns_raw_string():
     c._run = _fake_run
     result = await c.ps(format="{{.Names}}")
     assert result == "custom-output"
+
+
+# ── last_truncated (pagination honesty) ──
+
+
+@pytest.mark.asyncio
+async def test_ps_sets_last_truncated_when_limited():
+    c = _client()
+
+    async def _fake_run(argv, timeout=None, **kw):
+        return _jsonl([{"Names": f"c{i}"} for i in range(20)])
+
+    c._run = _fake_run
+    result = await c.ps(limit=5)
+    assert len(result) == 5
+    assert c.last_truncated is True
+
+
+@pytest.mark.asyncio
+async def test_ps_last_truncated_false_within_limit():
+    c = _client()
+
+    async def _fake_run(argv, timeout=None, **kw):
+        return _jsonl([{"Names": f"c{i}"} for i in range(3)])
+
+    c._run = _fake_run
+    await c.ps(limit=50)
+    assert c.last_truncated is False
+
+
+@pytest.mark.asyncio
+async def test_ps_sanitizes_labels_and_mounts_rows():
+    """ps() applies row-level path redaction end to end."""
+    c = _client()
+
+    async def _fake_run(argv, timeout=None, **kw):
+        return _jsonl(
+            [
+                {
+                    "Names": "web",
+                    "Image": "nginx",
+                    "Labels": (
+                        "com.docker.compose.project=web,"
+                        "com.docker.compose.project.config_files=/media/1TB/app/docker-compose.yml"
+                    ),
+                    "Mounts": "/media/1TB/app:/app",
+                }
+            ]
+        )
+
+    c._run = _fake_run
+    result = await c.ps()
+    row = result[0]
+    assert REDACTED in row["Labels"]
+    assert "/media/1TB/app/docker-compose.yml" not in row["Labels"]
+    assert row["Mounts"] == REDACTED
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "mcp_client_remote"))
 
-from fleet.shared import normalize_list_response
+from fleet.shared import list_pagination_meta, normalize_list_response
 
 
 def test_bare_list_wrapped():
@@ -75,3 +75,18 @@ def test_dict_with_items_and_meta():
         meta={"per_page": 30},
     )
     assert result == {"items": ["x"], "count": 1, "per_page": 30}
+
+
+def test_pagination_meta_full_page_truncated():
+    meta = list_pagination_meta(count=30, per_page=30)
+    assert meta == {"page": 1, "per_page": 30, "truncated": True}
+
+
+def test_pagination_meta_partial_page_not_truncated():
+    meta = list_pagination_meta(count=3, per_page=30)
+    assert meta == {"page": 1, "per_page": 30, "truncated": False}
+
+
+def test_pagination_meta_empty_page():
+    meta = list_pagination_meta(count=0, per_page=30)
+    assert meta == {"page": 1, "per_page": 30, "truncated": False}

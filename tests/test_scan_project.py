@@ -99,6 +99,24 @@ class TestScanProject:
         for r in parsed["runs"][0]["results"]:
             assert r["level"] in ("error", "warning", "note")
 
+    def test_no_absolute_host_root_in_result(self, tmp_path):
+        """T2.3: scan result (dict/json/sarif) must not echo the host root."""
+        (tmp_path / "x.sh").write_text("rm -rf /\n")
+        result = scan_project("test", pattern="*", max_files=10, _root_override=tmp_path)
+        assert "root" not in result
+        assert str(tmp_path.resolve()) not in repr(result)
+
+        parsed = json.loads(
+            scan_project("test", pattern="*", max_files=10, _root_override=tmp_path, fmt="json")
+        )
+        assert "root" not in parsed
+        assert str(tmp_path.resolve()) not in repr(parsed)
+
+        sarif = json.loads(
+            scan_project("test", pattern="*", max_files=10, _root_override=tmp_path, fmt="sarif")
+        )
+        assert str(tmp_path.resolve()) not in repr(sarif)
+
 
 class TestScanProjectSymlinkEscape:
     """Regression: root.rglob(pattern) follows symlinks when the pattern

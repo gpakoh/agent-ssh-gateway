@@ -87,6 +87,27 @@ def _safe_test_target(target: str) -> str:
     return target
 
 
+def _execution_duration_ms(raw: dict[str, Any]) -> int | None:
+    """Extract job duration in milliseconds from a raw job result.
+
+    Regression: the gateway's /api/jobs/{id}/wait endpoint returns
+    job.to_dict(), which carries ``duration`` in SECONDS and no
+    ``execution_duration_ms`` key at all — only the polling fallback in
+    GatewayClient.wait_job() converted the units. Every MCP tool that
+    built build_command_result(execution_duration_ms=raw.get(
+    "execution_duration_ms")) therefore reported null for run_pytest /
+    run_ruff / run_mypy and friends, even though meta.duration_ms was set.
+    This helper mirrors the fallback's conversion for all call sites.
+    """
+    ms = raw.get("execution_duration_ms")
+    if ms is not None:
+        return int(ms)
+    seconds = raw.get("duration")
+    if seconds is not None:
+        return int(seconds * 1000)
+    return None
+
+
 def _limit_output(output: str) -> str:
     lines = output.splitlines()
     if len(lines) > _OUTPUT_LINE_LIMIT:
@@ -103,6 +124,15 @@ _UV_TOOL_MAP: dict[str, list[str]] = {
     "pytest": ["pytest"],
     "compileall": ["python", "-m", "compileall"],
 }
+
+# compileall -x regex: skip service dirs when walking a tree. Without it,
+# "run_compileall" with no explicit target walks .git, .venv (and nested
+# venvs), caches and __pycache__ — tens of seconds of useless work and a
+# huge useless stdout. The regex anchors on path segments.
+COMPILEALL_EXCLUDE_RE = (
+    r"(^|/)(\.git|\.venv|venv|node_modules|__pycache__|\.mypy_cache|"
+    r"\.pytest_cache|\.ruff_cache|\.tox|\.benchmarks)(/|$)"
+)
 
 
 def _validate_targets(project_dir: str, targets: list[str]) -> list[str]:
@@ -134,6 +164,8 @@ def _build_uv_argv(tool: str, project_dir: str, targets: list[str]) -> list[str]
         raise ValueError("INVALID_INPUT: at least one target required")
     validated = _validate_targets(project_dir, targets)
     cmd = _UV_TOOL_MAP[tool]
+    if tool == "compileall":
+        cmd = cmd + ["-x", COMPILEALL_EXCLUDE_RE]
     return ["uv", "run", "--frozen", "--directory", project_dir, "--"] + cmd + ["--"] + validated
 
 
@@ -185,7 +217,7 @@ def run_readonly_command(
         exit_code=raw.get("exit_code", -1),
         stdout=raw.get("stdout") or raw.get("output", ""),
         stderr=raw.get("stderr", ""),
-        execution_duration_ms=raw.get("execution_duration_ms"),
+        execution_duration_ms=_execution_duration_ms(raw),
         job_id=job.get("job_id"),
     )
 
@@ -201,6 +233,7 @@ def read_file(
     """Read a UTF-8 text file inside a registered project with secret/hidden path filtering."""
     from app.workspace.files import project_file_read
     from app.workspace.registry import get_registry
+    from app.workspace_policy import HiddenPathError, WorkspacePolicyError
 
     safe = _safe_relpath(path)
     try:
@@ -210,6 +243,20 @@ def read_file(
             registry=get_registry(),
         )
         return tool_success(tool="read_file", result=result)
+    except HiddenPathError as exc:
+        return tool_error(
+            tool="read_file",
+            code="SECRET_PATH_DENIED",
+            message=str(exc),
+            retryable=False,
+        )
+    except WorkspacePolicyError as exc:
+        return tool_error(
+            tool="read_file",
+            code="POLICY_DENIED",
+            message=str(exc),
+            retryable=False,
+        )
     except Exception as exc:
         return tool_error(
             tool="read_file",
@@ -574,7 +621,7 @@ def _fallback_result(tool_key: str, tool_name: str, r2: dict[str, Any]) -> dict[
                 exit_code=r2.get("exit_code", -1),
                 stdout=r2.get("stdout") or r2.get("output", ""),
                 stderr=r2.get("stderr", ""),
-                execution_duration_ms=r2.get("execution_duration_ms"),
+                execution_duration_ms=_execution_duration_ms(r2),
                 job_id=r2.get("job_id"),
             ),
             tool_name=tool_name,
@@ -586,7 +633,7 @@ def _fallback_result(tool_key: str, tool_name: str, r2: dict[str, Any]) -> dict[
             exit_code=r2.get("exit_code", 0),
             stdout=r2.get("stdout") or r2.get("output", ""),
             stderr=r2.get("stderr", ""),
-            execution_duration_ms=r2.get("execution_duration_ms"),
+            execution_duration_ms=_execution_duration_ms(r2),
             job_id=r2.get("job_id"),
         ),
     )
@@ -598,8 +645,17 @@ def _run_uv_tool(
     tool_key: str,
     tool_name: str,
     target: list[str] | str | None = None,
+    *,
+    async_submit: bool = False,
 ) -> dict[str, Any]:
-    """Run a uv-backed tool via SSH gateway. Shared by all uv runner tools."""
+    """Run a uv-backed tool via SSH gateway. Shared by all uv runner tools.
+
+    With ``async_submit=True`` the tool returns immediately after the job
+    is queued, carrying ``{"job_id", "status": "running"}`` so the caller
+    can poll with gateway_job_status / gateway_job_result instead of
+    blocking on the full run (run_tests over a whole suite would otherwise
+    outlive the sync wait window).
+    """
     project_dir = _resolve_project(project)
     if isinstance(target, str):
         target = [target]
@@ -625,6 +681,25 @@ def _run_uv_tool(
 
     command = " ".join(shlex.quote(a) for a in argv)
     result = client.execute_raw(command)
+
+    if async_submit:
+        # Audit: run_tests over a full suite must not block on a sync wait
+        # that the gateway can outlive; return the job_id immediately and
+        # let the caller poll job_status/job_result.
+        return tool_success(
+            tool=tool_name,
+            result={
+                "job_id": result.get("job_id"),
+                "status": "running",
+                "outcome": "started",
+            },
+            source="gateway",
+            warnings=[
+                "Job submitted asynchronously; poll with gateway_job_status "
+                "then gateway_job_result"
+            ],
+        )
+
     raw = client.wait_job(result["job_id"])
 
     stderr_lower = (raw.get("stderr", "") or "").lower()
@@ -666,6 +741,8 @@ def _run_uv_tool(
                     "python3",
                     "-m",
                     "compileall",
+                    "-x",
+                    COMPILEALL_EXCLUDE_RE,
                     "--",
                     *targets,
                 ],
@@ -695,7 +772,7 @@ def _run_uv_tool(
                 exit_code=raw.get("exit_code", -1),
                 stdout=raw.get("stdout") or raw.get("output", ""),
                 stderr=raw.get("stderr", ""),
-                execution_duration_ms=raw.get("execution_duration_ms"),
+                execution_duration_ms=_execution_duration_ms(raw),
                 job_id=raw.get("job_id"),
             ),
             tool_name=tool_name,
@@ -707,7 +784,7 @@ def _run_uv_tool(
             exit_code=raw.get("exit_code", 0),
             stdout=raw.get("stdout") or raw.get("output", ""),
             stderr=raw.get("stderr", ""),
-            execution_duration_ms=raw.get("execution_duration_ms"),
+            execution_duration_ms=_execution_duration_ms(raw),
             job_id=raw.get("job_id"),
         ),
     )
@@ -862,16 +939,24 @@ def run_project_command(
         exit_code=result.get("exit_code", -1),
         stdout=result.get("stdout") or result.get("output", ""),
         stderr=result.get("stderr", ""),
-        execution_duration_ms=result.get("execution_duration_ms") or result.get("duration"),
+        execution_duration_ms=_execution_duration_ms(result),
         job_id=result.get("job_id"),
     )
 
 
 def working_directory(client: GatewayClient, project: str) -> dict[str, Any]:
-    result = run_project_command(client, project, "pwd")
-    if result.get("exit_code", -1) != 0:
-        result["ok"] = False
-    return result
+    """Report the project working directory as the project-relative
+    namespace "." — never the real host path (mirrors info()'s
+    "resolved_path": "." convention). No shell invocation needed."""
+    _validate_project(project)
+    return {
+        "outcome": "passed",
+        "exit_code": 0,
+        "stdout": ".",
+        "stderr": "",
+        "execution_duration_ms": 0,
+        "job_id": None,
+    }
 
 
 def _is_real_git_repo(path: Path) -> bool:
@@ -965,7 +1050,12 @@ def git_push(
 
 
 def run_tests(client: GatewayClient, project: str) -> dict[str, Any]:
-    return _run_uv_tool(client, project, "pytest", "run_tests", ["."])
+    """Submit the full test suite (pytest -q) as a background job.
+
+    Returns immediately with the job_id; poll via gateway_job_status /
+    gateway_job_result. run_pytest() covers targeted synchronous runs.
+    """
+    return _run_uv_tool(client, project, "pytest", "run_tests", ["."], async_submit=True)
 
 
 def run_lint(client: GatewayClient, project: str) -> dict[str, Any]:
