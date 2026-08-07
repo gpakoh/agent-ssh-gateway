@@ -80,3 +80,31 @@ def test_oauth_mode_configures_auth():
     assert srv.mcp.settings.auth is not None
     assert srv.mcp.settings.auth.client_registration_options.enabled is True
     assert "mcp:read" in srv.mcp.settings.auth.client_registration_options.valid_scopes
+
+
+@patch.dict(
+    os.environ,
+    {
+        "MCP_AUTH_MODE": "oauth",
+        "MCP_EXTRA_TOKENS_JSON": '{"extra-token-1": "mcp_client_sfae"}',
+    },
+)
+def test_extra_token_unknown_profile_fails_closed():
+    """Regression: a typo'd extra-token profile must NOT resolve to the
+    full SUPPORTED_SCOPES set (fail-open). It must fail closed to the
+    operator profile, so the token cannot reach admin/docker/execute."""
+    import importlib
+
+    import examples.mcp_server.server as srv
+
+    importlib.reload(srv)
+    assert srv._auth_provider is not None
+    token = srv._auth_provider.verify_access_token("extra-token-1")
+    assert token is not None
+    assert "mcp:admin" not in token.scopes
+    assert "mcp:execute" not in token.scopes
+    assert "mcp:docker" not in token.scopes
+    assert "mcp:docker:admin" not in token.scopes
+    assert "mcp:agent-run" not in token.scopes
+    assert "mcp:read" in token.scopes
+    assert "mcp:project" in token.scopes

@@ -68,6 +68,17 @@ class TestScopeDataIntegrity:
         assert "mcp:postgres" in scopes
         assert "mcp:project" not in scopes
 
+    def test_unknown_profile_fails_closed_to_operator(self):
+        """Regression: a typo'd profile (e.g. mcp_client_sfae) must NOT
+        resolve to the full SUPPORTED_SCOPES set — it must fail closed
+        to the operator profile, matching extra-token registration."""
+        scopes = get_profile_scopes("mcp_client_sfae")
+        assert scopes == get_profile_scopes("operator")
+        assert "mcp:admin" not in scopes
+        assert "mcp:execute" not in scopes
+        assert "mcp:docker" not in scopes
+        assert "mcp:agent-run" not in scopes
+
 
 # ── Scope checking logic ─────────────────────────────────────────
 
