@@ -6,6 +6,7 @@ by wrapping fixed allowlisted commands in semantic functions.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import shlex
 import time
@@ -559,11 +560,12 @@ def _build_readonly_fallback_script(
 ) -> str:
     """Build a script that sets up a writable temp project for read-only mounts.
 
-    Reuses a cached venv in /tmp/.mcp-test/<name>/ if it already exists and
-    pyproject.toml hasn't changed (by comparing a stamp file).  Only runs
+    Reuses a cached venv in /tmp/.mcp-test/<name>-<hash>/ if it already exists
+    and pyproject.toml hasn't changed (by comparing a stamp file).  Only runs
     ``uv sync`` on first call or when deps change.
     """
-    tmp_root = f"/tmp/.mcp-test/{Path(project_dir).name}"
+    project_hash = hashlib.sha1(project_dir.encode("utf-8")).hexdigest()[:8]
+    tmp_root = f"/tmp/.mcp-test/{Path(project_dir).name}-{project_hash}"
     abs_targets = []
     for t in targets:
         p = Path(t)

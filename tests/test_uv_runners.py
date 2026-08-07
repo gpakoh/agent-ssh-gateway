@@ -134,6 +134,55 @@ class TestReadOnlyFallbackNoPathTraversal:
         lock_check = [ln for ln in script.splitlines() if "uv.lock" in ln and "diff" in ln]
         assert lock_check, "uv.lock must participate in the NEED_SYNC diff check"
 
+    def test_readonly_fallback_tmp_root_scoped_by_project_path(self):
+        """Regression: tmp_root was keyed only by basename, so two projects
+        that happen to share a name (/work/a/proj and /home/b/proj) collided
+        in /tmp/.mcp-test/proj — the second reused the first's venv and,
+        because symlinks are only created when the destination is missing,
+        ran the first project's code instead of its own. tmp_root must be
+        scoped by a stable hash of the full project path.
+        """
+        from mcp_client_tools import _build_readonly_fallback_script
+
+        def tmp_root(script):
+            for ln in script.splitlines():
+                if ln.startswith("mkdir -p /tmp/.mcp-test/"):
+                    return ln.split()[-1]
+            raise AssertionError("no tmp_root in script")
+
+        root_a1 = tmp_root(_build_readonly_fallback_script("pytest", "/work/a/proj", ["tests"]))
+        root_b = tmp_root(_build_readonly_fallback_script("pytest", "/home/b/proj", ["tests"]))
+        root_a2 = tmp_root(_build_readonly_fallback_script("pytest", "/work/a/proj", ["tests"]))
+        assert root_a1 == root_a2, "same project path must map to a stable tmp_root"
+        assert root_a1 != root_b, "same basename from different parents must not collide"
+        assert "proj" in root_a1, "tmp_root should stay human-readable"
+        assert root_a1.startswith("/tmp/.mcp-test/")
+
+    def test_readonly_fallback_symlinks_use_scoped_tmp_root(self):
+        """The app/tests symlinks must be created inside the scoped tmp_root
+        so a project never links the previous tenant's code from a
+        basename-colliding directory.
+        """
+        from mcp_client_tools import _build_readonly_fallback_script
+
+        script = _build_readonly_fallback_script("pytest", "/home/b/proj", ["tests"])
+        roots = [
+            ln.split()[-1]
+            for ln in script.splitlines()
+            if ln.startswith("mkdir -p /tmp/.mcp-test/")
+        ]
+        assert len(roots) == 1
+        root = roots[0]
+        symlinks = [ln for ln in script.splitlines() if "ln -sf " in ln]
+        assert symlinks, "expected app/tests symlinks"
+        for ln in symlinks:
+            idx = ln.index("ln -sf ")
+            src, dst = ln[idx:].split()[2:4]
+            assert dst.startswith(root + "/"), (
+                f"symlink dst {dst} escapes scoped root {root}: {ln}"
+            )
+            assert "mcp-test/proj-" in root
+
     def test_run_uv_tool_validates_targets_early(self, monkeypatch):
         """_run_uv_tool must validate targets before any SSH call."""
         from mcp_client_tools import _run_uv_tool
