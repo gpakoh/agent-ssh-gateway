@@ -346,21 +346,17 @@ class DockerClient:
     async def ps(
         self,
         all: bool = False,
-        format: str | None = None,
         limit: int = 50,
-    ) -> list[dict] | str:
+    ) -> list[dict]:
         """List containers as structured rows (docker's native --format json,
-        one object per line). `format` overrides with a raw Go template and
-        returns the raw string instead, for callers that need a specific
-        legacy shape. Host paths inside Labels/Mounts are redacted; when
-        *limit* cuts the list short, `self.last_truncated` is set so the
-        wrapper can report it."""
+        one object per line). Arbitrary Go-template output is deliberately
+        not accepted: a raw template like ``{{.Labels}}`` would return
+        unredacted host paths and bypass row sanitization entirely. Host
+        paths inside Labels/Mounts are redacted; when *limit* cuts the list
+        short, `self.last_truncated` is set so the wrapper can report it."""
         argv = [DOCKER_BIN, "ps"]
         if all:
             argv.append("--all")
-        if format:
-            argv.extend(["--format", format])
-            return await self._run(argv)
         argv.extend(["--format", "json"])
         result = await self._run(argv)
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
@@ -369,13 +365,9 @@ class DockerClient:
 
     async def images(
         self,
-        format: str | None = None,
         limit: int = 50,
-    ) -> list[dict] | str:
+    ) -> list[dict]:
         argv = [DOCKER_BIN, "images"]
-        if format:
-            argv.extend(["--format", format])
-            return await self._run(argv)
         argv.extend(["--format", "json"])
         result = await self._run(argv)
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
@@ -580,19 +572,14 @@ class DockerClient:
 
     async def stats(
         self,
-        format: str | None = None,
         limit: int = 50,
-    ) -> list[dict] | str:
+    ) -> list[dict]:
         argv = [DOCKER_BIN, "stats", "--no-stream"]
-        if format:
-            argv.extend(["--format", format])
-            # Unlike `docker ps`/`docker images` (metadata-only), --no-stream
-            # still has to sample live cgroup counters for every running
-            # container once before returning — on a host running dozens of
-            # containers this can occasionally run past the default 30s
-            # SUBPROCESS_TIMEOUT under load. Same 60s budget as compose_ps,
-            # the other "enumerate everything" read.
-            return await self._run(argv, timeout=60.0)
+        # --no-stream still has to sample live cgroup counters for every
+        # running container once before returning — on a host running
+        # dozens of containers this can occasionally run past the default
+        # 30s SUBPROCESS_TIMEOUT under load. Same 60s budget as compose_ps,
+        # the other "enumerate everything" read.
         argv.extend(["--format", "json"])
         result = await self._run(argv, timeout=60.0)
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
@@ -602,15 +589,11 @@ class DockerClient:
     async def compose_ps(
         self,
         project_dir: str | None = None,
-        format: str | None = None,
         limit: int = 50,
-    ) -> list[dict] | str:
+    ) -> list[dict]:
         self._validate_project_dir(project_dir)
         argv = self._compose_base_argv(project_dir)
         argv.append("ps")
-        if format:
-            argv.extend(["--format", format])
-            return await self._run(argv, timeout=60.0)
         argv.extend(["--format", "json"])
         result = await self._run(argv, timeout=60.0)
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)

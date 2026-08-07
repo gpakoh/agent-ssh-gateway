@@ -34,23 +34,20 @@ def _docker_error(tool: str, exc: Exception) -> dict[str, Any]:
 @mcp.tool()
 async def docker_ps(
     all: bool = False,
-    format: str | None = None,
     limit: int = 50,
 ) -> dict:
     """List running containers. Use all=True to include stopped containers.
 
-    Returns structured rows (docker's native --format json) by default.
-    format: Go template string for docker ps --format overrides this and
-    returns the raw string instead, for callers that need a specific shape.
+    Returns structured rows (docker's native --format json), sanitized and
+    truncated. Arbitrary Go-template format is deliberately not accepted:
+    a template like {{.Labels}} would leak unredacted host paths.
     limit: max containers to return (default 50, set higher for full list).
     """
     client = _get_client()
     try:
-        rows = await client.ps(all=all, format=format or None, limit=limit)
+        rows = await client.ps(all=all, limit=limit)
     except (ValueError, RuntimeError) as exc:
         return _docker_error("docker_ps", exc)
-    if isinstance(rows, str):
-        return tool_success("docker_ps", {"output": rows, "format": format}, source="docker")
     return tool_success(
         "docker_ps",
         {"containers": rows, "count": len(rows)},
@@ -61,22 +58,20 @@ async def docker_ps(
 
 @mcp.tool()
 async def docker_images(
-    format: str | None = None,
     limit: int = 50,
 ) -> dict:
     """List Docker images on the host.
 
-    Returns structured rows by default. format: Go template string for
-    docker images --format overrides this and returns the raw string.
-    limit: max images to return (default 50, set higher for full list).
+    Returns structured rows (docker's native --format json), sanitized and
+    truncated. Arbitrary Go-template format is not accepted (would bypass
+    redaction). limit: max images to return (default 50, set higher for
+    full list).
     """
     client = _get_client()
     try:
-        rows = await client.images(format=format or None, limit=limit)
+        rows = await client.images(limit=limit)
     except (ValueError, RuntimeError) as exc:
         return _docker_error("docker_images", exc)
-    if isinstance(rows, str):
-        return tool_success("docker_images", {"output": rows, "format": format}, source="docker")
     return tool_success(
         "docker_images",
         {"images": rows, "count": len(rows)},
@@ -115,22 +110,20 @@ async def docker_logs(container: str, tail: int = 200) -> dict:
 
 @mcp.tool()
 async def docker_stats(
-    format: str | None = None,
     limit: int = 50,
 ) -> dict:
     """Show live resource usage statistics for all running containers (CPU, memory, network, block I/O).
 
-    Returns structured rows by default. format: Go template string overrides
-    this and returns the raw string.
-    limit: max containers to return (default 50, set higher for full list).
+    Returns structured rows (docker's native --format json), sanitized and
+    truncated. Arbitrary Go-template format is not accepted (would bypass
+    redaction). limit: max containers to return (default 50, set higher
+    for full list).
     """
     client = _get_client()
     try:
-        rows = await client.stats(format=format or None, limit=limit)
+        rows = await client.stats(limit=limit)
     except (ValueError, RuntimeError) as exc:
         return _docker_error("docker_stats", exc)
-    if isinstance(rows, str):
-        return tool_success("docker_stats", {"output": rows, "format": format}, source="docker")
     return tool_success(
         "docker_stats",
         {"stats": rows, "count": len(rows)},
@@ -146,7 +139,8 @@ async def docker_compose_ps(
 ) -> dict:
     """List containers in a Docker Compose project.
 
-    Returns structured rows by default.
+    Returns structured rows (docker's native --format json), sanitized and
+    truncated.
     project_dir: path to directory containing compose file (e.g. /media/1TB/Python/web_ssh/web-ssh-gateway/docker).
     limit: max services to return (default 50).
     """
@@ -155,8 +149,6 @@ async def docker_compose_ps(
         rows = await client.compose_ps(project_dir=project_dir, limit=limit)
     except (ValueError, RuntimeError) as exc:
         return _docker_error("docker_compose_ps", exc)
-    if isinstance(rows, str):
-        return tool_success("docker_compose_ps", {"output": rows}, source="docker")
     return tool_success(
         "docker_compose_ps",
         {"containers": rows, "count": len(rows)},
