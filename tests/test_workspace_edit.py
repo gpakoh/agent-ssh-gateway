@@ -589,3 +589,45 @@ class TestApplyPatch:
         target = edit_workspace["project"] / "README.md"
         assert target.exists()
         assert target.read_text().rstrip("\n") == "# Renamed"
+
+    def test_crlf_file_keeps_crlf_line_endings(self, edit_workspace):
+        """Regression: applying a patch to a CRLF file silently rewrote the
+        WHOLE file to LF — splitlines() stripped the trailing \r and the
+        join always used \n, so every unchanged line lost its \r. A patch
+        touching one hunk must not normalize line endings of lines it never
+        touched.
+        """
+        project = edit_workspace["project"]
+        crlf_file = project / "src" / "crlf.py"
+        original = "def first():\r\n    pass\r\n\r\ndef second():\r\n    pass\r\n"
+        crlf_file.write_bytes(original.encode("utf-8"))
+
+        patch = """\
+--- a/src/crlf.py
++++ b/src/crlf.py
+@@ -1,4 +1,4 @@
+ def first():
+     pass
+ 
+-def second():
+-    pass
++def second():
++    return 0
+"""
+        result = project_apply_patch(
+            "edit-project",
+            "src/crlf.py",
+            patch,
+            registry=edit_workspace["registry"],
+        )
+        assert result["applied"] is True
+        content = crlf_file.read_bytes().decode("utf-8")
+        assert "\r\n" in content
+        assert content == (
+            "def first():\r\n"
+            "    pass\r\n"
+            "\r\n"
+            "def second():\r\n"
+            "    return 0\r\n"
+        )
+        assert "\n" not in content.replace("\r\n", "")
