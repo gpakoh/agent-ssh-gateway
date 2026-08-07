@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app import state as _state
 from app.auth_middleware import AuthIdentity, ensure_session_owner, require_scope
 from app.exceptions import JobNotFoundError, PermissionDeniedError
+from app.job_serializer import serialize_job
 from app.metrics import metrics
 from app.models import (
     BulkExecuteRequest,
@@ -118,16 +119,13 @@ async def jobs_result(
     _identity: AuthIdentity = Depends(require_scope("jobs:read")),
 ):
     """Get full job result."""
-    await _get_owned_job(job_id, _identity)
-    result = await _state.job_manager.get_job_result(job_id)
-    stdout = result.get("stdout", "")
-    stderr = result.get("stderr", "")
-    if should_redact_command_output(redact_output):
-        stdout = redact_secrets(stdout)
-        stderr = redact_secrets(stderr)
-    return JobResultResponse(
-        **{**result, "stdout": stdout, "stderr": stderr},
+    job = await _get_owned_job(job_id, _identity)
+    result = serialize_job(
+        job,
+        redact=should_redact_command_output(redact_output),
+        include_output=True,
     )
+    return JobResultResponse(**result)
 
 
 @router.get("/api/jobs/queue/stats")
@@ -154,7 +152,11 @@ async def jobs_dead_letter(
         return {"error": "Redis not available"}
 
     jobs = await _state.redis_queue.get_dead_letter_jobs(limit)
-    jobs = [j for j in jobs if job_visible_to(j, _identity)]
+    jobs = [
+        serialize_job(j, redact=should_redact_command_output(None), include_output=True)
+        for j in jobs
+        if job_visible_to(j, _identity)
+    ]
     return {"jobs": jobs, "count": len(jobs)}
 
 
@@ -204,17 +206,30 @@ async def bulk_execute(
         else:
             failed += 1
 
+        redact = should_redact_command_output(None)
+        cmd = result.get("item", "")
+        stdout = result.get("result", {}).get("stdout", "") if is_success else ""
+        stderr = (
+            result.get("result", {}).get("stderr", "")
+            if is_success
+            else result.get("error", "")
+        )
+        error = result.get("error") if not is_success else None
+        if redact:
+            cmd = redact_secrets(cmd)
+            stdout = redact_secrets(stdout)
+            stderr = redact_secrets(stderr)
+            error = redact_secrets(error) if isinstance(error, str) else error
+
         response_results.append(
             BulkExecuteResult(
-                command=result.get("item", ""),
+                command=cmd,
                 success=is_success,
-                stdout=result.get("result", {}).get("stdout", "") if is_success else "",
-                stderr=result.get("result", {}).get("stderr", "")
-                if is_success
-                else result.get("error", ""),
+                stdout=stdout,
+                stderr=stderr,
                 exit_code=result.get("result", {}).get("exit_code", -1) if is_success else -1,
                 duration=result.get("result", {}).get("duration", 0.0) if is_success else 0.0,
-                error=result.get("error") if not is_success else None,
+                error=error,
             )
         )
 
@@ -237,7 +252,14 @@ async def jobs_list(
     jobs = await _state.job_manager.list_jobs(session_id=session_id, status=status)
     jobs = [j for j in jobs if job_visible_to(j, _identity)]
     return JobListResponse(
-        jobs=[JobResultResponse(**j.to_dict()) for j in jobs],
+        jobs=[
+            serialize_job(
+                j,
+                redact=should_redact_command_output(None),
+                include_output=False,
+            )
+            for j in jobs
+        ],
         count=len(jobs),
     )
 
@@ -284,7 +306,11 @@ async def jobs_wait(
             detail=_err(403, "Job belongs to a different owner"),
         ) from None
 
-    return result
+    return serialize_job(
+        result,
+        redact=should_redact_command_output(None),
+        include_output=True,
+    )
 
 
 # ---------------------------------------------------------------------------
