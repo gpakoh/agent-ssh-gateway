@@ -113,8 +113,18 @@ jobs:
     # "what passed CI" — before this job, every deploy rebuilt from
     # whatever source happened to be checked out on the deploy host at
     # that moment. Mirrors quart-core's ci-cd.yml build-and-push job.
+    #
+    # These two jobs (build-and-push, deploy) only ever run on the
+    # self-hosted Gitea runner pool (label docker-e2e-ci, Gitea at
+    # git.xloud.ru). GitHub's hosted runners have no such label AND their
+    # Actions parser rejects `container:` without an `image:` (which the
+    # Gitea runner accepts) — an invalid file fails every job in the
+    # workflow there. So: skip them on GitHub entirely via
+    # github.server_url (https://github.com vs Gitea's ROOT_URL), and give
+    # deploy's container an explicit image (nod-ci-docker-e2e, the same
+    # job image the Gitea runner's label already uses).
     needs: [test]
-    if: github.ref_name == 'master' && github.event_name == 'push'
+    if: github.ref_name == 'master' && github.event_name == 'push' && github.server_url != 'https://github.com'
     runs-on: docker-e2e-ci
     env:
       REGISTRY: ${{ secrets.REGISTRY_HOST }}
@@ -159,9 +169,10 @@ jobs:
     # config and why the smoke check can't curl "localhost" from inside
     # this job's container.
     needs: [build-and-push]
-    if: github.ref_name == 'master' && github.event_name == 'push'
+    if: github.ref_name == 'master' && github.event_name == 'push' && github.server_url != 'https://github.com'
     runs-on: docker-e2e-ci
     container:
+      image: nod-ci-docker-e2e:latest
       volumes:
         - /media/1TB/Python/web_ssh/web-ssh-gateway:/deploy/web-ssh-gateway
     env:
