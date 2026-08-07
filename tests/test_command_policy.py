@@ -1114,6 +1114,28 @@ class TestScanTool:
         assert r.total == 0
         assert r.findings == ()
 
+    def test_python_c_shutil_rmtree_found(self):
+        """Regression: scan_command missed python -c 'shutil.rmtree(...)'.
+
+        The regex packs cannot see shutil.rmtree behind an import; the AST
+        matcher (app.ast_matcher.check_ast) must fire on extracted Python
+        bodies and surface the finding.
+        """
+        from app.command_policy import scan_command
+
+        r = scan_command("python3 -c 'import shutil; shutil.rmtree(\"/tmp/x\")'")
+        names = {f.pattern_name for f in r.findings}
+        assert "ast.python.shutil_rmtree" in names, f"AST finding missing in {names}"
+        f = next(f for f in r.findings if f.pattern_name == "ast.python.shutil_rmtree")
+        assert f.severity == "critical"
+
+    def test_python_c_os_remove_found(self):
+        from app.command_policy import scan_command
+
+        r = scan_command("python3 -c \"import os; os.remove('/tmp/x')\"")
+        names = {f.pattern_name for f in r.findings}
+        assert "ast.python.os_remove" in names, f"AST finding missing in {names}"
+
     def test_docker_system_prune_found(self):
         from app.command_policy import scan_command
 
