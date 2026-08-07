@@ -31,6 +31,7 @@ class ConfirmAction:
     confirm_token: str
     summary: str
     risk: str = "high"
+    required_scope: str = "mcp:docker"
     created_at: float = field(default_factory=time.monotonic)
     consumed: bool = False
 
@@ -49,6 +50,7 @@ class ConfirmStore:
         summary: str,
         *,
         risk: str = "high",
+        required_scope: str = "mcp:docker",
     ) -> ConfirmAction:
         action_id = uuid.uuid4().hex
         confirm_token = token_urlsafe(16)
@@ -59,6 +61,7 @@ class ConfirmStore:
             confirm_token=confirm_token,
             summary=summary,
             risk=risk,
+            required_scope=required_scope,
         )
         self._actions[action_id] = action
         self._token_map[confirm_token] = action_id
