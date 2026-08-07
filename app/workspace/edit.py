@@ -586,10 +586,13 @@ def project_apply_patch(
     except Exception as exc:
         raise PatchError(f"Failed to apply patch: {exc}") from exc
 
-    # Preserve trailing newline if original had one
-    new_content = "\n".join(new_lines)
+    # Preserve the file's original line-ending style: splitlines() stripped
+    # \r from CRLF files and a bare "\n".join() would silently rewrite every
+    # untouched line to LF. Match the dominant terminator instead.
+    newline = "\r\n" if "\r\n" in old_content else "\n"
+    new_content = newline.join(new_lines)
     if old_content.endswith("\n") and not new_content.endswith("\n"):
-        new_content += "\n"
+        new_content += newline
 
     new_bytes = new_content.encode("utf-8")
 
