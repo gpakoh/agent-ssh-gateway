@@ -15,6 +15,11 @@ EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "mcp_server"
 
 def import_example_module(monkeypatch: pytest.MonkeyPatch, module_name: str):
     monkeypatch.syspath_prepend(str(EXAMPLE_DIR))
+    # Keep the pre-existing module object around so monkeypatch can restore
+    # it at teardown; a bare pop() would leave the reloaded copy in
+    # sys.modules and break import identity for later tests.
+    old = sys.modules.get(module_name)
+    monkeypatch.setitem(sys.modules, module_name, old)
     sys.modules.pop(module_name, None)
     return importlib.import_module(module_name)
 

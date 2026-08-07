@@ -609,6 +609,21 @@ def _build_readonly_fallback_script(
     return "\n".join(lines)
 
 
+def _venv_usable_on_target(client: Any, project_dir: str) -> bool:
+    """Probe whether the project venv is executable on the SSH target.
+
+    On read-only workspaces (e.g. the sshd container mounts the project
+    root ro while the venv points at a non-mounted base interpreter) the
+    venv is a dangling symlink: ``uv run --frozen`` would try to recreate
+    it, fail to remove ``.venv/.lock`` on the read-only FS and exit 2
+    before the tool ever runs. Detect that upfront so async runners can
+    fall back to the writable temp project instead.
+    """
+    probe = client.execute_raw(f"test -x {shlex.quote(project_dir)}/.venv/bin/python3")
+    raw = client.wait_job(probe["job_id"])
+    return raw.get("exit_code", 1) == 0
+
+
 def _fallback_result(tool_key: str, tool_name: str, r2: dict[str, Any]) -> dict[str, Any]:
     """Build the tool_error/tool_success envelope for a fallback command's raw job result."""
     outcome2, error_code2 = _map_uv_exit_code(tool_key, r2.get("exit_code", -1))
@@ -680,12 +695,39 @@ def _run_uv_tool(
         )
 
     command = " ".join(shlex.quote(a) for a in argv)
-    result = client.execute_raw(command)
 
     if async_submit:
         # Audit: run_tests over a full suite must not block on a sync wait
         # that the gateway can outlive; return the job_id immediately and
         # let the caller poll job_status/job_result.
+        # Regression: on read-only workspaces the project venv can be a
+        # dangling symlink (base interpreter not mounted). Plain
+        # `uv run --frozen` then dies with exit 2 (failed to remove
+        # .venv/.lock on a read-only FS) before the tool ever runs.
+        # Detect that upfront (before queuing the doomed job) and submit
+        # the writable temp-project script asynchronously so the async
+        # contract (job_id now, result later) still holds.
+        if tool_key == "pytest" and not _venv_usable_on_target(client, str(project_dir)):
+            script = _build_readonly_fallback_script(tool_key, str(project_dir), targets)
+            r2 = client.execute_project_script_async(project, script)
+            return tool_success(
+                tool=tool_name,
+                result={
+                    "job_id": r2.get("job_id"),
+                    "status": "running",
+                    "outcome": "started",
+                },
+                source="gateway",
+                warnings=[
+                    "Read-only workspace detected: tests run in the writable "
+                    "temp project (/tmp/.mcp-test); poll with "
+                    "gateway_job_status then gateway_job_result"
+                ],
+            )
+
+    result = client.execute_raw(command)
+
+    if async_submit:
         return tool_success(
             tool=tool_name,
             result={

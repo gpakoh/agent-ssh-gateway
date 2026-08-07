@@ -391,6 +391,43 @@ class GatewayClient:
         return result
 
     @_retry_on_session_not_found
+    def execute_project_script_async(
+        self,
+        project: str,
+        script: str,
+    ) -> dict[str, Any]:
+        """Write a bash script to a temp file on the host, submit it via SSH asynchronously.
+
+        Like execute_project_script, but submits the script through
+        execute_raw (async_mode=True) and returns the job_id immediately
+        instead of blocking on the full run. The temp file is left in place
+        so the background job can still read it; stale files in
+        ``.ai-bridge/tmp`` are harmless and bounded by the host FS.
+        """
+        import uuid as _uuid
+
+        cwd: str | None = None
+        try:
+            from app.workspace.registry import get_registry
+
+            info = get_registry().project_info(project)
+            cwd = str(info["root"])
+        except Exception:
+            raise
+
+        tmp_dir = os.path.join(cwd, ".ai-bridge", "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        script_name = f"mcp_script_{_uuid.uuid4().hex[:12]}.sh"
+        host_path = os.path.join(tmp_dir, script_name)
+
+        with open(host_path, "w") as f:
+            f.write(script)
+            f.write("\n")
+
+        return self.execute_raw(f"sh {host_path}")
+
+    @_retry_on_session_not_found
     def apply_patch(
         self,
         project: str,
