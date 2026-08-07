@@ -101,9 +101,13 @@ def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
 
 
 def _parse_scopes(scope_str: str | None) -> list[str]:
-    """Parse space-separated scope string, validate against SUPPORTED_SCOPES."""
+    """Parse space-separated scope string, validate against SUPPORTED_SCOPES.
+
+    An empty/absent scope resolves to the safe DEFAULT_SCOPES, never the
+    full SUPPORTED_SCOPES list (which includes admin/execute/docker).
+    """
     if not scope_str:
-        return list(SUPPORTED_SCOPES)
+        return list(DEFAULT_SCOPES)
     scopes = scope_str.strip().split()
     for s in scopes:
         if s not in SUPPORTED_SCOPES:
@@ -297,11 +301,18 @@ class GatewayOAuthProvider:
             raise ValueError(f"Unknown client: {client_id}")
         if not _is_redirect_uri_exact_match(client.redirect_uris, redirect_uri):
             raise ValueError(f"redirect_uri not registered: {redirect_uri}")
+        requested = list(scopes) if scopes else list(DEFAULT_SCOPES)
+        allowed = set(getattr(client, "scopes", None) or list(DEFAULT_SCOPES))
+        extra = set(requested) - allowed
+        if extra:
+            raise ValueError(
+                "Requested scopes exceed client grants: " + ", ".join(sorted(extra))
+            )
         code = _generate_id("auth_", 32)
         self._auth_codes[code] = StoredAuthCode(
             code=code,
             client_id=client_id,
-            scopes=scopes or list(DEFAULT_SCOPES),
+            scopes=requested,
             code_challenge=code_challenge,
             redirect_uri=redirect_uri,
             state=state,

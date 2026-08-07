@@ -401,13 +401,27 @@ async def consent_handler(request: Request):
         return JSONResponse({"error": "OAuth provider not available"}, status_code=500)
 
     scopes = _parse_scopes(scope_str)
-    result = prov.create_authorization_code(
-        client_id=client_id,
-        redirect_uri=redirect_uri,
-        code_challenge=code_challenge,
-        state=state,
-        scopes=scopes,
-    )
+    try:
+        result = prov.create_authorization_code(
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            code_challenge=code_challenge,
+            state=state,
+            scopes=scopes,
+        )
+    except ValueError as exc:
+        from urllib.parse import urlencode
+
+        params = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "scope": scope_str,
+            "state": state,
+            "code_challenge": code_challenge,
+            "resource": resource,
+            "error": f"Requested scopes not allowed: {exc}",
+        }
+        return RedirectResponse(url="/oauth/consent?" + urlencode(params), status_code=303)
     parsed = urlparse(redirect_uri)
     qs = {}
     if parsed.query:
