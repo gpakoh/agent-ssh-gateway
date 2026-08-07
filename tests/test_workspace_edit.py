@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import stat
+
 import pytest
 
 from app.workspace.edit import (
@@ -242,6 +244,31 @@ class TestFileWrite:
         assert outside.read_text() == "original"
         # Pre-existing temp must NOT have been cleaned up
         assert tmp_path.is_symlink()
+
+    def test_atomic_write_preserves_file_permissions(self, edit_workspace):
+        """Regression: rewriting a file must keep its permission bits.
+
+        The old _atomic_write created the temp with a fixed 0o644 and
+        os.replace()d it over the target, so an executable script
+        (0755) or a private config (0600) silently became world-readable
+        0644 after an edit.
+        """
+        project = edit_workspace["project"]
+
+        for mode in (0o755, 0o600):
+            target = project / f"perms_{mode:o}.sh"
+            target.write_text("#!/bin/sh\necho hi\n")
+            target.chmod(mode)
+            assert stat.S_IMODE(target.stat().st_mode) == mode
+
+            result = project_file_write(
+                "edit-project",
+                target.name,
+                "#!/bin/sh\necho updated\n",
+                registry=edit_workspace["registry"],
+            )
+            assert result["size"] == len("#!/bin/sh\necho updated\n")
+            assert stat.S_IMODE(target.stat().st_mode) == mode
 
 
 # ── project_file_edit tests ──────────────────────────────────────

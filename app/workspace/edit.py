@@ -13,6 +13,7 @@ import hashlib
 import logging
 import os
 import re
+import stat
 import uuid
 from pathlib import Path
 from typing import Any
@@ -134,13 +135,20 @@ def _atomic_write(target_path: Path, content_bytes: bytes) -> None:
     unique_suffix = f".{uuid.uuid4().hex}.tmp"
     tmp_path = target_path.parent / (target_path.name + unique_suffix)
 
+    # Preserve the original file's permission bits; a fresh file keeps 0644.
+    try:
+        mode = stat.S_IMODE(target_path.stat().st_mode)
+    except FileNotFoundError:
+        mode = 0o644
+
     created_tmp = False
     try:
-        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         created_tmp = True
         with os.fdopen(fd, "wb") as f:
             f.write(content_bytes)
 
+        os.chmod(tmp_path, mode)
         os.replace(tmp_path, target_path)
     except WriteError:
         raise
