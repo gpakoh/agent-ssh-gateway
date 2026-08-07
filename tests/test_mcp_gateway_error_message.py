@@ -154,3 +154,50 @@ class TestJobStatusEndToEnd:
         # Regression: no transport garbage (raw JSON blob, [API] placeholder).
         assert "detail" not in result["error"]["message"]
         assert "[API]" not in result["error"]["message"]
+
+
+class TestRunTestsWaitTimeoutEndToEnd:
+    """A long test suite (run_tests -> _run_uv_tool -> wait_job) that
+    outlives the wait window used to surface neither a result nor a job_id
+    -- wait_job() silently returned the gateway's {"wait_timed_out": True}
+    dict as if it were a finished job, which _run_uv_tool read as
+    exit_code=-1 and reported as a generic, misleading failure, with no
+    reliable way for the caller to find the job_id and check on it later.
+    Feeds a realistic timeout through the real run_tool()/gateway_run_tests
+    path (not just the two helper functions in isolation).
+    """
+
+    def test_run_tests_timeout_surfaces_job_id_and_wait_timeout_code(self, monkeypatch):
+        from pathlib import Path
+
+        import mcp_client_tools
+
+        from examples.mcp_server import server as mcp_server_mod
+
+        monkeypatch.setattr(mcp_client_tools, "_resolve_project", lambda _: Path("/project"))
+
+        calls = {"n": 0}
+
+        def _execute_raw(cmd):
+            calls["n"] += 1
+            return {"job_id": f"j{calls['n']}"}
+
+        def _wait_job(job_id, **kw):
+            if job_id == "j1":  # the "command -v uv" check
+                return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+            # the real pytest run outlives the wait window
+            raise mcp_server_mod.GatewayClientError(
+                f"Job {job_id} did not finish before timeout",
+                body={"job_id": job_id, "status": "running", "wait_timed_out": True},
+            )
+
+        monkeypatch.setattr(mcp_server_mod.client, "execute_raw", _execute_raw)
+        monkeypatch.setattr(mcp_server_mod.client, "wait_job", _wait_job)
+
+        result = mcp_server_mod.gateway_run_tests("proj")
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "WAIT_TIMEOUT"
+        assert result["error"]["retryable"] is True
+        assert result["error"]["details"]["job_id"] == "j2"
+        assert "job_status" in result["error"]["hint"]

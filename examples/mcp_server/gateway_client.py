@@ -429,9 +429,30 @@ class GatewayClient:
 
         Falls back to polling on NOT_SUPPORTED (multi-worker) or 404 (old gateway).
         No fallback on PERMISSION_DENIED, JOB_NOT_FOUND, or other real errors.
+
+        A job that outlives the wait window (e.g. a full test suite run
+        taking longer than MCP_GATEWAY_JOB_TIMEOUT) does NOT fail server-side
+        -- the gateway's own /wait endpoint returns {"wait_timed_out": True}
+        while the job keeps running in the background, retrievable later via
+        job_status()/job_result(). Silently `return`ing that dict as if it
+        were the finished job's result (the old behavior) fed a bare
+        {"job_id", "status": "running", "wait_timed_out": True} -- with no
+        exit_code/stdout -- into callers that assumed a completed job shape,
+        which read the missing exit_code as -1 and reported a fabricated
+        "exit code -1" failure instead of "still running, check back with
+        this job_id". Raise a structured, job_id-bearing error instead so
+        callers (run_tool()'s GatewayClientError handling) can surface the
+        job_id for the caller to actually poll, per _classify_gateway_error's
+        WAIT_TIMEOUT handling.
         """
         effective_timeout = timeout_sec or self.job_timeout
         http_timeout = effective_timeout + 5
+
+        def _wait_timeout_error() -> GatewayClientError:
+            return GatewayClientError(
+                f"Job {job_id} did not finish before timeout",
+                body={"job_id": job_id, "status": "running", "wait_timed_out": True},
+            )
 
         try:
             result = self._get(
@@ -439,8 +460,13 @@ class GatewayClient:
                 params={"timeout": effective_timeout},
                 timeout=http_timeout,
             )
+            if result.get("wait_timed_out"):
+                raise _wait_timeout_error()
             return result
         except GatewayClientError as exc:
+            if exc.body and exc.body.get("wait_timed_out"):
+                raise
+
             should_fallback = False
             if exc.status_code == 404:
                 should_fallback = True
@@ -462,7 +488,7 @@ class GatewayClient:
                     result["execution_duration_ms"] = int(result["duration"] * 1000)
                 return result
             time.sleep(1)
-        raise GatewayClientError(f"Job {job_id} did not finish before timeout")
+        raise _wait_timeout_error()
 
     @_retry_on_session_not_found
     def read_file(self, path: str, session_id: str | None = None) -> dict[str, Any]:

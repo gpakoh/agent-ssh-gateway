@@ -217,6 +217,21 @@ def test_bad_request_maps_to_invalid_input_not_internal_error():
     assert retryable is False
 
 
+def test_wait_timed_out_maps_to_wait_timeout_retryable():
+    """Regression: a job outliving wait_job()'s window (e.g. a full test
+    suite run) now raises a GatewayClientError with body={"job_id",
+    "wait_timed_out": True} instead of silently returning that dict as a
+    fake completed-job result. Must classify as WAIT_TIMEOUT/retryable,
+    not fall through to the generic INTERNAL_ERROR default.
+    """
+    code, retryable = _classify(
+        None,
+        {"job_id": "abc123", "status": "running", "wait_timed_out": True},
+    )
+    assert code == "WAIT_TIMEOUT"
+    assert retryable is True
+
+
 def test_malformed_body_falls_back_to_status_heuristics():
     """body present but not the expected {"detail": {...}} shape must
     not crash, and must fall back to status-code heuristics.

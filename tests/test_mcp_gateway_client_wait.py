@@ -47,7 +47,16 @@ class TestGatewayClientWaitJob:
                 timeout=15,
             )
 
-    def test_long_poll_timeout_returns_dict(self):
+    def test_long_poll_timeout_raises_with_job_id(self):
+        """Regression: a job outliving the wait window doesn't fail
+        server-side -- it keeps running, retrievable later via job_status()/
+        job_result(). wait_job() used to `return` the gateway's
+        {"wait_timed_out": True} dict as if it were a finished job's result
+        (no exit_code/stdout at all), which downstream callers (_run_uv_tool)
+        read as exit_code=-1 and reported as a fabricated tool failure --
+        with no clear, structured way for the caller to find the job_id and
+        actually check on it. Must raise instead, with the job_id in body.
+        """
         client = self._client()
         timeout_response = {
             "job_id": "j1",
@@ -55,8 +64,33 @@ class TestGatewayClientWaitJob:
             "wait_timed_out": True,
         }
         with patch.object(client, "_get", return_value=timeout_response):
-            result = client.wait_job("j1", timeout_sec=0.5)
-            assert result.get("wait_timed_out") is True
+            try:
+                client.wait_job("j1", timeout_sec=0.5)
+                raise AssertionError("Should have raised GatewayClientError")
+            except GatewayClientError as e:
+                assert e.body is not None
+                assert e.body["job_id"] == "j1"
+                assert e.body["wait_timed_out"] is True
+
+    def test_polling_fallback_timeout_raises_with_job_id(self):
+        """Same regression, but via the polling-fallback path (job never
+        reaches a terminal state before the deadline)."""
+        client = self._client()
+        client.job_timeout = 0.05
+
+        def _mock_get(path, params=None, timeout=30):
+            if path == "/api/jobs/j1/wait":
+                raise GatewayClientError("Not Found", status_code=404)
+            return {"job_id": "j1", "status": "running"}
+
+        with patch.object(client, "_get", side_effect=_mock_get):
+            try:
+                client.wait_job("j1", timeout_sec=0.05)
+                raise AssertionError("Should have raised GatewayClientError")
+            except GatewayClientError as e:
+                assert e.body is not None
+                assert e.body["job_id"] == "j1"
+                assert e.body["wait_timed_out"] is True
 
     def test_fallback_on_not_supported(self):
         client = self._client()
