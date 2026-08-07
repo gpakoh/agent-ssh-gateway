@@ -253,10 +253,12 @@ async def jobs_list(
     jobs = [j for j in jobs if job_visible_to(j, _identity)]
     return JobListResponse(
         jobs=[
-            serialize_job(
-                j,
-                redact=should_redact_command_output(None),
-                include_output=False,
+            JobResultResponse(
+                **serialize_job(
+                    j,
+                    redact=should_redact_command_output(None),
+                    include_output=False,
+                )
             )
             for j in jobs
         ],
