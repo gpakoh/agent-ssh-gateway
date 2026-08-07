@@ -287,6 +287,38 @@ def extract_auth_token(request: Request, valid_tokens: set[str]) -> str | None:
     return None
 
 
+def minimize_action_run_payload(run: dict[str, Any]) -> dict[str, Any]:
+    """Return compact Gitea/GitHub Actions run metadata without PII.
+
+    Raw action-run payloads embed full user objects (email, is_admin,
+    last_login) under actor/trigger_actor and a ~50-field repository
+    object (clone URLs, counters, topics, license) — a context flood.
+    Keep only what an agent needs to triage a run.
+    """
+    return {
+        "id": run.get("id"),
+        "run_number": run.get("run_number"),
+        "run_attempt": run.get("run_attempt"),
+        "name": run.get("display_title") or run.get("name"),
+        "event": run.get("event"),
+        "status": run.get("status"),
+        "conclusion": run.get("conclusion"),
+        "head_branch": run.get("head_branch"),
+        "head_sha": run.get("head_sha"),
+        "actor": minimize_user_payload(run.get("actor")),
+        "trigger_actor": minimize_user_payload(run.get("trigger_actor")),
+        "repository": {
+            "name": (run.get("repository") or {}).get("name"),
+            "full_name": (run.get("repository") or {}).get("full_name"),
+        }
+        if isinstance(run.get("repository"), dict)
+        else None,
+        "started_at": run.get("started_at"),
+        "completed_at": run.get("completed_at"),
+        "html_url": run.get("html_url"),
+    }
+
+
 def normalize_list_response(
     value: Any,
     meta: dict[str, Any] | None = None,
