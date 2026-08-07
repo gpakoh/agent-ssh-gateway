@@ -327,6 +327,35 @@ class TestRunUvToolContract:
         assert result["result"]["stderr"] == "found 3 errors"
         assert result["error"]["code"] == "CHECK_FAILED"
 
+    def test_mypy_exit_2_preserves_stdout_stderr_through_run_tool(self, monkeypatch):
+        """Regression: run_mypy exit 2 (TOOL_EXECUTION_FAILED) must keep
+        stdout/stderr in the result all the way through run_tool. The
+        wrapper used to rebuild a bare tool_error without result, hiding
+        the reason a diagnostic tool failed."""
+        from mcp_client_tools import run_mypy
+
+        from examples.mcp_server.server import run_tool
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: Path("/project"))
+        client = self._make_mock(
+            exit_code=2,
+            stdout="error: cannot find module 'app'\n",
+            stderr="mypy: fatal error\n",
+        )
+
+        result = run_tool(
+            tool="run_mypy",
+            title="run mypy",
+            fn=lambda: run_mypy(client, "proj", ["."]),
+            success_text="Ran project mypy.",
+        )
+
+        assert result.get("ok") is False
+        assert result.get("error", {}).get("code") == "TOOL_EXECUTION_FAILED"
+        assert result.get("error", {}).get("message") == "mypy exit code 2"
+        assert result["result"]["exit_code"] == 2
+        assert result["result"]["stdout"] == "error: cannot find module 'app'\n"
+        assert result["result"]["stderr"] == "mypy: fatal error\n"
+
     def test_validation_error_still_returns_ok_false(self, monkeypatch):
         """Validation errors (invalid target) must use tool_error, not break run_tool."""
         from mcp_client_tools import _run_uv_tool
