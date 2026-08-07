@@ -53,6 +53,7 @@ async def docker_ps(
         {"containers": rows, "count": len(rows)},
         source="docker",
         truncated=getattr(client, "last_truncated", False),
+        redacted=getattr(client, "last_redacted", False),
     )
 
 
@@ -90,7 +91,13 @@ async def docker_inspect(name: str) -> dict:
         data = await client.inspect(name, max_lines=500)
     except (ValueError, RuntimeError) as exc:
         return _docker_error("docker_inspect", exc)
-    return tool_success("docker_inspect", data, source="docker", redacted=True)
+    return tool_success(
+        "docker_inspect",
+        data,
+        source="docker",
+        redacted=True,
+        truncated=getattr(client, "last_truncated", False),
+    )
 
 
 @mcp.tool()
@@ -154,6 +161,7 @@ async def docker_compose_ps(
         {"containers": rows, "count": len(rows)},
         source="docker",
         truncated=getattr(client, "last_truncated", False),
+        redacted=getattr(client, "last_redacted", False),
     )
 
 

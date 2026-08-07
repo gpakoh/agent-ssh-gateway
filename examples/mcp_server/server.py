@@ -2277,6 +2277,7 @@ async def docker_ps(all: bool = False, limit: int = 50) -> dict[str, Any]:
         "docker_ps",
         result={"containers": rows, "count": len(rows)},
         truncated=client.last_truncated,
+        redacted=client.last_redacted,
         source="docker",
     )
 
@@ -2307,7 +2308,13 @@ async def docker_inspect(name: str) -> dict[str, Any]:
         data = await client.inspect(name, max_lines=500)
     except (ValueError, RuntimeError) as exc:
         return tool_error(tool="docker_inspect", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
-    return tool_success("docker_inspect", result=data, redacted=True, source="docker")
+    return tool_success(
+        "docker_inspect",
+        result=data,
+        redacted=True,
+        truncated=client.last_truncated,
+        source="docker",
+    )
 
 
 @register_tool("docker_logs")
@@ -2355,6 +2362,7 @@ async def docker_compose_ps(
         "docker_compose_ps",
         result={"containers": rows, "count": len(rows)},
         truncated=client.last_truncated,
+        redacted=client.last_redacted,
         source="docker",
     )
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -747,6 +748,87 @@ async def test_ps_sanitizes_labels_and_mounts_rows():
     assert REDACTED in row["Labels"]
     assert "/media/1TB/app/docker-compose.yml" not in row["Labels"]
     assert row["Mounts"] == REDACTED
+
+
+@pytest.mark.asyncio
+async def test_ps_sanitizes_multi_compose_config_files():
+    """A single Labels value can hold several compose files separated by
+    commas (config_files=/a.yml,/b.yml). Every path must be redacted, not
+    just the first — the continuation chunk carries no '='."""
+    c = _client()
+
+    async def _fake_run(argv, timeout=None, **kw):
+        return _jsonl(
+            [
+                {
+                    "Names": "web",
+                    "Labels": (
+                        "com.docker.compose.project=web,"
+                        "com.docker.compose.project.config_files=/media/1TB/app/docker-compose.yml,"
+                        "/media/1TB/app/docker-compose.override.yml"
+                    ),
+                }
+            ]
+        )
+
+    c._run = _fake_run
+    result = await c.ps()
+    labels = result[0]["Labels"]
+    assert "/media/1TB/app/docker-compose.yml" not in labels
+    assert "/media/1TB/app/docker-compose.override.yml" not in labels
+    assert labels.count(REDACTED) == 2
+
+
+def test_sanitize_labels_string_non_path_comma_value_preserved():
+    """Commas inside non-path label values (meta=foo,bar) are not paths and
+    must stay untouched."""
+    assert (
+        DockerClient._sanitize_labels_string("app=web,meta=foo,bar,other=x")
+        == "app=web,meta=foo,bar,other=x"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ps_reports_last_redacted():
+    """meta.redacted must reflect that row sanitization actually changed
+    something, not default to False while rows were redacted."""
+    c = _client()
+
+    async def _dirty_run(argv, timeout=None, **kw):
+        return _jsonl(
+            [{"Names": "web", "Labels": "com.docker.compose.project.config_files=/media/1TB/x.yml"}]
+        )
+
+    c._run = _dirty_run
+    await c.ps()
+    assert c.last_redacted is True
+
+    async def _clean_run(argv, timeout=None, **kw):
+        return _jsonl([{"Names": "web", "Status": "Up"}])
+
+    c._run = _clean_run
+    await c.ps()
+    assert c.last_redacted is False
+
+
+@pytest.mark.asyncio
+async def test_inspect_reports_last_truncated():
+    """inspect caps multi-container lists at max_lines; that cut must be
+    reported the same way ps/compose_ps report theirs."""
+    c = _client()
+    entries = [{"Name": f"c{i}", "Id": f"id{i}"} for i in range(10)]
+
+    async def _fake_run(argv, timeout=None, **kw):
+        return json.dumps(entries)
+
+    c._run = _fake_run
+    data = await c.inspect("c0", max_lines=3)
+    assert len(data) == 3
+    assert c.last_truncated is True
+
+    data = await c.inspect("c0", max_lines=None)
+    assert len(data) == 10
+    assert c.last_truncated is False
 
 
 @pytest.mark.asyncio
