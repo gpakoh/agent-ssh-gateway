@@ -555,11 +555,19 @@ def run_tool(
         raise
     if isinstance(data, dict) and data.get("ok") is False:
         error_info = data.get("error") or {}
+        meta = data.get("meta") or {}
         return tool_error(
             tool=tool,
             code=error_info.get("code", "INTERNAL_ERROR"),
             message=error_info.get("message", "Tool returned error"),
+            result=data.get("result"),
+            retryable=bool(error_info.get("retryable", False)),
+            hint=error_info.get("hint"),
+            details=error_info.get("details"),
             duration_ms=_elapsed(),
+            redacted=bool(meta.get("redacted", False)),
+            truncated=bool(meta.get("truncated", False)),
+            source=meta.get("source", "unknown"),
         )
     if isinstance(data, dict) and "ok" in data:
         if "duration_ms" not in data.get("meta", {}) or data["meta"].get("duration_ms", 0) == 0:

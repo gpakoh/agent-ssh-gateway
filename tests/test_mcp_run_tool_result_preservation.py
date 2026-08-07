@@ -150,3 +150,47 @@ class TestRunToolPreservesRawResult:
 
         assert result["result"] == {"content": "hello"}
         assert result["meta"]["duration_ms"] == 12.3
+
+    def test_canonical_error_envelope_preserves_result_stdout_stderr(self) -> None:
+        """Regression: a canonical {"ok": False} envelope that already
+        carries a result (e.g. _run_uv_tool's error path with stdout/stderr)
+        must keep that result. The old error branch rebuilt a bare
+        tool_error without result, discarding stdout/stderr entirely."""
+        from examples.mcp_server.server import run_tool
+
+        envelope = {
+            "ok": False,
+            "tool": "run_mypy",
+            "result": {
+                "outcome": "error",
+                "exit_code": 2,
+                "stdout": "error: cannot find module 'app'\n",
+                "stderr": "mypy: fatal error\n",
+                "execution_duration_ms": 123,
+                "job_id": "j2",
+            },
+            "error": {
+                "code": "TOOL_EXECUTION_FAILED",
+                "message": "mypy exit code 2",
+                "retryable": False,
+            },
+            "meta": {
+                "tool": "run_mypy",
+                "duration_ms": 45.6,
+                "redacted": False,
+                "source": "gateway",
+            },
+        }
+        result = run_tool(
+            tool="run_mypy",
+            title="run mypy",
+            fn=_fn(envelope),
+            success_text="Ran project mypy.",
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "TOOL_EXECUTION_FAILED"
+        assert result["error"]["message"] == "mypy exit code 2"
+        assert result["result"] == envelope["result"]
+        assert result["result"]["stdout"] == "error: cannot find module 'app'\n"
+        assert result["result"]["stderr"] == "mypy: fatal error\n"
