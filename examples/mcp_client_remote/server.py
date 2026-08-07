@@ -45,9 +45,11 @@ from starlette.responses import (  # noqa: E402
 sys.path.insert(0, str(MCP_SERVER_DIR))
 sys.path.insert(0, str(EXAMPLES_DIR.parent))
 
+from tool_modes import is_mcp_client_safe_mode  # noqa: E402
 from tool_scopes import (  # noqa: E402
     check_fleet_route,
     extract_tool_from_body,
+    get_profile_scopes,
     get_required_scopes,
     has_required_scope,
 )
@@ -81,7 +83,12 @@ if MCP_SCOPE_ENFORCEMENT not in ("off", "audit", "enforce"):
         f"Invalid MCP_SCOPE_ENFORCEMENT={MCP_SCOPE_ENFORCEMENT!r}; expected off|audit|enforce"
     )
 
-MCP_DEFAULT_ACCESS_PROFILE = os.environ.get("MCP_DEFAULT_ACCESS_PROFILE", "operator")
+MCP_DEFAULT_ACCESS_PROFILE = (
+    os.environ.get("MCP_ACCESS_PROFILE")
+    or os.environ.get("MCP_DEFAULT_ACCESS_PROFILE")
+    or "operator"
+)
+MCP_CLIENT_SAFE_MODE = is_mcp_client_safe_mode()
 
 MCP_AUTHORIZE_PASSWORD = os.environ.get("MCP_AUTHORIZE_PASSWORD", "")
 
@@ -163,6 +170,18 @@ class OAuthProxyMiddleware(BaseHTTPMiddleware):
         )
 
 
+def _default_access_profile() -> str:
+    """Return the effective default access profile.
+
+    Safe mode (MCP_CLIENT_SAFE_MODE=true) forces the ``mcp_client_safe``
+    profile, so a misconfigured MCP_ACCESS_PROFILE can never widen the
+    default token's scopes beyond the safe bundle.
+    """
+    if MCP_CLIENT_SAFE_MODE:
+        return "mcp_client_safe"
+    return MCP_DEFAULT_ACCESS_PROFILE
+
+
 async def _get_token_scopes(auth_token: str | None) -> list[str]:
     """Resolve token scopes from auth provider or fallback profile."""
     if not auth_token:
@@ -177,6 +196,10 @@ async def _get_token_scopes(auth_token: str | None) -> list[str]:
     except Exception:
         pass
 
+    # The shared default token (token mode) resolves to the configured
+    # default access profile; any other unknown token stays fail-closed.
+    if MCP_PUBLIC_TOKEN and auth_token == MCP_PUBLIC_TOKEN:
+        return list(get_profile_scopes(_default_access_profile()))
     return []
 
 
@@ -494,7 +517,8 @@ def run():
     print(f"  MCP public   : {public_host}:{public_port}", file=sys.stderr)
     print(f"  auth mode    : {MCP_AUTH_MODE}", file=sys.stderr)
     print(f"  scope enforce: {MCP_SCOPE_ENFORCEMENT}", file=sys.stderr)
-    print(f"  default prof : {MCP_DEFAULT_ACCESS_PROFILE}", file=sys.stderr)
+    print(f"  safe mode    : {MCP_CLIENT_SAFE_MODE}", file=sys.stderr)
+    print(f"  default prof : {_default_access_profile()}", file=sys.stderr)
     tok_display = MCP_PUBLIC_TOKEN[:8] + "..." if MCP_PUBLIC_TOKEN else "(not set)"
     print(f"  mcp_token    : {tok_display}", file=sys.stderr)
 
