@@ -519,20 +519,42 @@ class TestResolveRegistryRoot:
         assert resolve_registry_root() == repo_root
 
     def test_registry_from_resolved_root_contains_web_ssh_gateway(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
         """The project apply_patch resolves must be visible after startup
-        pins the root the same way the MCP server does."""
+        pins the root the same way the MCP server does. Uses a self-contained
+        workspace: CI clones the repo under its own directory name, so the
+        absolute paths in the checked-in projects.yaml don't exist there and
+        the registry would be empty."""
         from app.workspace.registry import (
             get_registry,
             resolve_registry_root,
             set_registry_root,
         )
 
-        monkeypatch.delenv("WORKSPACE_REGISTRY_ROOT", raising=False)
-        set_registry_root(resolve_registry_root())
-        reset_registry()
-        registry = get_registry()
-        assert "web-ssh-gateway" in registry
-        root = registry._policy._resolve_project_root("web-ssh-gateway")
-        assert root.exists()
+        (tmp_path / "web-ssh-gateway").mkdir()
+        (tmp_path / "projects.yaml").write_text(
+            yaml.dump(
+                {
+                    "version": 1,
+                    "registry_root": ".",
+                    "projects": {
+                        "web-ssh-gateway": {"root": "web-ssh-gateway", "type": "fastapi"},
+                    },
+                }
+            )
+        )
+        monkeypatch.setenv("WORKSPACE_REGISTRY_ROOT", str(tmp_path))
+        import app.workspace.registry as registry_module
+
+        prev_root = registry_module._registry_root
+        try:
+            set_registry_root(resolve_registry_root())
+            reset_registry()
+            registry = get_registry()
+            assert "web-ssh-gateway" in registry
+            root = registry._policy._resolve_project_root("web-ssh-gateway")
+            assert root.exists()
+        finally:
+            registry_module._registry_root = prev_root
+            reset_registry()
