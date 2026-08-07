@@ -700,6 +700,13 @@ def _classify_gateway_error(exc: GatewayClientError) -> tuple[str, bool]:
     status = exc.status_code
     msg = str(exc).lower()
 
+    if status is None and not isinstance(exc.body, dict):
+        # Client-side error raised locally by GatewayClient (missing session
+        # id, missing project root, invalid project/path) — there was no HTTP
+        # exchange, so the gateway's status-code heuristics below cannot
+        # apply and must not classify this as an internal failure.
+        return "INVALID_INPUT", False
+
     if isinstance(exc.body, dict) and exc.body.get("wait_timed_out"):
         return "WAIT_TIMEOUT", True
 

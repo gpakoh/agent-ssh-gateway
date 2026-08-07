@@ -241,6 +241,39 @@ def test_malformed_body_falls_back_to_status_heuristics():
     assert retryable is False
 
 
+def test_client_side_missing_session_is_invalid_input_not_internal_error():
+    """Regression: a client-side GatewayClientError (no HTTP status, no
+    gateway body — e.g. "GATEWAY_SESSION_ID is required" raised locally by
+    _require_session_id) fell through _classify_gateway_error's status-code
+    heuristics to the catch-all INTERNAL_ERROR/retryable=True. That is
+    wrong for every local validation/config error: there is nothing to
+    retry, and the agent needs to know the input was wrong (provide a
+    project or a session), not that the server imploded. Reachable via
+    repo_status() with no project and no session.
+    """
+    code, retryable = _classify(
+        None,
+        None,
+        message="GATEWAY_SESSION_ID is required",
+    )
+    assert code == "INVALID_INPUT"
+    assert retryable is False
+
+
+def test_client_side_project_root_missing_is_invalid_input_not_internal_error():
+    """Same class: _project_root() raises locally when MCP_GATEWAY_PROJECT_ROOT
+    is unset. A client-side configuration gap is an INVALID_INPUT for the
+    agent to surface, never an internal retryable failure.
+    """
+    code, retryable = _classify(
+        None,
+        None,
+        message="MCP_GATEWAY_PROJECT_ROOT is required for project tools",
+    )
+    assert code == "INVALID_INPUT"
+    assert retryable is False
+
+
 class TestRealGatewayResponseShapeSeam:
     """End-to-end across the actual seam, not a re-description of it.
 
