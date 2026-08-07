@@ -41,28 +41,72 @@ def test_build_compileall_argv():
         "uv", "run", "--frozen", "--directory", "/project", "--",
         "python",
     ]
-    assert argv[7:10] == ["-m", "compileall", "-x"]
+    assert argv[7] == "-c"
+    walk_code = argv[8]
+    assert "os.walk" in walk_code, "compileall must use the pruning walk, not -m compileall"
+    assert "-m" not in walk_code
     assert argv[-2:] == ["--", "src/"]
 
 
-def test_build_compileall_argv_excludes_service_dirs():
-    from mcp_client_tools import COMPILEALL_EXCLUDE_RE
+def test_build_compileall_argv_prunes_service_dirs():
+    from mcp_client_tools import _build_compileall_walk_code
 
     argv = _build_uv_argv("compileall", "/project", ["."])
-    exclude = argv[argv.index("-x") + 1]
-    assert exclude == COMPILEALL_EXCLUDE_RE
-    import re
-
+    assert argv[-2:] == ["--", "."]
+    code = _build_compileall_walk_code()
+    assert "dirnames[:]" in code, "walk must prune dirs at the descent level"
+    assert "os.walk" in code
     for path in (
-        ".venv/lib/python3.11/site-packages/foo.py",
-        ".git/objects/ab",
-        "__pycache__/x.cpython-311.pyc",
-        ".pytest_cache/README.md",
-        "node_modules/pkg/index.js",
+        ".venv",
+        ".git",
+        "venv",
+        "node_modules",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".benchmarks",
     ):
-        assert re.search(exclude, path), path
-    for path in ("src/app.py", "tests/test_x.py", "app/main.py"):
-        assert not re.search(exclude, path), path
+        assert path in code, f"excluded dir {path} must be baked into the walk"
+    assert "_LIMIT" in code and "truncated" in code, "walk output must be capped"
+
+
+def test_compileall_walk_code_prunes_dirs_and_reports_errors(tmp_path, monkeypatch, capsys):
+    """Run the generated walk code for real (no uv): excluded service dirs
+    must never be compiled, and a syntax error must surface with the real
+    message and a failing exit code."""
+    from mcp_client_tools import _build_compileall_walk_code
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "ok.py").write_text("x = 1\n")
+    (tmp_path / ".venv" / "lib").mkdir(parents=True)
+    (tmp_path / ".venv" / "lib" / "bad.py").write_text("def f(:\n")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "x.py").write_text("y = \n")
+    (tmp_path / "node_modules" / "pkg").mkdir(parents=True)
+    (tmp_path / "node_modules" / "pkg" / "z.py").write_text("z = \n")
+
+    code = compile(_build_compileall_walk_code(), "walk", "exec")
+
+    monkeypatch.setattr("sys.argv", ["-c", str(tmp_path)])
+    with pytest.raises(SystemExit) as exc:
+        exec(code, {})
+    out = capsys.readouterr().out
+    assert exc.value.code == 0, out
+    assert "ok.py" in out and "Compiling" in out
+    assert "bad.py" not in out, "walk descended into .venv"
+    assert "x.py" not in out, "walk descended into .git"
+    assert "z.py" not in out, "walk descended into node_modules"
+
+    (tmp_path / "broken.py").write_text("def broken(:\n")
+    monkeypatch.setattr("sys.argv", ["-c", str(tmp_path / "broken.py")])
+    with pytest.raises(SystemExit) as exc:
+        exec(code, {})
+    out = capsys.readouterr().out
+    assert exc.value.code == 1, out
+    assert "broken.py" in out
+    assert "failed" in out.lower() or "error" in out.lower()
 
 
 def test_invalid_target_with_traversal():

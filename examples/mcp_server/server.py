@@ -1486,12 +1486,16 @@ def gateway_run_lint(project: str) -> dict[str, Any]:
 
 
 @register_tool("run_compileall")
-def gateway_run_compileall(project: str) -> dict[str, Any]:
-    """Run Python compileall within a project."""
+def gateway_run_compileall(project: str, target: list[str] | str | None = None) -> dict[str, Any]:
+    """Run Python compileall within a project (syntax-check the tree).
+
+    ``target`` may be a single file/dir string or a list of targets.
+    Omitting it walks the whole project (service dirs pruned).
+    """
     return run_tool(
         tool="run_compileall",
         title="run compileall",
-        fn=lambda: run_compileall(client, project),
+        fn=lambda: run_compileall(client, project, target),
         success_text="Ran project Python compileall.",
     )
 
