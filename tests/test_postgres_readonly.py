@@ -129,6 +129,73 @@ class TestGuardrails:
             await client.execute("SELECT pg_sleep(10)")
 
     @pytest.mark.asyncio
+    async def test_semicolon_inside_string_literal_allowed(self):
+        """Regression: the semicolon count ran on raw SQL, so ';' inside a
+        string literal tripped the multi-statement ban."""
+        client = self._make_client(pool=_make_pool_mock())
+        result = await client.execute("SELECT ';'")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_ddl_word_inside_string_literal_allowed(self):
+        """Regression: DDL_BLOCKLIST matched words inside string literals,
+        rejecting legitimate queries like SELECT 'delete'."""
+        client = self._make_client(pool=_make_pool_mock())
+        for sql in [
+            "SELECT 'delete'",
+            "SELECT 'DROP TABLE users'",
+            "SELECT 'CREATE INDEX'",
+        ]:
+            assert await client.execute(sql) == []
+
+    @pytest.mark.asyncio
+    async def test_system_schema_inside_string_literal_allowed(self):
+        """Regression: SYSTEM_SCHEMA_RE matched 'pg_catalog' etc. inside
+        string literals."""
+        client = self._make_client(pool=_make_pool_mock())
+        for sql in [
+            "SELECT 'pg_catalog'",
+            "SELECT 'information_schema'",
+            "SELECT 'pg_toast'",
+        ]:
+            assert await client.execute(sql) == []
+
+    @pytest.mark.asyncio
+    async def test_ddl_word_as_quoted_identifier_allowed(self):
+        """Regression: "delete" as a quoted identifier is a column name,
+        not a DML statement."""
+        client = self._make_client(pool=_make_pool_mock())
+        result = await client.execute('SELECT "delete" FROM users')
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_ddl_in_comment_allowed(self):
+        """Regression: -- and /* */ comment bodies must not trigger the
+        guards."""
+        client = self._make_client(pool=_make_pool_mock())
+        for sql in [
+            "SELECT 1 -- ; DELETE FROM users\n",
+            "SELECT 1 /* ; DROP TABLE users */",
+        ]:
+            assert await client.execute(sql) == []
+
+    @pytest.mark.asyncio
+    async def test_dollar_quoted_string_allowed(self):
+        """Regression: Postgres dollar-quoted bodies must not trigger the
+        guards."""
+        client = self._make_client(pool=_make_pool_mock())
+        result = await client.execute("SELECT $$; DROP TABLE users$$")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_semicolon_in_middle_still_rejected(self):
+        """Control: real multi-statement SQL is still caught even though
+        literals are masked."""
+        client = self._make_client(pool=_make_pool_mock())
+        with pytest.raises(ValueError, match="Semicolon only allowed at end"):
+            await client.execute("SELECT ';' ; DROP TABLE users")
+
+    @pytest.mark.asyncio
     async def test_limit_enforced(self):
         conn = _make_conn_mock()
         pool = _make_pool_mock(conn)
