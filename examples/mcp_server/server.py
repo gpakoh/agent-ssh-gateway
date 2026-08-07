@@ -2261,16 +2261,14 @@ async def github_get_pull_request(owner: str, repo: str, pull_number: int) -> di
 
 
 @register_tool("docker_ps")
-async def docker_ps(all: bool = False, format: str | None = None, limit: int = 50) -> dict[str, Any]:
+async def docker_ps(all: bool = False, limit: int = 50) -> dict[str, Any]:
     """List running containers as structured rows. Use all=True to include
     stopped containers. limit: max rows (default 50)."""
     client = DockerClient()
     try:
-        rows = await client.ps(all=all, format=format, limit=limit)
+        rows = await client.ps(all=all, limit=limit)
     except (ValueError, RuntimeError) as exc:
         return tool_error(tool="docker_ps", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
-    if isinstance(rows, str):
-        return tool_success("docker_ps", result=rows, source="docker")
     return tool_success(
         "docker_ps",
         result={"containers": rows, "count": len(rows)},
@@ -2280,15 +2278,13 @@ async def docker_ps(all: bool = False, format: str | None = None, limit: int = 5
 
 
 @register_tool("docker_images")
-async def docker_images(format: str | None = None, limit: int = 50) -> dict[str, Any]:
+async def docker_images(limit: int = 50) -> dict[str, Any]:
     """List Docker images on the host as structured rows. limit: max rows (default 50)."""
     client = DockerClient()
     try:
-        rows = await client.images(format=format, limit=limit)
+        rows = await client.images(limit=limit)
     except RuntimeError as exc:
         return tool_error(tool="docker_images", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
-    if isinstance(rows, str):
-        return tool_success("docker_images", result=rows, source="docker")
     return tool_success(
         "docker_images",
         result={"images": rows, "count": len(rows)},
@@ -2321,16 +2317,14 @@ async def docker_logs(container: str, tail: int = 200) -> dict[str, Any]:
 
 
 @register_tool("docker_stats")
-async def docker_stats(format: str | None = None, limit: int = 50) -> dict[str, Any]:
+async def docker_stats(limit: int = 50) -> dict[str, Any]:
     """Show live resource usage statistics for all running containers as
     structured rows. limit: max rows (default 50)."""
     client = DockerClient()
     try:
-        rows = await client.stats(format=format, limit=limit)
+        rows = await client.stats(limit=limit)
     except RuntimeError as exc:
         return tool_error(tool="docker_stats", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
-    if isinstance(rows, str):
-        return tool_success("docker_stats", result=rows, source="docker")
     return tool_success(
         "docker_stats",
         result={"stats": rows, "count": len(rows)},
