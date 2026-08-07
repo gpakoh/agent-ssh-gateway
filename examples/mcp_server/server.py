@@ -2792,6 +2792,7 @@ async def docker_exec(
         "docker_exec",
         {"container": container, "command": command, "timeout": timeout},
         summary,
+        required_scope="mcp:docker:admin",
     )
     return _confirmation_response(action)
 
