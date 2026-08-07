@@ -36,6 +36,102 @@ DDL_BLOCKLIST = re.compile(
 )
 
 
+def _mask_literals(sql: str) -> str:
+    """Blank out string literals, quoted identifiers, comments and
+    dollar-quoted bodies so the regex guards (and the semicolon count) only
+    ever see real syntax.
+
+    Without this, ';' or a DDL keyword inside a literal (SELECT ';',
+    SELECT 'delete') trips the guards. Positions are preserved (each masked
+    character becomes a space) so \b word boundaries keep working.
+    """
+    out = list(sql)
+    n = len(sql)
+    i = 0
+    while i < n:
+        c = sql[i]
+        if c == "'":
+            if i > 0 and sql[i - 1] in "eE" and _is_word_boundary(sql, i - 1):
+                end = _find_escaped_quote(sql, i + 1, backslash=True)
+            else:
+                end = _find_escaped_quote(sql, i + 1, backslash=False)
+            for k in range(i, min(end + 1, n)):
+                out[k] = " "
+            i = end + 1
+        elif c == '"':
+            end = _find_escaped_quote(sql, i + 1, backslash=False, doubled='"')
+            for k in range(i, min(end + 1, n)):
+                out[k] = " "
+            i = end + 1
+        elif c == "-" and i + 1 < n and sql[i + 1] == "-":
+            end = n
+            nl = sql.find("\n", i)
+            if nl != -1:
+                end = nl
+            for k in range(i, end):
+                out[k] = " "
+            i = end
+        elif c == "/" and i + 1 < n and sql[i + 1] == "*":
+            end = sql.find("*/", i + 2)
+            if end == -1:
+                end = n
+            else:
+                end += 2
+            for k in range(i, min(end, n)):
+                out[k] = " "
+            i = min(end, n)
+        elif c == "$":
+            tag = _match_dollar_tag(sql, i)
+            if tag is not None:
+                end = sql.find(tag, i + len(tag))
+                if end != -1:
+                    for k in range(i, end + len(tag)):
+                        out[k] = " "
+                    i = end + len(tag)
+                    continue
+            i += 1
+        else:
+            i += 1
+    return "".join(out)
+
+
+def _is_word_boundary(sql: str, idx: int) -> bool:
+    return idx == 0 or not (sql[idx - 1].isalnum() or sql[idx - 1] == "_")
+
+
+def _find_escaped_quote(sql: str, start: int, *, backslash: bool, doubled: str = "'") -> int:
+    """Return the index of the closing quote that is not itself escaped."""
+    n = len(sql)
+    i = start
+    while i < n:
+        if sql[i] == doubled:
+            if i + 1 < n and sql[i + 1] == doubled:
+                i += 2
+                continue
+            return i
+        if backslash and sql[i] == "\\":
+            i += 2
+            continue
+        i += 1
+    return n
+
+
+def _match_dollar_tag(sql: str, i: int) -> str | None:
+    """Match a dollar-quote tag at position i: $$, $tag$ with [A-Za-z_][A-Za-z0-9_]*."""
+    if sql[i] != "$":
+        return None
+    j = i + 1
+    if j < len(sql) and sql[j] == "$":
+        return "$$"
+    if j < len(sql) and (sql[j].isalpha() or sql[j] == "_"):
+        j += 1
+        while j < len(sql) and (sql[j].isalnum() or sql[j] == "_"):
+            j += 1
+        if j < len(sql) and sql[j] == "$":
+            return sql[i : j + 1]
+    return None
+
+
 class PostgresClient:
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn
@@ -65,23 +161,25 @@ class PostgresClient:
         if len(sql_stripped) > MAX_SQL_LENGTH:
             raise ValueError(f"SQL exceeds max length ({len(sql_stripped)} > {MAX_SQL_LENGTH})")
 
-        semicolon_count = sql_stripped.count(";")
+        masked = _mask_literals(sql_stripped)
+
+        semicolon_count = masked.count(";")
         if semicolon_count > 1:
             raise ValueError("Multi-statement queries are not allowed")
-        if semicolon_count == 1 and not sql_stripped.endswith(";"):
+        if semicolon_count == 1 and not masked.endswith(";"):
             raise ValueError("Semicolon only allowed at end of query")
 
         clean_sql = sql_stripped.rstrip(";").strip()
 
-        if not re.match(r"^\s*(SELECT|WITH)\b", clean_sql, re.IGNORECASE):
+        if not re.match(r"^\s*(SELECT|WITH)\b", masked, re.IGNORECASE):
             raise ValueError("Only SELECT and WITH queries are allowed")
 
-        if SYSTEM_SCHEMA_RE.search(clean_sql):
+        if SYSTEM_SCHEMA_RE.search(masked):
             raise ValueError(
                 "Queries referencing system schemas (pg_catalog, information_schema) are not allowed"
             )
 
-        if DDL_BLOCKLIST.search(clean_sql):
+        if DDL_BLOCKLIST.search(masked):
             raise ValueError("DDL, DML, and dangerous statements are not allowed")
 
         pool = await self._ensure_pool()
