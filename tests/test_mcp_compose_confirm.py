@@ -26,6 +26,7 @@ def _mcp_started():
     yield
 
 
+from examples.mcp_server.docker_confirm import ConfirmAction  # noqa: E402
 from examples.mcp_server.server import (  # noqa: E402
     _CONFIRM_HANDLERS,
     _confirm_store,
@@ -37,6 +38,37 @@ from examples.mcp_server.server import (  # noqa: E402
     docker_compose_restart,
     docker_compose_up,
 )
+
+
+@pytest.fixture(autouse=True)
+def _sync_server_state():
+    """Re-bind server globals captured at module import time.
+
+    test_mcp_server.py's autouse reset_env fixture calls
+    importlib.reload() on examples.mcp_server.server for every test.
+    Reload re-executes the module and rebinds _confirm_store,
+    _CONFIRM_HANDLERS and the docker_*/impl functions to fresh objects,
+    so the ``from examples.mcp_server.server import ...`` names captured
+    here at import time go stale whenever test_mcp_server runs first:
+    confirm tests would create actions in an old store that
+    confirm_operation (reading the module's current global) never sees.
+    """
+    import examples.mcp_server.server as srv
+
+    globals().update(
+        {
+            "_CONFIRM_HANDLERS": srv._CONFIRM_HANDLERS,
+            "_confirm_store": srv._confirm_store,
+            "_docker_compose_build_impl": srv._docker_compose_build_impl,
+            "_docker_compose_restart_impl": srv._docker_compose_restart_impl,
+            "_docker_compose_up_impl": srv._docker_compose_up_impl,
+            "confirm_operation": srv.confirm_operation,
+            "docker_compose_build": srv.docker_compose_build,
+            "docker_compose_restart": srv.docker_compose_restart,
+            "docker_compose_up": srv.docker_compose_up,
+        }
+    )
+    yield
 
 
 @pytest.fixture
@@ -205,3 +237,54 @@ class TestComposeConfirmFlow:
         result = await confirm_operation(token=action_result["confirm_token"])
         assert result["ok"] is False
         assert result["error"]["code"] == "CONFIRM_TOKEN_EXPIRED"
+
+
+class TestAdminDoubleBarrier:
+    """Regression: confirming an admin-only operation must re-check the
+    mcp:docker:admin scope — possession of a confirm token alone must
+    not complete an admin action for a caller granted only mcp:docker."""
+
+    def _create_admin_action(self) -> ConfirmAction:
+        action = _confirm_store.create_action(
+            "docker_exec",
+            {"container": "web", "command": ["ls", "-la"], "timeout": 30},
+            "Exec in web: ls -la",
+            required_scope="mcp:docker:admin",
+        )
+        return action
+
+    @pytest.mark.asyncio
+    async def test_admin_action_denied_without_admin_scope(self, clean_confirm_store):
+        action = self._create_admin_action()
+        result = await confirm_operation(token=action.confirm_token)
+        assert result["ok"] is False
+        assert result["error"]["code"] == "CONFIRM_SCOPE_DENIED"
+        assert "mcp:docker:admin" in result["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_admin_action_allowed_with_admin_scope(self, clean_confirm_store):
+        action = self._create_admin_action()
+        with patch.dict(
+            "os.environ", {"MCP_TOKEN_SCOPES": "mcp:read,mcp:docker:admin"}
+        ):
+            with patch.dict(
+                _CONFIRM_HANDLERS,
+                {"docker_exec": AsyncMock(return_value={"ok": True, "output": "done"})},
+            ):
+                result = await confirm_operation(token=action.confirm_token)
+        assert result["ok"] is True
+
+    @pytest.mark.asyncio
+    async def test_non_admin_action_ok_without_scopes(self, clean_confirm_store):
+        """Compose actions (required_scope=mcp:docker default) keep working
+        without a token scope context, preserving existing behavior."""
+        action = await docker_compose_up(project_dir="/app")
+        action_result = action["result"]
+        with patch("examples.mcp_server.server.DockerClient") as mock_dc:
+            mock_instance = AsyncMock()
+            mock_instance.compose_up.return_value = "started"
+            mock_dc.return_value = mock_instance
+            result = await confirm_operation(
+                token=action_result["confirm_token"]
+            )
+        assert result["ok"] is True

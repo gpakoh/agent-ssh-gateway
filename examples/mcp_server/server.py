@@ -2898,6 +2898,7 @@ async def docker_run(
             "timeout": timeout,
         },
         summary,
+        required_scope="mcp:docker:admin",
     )
     return _confirmation_response(action)
 
@@ -2938,7 +2939,12 @@ async def docker_rmi(images: list[str]) -> dict[str, Any]:
                 source="docker",
             )
     summary = f"Remove image(s): {', '.join(images)}"
-    action = _confirm_store.create_action("docker_rmi", {"images": images}, summary)
+    action = _confirm_store.create_action(
+        "docker_rmi",
+        {"images": images},
+        summary,
+        required_scope="mcp:docker:admin",
+    )
     return _confirmation_response(action)
 
 
@@ -2978,7 +2984,12 @@ async def docker_volume_rm(volumes: list[str]) -> dict[str, Any]:
                 source="docker",
             )
     summary = f"Remove volume(s): {', '.join(volumes)}"
-    action = _confirm_store.create_action("docker_volume_rm", {"volumes": volumes}, summary)
+    action = _confirm_store.create_action(
+        "docker_volume_rm",
+        {"volumes": volumes},
+        summary,
+        required_scope="mcp:docker:admin",
+    )
     return _confirmation_response(action)
 
 
@@ -3029,6 +3040,41 @@ async def confirm_operation(token: str) -> dict[str, Any]:
             message=f"No handler for {action.tool}",
             source="docker",
         )
+
+    # Double Barrier: confirming an admin-only operation (docker_exec,
+    # docker_run, docker_rmi, docker_volume_rm) re-checks that the caller
+    # holds mcp:docker:admin. Possession of a confirm token alone must not
+    # complete an admin action for a caller granted only mcp:docker.
+    if action.required_scope != "mcp:docker":
+        scopes = _get_token_scopes()
+        if action.required_scope not in scopes:
+            # Emit structured audit event
+            try:
+                audit_logger = get_audit_logger()
+                audit_logger.append(McpAuditEvent(
+                    event_type="mcp.tool_blocked",
+                    tool="confirm_operation",
+                    action=f"confirm_{action.tool}",
+                    decision="deny",
+                    reason=(
+                        f"{action.required_scope} required to confirm "
+                        f"{action.tool}"
+                    ),
+                    error_code="CONFIRM_SCOPE_DENIED",
+                ))
+            except Exception:
+                pass  # audit failure must not change tool behavior
+            return tool_error(
+                tool="confirm_operation",
+                code="CONFIRM_SCOPE_DENIED",
+                message=(
+                    f"{action.required_scope} scope required to confirm "
+                    f"{action.tool}"
+                ),
+                hint="Request the admin Docker scope to confirm this operation.",
+                retryable=False,
+                source="docker",
+            )
 
     try:
         result = await handler(**action.kwargs)
