@@ -1210,7 +1210,7 @@ async def session_env(
         if prefix and not key.startswith(prefix):
             continue
         env[key] = val
-    return env
+    return redact_secrets(env)
 
 
 # ---------------------------------------------------------------------------

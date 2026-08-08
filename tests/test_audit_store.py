@@ -115,6 +115,56 @@ async def test_insert_command_execution(store):
 
 
 @pytest.mark.asyncio
+async def test_insert_command_execution_redacts_secrets(store):
+    """Regression: MAJOR finding from a live security audit. The full
+    command string can carry secrets typed straight onto the command line
+    (curl -H 'Authorization: Bearer ...', a psql DSN with an embedded
+    password, sshpass -p ...) -- unlike AuditLogger.log_command() (the
+    JSONL path), which only ever stores command_root for exactly this
+    reason, this persistent Postgres audit path stored the raw command
+    verbatim, in both the `command` column and `metadata_json`.
+    """
+    await store.insert_command_execution(
+        session_id="sess-3",
+        command="curl -H 'Authorization: Bearer sk-secret-abc123' https://api.example.com",
+        exit_code=0,
+        duration_ms=10,
+    )
+    rows = await store.query(session_id="sess-3")
+    assert len(rows) == 1
+    row = rows[0]
+    assert "sk-secret-abc123" not in row.command
+    assert "sk-secret-abc123" not in str(row.metadata_json)
+
+    await store.insert_command_execution(
+        session_id="sess-4",
+        command="psql postgresql://dbuser:hunter2@dbhost:5432/appdb -c 'select 1'",
+        exit_code=0,
+        duration_ms=10,
+    )
+    rows = await store.query(session_id="sess-4")
+    assert "hunter2" not in rows[0].command
+
+
+@pytest.mark.asyncio
+async def test_insert_event_redacts_command_and_metadata_secrets(store):
+    """Same regression, via insert_event()'s command= and metadata_json
+    paths (event.metadata is caller-supplied and was stored unredacted)."""
+    event = _make_event(metadata={"note": "token=sk-live-xyz789"})
+    await store.insert_event(
+        event,
+        command="env DATABASE_PASSWORD=hunter2 ./run.sh",
+        exit_code=0,
+        duration_ms=5,
+    )
+    rows = await store.query(session_id="sess-1")
+    assert len(rows) == 1
+    row = rows[0]
+    assert "hunter2" not in row.command
+    assert "sk-live-xyz789" not in str(row.metadata_json)
+
+
+@pytest.mark.asyncio
 async def test_insert_command_execution_denied(store):
     await store.insert_command_execution(
         session_id="sess-3",
