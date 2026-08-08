@@ -120,4 +120,22 @@ class TestServerWrapperBlocked:
             err_msg = result.get("error", {}).get("message", "")
             assert "blocked" in err_msg.lower()
         finally:
+            for name in [
+                n
+                for n in list(sys.modules)
+                if any(p in n for p in clear_prefixes) and n not in saved_modules
+            ]:
+                del sys.modules[name]
             sys.modules.update(saved_modules)
+            # update() restores sys.modules but NOT parent-package attributes:
+            # reimporting "server" re-created the examples.mcp_server namespace
+            # package and rebound examples.mcp_server to the new object. Restore
+            # the original parent attributes so later imports (e.g. monkeypatch
+            # on examples.mcp_server.mcp_client_tools._resolve_project) resolve
+            # to the pre-test modules instead of hitting stale objects.
+            for name, module in saved_modules.items():
+                if "." in name:
+                    parent_name, _, attr = name.rpartition(".")
+                    parent = sys.modules.get(parent_name)
+                    if parent is not None and getattr(parent, attr, None) is not module:
+                        setattr(parent, attr, module)
