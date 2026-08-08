@@ -56,6 +56,33 @@ def test_oauth_public_paths():
     assert _is_oauth_public_path("/oauth/register")
     assert not _is_oauth_public_path("/mcp")
     assert _is_oauth_public_path("/health")
+    # Bare top-level forms (advertised by openid_configuration()'s
+    # authorization_endpoint/token_endpoint/registration_endpoint) must
+    # also stay public, exactly and with nested subpaths.
+    assert _is_oauth_public_path("/authorize")
+    assert _is_oauth_public_path("/token")
+    assert _is_oauth_public_path("/register")
+    assert _is_oauth_public_path("/token/refresh")
+
+
+def test_oauth_public_paths_require_a_boundary_not_a_bare_prefix():
+    """Regression (R5): path.startswith(("/authorize", "/token",
+    "/register", "/health")) treated ANY path merely starting with one of
+    those substrings as public -- a future route named e.g.
+    /authorized_keys, /tokens-export, /registered-hosts, or
+    /health-debug-internal would silently skip Bearer/mcp_token auth. Each
+    must require an exact match or a "/"-bounded nested path.
+    """
+    from examples.mcp_client_remote.server import _is_oauth_public_path
+
+    assert not _is_oauth_public_path("/authorized_keys")
+    assert not _is_oauth_public_path("/authorize-legacy")
+    assert not _is_oauth_public_path("/tokens-export")
+    assert not _is_oauth_public_path("/token_leak")
+    assert not _is_oauth_public_path("/registered-hosts")
+    assert not _is_oauth_public_path("/registration-bypass")
+    assert not _is_oauth_public_path("/health-debug-internal")
+    assert not _is_oauth_public_path("/healthcheck-secret")
 
 
 def test_token_mode_no_auth(token_client):

@@ -95,6 +95,11 @@ MCP_AUTHORIZE_PASSWORD = os.environ.get("MCP_AUTHORIZE_PASSWORD", "")
 OAUTH_PUBLIC_PREFIXES = (
     "/.well-known/",
     "/oauth/",
+)
+# Advertised as bare top-level endpoints in openid_configuration()'s
+# authorization_endpoint/token_endpoint/registration_endpoint (see below),
+# in addition to their /oauth/-nested forms -- both must stay public.
+OAUTH_PUBLIC_EXACT_OR_NESTED = (
     "/authorize",
     "/token",
     "/register",
@@ -103,8 +108,18 @@ OAUTH_PUBLIC_PREFIXES = (
 
 
 def _is_oauth_public_path(path: str) -> bool:
-    """OAuth endpoints don't require mcp_token or Bearer."""
-    return path.startswith(OAUTH_PUBLIC_PREFIXES)
+    """OAuth endpoints don't require mcp_token or Bearer.
+
+    Boundary-aware on purpose: a bare `path.startswith(("/authorize",
+    "/token", "/register", "/health"))` would silently treat any future
+    route merely starting with one of those substrings (e.g.
+    /authorized_keys, /tokens-export, /registered-hosts,
+    /health-debug-internal) as public too, with no way to notice until it
+    ships. Each of these must match exactly or be followed by "/".
+    """
+    if path.startswith(OAUTH_PUBLIC_PREFIXES):
+        return True
+    return any(path == p or path.startswith(p + "/") for p in OAUTH_PUBLIC_EXACT_OR_NESTED)
 
 
 class OAuthProxyMiddleware(BaseHTTPMiddleware):
