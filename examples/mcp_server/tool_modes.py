@@ -171,7 +171,6 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "list_agent_tasks",
         "archive_agent_task",
         "run_opencode",
-        "run_mimo",
         "run_agent",
         "workspace_file_write",
         "workspace_file_edit",
@@ -193,7 +192,6 @@ class ToolModeError(ValueError):
 MCP_CLIENT_BLOCKED_TOOLS: frozenset[str] = frozenset({
     # Agent launch — never safe for first attach
     "run_opencode",
-    "run_mimo",
     "run_agent",
     # Write/patch mutations
     "apply_patch",
@@ -236,7 +234,6 @@ MCP_CLIENT_BLOCKED_TOOLS: frozenset[str] = frozenset({
 # still with no infrastructure control (no Docker, no agent-launch).
 MCP_CLIENT_WRITE_BLOCKED_TOOLS: frozenset[str] = frozenset({
     "run_opencode",
-    "run_mimo",
     "run_agent",
     "write_handoff_plan",
     "docker_start",

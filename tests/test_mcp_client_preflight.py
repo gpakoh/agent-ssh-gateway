@@ -221,7 +221,7 @@ class TestMcpStdioSmoke:
 
     def test_script_has_blocked_tools_set(self):
         content = self._load_script()
-        for tool in ("run_opencode", "run_mimo", "run_agent",
+        for tool in ("run_opencode", "run_agent",
                       "docker_exec", "docker_compose_up", "workspace_file_write",
                       "workspace_apply_patch", "apply_patch"):
             assert tool in content, f"Blocked tool {tool} missing from BLOCKED_TOOLS"

@@ -44,9 +44,12 @@ class TestBuildTaskJson:
         assert "created" in data
 
     def test_full(self):
+        """agent accepts an arbitrary string, not just "opencode" -- this
+        module doesn't restrict it to a fixed backend enum.
+        """
         result = build_task_json(
             task_id="b23456789012",
-            agent="mimo",
+            agent="custom-agent",
             allowed_files=["src/**", "tests/**"],
             forbidden_files=["migrations/**"],
             required_checks=["pytest -q", "ruff check"],
@@ -55,7 +58,7 @@ class TestBuildTaskJson:
             push_allowed=False,
         )
         data = json.loads(result)
-        assert data["agent"] == "mimo"
+        assert data["agent"] == "custom-agent"
         assert "src/**" in data["allowed_files"]
         assert data["required_checks"] == ["pytest -q", "ruff check"]
 
@@ -68,9 +71,10 @@ class TestBuildInitialStatus:
         assert "a12345678901" in result
 
     def test_different_agent(self):
-        result = build_initial_status(agent="mimo", task_id="b23456789012")
+        """agent accepts an arbitrary string, not just "opencode"."""
+        result = build_initial_status(agent="custom-agent", task_id="b23456789012")
         assert "Status: created" in result
-        assert "mimo" in result
+        assert "custom-agent" in result
 
 
 class TestBuildCurrentPlan:

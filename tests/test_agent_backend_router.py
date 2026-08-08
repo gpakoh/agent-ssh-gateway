@@ -1,4 +1,11 @@
-"""Tests for AgentBackendRouter — selection, cooldown, fallback."""
+"""Tests for AgentBackendRouter — selection, cooldown, fallback.
+
+"backend_b" is a fictional second backend used only to exercise the
+router's own generic multi-backend fallback mechanics (AgentBackendRouter,
+SelectionPolicy, TryPrimaryFallback, RoundRobin are backend-agnostic) --
+it is not tied to any real agent CLI. The only real, shipped backend is
+"opencode" (mimo was removed).
+"""
 
 import time
 
@@ -22,7 +29,7 @@ def router():
     return AgentBackendRouter(
         backends={
             "opencode": BackendEntry(name="opencode", priority=0),
-            "mimo": BackendEntry(name="mimo", priority=1),
+            "backend_b": BackendEntry(name="backend_b", priority=1),
         },
         enabled=True,
     )
@@ -33,7 +40,7 @@ def router_disabled():
     return AgentBackendRouter(
         backends={
             "opencode": BackendEntry(name="opencode", priority=0),
-            "mimo": BackendEntry(name="mimo", priority=1),
+            "backend_b": BackendEntry(name="backend_b", priority=1),
         },
         enabled=False,
     )
@@ -49,23 +56,23 @@ class TestSelectBackend:
 
     def test_returns_any_when_no_preferred(self, router):
         chosen = router.select_backend()
-        assert chosen in ("opencode", "mimo")
+        assert chosen in ("opencode", "backend_b")
 
     def test_skips_cooldown(self, router):
         router._backends["opencode"].status = BackendStatus.COOLDOWN
         router._backends["opencode"].cooldown_until = time.time() + 9999
         chosen = router.select_backend("opencode")
-        assert chosen == "mimo"
+        assert chosen == "backend_b"
 
     def test_skips_failed(self, router):
         router._backends["opencode"].status = BackendStatus.FAILED
         chosen = router.select_backend("opencode")
-        assert chosen == "mimo"
+        assert chosen == "backend_b"
 
     def test_skips_disabled(self, router):
         router._backends["opencode"].status = BackendStatus.DISABLED
         chosen = router.select_backend("opencode")
-        assert chosen == "mimo"
+        assert chosen == "backend_b"
 
     def test_none_when_all_unavailable(self, router):
         for b in router._backends.values():
@@ -74,10 +81,10 @@ class TestSelectBackend:
         assert chosen is None
 
     def test_respects_priority(self, router):
-        router._backends["mimo"].priority = 0
+        router._backends["backend_b"].priority = 0
         router._backends["opencode"].priority = 1
         chosen = router.select_backend()
-        assert chosen == "mimo"
+        assert chosen == "backend_b"
 
     def test_expired_cooldown_auto_recovers(self, router):
         router._backends["opencode"].status = BackendStatus.COOLDOWN
@@ -119,15 +126,10 @@ class TestRecordResult:
         assert router._backends["opencode"].cooldown_until is not None
 
     def test_error_triggers_short_cooldown(self, router):
-        cd = router.record_result("mimo", 1, stderr="Connection refused")
+        cd = router.record_result("backend_b", 1, stderr="Connection refused")
         assert cd is not None
         assert cd.reason == "error"
-        assert router._backends["mimo"].status == BackendStatus.FAILED
-
-    def test_cooldown_pattern_detected_mimo(self, router):
-        cd = router.record_result("mimo", 1, stderr="ollama timeout after 30s")
-        assert cd is not None
-        assert cd.reason == "rate_limit"
+        assert router._backends["backend_b"].status == BackendStatus.FAILED
 
     def test_no_pattern_match_fallback_to_error(self, router):
         cd = router.record_result("opencode", 1, stderr="unknown error")
@@ -143,21 +145,22 @@ class TestRecordResult:
 
 
 class TestFallback:
-    def test_opencode_cooldown_falls_to_mimo(self, router):
+    def test_opencode_cooldown_falls_to_backend_b(self, router):
         router.record_result("opencode", 1, stderr="Free usage exceeded")
         chosen = router.select_backend("opencode")
-        assert chosen == "mimo"
+        assert chosen == "backend_b"
 
     def test_both_cooldown_returns_none(self, router):
         router.record_result("opencode", 1, stderr="Free usage exceeded")
-        router.record_result("mimo", 1, stderr="model not found")
+        router._backends["backend_b"].status = BackendStatus.COOLDOWN
+        router._backends["backend_b"].cooldown_until = time.time() + 9999
         chosen = router.select_backend("opencode")
         assert chosen is None
 
-    def test_opencode_cooldown_mimo_available_returns_mimo(self, router):
+    def test_opencode_cooldown_backend_b_available_returns_backend_b(self, router):
         router.record_result("opencode", 1, stderr="rate limit")
         chosen = router.select_backend("opencode")
-        assert chosen == "mimo"
+        assert chosen == "backend_b"
 
     def test_opencode_recovers_after_cooldown_expires(self, router):
         router.record_result("opencode", 1, stderr="rate limit")
@@ -197,15 +200,14 @@ class TestCooldownPatterns:
         assert any(p.search("rate limit hit") for p in patterns)
         assert any(p.search("please retry in 7 hours") for p in patterns)
 
-    def test_mimo_patterns(self):
-        patterns = COOLDOWN_PATTERNS["mimo"]
-        assert any(p.search("model gemma4 not found") for p in patterns)
-        assert any(p.search("ollama timeout") for p in patterns)
-        assert any(p.search("OLLAMA_RETRY_EXCEEDED") for p in patterns)
-
     def test_no_false_positive(self):
         patterns = COOLDOWN_PATTERNS["opencode"]
         assert not any(p.search("normal output") for p in patterns)
+
+    def test_only_opencode_registered(self):
+        """Regression: mimo removal must also drop its COOLDOWN_PATTERNS
+        entry, not just its execution path."""
+        assert set(COOLDOWN_PATTERNS.keys()) == {"opencode"}
 
 
 # ── Policy: RoundRobin ──────────────────────────────────────────────────────
@@ -288,7 +290,7 @@ class TestRouterAdmin:
     def test_get_status_returns_snapshot(self, router):
         status = router.get_status()
         assert "opencode" in status
-        assert "mimo" in status
+        assert "backend_b" in status
 
     def test_get_cooldowns_returns_active(self, router):
         router.record_result("opencode", 1, stderr="rate limit")
@@ -330,9 +332,9 @@ class TestRouterAdmin:
 
 
 class TestFullFallbackFlow:
-    def test_opencode_fails_mimo_succeeds(self, router):
+    def test_opencode_fails_backend_b_succeeds(self, router):
         router.record_result("opencode", 1, stderr="rate limit")
         chosen = router.select_backend("opencode")
-        assert chosen == "mimo"
-        router.record_result("mimo", 0, stdout="ok")
-        assert router._backends["mimo"].status == BackendStatus.AVAILABLE
+        assert chosen == "backend_b"
+        router.record_result("backend_b", 0, stdout="ok")
+        assert router._backends["backend_b"].status == BackendStatus.AVAILABLE

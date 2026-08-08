@@ -115,7 +115,6 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "archive_agent_task": ["mcp:handoff"],
     # agent-run — mcp:agent-run
     "run_opencode": ["mcp:agent-run"],
-    "run_mimo": ["mcp:agent-run"],
     "run_agent": ["mcp:agent-run"],
     # repo — mcp:repo
     "gitea_get_repo": ["mcp:repo"],

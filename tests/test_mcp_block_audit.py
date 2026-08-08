@@ -164,31 +164,6 @@ class TestRunToolOpenCodeBlocked:
         assert event.error_code == "OPENCODE_BLOCKED"
 
 
-# ---------------------------------------------------------------------------
-# Tests: run_tool — MIMO_BLOCKED
-# ---------------------------------------------------------------------------
-
-class TestRunToolMimoBlocked:
-    def test_emits_audit_on_mimo_blocked(self) -> None:
-        from examples.mcp_server.server import run_tool
-
-        mock_logger = _make_mock_logger()
-        error = CommandPolicyError(
-            "run_mimo is blocked: --dangerously-skip-permissions is not allowed."
-        )
-
-        with patch("examples.mcp_server.server.get_audit_logger", return_value=mock_logger):
-            result = run_tool(
-                tool="run_mimo",
-                title="Run mimo task",
-                fn=_raising_fn(error),
-                success_text="ok",
-            )
-
-        assert result.get("ok") is False
-        event = mock_logger.append.call_args[0][0]
-        assert event.error_code == "MIMO_BLOCKED"
-
 
 # ---------------------------------------------------------------------------
 # Tests: run_tool — AGENT_BACKEND_BLOCKED
@@ -337,32 +312,7 @@ class TestOpenCodeToolsAudit:
 
 
 # ---------------------------------------------------------------------------
-# Tests: mimo_tools — hard block at raise site
-# ---------------------------------------------------------------------------
-
-class TestMimoToolsAudit:
-    def test_emits_audit_at_raise_site(self) -> None:
-        from examples.mcp_server.mimo_tools import project_run_mimo
-
-        mock_logger = _make_mock_logger()
-
-        with patch("examples.mcp_server.mcp_audit.get_audit_logger", return_value=mock_logger):
-            with pytest.raises(CommandPolicyError, match="blocked"):
-                project_run_mimo(
-                    run_cmd=lambda p, c: {},
-                    project="test",
-                    task_id="task-1",
-                )
-
-        mock_logger.append.assert_called_once()
-        event = mock_logger.append.call_args[0][0]
-        assert event.event_type == "mcp.tool_blocked"
-        assert event.tool == "run_mimo"
-        assert event.error_code == "MIMO_BLOCKED"
-
-
-# ---------------------------------------------------------------------------
-# Tests: agent_tools — opencode/mimo backend block at raise site
+# Tests: agent_tools — opencode backend block at raise site
 # ---------------------------------------------------------------------------
 
 class TestAgentToolsAudit:
@@ -373,10 +323,10 @@ class TestAgentToolsAudit:
 
         mock_logger = _make_mock_logger()
 
-        # task.json must contain agent=auto and allowed_backends with opencode/mimo
+        # task.json must contain agent=auto and allowed_backends with opencode
         task_json = json.dumps({
             "agent": "auto",
-            "allowed_backends": ["opencode", "mimo"],
+            "allowed_backends": ["opencode"],
         })
         def _fake_run(project: str, command: str) -> dict[str, Any]:
             if "cat " in command and "task.json" in command:

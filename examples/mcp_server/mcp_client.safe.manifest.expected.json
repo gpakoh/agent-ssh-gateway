@@ -2,8 +2,8 @@
   "mode": "mcp_client",
   "safe_mode": true,
   "expected_safe_count": 75,
-  "expected_blocked_count": 29,
-  "expected_mcp_client_full_count": 104,
+  "expected_blocked_count": 28,
+  "expected_mcp_client_full_count": 103,
   "must_include": [
     "health",
     "info",
@@ -16,7 +16,6 @@
     "docker_exec",
     "apply_patch",
     "run_agent",
-    "run_mimo",
     "run_opencode",
     "workspace_apply_patch",
     "workspace_file_write"
