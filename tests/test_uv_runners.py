@@ -1030,3 +1030,13 @@ def test_redact_project_root_replaces_abs_paths():
     assert "./app2" in out
     assert _redact_project_root("no abs path here", root) == "no abs path here"
     assert _redact_project_root(None, root) == ""
+
+
+def test_readonly_fallback_syncs_tool_config_files():
+    """pytest.ini/mypy.ini/ruff.toml/etc must be copied on every fallback run,
+    not only on uv resync (audit T31 #4: stale/absent config in temp project)."""
+    from mcp_client_tools import _build_readonly_fallback_script
+
+    script = _build_readonly_fallback_script("pytest", "/project", ["tests"])
+    for cfg in ("setup.cfg", "pytest.ini", "mypy.ini", "ruff.toml", ".ruff.toml", "tox.ini", ".coveragerc"):
+        assert f"/project/{cfg}" in script, f"fallback must sync {cfg}"
