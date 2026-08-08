@@ -1272,7 +1272,7 @@ def run_tests(client: GatewayClient, project: str) -> dict[str, Any]:
 
 
 def run_lint(client: GatewayClient, project: str) -> dict[str, Any]:
-    return _run_uv_tool(client, project, "ruff", "run_lint", ["app", "tests", "examples"])
+    return _run_uv_tool(client, project, "ruff", "run_lint", ["."])
 
 
 def run_compileall(
