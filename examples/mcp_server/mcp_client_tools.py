@@ -1051,9 +1051,12 @@ def read_handoff(
 ) -> dict[str, Any]:
     result = run_project_command(client, project, "cat .ai-bridge/current-plan.md")
     if result.get("exit_code") != 0:
-        return build_command_result(
-            outcome="passed", exit_code=0, stdout="(no handoff plan)", stderr=""
-        )
+        stderr = result.get("stderr", "")
+        if "No such file" in stderr or "does not exist" in stderr:
+            return build_command_result(
+                outcome="passed", exit_code=0, stdout="(no handoff plan)", stderr=""
+            )
+        return result
     return result
 
 

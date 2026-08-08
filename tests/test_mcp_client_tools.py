@@ -211,3 +211,43 @@ class TestShowChangesErrorEnvelope:
         result = mod.show_changes(_FakeClient(), "demo")
         assert "ok" not in result
         assert result["git_status"]["exit_code"] == 0
+
+
+class TestReadHandoffErrorDistinction:
+    """read_handoff must not mask real errors as '(no handoff plan)'."""
+
+    def test_missing_plan_reports_no_handoff(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+
+        missing = {
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": "cat: .ai-bridge/current-plan.md: No such file or directory",
+        }
+        monkeypatch.setattr(
+            mod, "run_project_command", lambda client, project, cmd: missing
+        )
+
+        result = mod.read_handoff(_FakeClient(), "demo")
+        assert result["exit_code"] == 0
+        assert result["stdout"] == "(no handoff plan)"
+
+    def test_permission_error_is_not_masked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+
+        denied = {
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": "cat: .ai-bridge/current-plan.md: Permission denied",
+        }
+        monkeypatch.setattr(
+            mod, "run_project_command", lambda client, project, cmd: denied
+        )
+
+        result = mod.read_handoff(_FakeClient(), "demo")
+        assert result["exit_code"] == 1
+        assert "Permission denied" in result["stderr"]
