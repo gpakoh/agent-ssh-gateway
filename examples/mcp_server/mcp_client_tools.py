@@ -29,6 +29,23 @@ def _resolve_project(project_name: str) -> Path:
         raise GatewayClientError(str(exc), status_code=404, body=body) from exc
 
 
+def _redact_project_root(text: str | None, project_dir: str) -> str:
+    """Replace the host project-root prefix in tool output with '.'.
+
+    Runner fallbacks pass absolute host paths (mypy cannot read a relative
+    path that resolves through a symlink), so pytest/mypy/ruff echo
+    /media/1TB/... in stdout/stderr while info/tree keep ``root: "."``.
+    Redaction here keeps the same host-layout invariant for execution tools.
+    """
+    if not text or not project_dir:
+        return text or ""
+    root = str(project_dir).rstrip("/")
+    if not root or root == "/":
+        return text
+    redacted = text.replace(f"{root}/", "./").replace(root, ".")
+    return redacted
+
+
 def _validate_project(project: str) -> str:
     if not project:
         raise ValueError("Project name must not be empty")
@@ -730,7 +747,9 @@ def _venv_usable_on_target(client: Any, project_dir: str) -> bool:
     return raw.get("exit_code", 1) == 0
 
 
-def _fallback_result(tool_key: str, tool_name: str, r2: dict[str, Any]) -> dict[str, Any]:
+def _fallback_result(
+    tool_key: str, tool_name: str, r2: dict[str, Any], project_dir: str = ""
+) -> dict[str, Any]:
     """Build the tool_error/tool_success envelope for a fallback command's raw job result."""
     outcome2, error_code2 = _map_uv_exit_code(tool_key, r2.get("exit_code", -1))
     if error_code2 or outcome2 == "failed":
@@ -740,8 +759,8 @@ def _fallback_result(tool_key: str, tool_name: str, r2: dict[str, Any]) -> dict[
             result=build_command_result(
                 outcome=outcome2 or "error",
                 exit_code=r2.get("exit_code", -1),
-                stdout=r2.get("stdout") or r2.get("output", ""),
-                stderr=r2.get("stderr", ""),
+                stdout=_redact_project_root(r2.get("stdout") or r2.get("output", ""), project_dir),
+                stderr=_redact_project_root(r2.get("stderr", ""), project_dir),
                 execution_duration_ms=_execution_duration_ms(r2),
                 job_id=r2.get("job_id"),
             ),
@@ -752,8 +771,8 @@ def _fallback_result(tool_key: str, tool_name: str, r2: dict[str, Any]) -> dict[
         result=build_command_result(
             outcome=outcome2 or "passed",
             exit_code=r2.get("exit_code", 0),
-            stdout=r2.get("stdout") or r2.get("output", ""),
-            stderr=r2.get("stderr", ""),
+            stdout=_redact_project_root(r2.get("stdout") or r2.get("output", ""), project_dir),
+            stderr=_redact_project_root(r2.get("stderr", ""), project_dir),
             execution_duration_ms=_execution_duration_ms(r2),
             job_id=r2.get("job_id"),
         ),
@@ -860,7 +879,7 @@ def _run_uv_tool(
         if tool_key in ("pytest", "mypy"):
             script = _build_readonly_fallback_script(tool_key, str(project_dir), targets)
             r2 = client.execute_project_script(project, script, timeout_s=300)
-            return _fallback_result(tool_key, tool_name, r2)
+            return _fallback_result(tool_key, tool_name, r2, str(project_dir))
 
         if tool_key == "compileall":
             # Regression: compileall is a stdlib module, not an installable
@@ -895,7 +914,7 @@ def _run_uv_tool(
                 cwd=str(project_dir),
                 timeout_s=300,
             )
-            return _fallback_result(tool_key, tool_name, r2)
+            return _fallback_result(tool_key, tool_name, r2, str(project_dir))
 
         try:
             uvx_argv = _build_uvx_argv(tool_key, targets)
@@ -906,7 +925,7 @@ def _run_uv_tool(
                 ["env", "RUFF_CACHE_DIR=/tmp/.mcp-ruff-cache"] + uvx_argv,
                 cwd=str(project_dir),
             )
-            return _fallback_result(tool_key, tool_name, r2)
+            return _fallback_result(tool_key, tool_name, r2, str(project_dir))
 
     outcome, error_code = _map_uv_exit_code(tool_key, raw.get("exit_code", -1))
     if error_code or outcome == "failed":
@@ -916,8 +935,8 @@ def _run_uv_tool(
             result=build_command_result(
                 outcome=outcome or "error",
                 exit_code=raw.get("exit_code", -1),
-                stdout=raw.get("stdout") or raw.get("output", ""),
-                stderr=raw.get("stderr", ""),
+                stdout=_redact_project_root(raw.get("stdout") or raw.get("output", ""), str(project_dir)),
+                stderr=_redact_project_root(raw.get("stderr", ""), str(project_dir)),
                 execution_duration_ms=_execution_duration_ms(raw),
                 job_id=raw.get("job_id"),
             ),
@@ -928,8 +947,8 @@ def _run_uv_tool(
         result=build_command_result(
             outcome=outcome or "passed",
             exit_code=raw.get("exit_code", 0),
-            stdout=raw.get("stdout") or raw.get("output", ""),
-            stderr=raw.get("stderr", ""),
+            stdout=_redact_project_root(raw.get("stdout") or raw.get("output", ""), str(project_dir)),
+            stderr=_redact_project_root(raw.get("stderr", ""), str(project_dir)),
             execution_duration_ms=_execution_duration_ms(raw),
             job_id=raw.get("job_id"),
         ),
@@ -1080,11 +1099,15 @@ def run_project_command(
     command: str,
 ) -> dict[str, Any]:
     result = client.execute_project_command(project, command)
+    try:
+        root = str(_resolve_project(project))
+    except GatewayClientError:
+        root = ""
     return build_command_result(
         outcome="passed" if result.get("exit_code", 1) == 0 else "failed",
         exit_code=result.get("exit_code", -1),
-        stdout=result.get("stdout") or result.get("output", ""),
-        stderr=result.get("stderr", ""),
+        stdout=_redact_project_root(result.get("stdout") or result.get("output", ""), root),
+        stderr=_redact_project_root(result.get("stderr", ""), root),
         execution_duration_ms=_execution_duration_ms(result),
         job_id=result.get("job_id"),
     )

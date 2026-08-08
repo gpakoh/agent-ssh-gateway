@@ -1015,3 +1015,18 @@ class TestAsyncRunTestsReadonlyFallback:
         assert not any(
             kind == "execute_project_script_async" for kind, _ in calls
         ), "healthy venv must keep the plain uv run path"
+
+
+def test_redact_project_root_replaces_abs_paths():
+    """Runner output must not leak the host project root (audit T31 #3)."""
+    from mcp_client_tools import _redact_project_root
+
+    root = "/media/1TB/Python/web-ssh-gateway"
+    out = _redact_project_root(
+        f"{root}/app/foo.py:1: error: x\n{root}/app\n{root}/app2\n", root
+    )
+    assert "/media/1TB" not in out
+    assert "./app/foo.py:1: error: x" in out
+    assert "./app2" in out
+    assert _redact_project_root("no abs path here", root) == "no abs path here"
+    assert _redact_project_root(None, root) == ""
