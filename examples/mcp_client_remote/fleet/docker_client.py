@@ -74,6 +74,13 @@ _SECRET_DICT_KEY_RE = re.compile(
 # doesn't look secret-ish (e.g. DATABASE_URL, REDIS_URL).
 _DSN_CREDENTIAL_RE = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^:/\s@]+:)([^@\s]+)(@)")
 
+# Values that carry host/CI topology but are not filesystem paths: URLs to
+# CI/registry services, email addresses, and commit/revision SHAs embedded in
+# image labels (org.opencontainers.image.*) leak infrastructure otherwise.
+_LABEL_URL_VALUE_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
+_LABEL_EMAIL_VALUE_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_LABEL_SHA_VALUE_RE = re.compile(r"^([0-9a-f]{40}|sha256:[0-9a-f]{64})$", re.IGNORECASE)
+
 # Strict allowlist for `docker inspect` output. Everything not listed here is
 # dropped, so host topology (GraphDriver paths, ResolvConfPath/HostsPath/
 # LogPath, PID, internal IPs/MACs, network/endpoint IDs, compose working
@@ -513,7 +520,12 @@ class DockerClient:
         for chunk in labels.split(","):
             if "=" in chunk:
                 key, _, value = chunk.partition("=")
-                if value.startswith("/"):
+                if (
+                    value.startswith("/")
+                    or _LABEL_URL_VALUE_RE.match(value)
+                    or _LABEL_EMAIL_VALUE_RE.match(value)
+                    or _LABEL_SHA_VALUE_RE.match(value)
+                ):
                     parts.append(f"{key}={REDACTED}")
                     prev_was_path = True
                 else:
