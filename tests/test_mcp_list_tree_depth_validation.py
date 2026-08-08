@@ -116,3 +116,23 @@ class TestWorkingDirectoryValidation:
         with pytest.raises(GatewayClientError) as exc:
             working_directory(None, "no-such-project")
         assert exc.value.status_code == 404
+
+
+class TestListFilesTruncation:
+    def test_many_files_marks_truncated(self, real_registry) -> None:
+        from mcp_client_tools import list_files
+
+        for i in range(210):
+            (real_registry / f"bulk{i}.txt").write_text("x")
+
+        result = list_files(None, "demo", "bulk*.txt")
+        assert len(result["files"]) == 200
+        assert result["truncated"] is True
+        assert result["count"] == 200
+
+    def test_few_files_not_truncated(self, real_registry) -> None:
+        from mcp_client_tools import list_files
+
+        result = list_files(None, "demo", "*.py")
+        assert result["truncated"] is False
+        assert result["count"] == len(result["files"])

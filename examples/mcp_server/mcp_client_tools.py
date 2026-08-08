@@ -486,7 +486,12 @@ def list_files(client: GatewayClient, project: str, pattern: str) -> dict[str, A
     }
 
     files: list[str] = []
+    start = time.monotonic()
+    timed_out = False
     for p in project_dir.rglob(pattern):
+        if time.monotonic() - start > GLOB_TIMEOUT_S:
+            timed_out = True
+            break
         # rglob() follows symlinks when the pattern explicitly names a
         # symlinked path segment (e.g. pattern="some_symlink/*"), even
         # though it doesn't descend into them for bare "*"/"**" wildcards.
@@ -501,8 +506,10 @@ def list_files(client: GatewayClient, project: str, pattern: str) -> dict[str, A
         if p.is_file():
             files.append(str(p.relative_to(project_dir)))
 
+    total = len(files)
     files.sort()
     files = files[:200]
+    truncated = total > 200 or timed_out
 
     return {
         "project": project,
@@ -514,6 +521,7 @@ def list_files(client: GatewayClient, project: str, pattern: str) -> dict[str, A
         "root": ".",
         "files": files,
         "count": len(files),
+        "truncated": truncated,
     }
 
 
