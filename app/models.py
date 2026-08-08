@@ -93,8 +93,6 @@ class ExecuteArgvRequest(BaseModel):
             raise ValueError("argv must not be empty")
         total = 0
         for arg in v:
-            if len(arg) > 255:
-                raise ValueError(f"Individual arg too long ({len(arg)} chars, max 255)")
             if "\x00" in arg:
                 raise ValueError("NUL byte not allowed in argv")
             total += len(arg.encode("utf-8"))

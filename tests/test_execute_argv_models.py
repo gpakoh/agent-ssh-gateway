@@ -35,14 +35,14 @@ def test_execute_argv_request_empty_argv_rejected():
         pass
 
 
-def test_execute_argv_request_arg_too_long_rejected():
-    from pydantic import ValidationError
-
-    try:
-        ExecuteArgvRequest(session_id="x", argv=["x" * 256])
-        raise AssertionError("Should have raised ValidationError")
-    except ValidationError:
-        pass
+def test_execute_argv_request_large_arg_accepted():
+    # Individual args must not be capped at 255 (compileall fallback passes
+    # a large python -c script); the total UTF-8 limit still applies.
+    req = ExecuteArgvRequest(
+        session_id="x",
+        argv=["python3", "-c", "print('hello')" + " # " + "x" * 2000],
+    )
+    assert len(req.argv[2]) > 2000
 
 
 def test_execute_argv_request_nul_in_arg_rejected():

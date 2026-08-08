@@ -51,11 +51,13 @@ def test_execute_argv_empty_argv_rejected(client, monkeypatch):
     assert resp.status_code == 422
 
 
-def test_execute_argv_arg_too_long_rejected(client, monkeypatch):
+def test_execute_argv_total_limit_rejected(client, monkeypatch):
+    # Per-arg 255 cap removed (compileall fallback passes a large -c script);
+    # the 65536-byte total limit still applies.
     _setup_test(monkeypatch)
     resp = client.post(
         "/api/ssh/execute-argv",
-        json={"session_id": "x", "argv": ["x" * 256]},
+        json={"session_id": "x", "argv": ["a" * 40000, "b" * 40000]},
         headers=_auth_headers(),
     )
     assert resp.status_code == 422
