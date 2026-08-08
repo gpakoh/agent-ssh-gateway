@@ -236,12 +236,8 @@ def _validate_targets(project_dir: str, targets: list[str]) -> list[str]:
     for t in targets:
         p = Path(t)
         if p.is_absolute():
-            parts = p.parts
-            if parts == ("/",) or parts[0] == "/":
-                t = str(Path(*parts[1:])) if len(parts) > 1 else "."
-                p = Path(t)
-            else:
-                raise ValueError(f"POLICY_DENIED: absolute target not allowed: {t}")
+            t = str(Path(*p.parts[1:])) if len(p.parts) > 1 else "."
+            p = Path(t)
         if ".." in p.parts:
             raise ValueError(f"POLICY_DENIED: path traversal in target: {t}")
         resolved = (root / p).resolve()
