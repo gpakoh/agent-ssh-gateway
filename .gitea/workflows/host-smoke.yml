@@ -1,0 +1,28 @@
+name: host-smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["master"]
+    paths: ["Makefile", ".gitea/workflows/host-smoke.yml", "tests/test_mtls_e2e.py", "tests/test_opencode_runner_wrapper.py", "tests/test_workspace_tools.py", "tests/test_run_compileall_uv_seam.py", "app/workspace/**"]
+
+jobs:
+  host-smoke:
+    name: Host smoke
+    runs-on: host-smoke-ci
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        run: |
+          python3 --version
+          uv sync --frozen --extra dev
+
+      - name: Make host-smoke
+        run: uv run make host-smoke
+
+      - name: Report
+        run: |
+          echo "host-smoke completed"
+          git rev-parse --short HEAD
