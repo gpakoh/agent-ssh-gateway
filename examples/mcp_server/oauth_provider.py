@@ -11,11 +11,17 @@ import hashlib
 import secrets
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mcp.server.auth.provider import AccessToken
 
 from examples.mcp_server.token_store import TokenStore
+
+if TYPE_CHECKING:
+    # Deferred: client_store.py imports StoredClient from this module, so a
+    # module-level import here would be circular. Safe under `from
+    # __future__ import annotations` (all annotations below are strings).
+    from examples.mcp_server.client_store import ClientStore
 
 
 def hash_token(token: str) -> str:
@@ -148,11 +154,29 @@ class GatewayOAuthProvider:
         self._auth_codes: dict[str, StoredAuthCode] = {}
         self._tokens: dict[str, StoredToken] = {}
         self._token_store: TokenStore | None = None
+        self._client_store: ClientStore | None = None
         self.public_base_url: str = ""
 
     def set_token_store(self, store: TokenStore) -> None:
         """Attach a TokenStore for synchronised revocations."""
         self._token_store = store
+
+    def set_client_store(self, store: ClientStore) -> None:
+        """Attach a ClientStore so register_client() persists across restarts."""
+        self._client_store = store
+
+    def load_clients(self) -> int:
+        """Load dynamically-registered clients from the attached ClientStore.
+
+        Returns the count of clients loaded.
+        """
+        if not self._client_store:
+            return 0
+        count = 0
+        for client in self._client_store.load():
+            self._clients[client.client_id] = client
+            count += 1
+        return count
 
     def load_tokens(self) -> int:
         """Load non-revoked tokens from the attached TokenStore.
@@ -258,6 +282,8 @@ class GatewayOAuthProvider:
             scopes=parsed_scopes,
         )
         self._clients[client_id] = client
+        if self._client_store:
+            self._client_store.add(client)
 
         client_info.client_id = client_id
         client_info.client_id_issued_at = int(client.created_at)
