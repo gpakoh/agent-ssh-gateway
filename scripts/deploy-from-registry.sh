@@ -33,6 +33,18 @@ fi
 COMPOSE="${COMPOSE:-docker compose -p web-ssh-gateway -f docker/docker-compose.yml}"
 GATEWAY_REPO="${WEB_SSH_GATEWAY_REPO:?set WEB_SSH_GATEWAY_REPO in docker/.env}"
 MCP_REPO="${MCP_SERVER_REPO:?set MCP_SERVER_REPO in docker/.env}"
+# CI's deploy job passes DEPLOY_SHA=${{ github.sha }}, the exact commit
+# that passed every other job and triggered this deploy -- build-and-push
+# already tags images with both :latest and :$DEPLOY_SHA. Deploying the
+# SHA tag instead of resolving :latest's digest at pull time closes a
+# real race: two pushes to master close together (no `concurrency:` gate
+# on this workflow) can interleave their build-and-push/deploy jobs, so
+# `docker compose pull` + a fresh `docker inspect ...:latest` moments
+# later could observe a DIFFERENT, newer push's image than the one that
+# actually triggered this run -- silently deploying the wrong commit
+# without either deploy run failing or even noticing. :latest is kept as
+# the fallback for manual/local invocation, where no DEPLOY_SHA exists.
+DEPLOY_TAG="${DEPLOY_SHA:-latest}"
 STATE_DIR="$ROOT/.state"
 STATE_FILE="$STATE_DIR/web-ssh-gateway-deploy.json"
 mkdir -p "$STATE_DIR"
@@ -139,14 +151,19 @@ deploy_services() {
   MCP_SERVER_IMAGE="$mcp_image" $COMPOSE up -d --no-deps --no-build mcp-server
 }
 
-log "=== deploy-from-registry: checking for a new image ==="
+log "=== deploy-from-registry: checking for a new image (tag: $DEPLOY_TAG) ==="
 
-$COMPOSE pull web-ssh-gateway mcp-server
+# Pull the exact tag we're about to check/deploy directly -- not via
+# `$COMPOSE pull`, which follows docker-compose.yml's own (env-substituted,
+# usually :latest-defaulting) image references and would silently pull the
+# wrong tag whenever DEPLOY_TAG is a SHA.
+docker pull "$GATEWAY_REPO:$DEPLOY_TAG"
+docker pull "$MCP_REPO:$DEPLOY_TAG"
 
 RUNNING_GATEWAY_ID=$(image_id web-ssh-gateway)
 RUNNING_MCP_ID=$(image_id mcp-server)
-PULLED_GATEWAY_ID=$(docker images --no-trunc --format '{{.ID}}' "$GATEWAY_REPO:latest" | head -1)
-PULLED_MCP_ID=$(docker images --no-trunc --format '{{.ID}}' "$MCP_REPO:latest" | head -1)
+PULLED_GATEWAY_ID=$(docker images --no-trunc --format '{{.ID}}' "$GATEWAY_REPO:$DEPLOY_TAG" | head -1)
+PULLED_MCP_ID=$(docker images --no-trunc --format '{{.ID}}' "$MCP_REPO:$DEPLOY_TAG" | head -1)
 
 if [ "$RUNNING_GATEWAY_ID" = "$PULLED_GATEWAY_ID" ] && [ "$RUNNING_MCP_ID" = "$PULLED_MCP_ID" ]; then
   log "Up to date — nothing to deploy."
@@ -156,9 +173,10 @@ fi
 PREVIOUS_GATEWAY_IMAGE=$(read_state_field gateway_image)
 PREVIOUS_MCP_IMAGE=$(read_state_field mcp_server_image)
 
-# Pin by digest for the actual deploy + state recording — never :latest.
-NEW_GATEWAY_IMAGE=$(repo_digest "$GATEWAY_REPO:latest")
-NEW_MCP_IMAGE=$(repo_digest "$MCP_REPO:latest")
+# Pin by digest for the actual deploy + state recording — never a floating
+# tag (:latest or otherwise).
+NEW_GATEWAY_IMAGE=$(repo_digest "$GATEWAY_REPO:$DEPLOY_TAG")
+NEW_MCP_IMAGE=$(repo_digest "$MCP_REPO:$DEPLOY_TAG")
 
 log "New image detected — deploying $NEW_GATEWAY_IMAGE / $NEW_MCP_IMAGE"
 deploy_services "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE"
