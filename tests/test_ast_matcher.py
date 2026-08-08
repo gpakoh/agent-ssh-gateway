@@ -32,7 +32,36 @@ def test_os_system():
 def test_subprocess_run():
     matches = check_ast("import subprocess\nsubprocess.run(['rm', '-rf', '/'])")
     assert len(matches) >= 1
-    assert matches[0].severity == MatchSeverity.MEDIUM
+    sub = [m for m in matches if m.rule_id == "ast.python.subprocess_run"]
+    assert len(sub) == 1
+    assert sub[0].severity == MatchSeverity.MEDIUM
+
+
+def test_subprocess_run_nested_rm_rf_detected():
+    matches = check_ast("import subprocess\nsubprocess.run(['rm', '-rf', '/'])")
+    nested = [m for m in matches if m.rule_id == "ast.python.nested.ast.bash.rm_rf"]
+    assert len(nested) == 1
+    assert nested[0].severity == MatchSeverity.CRITICAL
+
+
+def test_subprocess_run_sh_c_payload_scanned():
+    matches = check_ast("import subprocess\nsubprocess.run(['sh', '-c', 'rm -rf /'])")
+    nested = [m for m in matches if m.rule_id == "ast.python.nested.ast.bash.rm_rf"]
+    assert len(nested) == 1
+    assert nested[0].severity == MatchSeverity.CRITICAL
+
+
+def test_subprocess_run_shell_true_string_scanned():
+    matches = check_ast("import subprocess\nsubprocess.run('rm -rf /', shell=True)")
+    nested = [m for m in matches if m.rule_id == "ast.python.nested.ast.bash.rm_rf"]
+    assert len(nested) == 1
+    assert nested[0].severity == MatchSeverity.CRITICAL
+
+
+def test_subprocess_run_benign_argv_not_scanned():
+    matches = check_ast("import subprocess\nsubprocess.run(['echo', 'rm -rf /'])")
+    nested = [m for m in matches if m.rule_id.startswith("ast.python.nested.")]
+    assert nested == []
 
 
 def test_from_import():
