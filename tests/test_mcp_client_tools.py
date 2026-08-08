@@ -104,6 +104,33 @@ class _FakeClient:
 class TestWorkingDirectoryNoHostPaths:
     """T2.3: working_directory must not return absolute host paths."""
 
+    @pytest.fixture(autouse=True)
+    def _registry(self, tmp_path):
+        """The tool resolves the project through the workspace registry; on
+        CI the real /media/1TB/Python root does not exist, so load a local
+        registry containing web-ssh-gateway (audit T31 #13 regression)."""
+        import app.workspace.registry as registry_module
+        from app.workspace.registry import WorkspaceRegistry, reset_registry
+
+        project_root = tmp_path / "web-ssh-gateway"
+        project_root.mkdir()
+        yaml_path = tmp_path / "projects.yaml"
+        yaml_path.write_text(
+            f"""
+registry_root: {tmp_path}
+projects:
+  web-ssh-gateway:
+    root: web-ssh-gateway
+    type: fastapi
+    description: test project
+    tags: []
+"""
+        )
+        reset_registry()
+        registry_module._registry = WorkspaceRegistry.load(yaml_path)
+        yield
+        reset_registry()
+
     def test_returns_project_relative_dot(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mod = import_example_module(monkeypatch, "mcp_client_tools")
         result = mod.working_directory(_FakeClient(), "web-ssh-gateway")
