@@ -86,6 +86,23 @@ smoke() {
   $ok
 }
 
+validate_image_ref() {
+  # STATE_FILE is intentionally world-writable (chmod 777/666 above) so
+  # both the manual-root path and the CI job's non-root UID can write it
+  # -- but that also means any other local account on this host can edit
+  # it. Without this check, a tampered gateway_image/mcp_server_image
+  # field would be fed straight into `docker compose up` as the ROLLBACK
+  # target with no validation at all. Only accept the exact digest-pinned
+  # shape repo_digest() itself produces for the expected repo -- anything
+  # else (a different image, a local path, garbage) fails the deploy
+  # instead of silently deploying it.
+  local ref="$1" expected_repo="$2"
+  if [[ "$ref" =~ ^${expected_repo}@sha256:[0-9a-f]{64}$ ]]; then
+    return 0
+  fi
+  return 1
+}
+
 read_state_field() {
   python3 -c "
 import json
@@ -157,6 +174,11 @@ log "Smoke test FAILED."
 
 if [ -z "$PREVIOUS_GATEWAY_IMAGE" ]; then
   log "No previous known-good image recorded (first deploy) — cannot roll back. Leaving the failed deploy in place for manual investigation."
+  exit 1
+fi
+
+if ! validate_image_ref "$PREVIOUS_GATEWAY_IMAGE" "$GATEWAY_REPO" || ! validate_image_ref "$PREVIOUS_MCP_IMAGE" "$MCP_REPO"; then
+  log "Rollback state in $STATE_FILE does not look like a valid digest-pinned image reference — refusing to roll back to it. Leaving the failed deploy in place for manual investigation."
   exit 1
 fi
 
