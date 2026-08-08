@@ -171,3 +171,66 @@ projects:
     type: service
     description: "zep"
     tags: []
+
+  dangerzone-worker:
+    root: quart-platform/dangerzone-worker
+    parent: quart-platform
+    type: python-service
+    description: "Extracted from infra-quart/services/dangerzone-worker during consolidation"
+    tags: []
+
+  database:
+    root: quart-platform/database
+    parent: quart-platform
+    type: service
+    description: "Extracted from infra-quart/services/database during consolidation"
+    tags: []
+
+  father-ui:
+    root: quart-platform/father-ui
+    parent: quart-platform
+    type: node-service
+    description: "Father UI — React SPA admin panel for kojo bot (extracted from kojo-bot-service 2026-08-07)"
+    tags: []
+
+  gpu-telemetry-power:
+    root: quart-platform/gpu-telemetry-power
+    parent: quart-platform
+    type: python-service
+    description: "Extracted from infra-quart/services/gpu-telemetry-power during consolidation"
+    tags: []
+
+  lightrag-service:
+    root: quart-platform/lightrag-service
+    parent: quart-platform
+    type: python-service
+    description: "Extracted from infra-quart/services/lightrag-service during consolidation"
+    tags: []
+
+  mineru-worker:
+    root: quart-platform/mineru-worker
+    parent: quart-platform
+    type: python-service
+    description: "Extracted from infra-quart/services/mineru-worker during consolidation"
+    tags: []
+
+  rag-faiss-service:
+    root: quart-platform/rag-faiss-service
+    parent: quart-platform
+    type: python-service
+    description: "Extracted from infra-quart/services/rag-faiss-service during consolidation"
+    tags: []
+
+  rag-ingestion-worker:
+    root: quart-platform/rag-ingestion-worker
+    parent: quart-platform
+    type: python-service
+    description: "Extracted from infra-quart/services/rag-ingestion-worker during consolidation"
+    tags: []
+
+  rag-router-service:
+    root: quart-platform/rag-router-service
+    parent: quart-platform
+    type: python-service
+    description: "RAG Router Service — ingestion/query orchestration boundary for file-security, LightRAG, FAISS"
+    tags: []
