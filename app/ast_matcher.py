@@ -74,6 +74,16 @@ _PYTHON_MODULE_FUNC: dict[tuple[str | None, str], _PatternDef] = {
 # Regex-based patterns for non-Python scripts, grouped by language.
 _SCRIPT_PATTERNS: dict[str, list[tuple[re.Pattern, _PatternDef]]] = {}
 
+# Shell interpreters whose "-c" payload is a nested shell command.
+_SHELL_INTERPRETERS = {"sh", "bash", "dash", "zsh", "/bin/sh", "/bin/bash", "/bin/dash", "/bin/zsh"}
+
+# Binaries whose argv is scanned as a nested command when passed as a list
+# to subprocess.run/call/Popen (e.g. ["rm", "-rf", "/"]).
+_NESTED_SCAN_BINARIES = {
+    "rm", "mv", "dd", "mkfs", "wipefs", "fdisk", "sfdisk", "parted",
+    "truncate", "pkill", "killall", "git", "docker",
+}
+
 
 def _compile_script_patterns():
     if _SCRIPT_PATTERNS:
@@ -137,6 +147,14 @@ def _check_ast_python(code: str) -> list[AstMatch]:
 
         func = node.func
 
+        # Nested-command analysis for subprocess.run/call/Popen: a list argv
+        # or shell=True string is invisible to the regex packs above, so
+        # ``subprocess.run(['rm','-rf','/'])`` would only be MEDIUM.
+        if isinstance(func, (ast.Attribute, ast.Name)):
+            func_name = func.attr if isinstance(func, ast.Attribute) else func.id
+            if func_name in ("run", "call", "Popen"):
+                matches.extend(_subprocess_nested_matches(node, code))
+
         # Direct attribute call: os.remove(x) → func=Attribute(value=Name(id='os'), attr='remove')
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
             module_name = func.value.id
@@ -190,6 +208,62 @@ def _check_ast_python(code: str) -> list[AstMatch]:
                 matches.append(_make_ast_match(node, pattern, code))
                 continue
 
+    return matches
+
+
+def _subprocess_nested_matches(call_node: ast.Call, code: str) -> list[AstMatch]:
+    """Rebuild the nested command of a subprocess.run/call/Popen call.
+
+    Supports both forms:
+    * list argv: ``subprocess.run(['rm', '-rf', '/'])`` — rebuilt argv is
+      scanned when the binary is a shell interpreter (``sh -c ...``) or a
+      known destructive binary;
+    * string form: ``subprocess.run('rm -rf /', shell=True)``.
+
+    Returns additional matches (rule_id ``ast.python.nested.*``) so the
+    destructive intent is not lost behind the generic MEDIUM subprocess hit.
+    """
+    if not call_node.args:
+        return []
+    first = call_node.args[0]
+
+    nested: list[str] = []
+    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+        nested.append(first.value)
+    elif isinstance(first, ast.List):
+        argv: list[str] = []
+        for elt in first.elts:
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                argv.append(elt.value)
+            else:
+                return []
+        if not argv:
+            return []
+        if argv[0] in _SHELL_INTERPRETERS and len(argv) >= 3 and argv[1] == "-c":
+            nested.append(" ".join(argv[2:]))
+        elif argv[0].rsplit("/", 1)[-1] in _NESTED_SCAN_BINARIES:
+            nested.append(" ".join(argv))
+    else:
+        return []
+
+    _compile_script_patterns()
+    lineno = getattr(call_node, "lineno", 1)
+    col_offset = getattr(call_node, "col_offset", 0)
+    matches: list[AstMatch] = []
+    for cmd in nested:
+        for compiled_re, pattern in _SCRIPT_PATTERNS["bash"]:
+            for m in compiled_re.finditer(cmd):
+                matches.append(
+                    AstMatch(
+                        rule_id=f"ast.python.nested.{pattern.rule_id}",
+                        reason=f"{pattern.reason} (via subprocess argv)",
+                        severity=pattern.severity,
+                        lineno=lineno,
+                        col_offset=col_offset,
+                        matched_text=m.group().strip(),
+                        suggestion=pattern.suggestion,
+                    )
+                )
     return matches
 
 
