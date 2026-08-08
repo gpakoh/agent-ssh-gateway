@@ -933,6 +933,24 @@ async def test_compose_logs_returns_structured_lines():
     assert result == {"lines": ["web  | starting", "db   | ready"], "count": 2}
 
 
+@pytest.mark.asyncio
+async def test_compose_logs_follow_rejected_immediately():
+    """Regression: _run() awaits the subprocess's exit, but `docker compose
+    logs --follow` never exits on its own -- follow=True used to always
+    hang for the full timeout (up to 300s) and then fail with a misleading
+    "Command timed out" RuntimeError. Must fail fast with a clear error
+    instead, and must never even reach _run() (no subprocess spawned).
+    """
+    c = _client()
+
+    async def _unreachable_run(argv, timeout=None, **kw):
+        raise AssertionError("follow=True must not reach _run()")
+
+    c._run = _unreachable_run
+    with pytest.raises(ValueError, match="follow=True"):
+        await c.compose_logs(follow=True)
+
+
 def test_sanitize_labels_string_redacts_url_email_sha_values():
     """CI/registry URLs, emails and commit SHAs in label values must not
     leak infrastructure topology (audit T31 #11)."""

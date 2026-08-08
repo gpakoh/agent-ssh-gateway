@@ -773,14 +773,27 @@ class DockerClient:
         timeout: int = 30,
     ) -> dict:
         """Fetch logs from compose services. tail: 1-1000 lines."""
+        if follow:
+            # This is a request/response tool call, not a stream: _run()
+            # awaits the subprocess's exit via proc.communicate(), but
+            # `docker compose logs --follow` never exits on its own. Every
+            # follow=True call would silently hang for the full `timeout`
+            # (up to 300s) and then fail with a misleading "Command timed
+            # out" RuntimeError instead of ever returning. Fail fast with a
+            # clear error instead of burning up to 5 minutes to discover
+            # the same thing.
+            raise ValueError(
+                "compose_logs(follow=True) is not supported -- this is a "
+                "request/response tool call with no way to stream output; "
+                "call again with follow=False (or omitted) to fetch the "
+                "current tail instead."
+            )
         self._validate_project_dir(project_dir)
         timeout = max(1, min(timeout, 300))
         argv = self._compose_base_argv(project_dir)
         argv.append("logs")
         tail = max(1, min(tail, 1000))
         argv.extend(["--tail", str(tail)])
-        if follow:
-            argv.append("--follow")
         if timestamps:
             argv.append("--timestamps")
         if services:
