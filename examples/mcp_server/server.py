@@ -74,9 +74,6 @@ from mcp_client_tools import (
     working_directory,
     write_handoff_plan,
 )
-from mimo_tools import (
-    project_run_mimo as _project_run_mimo,
-)
 from opencode_tools import (
     project_run_opencode as _project_run_opencode,
 )
@@ -267,7 +264,7 @@ if os.environ.get("MCP_AGENT_BACKEND_ROUTER_ENABLED", "false").strip().lower() =
         _agent_router = AgentBackendRouter(
             fallback_order=[
                 x.strip()
-                for x in os.environ.get("MCP_BACKEND_FALLBACK_ORDER", "opencode,mimo").split(",")
+                for x in os.environ.get("MCP_BACKEND_FALLBACK_ORDER", "opencode").split(",")
                 if x.strip()
             ],
         )
@@ -521,8 +518,6 @@ def run_tool(
                     error_code = "AGENT_BACKEND_BLOCKED"
                 elif "blocked" in msg and "opencode" in msg:
                     error_code = "OPENCODE_BLOCKED"
-                elif "blocked" in msg and "mimo" in msg:
-                    error_code = "MIMO_BLOCKED"
                 elif "readonly" in msg or "allowlist" in msg or "denied" in msg:
                     error_code = "READONLY_COMMAND"
                 else:
@@ -3558,40 +3553,15 @@ def gateway_run_opencode(
     )
 
 
-@register_tool("run_mimo")
-def gateway_run_mimo(
-    project: str,
-    task_id: str,
-    model: str | None = None,
-) -> dict[str, Any]:
-    """Execute an existing handoff task via Mimo CLI inside a disposable git worktree.
-    Requires write mode handoff or full. See spec for 11 pre-flight guards.
-    Mimo runs with --dangerously-skip-permissions — only valid in disposable worktrees."""
-    from write_modes import assert_handoff_write_allowed
-
-    assert_handoff_write_allowed()
-    return run_tool(
-        tool="run_mimo",
-        title="Run mimo task",
-        fn=lambda: _project_run_mimo(
-            lambda p, c: run_project_command(client, p, c),
-            project=project,
-            task_id=task_id,
-            model=model,
-        ),
-        success_text="Submitted mimo task.",
-    )
-
-
 @register_tool("run_agent")
 def gateway_run_agent(
     project: str,
     task_id: str,
     model: str | None = None,
 ) -> dict[str, Any]:
-    """Execute a handoff task via the agent backend router — auto-selects OpenCode or Mimo.
+    """Execute a handoff task via the agent backend router — selects OpenCode.
     Requires write mode handoff or full. Router enabled by MCP_AGENT_BACKEND_ROUTER_ENABLED.
-    Task must have task.json with agent='auto' and worktree_path if mimo may be selected."""
+    Task must have task.json with agent='auto' or agent='opencode'."""
     from write_modes import assert_handoff_write_allowed
 
     assert_handoff_write_allowed()

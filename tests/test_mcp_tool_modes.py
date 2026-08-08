@@ -142,7 +142,6 @@ class TestChatGPTSafeMode:
 
     def test_blocked_tools_excludes_agent_launch(self):
         assert "run_opencode" in MCP_CLIENT_BLOCKED_TOOLS
-        assert "run_mimo" in MCP_CLIENT_BLOCKED_TOOLS
         assert "run_agent" in MCP_CLIENT_BLOCKED_TOOLS
 
     def test_blocked_tools_excludes_docker(self):
@@ -250,7 +249,6 @@ class TestMcpClientWriteMode:
     def test_agent_launch_still_blocked(self):
         write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
         assert "run_opencode" not in write_tools
-        assert "run_mimo" not in write_tools
         assert "run_agent" not in write_tools
 
     def test_handoff_and_agent_task_write_still_blocked(self):

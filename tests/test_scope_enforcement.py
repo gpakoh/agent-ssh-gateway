@@ -141,7 +141,6 @@ class TestScopeChecking:
     def test_has_required_scope_agent_runner(self):
         ar = get_profile_scopes("agent-runner")
         assert has_required_scope(ar, "run_opencode")
-        assert has_required_scope(ar, "run_mimo")
         assert not has_required_scope(ar, "docker_ps")
         assert not has_required_scope(ar, "execute_restricted")
 
@@ -244,9 +243,6 @@ class TestSpecificToolMappings:
 
     def test_project_run_opencode_requires_agent_run(self):
         assert get_required_scopes("run_opencode") == ["mcp:agent-run"]
-
-    def test_gateway_project_run_mimo_requires_agent_run(self):
-        assert get_required_scopes("run_mimo") == ["mcp:agent-run"]
 
     def test_all_gitea_fleet_requires_repo(self):
         for tool in TOOL_SCOPES:

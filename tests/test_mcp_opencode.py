@@ -104,7 +104,7 @@ class TestServerWrapperBlocked:
         clear_prefixes = ("server", "mcp_server", "tool_modes", "opencode_tools", "command_policy",
                           "gateway_client", "handoff", "self_test", "write_modes",
                           "docker_confirm", "agent_tools", "agent_tasks",
-                          "agent_backend_router", "mcp_client_tools", "mimo_tools")
+                          "agent_backend_router", "mcp_client_tools")
         saved_modules = {}
         for name in list(sys.modules):
             if any(p in name for p in clear_prefixes):

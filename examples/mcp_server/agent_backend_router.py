@@ -1,8 +1,8 @@
 """Agent Backend Router — selection, cooldown tracking, fallback between runners.
 
 Auto-selection disabled by default (MCP_AGENT_BACKEND_ROUTER_ENABLED=false).
-When enabled, wraps project_run_opencode / project_run_mimo with automatic
-fallback on cooldown/failure.
+When enabled, wraps project_run_opencode with automatic fallback on
+cooldown/failure.
 """
 
 from __future__ import annotations
@@ -61,11 +61,6 @@ COOLDOWN_PATTERNS: dict[str, list[re.Pattern]] = {
         re.compile(r"Free usage exceeded", re.IGNORECASE),
         re.compile(r"rate.limit", re.IGNORECASE),
         re.compile(r"retry in", re.IGNORECASE),
-    ],
-    "mimo": [
-        re.compile(r"model.*not.*found", re.IGNORECASE),
-        re.compile(r"ollama.*timeout", re.IGNORECASE),
-        re.compile(r"OLLAMA_RETRY_EXCEEDED", re.IGNORECASE),
     ],
 }
 
@@ -145,7 +140,7 @@ class RoundRobin(SelectionPolicy):
 # ── Router ────────────────────────────────────────────────────────────────────
 
 _ENABLED = os.environ.get("MCP_AGENT_BACKEND_ROUTER_ENABLED", "false").strip().lower() == "true"
-_FALLBACK_ORDER = os.environ.get("MCP_BACKEND_FALLBACK_ORDER", "opencode,mimo").strip().split(",")
+_FALLBACK_ORDER = os.environ.get("MCP_BACKEND_FALLBACK_ORDER", "opencode").strip().split(",")
 _COOLDOWN_DEFAULT = int(os.environ.get("MCP_BACKEND_COOLDOWN_DEFAULT", "25200"))
 _COOLDOWN_ERROR = int(os.environ.get("MCP_BACKEND_COOLDOWN_ERROR", "300"))
 _POLICY_NAME = (

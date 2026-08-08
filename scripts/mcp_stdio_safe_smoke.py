@@ -18,7 +18,6 @@ SERVER_PY = ROOT / "examples" / "mcp_server" / "server.py"
 
 BLOCKED_TOOLS = frozenset({
     "run_opencode",
-    "run_mimo",
     "run_agent",
     "docker_exec",
     "docker_compose_up",
