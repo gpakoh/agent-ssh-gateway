@@ -865,6 +865,30 @@ async def test_logs_returns_structured_lines():
 
 
 @pytest.mark.asyncio
+async def test_logs_redacts_secrets_in_lines():
+    """Regression: MAJOR finding from a live security audit. Container
+    logs are one of the most likely places an application accidentally
+    prints a real secret (a DSN with an embedded password, a bare
+    KEY=value env dump) -- logs() returned every line completely
+    unredacted."""
+    c = _client()
+
+    async def _fake_run(argv, timeout=None, **kw):
+        return (
+            "starting up\n"
+            "DATABASE_URL=postgresql://dbuser:hunter2@dbhost:5432/appdb\n"
+            "ready"
+        )
+
+    c._run = _fake_run
+    result = await c.logs("web")
+    assert result["count"] == 3
+    assert "hunter2" not in result["lines"][1]
+    assert result["lines"][0] == "starting up"
+    assert result["lines"][2] == "ready"
+
+
+@pytest.mark.asyncio
 async def test_compose_services_returns_structured_list():
     c = _client()
 

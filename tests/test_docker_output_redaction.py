@@ -323,3 +323,21 @@ def test_ps_mounts_volume_name_kept():
     }
     out = DockerClient._sanitize_ps_row(row)
     assert out["Mounts"] == "pgdata:/var/lib/postgresql/data"
+
+
+def test_ps_mounts_named_volume_first_still_redacts_later_path():
+    """Regression: MAJOR finding from a live security audit, confirmed live
+    on this exact host (mcp-server's own `docker ps` row): Mounts was only
+    redacted when the string STARTED with "/" -- docker orders mounts
+    arbitrarily, so "named_volume,/real/host/path" left the real path
+    unredacted whenever a named volume happened to sort first.
+    """
+    row = {
+        "Names": "mcp-server",
+        "Image": "mcp-server:latest",
+        "Labels": "",
+        "Mounts": "web-ssh-gateway_data,/deploy/web-ssh-gateway,46244ecad691da",
+    }
+    out = DockerClient._sanitize_ps_row(row)
+    assert "/deploy/web-ssh-gateway" not in out["Mounts"]
+    assert out["Mounts"] == f"web-ssh-gateway_data,{REDACTED},46244ecad691da"

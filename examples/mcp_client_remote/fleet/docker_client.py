@@ -551,8 +551,20 @@ class DockerClient:
         if isinstance(labels, str) and labels:
             out["Labels"] = DockerClient._sanitize_labels_string(labels)
         mounts = out.get("Mounts")
-        if isinstance(mounts, str) and mounts.startswith("/"):
-            out["Mounts"] = REDACTED
+        if isinstance(mounts, str) and mounts:
+            # `docker ps --format json` renders Mounts as one comma-
+            # separated list mixing named volumes (no leading "/") and
+            # bind-mount host paths (leading "/") in arbitrary order --
+            # checking mounts.startswith("/") on the whole string only
+            # caught the case where a path happened to sort first.
+            # Confirmed live on this exact host: "web-ssh-gateway_...,
+            # /deploy/web-ssh-gateway,..." left the real host path
+            # unredacted because a named volume came first. Redact each
+            # path-looking chunk individually instead.
+            out["Mounts"] = ",".join(
+                REDACTED if chunk.startswith("/") else chunk
+                for chunk in mounts.split(",")
+            )
         return out
 
     def _sanitize_value(self, value: object) -> object:
@@ -600,7 +612,12 @@ class DockerClient:
         tail = max(1, min(tail, 1000))
         argv = [DOCKER_BIN, "logs", "--tail", str(tail), container]
         result = await self._run(argv)
-        lines = result.splitlines()
+        # Container log lines are one of the most likely places for an
+        # application to have accidentally printed a real secret (an
+        # Authorization header, a DSN with an embedded password, ...) --
+        # reuse the same DSN/KEY=value redaction docker_inspect already
+        # applies, rather than returning raw log text unredacted.
+        lines = [self._sanitize_string(line) for line in result.splitlines()]
         return {"lines": lines, "count": len(lines)}
 
     async def stats(
@@ -769,7 +786,7 @@ class DockerClient:
                 self._validate_service_name(s)
             argv.extend(services)
         result = await self._run(argv, timeout=float(timeout))
-        lines = result.splitlines()
+        lines = [self._sanitize_string(line) for line in result.splitlines()]
         return {"lines": lines, "count": len(lines)}
 
     async def rm(self, container: str, force: bool = False) -> RunResult:
