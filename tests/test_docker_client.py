@@ -160,6 +160,27 @@ def test_compose_ps_validates_project_dir_allowed_root():
             c._validate_project_dir(tmpdir)
 
 
+def test_compose_ps_project_dir_error_does_not_leak_allowed_roots():
+    """Regression: MAJOR finding from a live security audit. The error
+    for a project_dir outside the allowlist used to enumerate the real
+    host directories (ALLOWED_PROJECT_ROOTS, e.g. /media/1TB/Python/,
+    /var/www/) in the message -- a routine validation error (any caller
+    passing a bad project_dir, not just an attacker) became a topology
+    oracle with no other access required.
+    """
+    from examples.mcp_server.config import ALLOWED_PROJECT_ROOTS
+
+    c = _client()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        try:
+            c._validate_project_dir(tmpdir)
+            raise AssertionError("Should have raised ValueError")
+        except ValueError as exc:
+            message = str(exc)
+            for root in ALLOWED_PROJECT_ROOTS:
+                assert root not in message
+
+
 def test_compose_ps_with_valid_project_dir():
     c = _client()
     c._validate_project_dir(None)  # None is always valid
