@@ -242,6 +242,15 @@ class TestGatewayResultFieldErrorHandling:
                 source="gateway",
                 read_only=True,
             )
+        except ValueError as exc:
+            return tool_error(
+                tool="health",
+                code="INVALID_INPUT",
+                message=str(exc),
+                retryable=False,
+                source="gateway",
+                read_only=True,
+            )
         return tool_success(
             tool="health",
             result=data,
@@ -293,6 +302,15 @@ class TestGatewayResultFieldErrorHandling:
         assert result["meta"]["contract_version"] == CONTRACT_VERSION
         assert result["meta"]["tool"] == "health"
 
+    def test_value_error_maps_to_invalid_input(self):
+        result = self._run_gateway(fn=_raise_value_error)
+        assert_tool_envelope(
+            result, ok=False, tool="health", source="gateway", has_error=True
+        )
+        assert result["error"]["code"] == "INVALID_INPUT"
+        assert result["error"].get("retryable") is False
+        assert "invalid glob" in result["error"]["message"]
+
 
 # ── Exception-raising helpers ──────────────────────────────────────
 
@@ -319,6 +337,10 @@ def _raise_write_mode_error() -> Any:
     from write_modes import WriteModeError
 
     raise WriteModeError("Unsupported write mode")
+
+
+def _raise_value_error() -> Any:
+    raise ValueError("invalid glob: '*.py'")
 
 
 def _return_sample_data() -> dict[str, str]:
