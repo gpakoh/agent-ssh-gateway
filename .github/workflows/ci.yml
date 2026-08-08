@@ -191,6 +191,14 @@ jobs:
         run: |
           echo "${{ secrets.REGISTRY_TOKEN }}" | docker login "$REGISTRY" -u gpakoh --password-stdin
       - name: Deploy, smoke-test, roll back on failure
+        # DEPLOY_SHA pins deploy-from-registry.sh to the exact commit that
+        # triggered this run (build-and-push already tagged images with
+        # both :latest and :${{ github.sha }}) instead of letting it
+        # re-resolve :latest fresh at pull time -- closes a race where two
+        # close-together pushes to master (no `concurrency:` gate on this
+        # workflow) could interleave and deploy the wrong commit's image.
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
         run: |
           cd /deploy/web-ssh-gateway
           bash scripts/deploy-from-registry.sh
