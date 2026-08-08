@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import random
@@ -42,6 +43,7 @@ class DeliveryService:
         self._http_session: aiohttp.ClientSession | None = None
         self._worker_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
+        self._inflight: set[asyncio.Task] = set()
         self._running = False
 
     async def create_tables(self):
@@ -51,12 +53,32 @@ class DeliveryService:
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-    async def close(self):
+    async def close(self, drain_timeout: float = 10.0):
+        """Stop the worker/cleanup loops and drain in-flight deliveries
+        before touching the HTTP session or DB engine.
+
+        `.cancel()` only *schedules* cancellation at the next checkpoint —
+        it does not block until the task has actually stopped. Previously
+        close() cancelled the loop tasks and immediately disposed the
+        engine/closed the session, while _worker_loop's per-delivery
+        `_send_delivery` tasks (fired via untracked `asyncio.create_task`)
+        could still be mid-flight using that exact session/engine,
+        producing unretrieved-exception warnings on shutdown.
+        """
         self._running = False
-        if self._worker_task:
-            self._worker_task.cancel()
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
+        for task in (self._worker_task, self._cleanup_task):
+            if task:
+                task.cancel()
+        for task in (self._worker_task, self._cleanup_task):
+            if task:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        if self._inflight:
+            _done, pending = await asyncio.wait(self._inflight, timeout=drain_timeout)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.wait(pending)
         if self._http_session:
             await self._http_session.close()
         await self._engine.dispose()
@@ -243,9 +265,11 @@ class DeliveryService:
             try:
                 deliveries = await self.claim_deliveries(limit=20, lease_ttl=lease_ttl)
                 for d in deliveries:
-                    asyncio.create_task(
+                    task = asyncio.create_task(
                         self._send_delivery(d, max_attempts, retry_base_sec, retry_max_sec)
                     )
+                    self._inflight.add(task)
+                    task.add_done_callback(self._inflight.discard)
             except Exception:
                 logger.exception("Delivery Worker Error")
             await asyncio.sleep(poll_interval)

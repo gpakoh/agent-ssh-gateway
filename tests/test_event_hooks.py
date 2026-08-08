@@ -1,5 +1,6 @@
 """Tests for event hook system."""
 
+import asyncio
 import json
 import socket
 from datetime import UTC, datetime, timedelta
@@ -487,3 +488,93 @@ async def test_delivery_cleanup(delivery_service):
     # Now It Should Be Cleaned
     count = await delivery_service.cleanup_old(sent_days=7, dead_days=30)
     assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# Delivery Service — Shutdown / close() (M14)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_close_awaits_worker_and_cleanup_tasks_before_returning():
+    """Regression: close() used to only .cancel() the worker/cleanup tasks
+    without awaiting them -- `.cancel()` merely schedules cancellation at
+    the next checkpoint, it doesn't block until the task actually stops.
+    A task that takes any time at all to unwind after being cancelled
+    could still be running when close() returned (and went on to dispose
+    the engine / close the HTTP session out from under it).
+    """
+    ds = DeliveryService(database_url="sqlite+aiosqlite:///:memory:", instance_id="test-close-1")
+    await ds.create_tables()
+
+    events: list[str] = []
+
+    async def slow_to_cancel(name: str):
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)
+            events.append(f"{name}-stopped")
+            raise
+
+    ds._worker_task = asyncio.create_task(slow_to_cancel("worker"))
+    ds._cleanup_task = asyncio.create_task(slow_to_cancel("cleanup"))
+    # Let both tasks actually start running (reach their `await
+    # asyncio.sleep(10)`) before cancelling -- cancelling a task that has
+    # never had a chance to run bypasses its try/except entirely (the
+    # CancelledError is thrown before the coroutine body ever executes),
+    # which would make this test pass for the wrong reason.
+    await asyncio.sleep(0)
+
+    await ds.close()
+    events.append("close-returned")
+
+    assert events == ["worker-stopped", "cleanup-stopped", "close-returned"] or events == [
+        "cleanup-stopped",
+        "worker-stopped",
+        "close-returned",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_close_drains_inflight_deliveries_before_disposing_engine():
+    """Regression: _worker_loop fired per-delivery `_send_delivery` tasks
+    via untracked `asyncio.create_task`, so close() had no way to wait for
+    them -- it could dispose the DB engine / close the HTTP session while
+    one was still using them mid-flight. close() must now wait for every
+    tracked in-flight task to finish before touching either.
+    """
+    from unittest.mock import AsyncMock
+
+    ds = DeliveryService(database_url="sqlite+aiosqlite:///:memory:", instance_id="test-close-2")
+    await ds.create_tables()
+
+    events: list[str] = []
+
+    async def slow_inflight_delivery():
+        await asyncio.sleep(0.05)
+        events.append("inflight-done")
+
+    task = asyncio.create_task(slow_inflight_delivery())
+    ds._inflight.add(task)
+    task.add_done_callback(ds._inflight.discard)
+
+    real_engine = ds._engine
+    ds._http_session = AsyncMock()
+
+    async def tracked_session_close():
+        events.append("session-closed")
+
+    ds._http_session.close = tracked_session_close
+
+    class _TrackedEngine:
+        async def dispose(self) -> None:
+            events.append("engine-disposed")
+            await real_engine.dispose()
+
+    ds._engine = _TrackedEngine()
+
+    await ds.close()
+
+    assert events == ["inflight-done", "session-closed", "engine-disposed"]
+    assert not ds._inflight
