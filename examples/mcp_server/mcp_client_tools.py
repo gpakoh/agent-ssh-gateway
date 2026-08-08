@@ -1170,8 +1170,13 @@ def git_add(
     project: str,
     paths: list[str],
 ) -> dict[str, Any]:
+    if not paths:
+        raise ValueError("INVALID_INPUT: paths must not be empty")
+    for p in paths:
+        if p.startswith("-") or not p.strip():
+            raise ValueError(f"INVALID_INPUT: path {p!r} must not start with '-'")
     quoted = " ".join(shlex.quote(p) for p in paths)
-    return run_project_command(client, project, f"git add {quoted}")
+    return run_project_command(client, project, f"git add -- {quoted}")
 
 
 def git_commit(
@@ -1182,12 +1187,30 @@ def git_commit(
     return run_project_command(client, project, f"git commit -m {shlex.quote(message)}")
 
 
+# git remote/branch names: no leading '-', no refspec ':', no whitespace.
+_GIT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/-]*$")
+
+
+def _validate_git_name(value: str, field: str) -> str:
+    """Reject git option injection (--mirror/--force/--delete, refspec ':').
+
+    shlex.quote() protects against shell injection but not against git
+    option injection; a strict name pattern is the actual control.
+    """
+    if not value or not _GIT_NAME_RE.match(value):
+        raise ValueError(f"INVALID_INPUT: {field} {value!r} is not a valid git remote/branch name")
+    return value
+
+
 def git_push(
     client: GatewayClient,
     project: str,
     remote: str = "origin",
     branch: str | None = None,
 ) -> dict[str, Any]:
+    _validate_git_name(remote, "remote")
+    if branch is not None:
+        _validate_git_name(branch, "branch")
     if branch is None:
         cmd = f"git push {shlex.quote(remote)}"
     else:
