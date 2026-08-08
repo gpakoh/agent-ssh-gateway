@@ -229,6 +229,16 @@ class TestWebUiE2E:
             "appendLine('Connected to <img src=x onerror=\"window.__xssFired=true\">@evil', 'system');"
         )
         line = driver.find_element(By.CSS_SELECTOR, ".terminal-line.system:last-child")
+        # The line exists in the DOM (innerHTML is set synchronously by
+        # appendLine), but WebDriver .text reflects the *rendered* text: in
+        # headless Chrome the layout pass runs asynchronously after
+        # execute_script, so .text can transiently read "" even though the
+        # node's textContent is already correct. Wait for the renderer to
+        # catch up instead of racing it.
+        WebDriverWait(driver, 5).until(
+            lambda d: d.find_element(By.CSS_SELECTOR, ".terminal-line.system:last-child").text
+        )
+        line = driver.find_element(By.CSS_SELECTOR, ".terminal-line.system:last-child")
         # The deterministic proof: if the markup were still live HTML, the
         # <img> element would have been parsed out of textContent entirely
         # (it isn't text, it's a child element) — its presence *as text*
