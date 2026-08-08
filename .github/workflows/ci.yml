@@ -139,7 +139,7 @@ jobs:
       - name: Log in to the Gitea container registry
         run: |
           echo "${{ secrets.REGISTRY_TOKEN }}" | docker login "$REGISTRY" -u gpakoh --password-stdin
-      - name: Build and push web-ssh-gateway image
+      - name: Build web-ssh-gateway image
         run: |
           docker build -f docker/Dockerfile \
             --build-arg BUILD_SHA=${{ github.sha }} \
@@ -147,9 +147,7 @@ jobs:
             -t "$REGISTRY/gpakoh/agent-ssh-gateway:${{ github.sha }}" \
             -t "$REGISTRY/gpakoh/agent-ssh-gateway:latest" \
             .
-          docker push "$REGISTRY/gpakoh/agent-ssh-gateway:${{ github.sha }}"
-          docker push "$REGISTRY/gpakoh/agent-ssh-gateway:latest"
-      - name: Build and push mcp-server image
+      - name: Build mcp-server image
         run: |
           docker build -f docker/Dockerfile.mcp-server \
             --build-arg BUILD_SHA=${{ github.sha }} \
@@ -157,6 +155,80 @@ jobs:
             -t "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}" \
             -t "$REGISTRY/gpakoh/mcp-server:latest" \
             .
+      - name: Smoke-test built images before pushing
+        # M18: until now, the freshly built image was never actually
+        # started anywhere before landing in production -- the `test` job
+        # only ever exercises the source tree, never the image itself (a
+        # Dockerfile bug, a missing system dependency, a broken entrypoint
+        # would first surface in prod). Run each image standalone and
+        # confirm it boots and answers its own health path with HTTP 200 --
+        # NOT the full compose stack: this runner is the same host the real
+        # deploy runs on (docker-e2e-ci), and docker-compose.yml hardcodes
+        # `container_name:` values identical to the live prod containers,
+        # so bringing that stack up here would collide with (or shut down)
+        # whatever is actually deployed. Uniquely-named, port-mapped
+        # standalone containers avoid that entirely; this checks the image
+        # itself starts cleanly, not full subsystem readiness (that's
+        # deploy-from-registry.sh's own smoke(), against the real stack,
+        # after deploy -- see M17).
+        run: |
+          set -euo pipefail
+          GW_NAME="ci-smoke-gateway-${{ github.run_id }}"
+          MCP_NAME="ci-smoke-mcp-${{ github.run_id }}"
+          cleanup() {
+            docker rm -f "$GW_NAME" "$MCP_NAME" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker run -d --name "$GW_NAME" -p 18085:8085 \
+            -e API_KEY=ci-smoke-only-not-a-real-secret \
+            -e AGENT_TOKEN=ci-smoke-only-not-a-real-secret \
+            -e JWT_SECRET=ci-smoke-only-not-a-real-secret \
+            "$REGISTRY/gpakoh/agent-ssh-gateway:${{ github.sha }}"
+
+          docker run -d --name "$MCP_NAME" -p 18087:8087 \
+            -e MCP_CLIENT_SAFE_MODE=true \
+            -e MCP_GATEWAY_TOOL_MODE=mcp_client \
+            -e MCP_STREAMABLE_HTTP_HOST=0.0.0.0 \
+            -e MCP_STREAMABLE_HTTP_ALLOW_NON_LOOPBACK=true \
+            -e MCP_STREAMABLE_HTTP_BEARER_TOKEN=ci-smoke-only-not-a-real-secret \
+            -e GATEWAY_BASE_URL=http://localhost:8085 \
+            -e GATEWAY_API_KEY=ci-smoke-only-not-a-real-secret \
+            "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}"
+
+          fail=false
+          for spec in "web-ssh-gateway:$GW_NAME:18085:/health" "mcp-server:$MCP_NAME:18087:/healthz"; do
+            IFS=: read -r label name port path <<< "$spec"
+            echo "Waiting for $label to answer $path..."
+            up=false
+            for _ in $(seq 1 30); do
+              if ! docker inspect --format '{{.State.Running}}' "$name" 2>/dev/null | grep -q true; then
+                echo "::error::$label container exited early"
+                break
+              fi
+              if curl -sf --max-time 2 "http://localhost:$port$path" >/dev/null 2>&1; then
+                up=true
+                break
+              fi
+              sleep 2
+            done
+            if [ "$up" != "true" ]; then
+              echo "::error::$label image failed to become reachable on $path"
+              docker logs "$name" 2>&1 | tail -80
+              fail=true
+            else
+              echo "$label OK"
+            fi
+          done
+          if [ "$fail" = "true" ]; then
+            exit 1
+          fi
+      - name: Push web-ssh-gateway image
+        run: |
+          docker push "$REGISTRY/gpakoh/agent-ssh-gateway:${{ github.sha }}"
+          docker push "$REGISTRY/gpakoh/agent-ssh-gateway:latest"
+      - name: Push mcp-server image
+        run: |
           docker push "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}"
           docker push "$REGISTRY/gpakoh/mcp-server:latest"
 
