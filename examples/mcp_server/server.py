@@ -994,7 +994,7 @@ def gateway_scan_file(project: str, path: str) -> dict[str, Any]:
     """
     from app.command_policy import scan_command as _scan
 
-    file_result = read_file(project=project, path=path)
+    file_result = read_file(client, project=project, path=path)
     if not file_result.get("ok"):
         return tool_error(
             tool="scan_file",
