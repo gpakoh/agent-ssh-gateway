@@ -21,12 +21,16 @@ def _resolve_project(project_name: str) -> Path:
     """Resolve a project name to a validated filesystem path via the workspace registry."""
     try:
         from app.workspace.registry import get_registry
+        from app.workspace_policy import WorkspacePolicyError
 
         info = get_registry().project_info(project_name)
         return Path(info["root"])
-    except Exception as exc:
+    except WorkspacePolicyError as exc:
         body = {"detail": {"code": "PROJECT_NOT_FOUND", "retryable": False}}
         raise GatewayClientError(str(exc), status_code=404, body=body) from exc
+    except Exception as exc:
+        body = {"detail": {"code": "INTERNAL_ERROR", "retryable": False}}
+        raise GatewayClientError(str(exc), status_code=500, body=body) from exc
 
 
 def _redact_project_root(text: str | None, project_dir: str) -> str:
