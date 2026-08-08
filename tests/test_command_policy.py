@@ -427,6 +427,165 @@ class TestDangerousTokens:
     def test_clean_command_allowed(self):
         assert contains_dangerous_token("ls -la") is None
 
+    def test_quote_concatenation_obfuscation_blocked(self):
+        """Regression: r''m -rf / is `rm -rf /` once a shell resolves the
+        empty single-quoted string, but the old raw-string substring match
+        against " rm -rf " never resolved it -- confirmed live, 0 findings.
+        """
+        assert contains_dangerous_token("r''m -rf /") is not None
+
+    def test_backslash_escape_obfuscation_blocked(self):
+        assert contains_dangerous_token(r"\rm -rf /") is not None
+
+
+class TestEnvWrapperBypass:
+    """Regression: BLOCKER finding from a live security audit. `env` sits
+    in every profile's root allowlist (to support `env FOO=bar <cmd>`),
+    but the command env actually executes was never re-validated against
+    the active profile -- only the crude, raw-string contains_dangerous_
+    token() denylist stood in the way, which quote/backslash obfuscation
+    defeats. `env <anything>` was a full readonly-policy bypass; combined
+    with obfuscation it also bypassed the denylist for unobfuscated
+    dangerous commands run through `env`.
+    """
+
+    def test_env_wrapped_rm_rf_blocked(self):
+        d = evaluate_command_policy("env rm -rf /", mode="enforce", profile="readonly")
+        assert d.allowed is False
+
+    def test_env_wrapped_obfuscated_rm_blocked(self):
+        d = evaluate_command_policy("env r''m -rf /", mode="enforce", profile="readonly")
+        assert d.allowed is False
+
+    def test_env_wrapped_backslash_escaped_rm_blocked(self):
+        d = evaluate_command_policy(r"env \rm -rf /", mode="enforce", profile="readonly")
+        assert d.allowed is False
+
+    def test_env_wrapped_disallowed_root_blocked(self):
+        """The wrapped command's root must itself be in the profile's
+        allowlist, not just pass the crude denylist."""
+        d = evaluate_command_policy("env docker rm myapp", mode="enforce", profile="readonly")
+        assert d.allowed is False
+
+    def test_env_with_var_assignment_still_validates_wrapped_command(self):
+        d = evaluate_command_policy("env FOO=bar rm -rf /", mode="enforce", profile="readonly")
+        assert d.allowed is False
+
+    def test_env_wrapping_allowed_readonly_command_still_works(self):
+        """The fix must not break the legitimate `env VAR=val <allowed
+        cmd>` use case the allowlist entry exists for."""
+        d = evaluate_command_policy("env FOO=bar ls -la", mode="enforce", profile="readonly")
+        assert d.allowed is True
+
+    def test_env_with_flag_wrapping_allowed_command_still_works(self):
+        d = evaluate_command_policy("env -i pwd", mode="enforce", profile="readonly")
+        assert d.allowed is True
+
+    def test_env_wrapped_mutating_git_still_blocked(self):
+        """The env-unwrap must recurse into the *same* profile evaluator,
+        so the git branch/tag/remote semantic check also applies."""
+        d = evaluate_command_policy(
+            "env git branch -D audit-test", mode="enforce", profile="readonly"
+        )
+        assert d.allowed is False
+
+    def test_env_with_no_wrapped_command_blocked(self):
+        d = evaluate_command_policy("env", mode="enforce", profile="readonly")
+        assert d.allowed is False
+
+
+class TestGitReadonlyMutatingVariants:
+    """Regression: BLOCKER finding from a live security audit.
+    GIT_READONLY_SUBCOMMANDS only vetted the subcommand NAME -- branch/
+    tag/remote/reflog each have mutating forms (delete, rename, create,
+    rewrite) that passed the readonly profile with zero findings.
+    """
+
+    def test_git_branch_delete_blocked(self):
+        d = evaluate_command_policy(
+            "git branch -D audit-test", mode="enforce", profile="readonly"
+        )
+        assert d.allowed is False
+
+    def test_git_branch_lowercase_delete_blocked(self):
+        d = evaluate_command_policy(
+            "git branch -d audit-test", mode="enforce", profile="readonly"
+        )
+        assert d.allowed is False
+
+    def test_git_branch_create_blocked(self):
+        """`git branch <name>` with no ref also creates a branch -- a write."""
+        d = evaluate_command_policy("git branch new-feature", mode="enforce", profile="readonly")
+        assert d.allowed is False
+
+    def test_git_tag_delete_blocked(self):
+        d = evaluate_command_policy("git tag -d v1.2.3", mode="enforce", profile="readonly")
+        assert d.allowed is False
+
+    def test_git_tag_create_blocked(self):
+        d = evaluate_command_policy("git tag v1.2.3", mode="enforce", profile="readonly")
+        assert d.allowed is False
+
+    def test_git_remote_set_url_blocked(self):
+        d = evaluate_command_policy(
+            "git remote set-url origin https://example.invalid/repo.git",
+            mode="enforce",
+            profile="readonly",
+        )
+        assert d.allowed is False
+
+    def test_git_remote_add_blocked(self):
+        d = evaluate_command_policy(
+            "git remote add evil https://example.invalid/repo.git",
+            mode="enforce",
+            profile="readonly",
+        )
+        assert d.allowed is False
+
+    def test_git_remote_remove_blocked(self):
+        d = evaluate_command_policy(
+            "git remote remove origin", mode="enforce", profile="readonly"
+        )
+        assert d.allowed is False
+
+    def test_git_reflog_delete_blocked(self):
+        d = evaluate_command_policy(
+            "git reflog delete HEAD@{0}", mode="enforce", profile="readonly"
+        )
+        assert d.allowed is False
+
+    # ── Read-only shapes must still work ──────────────────────────
+
+    def test_git_branch_bare_allowed(self):
+        d = evaluate_command_policy("git branch", mode="enforce", profile="readonly")
+        assert d.allowed is True
+
+    def test_git_branch_list_flags_allowed(self):
+        d = evaluate_command_policy("git branch -a", mode="enforce", profile="readonly")
+        assert d.allowed is True
+
+    def test_git_tag_bare_allowed(self):
+        d = evaluate_command_policy("git tag", mode="enforce", profile="readonly")
+        assert d.allowed is True
+
+    def test_git_remote_bare_allowed(self):
+        d = evaluate_command_policy("git remote", mode="enforce", profile="readonly")
+        assert d.allowed is True
+
+    def test_git_remote_verbose_allowed(self):
+        """Regression guard: `git remote -v` is what the remotes() MCP
+        tool actually runs -- must not be collateral damage of this fix."""
+        d = evaluate_command_policy("git remote -v", mode="enforce", profile="readonly")
+        assert d.allowed is True
+
+    def test_git_remote_show_allowed(self):
+        d = evaluate_command_policy("git remote show origin", mode="enforce", profile="readonly")
+        assert d.allowed is True
+
+    def test_git_reflog_bare_allowed(self):
+        d = evaluate_command_policy("git reflog", mode="enforce", profile="readonly")
+        assert d.allowed is True
+
 
 # ---------------------------------------------------------------------------
 # Combined flag detection tests

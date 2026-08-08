@@ -77,7 +77,9 @@ Destructive pattern packs (app/packs/):
 
 from __future__ import annotations
 
+import re
 import shlex
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -422,6 +424,39 @@ GIT_READONLY_SUBCOMMANDS: set[str] = {
     "rev-parse", "describe", "shortlog", "blame", "reflog",
 }
 
+# branch/tag/remote/reflog are only conditionally read-only: the
+# subcommand NAME is safe, but plenty of their own flags/positional
+# arguments mutate repo state (git branch -D <name> deletes a branch,
+# git tag <name> creates one, git remote set-url rewrites a remote).
+# See _validate_git_subcommand.
+_GIT_INFO_ONLY_FLAGS: set[str] = {
+    "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose",
+    "-l", "--list", "--color", "--no-color", "--column", "--no-column",
+    "-n", "--contains", "--merged", "--no-merged",
+}
+_GIT_MUTATING_REMOTE_SUBCOMMANDS: set[str] = {
+    "add", "remove", "rm", "rename", "set-url", "set-head",
+    "set-branches", "prune", "update",
+}
+_GIT_READONLY_REMOTE_SUBCOMMANDS: set[str] = {"show", "get-url"}
+
+# `env` is in every profile's root allowlist to let a caller set env vars
+# before an otherwise-allowed command (e.g. `env FOO=bar pytest ...`), but
+# the command env actually executes was never itself re-validated against
+# the active profile -- any command reachable via `env <cmd>` bypassed
+# every profile's allowlist and destructive-pattern checks entirely. See
+# _unwrap_env / the `root == "env"` branch in each evaluate_* function.
+_ENV_NO_ARG_FLAGS: set[str] = {
+    "-i", "--ignore-environment", "-0", "--null", "-v", "--verbose",
+    "-h", "--help",
+}
+_ENV_ONE_ARG_FLAGS: set[str] = {
+    "-u", "--unset", "-C", "--chdir", "-S", "--split-string",
+    "-P", "--default-signal", "-a", "--argv0", "--block-signal",
+    "--list-signal-names",
+}
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
 TESTLINT_ROOTS: set[str] = READONLY_ROOTS | {
     "pytest", "ruff", "mypy", "pyright", "flake8", "black", "isort",
     "compileall", "python", "uv",
@@ -630,7 +665,15 @@ def scan_command(command: str) -> ScanReport:
 
 
 def _validate_git_subcommand(parts: list[str]) -> tuple[bool, str]:
-    """Validate git subcommand for read-only profiles."""
+    """Validate git subcommand for read-only profiles.
+
+    GIT_READONLY_SUBCOMMANDS only vets the subcommand NAME. branch/tag/
+    remote/reflog are each read-only in SOME invocations and mutating in
+    others depending on their own flags/positional args -- confirmed live:
+    `git branch -D x` (deletes a branch), `git tag -d v1` (deletes a tag),
+    and `git remote set-url origin ...` (rewrites a remote) all passed the
+    subcommand-only check with zero findings despite being writes.
+    """
     if len(parts) < 2:
         return True, ""
 
@@ -638,7 +681,82 @@ def _validate_git_subcommand(parts: list[str]) -> tuple[bool, str]:
     if subcmd not in GIT_READONLY_SUBCOMMANDS:
         return False, f"git subcommand '{subcmd}' not allowed (only read-only: {', '.join(sorted(GIT_READONLY_SUBCOMMANDS))})"
 
+    rest = parts[2:]
+
+    if subcmd in ("branch", "tag"):
+        # Any positional (non-flag) argument names a branch/tag to
+        # create, delete, or rename -- always a write. `git branch` /
+        # `git tag` with only informational flags (-a, -v, -l, ...) just
+        # lists, which is the only read-only shape either subcommand has.
+        positional = [a for a in rest if not a.startswith("-")]
+        if positional:
+            return False, f"git {subcmd} with a name argument is a write operation, not allowed"
+        unknown_flags = [a for a in rest if a.startswith("-") and a not in _GIT_INFO_ONLY_FLAGS]
+        if unknown_flags:
+            return False, f"git {subcmd} flag '{unknown_flags[0]}' not recognized as read-only"
+        return True, ""
+
+    if subcmd == "remote":
+        if not rest:
+            return True, ""
+        first = rest[0]
+        if first in _GIT_MUTATING_REMOTE_SUBCOMMANDS:
+            return False, f"git remote {first} is a write operation, not allowed"
+        if first.startswith("-"):
+            if first not in _GIT_INFO_ONLY_FLAGS:
+                return False, f"git remote flag '{first}' not recognized as read-only"
+            return True, ""
+        if first in _GIT_READONLY_REMOTE_SUBCOMMANDS:
+            return True, ""
+        return False, f"git remote '{first}' not recognized as read-only"
+
+    if subcmd == "reflog":
+        if rest and rest[0] in ("expire", "delete"):
+            return False, f"git reflog {rest[0]} is a write operation, not allowed"
+        return True, ""
+
     return True, ""
+
+
+def _unwrap_env(parts: list[str]) -> list[str]:
+    """Return the argv of the command `env` actually executes.
+
+    Skips env's own flags and leading NAME=VALUE assignments so profile
+    checks (allowlist, dangerous-token scan, git-subcommand validation)
+    run against the real target instead of stopping at "env" itself.
+    ``parts[0]`` is assumed to be "env".
+    """
+    i = 1
+    while i < len(parts):
+        tok = parts[i]
+        if tok in _ENV_NO_ARG_FLAGS:
+            i += 1
+            continue
+        if tok in _ENV_ONE_ARG_FLAGS:
+            i += 2
+            continue
+        if _ENV_ASSIGNMENT_RE.match(tok):
+            i += 1
+            continue
+        break
+    return parts[i:]
+
+
+def _evaluate_env_wrapped(
+    command: str,
+    allowed_roots: set[str],
+    evaluator: Callable[[str, str | None], tuple[bool, str]],
+) -> tuple[bool, str]:
+    """Unwrap `env ...` and re-run the given profile evaluator on the
+    command env actually executes, instead of trusting env's own
+    root-allowlist membership (which says nothing about its target)."""
+    wrapped = _unwrap_env(get_command_parts(command))
+    if not wrapped:
+        return False, "env with no wrapped command not allowed"
+    wrapped_root = wrapped[0]
+    if wrapped_root not in allowed_roots:
+        return False, f"env-wrapped command '{wrapped_root}' not in allowlist"
+    return evaluator(shlex.join(wrapped), wrapped_root)
 
 
 def _validate_ops_command(parts: list[str]) -> tuple[bool, str]:
@@ -724,6 +842,12 @@ def evaluate_readonly(command: str, root: str | None) -> tuple[bool, str]:
     if dangerous:
         return False, f"Dangerous token detected: {dangerous}"
 
+    # env's own root-allowlist membership says nothing about the command
+    # it actually executes -- re-validate that command against this same
+    # profile instead of stopping at "env" itself.
+    if root == "env":
+        return _evaluate_env_wrapped(command, READONLY_ROOTS, evaluate_readonly)
+
     # Git read-only check
     if root == "git":
         ok, reason = _validate_git_subcommand(get_command_parts(command))
@@ -743,6 +867,9 @@ def evaluate_testlint(command: str, root: str | None) -> tuple[bool, str]:
     dangerous = contains_dangerous_token(command)
     if dangerous:
         return False, f"Dangerous token detected: {dangerous}"
+
+    if root == "env":
+        return _evaluate_env_wrapped(command, TESTLINT_ROOTS, evaluate_testlint)
 
     # Git read-only check
     if root == "git":
@@ -764,6 +891,9 @@ def evaluate_project_automation(command: str, root: str | None) -> tuple[bool, s
     if dangerous:
         return False, f"Dangerous token detected: {dangerous}"
 
+    if root == "env":
+        return _evaluate_env_wrapped(command, PROJECT_AUTOMATION_ROOTS, evaluate_project_automation)
+
     # Git read-only check
     if root == "git":
         ok, reason = _validate_git_subcommand(get_command_parts(command))
@@ -784,6 +914,9 @@ def evaluate_ops(command: str, root: str | None) -> tuple[bool, str]:
     if dangerous:
         return False, f"Dangerous token detected: {dangerous}"
 
+    if root == "env":
+        return _evaluate_env_wrapped(command, OPS_ROOTS, evaluate_ops)
+
     ok, reason = _validate_ops_command(get_command_parts(command))
     if not ok:
         return False, reason
@@ -801,6 +934,9 @@ def evaluate_docker_admin(command: str, root: str | None) -> tuple[bool, str]:
     dangerous = contains_dangerous_token(command)
     if dangerous:
         return False, f"Dangerous token detected: {dangerous}"
+
+    if root == "env":
+        return _evaluate_env_wrapped(command, DOCKER_ADMIN_ROOTS, evaluate_docker_admin)
 
     ok, reason = _validate_docker_command(get_command_parts(command), DOCKER_ADMIN_ALLOWED_ACTIONS)
     if not ok:
@@ -873,8 +1009,22 @@ def get_command_parts(command: str) -> list[str]:
 
 
 def contains_dangerous_token(command: str) -> str | None:
-    """Defense-in-depth: detect known dangerous tokens."""
-    normalized = normalize_command(command).lower()
+    """Defense-in-depth: detect known dangerous tokens.
+
+    Matches against the shlex-resolved token stream, not the raw string.
+    shlex.split() collapses shell quote-concatenation (r''m -> rm) and
+    backslash-escaping (\\rm -> rm) per POSIX parsing rules the same way a
+    real shell would -- a naive substring match on the untouched original
+    text does not, and confirmed live let `env r''m -rf /` and
+    `env \\rm -rf /` both slip past the " rm -rf " denylist entry
+    undetected. Falls back to the raw string when the command doesn't even
+    shlex-parse (unusual enough on its own to keep checking conservatively).
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = []
+    normalized = f" {' '.join(tokens).lower()} " if tokens else normalize_command(command).lower()
 
     DENYLIST_TOKENS: tuple[str, ...] = (
         " rm -rf ", " mkfs ", " dd if=", " :(){",
