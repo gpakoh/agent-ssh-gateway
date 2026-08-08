@@ -68,6 +68,15 @@ class ConfirmStore:
         return action
 
     def confirm_action(self, token: str) -> tuple[ConfirmAction | None, ConfirmStatus]:
+        action, status = self.peek_action(token)
+        if action is not None and status == ConfirmStatus.OK:
+            action.consumed = True
+        return action, status
+
+    def peek_action(self, token: str) -> tuple[ConfirmAction | None, ConfirmStatus]:
+        """Resolve a token without consuming it. Callers must follow up with
+        consume_action() once all authorization checks have passed, so a token
+        is only burned when the confirmation actually completes."""
         action_id = self._token_map.get(token)
         if action_id is None:
             for aid, act in self._actions.items():
@@ -89,8 +98,14 @@ class ConfirmStore:
         if elapsed > CONFIRM_TTL_SECONDS:
             return None, ConfirmStatus.EXPIRED
 
-        action.consumed = True
         return action, ConfirmStatus.OK
+
+    def consume_action(self, action_id: str) -> bool:
+        action = self._actions.get(action_id)
+        if action is None or action.consumed:
+            return False
+        action.consumed = True
+        return True
 
     def list_pending(self) -> list[dict[str, Any]]:
         now = time.monotonic()

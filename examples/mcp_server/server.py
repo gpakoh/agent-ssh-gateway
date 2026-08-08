@@ -3030,7 +3030,7 @@ async def docker_volume_rm(volumes: list[str]) -> dict[str, Any]:
 @register_tool("confirm_operation")
 async def confirm_operation(token: str) -> dict[str, Any]:
     """Confirm a pending dangerous Docker operation using the one-time token from the confirmation response."""
-    action, status = _confirm_store.confirm_action(token)
+    action, status = _confirm_store.peek_action(token)
     if action is None:
         code = {
             ConfirmStatus.INVALID: "CONFIRM_TOKEN_INVALID",
@@ -3079,6 +3079,8 @@ async def confirm_operation(token: str) -> dict[str, Any]:
     # docker_run, docker_rmi, docker_volume_rm) re-checks that the caller
     # holds mcp:docker:admin. Possession of a confirm token alone must not
     # complete an admin action for a caller granted only mcp:docker.
+    # The token is only consumed after every check passes, so a failed
+    # scope check does not burn it.
     if action.required_scope != "mcp:docker":
         scopes = _get_token_scopes()
         if action.required_scope not in scopes:
@@ -3109,6 +3111,16 @@ async def confirm_operation(token: str) -> dict[str, Any]:
                 retryable=False,
                 source="docker",
             )
+
+    if not _confirm_store.consume_action(action.action_id):
+        return tool_error(
+            tool="confirm_operation",
+            code="CONFIRM_TOKEN_CONSUMED",
+            message="Confirmation token already used",
+            hint="Call the dangerous tool again to get a new token.",
+            retryable=False,
+            source="docker",
+        )
 
     try:
         result = await handler(**action.kwargs)
