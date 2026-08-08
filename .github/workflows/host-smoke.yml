@@ -19,6 +19,7 @@ jobs:
     # silently ignores .github/workflows, which would kill ci.yml.
     if: github.server_url != 'https://github.com'
     runs-on: host-smoke-ci
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v7
