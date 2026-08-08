@@ -803,6 +803,15 @@ def _run_gateway(
             source="gateway",
             read_only=True,
         )
+    except ValueError as exc:
+        return tool_error(
+            tool=tool,
+            code="INVALID_INPUT",
+            message=str(exc),
+            retryable=False,
+            source="gateway",
+            read_only=True,
+        )
     return tool_success(
         tool=tool,
         result=data,
