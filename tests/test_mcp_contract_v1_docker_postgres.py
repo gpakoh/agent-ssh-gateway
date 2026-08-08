@@ -151,7 +151,7 @@ class TestPostgresToolsContractV1:
 
         result = await mcp_server_mod.postgres_describe_table("missing_table")
         _assert_envelope(result, ok=False)
-        assert result["error"]["code"] == "TOOL_NOT_FOUND"
+        assert result["error"]["code"] == "FILE_NOT_FOUND"
 
     @pytest.mark.asyncio
     async def test_postgres_select_returns_structured_rows_not_json_string(self, monkeypatch):
