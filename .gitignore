@@ -17,6 +17,10 @@ test-coverage-plan.md
 .ruff_cache/
 mypy.ini
 
+# Gitea-specific workflow dir (see .github/workflows/host-smoke.yml note:
+# keeping .gitea/workflows would make Gitea ignore .github/workflows)
+.gitea/
+
 # Generated SSH keys
 ssh_keys/
 

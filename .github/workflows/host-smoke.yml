@@ -1,0 +1,37 @@
+name: host-smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["master"]
+    paths: ["Makefile", ".github/workflows/host-smoke.yml", "tests/test_mtls_e2e.py", "tests/test_opencode_runner_wrapper.py", "tests/test_workspace_tools.py", "tests/test_run_compileall_uv_seam.py", "app/workspace/**"]
+
+jobs:
+  host-smoke:
+    name: Host smoke
+    # Self-hosted Gitea runner only (label host-smoke-ci, Gitea at
+    # git.xloud.ru) — needs real /media, nginx certs and Redis, which
+    # GitHub's hosted runners don't have. GitHub would queue this job
+    # forever without a matching runner, so skip it there entirely via
+    # github.server_url — same guard as ci.yml's build-and-push/deploy.
+    # NOTE: must live in .github/workflows (NOT .gitea/workflows): Gitea
+    # 1.26 scans only .gitea/workflows when that directory exists and
+    # silently ignores .github/workflows, which would kill ci.yml.
+    if: github.server_url != 'https://github.com'
+    runs-on: host-smoke-ci
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        run: |
+          python3 --version
+          /media/1TB/Anaconda/bin/uv sync --frozen --extra dev
+
+      - name: Make host-smoke
+        run: /media/1TB/Anaconda/bin/uv run make host-smoke
+
+      - name: Report
+        run: |
+          echo "host-smoke completed"
+          git rev-parse --short HEAD
