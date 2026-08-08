@@ -108,3 +108,30 @@ def test_extra_token_unknown_profile_fails_closed():
     assert "mcp:agent-run" not in token.scopes
     assert "mcp:read" in token.scopes
     assert "mcp:project" in token.scopes
+
+
+@patch.dict(
+    os.environ,
+    {"MCP_AUTH_MODE": "oauth", "MCP_HEALTHCHECK_BEARER_TOKEN": "health-tok-1"},
+)
+def test_healthcheck_token_scoped_to_read_only():
+    """Regression: MAJOR finding from a live security audit. The
+    healthcheck bearer token -- whose entire purpose is a liveness probe --
+    was registered with the full SUPPORTED_SCOPES set (admin/execute/docker
+    included) and never expires. If it ever leaked, its blast radius was
+    indistinguishable from a real operator credential. It only needs to
+    call `health`, which requires just "mcp:read" (see tool_scopes.py).
+    """
+    import importlib
+
+    import examples.mcp_server.server as srv
+
+    importlib.reload(srv)
+    assert srv._auth_provider is not None
+    token = srv._auth_provider.verify_access_token("health-tok-1")
+    assert token is not None
+    assert token.scopes == ["mcp:read"]
+    assert "mcp:admin" not in token.scopes
+    assert "mcp:execute" not in token.scopes
+    assert "mcp:docker" not in token.scopes
+    assert "mcp:project" not in token.scopes

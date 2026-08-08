@@ -474,6 +474,42 @@ class TestSessionOwnershipHTTP:
             )
         assert resp.status_code == 200
 
+    def test_session_env_redacts_secrets(self, monkeypatch):
+        """Regression: BLOCKER finding from a live security audit.
+        session_env() ran `printenv` on the SSH target and returned every
+        KEY=VALUE pair verbatim -- DB passwords, API keys, cloud/CI tokens
+        and other application secrets living in the target's environment
+        were returned to any caller with ssh:execute + session ownership,
+        with no redaction at all.
+        """
+        self._patch_base(monkeypatch)
+        with TestClient(app) as client:
+            mgr = self._make_session_mock()
+            mgr.execute = AsyncMock(
+                return_value={
+                    "stdout": (
+                        "PATH=/usr/bin\n"
+                        "DATABASE_URL=postgresql://dbuser:hunter2@dbhost:5432/appdb\n"
+                        "API_KEY=sk-abc123def456\n"
+                        "SAFE_VAR=hello\n"
+                    ),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            )
+            self._override_manager(client, mgr)
+            resp = client.get(
+                "/api/ssh/session/s-1/env",
+                headers={"Authorization": "Bearer agent-token-a"},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["SAFE_VAR"] == "hello"
+        assert body["PATH"] == "/usr/bin"
+        assert "hunter2" not in resp.text
+        assert "sk-abc123def456" not in resp.text
+        assert body["API_KEY"] != "sk-abc123def456"
+
     def test_sessions_list_agent_sees_only_own(self, monkeypatch):
         self._patch_base(monkeypatch)
         fp_a = token_fingerprint("agent-token-a")

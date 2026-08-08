@@ -131,7 +131,12 @@ if MCP_AUTH_MODE == "oauth":
         _auth_provider._tokens[_at_hash] = _StoredToken(
             token=_at_hash,
             client_id="mcp_healthcheck",
-            scopes=list(SUPPORTED_SCOPES),
+            # health (the only tool this credential exists to call) only
+            # requires "mcp:read" (see tool_scopes.py) -- granting the full
+            # SUPPORTED_SCOPES set (admin/execute/docker included) made a
+            # credential whose entire purpose is an unauthenticated-adjacent
+            # liveness probe as powerful as any operator token if it leaked.
+            scopes=["mcp:read"],
             expires_at=float("inf"),
             type="access",
         )

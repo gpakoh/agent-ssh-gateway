@@ -77,7 +77,7 @@ if MCP_AUTH_MODE not in ("token", "oauth"):
 
 MCP_PUBLIC_TOKEN = os.environ.get("MCP_PUBLIC_TOKEN", "")
 
-MCP_SCOPE_ENFORCEMENT = os.environ.get("MCP_SCOPE_ENFORCEMENT", "off").strip().lower()
+MCP_SCOPE_ENFORCEMENT = os.environ.get("MCP_SCOPE_ENFORCEMENT", "enforce").strip().lower()
 if MCP_SCOPE_ENFORCEMENT not in ("off", "audit", "enforce"):
     raise ValueError(
         f"Invalid MCP_SCOPE_ENFORCEMENT={MCP_SCOPE_ENFORCEMENT!r}; expected off|audit|enforce"
@@ -288,7 +288,12 @@ async def proxy_request(request: Request) -> StreamingResponse | JSONResponse | 
                 content=body,
                 headers=headers,
             )
-            logger.info(f"PROXY {request.method} {request.url.path} -> {url} -> {resp.status_code}")
+            # Log the path only, never `url` -- in token rollback mode `url`
+            # carries the full query string, including a live ?mcp_token=
+            # secret verbatim, straight into the application log at INFO.
+            logger.info(
+                f"PROXY {request.method} {request.url.path} -> {resp.status_code}"
+            )
             if resp.status_code == 401:
                 resp_body = await resp.aread()
                 logger.warning(f"PROXY 401 body={resp_body[:500]!r}")
@@ -325,6 +330,10 @@ CONSENT_HTML = """<!DOCTYPE html>
   input[type=password]:focus {{ border-color: #58a6ff; }}
   .error {{ color: #f85149; font-size: 13px; margin-top: 12px; display: none; }}
   .error.visible {{ display: block; }}
+  .scope-list {{ list-style: none; background: #0d1117; border: 1px solid #30363d;
+                 border-radius: 8px; padding: 10px 14px; margin-bottom: 20px;
+                 font-family: ui-monospace, monospace; font-size: 13px; color: #c9d1d9; }}
+  .scope-list li {{ padding: 2px 0; }}
   button {{ width: 100%; padding: 10px; margin-top: 20px; background: #238636;
            border: none; border-radius: 8px; color: #fff; font-size: 15px; font-weight: 500;
            cursor: pointer; transition: background .2s; }}
@@ -335,6 +344,8 @@ CONSENT_HTML = """<!DOCTYPE html>
 <div class="card">
   <h1>Authorize MCP Gateway</h1>
   <p>Enter the authorization password to connect this MCP server to ChatGPT.</p>
+  <label>Requested access:</label>
+  <ul class="scope-list">{scope_list}</ul>
   <form method="post" id="auth-form">
     <input type="hidden" name="client_id" value="{client_id}">
     <input type="hidden" name="redirect_uri" value="{redirect_uri}">
@@ -378,7 +389,16 @@ async def consent_handler(request: Request):
         # goes into the template, not just the ones that looked risky.
         client_id = html_lib.escape(request.query_params.get("client_id", ""))
         redirect_uri = html_lib.escape(request.query_params.get("redirect_uri", ""))
-        scope = html_lib.escape(request.query_params.get("scope", "mcp:read mcp:project"))
+        raw_scope = request.query_params.get("scope", "mcp:read mcp:project")
+        scope = html_lib.escape(raw_scope)
+        # The operator authorizing this client previously never saw which
+        # scopes it was requesting -- the scope value only traveled inside
+        # a hidden form field. mcp:execute/mcp:admin/etc. are all valid
+        # requestable scopes; render each one visibly so "Authorize" isn't
+        # a blind click.
+        scope_list = "".join(
+            f"<li>{html_lib.escape(s)}</li>" for s in raw_scope.split() if s
+        ) or "<li>(none)</li>"
         state = html_lib.escape(request.query_params.get("state", ""))
         code_challenge = html_lib.escape(request.query_params.get("code_challenge", ""))
         resource = html_lib.escape(request.query_params.get("resource", ""))
@@ -387,6 +407,7 @@ async def consent_handler(request: Request):
             client_id=client_id,
             redirect_uri=redirect_uri,
             scope=scope,
+            scope_list=scope_list,
             state=state,
             code_challenge=code_challenge,
             resource=resource,

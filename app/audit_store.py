@@ -27,6 +27,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.audit import AuditEvent
+from app.security import redact_secrets
 from app.session_store import AuditLogEntry, Base
 
 logger = logging.getLogger(__name__)
@@ -87,8 +88,8 @@ class AuditLogStore:
             decision=event.decision or None,
             reason=event.reason or None,
             error_code=event.error_code or None,
-            metadata_json=event.metadata or None,
-            command=command,
+            metadata_json=redact_secrets(event.metadata) if event.metadata else None,
+            command=redact_secrets(command) if command else None,
             exit_code=exit_code,
             duration_ms=duration_ms,
             created_at=datetime.fromisoformat(event.timestamp)
@@ -129,6 +130,14 @@ class AuditLogStore:
         audit table gets command/exit_code/duration_ms regardless of the
         JSONL event logger.
         """
+        # The full command string can carry secrets typed straight into
+        # the command line (curl -H 'Authorization: Bearer ...', a psql
+        # DSN with an embedded password, sshpass -p ..., ...) -- unlike
+        # AuditLogger.log_command() (JSONL path), which only ever stored
+        # command_root for exactly this reason, this persistent DB path
+        # stored the raw command verbatim in both `command` and
+        # `metadata_json`. Redact the same way logs/tool output already do.
+        redacted_command = redact_secrets(command) if command else None
         entry = AuditLogEntry(
             id=uuid.uuid4().hex,
             event_id=uuid.uuid4().hex,
@@ -145,8 +154,8 @@ class AuditLogStore:
             target_id=session_id,
             decision=decision,
             reason=reason or None,
-            metadata_json={"command": command} if command else None,
-            command=command,
+            metadata_json={"command": redacted_command} if redacted_command else None,
+            command=redacted_command,
             exit_code=exit_code,
             duration_ms=duration_ms,
             created_at=datetime.now(UTC),

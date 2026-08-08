@@ -89,3 +89,38 @@ class TestConsentPageEscapesQueryParams:
         assert resp.status_code == 200
         assert "chatgpt-connector" in resp.text
         assert "abc123" in resp.text
+
+
+class TestConsentPageShowsRequestedScopes:
+    """Regression: MAJOR finding from a live security audit. The consent
+    page carried the requested OAuth scope string only in a hidden form
+    field -- an operator authorizing a client (which can request anything
+    up to mcp:admin/mcp:execute) had no visible indication of what they
+    were actually granting before clicking Authorize.
+    """
+
+    def test_requested_scopes_are_visible(self, consent_client):
+        resp = consent_client.get(
+            "/oauth/consent",
+            params={"scope": "mcp:read mcp:execute mcp:admin"},
+        )
+        assert resp.status_code == 200
+        assert "mcp:read" in resp.text
+        assert "mcp:execute" in resp.text
+        assert "mcp:admin" in resp.text
+
+    def test_default_scopes_visible_when_none_requested(self, consent_client):
+        resp = consent_client.get("/oauth/consent")
+        assert resp.status_code == 200
+        assert "mcp:read" in resp.text
+        assert "mcp:project" in resp.text
+
+    def test_scope_list_html_is_escaped(self, consent_client):
+        """The visible scope list must not reopen the same reflected-HTML
+        hole the hidden field was already fixed for."""
+        resp = consent_client.get(
+            "/oauth/consent",
+            params={"scope": "<script>alert(1)</script>"},
+        )
+        assert resp.status_code == 200
+        assert "<script>alert(1)</script>" not in resp.text
