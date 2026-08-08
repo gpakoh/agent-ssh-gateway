@@ -99,3 +99,20 @@ class TestTreeDepthValidation:
     def test_valid_depth_passes_through_unchanged(self, real_registry):
         result = tree(None, "demo", depth=DEPTH_MIN)
         assert result["depth"] == DEPTH_MIN
+
+
+class TestWorkingDirectoryValidation:
+    def test_existing_project_returns_relative_root(self, real_registry):
+        from mcp_client_tools import working_directory
+
+        result = working_directory(None, "demo")
+        assert result["outcome"] == "passed"
+        assert result["stdout"] == "."
+
+    def test_missing_project_raises_project_not_found(self, real_registry):
+        from gateway_client import GatewayClientError
+        from mcp_client_tools import working_directory
+
+        with pytest.raises(GatewayClientError) as exc:
+            working_directory(None, "no-such-project")
+        assert exc.value.status_code == 404
