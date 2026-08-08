@@ -689,6 +689,26 @@ def _build_readonly_fallback_script(
         '_MCP_USER="$(id -un)"',
         f"export WORKSPACE_REGISTRY_ROOT={shlex.quote(project_dir)}",
         f"mkdir -p {tmp_root}",
+    ]
+
+    # Config files beyond pyproject/uv.lock/setup.cfg (pytest.ini, mypy.ini,
+    # ruff.toml, tox.ini, .coveragerc, ...) were never synchronized, so the
+    # temp project ran tools against a different configuration than the real
+    # checkout (audit T31 #4). Copy them on every run — they are tiny and the
+    # venv rebuild stays gated by the pyproject/uv.lock stamp below. Must run
+    # before uv sync: setup.cfg can carry setuptools build metadata.
+    for cfg in (
+        "setup.cfg",
+        "pytest.ini",
+        "mypy.ini",
+        "ruff.toml",
+        ".ruff.toml",
+        "tox.ini",
+        ".coveragerc",
+    ):
+        lines.append(f"test -f {project_dir}/{cfg} && cp {project_dir}/{cfg} {tmp_root}/ || true")
+
+    lines += [
         f"cp {project_dir}/pyproject.toml {tmp_root}/pyproject.toml.new",
         f"echo 3.12 > {tmp_root}/.python-version",
         f"STAMP={tmp_root}/.uv_sync_stamp",
