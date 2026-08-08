@@ -119,6 +119,29 @@ def test_invalid_target_absolute():
     assert result == ["etc/passwd"]
 
 
+def test_compileall_walk_truncation_marker_appears(tmp_path, monkeypatch, capsys):
+    """Regression: the truncation marker used to be unreachable — lines were
+    only appended while len(out) < _LIMIT, so len(out) > _LIMIT never held
+    and diagnostics silently disappeared. With a low limit the marker must
+    appear when more lines were produced than the cap allows."""
+    import mcp_client_tools
+    from mcp_client_tools import _build_compileall_walk_code
+
+    monkeypatch.setattr(mcp_client_tools, "_OUTPUT_LINE_LIMIT", 3)
+    code = compile(_build_compileall_walk_code(), "walk", "exec")
+
+    for i in range(5):
+        (tmp_path / f"m{i}.py").write_text(f"x = {i}\n")
+
+    monkeypatch.setattr("sys.argv", ["-c", str(tmp_path)])
+    with pytest.raises(SystemExit) as exc:
+        exec(code, {})
+    out = capsys.readouterr().out
+    assert exc.value.code == 0, out
+    assert "output truncated" in out
+    assert "2 more lines not shown" in out
+
+
 class TestReadOnlyFallbackNoPathTraversal:
     """Bug 1: absolute target must not pass through _build_readonly_fallback_script."""
 

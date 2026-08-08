@@ -83,6 +83,7 @@ def _validate_depth(depth: int) -> int:
 
 _OUTPUT_LINE_LIMIT = 2000
 _ALLOWED_PATH_RE = re.compile(r"^[a-zA-Z0-9_./-]+$")
+_ALLOWED_GLOB_RE = re.compile(r"^[a-zA-Z0-9_./*?\[\]-]+$")
 
 
 def _safe_relpath(path: str) -> str:
@@ -95,6 +96,22 @@ def _safe_relpath(path: str) -> str:
     if not _ALLOWED_PATH_RE.match(path):
         raise ValueError(f"invalid characters in path: {path!r}")
     return path
+
+
+def _validate_glob_pattern(glob: str) -> str:
+    """Validate a glob pattern for tree(): wildcards (* ? [...]) are allowed,
+    but shell metacharacters, absolute paths and traversal are not."""
+    if not glob:
+        raise ValueError("glob is required")
+    if glob.startswith("/"):
+        raise ValueError(f"absolute glob not allowed: {glob!r}")
+    if ".." in glob.split("/"):
+        raise ValueError(f"path traversal not allowed in glob: {glob!r}")
+    if any(ch in glob for ch in ";|`$"):
+        raise ValueError(f"shell metacharacters not allowed in glob: {glob!r}")
+    if not _ALLOWED_GLOB_RE.match(glob):
+        raise ValueError(f"invalid characters in glob: {glob!r}")
+    return glob
 
 
 def _safe_test_target(target: str) -> str:
@@ -183,6 +200,7 @@ def _compile_one(path):
 def _main() -> int:
     out = []
     failed = 0
+    skipped = 0
     for root in sys.argv[1:]:
         if os.path.isfile(root):
             ok, line = _compile_one(root)
@@ -190,6 +208,8 @@ def _main() -> int:
                 failed += 1
             if len(out) < _LIMIT:
                 out.append(line)
+            else:
+                skipped += 1
             continue
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = sorted(d for d in dirnames if d not in _EXCLUDED)
@@ -202,8 +222,10 @@ def _main() -> int:
                     failed += 1
                 if len(out) < _LIMIT:
                     out.append(line)
-    if len(out) > _LIMIT:
-        out = out[:_LIMIT] + ["[... output truncated to %d lines]" % _LIMIT]
+                else:
+                    skipped += 1
+    if skipped:
+        out.append("[... output truncated: %d more lines not shown ...]" % skipped)
     if out:
         sys.stdout.write("\\n".join(out) + "\\n")
     return 1 if failed else 0
@@ -579,8 +601,8 @@ def tree(
     depth must be an integer between DEPTH_MIN and DEPTH_MAX (inclusive);
     out-of-range values raise ValueError rather than being silently clamped.
     """
-    if glob and not _ALLOWED_PATH_RE.match(glob):
-        raise ValueError(f"invalid glob: {glob!r}")
+    if glob:
+        glob = _validate_glob_pattern(glob)
     depth = _validate_depth(depth)
     project = _validate_project(project)
     project_dir = _resolve_project(project)

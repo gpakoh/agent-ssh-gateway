@@ -118,6 +118,46 @@ class TestWorkingDirectoryValidation:
         assert exc.value.status_code == 404
 
 
+class TestTreeGlobValidation:
+    def test_glob_wildcard_accepts_py(self, real_registry):
+        result = tree(None, "demo", glob="*.py")
+        assert result["count"] == 2
+        assert "a.py" in result["entries"]
+        assert "sub/b.py" in result["entries"]
+
+    def test_glob_subdir_pattern_filters(self, real_registry):
+        result = tree(None, "demo", glob="sub/*.py")
+        assert result["count"] == 1
+        assert "sub/b.py" in result["entries"]
+        assert "a.py" not in result["entries"]
+
+    def test_glob_question_mark(self, real_registry):
+        result = tree(None, "demo", glob="?.py")
+        assert "a.py" in result["entries"]
+        assert "sub/b.py" in result["entries"]
+
+    def test_glob_no_match(self, real_registry):
+        result = tree(None, "demo", glob="*.txt")
+        assert result["count"] == 0
+        assert result["entries"] == []
+
+    def test_glob_invalid_characters_rejected(self, real_registry):
+        with pytest.raises(ValueError, match="glob"):
+            tree(None, "demo", glob="*.py;rm -rf /")
+
+    def test_glob_absolute_rejected(self, real_registry):
+        with pytest.raises(ValueError, match="glob"):
+            tree(None, "demo", glob="/etc/*.py")
+
+    def test_glob_traversal_rejected(self, real_registry):
+        with pytest.raises(ValueError, match="glob"):
+            tree(None, "demo", glob="../*.py")
+
+    def test_no_glob_still_works(self, real_registry):
+        result = tree(None, "demo")
+        assert result["count"] == 3
+
+
 class TestListFilesTruncation:
     def test_many_files_marks_truncated(self, real_registry) -> None:
         from mcp_client_tools import list_files
