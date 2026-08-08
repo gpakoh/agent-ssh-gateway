@@ -240,3 +240,41 @@ class TestConfirmStoreComposeActions:
         result, status = store.confirm_action(action.confirm_token)
         assert status == ConfirmStatus.OK
         assert result.tool == "docker_compose_build"
+
+
+class TestTwoPhaseConfirmation:
+    """Token must not be burned until all authorization checks pass."""
+
+    def test_peek_does_not_consume(self):
+        store = ConfirmStore()
+        action = store.create_action("docker_rm", {"container": "foo"}, "Remove foo")
+        result, status = store.peek_action(action.confirm_token)
+        assert status == ConfirmStatus.OK
+        assert result is not None
+        assert action.consumed is False
+
+    def test_peek_then_consume(self):
+        store = ConfirmStore()
+        action = store.create_action("docker_rm", {"container": "foo"}, "Remove foo")
+        _, status = store.peek_action(action.confirm_token)
+        assert status == ConfirmStatus.OK
+        assert action.consumed is False
+        assert store.consume_action(action.action_id) is True
+        assert action.consumed is True
+        result, status = store.peek_action(action.confirm_token)
+        assert result is None
+        assert status == ConfirmStatus.CONSUMED
+
+    def test_consume_idempotent(self):
+        store = ConfirmStore()
+        action = store.create_action("docker_rm", {"container": "foo"}, "Remove foo")
+        assert store.consume_action(action.action_id) is True
+        assert store.consume_action(action.action_id) is False
+        assert store.consume_action("no-such-id") is False
+
+    def test_confirm_action_still_consumes(self):
+        store = ConfirmStore()
+        action = store.create_action("docker_rm", {"container": "foo"}, "Remove foo")
+        _, status = store.confirm_action(action.confirm_token)
+        assert status == ConfirmStatus.OK
+        assert action.consumed is True
