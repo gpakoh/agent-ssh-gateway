@@ -428,9 +428,11 @@ def _safe_glob(
     project_root = project_dir.resolve()
     results: list[str] = []
     start = time.monotonic()
+    timed_out = False
 
     for path in project_root.glob(pattern):
         if time.monotonic() - start > GLOB_TIMEOUT_S:
+            timed_out = True
             break
         try:
             resolved = path.resolve()
@@ -451,7 +453,7 @@ def _safe_glob(
     return {
         "files": results,
         "count": len(results),
-        "truncated": len(results) >= max_results,
+        "truncated": timed_out or len(results) >= max_results,
     }
 
 
@@ -557,7 +559,12 @@ _EXCLUDE_DIRS = frozenset(
 )
 
 
-def list_tree(client: GatewayClient, project: str, depth: int = 2) -> dict[str, Any]:
+def list_tree(
+    client: GatewayClient,
+    project: str,
+    depth: int = 2,
+    max_results: int = MAX_GLOB_RESULTS,
+) -> dict[str, Any]:
     """List project directory tree using Python pathlib — no shell execution.
 
     depth must be an integer between DEPTH_MIN and DEPTH_MAX (inclusive);
@@ -577,6 +584,9 @@ def list_tree(client: GatewayClient, project: str, depth: int = 2) -> dict[str, 
         suffix = "/" if p.is_dir() else ""
         entries.append(f"{rel}{suffix}")
 
+    total = len(entries)
+    entries = entries[:max_results]
+
     return {
         "project": project,
         # "." represents the project's own root in the client-facing,
@@ -587,6 +597,7 @@ def list_tree(client: GatewayClient, project: str, depth: int = 2) -> dict[str, 
         "depth": depth,
         "entries": entries,
         "count": len(entries),
+        "truncated": total > max_results,
     }
 
 
@@ -595,6 +606,7 @@ def tree(
     project: str,
     depth: int = 2,
     glob: str | None = None,
+    max_results: int = MAX_GLOB_RESULTS,
 ) -> dict[str, Any]:
     """List project directory tree using Python pathlib — no shell execution.
 
@@ -620,6 +632,9 @@ def tree(
             continue
         entries.append(f"{name}{suffix}")
 
+    total = len(entries)
+    entries = entries[:max_results]
+
     return {
         "project": project,
         # "." represents the project's own root in the client-facing,
@@ -630,6 +645,7 @@ def tree(
         "depth": depth,
         "entries": entries,
         "count": len(entries),
+        "truncated": total > max_results,
     }
 
 

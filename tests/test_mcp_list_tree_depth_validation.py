@@ -176,3 +176,72 @@ class TestListFilesTruncation:
         result = list_files(None, "demo", "*.py")
         assert result["truncated"] is False
         assert result["count"] == len(result["files"])
+
+
+class TestListTreeTruncation:
+    def test_many_entries_marks_truncated(self, real_registry) -> None:
+        from mcp_client_tools import list_tree
+
+        for i in range(210):
+            (real_registry / f"bulk{i}.txt").write_text("x")
+
+        result = list_tree(None, "demo", depth=1)
+        assert len(result["entries"]) == 200
+        assert result["truncated"] is True
+        assert result["count"] == 200
+
+    def test_few_entries_not_truncated(self, real_registry) -> None:
+        result = list_tree(None, "demo", depth=1)
+        assert result["truncated"] is False
+        assert result["count"] == len(result["entries"])
+
+    def test_custom_max_results_slices(self, real_registry) -> None:
+        result = list_tree(None, "demo", depth=1, max_results=1)
+        assert len(result["entries"]) == 1
+        assert result["truncated"] is True
+        assert result["count"] == 1
+
+
+class TestTreeTruncation:
+    def test_many_entries_marks_truncated(self, real_registry) -> None:
+        for i in range(210):
+            (real_registry / f"bulk{i}.txt").write_text("x")
+
+        result = tree(None, "demo", depth=1)
+        assert len(result["entries"]) == 200
+        assert result["truncated"] is True
+        assert result["count"] == 200
+
+    def test_few_entries_not_truncated(self, real_registry) -> None:
+        result = tree(None, "demo", depth=1)
+        assert result["truncated"] is False
+        assert result["count"] == len(result["entries"])
+
+    def test_custom_max_results_slices(self, real_registry) -> None:
+        result = tree(None, "demo", depth=1, max_results=1)
+        assert len(result["entries"]) == 1
+        assert result["truncated"] is True
+        assert result["count"] == 1
+
+
+class TestSafeGlobTimeoutTruncation:
+    def test_timeout_marks_truncated(self, real_registry, monkeypatch) -> None:
+        from mcp_client_tools import _safe_glob
+
+        calls = {"n": 0}
+
+        def fake_monotonic() -> float:
+            calls["n"] += 1
+            return 0.0 if calls["n"] == 1 else 100.0
+
+        monkeypatch.setattr("time.monotonic", fake_monotonic)
+        result = _safe_glob(real_registry, "*.py")
+        assert result["truncated"] is True
+        assert result["count"] == 0
+
+    def test_no_timeout_not_truncated(self, real_registry) -> None:
+        from mcp_client_tools import _safe_glob
+
+        result = _safe_glob(real_registry, "*.py")
+        assert result["truncated"] is False
+        assert result["count"] == 1
