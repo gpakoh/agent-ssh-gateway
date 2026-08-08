@@ -238,6 +238,26 @@ if _auth_provider is not None:
     except Exception as _exc:
         print(f"  TokenStore: error loading tokens: {_exc}", file=sys.stderr)
 
+# ── ClientStore: load persisted dynamically-registered OAuth clients ──
+# Without this, GatewayOAuthProvider._clients was purely in-memory --
+# every restart forgot every client a connector had ever registered via
+# DCR, so the next reconnection attempt failed with "Client ID ... not
+# found" even though nothing about the connection itself had changed.
+if _auth_provider is not None and MCP_AUTH_MODE == "oauth":
+    try:
+        from examples.mcp_server.client_store import ClientStore
+
+        _client_store = ClientStore()
+        _auth_provider.set_client_store(_client_store)
+        _clients_loaded = _auth_provider.load_clients()
+        if _clients_loaded:
+            print(
+                f"  ClientStore: {_clients_loaded} clients loaded from {_client_store._path}",
+                file=sys.stderr,
+            )
+    except Exception as _exc:
+        print(f"  ClientStore: error loading clients: {_exc}", file=sys.stderr)
+
 # ── Agent Backend Router ─────────────────────────────────────────────
 _agent_router: AgentBackendRouter | None = None
 if os.environ.get("MCP_AGENT_BACKEND_ROUTER_ENABLED", "false").strip().lower() == "true":
