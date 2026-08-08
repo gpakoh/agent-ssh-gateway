@@ -160,6 +160,82 @@ class TestReadOnlyFallbackNoPathTraversal:
         script = _build_readonly_fallback_script("mypy", "/project", ["/etc/shadow"])
         assert "/project/etc/shadow" in script
 
+
+class TestReadOnlyFallbackMypyPackageBase:
+    """Regression: mypy (explicit_package_bases=true in pyproject.toml)
+    infers each file's package base relative to CWD. The fallback script
+    used to leave CWD at tmp_root (an unrelated dir holding only symlinked
+    app/tests) while passing mypy the project_dir's absolute path as the
+    target -- confirmed live to break package-base inference and collapse
+    examples/mcp_server/server.py and examples/mcp_client_remote/server.py
+    (sibling non-package dirs, no __init__.py) to the same bare module name
+    "server": "Duplicate module named 'server'", aborting the whole check.
+    mypy must instead run with CWD at project_dir (matching how it resolves
+    correctly everywhere else), using tmp_root's synced venv via
+    `uv run --project` (which, unlike --directory, does not chdir).
+    """
+
+    def test_mypy_invocation_cds_back_to_project_dir(self):
+        from mcp_client_tools import _build_readonly_fallback_script
+
+        script = _build_readonly_fallback_script("mypy", "/project", ["."])
+        mypy_line = [ln for ln in script.splitlines() if "mypy" in ln and "uv run" in ln][-1]
+        assert mypy_line.startswith("cd /project && ")
+
+    def test_mypy_invocation_uses_project_flag_not_directory_flag(self):
+        """--project (not --directory) is required: --directory would chdir
+        back into tmp_root, reintroducing the exact bug this fixes."""
+        from mcp_client_tools import _build_readonly_fallback_script
+
+        script = _build_readonly_fallback_script("mypy", "/project", ["."])
+        mypy_line = [ln for ln in script.splitlines() if "mypy" in ln and "uv run" in ln][-1]
+        assert "--project " in mypy_line
+        assert "--directory" not in mypy_line
+
+    def test_mypy_project_flag_points_at_tmp_root_not_project_dir(self):
+        from mcp_client_tools import _build_readonly_fallback_script
+
+        script = _build_readonly_fallback_script("mypy", "/project", ["."])
+        mypy_line = [ln for ln in script.splitlines() if "mypy" in ln and "uv run" in ln][-1]
+        assert "--project /tmp/.mcp-test/project-" in mypy_line
+
+    def test_mypy_project_flag_is_not_shell_quoted(self):
+        """Regression within the fix itself: tmp_root contains literal shell
+        variable refs (${_MCP_UID}/${_MCP_USER}) meant to be expanded by the
+        script at run time. Wrapping tmp_root in shlex.quote() puts it in
+        single quotes, which suppress $-expansion in POSIX shells -- uv then
+        received the literal, unexpanded string as a nonexistent path.
+        """
+        from mcp_client_tools import _build_readonly_fallback_script
+
+        script = _build_readonly_fallback_script("mypy", "/project", ["."])
+        assert "${_MCP_UID}" in script
+        assert "${_MCP_USER}" in script
+        # A quoted tmp_root would show up as --project '...literal...'
+        assert "--project '" not in script
+
+    def test_mypy_uses_cache_dir_since_project_dir_is_read_only(self):
+        """mypy's own .mypy_cache write must not land on the read-only
+        project_dir now that CWD points there again."""
+        from mcp_client_tools import _build_readonly_fallback_script
+
+        script = _build_readonly_fallback_script("mypy", "/project", ["."])
+        mypy_line = [ln for ln in script.splitlines() if "mypy" in ln and "uv run" in ln][-1]
+        assert "--cache-dir /tmp/.mcp-mypy-cache" in mypy_line
+
+    def test_pytest_and_ruff_still_run_from_tmp_root(self):
+        """Only mypy's CWD changed -- pytest/ruff must keep their existing,
+        already-working behavior untouched."""
+        from mcp_client_tools import _build_readonly_fallback_script
+
+        pytest_script = _build_readonly_fallback_script("pytest", "/project", ["."])
+        pytest_line = [ln for ln in pytest_script.splitlines() if "uv run pytest" in ln][-1]
+        assert not pytest_line.startswith("cd /project")
+
+        ruff_script = _build_readonly_fallback_script("ruff", "/project", ["."])
+        ruff_line = [ln for ln in ruff_script.splitlines() if "uv run ruff" in ln][-1]
+        assert not ruff_line.startswith("cd /project")
+
     def test_readonly_fallback_copies_uv_lock_and_syncs_frozen(self):
         """Regression: the fallback script copied only pyproject.toml, so
         `uv sync --extra dev` re-resolved dependencies on every first sync
@@ -729,7 +805,9 @@ class TestReadOnlyFallbackRejectsAbsoluteTargetsInRealFlow:
         mock = self._make_fallback_mock()
         _run_uv_tool(mock, "proj", "mypy", "run_mypy", target=["/etc/shadow"])
         assert mock.fallback_script is not None
-        last_line = [ln for ln in mock.fallback_script.splitlines() if "uv run mypy" in ln][-1]
+        last_line = [
+            ln for ln in mock.fallback_script.splitlines() if "mypy" in ln and "uv run" in ln
+        ][-1]
         assert not any(w == "/etc/shadow" for w in last_line.split()), (
             f"fallback must not use raw absolute /etc/shadow, last line: {last_line}"
         )
