@@ -17,10 +17,10 @@ jobs:
       - name: Set up Python
         run: |
           python3 --version
-          uv sync --frozen --extra dev
+          /media/1TB/Anaconda/bin/uv sync --frozen --extra dev
 
       - name: Make host-smoke
-        run: uv run make host-smoke
+        run: /media/1TB/Anaconda/bin/uv run make host-smoke
 
       - name: Report
         run: |
