@@ -41,6 +41,7 @@ from docker_confirm import ConfirmAction, ConfirmStatus, ConfirmStore
 from gateway_client import GatewayClient, GatewayClientError
 from mcp.server.fastmcp import FastMCP
 from mcp_client_tools import (
+    MAX_GLOB_RESULTS,
     commit_head,
     current_branch,
     find_files,
@@ -1560,20 +1561,29 @@ def gateway_list_files(project: str, pattern: str) -> dict[str, Any]:
 
 
 @register_tool("tree")
-def gateway_tree(project: str, depth: int = 2, glob: str | None = None) -> dict[str, Any]:
+def gateway_tree(
+    project: str,
+    depth: int = 2,
+    glob: str | None = None,
+    max_results: int = MAX_GLOB_RESULTS,
+) -> dict[str, Any]:
     """List project directory tree up to a given depth."""
     return _run_gateway(
         tool="tree",
-        fn=lambda: tree(client, project, depth=depth, glob=glob),
+        fn=lambda: tree(client, project, depth=depth, glob=glob, max_results=max_results),
     )
 
 
 @register_tool("list_tree")
-def gateway_list_tree(project: str, depth: int = 2) -> dict[str, Any]:
+def gateway_list_tree(
+    project: str,
+    depth: int = 2,
+    max_results: int = MAX_GLOB_RESULTS,
+) -> dict[str, Any]:
     """List project directory tree using Python pathlib — no shell execution."""
     return _run_gateway(
         tool="list_tree",
-        fn=lambda: list_tree(client, project, depth=depth),
+        fn=lambda: list_tree(client, project, depth=depth, max_results=max_results),
     )
 
 
