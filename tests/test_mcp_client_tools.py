@@ -175,3 +175,39 @@ class TestReadFileErrorCodes:
         )
         result = mod.read_file(_FakeClient(), "web-ssh-gateway", "main.py")
         assert result["error"]["code"] == "FILE_READ_ERROR"
+
+
+class TestShowChangesErrorEnvelope:
+    """show_changes must surface git diagnostics when both calls fail."""
+
+    def test_both_fail_returns_error_envelope(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+
+        failed = {"exit_code": 128, "stdout": "fatal: not a git repository", "stderr": ""}
+
+        monkeypatch.setattr(mod, "git_status", lambda client, project: failed)
+        monkeypatch.setattr(mod, "git_diff_stat", lambda client, project: failed)
+
+        result = mod.show_changes(_FakeClient(), "demo")
+        assert result["ok"] is False
+        assert result["error"]["code"] == "CHECK_FAILED"
+        assert result["error"]["details"]["git_status"]["stdout"] == (
+            "fatal: not a git repository"
+        )
+
+    def test_single_failure_still_reports_ok_with_payload(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+
+        ok = {"exit_code": 0, "stdout": " M main.py", "stderr": ""}
+        failed = {"exit_code": 128, "stdout": "fatal: not a git repository", "stderr": ""}
+
+        monkeypatch.setattr(mod, "git_status", lambda client, project: ok)
+        monkeypatch.setattr(mod, "git_diff_stat", lambda client, project: failed)
+
+        result = mod.show_changes(_FakeClient(), "demo")
+        assert "ok" not in result
+        assert result["git_status"]["exit_code"] == 0
