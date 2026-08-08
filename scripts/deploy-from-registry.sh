@@ -79,8 +79,10 @@ smoke() {
   # web-ssh-gateway's and mcp-server's own Dockerfile HEALTHCHECKs already
   # run inside each container; wait_docker_health reads that via `docker
   # inspect`, which is the same signal without the cross-namespace problem.
-  wait_docker_health "web-ssh-gateway" web-ssh-gateway 60  || ok=false
-  wait_docker_health "mcp-server"      mcp-server      60  || ok=false
+  # 120s: the gateway HEALTHCHECK is interval 30s / retries 3, so a cold
+  # first boot can legitimately take ~60-90s before reporting healthy.
+  wait_docker_health "web-ssh-gateway" web-ssh-gateway 120 || ok=false
+  wait_docker_health "mcp-server"      mcp-server      120 || ok=false
   $ok
 }
 
