@@ -15,7 +15,6 @@ data/
 report-*.md
 test-coverage-plan.md
 .ruff_cache/
-.gitea/
 mypy.ini
 
 # Generated SSH keys
