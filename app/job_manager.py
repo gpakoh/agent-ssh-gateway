@@ -56,6 +56,11 @@ class JobRecord:
     completed_at: float | None = None
     owner_id: str = ""
     error_message: str | None = None
+    # Absolute host path prefix to strip from command/stdout/stderr/
+    # error_message when redaction is applied (M8) -- deliberately excluded
+    # from to_dict()'s allowlist, since it's consumed internally by
+    # job_serializer.py, not returned to API callers itself.
+    redact_path_prefix: str | None = None
 
     # Monotonic timestamps (relative to process start; do NOT survive restart)
     queued_at_mono: float | None = None
@@ -218,7 +223,13 @@ class JobManager:
     # Create And Run Job
     # ------------------------------------------------------------------
 
-    async def create_job(self, session_id: str, command: str, owner_id: str = "") -> str:
+    async def create_job(
+        self,
+        session_id: str,
+        command: str,
+        owner_id: str = "",
+        redact_path_prefix: str | None = None,
+    ) -> str:
         """Create a new background job."""
         async with self._lock:
             if len(self._jobs) >= self._max_jobs:
@@ -230,6 +241,7 @@ class JobManager:
                 session_id=session_id,
                 command=command,
                 owner_id=owner_id,
+                redact_path_prefix=redact_path_prefix,
             )
             job.queued_at_mono = time.monotonic()
             self._jobs[job_id] = job
@@ -260,6 +272,7 @@ class JobManager:
                 stderr=job.stderr,
                 exit_code=job.exit_code,
                 error=job.error_message,
+                redact_path_prefix=job.redact_path_prefix,
             )
         except Exception:
             logger.warning("Failed to persist job %s to Redis", job.job_id, exc_info=True)

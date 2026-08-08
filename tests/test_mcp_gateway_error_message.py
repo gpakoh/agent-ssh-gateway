@@ -185,7 +185,7 @@ class TestRunTestsAsyncSubmit:
 
         calls = {"n": 0}
 
-        def _execute_raw(cmd):
+        def _execute_raw(cmd, **kw):
             calls["n"] += 1
             return {"job_id": f"j{calls['n']}"}
 
@@ -223,7 +223,7 @@ class TestRunTestsAsyncSubmit:
 
         calls = {"n": 0}
 
-        def _execute_raw(cmd):
+        def _execute_raw(cmd, **kw):
             calls["n"] += 1
             return {"job_id": f"j{calls['n']}"}
 

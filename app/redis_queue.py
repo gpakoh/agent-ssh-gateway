@@ -83,6 +83,7 @@ class RedisJobQueue:
         stderr: str = "",
         exit_code: int | None = None,
         error: str | None = None,
+        redact_path_prefix: str | None = None,
     ) -> None:
         """Persist a finished JobManager job so it survives a gateway restart.
 
@@ -109,6 +110,7 @@ class RedisJobQueue:
             "stderr": stderr,
             "exit_code": exit_code,
             "error": error,
+            "redact_path_prefix": redact_path_prefix,
         }
         is_failure = status not in ("completed",)
         ttl = 86400 * 7 if is_failure else 86400

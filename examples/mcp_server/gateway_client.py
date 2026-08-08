@@ -291,25 +291,32 @@ class GatewayClient:
         )
 
     @_retry_on_session_not_found
-    def execute_raw(self, command: str) -> dict[str, Any]:
+    def execute_raw(self, command: str, redact_path_prefix: str | None = None) -> dict[str, Any]:
         """Execute a command directly without cd wrapping.
 
         Unlike execute_project_command, this does NOT prepend ``cd <root>/<project> &&``.
         Use for commands that carry their own working-directory semantics
         (e.g. ``uv --directory <dir>``) or commands that must not contain
         shell metacharacters (``&&`` is blocked by the server metachar gate).
+
+        ``redact_path_prefix``: pass the absolute host project root when
+        ``command`` embeds it (e.g. ``--directory <root>`` or a generated
+        script's own absolute path) -- this always runs async_mode=True, so
+        a caller that only gets a job_id back and polls job_result() later
+        would otherwise have that absolute path echoed back verbatim in the
+        job's command/stdout/stderr (M8).
         """
         sid = self._require_session_id()
-        return self._post(
-            "/api/ssh/execute",
-            {
-                "session_id": sid,
-                "command": command,
-                "async_mode": True,
-                "redact_output": True,
-                "timeout": self.command_timeout,
-            },
-        )
+        payload: dict[str, Any] = {
+            "session_id": sid,
+            "command": command,
+            "async_mode": True,
+            "redact_output": True,
+            "timeout": self.command_timeout,
+        }
+        if redact_path_prefix:
+            payload["redact_path_prefix"] = redact_path_prefix
+        return self._post("/api/ssh/execute", payload)
 
     @_retry_on_session_not_found
     def execute_argv(
@@ -425,7 +432,7 @@ class GatewayClient:
             f.write(script)
             f.write("\n")
 
-        return self.execute_raw(f"sh {host_path}")
+        return self.execute_raw(f"sh {host_path}", redact_path_prefix=cwd)
 
     @_retry_on_session_not_found
     def apply_patch(
