@@ -10,6 +10,11 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    # No job in this workflow had a timeout at all -- a genuinely hung
+    # step (network stall, a test deadlocking) would run until GitHub's
+    # own default (360 minutes) or the self-hosted runner's own limits,
+    # occupying a runner slot the whole time instead of failing fast.
+    timeout-minutes: 20
 
     strategy:
       fail-fast: false
@@ -126,6 +131,7 @@ jobs:
     needs: [test]
     if: github.ref_name == 'master' && github.event_name == 'push' && github.server_url != 'https://github.com'
     runs-on: docker-e2e-ci
+    timeout-minutes: 20
     env:
       REGISTRY: ${{ secrets.REGISTRY_HOST }}
     steps:
@@ -171,6 +177,7 @@ jobs:
     needs: [build-and-push]
     if: github.ref_name == 'master' && github.event_name == 'push' && github.server_url != 'https://github.com'
     runs-on: docker-e2e-ci
+    timeout-minutes: 15
     container:
       image: nod-ci-docker-e2e:latest
       volumes:
