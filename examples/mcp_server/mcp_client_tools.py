@@ -1138,6 +1138,7 @@ def working_directory(client: GatewayClient, project: str) -> dict[str, Any]:
     namespace "." — never the real host path (mirrors info()'s
     "resolved_path": "." convention). No shell invocation needed."""
     _validate_project(project)
+    _resolve_project(project)
     return {
         "outcome": "passed",
         "exit_code": 0,
