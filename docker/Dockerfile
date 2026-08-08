@@ -54,8 +54,13 @@ USER appuser
 VOLUME ["/tmp", "/app/logs", "/app/data"]
 
 # Health check
+# /health always answers HTTP 200 (its body carries status/ready for callers
+# to interpret) -- a plain urlopen() only proves the process accepted a
+# connection, not that Redis/Postgres/SSH are actually working, so a
+# deployment could sit "healthy" while genuinely degraded. Parse the body
+# and only pass when status == "ok" (M17).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8085/health')" || exit 1
+    CMD python -c "import json, sys, urllib.request; d = json.load(urllib.request.urlopen('http://localhost:8085/health', timeout=4)); sys.exit(0 if d.get('status') == 'ok' else 1)"
 
 # Expose port
 EXPOSE 8085

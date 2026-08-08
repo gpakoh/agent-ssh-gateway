@@ -17,6 +17,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_PATH = ROOT / "docker" / "docker-compose.yml"
 MCP_SERVER_DOCKERFILE = ROOT / "docker" / "Dockerfile.mcp-server"
+GATEWAY_DOCKERFILE = ROOT / "docker" / "Dockerfile"
 
 
 def _load_compose() -> dict:
@@ -135,3 +136,37 @@ class TestMcpServerTokenStoreVolumeIsWritableByItsOwnUser:
             f"(chowned paths found: {chowned_paths!r}) — a fresh named volume there "
             "is created root-owned and unwritable by the container's own non-root user."
         )
+
+
+class TestGatewayHealthcheckReadsBodyStatusNotJustHttpStatus:
+    """Regression (M17): /health always answers HTTP 200 (its body carries a
+    status/ready field for callers to interpret) -- app/routers/system.py
+    intentionally never returns 503 on degraded, since that endpoint's HTTP
+    contract is relied on elsewhere (many tests, and any external caller
+    that only checks "did /health respond") as an always-200 liveness probe.
+    A bare `urlopen('.../health')` HEALTHCHECK therefore only proves the
+    process accepted a TCP connection, not that Redis/Postgres/SSH are
+    actually working -- both docker/Dockerfile's own HEALTHCHECK and
+    docker-compose.yml's override (which replaces it entirely, so both need
+    the same fix) must parse the JSON body and fail when status != "ok".
+    """
+
+    def test_dockerfile_healthcheck_parses_body_status(self):
+        text = GATEWAY_DOCKERFILE.read_text(encoding="utf-8")
+        healthcheck_line = next(
+            (line for line in text.splitlines() if "8085/health" in line),
+            None,
+        )
+        assert healthcheck_line is not None, "expected a HEALTHCHECK CMD probing :8085/health"
+        assert "json.load" in healthcheck_line
+        assert "status" in healthcheck_line
+        assert "== 'ok'" in healthcheck_line or '== "ok"' in healthcheck_line
+
+    def test_compose_healthcheck_override_parses_body_status(self):
+        service = _load_compose()["services"]["web-ssh-gateway"]
+        test_cmd = service["healthcheck"]["test"]
+        joined = " ".join(test_cmd)
+        assert "8085/health" in joined
+        assert "json.load" in joined
+        assert "status" in joined
+        assert "== 'ok'" in joined or '== "ok"' in joined

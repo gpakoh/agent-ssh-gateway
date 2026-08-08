@@ -207,7 +207,11 @@ services:
           cpus: '0.5'
           memory: 256M
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8085/health')"]
+      # Same JSON-body status check as docker/Dockerfile's own HEALTHCHECK
+      # (M17) -- this compose-level definition overrides it, so it needs
+      # the same fix or deploy-from-registry.sh's smoke() would still only
+      # ever see "the process accepted a connection", not "status == ok".
+      test: ["CMD", "python", "-c", "import json, sys, urllib.request; d = json.load(urllib.request.urlopen('http://localhost:8085/health', timeout=4)); sys.exit(0 if d.get('status') == 'ok' else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3
