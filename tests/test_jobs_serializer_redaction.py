@@ -89,6 +89,80 @@ class TestSerializeJob:
         assert out["progress"] == {"p": 1}
 
 
+class TestSerializeJobPathRedaction:
+    """M8: an absolute host path a caller already knew (its own project
+    root, embedded by the caller into `command` before submission) must not
+    be echoed back verbatim through job_result() -- redact_secrets() alone
+    is secret-pattern-only, with no path awareness.
+    """
+
+    PROJECT_ROOT = "/media/1TB/Python/web_ssh/web-ssh-gateway/workspace/demo-project"
+
+    def _job(self) -> JobRecord:
+        job = JobRecord(
+            job_id="j-path-1",
+            session_id="s-1",
+            command=f"sh {self.PROJECT_ROOT}/.ai-bridge/tmp/mcp_script_abc123.sh",
+            redact_path_prefix=self.PROJECT_ROOT,
+        )
+        job.status = "completed"
+        job.stdout = f"bash: {self.PROJECT_ROOT}/.ai-bridge/tmp/mcp_script_abc123.sh: line 3: uv: not found\n"
+        job.stderr = f"cd {self.PROJECT_ROOT}/subdir failed"
+        job.exit_code = 127
+        job.error_message = f"script {self.PROJECT_ROOT}/foo.sh not found"
+        return job
+
+    def test_redact_true_strips_project_root(self):
+        out = serialize_job(self._job(), redact=True)
+        assert self.PROJECT_ROOT not in out["command"]
+        assert self.PROJECT_ROOT not in out["stdout"]
+        assert self.PROJECT_ROOT not in out["stderr"]
+        assert self.PROJECT_ROOT not in out["error_message"]
+        # Same marker convention as mcp_client_tools.py's own
+        # _redact_project_root() -- "." for the bare root, "./" for a
+        # nested path -- so the two layers stay idempotent together.
+        assert out["command"] == "sh ./.ai-bridge/tmp/mcp_script_abc123.sh"
+
+    def test_redact_false_keeps_raw_path(self):
+        out = serialize_job(self._job(), redact=False)
+        assert self.PROJECT_ROOT in out["command"]
+        assert self.PROJECT_ROOT in out["stdout"]
+
+    def test_redact_path_prefix_itself_never_leaks_into_output(self):
+        """redact_path_prefix is internal-only plumbing, not a field callers
+        should ever see echoed back."""
+        out = serialize_job(self._job(), redact=True)
+        assert "redact_path_prefix" not in out
+        out_raw = serialize_job(self._job(), redact=False)
+        assert "redact_path_prefix" not in out_raw
+
+    def test_no_prefix_set_is_a_no_op(self):
+        job = JobRecord(job_id="j-2", session_id="s-1", command=f"echo {self.PROJECT_ROOT}")
+        out = serialize_job(job, redact=True)
+        assert self.PROJECT_ROOT in out["command"]
+
+    def test_redis_dict_shape_project_root_redacted(self):
+        """Same fix for jobs mirrored to Redis (job survives a restart) --
+        save_terminal_job() persists redact_path_prefix under the same
+        dict-shape key job_serializer already normalizes from."""
+        redis_job = {
+            "id": "r-path-1",
+            "session_id": "s-1",
+            "command": f"sh {self.PROJECT_ROOT}/script.sh",
+            "status": "completed",
+            "completed_at": 1.0,
+            "stdout": f"{self.PROJECT_ROOT}/script.sh: ok",
+            "stderr": "",
+            "exit_code": 0,
+            "error": None,
+            "redact_path_prefix": self.PROJECT_ROOT,
+        }
+        out = serialize_job(redis_job, redact=True)
+        assert self.PROJECT_ROOT not in out["command"]
+        assert self.PROJECT_ROOT not in out["stdout"]
+        assert "redact_path_prefix" not in out
+
+
 class TestJobManagerStartedMessage:
     @pytest.mark.asyncio
     async def test_started_message_redacts_command(self, monkeypatch):

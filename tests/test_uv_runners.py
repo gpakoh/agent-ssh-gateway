@@ -1117,6 +1117,44 @@ class TestAsyncRunTestsReadonlyFallback:
             kind == "execute_project_script_async" for kind, _ in calls
         ), "healthy venv must keep the plain uv run path"
 
+    def test_async_submit_passes_redact_path_prefix(self, monkeypatch):
+        """Regression (M8): an async_submit=True job only ever returns a
+        job_id -- the caller polls job_result() separately, with no
+        client-side _redact_project_root() ever running on that later
+        response. execute_raw() must be told the project root so the
+        gateway can redact it server-side when the job is polled.
+        """
+        from mcp_client_tools import _run_uv_tool
+
+        project_dir = Path("/project")
+        monkeypatch.setattr("mcp_client_tools._resolve_project", lambda _: project_dir)
+
+        captured_kwargs: dict[str, dict] = {}
+
+        class CapturingClient:
+            def execute_raw(self, cmd, **kw):
+                if cmd == "command -v uv" or cmd.startswith("test -x "):
+                    return {"job_id": "j-precheck"}
+                captured_kwargs[cmd] = kw
+                return {"job_id": "j-run"}
+
+            def wait_job(self, job_id, **kw):
+                return {"exit_code": 0, "stdout": "/usr/bin/uv", "stderr": ""}
+
+        result = _run_uv_tool(
+            CapturingClient(),
+            "proj",
+            "pytest",
+            "run_tests",
+            target=["."],
+            async_submit=True,
+        )
+
+        assert result["result"]["job_id"] == "j-run"
+        assert len(captured_kwargs) == 1
+        ((_cmd, kw),) = captured_kwargs.items()
+        assert kw.get("redact_path_prefix") == str(project_dir)
+
 
 def test_redact_project_root_replaces_abs_paths():
     """Runner output must not leak the host project root (audit T31 #3)."""

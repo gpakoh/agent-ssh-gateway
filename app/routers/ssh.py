@@ -601,6 +601,7 @@ async def ssh_execute(
             session_id=req.session_id,
             command=sanitized,
             owner_id=_identity.fingerprint,
+            redact_path_prefix=req.redact_path_prefix,
         )
         await _persist_command_audit(
             session_id=req.session_id,

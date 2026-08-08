@@ -826,7 +826,10 @@ def _venv_usable_on_target(client: Any, project_dir: str) -> bool:
     before the tool ever runs. Detect that upfront so async runners can
     fall back to the writable temp project instead.
     """
-    probe = client.execute_raw(f"test -x {shlex.quote(project_dir)}/.venv/bin/python3")
+    probe = client.execute_raw(
+        f"test -x {shlex.quote(project_dir)}/.venv/bin/python3",
+        redact_path_prefix=project_dir,
+    )
     raw = client.wait_job(probe["job_id"])
     return raw.get("exit_code", 1) == 0
 
@@ -934,7 +937,7 @@ def _run_uv_tool(
                 ],
             )
 
-    result = client.execute_raw(command)
+    result = client.execute_raw(command, redact_path_prefix=str(project_dir))
 
     if async_submit:
         return tool_success(

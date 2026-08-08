@@ -66,6 +66,18 @@ class ExecuteRequest(BaseModel):
         default=None,
         description="Override command output redaction for this request.",
     )
+    redact_path_prefix: str | None = Field(
+        default=None,
+        max_length=4096,
+        description=(
+            "Absolute host path prefix (e.g. the caller's own project root) to "
+            "strip from command/stdout/stderr/error_message when redaction is "
+            "applied. Callers that embed an absolute path they already know "
+            "into `command` (e.g. a generated script's own path) should set "
+            "this so a later job_result() poll doesn't echo back host "
+            "filesystem topology the caller never explicitly asked to see."
+        ),
+    )
 
 
 class ExecuteResponse(BaseModel):

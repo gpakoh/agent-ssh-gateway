@@ -34,9 +34,11 @@ def serialize_job(
     replaced with their redacted form.
     """
     if isinstance(job, JobRecord):
+        redact_path_prefix = job.redact_path_prefix
         data = job.to_dict()
     else:
         data = dict(job)
+        redact_path_prefix = data.pop("redact_path_prefix", None)
         if "id" in data and "job_id" not in data:
             data["job_id"] = data.pop("id")
         if "error" in data and "error_message" not in data:
@@ -45,6 +47,16 @@ def serialize_job(
     def _redact(value: Any) -> Any:
         if not redact or not isinstance(value, str):
             return value
+        if redact_path_prefix:
+            # Same replacement + marker as mcp_client_tools.py's
+            # _redact_project_root() (".", not a placeholder token) --
+            # callers on that path already apply it a second time on their
+            # own synchronous results, so this stays idempotent whichever
+            # order the two run in, instead of producing two different
+            # markers depending on which code path a caller happened to hit.
+            prefix = redact_path_prefix.rstrip("/")
+            if prefix and prefix != "/":
+                value = value.replace(f"{prefix}/", "./").replace(prefix, ".")
         return redact_secrets(value)
 
     out = dict(data)
