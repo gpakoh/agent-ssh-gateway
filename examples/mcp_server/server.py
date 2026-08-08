@@ -306,8 +306,11 @@ if os.path.exists(_pg_env):
         _resolved_host = _resolve_docker_host(_h)
         if _resolved_host != _h:
             print(f"  resolved {_h} -> {_resolved_host} via docker inspect", file=sys.stderr)
+        from urllib.parse import quote_plus
+
         PG_DSN = (
-            f"postgresql://{_u}:{_pw}@{_resolved_host}:{_p}/{_d}?sslmode=disable&application_name=mcp_gateway"
+            f"postgresql://{quote_plus(_u)}:{quote_plus(_pw)}@{_resolved_host}:{_p}/{_d}"
+            f"?sslmode=disable&application_name=mcp_gateway"
         )
 
 _pg_client: PostgresClient | None = None
@@ -3191,7 +3194,19 @@ async def postgres_list_schemas() -> dict[str, Any]:
     client = _get_pg_client()
     if client is None:
         return _postgres_not_configured("postgres_list_schemas")
-    schemas = await client.list_schemas()
+    try:
+        schemas = await client.list_schemas()
+    except ValueError as e:
+        return tool_error(
+            tool="postgres_list_schemas", code="INVALID_INPUT", message=str(e), source="postgres"
+        )
+    except Exception as e:
+        return tool_error(
+            tool="postgres_list_schemas",
+            code="INTERNAL_ERROR",
+            message=f"list schemas failed: {e}",
+            source="postgres",
+        )
     return tool_success(
         "postgres_list_schemas",
         result={"schemas": schemas, "count": len(schemas)},
@@ -3205,7 +3220,19 @@ async def postgres_list_tables(schema: str = "public") -> dict[str, Any]:
     client = _get_pg_client()
     if client is None:
         return _postgres_not_configured("postgres_list_tables")
-    tables = await client.list_tables(schema=schema)
+    try:
+        tables = await client.list_tables(schema=schema)
+    except ValueError as e:
+        return tool_error(
+            tool="postgres_list_tables", code="INVALID_INPUT", message=str(e), source="postgres"
+        )
+    except Exception as e:
+        return tool_error(
+            tool="postgres_list_tables",
+            code="INTERNAL_ERROR",
+            message=f"list tables failed: {e}",
+            source="postgres",
+        )
     return tool_success(
         "postgres_list_tables",
         result={"schema": schema, "tables": _json_safe(tables), "count": len(tables)},
@@ -3219,11 +3246,23 @@ async def postgres_describe_table(table_name: str, schema: str = "public") -> di
     client = _get_pg_client()
     if client is None:
         return _postgres_not_configured("postgres_describe_table")
-    columns = await client.describe_table(schema=schema, table_name=table_name)
+    try:
+        columns = await client.describe_table(schema=schema, table_name=table_name)
+    except ValueError as e:
+        return tool_error(
+            tool="postgres_describe_table", code="INVALID_INPUT", message=str(e), source="postgres"
+        )
+    except Exception as e:
+        return tool_error(
+            tool="postgres_describe_table",
+            code="INTERNAL_ERROR",
+            message=f"describe table failed: {e}",
+            source="postgres",
+        )
     if not columns:
         return tool_error(
             tool="postgres_describe_table",
-            code="TOOL_NOT_FOUND",
+            code="FILE_NOT_FOUND",
             message=f"Table '{schema}.{table_name}' not found or has no columns",
             retryable=False,
             source="postgres",
@@ -3273,7 +3312,19 @@ async def postgres_vector_status() -> dict[str, Any]:
     client = _get_pg_client()
     if client is None:
         return _postgres_not_configured("postgres_vector_status")
-    info = await client.vector_status()
+    try:
+        info = await client.vector_status()
+    except ValueError as e:
+        return tool_error(
+            tool="postgres_vector_status", code="INVALID_INPUT", message=str(e), source="postgres"
+        )
+    except Exception as e:
+        return tool_error(
+            tool="postgres_vector_status",
+            code="INTERNAL_ERROR",
+            message=f"vector status failed: {e}",
+            source="postgres",
+        )
     return tool_success("postgres_vector_status", result=info, source="postgres")
 
 
