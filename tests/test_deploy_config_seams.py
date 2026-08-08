@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_PATH = ROOT / "docker" / "docker-compose.yml"
 MCP_SERVER_DOCKERFILE = ROOT / "docker" / "Dockerfile.mcp-server"
 GATEWAY_DOCKERFILE = ROOT / "docker" / "Dockerfile"
+DEPLOY_SCRIPT = ROOT / "scripts" / "deploy-from-registry.sh"
 
 
 def _load_compose() -> dict:
@@ -170,3 +171,37 @@ class TestGatewayHealthcheckReadsBodyStatusNotJustHttpStatus:
         assert "json.load" in joined
         assert "status" in joined
         assert "== 'ok'" in joined or '== "ok"' in joined
+
+
+class TestDeployRunsAlembicMigrations:
+    """M15: app/main.py's startup create_all() is a fresh-DB/resilience
+    fallback, not a substitute for tracking migration history -- nothing
+    ever invoked Alembic itself. The deploy script must run `alembic
+    upgrade head` against the freshly-deployed container, gating the
+    smoke test on it (a migration failure must not be smoke-tested as if
+    nothing happened) and must never treat it as optional/backgrounded.
+    """
+
+    def test_deploy_script_runs_alembic_upgrade_head(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        assert "alembic upgrade head" in text
+        # Runs inside the deployed container (has alembic + real
+        # DATABASE_URL + network access to mcp-postgres already) rather
+        # than requiring a separate host-side Python/alembic install.
+        assert "docker exec web-ssh-gateway alembic upgrade head" in text
+
+    def test_migration_failure_gates_smoke_not_just_logged(self):
+        """A migration failure must skip smoke() entirely (fall straight
+        to the rollback path), not run smoke and report false success.
+        """
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        run_migrations_call = next(
+            i for i, line in enumerate(lines) if "run_migrations" in line and "()" not in line and line.strip().startswith(("if", "!"))
+        )
+        # The next non-blank lines must gate smoke() behind run_migrations
+        # succeeding -- i.e. `if ! run_migrations; then ... elif smoke`.
+        window = "\n".join(lines[run_migrations_call : run_migrations_call + 5])
+        assert "run_migrations" in window
+        assert "smoke" in window
+        assert window.index("run_migrations") < window.index("smoke")
