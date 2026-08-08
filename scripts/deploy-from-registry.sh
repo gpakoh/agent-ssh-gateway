@@ -151,6 +151,21 @@ deploy_services() {
   MCP_SERVER_IMAGE="$mcp_image" $COMPOSE up -d --no-deps --no-build mcp-server
 }
 
+run_migrations() {
+  # M15: app/main.py's startup already runs Base.metadata.create_all()
+  # (create_tables() on audit_log_store/event_hook_store/delivery_service)
+  # as its own startup-resilience mechanism for a DB that somehow never
+  # got migrated -- every existing Alembic migration (001/002/003) checks
+  # before acting specifically so it stays a real no-op once create_all()
+  # already produced that shape. This step's job is only to keep
+  # alembic_version stamped/current going forward, so a *future* migration
+  # gets a real signal instead of depending on every author remembering
+  # the same defensive-guard convention. Runs inside the already-deployed
+  # gateway container -- it already has alembic + the app code + the real
+  # DATABASE_URL, on the same network as mcp-postgres.
+  docker exec web-ssh-gateway alembic upgrade head
+}
+
 log "=== deploy-from-registry: checking for a new image (tag: $DEPLOY_TAG) ==="
 
 # Pull the exact tag we're about to check/deploy directly -- not via
@@ -181,14 +196,16 @@ NEW_MCP_IMAGE=$(repo_digest "$MCP_REPO:$DEPLOY_TAG")
 log "New image detected — deploying $NEW_GATEWAY_IMAGE / $NEW_MCP_IMAGE"
 deploy_services "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE"
 
-log "Smoke-testing..."
-if smoke; then
+log "Running database migrations (alembic upgrade head)..."
+if ! run_migrations; then
+  log "Database migration FAILED."
+elif smoke; then
   write_state "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE"
   log "Deploy OK — recorded as last known good."
   exit 0
+else
+  log "Smoke test FAILED."
 fi
-
-log "Smoke test FAILED."
 
 if [ -z "$PREVIOUS_GATEWAY_IMAGE" ]; then
   log "No previous known-good image recorded (first deploy) — cannot roll back. Leaving the failed deploy in place for manual investigation."
