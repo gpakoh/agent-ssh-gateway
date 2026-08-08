@@ -1206,6 +1206,12 @@ def show_changes(client: GatewayClient, project: str) -> dict[str, Any]:
     }
     if gs.get("exit_code", -1) != 0 and gds.get("exit_code", -1) != 0:
         result["ok"] = False
+        result["error"] = {
+            "code": "CHECK_FAILED",
+            "message": "git status and git diff both failed",
+            "retryable": False,
+            "details": {"git_status": gs, "git_diff_stat": gds},
+        }
     return result
 
 
