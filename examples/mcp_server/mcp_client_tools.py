@@ -793,7 +793,25 @@ def _build_readonly_fallback_script(
     elif tool_key == "ruff":
         lines.append(f"RUFF_CACHE_DIR=/tmp/.mcp-ruff-cache uv run ruff check {target_args} 2>&1")
     elif tool_key == "mypy":
-        lines.append(f"uv run mypy {target_args} 2>&1")
+        # mypy (explicit_package_bases=true in pyproject.toml) infers each
+        # file's package base relative to CWD. With CWD left at tmp_root
+        # (an unrelated dir holding only symlinked app/tests) and targets
+        # given as project_dir's absolute paths, checking sibling non-
+        # package dirs that each have their own same-named file --
+        # examples/mcp_server/server.py and examples/mcp_client_remote/
+        # server.py, neither dir has __init__.py -- collapses both to the
+        # bare module name "server": "Duplicate module named 'server'",
+        # and mypy refuses to check anything else in the run. Confirmed
+        # live: this exact invocation reproduces the error; running from
+        # project_dir directly does not. Put CWD back at the real
+        # (read-only) project_dir -- matching how mypy resolves correctly
+        # everywhere else -- while still using tmp_root's synced venv via
+        # `uv run --project` (unlike `--directory`, does not chdir) and
+        # redirecting mypy's own cache writes off the read-only mount.
+        lines.append(
+            f"cd {project_dir} && uv run --project {tmp_root} "
+            f"mypy --cache-dir /tmp/.mcp-mypy-cache {target_args} 2>&1"
+        )
 
     return "\n".join(lines)
 
