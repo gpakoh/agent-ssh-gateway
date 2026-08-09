@@ -261,3 +261,24 @@ class TestMcpOauthServiceCoherence:
         env = _env_dict(_load_compose()["services"]["mcp-oauth"]["environment"])
         assert env.get("MCP_TOKEN_STORE_FILE", "").startswith("/app/data/")
         assert env.get("MCP_CLIENT_STORE_FILE", "").startswith("/app/data/")
+
+    def test_healthcheck_uses_dedicated_oauth_script_not_inherited_curl(self):
+        """The mcp-server image's baked HEALTHCHECK (curl localhost:8087/
+        healthz) checks a port and path this service never listens on --
+        examples/mcp_client_remote/server.py has no REST /healthz at all
+        (confirmed live: 404 at both the outer proxy and the internal
+        FastMCP instance). Compose must override it with a check that
+        actually exercises this service's own transport (verified live:
+        a real MCP initialize + tools/list handshake against port 8788
+        authenticated with MCP_HEALTHCHECK_BEARER_TOKEN).
+        """
+        svc = _load_compose()["services"]["mcp-oauth"]
+        healthcheck = svc.get("healthcheck")
+        assert healthcheck is not None, "mcp-oauth must override the inherited image HEALTHCHECK"
+        test_cmd = healthcheck["test"]
+        assert "mcp_oauth_healthcheck.py" in " ".join(test_cmd)
+        assert "curl" not in " ".join(test_cmd)
+
+    def test_healthcheck_bearer_token_env_var_is_wired(self):
+        env = _env_dict(_load_compose()["services"]["mcp-oauth"]["environment"])
+        assert "MCP_HEALTHCHECK_BEARER_TOKEN" in env
