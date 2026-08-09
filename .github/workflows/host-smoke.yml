@@ -4,7 +4,26 @@ on:
   workflow_dispatch:
   push:
     branches: ["master"]
-    paths: ["Makefile", ".github/workflows/host-smoke.yml", "tests/test_mtls_e2e.py", "tests/test_opencode_runner_wrapper.py", "tests/test_workspace_tools.py", "tests/test_run_compileall_uv_seam.py", "app/workspace/**"]
+    # MAJOR audit finding: paths: here didn't actually match what `make
+    # host-smoke` (pytest -m host_smoke) exercises -- verified each test
+    # file's real coverage rather than guessing:
+    #   - test_opencode_runner_wrapper.py tests scripts/
+    #     opencode_runner_wrapper.py directly (was entirely missing here)
+    #   - test_run_compileall_uv_seam.py shells out to the real uv/uvx
+    #     command examples/mcp_server/mcp_client_tools.py builds for the
+    #     run_compileall fallback (also entirely missing)
+    #   - test_mtls_e2e.py SSHes into the nginx host and greps its live
+    #     config + drives requests through it -- the tracked templates
+    #     for that config, and app/auth_middleware.py (the mTLS/X-SSL-*/
+    #     X-API-Key header handling on the backend side), were missing
+    #   - test_workspace_tools.py -> app/workspace/** (already correct)
+    # This still doesn't add NEW host-level coverage for app/main.py's
+    # SSH execution stack or the OAuth/MCP server -- no host_smoke tests
+    # exercise those today, so no path list change can trigger something
+    # that doesn't test them. That's a test-content gap, not a trigger
+    # mismatch; left for a follow-up rather than pretending workflow_
+    # dispatch is available as an always-on manual fallback for now.
+    paths: ["Makefile", ".github/workflows/host-smoke.yml", "tests/test_mtls_e2e.py", "tests/test_opencode_runner_wrapper.py", "tests/test_workspace_tools.py", "tests/test_run_compileall_uv_seam.py", "app/workspace/**", "app/auth_middleware.py", "scripts/opencode_runner_wrapper.py", "examples/mcp_server/mcp_client_tools.py", "nginx-gateway.conf.example", "nginx-ssh-gateway.conf"]
 
 # Same rationale as ci.yml's top-level concurrency block: two
 # close-together master pushes touching these paths would otherwise run

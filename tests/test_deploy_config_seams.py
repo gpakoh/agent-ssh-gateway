@@ -10,6 +10,7 @@ content can.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import yaml
@@ -321,3 +322,53 @@ class TestDeploymentConcurrencySerialization:
         concurrency = wf.get("concurrency")
         assert concurrency is not None
         assert concurrency.get("cancel-in-progress") is False
+
+
+class TestE2eActuallyRunsSomewhere:
+    """MAJOR audit finding: pytest -m "not host_smoke and not e2e" in
+    ci.yml's test job deliberately excludes tests/test_webui_e2e.py's 4
+    Selenium tests, and nothing anywhere ever ran them for real."""
+
+    def test_e2e_job_exists_and_runs_the_e2e_marker(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        e2e_job = wf["jobs"].get("e2e")
+        assert e2e_job is not None, "ci.yml must have a job that runs -m e2e"
+        steps_text = json.dumps(e2e_job)
+        assert "pytest -m e2e" in steps_text
+
+    def test_e2e_job_puts_chromedriver_on_path(self):
+        """The test file does a plain shutil.which("chromedriver") before
+        ever touching Selenium -- ubuntu-latest ships ChromeDriver but
+        only exposes it via $CHROMEWEBDRIVER, not necessarily PATH."""
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps_text = json.dumps(wf["jobs"]["e2e"])
+        assert "CHROMEWEBDRIVER" in steps_text
+
+
+class TestHostSmokePathsMatchRealCoverage:
+    """MAJOR audit finding: host-smoke.yml's paths: filter didn't match
+    what `make host-smoke` (pytest -m host_smoke) actually exercises --
+    verified each test file's real source coverage rather than guessing.
+    """
+
+    def test_paths_cover_opencode_runner_wrapper_source(self):
+        wf = _load_workflow(HOST_SMOKE_WORKFLOW_PATH)
+        # `on:` parses as the boolean True key under PyYAML's YAML-1.1
+        # rules -- see _load_workflow()'s docstring note.
+        paths = wf[True]["push"]["paths"]
+        assert "scripts/opencode_runner_wrapper.py" in paths
+
+    def test_paths_cover_compileall_uvx_fallback_source(self):
+        wf = _load_workflow(HOST_SMOKE_WORKFLOW_PATH)
+        # `on:` parses as the boolean True key under PyYAML's YAML-1.1
+        # rules -- see _load_workflow()'s docstring note.
+        paths = wf[True]["push"]["paths"]
+        assert "examples/mcp_server/mcp_client_tools.py" in paths
+
+    def test_paths_cover_mtls_related_sources(self):
+        wf = _load_workflow(HOST_SMOKE_WORKFLOW_PATH)
+        # `on:` parses as the boolean True key under PyYAML's YAML-1.1
+        # rules -- see _load_workflow()'s docstring note.
+        paths = wf[True]["push"]["paths"]
+        assert "app/auth_middleware.py" in paths
+        assert any("nginx" in p for p in paths)
