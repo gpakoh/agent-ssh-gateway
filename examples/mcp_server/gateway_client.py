@@ -19,6 +19,40 @@ def _project_root() -> str:
     return root
 
 
+_STALE_SCRIPT_MAX_AGE_S = int(
+    os.environ.get("MCP_GATEWAY_STALE_SCRIPT_MAX_AGE_S", str(24 * 3600))
+)
+
+
+def _sweep_stale_scripts(tmp_dir: str) -> None:
+    """Delete leftover mcp_script_*.sh files older than
+    MCP_GATEWAY_STALE_SCRIPT_MAX_AGE_S (default 24h).
+
+    execute_project_script_async() deliberately leaves its temp script
+    file in place after submission so the background job can still read
+    it -- but nothing ever removed it afterwards (MAJOR audit finding:
+    unbounded growth in .ai-bridge/tmp, one file per async call forever).
+    Swept opportunistically at the start of each new async submission
+    rather than via a separate cron/background thread: cheap (one
+    os.scandir), self-healing during ordinary use, and the TTL is
+    generous enough that no legitimately long-running async agent job
+    could still be reading its script when its file gets swept.
+    """
+    try:
+        cutoff = time.time() - _STALE_SCRIPT_MAX_AGE_S
+        with os.scandir(tmp_dir) as it:
+            for entry in it:
+                if not (entry.name.startswith("mcp_script_") and entry.name.endswith(".sh")):
+                    continue
+                try:
+                    if entry.is_file() and entry.stat().st_mtime < cutoff:
+                        os.unlink(entry.path)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
 def _safe_project(project: str) -> str:
     if not project:
         raise GatewayClientError("project argument is required")
@@ -408,8 +442,10 @@ class GatewayClient:
         Like execute_project_script, but submits the script through
         execute_raw (async_mode=True) and returns the job_id immediately
         instead of blocking on the full run. The temp file is left in place
-        so the background job can still read it; stale files in
-        ``.ai-bridge/tmp`` are harmless and bounded by the host FS.
+        so the background job can still read it; each call sweeps
+        ``.ai-bridge/tmp`` for its own script files older than
+        MCP_GATEWAY_STALE_SCRIPT_MAX_AGE_S (default 24h) first, so they
+        don't accumulate forever.
         """
         import uuid as _uuid
 
@@ -424,6 +460,7 @@ class GatewayClient:
 
         tmp_dir = os.path.join(cwd, ".ai-bridge", "tmp")
         os.makedirs(tmp_dir, exist_ok=True)
+        _sweep_stale_scripts(tmp_dir)
 
         script_name = f"mcp_script_{_uuid.uuid4().hex[:12]}.sh"
         host_path = os.path.join(tmp_dir, script_name)
