@@ -205,3 +205,59 @@ class TestDeployRunsAlembicMigrations:
         assert "run_migrations" in window
         assert "smoke" in window
         assert window.index("run_migrations") < window.index("smoke")
+
+
+class TestMcpOauthServiceCoherence:
+    """#26: mcp-oauth reuses the mcp-server image with a different command
+    to run the OAuth proxy (examples/mcp_client_remote/server.py) instead
+    of the bearer-only entrypoint -- FastMCP's native OAuth and a static
+    bearer token can't coexist in one process (see mcp_sse_serve.py's
+    _force_fastmcp_auth_unwired()), so this must stay a genuinely separate
+    service, not a flag on mcp-server.
+    """
+
+    def test_uses_oauth_command_not_bearer_entrypoint(self):
+        svc = _load_compose()["services"]["mcp-oauth"]
+        assert svc["command"] == ["python", "examples/mcp_client_remote/server.py"]
+
+    def test_auth_mode_is_oauth(self):
+        env = _env_dict(_load_compose()["services"]["mcp-oauth"]["environment"])
+        assert env.get("MCP_AUTH_MODE") == "oauth"
+
+    def test_has_its_own_dedicated_volume_not_shared_with_mcp_server(self):
+        """Sharing mcp_server_tokens would couple the OAuth client/token
+        store to the unrelated bearer-only service's -- must be its own
+        volume. Only considers actual named Docker volumes (declared in
+        the top-level volumes: block) -- a shared read-only bind mount
+        like ../projects.yaml is expected and fine.
+        """
+        compose = _load_compose()
+        named_volumes = set(compose["volumes"])
+
+        def named_volume_refs(service_name: str) -> set[str]:
+            return {
+                v.split(":")[0]
+                for v in compose["services"][service_name]["volumes"]
+                if ":" in v and v.split(":")[0] in named_volumes
+            }
+
+        in_common = named_volume_refs("mcp-server") & named_volume_refs("mcp-oauth")
+        assert not in_common, (
+            f"mcp-oauth must not share a named volume with mcp-server: {in_common}"
+        )
+        assert "mcp_oauth_data" in named_volumes
+
+    def test_has_a_readable_ssh_key_bind_mount(self):
+        service = _load_compose()["services"]["mcp-oauth"]
+        env = _env_dict(service["environment"])
+        assert env.get("GATEWAY_SSH_KEY_PATH") == "/app/ssh_key"
+        bind_mounts = [v for v in service["volumes"] if isinstance(v, dict) and v.get("type") == "bind"]
+        targets = {v["target"] for v in bind_mounts}
+        assert "/app/ssh_key" in targets, (
+            "GATEWAY_SSH_KEY_PATH=/app/ssh_key is set but nothing bind-mounts a key there"
+        )
+
+    def test_client_and_token_store_both_persisted_under_app_data(self):
+        env = _env_dict(_load_compose()["services"]["mcp-oauth"]["environment"])
+        assert env.get("MCP_TOKEN_STORE_FILE", "").startswith("/app/data/")
+        assert env.get("MCP_CLIENT_STORE_FILE", "").startswith("/app/data/")
