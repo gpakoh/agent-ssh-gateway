@@ -62,6 +62,17 @@ class ExecuteRequest(BaseModel):
         default=False,
         description="Start command as an async background job instead of waiting for completion.",
     )
+    stdin: str = Field(
+        default="",
+        max_length=1_048_576,
+        description=(
+            "Data to write to the command's stdin before shutting down the "
+            "write side, mirroring execute-argv's stdin support. Only "
+            "honored when async_mode=True (job execution streams via "
+            "execute_stream()); the synchronous path ignores it -- use "
+            "execute-argv for a synchronous stdin-fed command."
+        ),
+    )
     redact_output: bool | None = Field(
         default=None,
         description="Override command output redaction for this request.",

@@ -101,77 +101,69 @@ class TestExecuteProjectCommandRealRegistrySeam:
         mock_post.assert_not_called()
 
 
-class TestExecuteProjectScriptRealRegistrySeam:
-    def test_writes_script_under_real_registry_root(self, real_registry):
-        client = _client()
+def _forbid_local_writes(monkeypatch, root: Path) -> None:
+    """Make any open()/os.makedirs() under ``root`` raise EROFS, simulating
+    the real ``:ro`` bind mount. Tests run as root (this whole environment
+    does), so chmod()-based read-only is a no-op -- root bypasses
+    permission bits, not mount flags -- and would silently fail to catch a
+    regression. Faking EROFS directly proves the code path never attempts
+    a local write, root or not.
+    """
+    real_open = open
+    real_makedirs = os.makedirs
 
+    def _guarded_open(file, mode="r", *args, **kwargs):
+        if "w" in mode or "a" in mode or "+" in mode:
+            path = Path(file)
+            if root in path.parents or path == root:
+                raise OSError(30, "Read-only file system", str(path))
+        return real_open(file, mode, *args, **kwargs)
+
+    def _guarded_makedirs(name, *args, **kwargs):
+        path = Path(name)
+        if root in path.parents or path == root:
+            raise OSError(30, "Read-only file system", str(path))
+        return real_makedirs(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", _guarded_open)
+    monkeypatch.setattr(os, "makedirs", _guarded_makedirs)
+
+
+class TestExecuteProjectScriptRealRegistrySeam:
+    """Audit finding (BLOCKER): execute_project_script*() used to write a
+    temp .sh file directly under the registry root before executing it --
+    but in production the MCP container bind-mounts that root read-only
+    (see docker-compose.yml's mcp-oauth/mcp-server ``:ro`` project mount),
+    so every call failed with EROFS before the script ever ran, taking
+    run_tests/run_pytest/run_mypy down entirely. Both methods now pipe the
+    script as stdin instead of writing it to disk at all. These tests fake
+    EROFS on any write under the registry root (see _forbid_local_writes)
+    so a regression back to local file writes fails loudly here instead of
+    only in production.
+    """
+
+    def test_pipes_script_via_stdin_on_read_only_root(self, real_registry, monkeypatch):
+        _forbid_local_writes(monkeypatch, real_registry)
+        client = _client()
         with patch.object(client, "execute_argv") as mock_execute_argv:
             mock_execute_argv.return_value = {"exit_code": 0, "stdout": "ok", "stderr": ""}
             result = client.execute_project_script("demo", "echo hi")
 
         assert result == {"exit_code": 0, "stdout": "ok", "stderr": ""}
-        call_kwargs = mock_execute_argv.call_args.kwargs
+        call_args, call_kwargs = mock_execute_argv.call_args
+        assert call_args[0] == ["sh"]
+        assert call_kwargs["stdin"] == "echo hi"
         assert call_kwargs["cwd"] == str(real_registry)
-        # The temp script is cleaned up after execution.
-        assert list((real_registry / ".ai-bridge" / "tmp").iterdir()) == []
 
-
-class TestExecuteProjectScriptAsyncStaleFileSweep:
-    """MAJOR audit finding: execute_project_script_async() deliberately
-    leaves its own temp script in place (the background job reads it
-    after this call returns) -- but nothing ever removed it afterwards,
-    so .ai-bridge/tmp grew by one file per async call forever. Each call
-    now sweeps its own mcp_script_*.sh files older than
-    MCP_GATEWAY_STALE_SCRIPT_MAX_AGE_S (default 24h) first.
-    """
-
-    def test_leaves_its_own_freshly_written_script_in_place(self, real_registry):
-        """The just-submitted job may still be reading its script -- the
-        sweep must never delete what this same call just wrote."""
+    def test_async_pipes_script_via_stdin_on_read_only_root(self, real_registry, monkeypatch):
+        _forbid_local_writes(monkeypatch, real_registry)
         client = _client()
         with patch.object(client, "execute_raw") as mock_execute_raw:
             mock_execute_raw.return_value = {"job_id": "async-1"}
-            client.execute_project_script_async("demo", "echo hi")
+            result = client.execute_project_script_async("demo", "echo hi")
 
-        tmp_dir = real_registry / ".ai-bridge" / "tmp"
-        scripts = list(tmp_dir.iterdir())
-        assert len(scripts) == 1
-        assert scripts[0].name.startswith("mcp_script_")
-
-    def test_sweeps_a_stale_script_from_a_prior_call(self, real_registry):
-        """A script old enough that no legitimately long-running async
-        job could still be reading it must be swept on the next call."""
-        import os as _os
-        import time as _time
-
-        tmp_dir = real_registry / ".ai-bridge" / "tmp"
-        tmp_dir.mkdir(parents=True)
-        stale = tmp_dir / "mcp_script_deadbeefcafe.sh"
-        stale.write_text("echo old\n")
-        old_time = _time.time() - (25 * 3600)
-        _os.utime(stale, (old_time, old_time))
-
-        client = _client()
-        with patch.object(client, "execute_raw") as mock_execute_raw:
-            mock_execute_raw.return_value = {"job_id": "async-2"}
-            client.execute_project_script_async("demo", "echo hi")
-
-        remaining = {p.name for p in tmp_dir.iterdir()}
-        assert stale.name not in remaining
-        assert len(remaining) == 1  # only this call's own new script
-
-    def test_does_not_sweep_a_recent_script(self, real_registry):
-        """A script from a few minutes ago is presumably still backing a
-        running async job and must not be deleted out from under it."""
-        tmp_dir = real_registry / ".ai-bridge" / "tmp"
-        tmp_dir.mkdir(parents=True)
-        recent = tmp_dir / "mcp_script_stillrunning0.sh"
-        recent.write_text("echo running\n")
-
-        client = _client()
-        with patch.object(client, "execute_raw") as mock_execute_raw:
-            mock_execute_raw.return_value = {"job_id": "async-3"}
-            client.execute_project_script_async("demo", "echo hi")
-
-        remaining = {p.name for p in tmp_dir.iterdir()}
-        assert recent.name in remaining
+        assert result == {"job_id": "async-1"}
+        call_args, call_kwargs = mock_execute_raw.call_args
+        assert call_args[0] == "sh"
+        assert call_kwargs["stdin"] == "echo hi"
+        assert call_kwargs["redact_path_prefix"] == str(real_registry)

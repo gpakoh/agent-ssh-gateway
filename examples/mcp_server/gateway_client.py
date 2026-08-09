@@ -19,40 +19,6 @@ def _project_root() -> str:
     return root
 
 
-_STALE_SCRIPT_MAX_AGE_S = int(
-    os.environ.get("MCP_GATEWAY_STALE_SCRIPT_MAX_AGE_S", str(24 * 3600))
-)
-
-
-def _sweep_stale_scripts(tmp_dir: str) -> None:
-    """Delete leftover mcp_script_*.sh files older than
-    MCP_GATEWAY_STALE_SCRIPT_MAX_AGE_S (default 24h).
-
-    execute_project_script_async() deliberately leaves its temp script
-    file in place after submission so the background job can still read
-    it -- but nothing ever removed it afterwards (MAJOR audit finding:
-    unbounded growth in .ai-bridge/tmp, one file per async call forever).
-    Swept opportunistically at the start of each new async submission
-    rather than via a separate cron/background thread: cheap (one
-    os.scandir), self-healing during ordinary use, and the TTL is
-    generous enough that no legitimately long-running async agent job
-    could still be reading its script when its file gets swept.
-    """
-    try:
-        cutoff = time.time() - _STALE_SCRIPT_MAX_AGE_S
-        with os.scandir(tmp_dir) as it:
-            for entry in it:
-                if not (entry.name.startswith("mcp_script_") and entry.name.endswith(".sh")):
-                    continue
-                try:
-                    if entry.is_file() and entry.stat().st_mtime < cutoff:
-                        os.unlink(entry.path)
-                except OSError:
-                    pass
-    except OSError:
-        pass
-
-
 def _safe_project(project: str) -> str:
     if not project:
         raise GatewayClientError("project argument is required")
@@ -345,7 +311,12 @@ class GatewayClient:
         )
 
     @_retry_on_session_not_found
-    def execute_raw(self, command: str, redact_path_prefix: str | None = None) -> dict[str, Any]:
+    def execute_raw(
+        self,
+        command: str,
+        redact_path_prefix: str | None = None,
+        stdin: str = "",
+    ) -> dict[str, Any]:
         """Execute a command directly without cd wrapping.
 
         Unlike execute_project_command, this does NOT prepend ``cd <root>/<project> &&``.
@@ -359,6 +330,9 @@ class GatewayClient:
         a caller that only gets a job_id back and polls job_result() later
         would otherwise have that absolute path echoed back verbatim in the
         job's command/stdout/stderr (M8).
+
+        ``stdin``: data to feed the command's stdin (e.g. ``sh`` with a
+        multi-line script piped in, avoiding a temp file entirely).
         """
         sid = self._require_session_id()
         payload: dict[str, Any] = {
@@ -370,6 +344,8 @@ class GatewayClient:
         }
         if redact_path_prefix:
             payload["redact_path_prefix"] = redact_path_prefix
+        if stdin:
+            payload["stdin"] = stdin
         return self._post("/api/ssh/execute", payload)
 
     @_retry_on_session_not_found
@@ -406,18 +382,17 @@ class GatewayClient:
         script: str,
         timeout_s: int | None = None,
     ) -> dict[str, Any]:
-        """Write a bash script to a temp file on the host, then execute it via SSH.
+        """Pipe a bash script to ``sh`` over SSH via stdin -- no temp file.
 
         Multi-line scripts with shell syntax (if/then, $(), heredocs, &&, ||)
-        cannot survive shlex.split() → shlex.join(). This method writes the
-        script to a temp file on the HOST filesystem (shared with the sshd
-        container via volume mount), then executes ``bash <path>`` as a single
-        argv command via SSH.
-
-        The temp file is cleaned up after execution.
+        cannot survive shlex.split() → shlex.join(). Piping the script as
+        stdin to a bare ``sh`` preserves it verbatim without ever writing it
+        to disk. This deliberately does NOT write to the project root: that
+        directory is read-only in this process (bind-mounted ``:ro`` for the
+        MCP container) even though it's writable on the real SSH target --
+        an earlier version wrote a temp file under ``<root>/.ai-bridge/tmp``
+        locally and always failed with EROFS before the script ever ran.
         """
-        import uuid as _uuid
-
         cwd: str | None = None
         try:
             from app.workspace.registry import get_registry
@@ -427,29 +402,12 @@ class GatewayClient:
         except Exception:
             raise
 
-        tmp_dir = os.path.join(cwd, ".ai-bridge", "tmp")
-        os.makedirs(tmp_dir, exist_ok=True)
-
-        script_name = f"mcp_script_{_uuid.uuid4().hex[:12]}.sh"
-        host_path = os.path.join(tmp_dir, script_name)
-
-        with open(host_path, "w") as f:
-            f.write(script)
-            f.write("\n")
-
-        try:
-            result = self.execute_argv(
-                ["sh", host_path],
-                timeout_s=timeout_s or self.command_timeout,
-                cwd=cwd,
-            )
-        finally:
-            try:
-                os.unlink(host_path)
-            except OSError:
-                pass
-
-        return result
+        return self.execute_argv(
+            ["sh"],
+            stdin=script,
+            timeout_s=timeout_s or self.command_timeout,
+            cwd=cwd,
+        )
 
     @_retry_on_session_not_found
     def execute_project_script_async(
@@ -457,18 +415,13 @@ class GatewayClient:
         project: str,
         script: str,
     ) -> dict[str, Any]:
-        """Write a bash script to a temp file on the host, submit it via SSH asynchronously.
+        """Pipe a bash script to ``sh`` over SSH via stdin, asynchronously.
 
-        Like execute_project_script, but submits the script through
-        execute_raw (async_mode=True) and returns the job_id immediately
-        instead of blocking on the full run. The temp file is left in place
-        so the background job can still read it; each call sweeps
-        ``.ai-bridge/tmp`` for its own script files older than
-        MCP_GATEWAY_STALE_SCRIPT_MAX_AGE_S (default 24h) first, so they
-        don't accumulate forever.
+        Like execute_project_script, but submits through execute_raw
+        (async_mode=True, stdin=script) and returns the job_id immediately
+        instead of blocking on the full run. See execute_project_script's
+        docstring for why this never writes a local temp file.
         """
-        import uuid as _uuid
-
         cwd: str | None = None
         try:
             from app.workspace.registry import get_registry
@@ -478,18 +431,7 @@ class GatewayClient:
         except Exception:
             raise
 
-        tmp_dir = os.path.join(cwd, ".ai-bridge", "tmp")
-        os.makedirs(tmp_dir, exist_ok=True)
-        _sweep_stale_scripts(tmp_dir)
-
-        script_name = f"mcp_script_{_uuid.uuid4().hex[:12]}.sh"
-        host_path = os.path.join(tmp_dir, script_name)
-
-        with open(host_path, "w") as f:
-            f.write(script)
-            f.write("\n")
-
-        return self.execute_raw(f"sh {host_path}", redact_path_prefix=cwd)
+        return self.execute_raw("sh", stdin=script, redact_path_prefix=cwd)
 
     @_retry_on_session_not_found
     def apply_patch(
