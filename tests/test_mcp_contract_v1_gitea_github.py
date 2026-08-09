@@ -151,6 +151,28 @@ class TestGiteaToolsContractV1:
         assert result["error"]["code"] == "REMOTE_API_ERROR"
 
     @pytest.mark.asyncio
+    async def test_gitea_get_repo_connection_failure_is_retryable(self, monkeypatch):
+        """P2 audit finding: a transient network failure (Gitea briefly
+        unreachable) used to be classified identically to an internal
+        program defect -- INTERNAL_ERROR, retryable=False -- telling a
+        calling agent not to bother retrying exactly the kind of
+        condition a retry fixes."""
+        methods = {
+            "get_repo": AsyncMock(
+                side_effect=httpx.ConnectError("All connection attempts failed")
+            )
+        }
+        monkeypatch.setattr(
+            mcp_server_mod, "GiteaClient", lambda token: _FakeRemoteClient(methods)
+        )
+        monkeypatch.setenv("GITEA_TOKEN", "tok")
+
+        result = await mcp_server_mod.gitea_get_repo("gpakoh", "web-ssh-gateway")
+        _assert_envelope(result, ok=False)
+        assert result["error"]["code"] == "REMOTE_UNAVAILABLE"
+        assert result["error"]["retryable"] is True
+
+    @pytest.mark.asyncio
     async def test_gitea_get_repo_auth_failure_is_contract_v1_error(self, monkeypatch):
         methods = {"get_repo": AsyncMock(side_effect=PermissionError("gitea api ...: unauthorized"))}
         monkeypatch.setattr(
