@@ -798,22 +798,37 @@ class TestMcpSseEnvCheckScript:
         """The script must be pure static validation — confirm no
         listening socket appears on the default SSE port while/after
         running it against a fully valid env.
+
+        Port chosen deliberately far from every port this project's own
+        services/CI runner pool actually use (8081-8087, 8092, 8788/8789,
+        18790, ...) -- this test previously hardcoded 8086, which
+        collided with a live act-runner-docker-2 container publishing
+        that exact host port, making "still_listening" true for a reason
+        that had nothing to do with the script under test (confirmed
+        live: docker ps showed act-runner-docker-2 mapping 0.0.0.0:8086
+        -> 9101/tcp). A single flaky port pick like this needed picking
+        again, not a real fix in the script -- the value itself is
+        arbitrary test input, not a documented default (unlike
+        MCP_HTTP_PORT=8086 in mcp_client.sse.env.example, asserted by
+        test_template_has_private_sse_bind_defaults above -- that one
+        must not change).
         """
         import socket
 
+        port = 48086
         env = self._write_env(
             tmp_path,
             "MCP_GATEWAY_TOOL_MODE=mcp_client\n"
             "MCP_CLIENT_SAFE_MODE=true\n"
             "MCP_HTTP_HOST=127.0.0.1\n"
-            "MCP_HTTP_PORT=8086\n"
+            f"MCP_HTTP_PORT={port}\n"
             "MCP_HTTP_BEARER_TOKEN=real-bearer-token-value\n"
             "GATEWAY_AGENT_TOKEN=real-agent-token-value\n",
         )
         self._run(env)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(1)
-            still_listening = s.connect_ex(("127.0.0.1", 8086)) == 0
+            still_listening = s.connect_ex(("127.0.0.1", port)) == 0
         assert not still_listening
 
 
