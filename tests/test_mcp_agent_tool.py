@@ -1,11 +1,20 @@
-"""Tests for agent_tools — gateway_project_run_agent routing."""
+"""Tests for agent_tools — gateway_project_run_agent routing.
+
+project_run_agent's opencode dispatch (and opencode_tools.py's
+project_run_opencode) run real --dangerously-skip-permissions execution
+-- the earlier "C3" hard block was deliberately lifted so run_agent/
+run_opencode can actually launch opencode, including async_submit=True
+for fleet mode (launch several agents without blocking, poll each job_id
+independently). Both tools remain gated by write-mode
+(assert_handoff_write_allowed) and by tool-mode registration
+(run_agent/run_opencode excluded from mcp_client/mcp_client_write's tool
+sets) at the server.py/tool_modes.py layer -- not tested here.
+"""
 
 from __future__ import annotations
 
 import json
 from unittest.mock import MagicMock
-
-import pytest
 
 from examples.mcp_server.agent_backend_router import AgentBackendRouter
 from examples.mcp_server.agent_tools import CommandPolicyError as AgentCommandPolicyError
@@ -36,40 +45,55 @@ def _make_run_cmd(
     stderr: str = "",
     current_plan: str = "# Plan\n\n1. Do the thing",
 ) -> MagicMock:
-    """Create a run_cmd mock that returns task.json for cat and plan for other."""
+    """Create a run_cmd mock that returns task.json for cat and plan for other.
+
+    Also serves as the fallback script executor (project_run_agent falls
+    back to run_cmd when run_script isn't provided) -- its catch-all
+    branch doesn't inspect command content, so it works for both the
+    single-line plan/task.json reads and the multi-line opencode script.
+    """
 
     def fake_run_cmd(project: str, command: str) -> dict:
-        if "cat " in command and "task.json" in command:
+        # startswith("cat "), not a bare substring check -- the generated
+        # opencode script itself legitimately contains the substring
+        # "current-plan.md" (it checks for the file's existence), so a
+        # naive "in command" match would misfire on the script execution
+        # call too, not just the actual `cat .../current-plan.md` read.
+        if command.startswith("cat ") and "task.json" in command:
             return {"exit_code": 0, "stdout": task_json, "stderr": ""}
-        if "current-plan.md" in command:
+        if command.startswith("cat ") and "current-plan.md" in command:
             return {"exit_code": 0, "stdout": current_plan, "stderr": ""}
         return {"exit_code": exit_code, "stdout": stdout, "stderr": stderr}
 
     return MagicMock(side_effect=fake_run_cmd)
 
 
+def _make_run_script_async(job_id: str = "job-async-1") -> MagicMock:
+    return MagicMock(return_value={"job_id": job_id})
+
+
 # ── project_run_agent: router disabled ──────────────────────────────────────
 
 
 class TestProjectRunAgentDisabled:
-    def test_auto_agent_uses_first_allowed(self):
-        """Auto agent selects opencode from allowed → should be blocked."""
+    def test_auto_agent_executes_opencode(self):
+        """Auto agent selects opencode from allowed and actually runs it."""
+        rc = _make_run_cmd(task_json=_make_task_json(), exit_code=0, stdout="done")
+        result = project_run_agent(rc, project="test", task_id=TASK_ID)
+        assert result["status"] == "needs-review"
+        assert result["exit_code"] == 0
+        assert result["stdout"] == "done"
 
-        rc = _make_run_cmd(task_json=_make_task_json())
-        with pytest.raises(CommandPolicyError, match="blocked"):
-            project_run_agent(rc, project="test", task_id=TASK_ID)
+    def test_explicit_opencode_agent_executes(self):
+        rc = _make_run_cmd(task_json=_make_task_json(agent="opencode"), exit_code=0)
+        result = project_run_agent(rc, project="test", task_id=TASK_ID)
+        assert result["status"] == "needs-review"
 
-    def test_auto_agent_opencode_selected(self):
-        """Auto agent → opencode selected → should be blocked."""
-
-        rc = _make_run_cmd(task_json=_make_task_json())
-        with pytest.raises(CommandPolicyError, match="blocked"):
-            project_run_agent(rc, project="test", task_id=TASK_ID)
-
-    def test_explicit_opencode_agent_disabled(self):
-        rc = _make_run_cmd(task_json=_make_task_json(agent="opencode"))
-        with pytest.raises(CommandPolicyError, match="blocked"):
-            project_run_agent(rc, project="test", task_id=TASK_ID)
+    def test_nonzero_exit_reports_failed(self):
+        rc = _make_run_cmd(task_json=_make_task_json(), exit_code=1, stderr="boom")
+        result = project_run_agent(rc, project="test", task_id=TASK_ID)
+        assert result["status"] == "failed"
+        assert result["exit_code"] == 1
 
     def test_no_allowed_backends(self):
         rc = _make_run_cmd(task_json=_make_task_json(allowed=[]))
@@ -85,7 +109,6 @@ class TestProjectRunAgentDisabled:
         """An allowed_backends entry that isn't opencode is neither blocked
         nor executed — it falls through to an "unsupported backend" error.
         """
-
         rc = _make_run_cmd(
             task_json=_make_task_json(agent="custom-backend", allowed=["custom-backend"]),
         )
@@ -93,12 +116,12 @@ class TestProjectRunAgentDisabled:
         assert result["status"] == "error"
         assert "unsupported backend" in result["error"]
 
-    def test_opencode_without_current_plan(self):
-        """opencode backend → blocked (before plan check)."""
-
+    def test_opencode_without_current_plan_errors(self):
+        """No current-plan.md → error, before any script is built/executed."""
         rc = _make_run_cmd(task_json=_make_task_json(), current_plan="")
-        with pytest.raises(CommandPolicyError, match="blocked"):
-            project_run_agent(rc, project="test", task_id=TASK_ID)
+        result = project_run_agent(rc, project="test", task_id=TASK_ID)
+        assert result["status"] == "error"
+        assert "current-plan.md" in result["error"]
 
 
 # ── project_run_agent: router enabled ───────────────────────────────────────
@@ -112,13 +135,12 @@ class TestProjectRunAgentEnabled:
         )
         return r
 
-    def test_opencode_selected_when_available(self):
-        """Router selects opencode → should be blocked."""
-
-        rc = _make_run_cmd(task_json=_make_task_json())
+    def test_opencode_selected_and_executed(self):
+        rc = _make_run_cmd(task_json=_make_task_json(), exit_code=0, stdout="ok")
         r = self._router()
-        with pytest.raises(CommandPolicyError, match="blocked"):
-            project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
+        result = project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
+        assert result["status"] == "needs-review"
+        assert result["stdout"] == "ok"
 
     def test_blocked_when_opencode_unavailable(self):
         import time
@@ -133,35 +155,129 @@ class TestProjectRunAgentEnabled:
         assert result["status"] == "blocked"
 
     def test_router_disabled_uses_direct_agent(self):
-        """Router disabled → auto → opencode → blocked."""
-
-        rc = _make_run_cmd(task_json=_make_task_json())
+        rc = _make_run_cmd(task_json=_make_task_json(), exit_code=0)
         r = self._router(enabled=False)
-        with pytest.raises(CommandPolicyError, match="blocked"):
-            project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
+        result = project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
+        assert result["status"] == "needs-review"
 
-    def test_record_result_not_called_when_blocked(self):
-        """Blocking happens before record_result."""
-
-        rc = _make_run_cmd(task_json=_make_task_json())
+    def test_record_result_called_after_sync_execution(self):
+        """The router's cooldown tracking IS fed by synchronous runs."""
+        rc = _make_run_cmd(task_json=_make_task_json(), exit_code=0)
         r = self._router()
-        with pytest.raises(CommandPolicyError, match="blocked"):
-            project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
-        # record_result should NOT have been called
+        project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
         assert r._backends["opencode"].status.value == "available"
 
     def test_selected_backend_not_in_allowed(self):
-        """allowed_backends doesn't include the only real backend (opencode)
-        -- the router still selects+blocks opencode before the
-        `selected not in allowed` check is ever reached.
+        """Router selects opencode (its only configured backend) but
+        task.json's allowed_backends doesn't include it -- must error out,
+        not execute anyway.
         """
-
         rc = _make_run_cmd(
             task_json=_make_task_json(agent="auto", allowed=["custom-other-backend"]),
         )
         r = self._router()
-        with pytest.raises(CommandPolicyError, match="blocked"):
-            project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
+        result = project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
+        assert result["status"] == "error"
+        assert "not in allowed_backends" in result["error"]
+
+
+# ── project_run_agent: async_submit (fleet mode) ────────────────────────────
+
+
+class TestProjectRunAgentAsyncSubmit:
+    def test_returns_job_id_immediately(self):
+        rc = _make_run_cmd(task_json=_make_task_json())
+        run_script_async = _make_run_script_async("job-42")
+        result = project_run_agent(
+            rc, project="test", task_id=TASK_ID, async_submit=True, run_script_async=run_script_async
+        )
+        assert result["status"] == "running"
+        assert result["job_id"] == "job-42"
+        assert result["exit_code"] is None
+        assert result["finished_at"] is None
+        run_script_async.assert_called_once()
+
+    def test_run_cmd_never_called_for_script_execution(self):
+        """Only task.json + current-plan.md are read via run_cmd; the actual
+        opencode script goes through run_script_async, not run_cmd.
+        """
+        calls: list[str] = []
+
+        def fake_run_cmd(project, command):
+            calls.append(command)
+            if "task.json" in command:
+                return {"exit_code": 0, "stdout": _make_task_json(), "stderr": ""}
+            if "current-plan.md" in command:
+                return {"exit_code": 0, "stdout": "# Plan", "stderr": ""}
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+        run_script_async = _make_run_script_async("job-99")
+        result = project_run_agent(
+            fake_run_cmd,
+            project="test",
+            task_id=TASK_ID,
+            async_submit=True,
+            run_script_async=run_script_async,
+        )
+        assert result["job_id"] == "job-99"
+        assert len(calls) == 2  # task.json read, current-plan.md read -- nothing else via run_cmd
+
+    def test_missing_run_script_async_errors(self):
+        """async_submit=True with no async callable provided must error,
+        not silently fall back to a blocking run.
+        """
+        rc = _make_run_cmd(task_json=_make_task_json())
+        result = project_run_agent(rc, project="test", task_id=TASK_ID, async_submit=True)
+        assert result["status"] == "error"
+        assert "async_submit" in result["error"]
+
+    def test_router_record_result_not_called_for_async(self):
+        """No completion callback exists for async-submitted jobs -- the
+        router must not be told anything happened yet.
+        """
+        rc = _make_run_cmd(task_json=_make_task_json())
+        r = AgentBackendRouter(fallback_order=["opencode"], enabled=True)
+        run_script_async = _make_run_script_async("job-1")
+        project_run_agent(
+            rc, project="test", task_id=TASK_ID, router=r, async_submit=True, run_script_async=run_script_async
+        )
+        assert r._backends["opencode"].status.value == "available"
+
+    def test_no_current_plan_still_errors_before_submitting(self):
+        rc = _make_run_cmd(task_json=_make_task_json(), current_plan="")
+        run_script_async = _make_run_script_async()
+        result = project_run_agent(
+            rc, project="test", task_id=TASK_ID, async_submit=True, run_script_async=run_script_async
+        )
+        assert result["status"] == "error"
+        run_script_async.assert_not_called()
+
+
+# ── project_run_agent: host-path redaction (sync path) ──────────────────────
+
+
+class TestProjectRunAgentRedaction:
+    def test_project_root_redacted_from_stdout_stderr(self, monkeypatch):
+        project_root = "/media/1TB/Python/web_ssh/web-ssh-gateway/workspace/test"
+        rc = _make_run_cmd(
+            task_json=_make_task_json(),
+            exit_code=0,
+            stdout=f"running in {project_root}/subdir",
+            stderr=f"warning at {project_root}",
+        )
+
+        class _FakeRegistry:
+            def project_info(self, project):
+                return {"root": project_root}
+
+        monkeypatch.setattr(
+            "app.workspace.registry.get_registry", lambda: _FakeRegistry()
+        )
+
+        result = project_run_agent(rc, project="test", task_id=TASK_ID)
+        assert project_root not in result["stdout"]
+        assert project_root not in result["stderr"]
+        assert result["stdout"] == "running in ./subdir"
 
 
 # ── Integration: router + tool flow ─────────────────────────────────────────
@@ -169,59 +285,42 @@ class TestProjectRunAgentEnabled:
 
 class TestAgentToolIntegration:
     def test_auto_agent_opencode_flow(self):
-        """Router disabled → auto → opencode → blocked."""
+        rc = _make_run_cmd(task_json=_make_task_json(), exit_code=0)
+        result = project_run_agent(rc, project="test", task_id=TASK_ID)
+        assert result["status"] == "needs-review"
 
-        rc = _make_run_cmd(task_json=_make_task_json())
-        with pytest.raises(CommandPolicyError, match="blocked"):
-            project_run_agent(rc, project="test", task_id=TASK_ID)
-
-    def test_old_tools_unchanged(self):
-        """Verify project_run_opencode is hard-blocked."""
+    def test_opencode_tools_executes(self):
+        """opencode_tools.project_run_opencode runs for real too (the
+        dedicated single-shot entrypoint, not routed through the backend
+        router)."""
         from examples.mcp_server.opencode_tools import project_run_opencode
 
-        # opencode_tools raises an error (blocked)
-        rc = _make_run_cmd(
-            task_json=_make_task_json(),
-            exit_code=0,
-        )
-        with pytest.raises(Exception, match="blocked"):
-            project_run_opencode(rc, project="test", task_id=TASK_ID)
+        rc = _make_run_cmd(exit_code=0, stdout="ok")
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID)
+        assert result["status"] == "needs-review"
+        assert result["stdout"] == "ok"
 
 
-# ── project_run_agent: C3 blocking ─────────────────────────────────────────
+# ── project_run_agent: execution ordering ───────────────────────────────────
 
 
-class TestProjectRunAgentC3Blocking:
-    def test_opencode_blocked(self):
-        """project_run_agent with agent=opencode must raise CommandPolicyError."""
-
-        rc = _make_run_cmd(task_json=_make_task_json(agent="opencode"))
-        with pytest.raises(CommandPolicyError, match="blocked"):
-            project_run_agent(rc, project="test", task_id=TASK_ID)
-
-    def test_opencode_blocked_before_execution(self):
-        """Blocking must happen before script execution (after task.json read)."""
-
-        call_count = 0
+class TestProjectRunAgentExecutionOrdering:
+    def test_plan_read_before_script_execution(self):
+        """task.json, then current-plan.md, then the opencode script itself
+        -- in that order, and the script only runs once a plan exists."""
+        calls: list[str] = []
 
         def counting_run(project, command):
-            nonlocal call_count
-            call_count += 1
+            calls.append(command)
+            if "task.json" in command:
+                return {"exit_code": 0, "stdout": _make_task_json(agent="opencode"), "stderr": ""}
+            if "current-plan.md" in command:
+                return {"exit_code": 0, "stdout": "# Plan", "stderr": ""}
             return {"exit_code": 0, "stdout": "", "stderr": ""}
 
-        task_json = _make_task_json(agent="opencode")
-        rc = _make_run_cmd(task_json=task_json, exit_code=0)
-        # Override to count actual executions
-        original_side_effect = rc.side_effect
-
-        def counting_side_effect(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            return original_side_effect(*args, **kwargs)
-
-        rc.side_effect = counting_side_effect
-
-        with pytest.raises(CommandPolicyError, match="blocked"):
-            project_run_agent(rc, project="test", task_id=TASK_ID)
-        # call_count=1 means only task.json was read, no script executed
-        assert call_count == 1, f"Expected 1 call (task.json read), got {call_count}"
+        result = project_run_agent(counting_run, project="test", task_id=TASK_ID)
+        assert result["status"] == "needs-review"
+        assert len(calls) == 3
+        assert "task.json" in calls[0]
+        assert "current-plan.md" in calls[1]
+        assert "--dangerously-skip-permissions" in calls[2]
