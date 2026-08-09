@@ -19,10 +19,20 @@ COMPOSE_PATH = ROOT / "docker" / "docker-compose.yml"
 MCP_SERVER_DOCKERFILE = ROOT / "docker" / "Dockerfile.mcp-server"
 GATEWAY_DOCKERFILE = ROOT / "docker" / "Dockerfile"
 DEPLOY_SCRIPT = ROOT / "scripts" / "deploy-from-registry.sh"
+CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
+HOST_SMOKE_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "host-smoke.yml"
 
 
 def _load_compose() -> dict:
     return yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
+
+
+def _load_workflow(path: Path) -> dict:
+    # PyYAML (YAML 1.1) parses the bare key `on:` as the boolean True, not
+    # the string "on" -- doesn't affect the `concurrency:` key these tests
+    # check, but worth noting so a future test here doesn't get tripped
+    # up trying to index result["on"].
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
 def _env_dict(env_list: list[str]) -> dict[str, str]:
@@ -282,3 +292,32 @@ class TestMcpOauthServiceCoherence:
     def test_healthcheck_bearer_token_env_var_is_wired(self):
         env = _env_dict(_load_compose()["services"]["mcp-oauth"]["environment"])
         assert "MCP_HEALTHCHECK_BEARER_TOKEN" in env
+
+
+class TestDeploymentConcurrencySerialization:
+    """MAJOR audit finding: ci.yml's deploy job ran scripts/
+    deploy-from-registry.sh with no lock of its own -- two close-together
+    pushes to master could run two deploys in parallel, both recreating
+    the same containers and running `alembic upgrade head` concurrently.
+    """
+
+    def test_ci_workflow_has_concurrency_group(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        concurrency = wf.get("concurrency")
+        assert concurrency is not None, "ci.yml must serialize master deploys via concurrency:"
+        assert "${{ github.workflow }}" in concurrency["group"]
+        assert "${{ github.ref }}" in concurrency["group"]
+
+    def test_ci_workflow_never_cancels_master_mid_deploy(self):
+        """cancel-in-progress must be conditioned off for master specifically
+        -- aborting a deploy job mid-flight (as opposed to a PR's test job)
+        can leave containers/migrations in a half-applied state."""
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        cancel_expr = wf["concurrency"]["cancel-in-progress"]
+        assert "refs/heads/master" in str(cancel_expr)
+
+    def test_host_smoke_workflow_has_concurrency_group(self):
+        wf = _load_workflow(HOST_SMOKE_WORKFLOW_PATH)
+        concurrency = wf.get("concurrency")
+        assert concurrency is not None
+        assert concurrency.get("cancel-in-progress") is False
