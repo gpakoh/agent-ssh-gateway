@@ -276,7 +276,27 @@ class GatewayClient:
 
     def _require_session_id(self) -> str:
         if not self.session_id:
-            raise GatewayClientError("GATEWAY_SESSION_ID is required")
+            if self._ssh_host and self._ssh_user:
+                # No session configured yet, but SSH credentials to
+                # establish one ARE present -- raise with the same
+                # _SESSION_NOT_FOUND sentinel _retry_on_session_not_found
+                # already looks for (every caller of this method is
+                # wrapped with that decorator), so the auto-reconnect
+                # path already built for a session that went STALE also
+                # covers a session that never existed in the first
+                # place. Confirmed live: a real GPT/MCP client hit
+                # "GATEWAY_SESSION_ID is required" on git_status against
+                # a deployment with valid GATEWAY_SSH_HOST/USERNAME/
+                # KEY_PATH already configured -- nothing was ever
+                # attempting to use them for a first connection.
+                raise GatewayClientError(
+                    f"{self._SESSION_NOT_FOUND}: no active session "
+                    "(GATEWAY_SESSION_ID not set) -- auto-connecting"
+                )
+            raise GatewayClientError(
+                "GATEWAY_SESSION_ID is required (no session configured and "
+                "no GATEWAY_SSH_HOST/GATEWAY_SSH_USER to auto-connect one)"
+            )
         return self.session_id
 
     def health(self) -> dict[str, Any]:

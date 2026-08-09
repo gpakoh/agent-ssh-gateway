@@ -40,8 +40,28 @@ class TestRequireSessionId:
         client = _client()
         assert client._require_session_id() == "test-session-1"
 
-    def test_raises_when_empty(self):
+    def test_raises_session_not_found_when_empty_but_ssh_creds_present(self):
+        """P0-adjacent audit finding: a real MCP client hit "GATEWAY_
+        SESSION_ID is required" on git_status against a deployment with
+        valid GATEWAY_SSH_HOST/USER/KEY already configured -- nothing
+        was ever attempting to use them for a first connection, even
+        though every caller of _require_session_id() is already wrapped
+        with _retry_on_session_not_found. Raising with the same
+        _SESSION_NOT_FOUND sentinel that decorator already looks for
+        means the auto-reconnect path built for a session that went
+        STALE now also covers a session that never existed yet.
+        """
         client = _client(GATEWAY_SESSION_ID="")
+        with pytest.raises(GatewayClientError, match=GatewayClient._SESSION_NOT_FOUND):
+            client._require_session_id()
+
+    def test_raises_helpful_error_when_empty_and_no_ssh_creds(self):
+        """No SSH creds to auto-connect with -- the SESSION_NOT_FOUND
+        sentinel would just trigger a doomed retry (_reconnect_session()
+        immediately fails with its own "GATEWAY_SSH_HOST and
+        GATEWAY_SSH_USER are required" error), so fail with one clear,
+        actionable message right away instead."""
+        client = _client(GATEWAY_SESSION_ID="", GATEWAY_SSH_HOST="", GATEWAY_SSH_USER="")
         with pytest.raises(GatewayClientError, match="GATEWAY_SESSION_ID is required"):
             client._require_session_id()
 
@@ -218,6 +238,29 @@ class TestExecuteRestrictedReconnect:
         assert result == {"job_id": "job-1"}
         assert call_count == 2
         mock_reconnect.assert_called_once()
+
+    def test_auto_connects_when_no_session_was_ever_set(self):
+        """End-to-end reproduction of the live finding: a client with no
+        GATEWAY_SESSION_ID configured at all (never even attempted a
+        connection yet) but valid SSH creds must auto-connect on first
+        use of any session-based tool -- git_status, execute_restricted,
+        etc. -- not fail outright with "GATEWAY_SESSION_ID is required".
+        """
+        client = _client(GATEWAY_SESSION_ID="")
+        assert client.session_id == ""
+
+        def _reconnect_side_effect():
+            client.session_id = "freshly-connected-session"
+
+        with patch.object(client, "_post") as mock_post:
+            mock_post.return_value = {"job_id": "job-1"}
+            with patch.object(
+                client, "_reconnect_session", side_effect=_reconnect_side_effect
+            ) as mock_reconnect:
+                result = client.execute_restricted("pwd")
+        mock_reconnect.assert_called_once()
+        assert result == {"job_id": "job-1"}
+        assert mock_post.call_args.args[1]["session_id"] == "freshly-connected-session"
 
 
 # ── Decorator: execute_project_command ──────────────────────────
