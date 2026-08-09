@@ -219,6 +219,54 @@ class TestDeployRunsAlembicMigrations:
         assert window.index("run_migrations") < window.index("smoke")
 
 
+class TestCiSmokeGatewayUsesHttpCheckNotHealthStatus:
+    """Live-discovered regression: web-ssh-gateway's HEALTHCHECK (M17)
+    requires /health's body to report status=="ok", which folds in SSH
+    reachability -- unreachable in this step's deliberately standalone
+    (no sshd peer) container, so status can only ever be "degraded" and
+    docker inspect's Health.Status can never reach "healthy" there, no
+    matter how long the loop waits. Confirmed live: the app boots and
+    /health already answers 200 within ~30s, but `docker inspect
+    --format '{{.State.Health.Status}}'` stayed "starting" for the full
+    poll window regardless. mcp-server's own HEALTHCHECK has no such
+    coupling and is unaffected -- only the gateway's check needed to
+    change, to a direct `docker exec ... urlopen(...)` HTTP-200 check
+    matching this step's own original stated intent ("confirm it boots
+    and answers its own health path with HTTP 200").
+    """
+
+    def test_gateway_check_does_not_use_health_status(self):
+        text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        gw_section_start = next(
+            i for i, line in enumerate(lines) if "Waiting for web-ssh-gateway to answer" in line
+        )
+        gw_section_end = next(
+            i
+            for i, line in enumerate(lines[gw_section_start:], start=gw_section_start)
+            if "web-ssh-gateway OK" in line
+        )
+        window = "\n".join(lines[gw_section_start:gw_section_end])
+        assert "State.Health.Status" not in window
+        assert "docker exec" in window and "urlopen" in window
+
+    def test_mcp_server_check_still_uses_health_status(self):
+        """Unaffected -- mcp-server's own HEALTHCHECK has no SSH/Redis
+        coupling and reports healthy fine standalone."""
+        text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        mcp_section_start = next(
+            i for i, line in enumerate(lines) if "Waiting for mcp-server to report healthy" in line
+        )
+        mcp_section_end = next(
+            i
+            for i, line in enumerate(lines[mcp_section_start:], start=mcp_section_start)
+            if line.strip() == 'echo "mcp-server OK"'
+        )
+        window = "\n".join(lines[mcp_section_start:mcp_section_end])
+        assert "State.Health.Status" in window
+
+
 class TestProductionSmokeIsAuthenticatedBlackBox:
     """P1 BLOCKER audit finding: the only post-deploy check was
     wait_docker_health() (docker inspect's own HEALTHCHECK status) --
