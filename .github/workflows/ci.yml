@@ -54,11 +54,32 @@ jobs:
         run: uv run pytest -m "not host_smoke and not e2e" --reruns 2 --reruns-delay 2 --only-rerun 'WebSocketDisconnect' --junitxml=test-results.xml --cov=app --cov-report=term-missing --cov-fail-under=69 -q
 
       - name: Verify test count
+        # GitHub Actions' default `run:` shell (no `shell:` key) is
+        # `bash -e {0}` -- errexit is already on, just not pipefail. That
+        # alone catches the case audited here (pytest --collect-only
+        # failing outright and grep matching nothing): `count=$(pipe)`
+        # is a simple-command assignment, so a nonzero exit from the
+        # pipe's last stage (grep) already aborts the step (verified
+        # empirically: `bash -e -c 'count=$(false_pipe); echo unreached'`
+        # never reaches the echo). What -e alone does NOT catch: pytest
+        # itself failing (nonzero exit) while grep still coincidentally
+        # matches a digit-leading line elsewhere in its output (e.g. a
+        # line number in a truncated traceback) -- without pipefail, the
+        # pipe's exit status is grep's, not pytest's, so a lucky/unlucky
+        # match could mask a real collection failure. Check pytest's own
+        # exit code directly instead of only pattern-matching its tail.
         run: |
-          count=$(uv run pytest --collect-only -q 2>&1 | tail -1 | grep -oP '^\d+')
+          set -euo pipefail
+          collect_output=$(uv run pytest --collect-only -q)
+          count=$(printf '%s\n' "$collect_output" | tail -1 | grep -oP '^\d+' || true)
+          if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+            echo "::error::could not parse a test count from pytest --collect-only output"
+            printf '%s\n' "$collect_output" | tail -10
+            exit 1
+          fi
           echo "collected $count tests"
           if [ "$count" -lt 3500 ]; then
-            echo "FAIL: test count ($count) below minimum 3500"
+            echo "::error::test count ($count) below minimum 3500"
             exit 1
           fi
           echo "OK: $count tests >= 3500"
