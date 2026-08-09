@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import time as _time
 from collections.abc import Callable
@@ -311,9 +312,33 @@ def _resolve_docker_host(hostname: str, network: str = "internal_net") -> str:
 
 
 # ── Postgres DSN ────────────────────────────────────────────────────
+def _build_pg_dsn(pg_vars: dict[str, str]) -> str | None:
+    h = pg_vars.get("PGHOST", "")
+    p = pg_vars.get("PGPORT", "5432")
+    d = pg_vars.get("PGDATABASE", "")
+    u = pg_vars.get("PGUSER", "")
+    pw = pg_vars.get("PGPASSWORD", "")
+    if not all([h, d, u, pw]):
+        return None
+    resolved_host = _resolve_docker_host(h)
+    if resolved_host != h:
+        print(f"  resolved {h} -> {resolved_host} via docker inspect", file=sys.stderr)
+    from urllib.parse import quote_plus
+
+    return (
+        f"postgresql://{quote_plus(u)}:{quote_plus(pw)}@{resolved_host}:{p}/{d}"
+        f"?sslmode=disable&application_name=mcp_gateway"
+    )
+
+
 PG_DSN: str | None = None
 _pg_env = "/etc/agent-mcp-postgres.env"
 if os.path.exists(_pg_env):
+    # Legacy systemd fleet-of-adapters convention: a separate systemd unit
+    # (agent-mcp-postgres) owns this file, deliberately scoped down (e.g.
+    # a read-only DB user) independently of whatever PG* vars this
+    # process's own env file happens to carry -- preserved as-is,
+    # unchanged, so that scoping can't silently regress.
     _pg_vars: dict[str, str] = {}
     with open(_pg_env) as f:
         for line in f:
@@ -321,21 +346,19 @@ if os.path.exists(_pg_env):
             if "=" in line and not line.startswith("#"):
                 k, v = line.split("=", 1)
                 _pg_vars[k] = v
-    _h = _pg_vars.get("PGHOST", "")
-    _p = _pg_vars.get("PGPORT", "5432")
-    _d = _pg_vars.get("PGDATABASE", "")
-    _u = _pg_vars.get("PGUSER", "")
-    _pw = _pg_vars.get("PGPASSWORD", "")
-    if all([_h, _d, _u, _pw]):
-        _resolved_host = _resolve_docker_host(_h)
-        if _resolved_host != _h:
-            print(f"  resolved {_h} -> {_resolved_host} via docker inspect", file=sys.stderr)
-        from urllib.parse import quote_plus
+    PG_DSN = _build_pg_dsn(_pg_vars)
 
-        PG_DSN = (
-            f"postgresql://{quote_plus(_u)}:{quote_plus(_pw)}@{_resolved_host}:{_p}/{_d}"
-            f"?sslmode=disable&application_name=mcp_gateway"
-        )
+if PG_DSN is None:
+    # Docker deployment: docker-compose.yml's mcp-oauth/mcp-server services
+    # already set PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD directly as
+    # container env vars -- there's no separate host file to read inside a
+    # container. Without this fallback PG_DSN stayed None forever there
+    # (confirmed live: postgres_* tools always failed with "Postgres not
+    # configured" despite every PG* var being correctly set) even though
+    # tools_manifest still advertised postgres_* as enabled (MAJOR audit
+    # finding -- the manifest-accuracy half of this bug; this is the
+    # functional half underneath it).
+    PG_DSN = _build_pg_dsn(dict(os.environ))
 
 _pg_client: PostgresClient | None = None
 
@@ -3657,6 +3680,40 @@ if _scope_enforcement not in ("off", "audit", "enforce"):
     _scope_enforcement = "off"
 
 
+def _unavailable_tool_reasons() -> dict[str, str]:
+    """Map tool name -> reason it's registered but won't actually work.
+
+    MAJOR audit finding: tools_manifest reported "enabled": True
+    unconditionally for docker_*/resolve_library_id/query_docs/postgres_*
+    even in images/deployments missing their actual runtime dependency
+    (confirmed live: this image has neither `docker` nor `npx` on PATH) --
+    a client had no way to distinguish "registered" from "will actually
+    work" short of calling the tool and getting a runtime error. Computed
+    here (not inside tools_manifest.build_manifest(), which stays pure
+    registry introspection with no I/O) from cheap, no-network-call
+    signals: PATH lookups and PG_DSN's own resolution (see _build_pg_dsn).
+    """
+    from tool_scopes import TOOL_SCOPES
+
+    reasons: dict[str, str] = {}
+    if shutil.which("docker") is None:
+        msg = "docker CLI not present in this image"
+        for name, scopes in TOOL_SCOPES.items():
+            if "mcp:docker" in scopes or "mcp:docker:admin" in scopes:
+                reasons[name] = msg
+    if shutil.which("npx") is None:
+        msg = "npx not present in this image"
+        for name, scopes in TOOL_SCOPES.items():
+            if "mcp:docs" in scopes:
+                reasons[name] = msg
+    if PG_DSN is None:
+        msg = "Postgres not configured (PG_DSN unresolved)"
+        for name, scopes in TOOL_SCOPES.items():
+            if "mcp:postgres" in scopes:
+                reasons[name] = msg
+    return reasons
+
+
 @register_tool("tools_manifest")
 def gateway_tools_manifest(
     scope: str | None = None,
@@ -3672,7 +3729,11 @@ def gateway_tools_manifest(
     Optional filters (scope/mode/name_prefix) and include_descriptions/
     offset/limit keep the response small -- the unfiltered manifest lists
     every registered tool's full description, which is expensive context
-    for an agent that only needs, say, the docker_* tool names.
+    for an agent that only needs, say, the docker_* tool names. Each
+    entry also reports "available" (and "unavailable_reason" when false)
+    -- distinct from "enabled": a tool can be registered/enabled for this
+    mode yet still not actually work in this deployment (missing docker/
+    npx binary, Postgres not configured).
     """
     return _run_gateway(
         tool="tools_manifest",
@@ -3685,6 +3746,7 @@ def gateway_tools_manifest(
             include_descriptions=include_descriptions,
             offset=offset,
             limit=limit,
+            unavailable_tool_reasons=_unavailable_tool_reasons(),
         ),
     )
 

@@ -202,6 +202,64 @@ class TestBuildManifest:
             assert isinstance(tool["mode"], str)
 
 
+class TestManifestAvailability:
+    """MAJOR audit finding: "enabled": True was unconditional, so a
+    client had no way to tell "registered" from "will actually work"
+    (e.g. docker_* tools in an image with no docker CLI) short of calling
+    it and getting a runtime error.
+    """
+
+    def test_defaults_to_available_with_no_reasons_given(
+        self, sample_tools: list[FakeTool]
+    ) -> None:
+        result = build_manifest(sample_tools, mode_override="mcp_client")
+        for tool in result["tools"]:
+            assert tool["available"] is True
+            assert "unavailable_reason" not in tool
+
+    def test_marks_tool_unavailable_with_reason(self, sample_tools: list[FakeTool]) -> None:
+        result = build_manifest(
+            sample_tools,
+            mode_override="mcp_client",
+            unavailable_tool_reasons={"docker_restart": "docker CLI not present in this image"},
+        )
+        by_name = {t["name"]: t for t in result["tools"]}
+        assert by_name["docker_restart"]["available"] is False
+        assert (
+            by_name["docker_restart"]["unavailable_reason"]
+            == "docker CLI not present in this image"
+        )
+
+    def test_only_the_named_tool_is_marked_unavailable(
+        self, sample_tools: list[FakeTool]
+    ) -> None:
+        """Marking docker_restart unavailable must not spill over to
+        unrelated tools like health or search_text."""
+        result = build_manifest(
+            sample_tools,
+            mode_override="mcp_client",
+            unavailable_tool_reasons={"docker_restart": "docker CLI not present in this image"},
+        )
+        by_name = {t["name"]: t for t in result["tools"]}
+        assert by_name["health"]["available"] is True
+        assert by_name["search_text"]["available"] is True
+        assert by_name["docker_compose_up"]["available"] is True
+
+    def test_enabled_stays_true_regardless_of_availability(
+        self, sample_tools: list[FakeTool]
+    ) -> None:
+        """"enabled" (registered/reachable in this mode) and "available"
+        (dependency actually present) are deliberately distinct fields."""
+        result = build_manifest(
+            sample_tools,
+            mode_override="mcp_client",
+            unavailable_tool_reasons={"docker_restart": "docker CLI not present in this image"},
+        )
+        by_name = {t["name"]: t for t in result["tools"]}
+        assert by_name["docker_restart"]["enabled"] is True
+        assert by_name["docker_restart"]["available"] is False
+
+
 class TestManifestModesReflectSafeModeFiltering:
     """modes["mcp_client"] must describe what should_register_tool() would
     actually register, not the raw TOOL_NAMES_BY_MODE["mcp_client"] set --
