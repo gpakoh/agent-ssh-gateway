@@ -106,6 +106,23 @@ class TestGiteaClientPathTraversal:
         )
         await client.aclose()
 
+    @pytest.mark.asyncio
+    async def test_get_file_empty_path_lists_repo_root(self):
+        """P2 audit finding: validate_repo_path() rejects an empty path
+        (by design -- distinguishing it from a malicious/invalid one), so
+        there was previously no way to request a repo's top-level listing
+        through get_file(). path="" (the new default) must route to the
+        path-less contents endpoint instead of being rejected."""
+        seen: dict = {}
+        client = GiteaClient("fake-token")
+        client._client = httpx.AsyncClient(
+            base_url="https://gitea.example/api/v1",
+            transport=_recording_transport(seen),
+        )
+        await client.get_file("owner", "repo")
+        assert seen["url"] == "https://gitea.example/api/v1/repos/owner/repo/contents"
+        await client.aclose()
+
 
 class TestGitHubClientPathTraversal:
     @pytest.mark.asyncio
@@ -144,4 +161,17 @@ class TestGitHubClientPathTraversal:
         )
         await client.get_repo("owner", "repo")
         assert seen["url"] == "https://api.github.com/repos/owner/repo"
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_get_file_empty_path_lists_repo_root(self):
+        """P2 audit finding: see the Gitea counterpart above."""
+        seen: dict = {}
+        client = GitHubClient("fake-token")
+        client._client = httpx.AsyncClient(
+            base_url="https://api.github.com",
+            transport=_recording_transport(seen),
+        )
+        await client.get_file("owner", "repo")
+        assert seen["url"] == "https://api.github.com/repos/owner/repo/contents"
         await client.aclose()

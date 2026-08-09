@@ -93,10 +93,10 @@ async def github_list_commits(
 async def github_get_file(
     owner: str,
     repo: str,
-    path: str,
+    path: str = "",
     branch: str | None = None,
 ) -> dict[str, Any]:
-    """Get a file or directory contents from a repository. Returns base64-encoded content or directory listing."""
+    """Get a file or directory contents from a repository. Returns base64-encoded content or directory listing. Omit path (or pass "") to list the repository root."""
     try:
         async with _get_client() as client:
             data = await client.get_file(owner, repo, path, branch=branch)
