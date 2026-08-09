@@ -64,6 +64,18 @@ def sample_project() -> Iterator[Path]:
         nested.mkdir(parents=True)
         (nested / "found.txt").write_text("SESSION_NOT_FOUND at line 1\nother line\n")
 
+        # Secret files (should never have their content read/returned —
+        # matches app.workspace.policy.SECRET_FILE_PATTERNS /
+        # HIDDEN_DIR_PATTERNS, the same patterns read_file/validate_read
+        # already enforce)
+        (root / ".env").write_text("DB_PASSWORD=SESSION_NOT_FOUND\n")
+        (root / ".env.production").write_text("API_KEY=SESSION_NOT_FOUND\n")
+        (root / "private.pem").write_text("-----BEGIN KEY-----SESSION_NOT_FOUND\n")
+        (root / "id_ed25519").write_text("SESSION_NOT_FOUND ssh private key\n")
+        (root / "secret.key").write_text("SESSION_NOT_FOUND\n")
+        nested_env = root / "nested" / ".env"
+        nested_env.write_text("NESTED_SECRET=SESSION_NOT_FOUND\n")
+
         yield root
 
 
@@ -208,6 +220,59 @@ class TestSearchText:
         )
         assert match is not None
         assert match["line_number"] == 5  # 5th line in main.py
+
+
+class TestSearchTextSkipsSecrets:
+    """P0: this function used to read every file's full content with no
+    secret-path filtering at all -- read_file/validate_read refuse .env/
+    *.pem/id_rsa* etc., but this MCP search_text path bypassed that
+    entirely and returned matching lines straight from secret files.
+    """
+
+    def test_does_not_match_dotenv(self, sample_project: Path) -> None:
+        result = search_text(sample_project, "SESSION_NOT_FOUND")
+        paths = [m["path"] for m in result["matches"]]
+        assert ".env" not in paths
+
+    def test_does_not_match_dotenv_production(self, sample_project: Path) -> None:
+        result = search_text(sample_project, "SESSION_NOT_FOUND")
+        paths = [m["path"] for m in result["matches"]]
+        assert ".env.production" not in paths
+
+    def test_does_not_match_pem_key(self, sample_project: Path) -> None:
+        result = search_text(sample_project, "SESSION_NOT_FOUND")
+        paths = [m["path"] for m in result["matches"]]
+        assert "private.pem" not in paths
+
+    def test_does_not_match_ssh_private_key(self, sample_project: Path) -> None:
+        result = search_text(sample_project, "SESSION_NOT_FOUND")
+        paths = [m["path"] for m in result["matches"]]
+        assert "id_ed25519" not in paths
+
+    def test_does_not_match_dotkey_file(self, sample_project: Path) -> None:
+        result = search_text(sample_project, "SESSION_NOT_FOUND")
+        paths = [m["path"] for m in result["matches"]]
+        assert "secret.key" not in paths
+
+    def test_does_not_match_nested_dotenv(self, sample_project: Path) -> None:
+        result = search_text(sample_project, "SESSION_NOT_FOUND")
+        paths = [m["path"] for m in result["matches"]]
+        assert not any(p.endswith(".env") for p in paths)
+
+    def test_secret_content_never_appears_in_any_match_line(self, sample_project: Path) -> None:
+        """Belt and suspenders: no returned match `line`/`preview` should
+        ever contain content unique to one of the secret fixture files.
+        """
+        result = search_text(sample_project, "SESSION_NOT_FOUND")
+        blob = repr(result)
+        for marker in ("DB_PASSWORD=", "API_KEY=", "BEGIN KEY", "ssh private key", "NESTED_SECRET="):
+            assert marker not in blob
+
+    def test_still_finds_non_secret_matches(self, sample_project: Path) -> None:
+        """The fix must not over-block -- ordinary files still match."""
+        result = search_text(sample_project, "SESSION_NOT_FOUND")
+        paths = [m["path"] for m in result["matches"]]
+        assert "src/main.py" in paths
 
 
 class TestSearchTextSymlinkEscape:
