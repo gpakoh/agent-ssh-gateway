@@ -28,6 +28,7 @@ def build_manifest(
     include_descriptions: bool = True,
     offset: int = 0,
     limit: int | None = None,
+    unavailable_tool_reasons: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build the tools manifest from registries.
 
@@ -55,6 +56,16 @@ def build_manifest(
                              for an agent that just wants names/scopes.
         offset: Pagination offset into the filtered tools list.
         limit: Pagination page size. None returns all (post-filter) tools.
+        unavailable_tool_reasons: Optional {tool_name: reason} map for
+            tools that are registered (reachable in this mode/scope) but
+            whose actual runtime dependency isn't present -- e.g. no
+            docker CLI in this image, no npx for context7, Postgres not
+            configured. MAJOR audit finding: "enabled": True used to be
+            unconditional, so a client had no way to tell "this tool
+            exists" from "this tool will actually work" short of calling
+            it and getting a runtime error. The caller (server.py, which
+            has actual access to shutil.which()/PG_DSN/etc.) computes
+            this map; build_manifest() stays pure registry introspection.
     """
     validate_pagination(offset, "offset", min_value=0, max_value=10_000)
     if limit is not None:
@@ -63,6 +74,7 @@ def build_manifest(
     active_mode = mode_override or get_tool_mode()
     registered_names = {t.name for t in registered_tools}
     name_to_tool = {t.name: t for t in registered_tools}
+    unavailable_tool_reasons = unavailable_tool_reasons or {}
 
     # Forward map: tool name -> list of modes it belongs to
     tool_to_modes: dict[str, list[str]] = {}
@@ -74,13 +86,17 @@ def build_manifest(
     all_tools_list: list[dict[str, Any]] = []
     for name in sorted(registered_names):
         tool = name_to_tool.get(name)
+        reason = unavailable_tool_reasons.get(name)
         entry: dict[str, Any] = {
             "name": name,
             "mode": active_mode,
             "modes": tool_to_modes.get(name, [active_mode]),
             "scopes": get_required_scopes(name),
             "enabled": True,
+            "available": reason is None,
         }
+        if reason is not None:
+            entry["unavailable_reason"] = reason
         if include_descriptions:
             entry["description"] = tool.description if tool else ""
         all_tools_list.append(entry)

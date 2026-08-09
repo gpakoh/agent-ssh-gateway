@@ -129,3 +129,138 @@ def test_healthcheck_token_scoped_to_read_only():
     assert "mcp:execute" not in token.scopes
     assert "mcp:docker" not in token.scopes
     assert "mcp:project" not in token.scopes
+
+
+class TestBuildPgDsn:
+    """MAJOR audit finding: postgres_* tools were completely non-
+    functional in the Docker deployment despite docker-compose.yml
+    setting PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD directly as
+    container env vars -- PG_DSN's only resolution path read a systemd-
+    only host file (/etc/agent-mcp-postgres.env) that never exists inside
+    a container, so PG_DSN stayed None forever there. Confirmed live
+    against the running mcp-oauth container before this fix.
+    """
+
+    def test_builds_dsn_from_complete_vars(self):
+        import examples.mcp_server.server as srv
+
+        dsn = srv._build_pg_dsn(
+            {
+                "PGHOST": "mcp-postgres",
+                "PGPORT": "5432",
+                "PGDATABASE": "gateway",
+                "PGUSER": "postgres",
+                "PGPASSWORD": "s3cr3t",
+            }
+        )
+        assert dsn is not None
+        assert dsn.startswith("postgresql://postgres:s3cr3t@")
+        assert "/gateway" in dsn
+
+    def test_returns_none_when_password_missing(self):
+        import examples.mcp_server.server as srv
+
+        dsn = srv._build_pg_dsn(
+            {
+                "PGHOST": "mcp-postgres",
+                "PGDATABASE": "gateway",
+                "PGUSER": "postgres",
+            }
+        )
+        assert dsn is None
+
+    def test_returns_none_for_empty_vars(self):
+        import examples.mcp_server.server as srv
+
+        assert srv._build_pg_dsn({}) is None
+
+    def test_url_encodes_special_characters_in_password(self):
+        import examples.mcp_server.server as srv
+
+        dsn = srv._build_pg_dsn(
+            {
+                "PGHOST": "mcp-postgres",
+                "PGDATABASE": "gateway",
+                "PGUSER": "postgres",
+                "PGPASSWORD": "p@ss/word:1",
+            }
+        )
+        assert dsn is not None
+        assert "p@ss/word:1" not in dsn  # must be percent-encoded, not raw
+
+
+class TestUnavailableToolReasons:
+    """MAJOR audit finding: docker_*/resolve_library_id/query_docs/
+    postgres_* were reported "enabled": True in tools_manifest even in a
+    deployment missing docker/npx or without Postgres configured.
+    """
+
+    def test_marks_docker_tools_unavailable_when_docker_missing(self, monkeypatch):
+        import examples.mcp_server.server as srv
+
+        monkeypatch.setattr(srv.shutil, "which", lambda name: None)
+        reasons = srv._unavailable_tool_reasons()
+        assert "docker_ps" in reasons
+        assert "docker_exec" in reasons  # mcp:docker:admin, not just mcp:docker
+
+    def test_marks_context7_tools_unavailable_when_npx_missing(self, monkeypatch):
+        import examples.mcp_server.server as srv
+
+        monkeypatch.setattr(srv.shutil, "which", lambda name: None)
+        reasons = srv._unavailable_tool_reasons()
+        assert "resolve_library_id" in reasons
+        assert "query_docs" in reasons
+
+    def test_marks_postgres_tools_unavailable_when_pg_dsn_none(self, monkeypatch):
+        import examples.mcp_server.server as srv
+
+        monkeypatch.setattr(srv, "PG_DSN", None)
+        reasons = srv._unavailable_tool_reasons()
+        assert "postgres_select" in reasons
+        assert "postgres_health" in reasons
+
+    def test_no_reasons_when_everything_present(self, monkeypatch):
+        import examples.mcp_server.server as srv
+
+        monkeypatch.setattr(srv.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(srv, "PG_DSN", "postgresql://u:p@h:5432/d")
+        assert srv._unavailable_tool_reasons() == {}
+
+    def test_unrelated_tools_never_marked_unavailable(self, monkeypatch):
+        import examples.mcp_server.server as srv
+
+        monkeypatch.setattr(srv.shutil, "which", lambda name: None)
+        monkeypatch.setattr(srv, "PG_DSN", None)
+        reasons = srv._unavailable_tool_reasons()
+        assert "health" not in reasons
+        assert "search_text" not in reasons
+        assert "run_agent" not in reasons
+
+
+@patch.dict(
+    os.environ,
+    {
+        "MCP_AUTH_MODE": "oauth",
+        "PGHOST": "mcp-postgres",
+        "PGPORT": "5432",
+        "PGDATABASE": "gateway",
+        "PGUSER": "postgres",
+        "PGPASSWORD": "s3cr3t",
+    },
+)
+def test_pg_dsn_falls_back_to_env_vars_when_legacy_host_file_absent():
+    """Integration-level check of the actual module wiring (not just the
+    pure _build_pg_dsn function): with the legacy systemd host file
+    absent -- the real case inside a Docker container -- module load must
+    still resolve PG_DSN from plain PG* env vars, matching what
+    docker-compose.yml's mcp-oauth/mcp-server services already set.
+    """
+    import importlib
+
+    with patch("os.path.exists", return_value=False):
+        import examples.mcp_server.server as srv
+
+        importlib.reload(srv)
+
+    assert srv.PG_DSN is not None
+    assert srv.PG_DSN.startswith("postgresql://postgres:s3cr3t@")
