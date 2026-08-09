@@ -55,13 +55,13 @@ jobs:
           uv sync --frozen --extra dev
 
       - name: Lockfile freshness
-        run: uv lock --check
+        run: make lockfile-check
 
       - name: Ruff
-        run: uv run ruff check app tests examples/mcp_server examples/mcp_client_remote
+        run: make lint
 
       - name: Mypy
-        run: uv run mypy app examples/mcp_server examples/mcp_client_remote
+        run: make mypy
 
       - name: Tests + coverage
         # --only-rerun WebSocketDisconnect: Starlette's in-process WebSocket
@@ -69,38 +69,15 @@ jobs:
         # contention (not reproducible locally, see TODO.md T80.5) — retry
         # ONLY that specific failure signature so a real regression in any
         # other test still fails the build on the first try.
-        run: uv run pytest -m "not host_smoke and not e2e" --reruns 2 --reruns-delay 2 --only-rerun 'WebSocketDisconnect' --junitxml=test-results.xml --cov=app --cov-report=term-missing --cov-fail-under=69 -q
+        #
+        # MAJOR audit finding (CI-04): this step and `make test-unit` used
+        # to be two separately-maintained copies of the same pytest
+        # invocation, free to drift apart silently. Now calls the Makefile
+        # target directly -- the flags exist in exactly one place.
+        run: make test-unit PYTEST_UNIT_ARGS="--junitxml=test-results.xml"
 
       - name: Verify test count
-        # GitHub Actions' default `run:` shell (no `shell:` key) is
-        # `bash -e {0}` -- errexit is already on, just not pipefail. That
-        # alone catches the case audited here (pytest --collect-only
-        # failing outright and grep matching nothing): `count=$(pipe)`
-        # is a simple-command assignment, so a nonzero exit from the
-        # pipe's last stage (grep) already aborts the step (verified
-        # empirically: `bash -e -c 'count=$(false_pipe); echo unreached'`
-        # never reaches the echo). What -e alone does NOT catch: pytest
-        # itself failing (nonzero exit) while grep still coincidentally
-        # matches a digit-leading line elsewhere in its output (e.g. a
-        # line number in a truncated traceback) -- without pipefail, the
-        # pipe's exit status is grep's, not pytest's, so a lucky/unlucky
-        # match could mask a real collection failure. Check pytest's own
-        # exit code directly instead of only pattern-matching its tail.
-        run: |
-          set -euo pipefail
-          collect_output=$(uv run pytest --collect-only -q)
-          count=$(printf '%s\n' "$collect_output" | tail -1 | grep -oP '^\d+' || true)
-          if ! [[ "$count" =~ ^[0-9]+$ ]]; then
-            echo "::error::could not parse a test count from pytest --collect-only output"
-            printf '%s\n' "$collect_output" | tail -10
-            exit 1
-          fi
-          echo "collected $count tests"
-          if [ "$count" -lt 3500 ]; then
-            echo "::error::test count ($count) below minimum 3500"
-            exit 1
-          fi
-          echo "OK: $count tests >= 3500"
+        run: make test-count
 
       - name: pip-audit
         # Two separate problems compounded here, both against pypi.org
@@ -192,29 +169,33 @@ jobs:
       - name: Put preinstalled ChromeDriver on PATH
         run: echo "$CHROMEWEBDRIVER" >> "$GITHUB_PATH"
 
-      - name: E2E tests
-        # Live-discovered while watching this session's own pushes run for
-        # real: this workflow also runs on a self-hosted Gitea runner pool
-        # (see github.server_url checks elsewhere in this file), where the
-        # `ubuntu-latest` label is mapped to a Python-focused custom image
-        # (nod-ci-python311) with no Chrome/Chromium/chromedriver at all --
-        # unlike genuine GitHub-hosted ubuntu-latest runners. The test file
-        # itself already skips gracefully when the browser toolchain is
-        # missing (pytest.skip(..., allow_module_level=True)), but with
-        # every e2e test skipped that way pytest collects zero items and
-        # exits 5 ("no tests ran"), which this step's default shell (-e)
-        # then treats as a hard failure -- a real e2e failure (exit 1) must
-        # still fail the job; "no browser here" must not.
+      - name: Check for browser toolchain
+        # P1 MAJOR audit finding: this workflow also runs on a self-hosted
+        # Gitea runner pool (see github.server_url checks elsewhere in this
+        # file), where the `ubuntu-latest` label is mapped to a
+        # Python-focused custom image (nod-ci-python311) with no
+        # Chrome/Chromium/chromedriver at all -- unlike genuine
+        # GitHub-hosted ubuntu-latest runners, which ship all three
+        # preinstalled. The old approach ran pytest regardless, let it
+        # collect zero tests (exit 5), and rewrote that into `exit 0` --
+        # a real pass and "nothing could run here" were indistinguishable
+        # in the job's own status, exactly what audit rule TEST-15 flags.
+        # Detecting toolchain presence *before* running anything lets the
+        # next step's `if:` skip it outright -- GitHub Actions marks a
+        # skipped step/job distinctly (grey, not green) in its own UI, so
+        # "no browser here" now reads as neutral, not as a passing check.
+        id: browser_check
         run: |
-          set +e
-          uv run pytest -m e2e -q
-          status=$?
-          set -e
-          if [ "$status" -eq 5 ]; then
-            echo "::warning::No e2e tests were collected -- Selenium/Chromium/chromedriver not available in this environment, treating as skipped rather than failed."
-            exit 0
+          if command -v chromedriver >/dev/null 2>&1 && command -v google-chrome >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No Chrome/Chromium/chromedriver on this runner -- E2E step will be skipped (not treated as passed)."
           fi
-          exit "$status"
+
+      - name: E2E tests
+        if: steps.browser_check.outputs.available == 'true'
+        run: uv run pytest -m e2e -q
 
   build-and-push:
     # Runs the build+smoke-test steps on BOTH a real push to master AND a
@@ -239,7 +220,7 @@ jobs:
     # github.server_url (https://github.com vs Gitea's ROOT_URL), and give
     # deploy's container an explicit image (nod-ci-docker-e2e, the same
     # job image the Gitea runner's label already uses).
-    needs: [test]
+    needs: [test, e2e]
     if: github.server_url != 'https://github.com' && (github.event_name == 'pull_request' || (github.ref_name == 'master' && github.event_name == 'push'))
     runs-on: docker-e2e-ci
     timeout-minutes: 20

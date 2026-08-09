@@ -56,7 +56,10 @@ class TestRegister:
         )
         assert resp.status_code == 201
         data = resp.json()
-        assert "token" in data
+        # Audit fix: token no longer echoed in the JSON body -- the JWT is
+        # only ever readable via the HttpOnly cookie the response sets.
+        assert "token" not in data
+        assert resp.cookies.get("auth_token")
         assert data["username"] == "admin"
 
     def test_second_register_returns_403(self):
@@ -151,7 +154,8 @@ class TestLogin:
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert "token" in data
+        assert "token" not in data
+        assert resp.cookies.get("auth_token")
         assert data["username"] == "admin"
 
     def test_login_invalid_password(self):
@@ -179,7 +183,10 @@ class TestVerify:
             "/api/auth/register",
             json={"username": "admin", "password": "Test123!@#", "password_confirm": "Test123!@#", "setup_token": SETUP_TOKEN},
         )
-        token = reg.json()["token"]
+        # The JWT no longer comes back in the JSON body -- the cookie IS
+        # the token value (see set_auth_cookie()), so extract it from
+        # there to exercise the separate Bearer-header auth path.
+        token = reg.cookies.get("auth_token")
         resp = client.get("/api/auth/verify", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
         data = resp.json()
@@ -227,7 +234,7 @@ class TestProtectedEndpointWithJWT:
             "/api/auth/register",
             json={"username": "admin", "password": "Test123!@#", "password_confirm": "Test123!@#", "setup_token": SETUP_TOKEN},
         )
-        token = reg.json()["token"]
+        token = reg.cookies.get("auth_token")
         resp = client.get("/api/capabilities", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
 
