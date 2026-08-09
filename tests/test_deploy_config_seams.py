@@ -427,6 +427,65 @@ class TestMcpOauthServiceCoherence:
         assert "MCP_HEALTHCHECK_BEARER_TOKEN" in env
 
 
+class TestMcpOauthWorkspaceMount:
+    """projects.yaml (registry_root: /media/1TB/Python) and
+    MCP_GATEWAY_PROJECT_ROOT/MCP_PROJECT_MAP_JSON were all correctly
+    configured, but mcp-oauth had no bind mount at all for the actual
+    project source trees -- WorkspaceRegistry could resolve config but
+    never find a single project's files on disk, so project_list always
+    returned count: 0 (confirmed live) regardless of registry content.
+    Live-verified after adding the mount: project_list -> 38 projects,
+    and the P0 search_text/read_file secret-path fixes still hold against
+    the now-reachable real project files (search_text query="PASSWORD"
+    against web-ssh-gateway: 48 matches, docker/.env absent from all of
+    them; read_file on docker/.env: SECRET_PATH_DENIED).
+    """
+
+    def test_workspace_mount_exists(self):
+        service = _load_compose()["services"]["mcp-oauth"]
+        bind_mounts = [v for v in service["volumes"] if isinstance(v, str) and ":" in v]
+        # String-form volumes look like "SRC:DST[:MODE]" -- match on the
+        # env var reference itself rather than a resolved host path,
+        # since docker-compose.yml never hardcodes the real path.
+        assert any("MCP_OAUTH_PROJECT_ROOT" in v for v in bind_mounts), (
+            "mcp-oauth must bind-mount the project workspace root "
+            "(MCP_OAUTH_PROJECT_ROOT) -- without it WorkspaceRegistry "
+            "can resolve project config but never find any project's "
+            "actual files on disk"
+        )
+
+    def test_workspace_mount_is_read_only(self):
+        """WORKSPACE_READONLY=true is already the documented default
+        (app/api_help.py: "All project volumes mounted :ro") -- the
+        mount itself must match, independent of the app-layer gate."""
+        service = _load_compose()["services"]["mcp-oauth"]
+        mount = next(
+            v
+            for v in service["volumes"]
+            if isinstance(v, str) and "MCP_OAUTH_PROJECT_ROOT" in v
+        )
+        assert mount.endswith(":ro")
+
+    def test_source_and_target_use_the_same_path(self):
+        """Source and target must be identical -- projects.yaml's
+        registry_root and MCP_PROJECT_MAP_JSON's per-project paths are
+        already host-absolute; a different container-side path would
+        require translating every one of those configured paths too.
+        The mount string is "${VAR:?msg}:${VAR:?msg}:ro" -- the `:?`
+        inside each ${...} expression makes a naive split(":") on the
+        whole string wrong, so match on the expression appearing twice
+        instead.
+        """
+        service = _load_compose()["services"]["mcp-oauth"]
+        mount = next(
+            v
+            for v in service["volumes"]
+            if isinstance(v, str) and "MCP_OAUTH_PROJECT_ROOT" in v
+        )
+        var_expr = "${MCP_OAUTH_PROJECT_ROOT:?set MCP_OAUTH_PROJECT_ROOT}"
+        assert mount == f"{var_expr}:{var_expr}:ro", mount
+
+
 class TestDeploymentConcurrencySerialization:
     """MAJOR audit finding: ci.yml's deploy job ran scripts/
     deploy-from-registry.sh with no lock of its own -- two close-together
