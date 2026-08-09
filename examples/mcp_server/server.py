@@ -85,6 +85,7 @@ from tool_results import (
     text_result,
     tool_error,
     tool_success,
+    validate_pagination,
 )
 from write_modes import WriteModeError, WritePermissionError
 
@@ -1903,6 +1904,7 @@ async def gitea_list_branches(owner: str, repo: str, limit: int = 30) -> dict[st
             source="gitea",
         )
     try:
+        validate_pagination(limit, "limit")
         async with GiteaClient(token) as client:
             raw = await client.list_branches(owner, repo, limit=limit)
             data = normalize_list_response(raw, meta=list_pagination_meta(len(raw), limit))
@@ -1925,6 +1927,7 @@ async def gitea_list_commits(
             source="gitea",
         )
     try:
+        validate_pagination(limit, "limit")
         async with GiteaClient(token) as client:
             raw = await client.list_commits(owner, repo, sha=sha, limit=limit)
             data = normalize_list_response(raw, meta=list_pagination_meta(len(raw), limit))
@@ -1968,6 +1971,7 @@ async def gitea_list_issues(
             source="gitea",
         )
     try:
+        validate_pagination(limit, "limit")
         async with GiteaClient(token) as client:
             raw = await client.list_issues(owner, repo, state=state, limit=limit)
             data = normalize_list_response(
@@ -2013,6 +2017,7 @@ async def gitea_list_pull_requests(
             source="gitea",
         )
     try:
+        validate_pagination(limit, "limit")
         async with GiteaClient(token) as client:
             raw = await client.list_pull_requests(owner, repo, state=state, limit=limit)
             data = normalize_list_response(
@@ -2058,6 +2063,7 @@ async def gitea_list_action_runs(
             source="gitea",
         )
     try:
+        validate_pagination(limit, "limit")
         async with GiteaClient(token) as client:
             data = await client.list_action_runs(owner, repo, status=status, limit=limit)
     except Exception as exc:
@@ -2156,6 +2162,7 @@ async def github_list_branches(owner: str, repo: str, per_page: int = 30) -> dic
             source="github",
         )
     try:
+        validate_pagination(per_page, "per_page")
         async with GitHubClient(token) as client:
             raw = await client.list_branches(owner, repo, per_page=per_page)
             data = normalize_list_response(
@@ -2181,6 +2188,7 @@ async def github_list_commits(
             source="github",
         )
     try:
+        validate_pagination(per_page, "per_page")
         async with GitHubClient(token) as client:
             raw = await client.list_commits(owner, repo, sha=sha, per_page=per_page)
             data = normalize_list_response(
@@ -2227,6 +2235,7 @@ async def github_list_issues(
             source="github",
         )
     try:
+        validate_pagination(per_page, "per_page")
         async with GitHubClient(token) as client:
             raw = await client.list_issues(owner, repo, state=state, per_page=per_page)
             data = normalize_list_response(
@@ -2272,6 +2281,7 @@ async def github_list_pull_requests(
             source="github",
         )
     try:
+        validate_pagination(per_page, "per_page")
         async with GitHubClient(token) as client:
             raw = await client.list_pull_requests(owner, repo, state=state, per_page=per_page)
             data = normalize_list_response(
@@ -2312,8 +2322,11 @@ async def docker_ps(all: bool = False, limit: int = 50) -> dict[str, Any]:
     stopped containers. limit: max rows (default 50)."""
     client = DockerClient()
     try:
+        validate_pagination(limit, "limit")
         rows = await client.ps(all=all, limit=limit)
-    except (ValueError, RuntimeError) as exc:
+    except ValueError as exc:
+        return tool_error(tool="docker_ps", code="INVALID_INPUT", message=str(exc), source="docker")
+    except RuntimeError as exc:
         return tool_error(tool="docker_ps", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
     return tool_success(
         "docker_ps",
@@ -2329,7 +2342,10 @@ async def docker_images(limit: int = 50) -> dict[str, Any]:
     """List Docker images on the host as structured rows. limit: max rows (default 50)."""
     client = DockerClient()
     try:
+        validate_pagination(limit, "limit")
         rows = await client.images(limit=limit)
+    except ValueError as exc:
+        return tool_error(tool="docker_images", code="INVALID_INPUT", message=str(exc), source="docker")
     except RuntimeError as exc:
         return tool_error(tool="docker_images", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
     return tool_success(
@@ -2363,8 +2379,11 @@ async def docker_inspect(name: str) -> dict[str, Any]:
 async def docker_logs(container: str, tail: int = 200) -> dict[str, Any]:
     """Fetch logs from a running container. tail: number of recent lines (1-1000, default 200)."""
     try:
+        validate_pagination(tail, "tail", max_value=1000)
         result = await DockerClient().logs(container, tail=tail)
-    except (ValueError, RuntimeError) as exc:
+    except ValueError as exc:
+        return tool_error(tool="docker_logs", code="INVALID_INPUT", message=str(exc), source="docker")
+    except RuntimeError as exc:
         return tool_error(tool="docker_logs", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
     return tool_success("docker_logs", result=result, source="docker")
 
@@ -2375,7 +2394,10 @@ async def docker_stats(limit: int = 50) -> dict[str, Any]:
     structured rows. limit: max rows (default 50)."""
     client = DockerClient()
     try:
+        validate_pagination(limit, "limit")
         rows = await client.stats(limit=limit)
+    except ValueError as exc:
+        return tool_error(tool="docker_stats", code="INVALID_INPUT", message=str(exc), source="docker")
     except RuntimeError as exc:
         return tool_error(tool="docker_stats", code="DOCKER_COMMAND_FAILED", message=str(exc), source="docker")
     return tool_success(
@@ -2393,6 +2415,7 @@ async def docker_compose_ps(
     """List containers in a Docker Compose project as structured rows. limit: max rows (default 50)."""
     client = DockerClient()
     try:
+        validate_pagination(limit, "limit")
         rows = await client.compose_ps(project_dir=project_dir, limit=limit)
     except ValueError as exc:
         return tool_error(tool="docker_compose_ps", code="INVALID_INPUT", message=str(exc), source="docker")
