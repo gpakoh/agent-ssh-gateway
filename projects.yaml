@@ -88,6 +88,20 @@ projects:
     description: "gateway_client"
     tags: []
 
+  master_server:
+    root: NOD_gateway/master_server
+    parent: nod-gateway
+    type: service
+    description: "NOD Gateway master server"
+    tags: [nod]
+
+  tg-bot-service:
+    root: NOD_gateway/tg-bot-service
+    parent: nod-gateway
+    type: service
+    description: "Telegram bot service for NOD gateway"
+    tags: [nod, bot, telegram]
+
   infinity:
     root: quart-platform/infinity
     parent: quart-platform
