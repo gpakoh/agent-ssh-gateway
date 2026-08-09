@@ -290,47 +290,82 @@ jobs:
             -e GATEWAY_API_KEY=ci-smoke-only-not-a-real-secret \
             "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}"
 
-          # `curl localhost:$port` (the previous approach here) is exactly
+          # `curl localhost:$port` (an earlier approach here) is exactly
           # the anti-pattern deploy-from-registry.sh's own smoke() already
           # documents and avoids: this job runs inside its own container on
           # the docker-e2e-ci runner, a SIBLING of $GW_NAME/$MCP_NAME, not
           # sharing their network namespace -- "localhost" here is this
           # job's own loopback, not the host's, so the published -p ports
-          # were never actually reachable this way. This was live (never
-          # caught locally, where the shell genuinely does share the
-          # host's network namespace) until this exact step started
-          # failing every build-and-push run and blocking all deploys.
-          # `docker inspect` talks to the daemon over the shared socket
-          # instead of the network, so it works regardless -- reusing the
-          # HEALTHCHECK already baked into each Dockerfile (python for
-          # gateway, curl for mcp-server; this step doesn't need to know
-          # or care which), exactly like deploy-from-registry.sh's own
-          # wait_docker_health() already does post-deploy.
+          # were never actually reachable this way.
           fail=false
-          for spec in "web-ssh-gateway:$GW_NAME" "mcp-server:$MCP_NAME"; do
-            IFS=: read -r label name <<< "$spec"
-            echo "Waiting for $label to report healthy..."
-            up=false
-            for _ in $(seq 1 30); do
-              status=$(docker inspect --format '{{.State.Health.Status}}' "$name" 2>/dev/null || echo missing)
-              if [ "$status" = "healthy" ]; then
-                up=true
-                break
-              fi
-              if [ "$status" = "missing" ] && ! docker inspect --format '{{.State.Running}}' "$name" 2>/dev/null | grep -q true; then
-                echo "::error::$label container exited early"
-                break
-              fi
-              sleep 2
-            done
-            if [ "$up" != "true" ]; then
-              echo "::error::$label image failed to become healthy (last status: ${status:-unknown})"
-              docker logs "$name" 2>&1 | tail -80
-              fail=true
-            else
-              echo "$label OK"
+
+          # mcp-server: docker inspect's own HEALTHCHECK status works fine
+          # standalone -- its /healthz check has no dependency on SSH/Redis
+          # being reachable (confirmed live: this container alone reports
+          # healthy in this exact standalone setup every run).
+          echo "Waiting for mcp-server to report healthy..."
+          up=false
+          for _ in $(seq 1 30); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' "$MCP_NAME" 2>/dev/null || echo missing)
+            if [ "$status" = "healthy" ]; then
+              up=true
+              break
             fi
+            if [ "$status" = "missing" ] && ! docker inspect --format '{{.State.Running}}' "$MCP_NAME" 2>/dev/null | grep -q true; then
+              echo "::error::mcp-server container exited early"
+              break
+            fi
+            sleep 2
           done
+          if [ "$up" != "true" ]; then
+            echo "::error::mcp-server image failed to become healthy (last status: ${status:-unknown})"
+            docker logs "$MCP_NAME" 2>&1 | tail -80
+            fail=true
+          else
+            echo "mcp-server OK"
+          fi
+
+          # web-ssh-gateway: its HEALTHCHECK (M17) deliberately requires
+          # /health's body to report status=="ok", which folds in SSH
+          # reachability and Redis availability -- neither exists in this
+          # deliberately dependency-free standalone container (no sshd, no
+          # redis network peer), so status can only ever be "degraded"
+          # here, and .State.Health.Status can never reach "healthy" no
+          # matter how long this waited (confirmed live: the app itself
+          # boots fine and /health already answers 200 within ~15s, but
+          # docker inspect stayed "starting" for the full 60s timeout
+          # regardless -- this is the exact anti-pattern M17 was built to
+          # make honest, now colliding with a step that assumed "healthy"
+          # was reachable everywhere). This step's own original intent
+          # (see the comment above this whole step) was only ever "confirm
+          # it boots and answers its own health path with HTTP 200" -- not
+          # full subsystem readiness, which is deploy-from-registry.sh's
+          # job against the real stack, where SSH/Redis genuinely exist.
+          # `docker exec` runs inside the container's own namespace
+          # regardless of where this script itself runs, avoiding the
+          # curl-from-sibling-container problem without needing the
+          # stricter Health.Status signal at all.
+          echo "Waiting for web-ssh-gateway to answer /health..."
+          up=false
+          for _ in $(seq 1 30); do
+            if ! docker inspect --format '{{.State.Running}}' "$GW_NAME" 2>/dev/null | grep -q true; then
+              echo "::error::web-ssh-gateway container exited early"
+              break
+            fi
+            if docker exec "$GW_NAME" python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8085/health', timeout=4)" 2>/dev/null; then
+              up=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$up" != "true" ]; then
+            echo "::error::web-ssh-gateway image never answered /health with HTTP 200"
+            docker logs "$GW_NAME" 2>&1 | tail -80
+            fail=true
+          else
+            echo "web-ssh-gateway OK"
+          fi
+
           if [ "$fail" = "true" ]; then
             exit 1
           fi
