@@ -26,6 +26,7 @@ ALLOWED_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}",
         "/repos/{owner}/{repo}/branches",
         "/repos/{owner}/{repo}/commits",
+        "/repos/{owner}/{repo}/contents",
         "/repos/{owner}/{repo}/contents/{path}",
         "/repos/{owner}/{repo}/issues",
         "/repos/{owner}/{repo}/issues/{number}",
@@ -145,19 +146,33 @@ class GiteaClient:
         self,
         owner: str,
         repo: str,
-        path: str,
+        path: str = "",
         branch: str | None = None,
     ) -> dict[str, Any]:
+        """Get a file, a directory listing, or (path="") the repo root
+        listing. validate_repo_path() rejects an empty path, so root
+        listing must go through the path-less endpoint variant instead
+        of substituting {path} at all -- P2 audit finding: there was
+        previously no way to list a repo's top level through this tool.
+        """
         params: dict[str, str] = {}
         if branch:
             params["ref"] = branch
-        result = await self._get(
-            "/repos/{owner}/{repo}/contents/{path}",
-            params=params,
-            owner=owner,
-            repo=repo,
-            path=path,
-        )
+        if path:
+            result = await self._get(
+                "/repos/{owner}/{repo}/contents/{path}",
+                params=params,
+                owner=owner,
+                repo=repo,
+                path=path,
+            )
+        else:
+            result = await self._get(
+                "/repos/{owner}/{repo}/contents",
+                params=params,
+                owner=owner,
+                repo=repo,
+            )
         if isinstance(result, dict) and "content" in result:
             import base64
 

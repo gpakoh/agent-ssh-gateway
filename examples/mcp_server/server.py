@@ -1938,9 +1938,10 @@ async def gitea_list_commits(
 
 @register_tool("gitea_get_file")
 async def gitea_get_file(
-    owner: str, repo: str, path: str, branch: str | None = None
+    owner: str, repo: str, path: str = "", branch: str | None = None
 ) -> dict[str, Any]:
-    """Get a file or directory from a Gitea repository."""
+    """Get a file or directory from a Gitea repository. Omit path (or
+    pass "") to list the repository root."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
@@ -2202,9 +2203,10 @@ async def github_list_commits(
 
 @register_tool("github_get_file")
 async def github_get_file(
-    owner: str, repo: str, path: str, branch: str | None = None
+    owner: str, repo: str, path: str = "", branch: str | None = None
 ) -> dict[str, Any]:
-    """Get a file or directory from a GitHub repository."""
+    """Get a file or directory from a GitHub repository. Omit path (or
+    pass "") to list the repository root."""
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         return tool_error(
