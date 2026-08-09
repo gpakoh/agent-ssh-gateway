@@ -196,24 +196,41 @@ jobs:
             -e GATEWAY_API_KEY=ci-smoke-only-not-a-real-secret \
             "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}"
 
+          # `curl localhost:$port` (the previous approach here) is exactly
+          # the anti-pattern deploy-from-registry.sh's own smoke() already
+          # documents and avoids: this job runs inside its own container on
+          # the docker-e2e-ci runner, a SIBLING of $GW_NAME/$MCP_NAME, not
+          # sharing their network namespace -- "localhost" here is this
+          # job's own loopback, not the host's, so the published -p ports
+          # were never actually reachable this way. This was live (never
+          # caught locally, where the shell genuinely does share the
+          # host's network namespace) until this exact step started
+          # failing every build-and-push run and blocking all deploys.
+          # `docker inspect` talks to the daemon over the shared socket
+          # instead of the network, so it works regardless -- reusing the
+          # HEALTHCHECK already baked into each Dockerfile (python for
+          # gateway, curl for mcp-server; this step doesn't need to know
+          # or care which), exactly like deploy-from-registry.sh's own
+          # wait_docker_health() already does post-deploy.
           fail=false
-          for spec in "web-ssh-gateway:$GW_NAME:18085:/health" "mcp-server:$MCP_NAME:18087:/healthz"; do
-            IFS=: read -r label name port path <<< "$spec"
-            echo "Waiting for $label to answer $path..."
+          for spec in "web-ssh-gateway:$GW_NAME" "mcp-server:$MCP_NAME"; do
+            IFS=: read -r label name <<< "$spec"
+            echo "Waiting for $label to report healthy..."
             up=false
             for _ in $(seq 1 30); do
-              if ! docker inspect --format '{{.State.Running}}' "$name" 2>/dev/null | grep -q true; then
-                echo "::error::$label container exited early"
+              status=$(docker inspect --format '{{.State.Health.Status}}' "$name" 2>/dev/null || echo missing)
+              if [ "$status" = "healthy" ]; then
+                up=true
                 break
               fi
-              if curl -sf --max-time 2 "http://localhost:$port$path" >/dev/null 2>&1; then
-                up=true
+              if [ "$status" = "missing" ] && ! docker inspect --format '{{.State.Running}}' "$name" 2>/dev/null | grep -q true; then
+                echo "::error::$label container exited early"
                 break
               fi
               sleep 2
             done
             if [ "$up" != "true" ]; then
-              echo "::error::$label image failed to become reachable on $path"
+              echo "::error::$label image failed to become healthy (last status: ${status:-unknown})"
               docker logs "$name" 2>&1 | tail -80
               fail=true
             else
