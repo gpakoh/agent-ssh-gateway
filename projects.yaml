@@ -234,3 +234,17 @@ projects:
     type: python-service
     description: "RAG Router Service — ingestion/query orchestration boundary for file-security, LightRAG, FAISS"
     tags: []
+
+  astro-miniapp-builder-template:
+    root: quart-platform/astro_miniapp_builder-template
+    parent: quart-platform
+    type: unknown
+    description: "MiniApp builder template — source of truth"
+    tags: []
+
+  proxy-parser:
+    root: quart-platform/proxy_parser
+    parent: quart-platform
+    type: unknown
+    description: "Парсер HTTPS-прокси с best-proxies.ru"
+    tags: []
