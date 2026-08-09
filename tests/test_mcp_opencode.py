@@ -71,6 +71,26 @@ class TestProjectRunOpencodeExecutes:
         assert "current-plan.md" in result["error"]
         run_script.assert_not_called()
 
+    def test_script_cds_into_project_root(self, monkeypatch):
+        """Regression: confirmed live via a real MCP run_opencode-equivalent
+        (run_agent) call -- the async dispatch path has no cwd concept, so
+        the script's relative $td references silently resolved against the
+        SSH session's home dir instead of the project root. The script
+        must cd into the absolute project root itself."""
+        monkeypatch.setattr(
+            "app.workspace.registry.get_registry",
+            lambda: type("R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}})(),
+        )
+        rc = _fake_run_cmd()
+        captured: dict[str, str] = {}
+
+        def run_script(project, script):
+            captured["script"] = script
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+        project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert captured["script"].startswith("cd '/abs/project/root' || exit 1")
+
     def test_model_override_reaches_the_script(self):
         rc = _fake_run_cmd()
         captured: dict[str, str] = {}
