@@ -196,12 +196,18 @@ jobs:
         run: uv run pytest -m e2e -q
 
   build-and-push:
-    # Only ever builds images from a commit that already passed every
-    # other job, and only on a real push to master — never on a PR run.
-    # This is what actually lets "what's in prod" be proven equal to
-    # "what passed CI" — before this job, every deploy rebuilt from
-    # whatever source happened to be checked out on the deploy host at
-    # that moment. Mirrors quart-core's ci-cd.yml build-and-push job.
+    # Runs the build+smoke-test steps on BOTH a real push to master AND a
+    # pull_request -- only the final push-to-registry steps are gated to
+    # master pushes. P1 BLOCKER audit finding: before this, a PR's `test`
+    # job only ever exercised the source tree (ruff/mypy/pytest against
+    # files on disk), never the actual Docker artifact -- a broken
+    # Dockerfile, a missing system dependency, a bad COPY, or an
+    # entrypoint crash would first surface after merge, in build-and-push
+    # on master (or worse, in prod). Building and smoke-testing on PRs
+    # closes that: the same image-boots-and-answers-healthy check M18
+    # already does for master now runs before merge too, just without
+    # ever touching the registry or :latest for an unmerged commit.
+    # Mirrors quart-core's ci-cd.yml build-and-push job for the push path.
     #
     # These two jobs (build-and-push, deploy) only ever run on the
     # self-hosted Gitea runner pool (label docker-e2e-ci, Gitea at
@@ -213,7 +219,7 @@ jobs:
     # deploy's container an explicit image (nod-ci-docker-e2e, the same
     # job image the Gitea runner's label already uses).
     needs: [test]
-    if: github.ref_name == 'master' && github.event_name == 'push' && github.server_url != 'https://github.com'
+    if: github.server_url != 'https://github.com' && (github.event_name == 'pull_request' || (github.ref_name == 'master' && github.event_name == 'push'))
     runs-on: docker-e2e-ci
     timeout-minutes: 20
     env:
@@ -221,6 +227,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Log in to the Gitea container registry
+        # Only needed for the push steps below -- skipped entirely for a
+        # PR run, which never pushes anything, so a PR run doesn't even
+        # need REGISTRY_TOKEN available to it.
+        if: github.event_name == 'push'
         run: |
           echo "${{ secrets.REGISTRY_TOKEN }}" | docker login "$REGISTRY" -u gpakoh --password-stdin
       - name: Build web-ssh-gateway image
@@ -239,7 +249,7 @@ jobs:
             -t "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}" \
             -t "$REGISTRY/gpakoh/mcp-server:latest" \
             .
-      - name: Smoke-test built images before pushing
+      - name: Smoke-test built images (before pushing, on a push; standalone, on a PR)
         # M18: until now, the freshly built image was never actually
         # started anywhere before landing in production -- the `test` job
         # only ever exercises the source tree, never the image itself (a
@@ -325,10 +335,15 @@ jobs:
             exit 1
           fi
       - name: Push web-ssh-gateway image
+        # PRs build+smoke-test the image above but never push it -- an
+        # unmerged commit must never become :latest or be pullable by
+        # deploy-from-registry.sh.
+        if: github.event_name == 'push'
         run: |
           docker push "$REGISTRY/gpakoh/agent-ssh-gateway:${{ github.sha }}"
           docker push "$REGISTRY/gpakoh/agent-ssh-gateway:latest"
       - name: Push mcp-server image
+        if: github.event_name == 'push'
         run: |
           docker push "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}"
           docker push "$REGISTRY/gpakoh/mcp-server:latest"

@@ -416,6 +416,48 @@ class TestHostSmokePathsMatchRealCoverage:
         assert any("nginx" in p for p in paths)
 
 
+class TestPrBuildsAndSmokeTestsDockerArtifact:
+    """P1 BLOCKER audit finding: a PR's `test` job only ever exercised
+    the source tree -- ruff/mypy/pytest against files on disk -- never
+    the actual Docker artifact. A broken Dockerfile, missing system
+    dependency, bad COPY, or crashing entrypoint would first surface
+    after merge (in build-and-push on master) or worse, in prod.
+    """
+
+    def test_build_and_push_job_runs_on_pull_request(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        job_if = wf["jobs"]["build-and-push"]["if"]
+        assert "pull_request" in job_if
+
+    def test_registry_login_and_push_steps_gated_to_real_push_only(self):
+        """A PR run must build + smoke-test but never touch the registry
+        or :latest for an unmerged commit."""
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["build-and-push"]["steps"]
+        gated_names = {"Log in to the Gitea container registry", "Push web-ssh-gateway image", "Push mcp-server image"}
+        for step in steps:
+            if step.get("name") in gated_names:
+                assert step.get("if") == "github.event_name == 'push'", (
+                    f"{step['name']!r} must be gated to push events only"
+                )
+
+    def test_build_and_smoke_test_steps_run_unconditionally(self):
+        """The actual new coverage (build + smoke-test) must NOT be
+        gated behind push -- that's the whole point of this fix."""
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["build-and-push"]["steps"]
+        build_and_smoke_names = {
+            "Build web-ssh-gateway image",
+            "Build mcp-server image",
+        }
+        found = 0
+        for step in steps:
+            if step.get("name") in build_and_smoke_names:
+                assert "if" not in step, f"{step['name']!r} must not be gated to push-only"
+                found += 1
+        assert found == len(build_and_smoke_names)
+
+
 class TestMakeCheckMirrorsCiExactly:
     """MAJOR audit finding: `make check`'s pytest invocation and ci.yml's
     were two separately-maintained implementations of "run the tests" --
