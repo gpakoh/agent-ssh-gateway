@@ -57,6 +57,30 @@ class TestDockerToolsContractV1:
         assert result["error"]["code"] == "DOCKER_COMMAND_FAILED"
 
     @pytest.mark.asyncio
+    async def test_docker_ps_rejects_negative_limit(self, monkeypatch):
+        """P2 audit finding: a negative/zero limit used to be passed
+        straight through to DockerClient.ps() instead of being rejected."""
+        fake_client = MagicMock()
+        fake_client.ps = AsyncMock(return_value=[{"Names": "web"}])
+        monkeypatch.setattr(mcp_server_mod, "DockerClient", lambda: fake_client)
+
+        result = await mcp_server_mod.docker_ps(limit=-1)
+        _assert_envelope(result, ok=False)
+        assert result["error"]["code"] == "INVALID_INPUT"
+        fake_client.ps.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_docker_ps_rejects_zero_limit(self, monkeypatch):
+        fake_client = MagicMock()
+        fake_client.ps = AsyncMock(return_value=[{"Names": "web"}])
+        monkeypatch.setattr(mcp_server_mod, "DockerClient", lambda: fake_client)
+
+        result = await mcp_server_mod.docker_ps(limit=0)
+        _assert_envelope(result, ok=False)
+        assert result["error"]["code"] == "INVALID_INPUT"
+        fake_client.ps.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_docker_images_returns_structured_result(self, monkeypatch):
         fake_client = MagicMock()
         fake_client.images = AsyncMock(return_value=[{"Repository": "nginx", "Tag": "alpine"}])
@@ -85,6 +109,18 @@ class TestDockerToolsContractV1:
         result = await mcp_server_mod.docker_logs("web")
         _assert_envelope(result)
         assert result["result"] == {"lines": ["a", "b"], "count": 2}
+
+    @pytest.mark.asyncio
+    async def test_docker_logs_rejects_tail_over_1000(self, monkeypatch):
+        """docker_logs' own docstring documents tail as 1-1000."""
+        fake_client = MagicMock()
+        fake_client.logs = AsyncMock(return_value={"lines": [], "count": 0})
+        monkeypatch.setattr(mcp_server_mod, "DockerClient", lambda: fake_client)
+
+        result = await mcp_server_mod.docker_logs("web", tail=1001)
+        _assert_envelope(result, ok=False)
+        assert result["error"]["code"] == "INVALID_INPUT"
+        fake_client.logs.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_docker_stats_returns_structured_result(self, monkeypatch):

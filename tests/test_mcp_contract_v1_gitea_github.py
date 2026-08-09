@@ -189,6 +189,34 @@ class TestGiteaToolsContractV1:
         assert result["result"]["items"] == [{"name": "main"}, {"name": "dev"}]
         assert result["result"]["count"] == 2
 
+    @pytest.mark.asyncio
+    async def test_gitea_list_branches_rejects_negative_limit(self, monkeypatch):
+        """P2 audit finding: a negative/zero limit used to be passed straight
+        through to the remote API / list slicing instead of being rejected."""
+        list_branches = AsyncMock(return_value=[{"name": "main"}])
+        monkeypatch.setattr(
+            mcp_server_mod, "GiteaClient", lambda token: _FakeRemoteClient({"list_branches": list_branches})
+        )
+        monkeypatch.setenv("GITEA_TOKEN", "tok")
+
+        result = await mcp_server_mod.gitea_list_branches("gpakoh", "web-ssh-gateway", limit=-1)
+        _assert_envelope(result, ok=False)
+        assert result["error"]["code"] == "INVALID_INPUT"
+        list_branches.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_gitea_list_branches_rejects_zero_limit(self, monkeypatch):
+        list_branches = AsyncMock(return_value=[{"name": "main"}])
+        monkeypatch.setattr(
+            mcp_server_mod, "GiteaClient", lambda token: _FakeRemoteClient({"list_branches": list_branches})
+        )
+        monkeypatch.setenv("GITEA_TOKEN", "tok")
+
+        result = await mcp_server_mod.gitea_list_branches("gpakoh", "web-ssh-gateway", limit=0)
+        _assert_envelope(result, ok=False)
+        assert result["error"]["code"] == "INVALID_INPUT"
+        list_branches.assert_not_awaited()
+
 
 class TestGitHubToolsContractV1:
     @pytest.mark.asyncio
@@ -303,6 +331,50 @@ GITEA_ISSUE_PAYLOAD = {
     "html_url": "https://git.example.com/gpakoh/web-ssh-gateway/issues/42",
     "api_url": "https://git.example.com/api/v1/repos/gpakoh/web-ssh-gateway/issues/42",
 }
+
+
+class TestPaginationValidation:
+    """P2 audit finding: negative/zero per_page/limit arguments were
+    accepted and passed straight through instead of being rejected."""
+
+    @pytest.mark.asyncio
+    async def test_github_list_branches_rejects_negative_per_page(self, monkeypatch):
+        list_branches = AsyncMock(return_value=[{"name": "main"}])
+        monkeypatch.setattr(
+            mcp_server_mod, "GitHubClient", lambda token: _FakeRemoteClient({"list_branches": list_branches})
+        )
+        monkeypatch.setenv("GITHUB_TOKEN", "tok")
+
+        result = await mcp_server_mod.github_list_branches("gpakoh", "web-ssh-gateway", per_page=-1)
+        _assert_envelope(result, ok=False)
+        assert result["error"]["code"] == "INVALID_INPUT"
+        list_branches.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_github_list_branches_rejects_zero_per_page(self, monkeypatch):
+        list_branches = AsyncMock(return_value=[{"name": "main"}])
+        monkeypatch.setattr(
+            mcp_server_mod, "GitHubClient", lambda token: _FakeRemoteClient({"list_branches": list_branches})
+        )
+        monkeypatch.setenv("GITHUB_TOKEN", "tok")
+
+        result = await mcp_server_mod.github_list_branches("gpakoh", "web-ssh-gateway", per_page=0)
+        _assert_envelope(result, ok=False)
+        assert result["error"]["code"] == "INVALID_INPUT"
+        list_branches.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_github_list_branches_rejects_excessive_per_page(self, monkeypatch):
+        list_branches = AsyncMock(return_value=[{"name": "main"}])
+        monkeypatch.setattr(
+            mcp_server_mod, "GitHubClient", lambda token: _FakeRemoteClient({"list_branches": list_branches})
+        )
+        monkeypatch.setenv("GITHUB_TOKEN", "tok")
+
+        result = await mcp_server_mod.github_list_branches("gpakoh", "web-ssh-gateway", per_page=100_000)
+        _assert_envelope(result, ok=False)
+        assert result["error"]["code"] == "INVALID_INPUT"
+        list_branches.assert_not_awaited()
 
 
 class TestIssuePayloadMinimization:

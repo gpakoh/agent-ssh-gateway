@@ -348,3 +348,17 @@ class TestManifestFilteringAndPagination:
 
         page = build_manifest(sample_tools, mode_override="mcp_client", offset=2)
         assert [t["name"] for t in page["tools"]] == all_names[2:]
+
+    def test_negative_offset_rejected(self, sample_tools: list[FakeTool]) -> None:
+        """P2 audit finding: offset=-1 used to silently select from the
+        end of the filtered list instead of being rejected."""
+        with pytest.raises(ValueError, match="offset"):
+            build_manifest(sample_tools, mode_override="mcp_client", offset=-1)
+
+    def test_zero_limit_rejected(self, sample_tools: list[FakeTool]) -> None:
+        with pytest.raises(ValueError, match="limit"):
+            build_manifest(sample_tools, mode_override="mcp_client", limit=0)
+
+    def test_negative_limit_rejected(self, sample_tools: list[FakeTool]) -> None:
+        with pytest.raises(ValueError, match="limit"):
+            build_manifest(sample_tools, mode_override="mcp_client", limit=-5)

@@ -13,6 +13,7 @@ from tool_modes import (
     get_tool_mode,
     is_mcp_client_safe_mode,
 )
+from tool_results import validate_pagination
 from tool_scopes import ACCESS_PROFILES, get_required_scopes
 
 
@@ -55,6 +56,10 @@ def build_manifest(
         offset: Pagination offset into the filtered tools list.
         limit: Pagination page size. None returns all (post-filter) tools.
     """
+    validate_pagination(offset, "offset", min_value=0, max_value=10_000)
+    if limit is not None:
+        validate_pagination(limit, "limit", max_value=10_000)
+
     active_mode = mode_override or get_tool_mode()
     registered_names = {t.name for t in registered_tools}
     name_to_tool = {t.name: t for t in registered_tools}

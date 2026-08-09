@@ -123,6 +123,32 @@ def tool_success(
     }
 
 
+def validate_pagination(
+    value: int,
+    name: str,
+    *,
+    min_value: int = 1,
+    max_value: int = 500,
+) -> None:
+    """Raise ValueError if a pagination parameter (per_page/limit/offset/etc.)
+    is out of range.
+
+    P2 audit finding: negative/zero per_page, limit, and offset arguments
+    were accepted and passed straight through to list slicing (e.g.
+    tools_list[offset:offset+limit]) or a remote API call -- not a crash,
+    but silently produced confusing results (a negative offset selects
+    from the end of the list; a negative/zero limit truncates or empties
+    it) with no indication anything was wrong. Call sites that already
+    map a bare ValueError to an INVALID_INPUT tool_error (gitea/github
+    list tools via _remote_api_error, tools_manifest via _run_gateway)
+    can just call this directly; others (docker_ps/images/stats) catch
+    ValueError separately to return INVALID_INPUT instead of their
+    subprocess-failure error code.
+    """
+    if value < min_value or value > max_value:
+        raise ValueError(f"{name} must be between {min_value} and {max_value}, got {value}")
+
+
 def tool_error(
     tool: str = "",
     code: str = "INTERNAL_ERROR",
