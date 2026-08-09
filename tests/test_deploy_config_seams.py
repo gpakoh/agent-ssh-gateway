@@ -456,6 +456,31 @@ class TestDeploymentConcurrencySerialization:
         assert concurrency.get("cancel-in-progress") is False
 
 
+class TestE2eToleratesMissingBrowserToolchain:
+    """Live-discovered regression: this workflow also runs on a
+    self-hosted Gitea runner pool where the `ubuntu-latest` label maps to
+    a Python-focused custom image with no Chrome/Chromium/chromedriver at
+    all. tests/test_webui_e2e.py already self-skips gracefully when the
+    browser toolchain is missing, but with every e2e test skipped that
+    way pytest collects zero items and exits 5 ("no tests ran") --
+    confirmed live: this failed the job on the Gitea runner pool on the
+    very first real run of the e2e job this session added.
+    """
+
+    def test_exit_code_5_is_tolerated(self):
+        text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        e2e_job = _load_workflow(CI_WORKFLOW_PATH)["jobs"]["e2e"]
+        steps_text = json.dumps(e2e_job)
+        assert '"$status" -eq 5' in steps_text or "$status\" -eq 5" in text
+        assert "exit 0" in steps_text
+
+    def test_a_real_test_failure_still_fails_the_job(self):
+        """Only exit 5 (zero collected) is tolerated -- any other nonzero
+        status (1: real failures, 2: usage error, ...) must still fail."""
+        text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        assert 'exit "$status"' in text
+
+
 class TestE2eActuallyRunsSomewhere:
     """MAJOR audit finding: pytest -m "not host_smoke and not e2e" in
     ci.yml's test job deliberately excludes tests/test_webui_e2e.py's 4

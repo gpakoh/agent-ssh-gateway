@@ -193,7 +193,28 @@ jobs:
         run: echo "$CHROMEWEBDRIVER" >> "$GITHUB_PATH"
 
       - name: E2E tests
-        run: uv run pytest -m e2e -q
+        # Live-discovered while watching this session's own pushes run for
+        # real: this workflow also runs on a self-hosted Gitea runner pool
+        # (see github.server_url checks elsewhere in this file), where the
+        # `ubuntu-latest` label is mapped to a Python-focused custom image
+        # (nod-ci-python311) with no Chrome/Chromium/chromedriver at all --
+        # unlike genuine GitHub-hosted ubuntu-latest runners. The test file
+        # itself already skips gracefully when the browser toolchain is
+        # missing (pytest.skip(..., allow_module_level=True)), but with
+        # every e2e test skipped that way pytest collects zero items and
+        # exits 5 ("no tests ran"), which this step's default shell (-e)
+        # then treats as a hard failure -- a real e2e failure (exit 1) must
+        # still fail the job; "no browser here" must not.
+        run: |
+          set +e
+          uv run pytest -m e2e -q
+          status=$?
+          set -e
+          if [ "$status" -eq 5 ]; then
+            echo "::warning::No e2e tests were collected -- Selenium/Chromium/chromedriver not available in this environment, treating as skipped rather than failed."
+            exit 0
+          fi
+          exit "$status"
 
   build-and-push:
     # Runs the build+smoke-test steps on BOTH a real push to master AND a
