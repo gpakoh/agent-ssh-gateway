@@ -206,17 +206,16 @@ services:
         target: /app/ssh_key
         read_only: true
       # Mounted at the SAME absolute path as on the host -- reuses
-      # MCP_OAUTH_PROJECT_ROOT (already set to /media/1TB/Python in
-      # docker/.env and already wired into MCP_GATEWAY_PROJECT_ROOT
-      # below), so no new env var and no path-translation logic needed
-      # anywhere else: projects.yaml's registry_root and
-      # MCP_PROJECT_MAP_JSON's per-project paths are already
-      # host-absolute /media/1TB/Python/... paths. Was entirely missing
-      # until now: projects.yaml and the env-based project map were both
-      # correctly configured, but WorkspaceRegistry had no actual
-      # filesystem access to any registered project, so project_list
-      # always returned count: 0 regardless of the registry's own
-      # content (confirmed live).
+      # MCP_OAUTH_PROJECT_ROOT (set in docker/.env, not tracked here,
+      # and already wired into MCP_GATEWAY_PROJECT_ROOT below), so no
+      # new env var and no path-translation logic needed anywhere else:
+      # projects.yaml's registry_root and MCP_PROJECT_MAP_JSON's
+      # per-project paths are already host-absolute under that same
+      # root. Was entirely missing until now: projects.yaml and the
+      # env-based project map were both correctly configured, but
+      # WorkspaceRegistry had no actual filesystem access to any
+      # registered project, so project_list always returned count: 0
+      # regardless of the registry's own content (confirmed live).
       # :ro matches WORKSPACE_READONLY's already-documented default (see
       # app/api_help.py's own docs: "Container filesystem read-only. All
       # project volumes mounted :ro") -- read access for search_text/
