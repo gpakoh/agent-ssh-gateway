@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from examples.mcp_server.tool_scopes import (
     ACCESS_PROFILES,
     TOOL_SCOPES,
@@ -68,16 +70,17 @@ class TestScopeDataIntegrity:
         assert "mcp:postgres" in scopes
         assert "mcp:project" not in scopes
 
-    def test_unknown_profile_fails_closed_to_operator(self):
-        """Regression: a typo'd profile (e.g. mcp_client_sfae) must NOT
-        resolve to the full SUPPORTED_SCOPES set — it must fail closed
-        to the operator profile, matching extra-token registration."""
-        scopes = get_profile_scopes("mcp_client_sfae")
-        assert scopes == get_profile_scopes("operator")
-        assert "mcp:admin" not in scopes
-        assert "mcp:execute" not in scopes
-        assert "mcp:docker" not in scopes
-        assert "mcp:agent-run" not in scopes
+    def test_unknown_profile_raises_instead_of_granting_any_scopes(self):
+        """P0 audit finding: an unknown profile used to silently fall back
+        to operator's scopes (itself a prior fix for an even worse bug —
+        falling back to the FULL/admin scope set). Neither is fail-closed:
+        a typo'd profile (e.g. "mcp_client_sfae") must grant zero scopes,
+        not some other named profile's scopes nobody asked for. It must
+        raise so the misconfiguration is loud (crashes MCP_EXTRA_TOKENS_JSON
+        startup wiring, mcp_token_cli.py, MCP_ACCESS_PROFILE resolution)
+        rather than silently under- or over-privileging a token."""
+        with pytest.raises(ValueError, match="Unknown access profile"):
+            get_profile_scopes("mcp_client_sfae")
 
 
 # ── Scope checking logic ─────────────────────────────────────────
@@ -276,8 +279,9 @@ class TestProfileResolution:
     def test_get_profile_scopes_known(self):
         assert get_profile_scopes("viewer") == ACCESS_PROFILES["viewer"]
 
-    def test_get_profile_scopes_unknown_falls_back_to_operator(self):
-        assert get_profile_scopes("bogus") == ACCESS_PROFILES["operator"]
+    def test_get_profile_scopes_unknown_raises(self):
+        with pytest.raises(ValueError, match="Unknown access profile"):
+            get_profile_scopes("bogus")
 
     def test_profile_scopes_are_distinct(self):
         for name, scopes in ACCESS_PROFILES.items():

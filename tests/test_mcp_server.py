@@ -90,24 +90,18 @@ def test_oauth_mode_configures_auth():
     },
 )
 def test_extra_token_unknown_profile_fails_closed():
-    """Regression: a typo'd extra-token profile must NOT resolve to the
-    full SUPPORTED_SCOPES set (fail-open). It must fail closed to the
-    operator profile, so the token cannot reach admin/docker/execute."""
+    """P0 audit finding: a typo'd extra-token profile must NOT resolve to
+    any named profile's scopes (the old "fix" fell back to operator,
+    which is itself fail-open -- operator still grants mcp:project/
+    mcp:handoff/etc. nobody asked for). Startup must fail loudly instead,
+    so a misconfigured MCP_EXTRA_TOKENS_JSON is caught immediately rather
+    than silently under/over-privileging a token."""
     import importlib
 
     import examples.mcp_server.server as srv
 
-    importlib.reload(srv)
-    assert srv._auth_provider is not None
-    token = srv._auth_provider.verify_access_token("extra-token-1")
-    assert token is not None
-    assert "mcp:admin" not in token.scopes
-    assert "mcp:execute" not in token.scopes
-    assert "mcp:docker" not in token.scopes
-    assert "mcp:docker:admin" not in token.scopes
-    assert "mcp:agent-run" not in token.scopes
-    assert "mcp:read" in token.scopes
-    assert "mcp:project" in token.scopes
+    with pytest.raises(ValueError, match="Unknown access profile"):
+        importlib.reload(srv)
 
 
 @patch.dict(
