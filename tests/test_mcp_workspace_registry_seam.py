@@ -114,3 +114,64 @@ class TestExecuteProjectScriptRealRegistrySeam:
         assert call_kwargs["cwd"] == str(real_registry)
         # The temp script is cleaned up after execution.
         assert list((real_registry / ".ai-bridge" / "tmp").iterdir()) == []
+
+
+class TestExecuteProjectScriptAsyncStaleFileSweep:
+    """MAJOR audit finding: execute_project_script_async() deliberately
+    leaves its own temp script in place (the background job reads it
+    after this call returns) -- but nothing ever removed it afterwards,
+    so .ai-bridge/tmp grew by one file per async call forever. Each call
+    now sweeps its own mcp_script_*.sh files older than
+    MCP_GATEWAY_STALE_SCRIPT_MAX_AGE_S (default 24h) first.
+    """
+
+    def test_leaves_its_own_freshly_written_script_in_place(self, real_registry):
+        """The just-submitted job may still be reading its script -- the
+        sweep must never delete what this same call just wrote."""
+        client = _client()
+        with patch.object(client, "execute_raw") as mock_execute_raw:
+            mock_execute_raw.return_value = {"job_id": "async-1"}
+            client.execute_project_script_async("demo", "echo hi")
+
+        tmp_dir = real_registry / ".ai-bridge" / "tmp"
+        scripts = list(tmp_dir.iterdir())
+        assert len(scripts) == 1
+        assert scripts[0].name.startswith("mcp_script_")
+
+    def test_sweeps_a_stale_script_from_a_prior_call(self, real_registry):
+        """A script old enough that no legitimately long-running async
+        job could still be reading it must be swept on the next call."""
+        import os as _os
+        import time as _time
+
+        tmp_dir = real_registry / ".ai-bridge" / "tmp"
+        tmp_dir.mkdir(parents=True)
+        stale = tmp_dir / "mcp_script_deadbeefcafe.sh"
+        stale.write_text("echo old\n")
+        old_time = _time.time() - (25 * 3600)
+        _os.utime(stale, (old_time, old_time))
+
+        client = _client()
+        with patch.object(client, "execute_raw") as mock_execute_raw:
+            mock_execute_raw.return_value = {"job_id": "async-2"}
+            client.execute_project_script_async("demo", "echo hi")
+
+        remaining = {p.name for p in tmp_dir.iterdir()}
+        assert stale.name not in remaining
+        assert len(remaining) == 1  # only this call's own new script
+
+    def test_does_not_sweep_a_recent_script(self, real_registry):
+        """A script from a few minutes ago is presumably still backing a
+        running async job and must not be deleted out from under it."""
+        tmp_dir = real_registry / ".ai-bridge" / "tmp"
+        tmp_dir.mkdir(parents=True)
+        recent = tmp_dir / "mcp_script_stillrunning0.sh"
+        recent.write_text("echo running\n")
+
+        client = _client()
+        with patch.object(client, "execute_raw") as mock_execute_raw:
+            mock_execute_raw.return_value = {"job_id": "async-3"}
+            client.execute_project_script_async("demo", "echo hi")
+
+        remaining = {p.name for p in tmp_dir.iterdir()}
+        assert recent.name in remaining
