@@ -96,6 +96,20 @@ smoke() {
   # first boot can legitimately take ~60-90s before reporting healthy.
   wait_docker_health "web-ssh-gateway" web-ssh-gateway 120 || ok=false
   wait_docker_health "mcp-server"      mcp-server      120 || ok=false
+  # mcp-oauth (the public ChatGPT-facing OAuth endpoint, port 8788) reuses
+  # the same mcp-server image but was, until this check existed, never
+  # actually redeployed by this script at all -- deploy_services() below
+  # only ever recreated web-ssh-gateway/mcp-server, so every CI-built image
+  # landed in the registry with real provenance but mcp-oauth kept running
+  # whatever had last been deployed to it manually (P0 audit finding:
+  # "MCP runtime build_sha: unknown" -- root cause was this exact gap, not
+  # a code bug in how BUILD_SHA is baked in or reported). Its own Docker
+  # HEALTHCHECK (scripts/mcp_oauth_healthcheck.py) already does a real
+  # authenticated MCP initialize+tools/list through the OAuth provider --
+  # unlike mcp-server's HEALTHCHECK, which deliberately hits an
+  # auth-exempt /healthz -- so wait_docker_health here is already a
+  # meaningful smoke check, no separate docker-exec step needed.
+  wait_docker_health "mcp-oauth"       mcp-oauth       120 || ok=false
 
   # P1 BLOCKER audit finding: wait_docker_health above only proves each
   # container's own HEALTHCHECK passes (process readiness) -- mcp-server's
@@ -129,7 +143,34 @@ smoke() {
       echo "FAIL"
       ok=false
     fi
+    verify_provenance || ok=false
   fi
+  $ok
+}
+
+verify_provenance() {
+  # P0 BLOCKER audit finding: nothing ever confirmed the container actually
+  # running after a deploy is the commit that triggered it -- a stuck
+  # `docker compose up -d` (wrong image resolved, a stale local tag
+  # shadowing the pulled one, ...) could leave the OLD code running while
+  # every check above still reports healthy. Only meaningful when
+  # DEPLOY_TAG is a real commit SHA (CI always sets DEPLOY_SHA); a manual
+  # invocation with no DEPLOY_SHA falls back to the floating :latest tag,
+  # which has no single commit to compare against.
+  if [ "$DEPLOY_TAG" = "latest" ]; then
+    return 0
+  fi
+  local ok=true
+  local name sha
+  for name in web-ssh-gateway mcp-server mcp-oauth; do
+    sha=$(docker exec "$name" printenv BUILD_SHA 2>/dev/null || echo "")
+    if [ "$sha" != "$DEPLOY_TAG" ]; then
+      echo "  $name: provenance MISMATCH (running BUILD_SHA='$sha', expected '$DEPLOY_TAG')"
+      ok=false
+    else
+      echo "  $name: provenance OK ($sha)"
+    fi
+  done
   $ok
 }
 
@@ -180,10 +221,14 @@ json.dump(
 deploy_services() {
   # One container per `up -d` call, not both together -- mirrors
   # deploy-quart-core.sh's fix for a Compose rename-swap race when
-  # recreating multiple containers in a single call.
+  # recreating multiple containers in a single call. mcp-oauth reuses the
+  # same MCP_SERVER_IMAGE as mcp-server (see docker-compose.yml) -- both
+  # must be redeployed together or mcp-oauth silently drifts from what
+  # was just pushed/rolled back (see verify_provenance()).
   local gateway_image="$1" mcp_image="$2"
   WEB_SSH_GATEWAY_IMAGE="$gateway_image" $COMPOSE up -d --no-deps --no-build web-ssh-gateway
   MCP_SERVER_IMAGE="$mcp_image" $COMPOSE up -d --no-deps --no-build mcp-server
+  MCP_SERVER_IMAGE="$mcp_image" $COMPOSE up -d --no-deps --no-build mcp-oauth
 }
 
 run_migrations() {

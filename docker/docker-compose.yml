@@ -299,6 +299,15 @@ services:
       - SSH_CONNECTION_POOL_SIZE=${SSH_CONNECTION_POOL_SIZE:-0}
       - SSH_CONNECTION_POOL_TTL_SECONDS=${SSH_CONNECTION_POOL_TTL_SECONDS:-60}
       - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET}
+      # P1 MAJOR audit finding: JWT_COOKIE_SECURE defaults to false at the
+      # Python settings level (app/config.py) so the local http demo
+      # stack (docker compose --profile demo, curl http://localhost:8085)
+      # keeps working -- but that means it silently stayed false here too
+      # unless explicitly overridden. This tracked prod compose file is
+      # the one place that default must not apply: nginx terminates real
+      # TLS in front of this service (see nginx-ssh-gateway.conf), so the
+      # cookie can and must be Secure.
+      - JWT_COOKIE_SECURE=true
       - SETUP_TOKEN=${SETUP_TOKEN:-}
       - AUTH_DB_PATH=/app/data/auth.sqlite3
       - JWT_EXPIRES_MINUTES=${JWT_EXPIRES_MINUTES:-1440}

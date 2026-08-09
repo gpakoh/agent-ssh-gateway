@@ -240,9 +240,15 @@ async def register(request: Request, req: RegisterRequest):
                 raise RuntimeError("Username was not assigned")
 
             token = create_jwt(username=user.username, user_id=user.id)
+            # Audit finding: the token was returned here too, even though
+            # the only real consumer (app/static/app.js) never reads it --
+            # it relies entirely on the HttpOnly cookie set below. Echoing
+            # the JWT into a JS-readable JSON response undermines the
+            # whole point of HttpOnly (XSS can't read the cookie, but
+            # could read this response body).
             response = JSONResponse(
                 status_code=201,
-                content={"token": token, "username": user.username},
+                content={"username": user.username},
             )
             set_auth_cookie(response, token)
             return response
@@ -268,9 +274,11 @@ async def login(request: Request, req: LoginRequest):
             raise RuntimeError("User record is incomplete")
 
         token = create_jwt(username=user.username, user_id=user.id)
+        # See register()'s matching comment -- the JS client only reads
+        # the HttpOnly cookie, never this body.
         response = JSONResponse(
             status_code=200,
-            content={"token": token, "username": user.username},
+            content={"username": user.username},
         )
         set_auth_cookie(response, token)
         return response

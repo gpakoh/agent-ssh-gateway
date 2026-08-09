@@ -28,6 +28,10 @@ server {
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    # Instructs the browser to rewrite http:// to https:// itself for
+    # every future request to this domain -- closes the window between a
+    # plain-HTTP request and the redirect above completing.
+    add_header Strict-Transport-Security "max-age=31536000" always;
 
     # ---- mTLS for agent certificates ----
     ssl_client_certificate /etc/nginx/certs/ca.crt;
@@ -41,11 +45,24 @@ server {
     # Optional: SSO / Authelia auth
     # include /etc/nginx/snippets/authelia-location.conf;
 
-    # Health endpoint — no auth
-    location /health {
+    # Nginx-only liveness check — no auth, does not touch the backend.
+    # Confirms nginx itself is up, nothing more.
+    location /nginx-health {
         access_log off;
         add_header Content-Type application/json;
         return 200 '{"status":"ok"}';
+    }
+
+    # Real health — proxied to the backend, no auth (matches the backend's
+    # own /health, which is deliberately unauthenticated). Audit finding:
+    # this used to be nginx returning a static 200 unconditionally, so a
+    # dead/degraded backend (Gateway process down, Redis/Postgres
+    # unreachable) was invisible from outside -- external monitoring saw
+    # green while the actual service was broken.
+    location /health {
+        access_log off;
+        proxy_pass http://__BACKEND_IP__:8085/health;
+        proxy_set_header Host $host;
     }
 
     # Default location — mTLS bypass, otherwise SSO auth

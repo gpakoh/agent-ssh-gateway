@@ -701,4 +701,5 @@ class TestSsoEndpoints:
                 json={"username": "localadmin", "password": "LocalPass123!"},
             )
         assert login.status_code == 200
-        assert "token" in login.json()
+        assert login.json()["username"] == "localadmin"
+        assert login.cookies.get("auth_token")

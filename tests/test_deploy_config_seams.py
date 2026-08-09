@@ -350,6 +350,69 @@ class TestRollbackSchemaCompatibilityVisibility:
         assert "alembic downgrade" not in text
 
 
+class TestMcpOauthIsPartOfTheDeployPipeline:
+    """P0 BLOCKER audit finding: mcp-oauth (the public ChatGPT-facing OAuth
+    endpoint) reuses the mcp-server image but was never actually
+    redeployed by this script -- deploy_services() only ever recreated
+    web-ssh-gateway/mcp-server, so a CI-built image landed in the registry
+    with real BUILD_SHA provenance while mcp-oauth kept running whatever
+    had last been deployed to it by hand. This is the actual root cause
+    the audit observed as "MCP runtime build_sha: unknown".
+    """
+
+    def test_deploy_services_recreates_mcp_oauth(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        deploy_fn = text.split("deploy_services() {", 1)[1].split("\n}\n", 1)[0]
+        assert "up -d --no-deps --no-build mcp-oauth" in deploy_fn
+        # Must reuse the same MCP_SERVER_IMAGE as mcp-server, not a
+        # separate/undefined image var -- they share one image by design.
+        mcp_oauth_line = next(
+            line for line in deploy_fn.splitlines() if "up -d --no-deps --no-build mcp-oauth" in line
+        )
+        assert "MCP_SERVER_IMAGE=" in mcp_oauth_line
+
+    def test_smoke_waits_for_mcp_oauth_health(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        assert 'wait_docker_health "mcp-oauth"' in text
+
+
+class TestDeployVerifiesRunningProvenance:
+    """P0 BLOCKER audit finding: nothing ever confirmed the container
+    running after a deploy is actually the commit that triggered it --
+    Gateway/mcp-server/mcp-oauth could all report "healthy" while quietly
+    still running stale code (a stuck `up -d`, a shadowing local tag).
+    """
+
+    def test_verify_provenance_compares_all_three_containers(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        fn = text.split("verify_provenance() {", 1)[1].split("\n}\n", 1)[0]
+        for name in ("web-ssh-gateway", "mcp-server", "mcp-oauth"):
+            assert name in fn
+        assert "printenv BUILD_SHA" in fn
+        assert 'DEPLOY_TAG"' in fn
+
+    def test_verify_provenance_is_skipped_for_the_floating_latest_tag(self):
+        """DEPLOY_TAG defaults to "latest" for manual/local invocation --
+        a floating tag has no single commit to compare running BUILD_SHA
+        against, so the check must no-op rather than false-fail."""
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        fn = text.split("verify_provenance() {", 1)[1].split("\n}\n", 1)[0]
+        assert '"$DEPLOY_TAG" = "latest"' in fn
+
+    def test_smoke_calls_verify_provenance_after_black_box_checks(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        mcp_check_line = next(
+            i for i, line in enumerate(lines) if "mcp_black_box_smoke.py" in line
+        )
+        verify_call_line = next(
+            i
+            for i, line in enumerate(lines)
+            if line.strip() == "verify_provenance || ok=false"
+        )
+        assert mcp_check_line < verify_call_line
+
+
 class TestMcpOauthServiceCoherence:
     """#26: mcp-oauth reuses the mcp-server image with a different command
     to run the OAuth proxy (examples/mcp_client_remote/server.py) instead
@@ -515,29 +578,54 @@ class TestDeploymentConcurrencySerialization:
         assert concurrency.get("cancel-in-progress") is False
 
 
-class TestE2eToleratesMissingBrowserToolchain:
-    """Live-discovered regression: this workflow also runs on a
-    self-hosted Gitea runner pool where the `ubuntu-latest` label maps to
-    a Python-focused custom image with no Chrome/Chromium/chromedriver at
-    all. tests/test_webui_e2e.py already self-skips gracefully when the
-    browser toolchain is missing, but with every e2e test skipped that
-    way pytest collects zero items and exits 5 ("no tests ran") --
-    confirmed live: this failed the job on the Gitea runner pool on the
-    very first real run of the e2e job this session added.
+class TestE2eSkipsHonestlyWithoutBrowserToolchain:
+    """P1 MAJOR audit finding: this workflow also runs on a self-hosted
+    Gitea runner pool where the `ubuntu-latest` label maps to a
+    Python-focused custom image with no Chrome/Chromium/chromedriver at
+    all -- confirmed live: every runner in the pool (python311/node22/
+    docker-e2e/security) lacks a browser toolchain. The old mechanism ran
+    pytest anyway, let it collect zero items (exit 5), and rewrote that
+    into `exit 0` -- a real pass and "nothing could run here" were
+    indistinguishable in the job's own status (TEST-15: zero collected
+    tests must not read as a passing check). Detecting the toolchain
+    first and gating the actual test step behind `if:` means GitHub
+    Actions marks it skipped (grey), not passed (green). build-and-push
+    now depends on e2e (`needs: [test, e2e]`) -- on runners with a
+    browser the e2e job really gates the artifact; on the no-browser
+    pool it completes as a skipped step and does not stall deploy.
     """
 
-    def test_exit_code_5_is_tolerated(self):
-        text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
-        e2e_job = _load_workflow(CI_WORKFLOW_PATH)["jobs"]["e2e"]
-        steps_text = json.dumps(e2e_job)
-        assert '"$status" -eq 5' in steps_text or "$status\" -eq 5" in text
-        assert "exit 0" in steps_text
+    def test_browser_presence_is_detected_before_running_tests(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps_text = json.dumps(wf["jobs"]["e2e"])
+        assert "chromedriver" in steps_text
+        assert "google-chrome" in steps_text
+        assert "browser_check" in steps_text
+
+    def test_e2e_test_step_is_gated_on_browser_availability(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["e2e"]["steps"]
+        e2e_step = next(s for s in steps if s.get("name") == "E2E tests")
+        assert e2e_step.get("if") == "steps.browser_check.outputs.available == 'true'"
 
     def test_a_real_test_failure_still_fails_the_job(self):
-        """Only exit 5 (zero collected) is tolerated -- any other nonzero
-        status (1: real failures, 2: usage error, ...) must still fail."""
-        text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
-        assert 'exit "$status"' in text
+        """No more exit-code rewriting at all -- once the step only runs
+        with a confirmed browser present, any nonzero pytest exit
+        (failures, errors) propagates as the step's own exit status."""
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["e2e"]["steps"]
+        e2e_step = next(s for s in steps if s.get("name") == "E2E tests")
+        assert e2e_step["run"].strip() == "uv run pytest -m e2e -q"
+
+    def test_build_and_push_depends_on_e2e(self):
+        """P1 MAJOR audit finding (CI-06): build/deploy did not depend on
+        the e2e job -- unit/static could pass while the e2e gate was
+        skipped or failed and the artifact would still advance. Now the
+        artifact cannot build before the e2e job has resolved."""
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        needs = wf["jobs"]["build-and-push"].get("needs", [])
+        assert "e2e" in needs
+        assert "test" in needs
 
 
 class TestE2eActuallyRunsSomewhere:
@@ -633,28 +721,73 @@ class TestPrBuildsAndSmokeTestsDockerArtifact:
 
 
 class TestMakeCheckMirrorsCiExactly:
-    """MAJOR audit finding: `make check`'s pytest invocation and ci.yml's
-    were two separately-maintained implementations of "run the tests" --
-    `make check` silently dropped the coverage floor, the flaky-test
-    rerun handling, and the collection-count floor, so it could pass
-    locally on a change that would fail in CI.
+    """MAJOR audit finding (CI-04): `make check`'s pytest invocation and
+    ci.yml's were two separately-maintained implementations of "run the
+    tests" -- `make check` silently dropped the coverage floor, the
+    flaky-test rerun handling, and the collection-count floor, so it
+    could pass locally on a change that would fail in CI.
+
+    Fixed at the root instead of just re-syncing the flags a second time:
+    ci.yml's steps now call the Makefile targets directly (make lint,
+    make mypy, make test-unit, make test-count, make lockfile-check) --
+    there is exactly one place these flags are written down, so the two
+    can no longer drift apart silently the way they already had once.
     """
 
-    def test_make_test_matches_ci_coverage_floor(self):
+    def test_makefile_owns_the_coverage_floor_and_rerun_handling(self):
         makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
-        ci = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
-        assert "--cov-fail-under=69" in makefile
-        assert "--cov-fail-under=69" in ci
-
-    def test_make_test_matches_ci_rerun_handling(self):
-        makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
-        ci = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
-        for flag in ("--reruns 2", "--only-rerun 'WebSocketDisconnect'"):
+        for flag in ("--cov-fail-under=69", "--reruns 2", "--only-rerun 'WebSocketDisconnect'"):
             assert flag in makefile, f"Makefile missing {flag!r}"
-            assert flag in ci, f"ci.yml missing {flag!r}"
+
+    def test_ci_test_step_calls_make_test_unit_not_a_duplicate_pytest_invocation(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["test"]["steps"]
+        step = next(s for s in steps if s.get("name") == "Tests + coverage")
+        assert step["run"].strip().startswith("make test-unit")
+        # The flags themselves must NOT be duplicated here -- if they are,
+        # the two really have drifted apart again.
+        for flag in ("--cov-fail-under=69", "--reruns 2"):
+            assert flag not in step["run"]
+
+    def test_ci_lint_mypy_lockfile_testcount_steps_call_make_targets(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = {s.get("name"): s.get("run", "").strip() for s in wf["jobs"]["test"]["steps"]}
+        assert steps.get("Lockfile freshness") == "make lockfile-check"
+        assert steps.get("Ruff") == "make lint"
+        assert steps.get("Mypy") == "make mypy"
+        assert steps.get("Verify test count") == "make test-count"
 
     def test_make_check_verifies_lockfile_and_test_count(self):
         makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
         assert "check: lockfile-check lint mypy compileall test test-count" in makefile
         assert "uv lock --check" in makefile
         assert "3500" in makefile
+
+
+class TestCanonicalCiEntrypoints:
+    """P1 MAJOR audit finding (TEST-08/CI-04): no canonical top-level
+    `ci`/`test-unit`/`test-integration`/`test-smoke` commands existed --
+    only `test` (unit tests) and `check` (the full local gate), with no
+    dedicated name for integration or smoke runs and nothing named `ci`
+    at all.
+    """
+
+    def test_canonical_targets_exist(self):
+        makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
+        for target in ("ci:", "test-unit:", "test-integration:", "test-smoke:"):
+            assert target in makefile, f"Makefile missing canonical target {target!r}"
+
+    def test_ci_target_runs_the_full_local_gate(self):
+        makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
+        assert "ci: check" in makefile
+
+    def test_test_is_a_backward_compatible_alias_for_test_unit(self):
+        makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
+        assert "test: test-unit" in makefile
+
+    def test_test_smoke_reuses_existing_host_smoke(self):
+        """host-smoke predates this and CLAUDE.md/runbooks already
+        reference it directly -- test-smoke is an alias, not a
+        reimplementation."""
+        makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
+        assert "test-smoke: host-smoke" in makefile
