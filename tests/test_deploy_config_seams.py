@@ -22,6 +22,7 @@ GATEWAY_DOCKERFILE = ROOT / "docker" / "Dockerfile"
 DEPLOY_SCRIPT = ROOT / "scripts" / "deploy-from-registry.sh"
 CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 HOST_SMOKE_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "host-smoke.yml"
+MAKEFILE_PATH = ROOT / "Makefile"
 
 
 def _load_compose() -> dict:
@@ -372,3 +373,31 @@ class TestHostSmokePathsMatchRealCoverage:
         paths = wf[True]["push"]["paths"]
         assert "app/auth_middleware.py" in paths
         assert any("nginx" in p for p in paths)
+
+
+class TestMakeCheckMirrorsCiExactly:
+    """MAJOR audit finding: `make check`'s pytest invocation and ci.yml's
+    were two separately-maintained implementations of "run the tests" --
+    `make check` silently dropped the coverage floor, the flaky-test
+    rerun handling, and the collection-count floor, so it could pass
+    locally on a change that would fail in CI.
+    """
+
+    def test_make_test_matches_ci_coverage_floor(self):
+        makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
+        ci = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        assert "--cov-fail-under=69" in makefile
+        assert "--cov-fail-under=69" in ci
+
+    def test_make_test_matches_ci_rerun_handling(self):
+        makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
+        ci = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        for flag in ("--reruns 2", "--only-rerun 'WebSocketDisconnect'"):
+            assert flag in makefile, f"Makefile missing {flag!r}"
+            assert flag in ci, f"ci.yml missing {flag!r}"
+
+    def test_make_check_verifies_lockfile_and_test_count(self):
+        makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
+        assert "check: lockfile-check lint mypy compileall test test-count" in makefile
+        assert "uv lock --check" in makefile
+        assert "3500" in makefile
