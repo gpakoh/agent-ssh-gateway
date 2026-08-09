@@ -96,6 +96,40 @@ smoke() {
   # first boot can legitimately take ~60-90s before reporting healthy.
   wait_docker_health "web-ssh-gateway" web-ssh-gateway 120 || ok=false
   wait_docker_health "mcp-server"      mcp-server      120 || ok=false
+
+  # P1 BLOCKER audit finding: wait_docker_health above only proves each
+  # container's own HEALTHCHECK passes (process readiness) -- mcp-server's
+  # HEALTHCHECK in particular hits /healthz, deliberately exempt from
+  # bearer auth, so neither check had ever exercised the real API surface
+  # or the auth boundary. `docker exec` runs inside each container's own
+  # namespace regardless of where this script itself is running, so the
+  # same cross-namespace problem the comment above avoids doesn't apply
+  # here either. Only run these once the containers are already healthy
+  # -- no point authenticating against a service still booting.
+  if $ok; then
+    # No -e API_KEY/-e MCP_STREAMABLE_HTTP_BEARER_TOKEN here -- `docker
+    # exec` already inherits the TARGET container's own environment by
+    # default, which is what's actually authoritative for this running
+    # instance (set by docker-compose.yml at container start). Reading
+    # this script's own sourced docker/.env instead would test against
+    # what's on disk right now, not what the deployed container is
+    # actually configured with -- a subtle drift if those two ever
+    # disagree.
+    echo -n "  web-ssh-gateway (authenticated): "
+    if docker exec web-ssh-gateway python3 scripts/gateway_black_box_smoke.py; then
+      echo "OK"
+    else
+      echo "FAIL"
+      ok=false
+    fi
+    echo -n "  mcp-server (authenticated MCP):  "
+    if docker exec mcp-server python3 scripts/mcp_black_box_smoke.py; then
+      echo "OK"
+    else
+      echo "FAIL"
+      ok=false
+    fi
+  fi
   $ok
 }
 

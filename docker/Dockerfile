@@ -39,6 +39,15 @@ COPY --chown=appuser:appuser sdk/ ./sdk/
 COPY --chown=appuser:appuser alembic.ini ./alembic.ini
 COPY --chown=appuser:appuser alembic/ ./alembic/
 
+# Copy the authenticated black-box smoke check deploy-from-registry.sh
+# runs (via `docker exec`) after a real deploy -- P1 BLOCKER audit
+# finding: the only prior post-deploy check was this image's own
+# HEALTHCHECK below, proving process readiness, not that the real
+# authenticated API surface works. Only this one script, not the whole
+# scripts/ directory -- most of it is MCP-specific and not meaningful
+# (or importable, given this image's leaner dependency set) here.
+COPY --chown=appuser:appuser scripts/gateway_black_box_smoke.py ./scripts/gateway_black_box_smoke.py
+
 # Security: Create necessary directories
 RUN mkdir -p /app/ssh_keys /app/logs /app/data /tmp && \
     chown -R appuser:appuser /app /tmp

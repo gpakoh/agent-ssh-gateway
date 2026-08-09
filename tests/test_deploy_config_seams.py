@@ -219,6 +219,48 @@ class TestDeployRunsAlembicMigrations:
         assert window.index("run_migrations") < window.index("smoke")
 
 
+class TestProductionSmokeIsAuthenticatedBlackBox:
+    """P1 BLOCKER audit finding: the only post-deploy check was
+    wait_docker_health() (docker inspect's own HEALTHCHECK status) --
+    process readiness, not proof the actual authenticated API/MCP
+    surface works. mcp-server's own HEALTHCHECK in particular hits
+    /healthz, deliberately exempt from bearer auth, so it never
+    exercised the auth boundary at all.
+    """
+
+    def test_gateway_dockerfile_copies_the_smoke_script(self):
+        text = GATEWAY_DOCKERFILE.read_text(encoding="utf-8")
+        assert "scripts/gateway_black_box_smoke.py" in text
+
+    def test_mcp_server_dockerfile_copies_scripts_dir(self):
+        """mcp_black_box_smoke.py ships via the existing wholesale
+        `COPY scripts/` -- confirm that copy still exists (a MAJOR
+        finding elsewhere in this same audit already covers
+        mcp_oauth_healthcheck.py depending on this same copy)."""
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        assert "COPY --chown=appuser:appuser scripts/ ./scripts/" in text
+
+    def test_smoke_runs_gateway_black_box_check_via_docker_exec(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        assert "docker exec web-ssh-gateway python3 scripts/gateway_black_box_smoke.py" in text
+
+    def test_smoke_runs_mcp_black_box_check_via_docker_exec(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        assert "docker exec mcp-server python3 scripts/mcp_black_box_smoke.py" in text
+
+    def test_black_box_checks_only_run_after_containers_are_healthy(self):
+        """No point authenticating against a service that's still
+        booting -- must be gated behind the existing health checks, not
+        run unconditionally/in parallel with them."""
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        gate_line = next(i for i, line in enumerate(lines) if line.strip() == "if $ok; then")
+        gateway_check_line = next(
+            i for i, line in enumerate(lines) if "gateway_black_box_smoke.py" in line
+        )
+        assert gate_line < gateway_check_line
+
+
 class TestRollbackSchemaCompatibilityVisibility:
     """MAJOR audit finding: rollback reverts the application images but
     never the DB schema (alembic has no downgrade step here, and a real
