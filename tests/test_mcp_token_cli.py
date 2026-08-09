@@ -48,6 +48,22 @@ def test_cli_create_with_profile(store_path):
     assert entries[0].profile == "operator"
 
 
+def test_cli_create_with_typo_profile_raises_instead_of_creating_token(store_path):
+    """P0 audit finding: a typo'd --profile (e.g. "operatr") must not
+    silently create a token with some other profile's scopes. In
+    practice argparse's `choices=` already rejects it before
+    get_profile_scopes() is ever reached (SystemExit(2)) -- this pins
+    that behavior so it can't regress (e.g. choices= being dropped) back
+    to get_profile_scopes()'s old silent fallback-to-operator. Either
+    way, no token may end up written to the store."""
+    with pytest.raises(SystemExit) as exc_info:
+        main(["create", "typo-token", "--profile", "operatr"])
+    assert exc_info.value.code == 2
+
+    store = TokenStore(store_path)
+    assert store.load() == []
+
+
 def test_cli_create_output_json(store_path, capsys):
     exit_code = main(["create", "json-token", "--output", "json"])
     assert exit_code == 0

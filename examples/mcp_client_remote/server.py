@@ -88,6 +88,11 @@ MCP_DEFAULT_ACCESS_PROFILE = (
     or os.environ.get("MCP_DEFAULT_ACCESS_PROFILE")
     or "operator"
 )
+# Fail fast on a typo'd profile at startup rather than at first request --
+# get_profile_scopes() itself raises for an unknown profile (no more
+# silent fallback to "operator"), so this would otherwise only surface
+# the first time _get_token_scopes() resolved MCP_PUBLIC_TOKEN.
+get_profile_scopes(MCP_DEFAULT_ACCESS_PROFILE)
 MCP_CLIENT_SAFE_MODE = is_mcp_client_safe_mode()
 
 MCP_AUTHORIZE_PASSWORD = os.environ.get("MCP_AUTHORIZE_PASSWORD", "")

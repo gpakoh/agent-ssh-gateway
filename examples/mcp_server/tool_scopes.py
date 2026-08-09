@@ -205,8 +205,24 @@ def get_required_scopes(tool_name: str) -> list[str]:
 
 
 def get_profile_scopes(profile: str) -> list[str]:
-    """Return scopes for a named access profile."""
-    return ACCESS_PROFILES.get(profile, list(ACCESS_PROFILES.get("operator", [])))
+    """Return scopes for a named access profile.
+
+    Fail-closed: an unrecognized profile (typo in MCP_EXTRA_TOKENS_JSON,
+    MCP_ACCESS_PROFILE, a token-CLI --profile argument, etc.) used to
+    silently fall back to "operator"'s scopes -- a misconfigured token
+    intended to be low-privilege could end up granted mcp:project/
+    mcp:handoff/etc. with nothing to notice. Every call site here is
+    either startup-time config resolution or an explicit admin action
+    (mcp_token_cli.py), so raising is safe -- it fails the process/command
+    loudly instead of granting scopes nobody asked for.
+    """
+    try:
+        return list(ACCESS_PROFILES[profile])
+    except KeyError:
+        valid = ", ".join(sorted(ACCESS_PROFILES))
+        raise ValueError(
+            f"Unknown access profile {profile!r}; expected one of: {valid}"
+        ) from None
 
 
 def has_required_scope(token_scopes: list[str], tool_name: str) -> bool:
