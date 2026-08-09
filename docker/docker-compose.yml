@@ -131,6 +131,102 @@ services:
       web-ssh-gateway:
         condition: service_healthy
 
+  mcp-oauth:
+    # Same image as mcp-server -- docker/Dockerfile.mcp-server already
+    # COPYs all of examples/, including examples/mcp_client_remote/server.py
+    # (the full OAuth proxy: DCR, /authorize, consent, /token, in front of
+    # an internal FastMCP instance) -- no new image needed, just a
+    # different command. mcp-server itself stays bearer-only: FastMCP's
+    # native OAuth (RequireAuthMiddleware, wired only when MCP_AUTH_MODE=
+    # oauth) rejects a static bearer token with its own 401 (see
+    # scripts/mcp_sse_serve.py's _force_fastmcp_auth_unwired() docstring
+    # for the empirically-reproduced conflict) -- the two auth models
+    # can't share one process, hence a second service instead of a flag
+    # on the existing one.
+    image: ${MCP_SERVER_IMAGE:-mcp-server:latest}
+    command: ["python", "examples/mcp_client_remote/server.py"]
+    container_name: mcp-oauth
+    hostname: mcp-oauth
+    networks:
+      internal_net: {}
+    ports:
+      # MCP_OAUTH_HOST_PORT stays a throwaway port during verification;
+      # only set to 8788 (matching the systemd service's own port, so the
+      # existing autossh tunnel + VPS nginx config need no changes at all)
+      # at actual cutover time, after systemd is stopped.
+      - "127.0.0.1:${MCP_OAUTH_HOST_PORT:-18790}:8788"
+    environment:
+      - GATEWAY_BASE_URL=http://web-ssh-gateway:8085
+      - GATEWAY_API_KEY=${MCP_OAUTH_GATEWAY_API_KEY:?set MCP_OAUTH_GATEWAY_API_KEY}
+      - GATEWAY_SSH_HOST=${MCP_OAUTH_SSH_HOST:?set MCP_OAUTH_SSH_HOST}
+      - GATEWAY_SSH_PORT=${MCP_OAUTH_SSH_PORT:?set MCP_OAUTH_SSH_PORT}
+      - GATEWAY_SSH_USERNAME=${MCP_OAUTH_SSH_USERNAME:?set MCP_OAUTH_SSH_USERNAME}
+      - GATEWAY_SSH_KEY_PATH=/app/ssh_key
+      - MCP_GATEWAY_PROJECT_ROOT=${MCP_OAUTH_PROJECT_ROOT:-}
+      - MCP_PROJECT_MAP_JSON=${MCP_OAUTH_PROJECT_MAP_JSON:-}
+      - MCP_GATEWAY_TOOL_MODE=mcp_client
+      - MCP_GATEWAY_WRITE_MODE=${MCP_OAUTH_WRITE_MODE:-handoff}
+      - MCP_CLIENT_SAFE_MODE=true
+      - MCP_ACCESS_PROFILE=mcp_client_safe
+      - MCP_AUTH_MODE=oauth
+      - MCP_ISSUER_URL=${MCP_OAUTH_ISSUER_URL:?set MCP_OAUTH_ISSUER_URL}
+      - MCP_RESOURCE_URL=${MCP_OAUTH_RESOURCE_URL:?set MCP_OAUTH_RESOURCE_URL}
+      - MCP_PUBLIC_URL=${MCP_OAUTH_PUBLIC_URL:?set MCP_OAUTH_PUBLIC_URL}
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8788
+      - MCP_INTERNAL_HOST=127.0.0.1
+      - MCP_INTERNAL_PORT=8789
+      - MCP_HEALTHCHECK_BEARER_TOKEN=${MCP_OAUTH_HEALTHCHECK_BEARER_TOKEN:-}
+      - MCP_SCOPE_ENFORCEMENT=enforce
+      - MCP_AGENT_BACKEND_ROUTER_ENABLED=true
+      - MCP_AUTHORIZE_PASSWORD=${MCP_OAUTH_AUTHORIZE_PASSWORD:?set MCP_OAUTH_AUTHORIZE_PASSWORD}
+      - MCP_TOKEN_STORE_FILE=/app/data/mcp_tokens.json
+      - MCP_CLIENT_STORE_FILE=/app/data/mcp_clients.json
+      - GITEA_TOKEN=${MCP_OAUTH_GITEA_TOKEN:-}
+      - GITEA_API_BASE=${MCP_OAUTH_GITEA_API_BASE:-}
+      - GITEA_FORWARDED_HOST=${MCP_OAUTH_GITEA_FORWARDED_HOST:-}
+      - GITEA_FORWARDED_PROTO=${MCP_OAUTH_GITEA_FORWARDED_PROTO:-}
+      - GITHUB_TOKEN=${MCP_OAUTH_GITHUB_TOKEN:-}
+      - PGHOST=mcp-postgres
+      - PGPORT=5432
+      - PGDATABASE=${MCP_OAUTH_PGDATABASE:-gateway}
+      - PGUSER=postgres
+      - PGPASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      - PGSSLMODE=${MCP_OAUTH_PGSSLMODE:-disable}
+      - PGAPPNAME=${MCP_OAUTH_PGAPPNAME:-mcp-oauth}
+      - WORKSPACE_READONLY=${WORKSPACE_READONLY:-true}
+    volumes:
+      - ../projects.yaml:/app/projects.yaml:ro
+      # Dedicated volume, deliberately NOT shared with mcp-server's
+      # mcp_server_tokens -- keeps the OAuth client/token store
+      # independent of the bearer-only service's.
+      - mcp_oauth_data:/app/data
+      - type: bind
+        source: ${MCP_OAUTH_SSH_KEY_PATH:?set MCP_OAUTH_SSH_KEY_PATH}
+        target: /app/ssh_key
+        read_only: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    depends_on:
+      web-ssh-gateway:
+        condition: service_healthy
+      mcp-postgres:
+        condition: service_healthy
+
   web-ssh-gateway:
     # `image:` names the CI-built, git-SHA-tagged artifact (see
     # .github/workflows/ci.yml's build-and-push job) — `docker compose
@@ -241,4 +337,6 @@ volumes:
   known_hosts:
     driver: local
   mcp_server_tokens:
+    driver: local
+  mcp_oauth_data:
     driver: local
