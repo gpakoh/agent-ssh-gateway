@@ -317,10 +317,14 @@ class TestExecuteProjectScriptResolvesRealDictContract:
 
         assert result == {"exit_code": 0, "stdout": "ok", "stderr": ""}
         mock_execute_argv.assert_called_once()
-        call_kwargs = mock_execute_argv.call_args.kwargs
+        call_args, call_kwargs = mock_execute_argv.call_args
+        assert call_args[0] == ["sh"]
+        assert call_kwargs["stdin"] == "echo hi"
         assert call_kwargs["cwd"] == str(tmp_path)
-        # The temp script is cleaned up after execution — nothing left behind.
-        assert list((tmp_path / ".ai-bridge" / "tmp").iterdir()) == []
+        # No local temp file is ever written -- the script is piped via
+        # stdin (audit BLOCKER: the old temp-file approach always failed
+        # with EROFS against the real, read-only-mounted project root).
+        assert not (tmp_path / ".ai-bridge").exists()
 
 
 # ── Decorator: read_file / write_file ──────────────────────────

@@ -719,10 +719,16 @@ class SSHSessionManager:
         command: str,
         timeout: int = 600,
         cancel_event: asyncio.Event | None = None,
+        stdin_data: bytes = b"",
     ):
         """Execute a command and yield (type, data) tuples for WebSocket streaming.
 
         If cancel_event is provided and set, closes the channel and stops streaming.
+        ``stdin_data``, if given, is written to the command's stdin before
+        shutting down the write side -- mirrors execute_argv()'s stdin
+        support so async job execution (which streams through this method)
+        can run a multi-line script piped via stdin instead of needing it
+        materialized as a file first.
         """
         async with self._lock:
             record = self._sessions.get(session_id)
@@ -748,6 +754,8 @@ class SSHSessionManager:
                 None,
                 lambda: client.exec_command(command),
             )
+            if stdin_data:
+                stdin.write(stdin_data)
             stdin.channel.shutdown_write()
 
             out_channel = stdout.channel

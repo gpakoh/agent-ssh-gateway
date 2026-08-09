@@ -130,8 +130,44 @@ class TestExecuteAsyncMode:
             command="sleep 60",
             owner_id=token_fingerprint("secret-42"),
             redact_path_prefix=None,
+            stdin=b"",
         )
         _app_state.manager.execute.assert_not_called()
+
+    def test_async_mode_stdin_reaches_create_job(self, monkeypatch):
+        """P0 audit fix: run_tests/run_pytest/run_mypy's read-only-workspace
+        fallback pipes a multi-line script via stdin instead of writing a
+        temp file (see gateway_client.execute_project_script_async). That
+        only works end-to-end if stdin actually reaches the background job
+        -- confirm it's UTF-8 encoded and forwarded to create_job()."""
+        monkeypatch.setattr(settings, "api_auth_enabled", True)
+        monkeypatch.setattr(settings, "api_key", "secret-42")
+        monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
+        monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
+
+        with TestClient(app) as client:
+            self._setup_state()
+            from app import state as _app_state
+
+            resp = client.post(
+                "/api/ssh/execute",
+                headers={"X-API-Key": "secret-42"},
+                json={
+                    "session_id": "s-1",
+                    "command": "sh",
+                    "async_mode": True,
+                    "stdin": "set -eu\necho hi\n",
+                },
+            )
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+        _app_state.job_manager.create_job.assert_awaited_once_with(
+            session_id="s-1",
+            command="sh",
+            owner_id=token_fingerprint("secret-42"),
+            redact_path_prefix=None,
+            stdin=b"set -eu\necho hi\n",
+        )
 
     # ------------------------------------------------------------------
     # Policy — still enforced before job creation
@@ -265,6 +301,7 @@ class TestExecuteAsyncMode:
                 command="docker compose build",
                 owner_id=token_fingerprint("secret-42"),
                 redact_path_prefix=None,
+                stdin=b"",
             )
             _app_state.manager.execute.assert_not_called()
             _app_state.job_manager.get_job_status.assert_awaited_once_with("mock-job-id")

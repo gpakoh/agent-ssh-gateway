@@ -61,6 +61,9 @@ class JobRecord:
     # from to_dict()'s allowlist, since it's consumed internally by
     # job_serializer.py, not returned to API callers itself.
     redact_path_prefix: str | None = None
+    # Data written to the command's stdin before shutdown_write (mirrors
+    # execute-argv's stdin). Never returned to API callers.
+    stdin: bytes = b""
 
     # Monotonic timestamps (relative to process start; do NOT survive restart)
     queued_at_mono: float | None = None
@@ -229,6 +232,7 @@ class JobManager:
         command: str,
         owner_id: str = "",
         redact_path_prefix: str | None = None,
+        stdin: bytes = b"",
     ) -> str:
         """Create a new background job."""
         async with self._lock:
@@ -242,6 +246,7 @@ class JobManager:
                 command=command,
                 owner_id=owner_id,
                 redact_path_prefix=redact_path_prefix,
+                stdin=stdin,
             )
             job.queued_at_mono = time.monotonic()
             self._jobs[job_id] = job
@@ -346,7 +351,10 @@ class JobManager:
         try:
             job.command_started_at_mono = time.monotonic()
             async for msg_type, msg_data in self._ssh_manager.execute_stream(
-                job.session_id, job.command, cancel_event=job.cancel_event
+                job.session_id,
+                job.command,
+                cancel_event=job.cancel_event,
+                stdin_data=job.stdin,
             ):
                 job.touch()
 
