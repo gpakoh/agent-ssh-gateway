@@ -324,3 +324,65 @@ class TestProjectRunAgentExecutionOrdering:
         assert "task.json" in calls[0]
         assert "current-plan.md" in calls[1]
         assert "--dangerously-skip-permissions" in calls[2]
+
+
+# ── project_run_agent: script cd's into the project root ────────────────────
+
+
+class TestProjectRunAgentScriptCwd:
+    """Regression: confirmed live via a real MCP run_agent call --
+    execute_argv (the sync dispatch path, via run_script=execute_project_script)
+    sets cwd server-side, so the generated script's relative $td references
+    happened to resolve correctly there, but execute_raw (the async dispatch
+    path, via run_script_async=execute_project_script_async) has no cwd
+    concept at all -- the script ran from the SSH session's own default
+    directory (its home dir), and every relative $td reference silently
+    resolved to the wrong place. A real async_submit=True run_agent call
+    failed with "current-plan.md not found" despite the file genuinely
+    existing at the right path. The script must cd into the absolute
+    project root itself, so it's correct regardless of which dispatch path
+    invoked it.
+    """
+
+    def test_generated_script_cds_into_project_root(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.workspace.registry.get_registry",
+            lambda: type("R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}})(),
+        )
+        calls: list[str] = []
+
+        def counting_run(project, command):
+            calls.append(command)
+            if "task.json" in command:
+                return {"exit_code": 0, "stdout": _make_task_json(), "stderr": ""}
+            if "current-plan.md" in command:
+                return {"exit_code": 0, "stdout": "# Plan", "stderr": ""}
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+        project_run_agent(counting_run, project="test", task_id=TASK_ID)
+        script = calls[2]
+        assert script.startswith("cd '/abs/project/root' || exit 1")
+
+    def test_no_cd_when_project_root_unresolvable(self, monkeypatch):
+        """Registry lookup failure must not crash the whole call -- just
+        skip the cd (matching the pre-fix, still-correct-for-sync behavior)."""
+        monkeypatch.setattr(
+            "app.workspace.registry.get_registry",
+            lambda: (_ for _ in ()).throw(RuntimeError("no registry")),
+        )
+        rc = _make_run_cmd(task_json=_make_task_json(), exit_code=0)
+        result = project_run_agent(rc, project="test", task_id=TASK_ID)
+        assert result["status"] == "needs-review"
+
+    def test_async_submit_script_also_cds_into_project_root(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.workspace.registry.get_registry",
+            lambda: type("R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}})(),
+        )
+        rc = _make_run_cmd(task_json=_make_task_json())
+        run_script_async = _make_run_script_async("job-cwd-1")
+        project_run_agent(
+            rc, project="test", task_id=TASK_ID, async_submit=True, run_script_async=run_script_async
+        )
+        submitted_script = run_script_async.call_args[0][1]
+        assert submitted_script.startswith("cd '/abs/project/root' || exit 1")

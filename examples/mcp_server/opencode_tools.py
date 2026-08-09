@@ -21,6 +21,7 @@ from examples.mcp_server.agent_tools import (
     _build_opencode_script,
     _now_iso,
     _read_current_plan,
+    _resolve_project_root,
 )
 
 
@@ -77,7 +78,8 @@ def project_run_opencode(
             "finished_at": _now_iso(),
         }
 
-    cmd = _build_opencode_script(td, task_id, model)
+    project_root = _resolve_project_root(project)
+    cmd = _build_opencode_script(td, task_id, model, project_root=project_root)
 
     if async_submit:
         if run_script_async is None:
@@ -108,15 +110,14 @@ def project_run_opencode(
 
     stdout = result.get("stdout", "")
     stderr = result.get("stderr", "")
-    try:
-        from app.workspace.registry import get_registry
-        from examples.mcp_server.mcp_client_tools import _redact_project_root
+    if project_root:
+        try:
+            from examples.mcp_server.mcp_client_tools import _redact_project_root
 
-        project_root = str(get_registry().project_info(project)["root"])
-        stdout = _redact_project_root(stdout, project_root)
-        stderr = _redact_project_root(stderr, project_root)
-    except Exception:
-        pass  # redaction failure must not hide a real result
+            stdout = _redact_project_root(stdout, project_root)
+            stderr = _redact_project_root(stderr, project_root)
+        except Exception:
+            pass  # redaction failure must not hide a real result
 
     return {
         "task_id": task_id,

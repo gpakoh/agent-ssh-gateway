@@ -35,6 +35,20 @@ def _shell_escape(text: str) -> str:
     return f"'{escaped}'"
 
 
+def _resolve_project_root(project: str) -> str | None:
+    """Resolve a project name to its absolute host root, or None if it
+    can't be resolved (unknown project, registry unavailable, etc.) --
+    callers must treat a None result as "skip this, don't fail the whole
+    call over it" (used for both the script's own `cd` and for redacting
+    the root out of returned stdout/stderr)."""
+    try:
+        from app.workspace.registry import get_registry
+
+        return str(get_registry().project_info(project)["root"])
+    except Exception:
+        return None
+
+
 def _read_task_json(
     run_cmd: Callable[[str, str], dict[str, Any]],
     project: str,
@@ -117,7 +131,9 @@ def _proxy_fetch_script_lines(provider_url: str, timeout: str) -> list[str]:
     ]
 
 
-def _build_opencode_script(td: str, task_id: str, model: str | None) -> str:
+def _build_opencode_script(
+    td: str, task_id: str, model: str | None, project_root: str | None = None
+) -> str:
     opencode_flags = "--dangerously-skip-permissions"
     if model:
         opencode_flags += f" --model {_shell_escape(model)}"
@@ -125,12 +141,26 @@ def _build_opencode_script(td: str, task_id: str, model: str | None) -> str:
     proxy_provider_url = os.environ.get("OPENCODE_PROXY_PROVIDER_URL", "").strip()
     proxy_timeout = os.environ.get("OPENCODE_PROXY_PROVIDER_TIMEOUT", "5").strip() or "5"
 
-    parts = [
+    parts = []
+    if project_root:
+        # `td` (below) is relative to the project root -- execute_argv's
+        # sync dispatch path sets cwd server-side, so this was previously
+        # a no-op there, but execute_raw's async dispatch path (used by
+        # run_script_async / async_submit=True) has no cwd concept at all:
+        # the script would otherwise run from the SSH session's own
+        # default directory (its home dir, not the project), and every
+        # relative $td reference below would silently resolve to the
+        # wrong place -- confirmed live via a real MCP run_agent call,
+        # which failed with "current-plan.md not found" despite the file
+        # genuinely existing at the right path. Make the script
+        # self-sufficient regardless of which dispatch path invoked it.
+        parts.append(f"cd {_shell_escape(project_root)} || exit 1")
+    parts.extend([
         f"td='{td}'",
         'mkdir -p "$td"',
         'echo "Status: running" > "$td/agent-status.md"',
         "OPCODE_BIN=$(command -v opencode 2>/dev/null || echo '/root/.opencode/bin/opencode')",
-    ]
+    ])
     if proxy_provider_url:
         parts.extend(_proxy_fetch_script_lines(proxy_provider_url, proxy_timeout))
     parts.extend([
@@ -291,7 +321,8 @@ def project_run_agent(
                 "started_at": started_at,
                 "finished_at": _now_iso(),
             }
-        cmd = _build_opencode_script(td, task_id, model)
+        project_root = _resolve_project_root(project)
+        cmd = _build_opencode_script(td, task_id, model, project_root=project_root)
     else:
         return {
             "task_id": task_id,
@@ -341,15 +372,14 @@ def project_run_agent(
 
     stdout = result.get("stdout", "")
     stderr = result.get("stderr", "")
-    try:
-        from app.workspace.registry import get_registry
-        from examples.mcp_server.mcp_client_tools import _redact_project_root
+    if project_root:
+        try:
+            from examples.mcp_server.mcp_client_tools import _redact_project_root
 
-        project_root = str(get_registry().project_info(project)["root"])
-        stdout = _redact_project_root(stdout, project_root)
-        stderr = _redact_project_root(stderr, project_root)
-    except Exception:
-        pass  # redaction failure must not hide a real result
+            stdout = _redact_project_root(stdout, project_root)
+            stderr = _redact_project_root(stderr, project_root)
+        except Exception:
+            pass  # redaction failure must not hide a real result
 
     return {
         "task_id": task_id,
