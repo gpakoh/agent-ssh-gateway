@@ -6,6 +6,24 @@ on:
   pull_request:
     branches: ["main", "master"]
 
+# MAJOR audit finding: this workflow's deploy job runs
+# scripts/deploy-from-registry.sh directly against the host's live
+# containers/DB migrations with no lock of its own -- two close-together
+# pushes to master could run deploy A and deploy B in parallel, both
+# recreating the same containers, both running `alembic upgrade head`,
+# both reading/writing the same rollback state, racing each other's
+# health checks. group scopes by ref, so PRs on different branches (and
+# master) never block each other; cancel-in-progress only for non-master
+# refs -- a PR's superseded run is safe to abandon mid-flight, but a
+# master push must never abort mid-deploy, so same-ref master runs queue
+# strictly one-at-a-time instead. DEPLOY_SHA (see the deploy job below)
+# stays as defense-in-depth for the narrower race this doesn't cover: a
+# manual re-run or workflow_dispatch replay landing between two ordinary
+# pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
 jobs:
   test:
     name: Python ${{ matrix.python-version }}
@@ -304,9 +322,13 @@ jobs:
         # DEPLOY_SHA pins deploy-from-registry.sh to the exact commit that
         # triggered this run (build-and-push already tagged images with
         # both :latest and :${{ github.sha }}) instead of letting it
-        # re-resolve :latest fresh at pull time -- closes a race where two
-        # close-together pushes to master (no `concurrency:` gate on this
-        # workflow) could interleave and deploy the wrong commit's image.
+        # re-resolve :latest fresh at pull time. The top-level
+        # `concurrency:` block now serializes master runs of this whole
+        # workflow (deploy jobs from two close-together pushes can no
+        # longer overlap at all) -- DEPLOY_SHA remains as defense-in-depth
+        # for the narrower case that gate doesn't cover: a manual re-run
+        # or workflow_dispatch replay resolving :latest to something
+        # other than the commit that started this specific run.
         env:
           DEPLOY_SHA: ${{ github.sha }}
         run: |
