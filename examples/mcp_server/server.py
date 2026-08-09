@@ -1375,7 +1375,12 @@ def gateway_repo_status(
     """Collect basic repository status using read-only commands.
 
     Args:
-        session_id: Optional existing session ID. A new one is created if omitted.
+        session_id: Optional existing session ID. No new session is ever
+            created here -- there's no host/credentials in this tool's
+            signature to connect with. When omitted, falls back to the
+            client's configured default session (GATEWAY_SESSION_ID); if
+            that isn't set either, the call fails with
+            "GATEWAY_SESSION_ID is required".
         project: Project subdirectory under MCP_GATEWAY_PROJECT_ROOT. Required when
             the SSH session working directory is not a git repository.
     """
