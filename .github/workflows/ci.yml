@@ -150,6 +150,51 @@ jobs:
           echo "::error::pip-audit failed after 3 attempts due to persistent network errors"
           exit 1
 
+  e2e:
+    # MAJOR audit finding: pytest -m "not host_smoke and not e2e" above
+    # deliberately excludes tests/test_webui_e2e.py's 4 Selenium/headless-
+    # Chromium browser tests -- e2e's own pyproject.toml marker docstring
+    # already says why ("the CI container may not ship Selenium/
+    # Chromium"), but nothing anywhere ever actually ran them; they were
+    # simply never executed by any CI path. Separate job (not a step
+    # added to `test`) so a browser/driver hiccup here can't block the
+    # fast unit-test signal, and its own pass/fail is clearly attributed.
+    # Runs on GitHub's own ubuntu-latest (not the self-hosted pool) --
+    # these tests boot their own uvicorn server and need no host-specific
+    # infra (nginx, real SSH host, /media paths) unlike host-smoke.yml's
+    # tests, only a browser. ubuntu-latest already ships Google Chrome,
+    # Chromium, and ChromeDriver preinstalled (no apt-get / third-party
+    # Action needed -- avoided guessing apt package names, which differ
+    # across Ubuntu releases and would make this step a silent CI
+    # breakage risk on the next runner-image bump). ChromeDriver's own
+    # location is only exposed via the $CHROMEWEBDRIVER env var, not
+    # necessarily PATH -- the test file does a plain shutil.which(
+    # "chromedriver") before ever touching Selenium, so it's added to
+    # PATH explicitly below.
+    name: E2E (Selenium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install package (frozen lockfile)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+          uv sync --frozen --extra dev
+
+      - name: Put preinstalled ChromeDriver on PATH
+        run: echo "$CHROMEWEBDRIVER" >> "$GITHUB_PATH"
+
+      - name: E2E tests
+        run: uv run pytest -m e2e -q
+
   build-and-push:
     # Only ever builds images from a commit that already passed every
     # other job, and only on a real push to master — never on a PR run.
