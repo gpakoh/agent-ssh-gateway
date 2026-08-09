@@ -1,7 +1,12 @@
 """Tests for OpenCode runner MCP tool — opencode_tools module.
 
-CRITICAL: project_run_opencode is hard-blocked.
---dangerously-skip-permissions is never allowed.
+project_run_opencode runs real --dangerously-skip-permissions execution --
+the earlier "C3" hard block was deliberately lifted so run_opencode can
+actually launch opencode, including async_submit=True for fleet mode.
+Still gated by write-mode (assert_handoff_write_allowed, checked by
+gateway_run_opencode) and by tool-mode registration (excluded from
+mcp_client/mcp_client_write's tool sets, see tool_modes.py) -- neither is
+exercised by this file.
 """
 
 from __future__ import annotations
@@ -17,79 +22,120 @@ MCP_DIR = str(Path(__file__).resolve().parents[1] / "examples" / "mcp_server")
 if MCP_DIR not in sys.path:
     sys.path.insert(0, MCP_DIR)
 
-from examples.mcp_server.opencode_tools import (  # noqa: E402
-    CommandPolicyError as OpenCodeCommandPolicyError,
-)
 from examples.mcp_server.opencode_tools import project_run_opencode  # noqa: E402
 
-CommandPolicyError = OpenCodeCommandPolicyError
+TASK_ID = "2026-06-25-fix-auth-opencode"
 
 
-def _fake_run_cmd(project: str, command: str) -> dict:
-    return {"stdout": "", "stderr": "", "exit_code": 0}
+def _fake_run_cmd(current_plan: str = "# Plan\n\n1. Do the thing") -> MagicMock:
+    def fn(project: str, command: str) -> dict:
+        if command.startswith("cat ") and "current-plan.md" in command:
+            return {"exit_code": 0, "stdout": current_plan, "stderr": ""}
+        return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+    return MagicMock(side_effect=fn)
 
 
-class TestProjectRunOpencodeBlocked:
-    """project_run_opencode is hard-blocked — --dangerously-skip-permissions not allowed."""
+class TestProjectRunOpencodeExecutes:
+    """project_run_opencode runs for real -- no confirmation flow, no
+    override, but also no block: write-mode + tool-mode registration are
+    the only gates, both enforced above this function."""
 
-    def test_raises_command_policy_error(self):
-        """Must raise CommandPolicyError, never execute."""
-        with pytest.raises(CommandPolicyError, match="blocked"):
-            project_run_opencode(
-                _fake_run_cmd,
-                project="test",
-                task_id="2026-06-25-fix-auth-opencode",
-            )
+    def test_runs_and_returns_result(self):
+        rc = _fake_run_cmd()
+        run_script = MagicMock(return_value={"exit_code": 0, "stdout": "ok", "stderr": ""})
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert result["status"] == "needs-review"
+        assert result["exit_code"] == 0
+        assert result["stdout"] == "ok"
+        run_script.assert_called_once()
 
-    def test_run_cmd_never_called(self):
-        """The run_cmd callable must NEVER be invoked."""
-        mock_run = MagicMock(return_value={"stdout": "", "stderr": "", "exit_code": 0})
+    def test_falls_back_to_run_cmd_when_no_run_script(self):
+        rc = _fake_run_cmd()
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID)
+        # rc's catch-all branch returns exit_code=0, empty stdout/stderr
+        assert result["status"] == "needs-review"
 
-        with pytest.raises(CommandPolicyError):
-            project_run_opencode(
-                mock_run,
-                project="test",
-                task_id="2026-06-25-fix-auth-opencode",
-            )
-        mock_run.assert_not_called()
+    def test_nonzero_exit_reports_failed(self):
+        rc = _fake_run_cmd()
+        run_script = MagicMock(return_value={"exit_code": 1, "stdout": "", "stderr": "boom"})
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert result["status"] == "failed"
+        assert result["exit_code"] == 1
 
-    def test_no_dangerously_skip_permissions_in_any_path(self):
-        """Even if someone catches the error, no command with the flag was built."""
-        with pytest.raises(CommandPolicyError, match="--dangerously-skip-permissions"):
-            project_run_opencode(
-                _fake_run_cmd,
-                project="test",
-                task_id="2026-06-25-fix-auth-opencode",
-            )
+    def test_no_current_plan_errors_before_execution(self):
+        rc = _fake_run_cmd(current_plan="")
+        run_script = MagicMock(return_value={"exit_code": 0, "stdout": "", "stderr": ""})
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert result["status"] == "error"
+        assert "current-plan.md" in result["error"]
+        run_script.assert_not_called()
 
-    def test_model_override_also_blocked(self):
-        """Even with a model override, the tool is blocked."""
-        with pytest.raises(CommandPolicyError, match="blocked"):
-            project_run_opencode(
-                _fake_run_cmd,
-                project="test",
-                task_id="2026-06-25-fix-auth-opencode",
-                model="gpt-4o",
-            )
+    def test_model_override_reaches_the_script(self):
+        rc = _fake_run_cmd()
+        captured: dict[str, str] = {}
 
-    def test_error_message_includes_safe_alternatives(self):
-        """Error message suggests safe alternatives."""
-        with pytest.raises(CommandPolicyError, match="run_pytest"):
-            project_run_opencode(
-                _fake_run_cmd,
-                project="test",
-                task_id="2026-06-25-fix-auth-opencode",
-            )
+        def run_script(project, script):
+            captured["script"] = script
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+        project_run_opencode(rc, project="test", task_id=TASK_ID, model="gpt-4o", run_script=run_script)
+        assert "--model 'gpt-4o'" in captured["script"]
+
+    def test_dangerously_skip_permissions_present_in_generated_script(self):
+        """This is the whole point of the tool -- opencode's own safety
+        confirmations must be disabled for unattended execution."""
+        rc = _fake_run_cmd()
+        captured: dict[str, str] = {}
+
+        def run_script(project, script):
+            captured["script"] = script
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+        project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert "--dangerously-skip-permissions" in captured["script"]
 
 
-class TestServerWrapperBlocked:
-    """Server.py run_tool() wrapper catches CommandPolicyError → error response."""
+class TestProjectRunOpencodeAsyncSubmit:
+    def test_returns_job_id_immediately(self):
+        rc = _fake_run_cmd()
+        run_script_async = MagicMock(return_value={"job_id": "job-77"})
+        result = project_run_opencode(
+            rc, project="test", task_id=TASK_ID, async_submit=True, run_script_async=run_script_async
+        )
+        assert result["status"] == "running"
+        assert result["job_id"] == "job-77"
+        assert result["exit_code"] is None
+        run_script_async.assert_called_once()
+
+    def test_missing_run_script_async_errors(self):
+        rc = _fake_run_cmd()
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID, async_submit=True)
+        assert result["status"] == "error"
+        assert "async_submit" in result["error"]
+
+    def test_no_current_plan_skips_submit(self):
+        rc = _fake_run_cmd(current_plan="")
+        run_script_async = MagicMock(return_value={"job_id": "job-1"})
+        result = project_run_opencode(
+            rc, project="test", task_id=TASK_ID, async_submit=True, run_script_async=run_script_async
+        )
+        assert result["status"] == "error"
+        run_script_async.assert_not_called()
+
+
+class TestServerWrapperWired:
+    """Server.py's gateway_run_opencode wraps project_run_opencode with the
+    real client -- verify the wiring (write-mode gate passes, client
+    methods get called with the right shape) end to end through a fresh
+    server.py reimport, without a live SSH session.
+    """
 
     @pytest.mark.skipif(
         not importlib.util.find_spec("mcp"),
         reason="mcp package not installed",
     )
-    def test_server_wrapper_returns_error_response(self, monkeypatch):
+    def test_server_wrapper_executes_via_client(self, monkeypatch):
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
         monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
         monkeypatch.setenv("GITEA_TOKEN", "test-token")
@@ -114,11 +160,16 @@ class TestServerWrapperBlocked:
             tool_fn = getattr(server, "gateway_run_opencode", None)
             assert tool_fn is not None
 
-            result = tool_fn(project="test", task_id="2026-06-25-fix-auth-opencode")
-            # run_tool catches CommandPolicyError → canonical error envelope
-            assert result.get("ok") is False
-            err_msg = result.get("error", {}).get("message", "")
-            assert "blocked" in err_msg.lower()
+            server.client.execute_project_command = MagicMock(
+                return_value={"exit_code": 0, "stdout": "# Plan", "stderr": ""}
+            )
+            server.client.execute_project_script = MagicMock(
+                return_value={"exit_code": 0, "stdout": "done", "stderr": ""}
+            )
+
+            result = tool_fn(project="test", task_id=TASK_ID)
+            assert result.get("ok") is True
+            server.client.execute_project_script.assert_called_once()
         finally:
             for name in [
                 n

@@ -1,8 +1,13 @@
 """OpenCode runner MCP tool — execute handoff tasks via OpenCode CLI.
 
-HARD BLOCKED: --dangerously-skip-permissions is not allowed.
-This tool is disabled — no confirmation flow, no override.
-Use project_run_pytest or project_run_ruff for safe command execution.
+Thin wrapper around agent_tools.py's opencode script-building logic (the
+single, dedicated entrypoint -- not routed through the agent backend
+router's cooldown/fallback selection like run_agent). Runs with
+--dangerously-skip-permissions -- opencode's own internal safety
+confirmations are disabled for unattended execution. Gated by write-mode
+(assert_handoff_write_allowed, checked by gateway_run_opencode before
+calling into this module) and by tool-mode registration (excluded from
+mcp_client/mcp_client_write's tool sets -- see tool_modes.py).
 """
 
 from __future__ import annotations
@@ -10,7 +15,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from command_policy import CommandPolicyError
+from examples.mcp_server.agent_tasks import validate_task_id
+from examples.mcp_server.agent_tools import (
+    TASKS_REL_DIR,
+    _build_opencode_script,
+    _now_iso,
+    _read_current_plan,
+)
 
 
 def project_run_opencode(
@@ -19,38 +30,104 @@ def project_run_opencode(
     project: str,
     task_id: str,
     model: str | None = None,
+    run_script: Callable[[str, str], dict[str, Any]] | None = None,
+    run_script_async: Callable[[str, str], dict[str, Any]] | None = None,
+    async_submit: bool = False,
 ) -> dict[str, Any]:
     """Execute an existing handoff task via OpenCode CLI on the SSH target.
 
-    BLOCKED: --dangerously-skip-permissions is not allowed.
-    This tool is hard-blocked — no confirmation flow, no override.
-
     Args:
-        run_cmd: callable(project, command) that executes a shell command
+        run_cmd: callable(project, command) that executes a single shell
+            command -- used only to read current-plan.md, never for the
+            multi-line opencode script itself (that needs run_script:
+            run_cmd's underlying execute-argv path shlex.splits its
+            command string, which mangles a multi-line script's own
+            syntax -- if/then/fi, heredocs -- into broken argv).
         project: project name under MCP_GATEWAY_PROJECT_ROOT
         task_id: validated .ai-bridge task ID (must exist in tasks/)
         model: optional model override (e.g., "gpt-4o")
+        run_script: callable(project, script) for multi-line bash scripts,
+            required for the synchronous (async_submit=False) path
+        run_script_async: callable(project, script) -> {"job_id": ...},
+            submits without waiting -- required when async_submit=True
+        async_submit: submit and return a job_id immediately instead of
+            waiting for the full run (fleet mode: launch several agents
+            without blocking, poll each job_id independently)
 
     Returns:
         dict with keys: task_id, status, exit_code, stdout, stderr,
-        started_at, finished_at
+        started_at, finished_at (async: status="running", job_id set,
+        exit_code/stdout/stderr/finished_at are None/empty until polled)
     """
-    # Emit audit event at raise site for traceability
+    validate_task_id(task_id)
+
+    started_at = _now_iso()
+    td = f"{TASKS_REL_DIR}/{task_id}"
+
+    plan = _read_current_plan(run_cmd, project, task_id)
+    if not plan:
+        return {
+            "task_id": task_id,
+            "status": "error",
+            "error": "current-plan.md not found — write task plan first",
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "started_at": started_at,
+            "finished_at": _now_iso(),
+        }
+
+    cmd = _build_opencode_script(td, task_id, model)
+
+    if async_submit:
+        if run_script_async is None:
+            return {
+                "task_id": task_id,
+                "status": "error",
+                "error": "async_submit=True requires an async submit callable",
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "started_at": started_at,
+                "finished_at": None,
+            }
+        submitted = run_script_async(project, cmd)
+        return {
+            "task_id": task_id,
+            "status": "running",
+            "job_id": submitted.get("job_id"),
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "started_at": started_at,
+            "finished_at": None,
+        }
+
+    result = (run_script or run_cmd)(project, cmd)
+    exit_code = result.get("exit_code")
+
+    stdout = result.get("stdout", "")
+    stderr = result.get("stderr", "")
     try:
-        from examples.mcp_server.mcp_audit import McpAuditEvent, get_audit_logger
+        from app.workspace.registry import get_registry
+        from examples.mcp_server.mcp_client_tools import _redact_project_root
 
-        get_audit_logger().append(McpAuditEvent(
-            event_type="mcp.tool_blocked",
-            tool="run_opencode",
-            action="execute_task",
-            decision="block",
-            reason="--dangerously-skip-permissions is not allowed",
-            error_code="OPENCODE_BLOCKED",
-        ))
+        project_root = str(get_registry().project_info(project)["root"])
+        stdout = _redact_project_root(stdout, project_root)
+        stderr = _redact_project_root(stderr, project_root)
     except Exception:
-        pass  # audit failure must not change tool behavior
+        pass  # redaction failure must not hide a real result
 
-    raise CommandPolicyError(
-        "run_opencode is blocked: --dangerously-skip-permissions is not allowed. "
-        "Use run_pytest or run_ruff for safe command execution."
-    )
+    return {
+        "task_id": task_id,
+        "status": "needs-review"
+        if exit_code == 0
+        else "failed"
+        if exit_code is not None
+        else "error",
+        "exit_code": exit_code,
+        "stdout": stdout,
+        "stderr": stderr,
+        "started_at": started_at,
+        "finished_at": _now_iso(),
+    }

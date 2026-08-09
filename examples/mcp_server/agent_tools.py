@@ -2,16 +2,26 @@
 
 The router selects the backend based on availability and cooldown state.
 When disabled, falls back to the task.json ``agent`` field.
+
+Runs opencode with --dangerously-skip-permissions -- opencode's own
+internal safety confirmations are disabled for unattended execution.
+Gated by write-mode (assert_handoff_write_allowed, checked by the
+gateway_run_agent/gateway_run_opencode MCP tool wrappers before calling
+into this module) and by tool-mode registration (run_agent/run_opencode
+are excluded from mcp_client/mcp_client_write's tool sets -- see
+tool_modes.py) -- there is no confirmation flow or override *within*
+this module itself.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from command_policy import CommandPolicyError
+from command_policy import CommandPolicyError  # noqa: F401 -- re-exported for tests
 
 TASKS_REL_DIR = ".ai-bridge/tasks"
 
@@ -53,16 +63,77 @@ def _read_current_plan(
     return result.get("stdout", "").strip() or None
 
 
+def _proxy_fetch_script_lines(provider_url: str, timeout: str) -> list[str]:
+    """Bash lines that fetch a live proxy from OPENCODE_PROXY_PROVIDER_URL
+    at *script execution time* on the SSH target (not at script-build time
+    in this process) and export it for the opencode subprocess.
+
+    Mirrors quart-platform/opencode-adapter's ProxySource._fetch_from_provider
+    response-shape precedence exactly: {"proxy"|"https_proxy"|"url": "..."},
+    then {"proxies": [...]}/a bare JSON array (first entry), then a bare
+    text body. Empty/unreachable provider -> no proxy, opencode runs direct
+    (same fail-open-to-no-proxy behavior as the adapter's static-pool
+    fallback, just without a static pool here -- this is a single agent
+    run, not a long-lived multi-instance service).
+    """
+    return [
+        "",
+        "# Fetch a live proxy from the provider container (OPENCODE_PROXY_PROVIDER_URL)",
+        f"OPENCODE_PROXY_URL=$(python3 - {_shell_escape(provider_url)} {_shell_escape(timeout)} <<'PROXYFETCH_EOF'",
+        "import json, sys, urllib.request",
+        "",
+        "url, timeout = sys.argv[1], float(sys.argv[2])",
+        "try:",
+        "    raw = urllib.request.urlopen(url, timeout=timeout).read().decode('utf-8', 'replace').strip()",
+        "except Exception:",
+        "    sys.exit(0)",
+        "try:",
+        "    data = json.loads(raw)",
+        "except ValueError:",
+        "    if raw:",
+        "        print(raw)",
+        "    sys.exit(0)",
+        "if isinstance(data, dict):",
+        "    for key in ('proxy', 'https_proxy', 'url'):",
+        "        value = data.get(key)",
+        "        if isinstance(value, str) and value.strip():",
+        "            print(value.strip())",
+        "            sys.exit(0)",
+        "    proxies = data.get('proxies')",
+        "    if isinstance(proxies, list) and proxies:",
+        "        print(str(proxies[0]).strip())",
+        "        sys.exit(0)",
+        "elif isinstance(data, list) and data:",
+        "    print(str(data[0]).strip())",
+        "PROXYFETCH_EOF",
+        ")",
+        'if [ -n "$OPENCODE_PROXY_URL" ]; then',
+        '  export HTTP_PROXY="$OPENCODE_PROXY_URL" HTTPS_PROXY="$OPENCODE_PROXY_URL"',
+        '  export http_proxy="$OPENCODE_PROXY_URL" https_proxy="$OPENCODE_PROXY_URL"',
+        '  export NO_PROXY="localhost,127.0.0.1" no_proxy="localhost,127.0.0.1"',
+        '  echo "Using live proxy: $OPENCODE_PROXY_URL" >> "$td/agent-status.md"',
+        "fi",
+        "",
+    ]
+
+
 def _build_opencode_script(td: str, task_id: str, model: str | None) -> str:
     opencode_flags = "--dangerously-skip-permissions"
     if model:
         opencode_flags += f" --model {_shell_escape(model)}"
+
+    proxy_provider_url = os.environ.get("OPENCODE_PROXY_PROVIDER_URL", "").strip()
+    proxy_timeout = os.environ.get("OPENCODE_PROXY_PROVIDER_TIMEOUT", "5").strip() or "5"
 
     parts = [
         f"td='{td}'",
         'mkdir -p "$td"',
         'echo "Status: running" > "$td/agent-status.md"',
         "OPCODE_BIN=$(command -v opencode 2>/dev/null || echo '/root/.opencode/bin/opencode')",
+    ]
+    if proxy_provider_url:
+        parts.extend(_proxy_fetch_script_lines(proxy_provider_url, proxy_timeout))
+    parts.extend([
         'if [ -f "$td/current-plan.md" ]; then',
         f'  $OPCODE_BIN run {opencode_flags} "Read the plan at $td/current-plan.md and execute it fully. Save the implementation diff to $td/implementation-diff.patch. Update $td/agent-status.md as you complete each step. Do not commit, do not push, do not create branches."',
         "  RC=$?",
@@ -71,7 +142,7 @@ def _build_opencode_script(td: str, task_id: str, model: str | None) -> str:
         "  RC=1",
         "fi",
         'git diff --no-color > "$td/implementation-diff.patch" 2>/dev/null',
-    ]
+    ])
     parts.extend(
         [
             "if [ $RC -eq 0 ]; then",
@@ -102,6 +173,8 @@ def project_run_agent(
     model: str | None = None,
     router: Any | None = None,
     run_script: Callable[[str, str], dict[str, Any]] | None = None,
+    run_script_async: Callable[[str, str], dict[str, Any]] | None = None,
+    async_submit: bool = False,
 ) -> dict[str, Any]:
     """Execute a handoff task via the agent backend router.
 
@@ -116,10 +189,23 @@ def project_run_agent(
         model: optional model override
         router: optional ``AgentBackendRouter`` instance
         run_script: callable(project, script) for multi-line bash scripts
+        run_script_async: callable(project, script) -> {"job_id": ...},
+            submits without waiting -- required when async_submit=True.
+            Fleet mode: call run_agent repeatedly with async_submit=True to
+            launch several agents without blocking on each one, then poll
+            each job_id independently via job_status/job_result/job_wait.
+            The router's cooldown tracking (record_result) is NOT fed by
+            async-submitted jobs -- there is no completion callback into
+            this process once a job is handed off, so an async run's
+            eventual failure/rate-limit never reaches the router. Only the
+            synchronous path (async_submit=False) updates cooldown state.
+        async_submit: submit and return a job_id immediately instead of
+            waiting for the full run.
 
     Returns:
         dict with keys: task_id, status, exit_code, stdout, stderr,
-        started_at, finished_at
+        started_at, finished_at (async: status="running", job_id set,
+        exit_code/stdout/stderr/finished_at are None/empty until polled)
     """
     from examples.mcp_server.agent_tasks import validate_task_id
 
@@ -180,28 +266,6 @@ def project_run_agent(
             "finished_at": _now_iso(),
         }
 
-    if selected == "opencode":
-        # Emit audit event at raise site for traceability
-        try:
-            from examples.mcp_server.mcp_audit import McpAuditEvent, get_audit_logger
-
-            get_audit_logger().append(McpAuditEvent(
-                event_type="mcp.tool_blocked",
-                tool="run_agent",
-                action="select_backend",
-                decision="block",
-                reason=f"{selected} agent backend is not allowed",
-                error_code="AGENT_BACKEND_BLOCKED",
-                metadata={"command_root": selected},
-            ))
-        except Exception:
-            pass  # audit failure must not change tool behavior
-
-        raise CommandPolicyError(
-            f"run_agent is blocked: {selected} agent backend is not allowed. "
-            "Use the dedicated run_opencode tool instead."
-        )
-
     if selected not in allowed:
         return {
             "task_id": task_id,
@@ -240,6 +304,30 @@ def project_run_agent(
             "finished_at": _now_iso(),
         }
 
+    if async_submit:
+        if run_script_async is None:
+            return {
+                "task_id": task_id,
+                "status": "error",
+                "error": "async_submit=True requires an async submit callable",
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "started_at": started_at,
+                "finished_at": None,
+            }
+        submitted = run_script_async(project, cmd)
+        return {
+            "task_id": task_id,
+            "status": "running",
+            "job_id": submitted.get("job_id"),
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "started_at": started_at,
+            "finished_at": None,
+        }
+
     result = (run_script or run_cmd)(project, cmd)
     exit_code = result.get("exit_code")
 
@@ -251,6 +339,18 @@ def project_run_agent(
             stderr=result.get("stderr", ""),
         )
 
+    stdout = result.get("stdout", "")
+    stderr = result.get("stderr", "")
+    try:
+        from app.workspace.registry import get_registry
+        from examples.mcp_server.mcp_client_tools import _redact_project_root
+
+        project_root = str(get_registry().project_info(project)["root"])
+        stdout = _redact_project_root(stdout, project_root)
+        stderr = _redact_project_root(stderr, project_root)
+    except Exception:
+        pass  # redaction failure must not hide a real result
+
     return {
         "task_id": task_id,
         "status": "needs-review"
@@ -259,8 +359,8 @@ def project_run_agent(
         if exit_code is not None
         else "error",
         "exit_code": exit_code,
-        "stdout": result.get("stdout", ""),
-        "stderr": result.get("stderr", ""),
+        "stdout": stdout,
+        "stderr": stderr,
         "started_at": started_at,
         "finished_at": _now_iso(),
     }

@@ -286,67 +286,20 @@ class TestConfirmOperation:
 
 
 # ---------------------------------------------------------------------------
-# Tests: opencode_tools — hard block at raise site
-# (local import means we patch mcp_audit.get_audit_logger directly)
+# Tests: opencode_tools / agent_tools — no longer hard-blocked
+#
+# project_run_opencode / project_run_agent's opencode dispatch used to
+# raise CommandPolicyError (and emit a tool_blocked audit event) at the
+# raise site unconditionally -- that "C3" hard block was deliberately
+# lifted so run_agent/run_opencode can actually launch opencode
+# (--dangerously-skip-permissions), including async_submit=True for
+# fleet mode. See tests/test_mcp_opencode.py and tests/test_mcp_agent_tool.py
+# for coverage of the real execution/async-submit/redaction behavior.
+# TestRunToolOpenCodeBlocked/TestRunToolAgentBackendBlocked above still
+# cover run_tool()'s OPENCODE_BLOCKED/AGENT_BACKEND_BLOCKED classifier in
+# isolation (against a manually constructed error) -- that classification
+# logic itself wasn't removed, only its two former call sites.
 # ---------------------------------------------------------------------------
-
-class TestOpenCodeToolsAudit:
-    def test_emits_audit_at_raise_site(self) -> None:
-        from examples.mcp_server.opencode_tools import project_run_opencode
-
-        mock_logger = _make_mock_logger()
-
-        with patch("examples.mcp_server.mcp_audit.get_audit_logger", return_value=mock_logger):
-            with pytest.raises(CommandPolicyError, match="blocked"):
-                project_run_opencode(
-                    run_cmd=lambda p, c: {},
-                    project="test",
-                    task_id="task-1",
-                )
-
-        mock_logger.append.assert_called_once()
-        event = mock_logger.append.call_args[0][0]
-        assert event.event_type == "mcp.tool_blocked"
-        assert event.tool == "run_opencode"
-        assert event.error_code == "OPENCODE_BLOCKED"
-
-
-# ---------------------------------------------------------------------------
-# Tests: agent_tools — opencode backend block at raise site
-# ---------------------------------------------------------------------------
-
-class TestAgentToolsAudit:
-    def test_emits_audit_for_opencode_backend(self) -> None:
-        import json
-
-        from examples.mcp_server.agent_tools import project_run_agent
-
-        mock_logger = _make_mock_logger()
-
-        # task.json must contain agent=auto and allowed_backends with opencode
-        task_json = json.dumps({
-            "agent": "auto",
-            "allowed_backends": ["opencode"],
-        })
-        def _fake_run(project: str, command: str) -> dict[str, Any]:
-            if "cat " in command and "task.json" in command:
-                return {"stdout": task_json, "stderr": "", "exit_code": 0}
-            return {"stdout": "", "stderr": "", "exit_code": 0}
-
-        with patch("examples.mcp_server.mcp_audit.get_audit_logger", return_value=mock_logger):
-            with pytest.raises(CommandPolicyError, match="blocked"):
-                project_run_agent(
-                    run_cmd=_fake_run,
-                    project="test",
-                    task_id="2026-07-19-test-task-01",
-                )
-
-        mock_logger.append.assert_called_once()
-        event = mock_logger.append.call_args[0][0]
-        assert event.event_type == "mcp.tool_blocked"
-        assert event.tool == "run_agent"
-        assert event.error_code == "AGENT_BACKEND_BLOCKED"
-
 
 # ---------------------------------------------------------------------------
 # Tests: No forbidden content in metadata

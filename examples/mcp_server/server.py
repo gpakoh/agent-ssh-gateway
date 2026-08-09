@@ -3534,9 +3534,15 @@ def gateway_run_opencode(
     project: str,
     task_id: str,
     model: str | None = None,
+    async_submit: bool = False,
 ) -> dict[str, Any]:
-    """Execute an existing handoff task via agent CLI.
-    Requires write mode handoff or full."""
+    """Execute an existing handoff task via OpenCode CLI (--dangerously-skip-permissions).
+    Requires write mode handoff or full.
+
+    async_submit=True returns a job_id immediately instead of waiting for
+    the full run -- poll with job_status/job_result/job_wait. Fleet mode:
+    call this repeatedly with async_submit=True to launch several agents
+    without blocking on each one."""
     from write_modes import assert_handoff_write_allowed
 
     assert_handoff_write_allowed()
@@ -3548,6 +3554,9 @@ def gateway_run_opencode(
             project=project,
             task_id=task_id,
             model=model,
+            run_script=lambda p, s: client.execute_project_script(p, s),
+            run_script_async=lambda p, s: client.execute_project_script_async(p, s),
+            async_submit=async_submit,
         ),
         success_text="Submitted opencode task.",
     )
@@ -3558,10 +3567,19 @@ def gateway_run_agent(
     project: str,
     task_id: str,
     model: str | None = None,
+    async_submit: bool = False,
 ) -> dict[str, Any]:
-    """Execute a handoff task via the agent backend router — selects OpenCode.
+    """Execute a handoff task via the agent backend router — selects OpenCode
+    (--dangerously-skip-permissions).
     Requires write mode handoff or full. Router enabled by MCP_AGENT_BACKEND_ROUTER_ENABLED.
-    Task must have task.json with agent='auto' or agent='opencode'."""
+    Task must have task.json with agent='auto' or agent='opencode'.
+
+    async_submit=True returns a job_id immediately instead of waiting for
+    the full run -- poll with job_status/job_result/job_wait. Fleet mode:
+    call this repeatedly with async_submit=True to launch several agents
+    without blocking on each one; the router's cooldown tracking is not
+    fed by async-submitted jobs (no completion callback into this
+    process), only by synchronous (async_submit=False) runs."""
     from write_modes import assert_handoff_write_allowed
 
     assert_handoff_write_allowed()
@@ -3575,6 +3593,8 @@ def gateway_run_agent(
             model=model,
             router=_agent_router,
             run_script=lambda p, s: client.execute_project_script(p, s),
+            run_script_async=lambda p, s: client.execute_project_script_async(p, s),
+            async_submit=async_submit,
         ),
         success_text="Submitted agent task via router.",
     )
