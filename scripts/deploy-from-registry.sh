@@ -36,14 +36,15 @@ MCP_REPO="${MCP_SERVER_REPO:?set MCP_SERVER_REPO in docker/.env}"
 # CI's deploy job passes DEPLOY_SHA=${{ github.sha }}, the exact commit
 # that passed every other job and triggered this deploy -- build-and-push
 # already tags images with both :latest and :$DEPLOY_SHA. Deploying the
-# SHA tag instead of resolving :latest's digest at pull time closes a
-# real race: two pushes to master close together (no `concurrency:` gate
-# on this workflow) can interleave their build-and-push/deploy jobs, so
-# `docker compose pull` + a fresh `docker inspect ...:latest` moments
-# later could observe a DIFFERENT, newer push's image than the one that
-# actually triggered this run -- silently deploying the wrong commit
-# without either deploy run failing or even noticing. :latest is kept as
-# the fallback for manual/local invocation, where no DEPLOY_SHA exists.
+# SHA tag instead of resolving :latest's digest at pull time is
+# defense-in-depth alongside ci.yml's own top-level `concurrency:` block
+# (which now serializes master runs of the whole workflow): without
+# DEPLOY_TAG, `docker compose pull` + a fresh `docker inspect ...:latest`
+# moments later could still observe a different image than the one that
+# triggered this specific run (e.g. a manual re-run/workflow_dispatch
+# replay) -- silently deploying the wrong commit without either deploy
+# run failing or even noticing. :latest is kept as the fallback for
+# manual/local invocation, where no DEPLOY_SHA exists.
 DEPLOY_TAG="${DEPLOY_SHA:-latest}"
 STATE_DIR="$ROOT/.state"
 STATE_FILE="$STATE_DIR/web-ssh-gateway-deploy.json"
@@ -166,6 +167,14 @@ run_migrations() {
   docker exec web-ssh-gateway alembic upgrade head
 }
 
+alembic_revision() {
+  # Last non-INFO line of `alembic current`'s output is the revision id
+  # (e.g. "003_webhook_delivery_headers (head)"), or empty on a container
+  # that doesn't exist / can't reach the DB -- callers treat empty as
+  # "unknown", not as "unchanged".
+  docker exec "$1" alembic current 2>&1 | tail -1 || true
+}
+
 log "=== deploy-from-registry: checking for a new image (tag: $DEPLOY_TAG) ==="
 
 # Pull the exact tag we're about to check/deploy directly -- not via
@@ -193,6 +202,18 @@ PREVIOUS_MCP_IMAGE=$(read_state_field mcp_server_image)
 NEW_GATEWAY_IMAGE=$(repo_digest "$GATEWAY_REPO:$DEPLOY_TAG")
 NEW_MCP_IMAGE=$(repo_digest "$MCP_REPO:$DEPLOY_TAG")
 
+# MAJOR audit finding: rollback below reverts the application images but
+# has never reverted the DB schema -- Alembic has no downgrade step here,
+# and a real auto-downgrade is its own hazard (data loss on a migration
+# that dropped/renamed a column). The correct discipline is that
+# migrations themselves stay backward-compatible with the previous app
+# version for at least one release (expand/contract), which no script
+# can enforce after the fact. What this script CAN do honestly: notice
+# whether a migration actually advanced the schema before a rollback, and
+# say so plainly instead of printing an unqualified "Rollback OK" that
+# implies full reversion when only the application was reverted.
+PRE_DEPLOY_REVISION=$(alembic_revision web-ssh-gateway)
+
 log "New image detected — deploying $NEW_GATEWAY_IMAGE / $NEW_MCP_IMAGE"
 deploy_services "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE"
 
@@ -207,6 +228,8 @@ else
   log "Smoke test FAILED."
 fi
 
+POST_MIGRATION_REVISION=$(alembic_revision web-ssh-gateway)
+
 if [ -z "$PREVIOUS_GATEWAY_IMAGE" ]; then
   log "No previous known-good image recorded (first deploy) — cannot roll back. Leaving the failed deploy in place for manual investigation."
   exit 1
@@ -220,8 +243,17 @@ fi
 log "Rolling back to $PREVIOUS_GATEWAY_IMAGE / $PREVIOUS_MCP_IMAGE"
 deploy_services "$PREVIOUS_GATEWAY_IMAGE" "$PREVIOUS_MCP_IMAGE"
 
+SCHEMA_ADVANCED=false
+if [ -n "$PRE_DEPLOY_REVISION" ] && [ -n "$POST_MIGRATION_REVISION" ] && [ "$PRE_DEPLOY_REVISION" != "$POST_MIGRATION_REVISION" ]; then
+  SCHEMA_ADVANCED=true
+fi
+
 if smoke; then
-  log "Rollback OK — $NEW_GATEWAY_IMAGE failed smoke, reverted to $PREVIOUS_GATEWAY_IMAGE."
+  if [ "$SCHEMA_ADVANCED" = "true" ]; then
+    log "Rollback PARTIAL — application reverted to $PREVIOUS_GATEWAY_IMAGE and passed smoke, but the DB schema was NOT reverted: still at '$POST_MIGRATION_REVISION' (was '$PRE_DEPLOY_REVISION' before this deploy). The rolled-back application is now running against a newer schema than it shipped with -- verify compatibility manually; downgrading the schema automatically is not attempted here (real data-loss risk on some migrations)."
+  else
+    log "Rollback OK — $NEW_GATEWAY_IMAGE failed smoke, reverted to $PREVIOUS_GATEWAY_IMAGE. No schema change to reconcile (migrations were a no-op or never ran)."
+  fi
 else
   log "Rollback ALSO failed smoke — manual investigation required."
 fi
