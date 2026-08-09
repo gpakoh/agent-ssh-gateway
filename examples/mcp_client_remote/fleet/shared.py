@@ -255,7 +255,8 @@ def remote_api_error(tool: str, source: str, exc: Exception) -> dict[str, Any]:
     GiteaClient/GitHubClient exception vocabulary (ValueError for bad
     input, PermissionError for 401/403, httpx.HTTPStatusError for any
     other non-2xx e.g. a 404 on a typo'd repo/issue number -- none of
-    which are retryable, unlike a real transport failure). RuntimeError
+    which are retryable, unlike a real transport failure, now handled
+    below instead of merely called out in this docstring). RuntimeError
     additionally covers this module's own _get_client() raising when a
     required token env var is missing. Not used for DockerClient, whose
     RuntimeError means a command actually failed, not a missing dependency.
@@ -266,6 +267,8 @@ def remote_api_error(tool: str, source: str, exc: Exception) -> dict[str, Any]:
         return tool_error(tool, "AUTH_ERROR", str(exc), source=source)
     if isinstance(exc, httpx.HTTPStatusError):
         return tool_error(tool, "REMOTE_API_ERROR", str(exc), source=source)
+    if isinstance(exc, httpx.TransportError):
+        return tool_error(tool, "REMOTE_UNAVAILABLE", str(exc), retryable=True, source=source)
     if isinstance(exc, RuntimeError):
         return tool_error(tool, "DEPENDENCY_MISSING", str(exc), source=source)
     return tool_error(tool, "INTERNAL_ERROR", str(exc), source=source)

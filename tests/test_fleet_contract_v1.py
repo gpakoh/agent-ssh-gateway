@@ -213,6 +213,30 @@ async def test_gitea_repo_not_found_is_remote_api_error_not_retryable(
 
 
 @pytest.mark.asyncio
+async def test_gitea_connection_failure_is_remote_unavailable_and_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P2 audit finding: remote_api_error()'s own docstring already called
+    out "unlike a real transport failure" as a distinct, retryable case,
+    but never actually implemented it -- httpx.TransportError (Gitea/
+    GitHub briefly unreachable, DNS failure, connection refused) fell
+    through to the generic INTERNAL_ERROR/retryable=False branch, same as
+    an actual internal defect.
+    """
+    import fleet.gitea_server as server
+    import httpx
+
+    unreachable = httpx.ConnectError("All connection attempts failed")
+    monkeypatch.setattr(server, "_get_client", lambda: _AsyncClient(repo=unreachable))
+
+    result = await server.gitea_get_repo("alice", "repo")
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "REMOTE_UNAVAILABLE"
+    assert result["error"]["retryable"] is True
+
+
+@pytest.mark.asyncio
 async def test_docker_ps_command_failure_is_docker_command_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1795,10 +1795,19 @@ def _remote_api_error(tool: str, source: str, exc: Exception) -> dict[str, Any]:
     """Map a GiteaClient/GitHubClient exception to a Contract v1 error.
 
     Both clients raise ValueError (bad endpoint/owner/repo/path input),
-    PermissionError (401/403 from the remote API), or httpx.HTTPStatusError
-    (any other non-2xx, e.g. 404 for a typo'd repo/issue number) -- see
+    PermissionError (401/403 from the remote API), httpx.HTTPStatusError
+    (any other non-2xx, e.g. 404 for a typo'd repo/issue number), or
+    httpx.TransportError (connect/read/write timeout, DNS failure,
+    connection refused -- no HTTP response was ever received) -- see
     gitea_client.py/github_client.py's _get(). Their messages are already
     scrubbed of the resolved base URL by those clients.
+
+    httpx.TransportError used to fall through to the generic
+    INTERNAL_ERROR/retryable=False branch below -- P2 audit finding: a
+    transient network problem (Gitea/GitHub briefly unreachable) looked
+    identical to an internal program defect, and retryable=False told a
+    calling agent not to bother retrying a condition that was, in fact,
+    exactly the kind of thing a retry fixes.
     """
     if isinstance(exc, ValueError):
         return tool_error(tool=tool, code="INVALID_INPUT", message=str(exc), source=source)
@@ -1810,6 +1819,15 @@ def _remote_api_error(tool: str, source: str, exc: Exception) -> dict[str, Any]:
             code="REMOTE_API_ERROR",
             message=str(exc),
             hint="Check that owner/repo/number exist and the token has access.",
+            source=source,
+        )
+    if isinstance(exc, httpx.TransportError):
+        return tool_error(
+            tool=tool,
+            code="REMOTE_UNAVAILABLE",
+            message=str(exc),
+            retryable=True,
+            hint="The remote API host did not respond -- transient network issue, retry later.",
             source=source,
         )
     return tool_error(tool=tool, code="INTERNAL_ERROR", message=str(exc), source=source)
