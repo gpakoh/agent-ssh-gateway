@@ -219,6 +219,47 @@ class TestDeployRunsAlembicMigrations:
         assert window.index("run_migrations") < window.index("smoke")
 
 
+class TestRollbackSchemaCompatibilityVisibility:
+    """MAJOR audit finding: rollback reverts the application images but
+    never the DB schema (alembic has no downgrade step here, and a real
+    auto-downgrade risks data loss) -- the script used to print an
+    unqualified "Rollback OK" even when the schema stayed on the newer
+    (post-migration) revision, implying full reversion when only the
+    application was reverted. A real compatibility gate would require
+    running the previous app version against the new schema, which is
+    out of scope for a shell script; what it can do is stop claiming
+    full success when it didn't achieve it.
+    """
+
+    def test_captures_pre_deploy_revision_before_deploying(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        capture_line = next(
+            i for i, line in enumerate(lines) if "PRE_DEPLOY_REVISION=" in line
+        )
+        deploy_line = next(
+            i
+            for i, line in enumerate(lines)
+            if 'deploy_services "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE"' in line
+        )
+        assert capture_line < deploy_line, (
+            "must read the OLD container's revision before it's replaced by the new deploy"
+        )
+
+    def test_rollback_message_distinguishes_schema_not_reverted(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        assert "SCHEMA_ADVANCED" in text
+        assert "Rollback PARTIAL" in text
+        assert "was NOT reverted" in text
+
+    def test_does_not_attempt_automatic_schema_downgrade(self):
+        """A mechanical `alembic downgrade` here would be its own hazard
+        (data loss on a migration that dropped/renamed a column) --
+        confirm this stays a visibility fix, not an auto-downgrade."""
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        assert "alembic downgrade" not in text
+
+
 class TestMcpOauthServiceCoherence:
     """#26: mcp-oauth reuses the mcp-server image with a different command
     to run the OAuth proxy (examples/mcp_client_remote/server.py) instead
