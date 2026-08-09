@@ -65,6 +65,31 @@ SECRET_FILE_PATTERNS: tuple[str, ...] = (
     "*.keychain",
 )
 
+
+def is_hidden_or_secret_path(relative: str) -> bool:
+    """Check if a relative path matches hidden/secret patterns.
+
+    Module-level so every code path that walks project files directly
+    (WorkspacePolicy._is_hidden_or_secret, and any search/read
+    implementation outside this class) shares one definition instead of
+    re-deriving it — a second, unfiltered file-content search
+    implementation (app/services/project_search.py, used by the MCP
+    search_text tool) was found reading .env/*.pem/id_rsa* files that
+    read_file/validate_read already refuse, because it never called this
+    check at all.
+    """
+    parts = Path(relative).parts
+    for part in parts:
+        for pattern in HIDDEN_DIR_PATTERNS:
+            if fnmatch.fnmatch(part, pattern):
+                return True
+    name = Path(relative).name
+    for pattern in SECRET_FILE_PATTERNS:
+        if fnmatch.fnmatch(name, pattern):
+            return True
+    return False
+
+
 # Paths that are always forbidden regardless of scope
 SYSTEM_FORBIDDEN: frozenset[str] = frozenset({
     "/etc/passwd",
@@ -237,16 +262,7 @@ class WorkspacePolicy:
 
     def _is_hidden_or_secret(self, relative: str) -> bool:
         """Check if a relative path matches hidden/secret patterns."""
-        parts = Path(relative).parts
-        for part in parts:
-            for pattern in HIDDEN_DIR_PATTERNS:
-                if fnmatch.fnmatch(part, pattern):
-                    return True
-        name = Path(relative).name
-        for pattern in SECRET_FILE_PATTERNS:
-            if fnmatch.fnmatch(name, pattern):
-                return True
-        return False
+        return is_hidden_or_secret_path(relative)
 
     def validate_read(self, project_id: str, relative_path: str) -> Path:
         """Validate a read operation. Returns the resolved absolute path.

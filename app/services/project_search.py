@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from app.workspace.policy import is_hidden_or_secret_path
+
 _PRUNE_DIRS = frozenset(
     {
         ".git",
@@ -82,6 +84,9 @@ def search_text(
             continue
 
         if any(part in _PRUNE_DIRS for part in rel.parts):
+            continue
+
+        if is_hidden_or_secret_path(str(rel)):
             continue
 
         if p.stat().st_size > max_file_size_bytes:
