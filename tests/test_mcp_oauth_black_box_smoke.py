@@ -73,7 +73,8 @@ CONSENT_URL = (
 CALLBACK_URL = "http://localhost/callback?code=authcode"
 GIT_STATUS_TEXT = json.dumps({
     "ok": True,
-    "result": {"exit_code": 0, "stdout": " M docker/docker-compose.yml\n"},
+    "result": {"outcome": "passed", "exit_code": 0,
+               "stdout": " M docker/docker-compose.yml\n"},
 })
 
 
@@ -158,7 +159,10 @@ class TestMcpOauthBlackBoxSmoke:
         with patch.object(smoke.http.client, "HTTPConnection", return_value=fake_conn):
             assert smoke.main() == 1
 
-    def test_git_status_empty_stdout_fails(self, monkeypatch):
+    def test_git_status_clean_checkout_succeeds(self, monkeypatch):
+        # git status --short on a clean checkout produces EMPTY stdout;
+        # outcome=passed + exit_code=0 is still the exact result (the
+        # SSH chain really executed via /api/ssh/execute-argv -> sshd).
         monkeypatch.setenv("MCP_AUTHORIZE_PASSWORD", "secret")
         responses = [
             _json(201, {"client_id": "cid"}),
@@ -172,7 +176,34 @@ class TestMcpOauthBlackBoxSmoke:
                 "result": {
                     "isError": False,
                     "content": [{"type": "text", "text": json.dumps(
-                        {"result": {"exit_code": 0, "stdout": ""}}
+                        {"ok": True, "result": {"outcome": "passed",
+                                                "exit_code": 0, "stdout": ""}}
+                    )}],
+                },
+            }),
+        ]
+        fake_conn = MagicMock()
+        fake_conn.getresponse.side_effect = responses
+        with patch.object(smoke.http.client, "HTTPConnection", return_value=fake_conn):
+            assert smoke.main() == 0
+
+    def test_git_status_failed_outcome_fails(self, monkeypatch):
+        monkeypatch.setenv("MCP_AUTHORIZE_PASSWORD", "secret")
+        responses = [
+            _json(201, {"client_id": "cid"}),
+            _FakeResponse(302, b"", location="http://localhost" + CONSENT_URL),
+            _FakeResponse(303, b"", location=CALLBACK_URL),
+            _json(200, {"access_token": "at-1"}),
+            _sse({"jsonrpc": "2.0", "id": 1, "result": {}}, sid="sid-1"),
+            _sse({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "isError": False,
+                    "content": [{"type": "text", "text": json.dumps(
+                        {"ok": False, "result": {"outcome": "failed",
+                                                 "exit_code": 1,
+                                                 "stdout": "boom"}}
                     )}],
                 },
             }),

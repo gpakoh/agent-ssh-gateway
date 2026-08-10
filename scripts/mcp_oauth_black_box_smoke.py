@@ -207,13 +207,17 @@ def main() -> int:
             payload = json.loads(text)
         except (ValueError, TypeError):
             pass
-        exit_code = payload.get("result", {}).get("exit_code")
-        stdout = payload.get("result", {}).get("stdout", "")
-        if exit_code != 0 or not stdout:
+        result_data = payload.get("result", {})
+        exit_code = result_data.get("exit_code")
+        outcome = result_data.get("outcome")
+        # git status --short on a clean checkout is EMPTY stdout -- the
+        # exact result is that the SSH chain really ran: outcome=passed
+        # + exit_code=0 (executed via /api/ssh/execute-argv -> sshd).
+        if outcome != "passed" or exit_code != 0:
             raise SmokeError(f"git_status unexpected result: {payload}")
 
-        print(f"mcp_oauth_black_box_smoke: OK client={client_id} exit_code=0 "
-              f"stdout={stdout.strip()!r}")
+        print(f"mcp_oauth_black_box_smoke: OK client={client_id} "
+              f"outcome={outcome} exit_code={exit_code}")
         return 0
     except SmokeError as exc:
         print(f"mcp_oauth_black_box_smoke: {exc}", file=sys.stderr)
