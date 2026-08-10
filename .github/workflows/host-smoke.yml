@@ -17,13 +17,18 @@ on:
     #     for that config, and app/auth_middleware.py (the mTLS/X-SSL-*/
     #     X-API-Key header handling on the backend side), were missing
     #   - test_workspace_tools.py -> app/workspace/** (already correct)
-    # This still doesn't add NEW host-level coverage for app/main.py's
-    # SSH execution stack or the OAuth/MCP server -- no host_smoke tests
-    # exercise those today, so no path list change can trigger something
-    # that doesn't test them. That's a test-content gap, not a trigger
-    # mismatch; left for a follow-up rather than pretending workflow_
-    # dispatch is available as an always-on manual fallback for now.
-    paths: ["Makefile", ".github/workflows/host-smoke.yml", "tests/test_mtls_e2e.py", "tests/test_opencode_runner_wrapper.py", "tests/test_workspace_tools.py", "tests/test_run_compileall_uv_seam.py", "app/workspace/**", "app/auth_middleware.py", "scripts/opencode_runner_wrapper.py", "examples/mcp_server/mcp_client_tools.py", "nginx-gateway.conf.example", "nginx-ssh-gateway.conf"]
+    # The old "SSH execution stack / OAuth-MCP server are not exercised
+    # by any host_smoke test" gap (#6) is now CLOSED:
+    #   - test_mcp_oauth_host_smoke.py runs the FULL live black-box flow
+    #     through the mcp-oauth container: DCR /register -> /authorize
+    #     (PKCE S256) -> /oauth/consent (MCP_AUTHORIZE_PASSWORD) ->
+    #     /token -> initialize -> tools/call git_status, which really
+    #     executes a harmless SSH command (git status --short) through
+    #     the Gateway (/api/ssh/execute-argv -> sshd) and asserts the
+    #     exact result -- the MCP->Gateway->SSH->harmless command chain
+    #     is now covered end to end (see scripts/mcp_oauth_black_box_
+    #     smoke.py, driven by scripts/mcp_black_box_smoke.py's sibling).
+    paths: ["Makefile", ".github/workflows/host-smoke.yml", "tests/test_mtls_e2e.py", "tests/test_opencode_runner_wrapper.py", "tests/test_workspace_tools.py", "tests/test_run_compileall_uv_seam.py", "tests/test_mcp_oauth_host_smoke.py", "tests/test_mcp_oauth_black_box_smoke.py", "app/workspace/**", "app/auth_middleware.py", "scripts/opencode_runner_wrapper.py", "scripts/mcp_oauth_black_box_smoke.py", "examples/mcp_server/mcp_client_tools.py", "nginx-gateway.conf.example", "nginx-ssh-gateway.conf"]
 
 # Same rationale as ci.yml's top-level concurrency block: two
 # close-together master pushes touching these paths would otherwise run
