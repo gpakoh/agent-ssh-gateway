@@ -89,7 +89,7 @@ from tool_results import (
 from write_modes import WriteModeError, WritePermissionError
 
 from examples.mcp_client_remote.fleet.context7_server import (
-    _call_upstream as _call_context7_upstream,
+    _call_upstream as _call_context7_upstream,  # noqa: F401  (facade: tests monkeypatch this name)
 )
 from examples.mcp_client_remote.fleet.docker_client import DockerClient, RunResult
 from examples.mcp_client_remote.fleet.gitea_client import GiteaClient
@@ -2837,217 +2837,6 @@ async def docker_pending_actions() -> dict[str, Any]:
 # ── Postgres tools ────────────────────────────────────────────────
 
 
-def _json_safe(value: Any) -> Any:
-    """Round-trip through json.dumps(default=str) to coerce driver-native
-    types (datetime, Decimal, UUID, ...) into JSON-safe primitives, while
-    keeping the result a real structure (dict/list/etc.) rather than a
-    JSON string -- callers still get structured data, not a second
-    parsing step."""
-    return json.loads(json.dumps(value, default=str, ensure_ascii=False))
-
-
-def _postgres_not_configured(tool: str) -> dict[str, Any]:
-    return tool_error(
-        tool=tool,
-        code="DEPENDENCY_MISSING",
-        message="Postgres not configured (PG DSN missing)",
-        retryable=False,
-        source="postgres",
-    )
-
-
-@register_tool("postgres_health")
-async def postgres_health() -> dict[str, Any]:
-    """Check Postgres connectivity. Returns DB name, user, version."""
-    client = _get_pg_client()
-    if client is None:
-        return _postgres_not_configured("postgres_health")
-    try:
-        info = await client.health()
-    except Exception as e:
-        return tool_error(
-            tool="postgres_health", code="INTERNAL_ERROR", message=str(e), source="postgres"
-        )
-    return tool_success("postgres_health", result=_json_safe(info), source="postgres")
-
-
-@register_tool("postgres_list_schemas")
-async def postgres_list_schemas() -> dict[str, Any]:
-    """List non-system schemas in the database."""
-    client = _get_pg_client()
-    if client is None:
-        return _postgres_not_configured("postgres_list_schemas")
-    try:
-        schemas = await client.list_schemas()
-    except ValueError as e:
-        return tool_error(
-            tool="postgres_list_schemas", code="INVALID_INPUT", message=str(e), source="postgres"
-        )
-    except Exception as e:
-        return tool_error(
-            tool="postgres_list_schemas",
-            code="INTERNAL_ERROR",
-            message=f"list schemas failed: {e}",
-            source="postgres",
-        )
-    return tool_success(
-        "postgres_list_schemas",
-        result={"schemas": schemas, "count": len(schemas)},
-        source="postgres",
-    )
-
-
-@register_tool("postgres_list_tables")
-async def postgres_list_tables(schema: str = "public") -> dict[str, Any]:
-    """List tables in a schema with type and row estimate."""
-    client = _get_pg_client()
-    if client is None:
-        return _postgres_not_configured("postgres_list_tables")
-    try:
-        tables = await client.list_tables(schema=schema)
-    except ValueError as e:
-        return tool_error(
-            tool="postgres_list_tables", code="INVALID_INPUT", message=str(e), source="postgres"
-        )
-    except Exception as e:
-        return tool_error(
-            tool="postgres_list_tables",
-            code="INTERNAL_ERROR",
-            message=f"list tables failed: {e}",
-            source="postgres",
-        )
-    return tool_success(
-        "postgres_list_tables",
-        result={"schema": schema, "tables": _json_safe(tables), "count": len(tables)},
-        source="postgres",
-    )
-
-
-@register_tool("postgres_describe_table")
-async def postgres_describe_table(table_name: str, schema: str = "public") -> dict[str, Any]:
-    """Describe columns of a table."""
-    client = _get_pg_client()
-    if client is None:
-        return _postgres_not_configured("postgres_describe_table")
-    try:
-        columns = await client.describe_table(schema=schema, table_name=table_name)
-    except ValueError as e:
-        return tool_error(
-            tool="postgres_describe_table", code="INVALID_INPUT", message=str(e), source="postgres"
-        )
-    except Exception as e:
-        return tool_error(
-            tool="postgres_describe_table",
-            code="INTERNAL_ERROR",
-            message=f"describe table failed: {e}",
-            source="postgres",
-        )
-    if not columns:
-        return tool_error(
-            tool="postgres_describe_table",
-            code="FILE_NOT_FOUND",
-            message=f"Table '{schema}.{table_name}' not found or has no columns",
-            retryable=False,
-            source="postgres",
-        )
-    return tool_success(
-        "postgres_describe_table",
-        result={
-            "schema": schema,
-            "table_name": table_name,
-            "columns": _json_safe(columns),
-            "count": len(columns),
-        },
-        source="postgres",
-    )
-
-
-@register_tool("postgres_select")
-async def postgres_select(sql: str) -> dict[str, Any]:
-    """Execute a read-only SELECT or WITH query with enforced LIMIT 1000.
-    Multi-statement not allowed, DDL/DML blocked."""
-    client = _get_pg_client()
-    if client is None:
-        return _postgres_not_configured("postgres_select")
-    try:
-        rows = await client.execute(sql)
-    except ValueError as e:
-        return tool_error(
-            tool="postgres_select", code="INVALID_INPUT", message=str(e), source="postgres"
-        )
-    except Exception as e:
-        return tool_error(
-            tool="postgres_select",
-            code="INTERNAL_ERROR",
-            message=f"query failed: {e}",
-            source="postgres",
-        )
-    return tool_success(
-        "postgres_select",
-        result={"rows": _json_safe(rows), "row_count": len(rows)},
-        source="postgres",
-    )
-
-
-@register_tool("postgres_vector_status")
-async def postgres_vector_status() -> dict[str, Any]:
-    """Check if pgvector extension is installed and its version."""
-    client = _get_pg_client()
-    if client is None:
-        return _postgres_not_configured("postgres_vector_status")
-    try:
-        info = await client.vector_status()
-    except ValueError as e:
-        return tool_error(
-            tool="postgres_vector_status", code="INVALID_INPUT", message=str(e), source="postgres"
-        )
-    except Exception as e:
-        return tool_error(
-            tool="postgres_vector_status",
-            code="INTERNAL_ERROR",
-            message=f"vector status failed: {e}",
-            source="postgres",
-        )
-    return tool_success("postgres_vector_status", result=info, source="postgres")
-
-
-# ── Context7 tools ────────────────────────────────────────────────
-
-
-@register_tool("resolve_library_id")
-async def resolve_library_id(query: str, libraryName: str) -> dict[str, Any]:
-    """Resolve a package/product name to a Context7-compatible library ID."""
-    try:
-        text = await _call_context7_upstream(
-            "resolve-library-id", {"query": query, "libraryName": libraryName}
-        )
-    except Exception as exc:
-        return tool_error(
-            tool="resolve_library_id",
-            code="REMOTE_API_ERROR",
-            message=str(exc),
-            source="context7",
-        )
-    return tool_success("resolve_library_id", result=text, source="context7")
-
-
-@register_tool("query_docs")
-async def query_docs(libraryId: str, query: str) -> dict[str, Any]:
-    """Query Context7 for documentation on a resolved library."""
-    try:
-        text = await _call_context7_upstream(
-            "query-docs", {"libraryId": libraryId, "query": query}
-        )
-    except Exception as exc:
-        return tool_error(
-            tool="query_docs",
-            code="REMOTE_API_ERROR",
-            message=str(exc),
-            source="context7",
-        )
-    return tool_success("query_docs", result=text, source="context7")
-
-
 # ── Agent Handoff v2 tools ──────────────────────────────────────────
 
 
@@ -3679,6 +3468,26 @@ def gateway_workspace_verify(
 
 
 # ── Main ─────────────────────────────────────────────────────────
+
+# Import adapters and register their tools into the live FastMCP
+# instance. Explicit register_all() (not import-time decorator side
+# effects): server.py may be importlib.reloaded, and the adapters are
+# cached in sys.modules, so import-time registration would miss a fresh
+# FastMCP instance.
+from examples.mcp_server.mcp_infra.adapters import context7, postgres  # noqa: E402
+
+resolve_library_id = context7.resolve_library_id
+query_docs = context7.query_docs
+
+postgres_health = postgres.postgres_health
+postgres_list_schemas = postgres.postgres_list_schemas
+postgres_list_tables = postgres.postgres_list_tables
+postgres_describe_table = postgres.postgres_describe_table
+postgres_select = postgres.postgres_select
+postgres_vector_status = postgres.postgres_vector_status
+
+context7.register_all()
+postgres.register_all()
 
 if __name__ == "__main__":
     mcp.run()
