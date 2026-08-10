@@ -123,14 +123,8 @@ disallow_untyped_defs = true
 check_untyped_defs = true
 ignore_missing_imports = true
 disable_error_code = [
-  "import-untyped",
   "no-untyped-def",
-  "no-untyped-call",
-  "annotation-unchecked",
   "union-attr",
-  "no-any-return",
-  "assignment",
-  "attr-defined",
 ]
 plugins = ["sqlalchemy.ext.mypy.plugin"]
 exclude = [

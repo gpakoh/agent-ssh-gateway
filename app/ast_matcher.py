@@ -161,7 +161,7 @@ def _check_ast_python(code: str) -> list[AstMatch]:
             func_name = func.attr
 
             # Check (module, function) pattern
-            key = (module_name, func_name)
+            key: tuple[str | None, str] = (module_name, func_name)
             if key in _PYTHON_MODULE_FUNC:
                 pattern = _PYTHON_MODULE_FUNC[key]
                 matches.append(_make_ast_match(node, pattern, code))

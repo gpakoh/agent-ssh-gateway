@@ -646,7 +646,7 @@ def require_scope(required: str) -> Callable[[Request], Awaitable[AuthIdentity]]
             },
         )
 
-    _scope_check.required_scope = required
+    _scope_check.required_scope = required  # type: ignore[attr-defined]
     return _scope_check
 
 

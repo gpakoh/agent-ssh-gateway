@@ -417,11 +417,11 @@ def assert_workspace_writable(
 @router.post("/api/workspace/projects/{project_id}/files/write")
 def write_file(
     project_id: str,
+    request: Request,
     path: str = Body(..., alias="path"),
     content: str = Body(...),
     safe: bool = Body(False),
     _identity: AuthIdentity = Depends(require_scope("project:write")),
-    request: Request = ...,
 ) -> dict[str, Any]:
     """Write (create or overwrite) a UTF-8 text file."""
     assert_workspace_writable(
@@ -446,12 +446,12 @@ def write_file(
 @router.post("/api/workspace/projects/{project_id}/files/edit")
 def edit_file(
     project_id: str,
+    request: Request,
     path: str = Body(..., alias="path"),
     old_string: str = Body(...),
     new_string: str = Body(...),
     safe: bool = Body(False),
     _identity: AuthIdentity = Depends(require_scope("project:write")),
-    request: Request = ...,
 ) -> dict[str, Any]:
     """Edit a file by replacing the first occurrence of old_string."""
     assert_workspace_writable(
@@ -476,11 +476,11 @@ def edit_file(
 @router.post("/api/workspace/projects/{project_id}/files/patch")
 def patch_file(
     project_id: str,
+    request: Request,
     path: str = Body(..., alias="path"),
     patch: str = Body(...),
     safe: bool = Body(False),
     _identity: AuthIdentity = Depends(require_scope("project:write")),
-    request: Request = ...,
 ) -> dict[str, Any]:
     """Apply a unified diff patch to a file."""
     assert_workspace_writable(

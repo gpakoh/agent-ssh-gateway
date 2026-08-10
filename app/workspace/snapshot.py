@@ -265,6 +265,7 @@ class SnapshotStore:
             before_hash = None
 
         # expected_current_hash: hash of file on disk at capture time.
+        expected_current_hash: str | None
         if file_hash is not None:
             expected_current_hash = file_hash
         elif file_exists_before and content is not None:

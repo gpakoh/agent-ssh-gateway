@@ -11,8 +11,12 @@ import hashlib
 import logging
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from app.redis_compat import close_redis_client
+
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +107,7 @@ class AccessControlStore:
         self._allow_ttl = allow_ttl
         self._deny_ttl = deny_ttl
         self._redis_url = redis_url
-        self._redis = None
+        self._redis: Redis | None = None
         self._cleanup_task: asyncio.Task | None = None
 
     # -- TTL helper --

@@ -9,6 +9,7 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from datetime import UTC
+from typing import cast
 
 import paramiko
 
@@ -23,7 +24,9 @@ try:
         Text,
         UniqueConstraint,
     )
+    from sqlalchemy.engine import CursorResult
     from sqlalchemy.ext.asyncio import (
+        AsyncEngine,
         AsyncSession,
         async_sessionmaker,
         create_async_engine,
@@ -199,7 +202,7 @@ class PostgresHostKeyStore(HostKeyStore):
         if not _sa_available:
             raise RuntimeError("SQLAlchemy is not installed")
         self._database_url = database_url
-        self._engine = None
+        self._engine: AsyncEngine | None = None
         self._session_maker: async_sessionmaker[AsyncSession] | None = None
         self._lock = asyncio.Lock()
 
@@ -317,7 +320,7 @@ class PostgresHostKeyStore(HostKeyStore):
                 )
             )
             await session.commit()
-            return result.rowcount
+            return cast(CursorResult, result).rowcount or 0
 
     async def delete_all(self) -> int:
         async with self._lock:
@@ -329,7 +332,7 @@ class PostgresHostKeyStore(HostKeyStore):
 
             result = await session.execute(sa_delete(HostKeyRecord))
             await session.commit()
-            return result.rowcount
+            return cast(CursorResult, result).rowcount or 0
 
     async def get_host(self, host: str, port: int = 22) -> dict | None:
         async with self._lock:
