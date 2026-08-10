@@ -26,25 +26,20 @@ from examples.mcp_client_remote.fleet.docker_client import (
 )
 from examples.mcp_server.docker_confirm import ConfirmAction, ConfirmStatus
 from examples.mcp_server.mcp_audit import McpAuditEvent
+from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.tool_registry import register_tool
 
 
 def _docker_client():
-    from examples.mcp_server import server as _server
-
-    return _server.DockerClient()
+    return server_attr("DockerClient")()
 
 
 def _confirm_store():
-    from examples.mcp_server import server as _server
-
-    return _server._confirm_store
+    return server_attr("_confirm_store")
 
 
 def _get_audit_logger():
-    from examples.mcp_server import server as _server
-
-    return _server.get_audit_logger()
+    return server_attr("get_audit_logger")()
 
 
 async def docker_ps(all: bool = False, limit: int = 50) -> dict[str, Any]:

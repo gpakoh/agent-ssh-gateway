@@ -27,19 +27,16 @@ from examples.mcp_client_remote.fleet.shared import (
     list_pagination_meta,
     minimize_issue_payload,
 )
+from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.tool_registry import register_tool
 
 
 def _server_gitea_client():
-    from examples.mcp_server import server as _server
-
-    return _server.GiteaClient
+    return server_attr("GiteaClient")
 
 
 def _server_github_client():
-    from examples.mcp_server import server as _server
-
-    return _server.GitHubClient
+    return server_attr("GitHubClient")
 
 
 # ── Gitea/GitHub tools ───────────────────────────────────────────
