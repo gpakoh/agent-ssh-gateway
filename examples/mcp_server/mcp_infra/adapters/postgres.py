@@ -9,6 +9,7 @@ from typing import Any
 
 from tool_results import tool_error, tool_success
 
+from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.tool_registry import register_tool
 
 
@@ -22,9 +23,7 @@ def _json_safe(value: Any) -> Any:
 
 
 def _get_pg_client():
-    from examples.mcp_server import server as _server
-
-    return _server._get_pg_client()
+    return server_attr("_get_pg_client")()
 
 
 def _postgres_not_configured(tool: str) -> dict[str, Any]:

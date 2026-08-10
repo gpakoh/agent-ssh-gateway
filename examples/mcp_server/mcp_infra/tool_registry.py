@@ -23,6 +23,7 @@ from write_modes import WriteModeError, WritePermissionError
 from examples.mcp_server.latency_metrics import get_tracker
 from examples.mcp_server.mcp_audit import McpAuditEvent
 from examples.mcp_server.mcp_infra import runtime
+from examples.mcp_server.mcp_infra._server_ref import server_module as _server_module
 
 from .gateway_errors import (
     _gateway_error_hint,
@@ -180,7 +181,7 @@ def run_tool(
     success_text: str,
 ) -> dict[str, Any]:
     """Execute a tool call with structured error handling."""
-    from examples.mcp_server import server as _server
+    _server = _server_module()
 
     _start = _time.monotonic()
 

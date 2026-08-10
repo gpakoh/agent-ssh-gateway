@@ -16,13 +16,12 @@ from typing import Any
 
 from tool_results import tool_error, tool_success
 
+from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.tool_registry import register_tool
 
 
 def _call_context7_upstream(name: str, args: dict) -> Any:
-    from examples.mcp_server import server as _server
-
-    return _server._call_context7_upstream(name, args)
+    return server_attr("_call_context7_upstream")(name, args)
 
 
 async def resolve_library_id(query: str, libraryName: str) -> dict[str, Any]:

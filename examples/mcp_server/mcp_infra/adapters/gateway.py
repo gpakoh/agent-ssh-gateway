@@ -65,6 +65,7 @@ from write_modes import WriteModeError, WritePermissionError
 from examples.mcp_server.latency_metrics import get_tracker
 from examples.mcp_server.mcp_audit import McpAuditEvent
 from examples.mcp_server.mcp_infra import gateway_errors
+from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.tool_registry import (
     _validate_project,
     compute_toolset_hash,
@@ -79,45 +80,31 @@ _gateway_error_hint = gateway_errors._gateway_error_hint
 
 
 def _server_client():
-    from examples.mcp_server import server as _server
-
-    return _server.client
+    return server_attr("client")
 
 
 def _server_read_file():
-    from examples.mcp_server import server as _server
-
-    return _server.read_file
+    return server_attr("read_file")
 
 
 def _server_mcp():
-    from examples.mcp_server import server as _server
-
-    return _server.mcp
+    return server_attr("mcp")
 
 
 def _server_mcp_started_at():
-    from examples.mcp_server import server as _server
-
-    return _server._mcp_started_at
+    return server_attr("_mcp_started_at")
 
 
 def _server_workspace_registry():
-    from examples.mcp_server import server as _server
-
-    return _server._get_workspace_registry()
+    return server_attr("_get_workspace_registry")()
 
 
 def _server_audit_logger():
-    from examples.mcp_server import server as _server
-
-    return _server.get_audit_logger()
+    return server_attr("get_audit_logger")()
 
 
 def _server_file():
-    from examples.mcp_server import server as _server
-
-    return _server.__file__
+    return server_attr("__file__")
 
 
 def _run_gateway(
