@@ -22,8 +22,10 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.audit import AuditEvent
@@ -242,9 +244,9 @@ class AuditLogStore:
                     delete(AuditLogEntry).where(AuditLogEntry.id.in_(subq))
                 )
                 await session.commit()
-                if result.rowcount == 0:
+                if cast(CursorResult, result).rowcount == 0:
                     break
-                total += result.rowcount
+                total += cast(CursorResult, result).rowcount
         if total:
             logger.info("Audit log retention: removed %d entries older than %d days", total, retention_days)
         return total

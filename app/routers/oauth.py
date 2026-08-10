@@ -13,6 +13,7 @@ import secrets
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import Response
 
 from app.config import settings
 from app.oauth_sso import (
@@ -184,7 +185,7 @@ async def oauth_callback(request: Request, code: str = "", state: str = ""):
     # Browser flow: httpOnly cookie carries the JWT; the page then redirects.
     accept = request.headers.get("accept", "")
     if "application/json" in accept:
-        response = JSONResponse(
+        response: Response = JSONResponse(
             {"token": token, "username": userinfo.username, "provider": pending.provider}
         )
         set_auth_cookie(response, token)

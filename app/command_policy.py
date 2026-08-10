@@ -634,15 +634,15 @@ def scan_command(command: str) -> ScanReport:
     # AST pass over extracted Python bodies: regex packs cannot see
     # ``shutil.rmtree`` behind an import, the AST matcher can.
     for script in extract_python_scripts(command):
-        for m in check_ast(script, "python"):
-            if m.rule_id not in seen_patterns:
-                seen_patterns.add(m.rule_id)
+        for ast_match in check_ast(script, "python"):
+            if ast_match.rule_id not in seen_patterns:
+                seen_patterns.add(ast_match.rule_id)
                 matches.append(
                     DestructiveMatch(
-                        pattern_name=m.rule_id,
-                        reason=m.reason,
-                        severity=Severity(m.severity.value),
-                        suggestion=m.suggestion,
+                        pattern_name=ast_match.rule_id,
+                        reason=ast_match.reason,
+                        severity=Severity(ast_match.severity.value),
+                        suggestion=ast_match.suggestion,
                     )
                 )
 

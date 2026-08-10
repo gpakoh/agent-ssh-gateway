@@ -20,6 +20,7 @@ import secrets
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 EXAMPLES_DIR = Path(__file__).resolve().parents[1]
 MCP_SERVER_DIR = EXAMPLES_DIR / "mcp_server"
@@ -436,13 +437,13 @@ async def consent_handler(request: Request):
         return HTMLResponse(page_html, status_code=200)
 
     form = await request.form()
-    password = form.get("password", "")
-    client_id = form.get("client_id", "")
-    redirect_uri = form.get("redirect_uri", "")
+    password = cast(str, form.get("password", ""))
+    client_id = cast(str, form.get("client_id", ""))
+    redirect_uri = cast(str, form.get("redirect_uri", ""))
     scope_str: str = str(form.get("scope", "mcp:read mcp:project"))
-    state = form.get("state", "")
-    code_challenge = form.get("code_challenge", "")
-    resource = form.get("resource", "")
+    state = cast(str, form.get("state", ""))
+    code_challenge = cast(str, form.get("code_challenge", ""))
+    resource = cast(str, form.get("resource", ""))
 
     if not password or not secrets.compare_digest(str(password), MCP_AUTHORIZE_PASSWORD):
         from urllib.parse import urlencode

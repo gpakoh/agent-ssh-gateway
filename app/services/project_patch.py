@@ -118,7 +118,7 @@ async def apply_project_patch(
         )
 
     # Apply: read, verify hashes, apply in memory
-    prepared: list[tuple[object, str, str, int, bool]] = []
+    prepared: list[tuple[Path, str, str, int, bool]] = []
 
     for f in files:
         full_path = _resolve_within_root(project_root, f["path"])
@@ -148,7 +148,7 @@ async def apply_project_patch(
         prepared.append((full_path, original, new_content, f["hunk_count"], is_delete))
 
     # Transactional write with rollback
-    completed: list[tuple[object, object, bool]] = []
+    completed: list[tuple[Path, Path, bool]] = []
 
     for full_path, _original, new_content, _hunk_count, is_delete in prepared:
         backup = full_path.parent / f".{full_path.name}.mcp-patch-{rid}.bak"

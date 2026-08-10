@@ -2,9 +2,16 @@
 
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 from sqlalchemy import JSON, Boolean, Column, DateTime, Integer, String, Text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import declarative_base
 
 from app.config import settings as _settings
@@ -186,7 +193,7 @@ class SessionStore:
 
     def __init__(self, database_url: str):
         self._database_url = database_url
-        self._engine = None
+        self._engine: AsyncEngine | None = None
         self._session_maker: async_sessionmaker[AsyncSession] | None = None
 
     async def connect(self):
@@ -342,9 +349,9 @@ class SessionStore:
                     delete(PersistentSession).where(PersistentSession.session_id.in_(subq))
                 )
                 await session.commit()
-                if result.rowcount == 0:
+                if cast(CursorResult, result).rowcount == 0:
                     break
-                total += result.rowcount
+                total += cast(CursorResult, result).rowcount
 
         if total > 0:
             logger.info("Cleaned up %d expired sessions", total)

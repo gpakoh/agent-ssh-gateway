@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
 manager: SSHSessionManager | None = None
 job_manager: JobManager | None = None
+_audit_retention_task: asyncio.Task | None = None
 file_editor: FileEditor | None = None
 context_manager: ContextManager | None = None
 batch_manager: BatchOperationsManager | None = None

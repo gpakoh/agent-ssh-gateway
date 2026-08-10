@@ -1270,7 +1270,7 @@ def git_diff_stat(client: GatewayClient, project: str) -> dict[str, Any]:
 def show_changes(client: GatewayClient, project: str) -> dict[str, Any]:
     gs = git_status(client, project)
     gds = git_diff_stat(client, project)
-    result = {
+    result: dict[str, Any] = {
         "git_status": gs,
         "git_diff_stat": gds,
     }
