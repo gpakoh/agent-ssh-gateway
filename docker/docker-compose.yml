@@ -109,7 +109,14 @@ services:
       - MCP_STREAMABLE_HTTP_BEARER_TOKEN=${MCP_STREAMABLE_HTTP_BEARER_TOKEN:?set MCP_STREAMABLE_HTTP_BEARER_TOKEN}
       - MCP_TOKEN_STORE_FILE=/app/data/mcp_tokens.json
     volumes:
-      - ../projects.yaml:/app/projects.yaml:ro
+      # Absolute host path via PROJECTS_YAML_PATH (docker/.env) -- a
+      # relative "../projects.yaml" resolves inside the CI deploy
+      # container to /deploy/web-ssh-gateway/projects.yaml, which the
+      # host docker daemon auto-creates as an EMPTY DIRECTORY (not the
+      # file) on first bind-mount, silently breaking the workspace
+      # registry for every service. Found live by the #6 black-box flow
+      # ("Registry path is not a file: /app/projects.yaml").
+      - ${PROJECTS_YAML_PATH:-../projects.yaml}:/app/projects.yaml:ro
       - mcp_server_tokens:/app/data
     restart: unless-stopped
     security_opt:
@@ -196,7 +203,7 @@ services:
       - PGAPPNAME=${MCP_OAUTH_PGAPPNAME:-mcp-oauth}
       - WORKSPACE_READONLY=${WORKSPACE_READONLY:-true}
     volumes:
-      - ../projects.yaml:/app/projects.yaml:ro
+      - ${PROJECTS_YAML_PATH:-../projects.yaml}:/app/projects.yaml:ro
       # Dedicated volume, deliberately NOT shared with mcp-server's
       # mcp_server_tokens -- keeps the OAuth client/token store
       # independent of the bearer-only service's.
@@ -325,7 +332,7 @@ services:
       - OAUTH_ALLOWED_EMAILS=${OAUTH_ALLOWED_EMAILS:-}
       - OAUTH_DEFAULT_ROLE=${OAUTH_DEFAULT_ROLE:-operator}
     volumes:
-      - ../projects.yaml:/app/projects.yaml:ro
+      - ${PROJECTS_YAML_PATH:-../projects.yaml}:/app/projects.yaml:ro
       - ${WORKSPACE_HOST_PATH:-..}:${WORKSPACE_CONTAINER_PATH:-/workspace}:ro
       - ssh_keys:/app/ssh_keys:ro
       - gateway_logs:/app/logs
