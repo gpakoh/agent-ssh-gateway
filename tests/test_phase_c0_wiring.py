@@ -195,7 +195,11 @@ class TestC1MCPToolRegistration:
         import pathlib
 
         path = pathlib.Path(__file__).resolve().parent.parent / self.MCP_DIR / "server.py"
-        return path.read_text()
+        src = path.read_text()
+        adapter = path.parent / "mcp_infra" / "adapters" / "gateway.py"
+        if adapter.exists():
+            src += "\n" + adapter.read_text()
+        return src
 
     def test_project_apply_patch_registered(self):
         src = self._read_server_source()
@@ -211,7 +215,7 @@ class TestC1MCPToolRegistration:
 
     def test_patch_tool_has_instrumented_decorator(self):
         src = self._read_server_source()
-        assert '@register_tool("apply_patch")' in src
+        assert 'register_tool("apply_patch")(instrumented("apply_patch")' in src
 
     def test_write_tool_has_instrumented_decorator(self):
         src = self._read_server_source()
