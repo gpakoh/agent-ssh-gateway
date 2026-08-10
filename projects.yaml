@@ -262,3 +262,10 @@ projects:
     type: unknown
     description: "Парсер HTTPS-прокси с best-proxies.ru"
     tags: []
+
+  agent-memory-service:
+    root: quart-platform/agent-memory-service
+    parent: quart-platform
+    type: python-service
+    description: "Agent semantic/procedural memory service for quart-platform (L1-L3, Continual Harness)"
+    tags: []
