@@ -196,8 +196,8 @@ class TestC1MCPToolRegistration:
 
         path = pathlib.Path(__file__).resolve().parent.parent / self.MCP_DIR / "server.py"
         src = path.read_text()
-        adapter = path.parent / "mcp_infra" / "adapters" / "gateway.py"
-        if adapter.exists():
+        adapter_dir = path.parent / "mcp_infra" / "adapters"
+        for adapter in sorted(adapter_dir.glob("*.py")):
             src += "\n" + adapter.read_text()
         return src
 
