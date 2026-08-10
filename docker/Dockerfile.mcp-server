@@ -9,11 +9,31 @@ ENV BUILD_SHA=${BUILD_SHA}
 ENV BUILD_TIME=${BUILD_TIME}
 
 # Security: Install only necessary packages
+# docker CLI is intentionally NOT installed — the container has no
+# /var/run/docker.sock, so docker_* tools stay honestly unavailable
+# (marked by _unavailable_tool_reasons in examples/mcp_server/server.py).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     curl \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
+
+# nodejs/npm provide npx for the context7 docs tools (resolve_library_id,
+# query_docs). Official Node tarball instead of Debian packages: apt's
+# nodejs+npm pull a 250MB+ layer of build tooling; the tarball adds ~110MB
+# (bin+lib only; include/ is C headers only needed for native addon
+# compilation, which this image never does).
+RUN curl -fsSL --max-time 300 -o /tmp/node.tar.xz \
+    https://nodejs.org/dist/v20.19.2/node-v20.19.2-linux-x64.tar.xz \
+    && tar -xJf /tmp/node.tar.xz -C /opt \
+    && rm -rf /opt/node-v20.19.2-linux-x64/include \
+      /opt/node-v20.19.2-linux-x64/share \
+      /opt/node-v20.19.2-linux-x64/CHANGELOG.md \
+      /opt/node-v20.19.2-linux-x64/LICENSE \
+      /opt/node-v20.19.2-linux-x64/README.md \
+    && rm -f /tmp/node.tar.xz
+ENV PATH="/opt/node-v20.19.2-linux-x64/bin:$PATH"
 
 # Security: Create non-root user
 RUN groupadd -r -g 1000 appuser && \

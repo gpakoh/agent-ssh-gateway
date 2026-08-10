@@ -27,6 +27,11 @@ HTTP_TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 INTERNAL_PORT = 8780  # FastMCP streamable-http (no auth, localhost only)
 CONTEXT7_ENV = {
     "CONTEXT7_MCP_URL": os.environ.get("CONTEXT7_MCP_URL", "https://mcp.context7.com/mcp"),
+    # Container rootfs is read-only (VOLUME ["/tmp", "/app/data"]) and HOME
+    # points at /app, so npx cannot write its cache to ~/.npm. Redirect the
+    # npm cache to the writable /tmp volume, otherwise `npx -y
+    # @upstash/context7-mcp` dies with ENOENT on first call.
+    "npm_config_cache": "/tmp/.npm",
 }
 
 # ── FastMCP with tools ────────────────────────────────────────────────
@@ -101,9 +106,7 @@ async def resolve_library_id(query: str, libraryName: str) -> Any:
             "resolve-library-id", {"query": query, "libraryName": libraryName}
         )
     except Exception as exc:
-        return tool_error(
-            "resolve_library_id", "REMOTE_API_ERROR", str(exc), source="context7"
-        )
+        return tool_error("resolve_library_id", "REMOTE_API_ERROR", str(exc), source="context7")
     return tool_success("resolve_library_id", text, source="context7")
 
 
@@ -111,13 +114,9 @@ async def resolve_library_id(query: str, libraryName: str) -> Any:
 async def query_docs(libraryId: str, query: str) -> Any:
     """Query Context7 for documentation on a resolved library."""
     try:
-        text = await _call_upstream(
-            "query-docs", {"libraryId": libraryId, "query": query}
-        )
+        text = await _call_upstream("query-docs", {"libraryId": libraryId, "query": query})
     except Exception as exc:
-        return tool_error(
-            "query_docs", "REMOTE_API_ERROR", str(exc), source="context7"
-        )
+        return tool_error("query_docs", "REMOTE_API_ERROR", str(exc), source="context7")
     return tool_success("query_docs", text, source="context7")
 
 
