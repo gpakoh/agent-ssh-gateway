@@ -285,10 +285,17 @@ def _build_opencode_script(
             # share one HOME (~/.local/share/opencode/opencode.db) and two
             # concurrent processes race SQLite schema migration / WAL
             # locking ("Failed query: CREATE TABLE ..." -- seen live in the
-            # E2E smoke). Point XDG data+cache at the disposable worktree;
-            # config (~/.config/opencode) is read-only and safe to share.
-            'export XDG_DATA_HOME="$wt/.opencode-data"',
-            'export XDG_CACHE_HOME="$wt/.opencode-cache"',
+            # E2E smoke). Point XDG data+cache at the task dir (gitignored,
+            # OUTSIDE the worktree); config (~/.config/opencode) is
+            # read-only and safe to share.
+            # Storing under $wt is fatal: opencode's background snapshot
+            # `git add --all --sparse` uses the worktree as --work-tree and
+            # would then add .opencode-data -- including the snapshot repo's
+            # own object store -- re-scanning its own growth forever; the
+            # opencode process waits for the snapshot and never exits, so
+            # the runner script hangs (job timeout 600s, seen live).
+            f'export XDG_DATA_HOME="{td}/.opencode-data"',
+            f'export XDG_CACHE_HOME="{td}/.opencode-cache"',
             'mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME"',
         ])
     if proxy_provider_url:
