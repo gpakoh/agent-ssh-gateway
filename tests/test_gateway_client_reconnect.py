@@ -319,7 +319,8 @@ class TestExecuteProjectScriptResolvesRealDictContract:
         mock_execute_argv.assert_called_once()
         call_args, call_kwargs = mock_execute_argv.call_args
         assert call_args[0] == ["sh"]
-        assert call_kwargs["stdin"] == "echo hi"
+        assert "echo hi" in call_kwargs["stdin"]
+        assert "__AGENT_SCRIPT_BODY__" in call_kwargs["stdin"]
         assert call_kwargs["cwd"] == str(tmp_path)
         # No local temp file is ever written -- the script is piped via
         # stdin (audit BLOCKER: the old temp-file approach always failed

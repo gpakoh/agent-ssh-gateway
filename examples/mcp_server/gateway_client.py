@@ -29,6 +29,41 @@ def _safe_project(project: str) -> str:
     return "/".join(parts)
 
 
+_SCRIPT_BODY_DELIM = "__AGENT_SCRIPT_BODY__"
+
+
+def _script_stdin_wrapper(script: str) -> str:
+    """Wrap a script so the SSH target materializes it to a temp file and
+    runs ``sh`` on the file, instead of ``sh`` consuming the script from
+    the channel stdin.
+
+    With stdin piping, a long-running child of the script (opencode spawns
+    a background snapshot ``git add`` after its run) inherits the channel
+    stdin. The shell's un-parsed script tail is then gone when the shell
+    reaches it, and ``sh`` aborts at EOF with 'unexpected end of file
+    (expecting \"fi\")' (exit 2) right after the child -- the agent's diff
+    is already saved, so the job looks failed despite complete work
+    (confirmed live in the E2E smoke, runs 1-4). Running from a file makes
+    the shell's input the file: heredocs are read from the file, not stdin,
+    and the inner script's children inherit a drained pipe (EOF), so
+    nothing can consume the script source.
+
+    The temp file lives in the SSH target's /tmp (writable there); the
+    project root itself is never touched, preserving the read-only-root
+    guarantee for the MCP container.
+    """
+    return (
+        'tmpf=$(mktemp /tmp/agent-script-XXXXXX)\n'
+        f'cat > "$tmpf" <<\'{_SCRIPT_BODY_DELIM}\'\n'
+        + script.rstrip("\n")
+        + f"\n{_SCRIPT_BODY_DELIM}\n"
+        'sh "$tmpf"\n'
+        'rc=$?\n'
+        'rm -f "$tmpf"\n'
+        'exit $rc\n'
+    )
+
+
 def resolve_file_path(path: str) -> str:
     """Resolve a file path for gateway file operations.
 
@@ -382,12 +417,15 @@ class GatewayClient:
         script: str,
         timeout_s: int | None = None,
     ) -> dict[str, Any]:
-        """Pipe a bash script to ``sh`` over SSH via stdin -- no temp file.
+        """Pipe a wrapped bash script to ``sh`` over SSH via stdin.
 
         Multi-line scripts with shell syntax (if/then, $(), heredocs, &&, ||)
-        cannot survive shlex.split() → shlex.join(). Piping the script as
-        stdin to a bare ``sh`` preserves it verbatim without ever writing it
-        to disk. This deliberately does NOT write to the project root: that
+        cannot survive shlex.split() → shlex.join(). The wrapper makes the
+        target materialize the script to a /tmp temp file and run ``sh`` on
+        it -- piping a bare ``sh`` via stdin is safe for short scripts, but
+        any long-running child inherits the channel stdin and can consume
+        the shell's un-parsed script tail (see _script_stdin_wrapper).
+        This deliberately does NOT write to the project root: that
         directory is read-only in this process (bind-mounted ``:ro`` for the
         MCP container) even though it's writable on the real SSH target --
         an earlier version wrote a temp file under ``<root>/.ai-bridge/tmp``
@@ -404,7 +442,7 @@ class GatewayClient:
 
         return self.execute_argv(
             ["sh"],
-            stdin=script,
+            stdin=_script_stdin_wrapper(script),
             timeout_s=timeout_s or self.command_timeout,
             cwd=cwd,
         )
@@ -415,12 +453,13 @@ class GatewayClient:
         project: str,
         script: str,
     ) -> dict[str, Any]:
-        """Pipe a bash script to ``sh`` over SSH via stdin, asynchronously.
+        """Submit a wrapped bash script to ``sh`` over SSH, asynchronously.
 
         Like execute_project_script, but submits through execute_raw
-        (async_mode=True, stdin=script) and returns the job_id immediately
-        instead of blocking on the full run. See execute_project_script's
-        docstring for why this never writes a local temp file.
+        (async_mode=True, stdin=<wrapper>) and returns the job_id
+        immediately instead of blocking on the full run. See
+        execute_project_script's docstring for why this never writes to the
+        project root.
         """
         cwd: str | None = None
         try:
@@ -431,7 +470,11 @@ class GatewayClient:
         except Exception:
             raise
 
-        return self.execute_raw("sh", stdin=script, redact_path_prefix=cwd)
+        return self.execute_raw(
+            "sh",
+            stdin=_script_stdin_wrapper(script),
+            redact_path_prefix=cwd,
+        )
 
     @_retry_on_session_not_found
     def apply_patch(
