@@ -39,7 +39,7 @@ services:
     networks:
       internal_net: {}
       # proxy-parser-worker lives in quart-platform's proxy_parser_default
-      # network (172.17.45.0/24) -- the generated agent script fetches a
+      # network -- the generated agent script fetches a
       # live proxy from OPENCODE_PROXY_PROVIDER_URL on the SSH target, so
       # sshd must resolve/reach the provider by name. External network:
       # created by the quart-platform proxy_parser project; removed if that
