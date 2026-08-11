@@ -281,6 +281,15 @@ def _build_opencode_script(
             '  git worktree add --detach "$wt" HEAD 2>>"$td/agent-status.md" || { echo "git worktree add failed: $wt" >> "$td/agent-status.md"; exit 1; }',
             "fi",
             'cd "$wt" || exit 1',
+            # Isolate opencode's storage per run: parallel fleet agents
+            # share one HOME (~/.local/share/opencode/opencode.db) and two
+            # concurrent processes race SQLite schema migration / WAL
+            # locking ("Failed query: CREATE TABLE ..." -- seen live in the
+            # E2E smoke). Point XDG data+cache at the disposable worktree;
+            # config (~/.config/opencode) is read-only and safe to share.
+            'export XDG_DATA_HOME="$wt/.opencode-data"',
+            'export XDG_CACHE_HOME="$wt/.opencode-cache"',
+            'mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME"',
         ])
     if proxy_provider_url:
         parts.extend(_proxy_fetch_script_lines(proxy_provider_url, proxy_timeout))
