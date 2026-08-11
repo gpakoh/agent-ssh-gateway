@@ -295,7 +295,15 @@ def _build_opencode_script(
         parts.extend(_proxy_fetch_script_lines(proxy_provider_url, proxy_timeout))
     parts.extend([
         'if [ -f "$td/current-plan.md" ]; then',
-        f'  $OPCODE_BIN run {opencode_flags} "Read the plan at $td/current-plan.md and execute it fully. Save the implementation diff to $td/implementation-diff.patch. Update $td/agent-status.md as you complete each step. Do not commit, do not push, do not create branches." > "$td/opencode-output.log" 2>&1',
+        # stdin must be /dev/null for opencode: the script itself is piped
+        # to `sh` via stdin (execute_project_script*), and a long-running
+        # child that reads stdin steals the script tail the shell has not
+        # consumed yet -- sh then hits EOF with an unclosed construct
+        # ("sh: syntax error: unexpected end of file (expecting \"fi\")",
+        # seen live in the E2E smoke) and aborts before the post-run
+        # status/report block. Children inherit /dev/null, so this covers
+        # the whole opencode subtree.
+        f'  $OPCODE_BIN run {opencode_flags} < /dev/null "Read the plan at $td/current-plan.md and execute it fully. Save the implementation diff to $td/implementation-diff.patch. Update $td/agent-status.md as you complete each step. Do not commit, do not push, do not create branches." > "$td/opencode-output.log" 2>&1',
         "  RC=$?",
         '  cat "$td/opencode-output.log"',
         "else",
