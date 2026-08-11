@@ -21,7 +21,15 @@ COPY authorized_keys /home/mcpuser/.ssh/authorized_keys
 
 RUN chown -R mcpuser:mcpuser /home/mcpuser/.ssh && \
     chmod 600 /home/mcpuser/.ssh/authorized_keys && \
-    ssh-keygen -A && \
+    mkdir -p /etc/ssh/hostkeys && \
+    ssh-keygen -q -t rsa -b 4096 -f /etc/ssh/hostkeys/ssh_host_rsa_key -N "" && \
+    ssh-keygen -q -t ecdsa -f /etc/ssh/hostkeys/ssh_host_ecdsa_key -N "" && \
+    ssh-keygen -q -t ed25519 -f /etc/ssh/hostkeys/ssh_host_ed25519_key -N "" && \
+    chmod 700 /etc/ssh/hostkeys && \
+    chmod 600 /etc/ssh/hostkeys/ssh_host_*_key && \
+    echo "HostKey /etc/ssh/hostkeys/ssh_host_rsa_key" >> /etc/ssh/sshd_config && \
+    echo "HostKey /etc/ssh/hostkeys/ssh_host_ecdsa_key" >> /etc/ssh/sshd_config && \
+    echo "HostKey /etc/ssh/hostkeys/ssh_host_ed25519_key" >> /etc/ssh/sshd_config && \
     echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config && \
     echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
     echo "mcpuser:sshpass123" | chpasswd && \

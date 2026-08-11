@@ -51,6 +51,12 @@ services:
       - OPENCODE_PROXY_PROVIDER_TIMEOUT=${OPENCODE_PROXY_PROVIDER_TIMEOUT:-5}
     volumes:
       - ${WORKSPACE_HOST_PATH:-..}:${WORKSPACE_CONTAINER_PATH:-/workspace}:rw
+      # Persistent SSH server host keys: sshd no longer regenerates them on
+      # every image build (that rotated the fingerprint and broke the
+      # gateway's strict known_hosts check with a 502). Keys live in a named
+      # volume, auto-populated from the image on first mount; regenerate via
+      # `docker compose down -v` + `up` if identity rotation is ever wanted.
+      - sshd_host_keys:/etc/ssh/hostkeys
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -417,6 +423,8 @@ volumes:
   gateway_logs:
     driver: local
   redis_data:
+    driver: local
+  sshd_host_keys:
     driver: local
   known_hosts:
     driver: local

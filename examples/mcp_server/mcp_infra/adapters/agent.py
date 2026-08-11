@@ -62,7 +62,12 @@ def gateway_write_agent_task(
 
     def _fn() -> dict[str, Any]:
         return _write_agent_task(
-            lambda p, c: run_project_command(_server_client(), p, c),
+            # Script transport (sh + stdin), NOT run_project_command: the
+            # generated command is a multi-line heredoc script that
+            # shlex.split() would shred (live: mkdir saw 'cat', '>', 'JEOF'
+            # as separate argv entries). execute_project_script pipes it
+            # verbatim to a bare `sh` -- same shape, correct semantics.
+            lambda p, s: _server_client().execute_project_script(p, s),
             project=project,
             task_id=task_id,
             agent=agent,
