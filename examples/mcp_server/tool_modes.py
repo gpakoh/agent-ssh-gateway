@@ -226,34 +226,14 @@ MCP_CLIENT_BLOCKED_TOOLS: frozenset[str] = frozenset({
 })
 
 
-# Tools still blocked in "mcp_client_write" mode: agent launch, Docker
-# write/admin, and handoff/agent-task-plan writes remain off-limits.
-# Unlike MCP_CLIENT_BLOCKED_TOOLS, project file write/edit/patch tools and
-# git_add/git_commit/git_push are deliberately NOT in this set -- that is
-# the entire point of this mode: project read/write + git commit/push,
-# still with no infrastructure control (no Docker, no agent-launch).
-MCP_CLIENT_WRITE_BLOCKED_TOOLS: frozenset[str] = frozenset({
-    "run_opencode",
-    "run_agent",
-    "write_handoff_plan",
-    "docker_start",
-    "docker_stop",
-    "docker_restart",
-    "docker_compose_up",
-    "docker_compose_restart",
-    "docker_compose_build",
-    "docker_rm",
-    "docker_compose_down",
-    "docker_prune",
-    "confirm_operation",
-    "docker_pending_actions",
-    "docker_exec",
-    "docker_run",
-    "docker_rmi",
-    "docker_volume_rm",
-    "write_agent_task",
-    "archive_agent_task",
-})
+# Tools still blocked in "mcp_client_write" mode.
+# Deliberately EMPTY: the user granted the ChatGPT-connected client FULL
+# rights -- project edits, git add/commit/push, agent launches, and
+# infrastructure control (Docker/Postgres) alike. Nothing is filtered out
+# of the mcp_client tool set for this mode anymore; keep the set empty as
+# the explicit, auditable record of that decision (an empty frozenset is
+# the "everything allowed" state, and is asserted by tests below).
+MCP_CLIENT_WRITE_BLOCKED_TOOLS: frozenset[str] = frozenset()
 
 # "mcp_client_write" starts from the same broad "mcp_client" tool set
 # (project inspection, read-only git, gitea/github, tests/lint, workspace
