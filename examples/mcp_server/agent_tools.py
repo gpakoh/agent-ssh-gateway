@@ -20,10 +20,26 @@ import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from command_policy import CommandPolicyError  # noqa: F401 -- re-exported for tests
 
 TASKS_REL_DIR = ".ai-bridge/tasks"
+
+# Same markers as quart-platform/opencode-adapter's LIMIT_MARKERS (minus
+# the bare "pay", which would false-positive on ordinary opencode output).
+# Used to detect a rate-limited proxy in the captured run log and report
+# it back to the provider (POST {provider}/proxy/report) for cooldown.
+PROXY_LIMIT_MARKERS = (
+    "rate limit",
+    "too many requests",
+    "quota",
+    "credits",
+    "payment required",
+    "free tier",
+    "usage limit",
+    "please upgrade",
+)
 
 
 def _now_iso() -> str:
@@ -61,7 +77,14 @@ def _read_task_json(
     raw = result.get("stdout", "")
     if not raw.strip():
         return {}
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except ValueError:
+        # Corrupt/unrelated stdout must not crash the caller. run_agent
+        # still fails closed (empty dict -> "task.json not found or empty");
+        # run_opencode treats task.json as optional metadata (worktree_path)
+        # and proceeds with the plan as its only contract.
+        return {}
 
 
 def _read_current_plan(
@@ -131,8 +154,86 @@ def _proxy_fetch_script_lines(provider_url: str, timeout: str) -> list[str]:
     ]
 
 
+def _proxy_report_script_lines(provider_url: str, timeout: str) -> list[str]:
+    """Bash lines that give a rate-limited proxy back to the provider.
+
+    Mirrors quart-platform/opencode-adapter's ProxySource.report_limit:
+    when the captured opencode log (written by _build_opencode_script to
+    ``$td/opencode-output.log``) matches a rate-limit marker, POST
+    ``{provider_base}/proxy/report`` with the leased proxy and a
+    best-effort retry_after_seconds parsed from the log text. The provider
+    puts the proxy on cooldown (it is NOT deleted from the pool), exactly
+    like the adapter's report loop: lease a live proxy before the run,
+    return it when the IP hit limits.
+
+    The whole block is best-effort: a failed report must never fail the
+    agent run (opencode already finished at this point). Sets RATE_LIMITED=1
+    so _build_opencode_script can mark the task status accordingly.
+    """
+    base = urlsplit(provider_url)
+    report_url = f"{base.scheme}://{base.netloc}/proxy/report"
+    marker_pattern = "|".join(PROXY_LIMIT_MARKERS)
+    return [
+        "",
+        "# Give a rate-limited proxy back to the provider (POST /proxy/report)",
+        'if [ -n "$OPENCODE_PROXY_URL" ] && [ -f "$td/opencode-output.log" ]; then',
+        f"  if grep -Eqi {_shell_escape(marker_pattern)} \"$td/opencode-output.log\"; then",
+        "    RATE_LIMITED=1",
+        '    RETRY_AFTER=$(python3 - "$td/opencode-output.log" <<\'PROXYRETRY_EOF\'',
+        "import re, sys",
+        "",
+        "text = open(sys.argv[1], encoding='utf-8', errors='replace').read()",
+        "m = re.search(r'(?:retry(?:ing)?|try\\s+again)\\s+in\\s+(\\d+)\\s*(h(?:our)?s?|m(?:in(?:ute)?s?)?|s(?:ec(?:ond)?s?)?)(?:\\s+(\\d+)\\s*(h(?:our)?s?|m(?:in(?:ute)?s?)?|s(?:ec(?:ond)?s?)?))?', text, re.I)",
+        "if m:",
+        "    total = 0",
+        "    for i in range(1, len(m.groups()), 2):",
+        "        number, unit = m.group(i), m.group(i + 1)",
+        "        if not number or not unit:",
+        "            continue",
+        "        unit = unit.lower()",
+        "        if unit.startswith('h'):",
+        "            total += int(number) * 3600",
+        "        elif unit.startswith('m'):",
+        "            total += int(number) * 60",
+        "        else:",
+        "            total += int(number)",
+        "    if total:",
+        "        print(total)",
+        "        sys.exit(0)",
+        "m2 = re.search(r'\\bretry\\s+after\\s+(\\d+)\\b', text, re.I)",
+        "if m2:",
+        "    print(int(m2.group(1)))",
+        "PROXYRETRY_EOF",
+        ")",
+        '    [ -n "$RETRY_AFTER" ] || RETRY_AFTER=300',
+        '    python3 - "$OPENCODE_PROXY_URL" "$RETRY_AFTER" <<\'PROXYREPORT_EOF\'',
+        "import json, sys, urllib.request",
+        "",
+        "proxy_url, retry_after = sys.argv[1], sys.argv[2]",
+        f"report_url = {report_url!r}",
+        "try:",
+        "    req = urllib.request.Request(",
+        "        report_url,",
+        "        data=json.dumps({'proxy': proxy_url, 'retry_after_seconds': int(retry_after)}).encode(),",
+        "        headers={'Content-Type': 'application/json'},",
+        "    )",
+        f"    urllib.request.urlopen(req, timeout={timeout})",
+        "except Exception:",
+        "    pass",
+        "PROXYREPORT_EOF",
+        '    echo "Rate limited via $OPENCODE_PROXY_URL — reported to provider (retry after ${RETRY_AFTER}s)" >> "$td/agent-status.md"',
+        "  fi",
+        "fi",
+        "",
+    ]
+
+
 def _build_opencode_script(
-    td: str, task_id: str, model: str | None, project_root: str | None = None
+    td: str,
+    task_id: str,
+    model: str | None,
+    project_root: str | None = None,
+    worktree_path: str | None = None,
 ) -> str:
     opencode_flags = "--dangerously-skip-permissions"
     if model:
@@ -155,28 +256,55 @@ def _build_opencode_script(
         # genuinely existing at the right path. Make the script
         # self-sufficient regardless of which dispatch path invoked it.
         parts.append(f"cd {_shell_escape(project_root)} || exit 1")
+        # Absolute task dir: a git worktree below is a fresh checkout from
+        # HEAD and never contains .ai-bridge (it is gitignored), so a
+        # relative $td would resolve inside the worktree to nothing. The
+        # plan/status/diff must stay in the main checkout's task dir.
+        parts.append(f"td={_shell_escape(os.path.join(project_root, td))}")
+    else:
+        parts.append(f"td='{td}'")
     parts.extend([
-        f"td='{td}'",
         'mkdir -p "$td"',
         'echo "Status: running" > "$td/agent-status.md"',
         "OPCODE_BIN=$(command -v opencode 2>/dev/null || echo '/root/.opencode/bin/opencode')",
     ])
+    if worktree_path:
+        wt = worktree_path
+        if project_root and not os.path.isabs(wt):
+            wt = os.path.normpath(os.path.join(project_root, wt))
+        parts.extend([
+            f"wt={_shell_escape(wt)}",
+            'mkdir -p "$(dirname "$wt")"',
+            'if [ -e "$wt/.git" ] || git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then',
+            '  echo "Worktree already exists, reusing: $wt" >> "$td/agent-status.md"',
+            "else",
+            '  git worktree add --detach "$wt" HEAD 2>>"$td/agent-status.md" || { echo "git worktree add failed: $wt" >> "$td/agent-status.md"; exit 1; }',
+            "fi",
+            'cd "$wt" || exit 1',
+        ])
     if proxy_provider_url:
         parts.extend(_proxy_fetch_script_lines(proxy_provider_url, proxy_timeout))
     parts.extend([
         'if [ -f "$td/current-plan.md" ]; then',
-        f'  $OPCODE_BIN run {opencode_flags} "Read the plan at $td/current-plan.md and execute it fully. Save the implementation diff to $td/implementation-diff.patch. Update $td/agent-status.md as you complete each step. Do not commit, do not push, do not create branches."',
+        f'  $OPCODE_BIN run {opencode_flags} "Read the plan at $td/current-plan.md and execute it fully. Save the implementation diff to $td/implementation-diff.patch. Update $td/agent-status.md as you complete each step. Do not commit, do not push, do not create branches." > "$td/opencode-output.log" 2>&1',
         "  RC=$?",
+        '  cat "$td/opencode-output.log"',
         "else",
         '  echo "Error: current-plan.md not found in $td"',
         "  RC=1",
         "fi",
+    ])
+    if proxy_provider_url:
+        parts.extend(_proxy_report_script_lines(proxy_provider_url, proxy_timeout))
+    parts.extend([
         'git diff --no-color > "$td/implementation-diff.patch" 2>/dev/null',
     ])
     parts.extend(
         [
             "if [ $RC -eq 0 ]; then",
             '  echo "Status: needs-review" > "$td/agent-status.md"',
+            'elif [ "${RATE_LIMITED:-0}" = "1" ]; then',
+            '  echo "Status: rate-limited" > "$td/agent-status.md"',
             "else",
             '  echo "Status: failed" > "$td/agent-status.md"',
             "fi",
@@ -322,7 +450,10 @@ def project_run_agent(
                 "finished_at": _now_iso(),
             }
         project_root = _resolve_project_root(project)
-        cmd = _build_opencode_script(td, task_id, model, project_root=project_root)
+        worktree_path = (task_json.get("worktree_path") or "").strip() or None
+        cmd = _build_opencode_script(
+            td, task_id, model, project_root=project_root, worktree_path=worktree_path
+        )
     else:
         return {
             "task_id": task_id,
