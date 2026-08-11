@@ -386,3 +386,32 @@ class TestProjectRunAgentScriptCwd:
         )
         submitted_script = run_script_async.call_args[0][1]
         assert submitted_script.startswith("cd '/abs/project/root' || exit 1")
+
+
+# ── gateway_write_agent_task: script transport, not argv ────────────────────
+
+
+class TestGatewayWriteAgentTaskScriptTransport:
+    """Regression: write_agent_task builds a multi-line heredoc script, so the
+    adapter must ship it through execute_project_script (sh + stdin), never
+    run_project_command (shlex.split shreds heredocs -- live: mkdir saw
+    'cat', '>', 'JEOF' as separate argv entries)."""
+
+    def test_routes_through_execute_project_script(self, monkeypatch):
+        import examples.mcp_server.server as server_mod
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_write_agent_task
+
+        client = MagicMock()
+        client.execute_project_script.return_value = {"exit_code": 0, "stdout": "ok", "stderr": ""}
+        monkeypatch.setattr(server_mod, "client", client)
+
+        result = gateway_write_agent_task(
+            project="test", task_id=TASK_ID, agent="opencode", task="Do the thing"
+        )
+
+        assert result["result"]["exit_code"] == 0
+        client.execute_project_script.assert_called_once()
+        script = client.execute_project_script.call_args[0][1]
+        assert f"cat > .ai-bridge/tasks/{TASK_ID}/task.json << 'JEOF'" in script
+        client.execute_argv.assert_not_called()
+        client.execute_project_command.assert_not_called()
