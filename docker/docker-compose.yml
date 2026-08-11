@@ -228,7 +228,23 @@ services:
       # project volumes mounted :ro") -- read access for search_text/
       # read_file/run_tests/etc., no write path opened by this mount.
       - ${MCP_OAUTH_PROJECT_ROOT:?set MCP_OAUTH_PROJECT_ROOT}:${MCP_OAUTH_PROJECT_ROOT:?set MCP_OAUTH_PROJECT_ROOT}:ro
+      # Host docker daemon socket: makes docker_* tools (docker_client.py
+      # spawns /usr/bin/docker) actually work against the host daemon.
+      # User decision (Aug 11 2026): ChatGPT-connected OAuth client gets
+      # FULL rights including Docker -- this mount is root-equivalent on
+      # the host and is the deliberate trade-off behind that decision.
+      # mcp-server (bearer-only, 8087) deliberately does NOT get this
+      # mount: its clients are scoped mcp_client_safe, and
+      # _unavailable_tool_reasons marks docker_* unavailable there.
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
+    # Supplementary host group for the docker daemon socket: socket is
+    # srw-rw---- root:docker on the host, container runs as appuser
+    # (uid/gid 1000) -- without membership in the host's docker group gid
+    # (116 on this host), /usr/bin/docker inside the container gets
+    # "permission denied" on /var/run/docker.sock.
+    group_add:
+      - "${DOCKER_GROUP_GID:-116}"
     security_opt:
       - no-new-privileges:true
     cap_drop:

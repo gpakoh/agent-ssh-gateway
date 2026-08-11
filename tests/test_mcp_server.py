@@ -203,6 +203,18 @@ class TestUnavailableToolReasons:
         assert "docker_ps" in reasons
         assert "docker_exec" in reasons  # mcp:docker:admin, not just mcp:docker
 
+    def test_marks_docker_tools_unavailable_when_daemon_unreachable(self, monkeypatch):
+        import examples.mcp_server.server as srv
+
+        # CLI present, but neither the socket nor DOCKER_HOST is available
+        # (mcp-server keeps the socket unmounted; mcp-oauth mounts it).
+        monkeypatch.setattr(srv.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(srv.os, "environ", {})
+        monkeypatch.setattr(srv.os.path, "exists", lambda path: False)
+        reasons = srv._unavailable_tool_reasons()
+        assert "docker_ps" in reasons
+        assert "docker_exec" in reasons
+
     def test_marks_context7_tools_unavailable_when_npx_missing(self, monkeypatch):
         import examples.mcp_server.server as srv
 
@@ -223,6 +235,7 @@ class TestUnavailableToolReasons:
         import examples.mcp_server.server as srv
 
         monkeypatch.setattr(srv.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(srv.os, "environ", {"DOCKER_HOST": "unix:///var/run/docker.sock"})
         monkeypatch.setattr(srv, "PG_DSN", "postgresql://u:p@h:5432/d")
         assert srv._unavailable_tool_reasons() == {}
 
