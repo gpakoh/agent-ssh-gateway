@@ -38,6 +38,14 @@ services:
     hostname: sshd
     networks:
       internal_net: {}
+      # proxy-parser-worker lives in quart-platform's proxy_parser_default
+      # network (172.17.45.0/24) -- the generated agent script fetches a
+      # live proxy from OPENCODE_PROXY_PROVIDER_URL on the SSH target, so
+      # sshd must resolve/reach the provider by name. External network:
+      # created by the quart-platform proxy_parser project; removed if that
+      # stack is ever `docker compose down`ed (sshd then loses it until
+      # recreated). Without it, fetch fails open and opencode runs direct.
+      proxy_parser_default: {}
     environment:
       - OPENCODE_PROXY_PROVIDER_URL=${OPENCODE_PROXY_PROVIDER_URL:-}
       - OPENCODE_PROXY_PROVIDER_TIMEOUT=${OPENCODE_PROXY_PROVIDER_TIMEOUT:-5}
@@ -395,6 +403,10 @@ networks:
     external: true
     name: ${GATEWAY_PUBLIC_NETWORK:-public_net}
   internal_net:
+    external: true
+  # quart-platform proxy_parser project's default network; see the sshd
+  # service comment for why sshd joins it.
+  proxy_parser_default:
     external: true
 
 volumes:
