@@ -518,23 +518,25 @@ class TestMcpOauthWorkspaceMount:
         )
 
     def test_workspace_mount_is_read_only(self):
-        """WORKSPACE_READONLY=true is already the documented default
-        (app/api_help.py: "All project volumes mounted :ro") -- the
-        mount itself must match, independent of the app-layer gate."""
+        """User decision (Aug 11 2026): full rights for the OAuth GPT --
+        mcp-oauth's workspace mount is deliberately :rw so the external
+        ChatGPT agent can write project files directly (workspace_file_*,
+        apply_patch). The old :ro boundary lives on only for
+        web-ssh-gateway itself, not for mcp-oauth."""
         service = _load_compose()["services"]["mcp-oauth"]
         mount = next(
             v
             for v in service["volumes"]
             if isinstance(v, str) and "MCP_OAUTH_PROJECT_ROOT" in v
         )
-        assert mount.endswith(":ro")
+        assert mount.endswith(":rw")
 
     def test_source_and_target_use_the_same_path(self):
         """Source and target must be identical -- projects.yaml's
         registry_root and MCP_PROJECT_MAP_JSON's per-project paths are
         already host-absolute; a different container-side path would
         require translating every one of those configured paths too.
-        The mount string is "${VAR:?msg}:${VAR:?msg}:ro" -- the `:?`
+        The mount string is "${VAR:?msg}:${VAR:?msg}:rw" -- the `:?`
         inside each ${...} expression makes a naive split(":") on the
         whole string wrong, so match on the expression appearing twice
         instead.
@@ -546,7 +548,7 @@ class TestMcpOauthWorkspaceMount:
             if isinstance(v, str) and "MCP_OAUTH_PROJECT_ROOT" in v
         )
         var_expr = "${MCP_OAUTH_PROJECT_ROOT:?set MCP_OAUTH_PROJECT_ROOT}"
-        assert mount == f"{var_expr}:{var_expr}:ro", mount
+        assert mount == f"{var_expr}:{var_expr}:rw", mount
 
 
 class TestDeploymentConcurrencySerialization:

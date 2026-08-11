@@ -38,8 +38,11 @@ services:
     hostname: sshd
     networks:
       internal_net: {}
+    environment:
+      - OPENCODE_PROXY_PROVIDER_URL=${OPENCODE_PROXY_PROVIDER_URL:-}
+      - OPENCODE_PROXY_PROVIDER_TIMEOUT=${OPENCODE_PROXY_PROVIDER_TIMEOUT:-5}
     volumes:
-      - ${WORKSPACE_HOST_PATH:-..}:${WORKSPACE_CONTAINER_PATH:-/workspace}:ro
+      - ${WORKSPACE_HOST_PATH:-..}:${WORKSPACE_CONTAINER_PATH:-/workspace}:rw
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -201,7 +204,9 @@ services:
       - PGPASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       - PGSSLMODE=${MCP_OAUTH_PGSSLMODE:-disable}
       - PGAPPNAME=${MCP_OAUTH_PGAPPNAME:-mcp-oauth}
-      - WORKSPACE_READONLY=${WORKSPACE_READONLY:-true}
+      - WORKSPACE_READONLY=false
+      - OPENCODE_PROXY_PROVIDER_URL=${OPENCODE_PROXY_PROVIDER_URL:-}
+      - OPENCODE_PROXY_PROVIDER_TIMEOUT=${OPENCODE_PROXY_PROVIDER_TIMEOUT:-5}
     volumes:
       - ${PROJECTS_YAML_PATH:-../projects.yaml}:/app/projects.yaml:ro
       # Dedicated volume, deliberately NOT shared with mcp-server's
@@ -227,7 +232,7 @@ services:
       # app/api_help.py's own docs: "Container filesystem read-only. All
       # project volumes mounted :ro") -- read access for search_text/
       # read_file/run_tests/etc., no write path opened by this mount.
-      - ${MCP_OAUTH_PROJECT_ROOT:?set MCP_OAUTH_PROJECT_ROOT}:${MCP_OAUTH_PROJECT_ROOT:?set MCP_OAUTH_PROJECT_ROOT}:ro
+      - ${MCP_OAUTH_PROJECT_ROOT:?set MCP_OAUTH_PROJECT_ROOT}:${MCP_OAUTH_PROJECT_ROOT:?set MCP_OAUTH_PROJECT_ROOT}:rw
       # Host docker daemon socket: makes docker_* tools (docker_client.py
       # spawns /usr/bin/docker) actually work against the host daemon.
       # User decision (Aug 11 2026): ChatGPT-connected OAuth client gets

@@ -21,6 +21,7 @@ from examples.mcp_server.agent_tools import (
     _build_opencode_script,
     _now_iso,
     _read_current_plan,
+    _read_task_json,
     _resolve_project_root,
 )
 
@@ -79,7 +80,11 @@ def project_run_opencode(
         }
 
     project_root = _resolve_project_root(project)
-    cmd = _build_opencode_script(td, task_id, model, project_root=project_root)
+    task_json = _read_task_json(run_cmd, project, task_id)
+    worktree_path = (task_json or {}).get("worktree_path") or None
+    cmd = _build_opencode_script(
+        td, task_id, model, project_root=project_root, worktree_path=worktree_path
+    )
 
     if async_submit:
         if run_script_async is None:
