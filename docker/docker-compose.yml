@@ -63,8 +63,10 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.0'
-          memory: 512M
+          # 2 parallel opencode runs (fleet mode) OOM at 512M -- each
+          # opencode process peaks ~300-400MB; verified in the E2E smoke.
+          cpus: '2.0'
+          memory: 2048M
         reservations:
           cpus: '0.1'
           memory: 128M
