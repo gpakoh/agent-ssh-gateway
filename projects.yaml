@@ -269,3 +269,10 @@ projects:
     type: python-service
     description: "Agent semantic/procedural memory service for quart-platform (L1-L3, Continual Harness)"
     tags: []
+
+  astro-miniapp-builder:
+    root: quart-platform/astro-miniapp-builder
+    parent: quart-platform
+    type: unknown
+    description: "MiniApp builder template — source of truth"
+    tags: []
