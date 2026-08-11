@@ -149,8 +149,12 @@ class TestChatGPTSafeMode:
             assert name in MCP_CLIENT_BLOCKED_TOOLS
 
     def test_blocked_tools_excludes_write_mutations(self):
-        for name in ("workspace_file_write", "workspace_file_edit", "workspace_apply_patch",
-                       "apply_patch"):
+        for name in (
+            "workspace_file_write",
+            "workspace_file_edit",
+            "workspace_apply_patch",
+            "apply_patch",
+        ):
             assert name in MCP_CLIENT_BLOCKED_TOOLS
 
     def test_safe_tools_include_readonly(self):
@@ -194,8 +198,8 @@ class TestChatGPTSafeMode:
 
 
 # ---------------------------------------------------------------------------
-# mcp_client_write mode -- project read/write + git commit/push,
-# still no Docker admin / agent-launch / handoff-plan write.
+# mcp_client_write mode -- project read/write + git commit/push +
+# agent launch + Docker/Postgres admin (FULL rights: nothing blocked).
 # ---------------------------------------------------------------------------
 
 
@@ -234,28 +238,45 @@ class TestMcpClientWriteMode:
 
     def test_project_inspection_and_tests_still_present(self):
         write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
-        for name in ("health", "read_file", "repo_status", "run_tests", "run_lint", "git_status", "git_diff"):
+        for name in (
+            "health",
+            "read_file",
+            "repo_status",
+            "run_tests",
+            "run_lint",
+            "git_status",
+            "git_diff",
+        ):
             assert name in write_tools
 
-    def test_docker_admin_still_blocked(self):
+    def test_docker_admin_allowed(self):
+        """mcp_client_write now carries FULL rights: Docker admin, agent
+        launch, handoff/agent-task writes are all reachable (the user
+        granted the ChatGPT-connected client full access)."""
         write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
         for name in (
-            "docker_exec", "docker_run", "docker_rmi", "docker_volume_rm",
-            "docker_start", "docker_stop", "docker_restart",
-            "docker_compose_up", "docker_compose_down", "docker_prune",
+            "docker_exec",
+            "docker_run",
+            "docker_rmi",
+            "docker_volume_rm",
+            "docker_stop",
+            "docker_restart",
+            "docker_compose_up",
+            "docker_compose_down",
+            "docker_prune",
         ):
-            assert name not in write_tools
+            assert name in write_tools
 
-    def test_agent_launch_still_blocked(self):
+    def test_agent_launch_allowed(self):
         write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
-        assert "run_opencode" not in write_tools
-        assert "run_agent" not in write_tools
+        assert "run_opencode" in write_tools
+        assert "run_agent" in write_tools
 
-    def test_handoff_and_agent_task_write_still_blocked(self):
+    def test_handoff_and_agent_task_write_allowed(self):
         write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
-        assert "write_handoff_plan" not in write_tools
-        assert "write_agent_task" not in write_tools
-        assert "archive_agent_task" not in write_tools
+        assert "write_handoff_plan" in write_tools
+        assert "write_agent_task" in write_tools
+        assert "archive_agent_task" in write_tools
 
     def test_get_mcp_client_write_tools_matches_mode_entry(self):
         assert get_mcp_client_write_tools() == frozenset(TOOL_NAMES_BY_MODE["mcp_client_write"])
@@ -270,8 +291,8 @@ class TestMcpClientWriteMode:
         assert should_register_tool("git_commit")
         assert should_register_tool("workspace_file_write")
         assert should_register_tool("read_file")
-        assert not should_register_tool("docker_exec")
-        assert not should_register_tool("run_agent")
+        assert should_register_tool("docker_exec")
+        assert should_register_tool("run_agent")
 
     def test_plain_mcp_client_mode_is_unaffected(self):
         """The new mode must not change plain "mcp_client" mode's own
