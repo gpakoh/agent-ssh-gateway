@@ -54,8 +54,18 @@ All guards run as shell script on the SSH target:
 
 ### OpenCode binary not found
 
-- MCP tool checks `command -v opencode` → `/root/.opencode/bin/opencode`.
-- Install via `npm install -g @opencode/cli` or set `OPENCODE_BIN` env var.
+- MCP tool checks `command -v opencode` → falls back to `/root/.opencode/bin/opencode`.
+- The sshd image already ships the CLI: `docker/sshd/Dockerfile` installs the
+  **opencode.ai CLI** (not the npm `@opencode/cli` package) via the official
+  installer at a pinned version and copies the binary to `/usr/local/bin/opencode`
+  so `command -v opencode` resolves in mcpuser's SSH session. The generated
+  agent script's flags (`opencode run --dangerously-skip-permissions --model ...`)
+  belong to this CLI.
+- Manual install on a non-container target (or to upgrade the pinned version):
+  `curl -fsSL https://opencode.ai/install | bash -s -- --version <v>` then make
+  the binary reachable on the runner's PATH (e.g. copy to `/usr/local/bin` —
+  a symlink into `$HOME/.opencode/bin` of a different user breaks on a 0700 home).
+- To point at a local wrapper instead (proxy rotation etc.), set `OPENCODE_BIN` env var.
 
 ### `MCP_GATEWAY_WORKTREE_ROOT` not set
 
@@ -100,7 +110,7 @@ When a backend provider (OpenCode, Mimo) exhausts its quota or becomes unavailab
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `OPENCODE_BIN` | No | `/root/.opencode/bin/opencode` | Path to OpenCode binary. Can point to a local wrapper (e.g. `/usr/local/bin/opencode-proxy`) at operator's discretion. |
+| `OPENCODE_BIN` | No | `/root/.opencode/bin/opencode` | Path to OpenCode binary (script fallback; `command -v opencode` wins — resolves to `/usr/local/bin/opencode` on the sshd image). Can point to a local wrapper (e.g. `/usr/local/bin/opencode-proxy`) at operator's discretion. |
 
 **Policy:** The project does not include automatic proxy rotation or public proxy scraping to bypass rate limits. See [`docs/architecture/ADR-2026-06-26-agent-backend-routing.md`](../architecture/ADR-2026-06-26-agent-backend-routing.md).
 
