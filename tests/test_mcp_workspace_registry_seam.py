@@ -152,7 +152,8 @@ class TestExecuteProjectScriptRealRegistrySeam:
         assert result == {"exit_code": 0, "stdout": "ok", "stderr": ""}
         call_args, call_kwargs = mock_execute_argv.call_args
         assert call_args[0] == ["sh"]
-        assert call_kwargs["stdin"] == "echo hi"
+        assert "echo hi" in call_kwargs["stdin"]
+        assert "__AGENT_SCRIPT_BODY__" in call_kwargs["stdin"]
         assert call_kwargs["cwd"] == str(real_registry)
 
     def test_async_pipes_script_via_stdin_on_read_only_root(self, real_registry, monkeypatch):
@@ -165,5 +166,6 @@ class TestExecuteProjectScriptRealRegistrySeam:
         assert result == {"job_id": "async-1"}
         call_args, call_kwargs = mock_execute_raw.call_args
         assert call_args[0] == "sh"
-        assert call_kwargs["stdin"] == "echo hi"
+        assert "echo hi" in call_kwargs["stdin"]
+        assert "__AGENT_SCRIPT_BODY__" in call_kwargs["stdin"]
         assert call_kwargs["redact_path_prefix"] == str(real_registry)
