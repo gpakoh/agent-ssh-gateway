@@ -196,8 +196,18 @@ def _unavailable_tool_reasons() -> dict[str, str]:
     from tool_scopes import TOOL_SCOPES
 
     reasons: dict[str, str] = {}
-    if shutil.which("docker") is None:
+    docker_cli = shutil.which("docker")
+    docker_connectable = (
+        bool(os.environ.get("DOCKER_HOST"))
+        or os.path.exists("/var/run/docker.sock")
+    )
+    if docker_cli is None:
         msg = "docker CLI not present in this image"
+        for name, scopes in TOOL_SCOPES.items():
+            if "mcp:docker" in scopes or "mcp:docker:admin" in scopes:
+                reasons[name] = msg
+    elif not docker_connectable:
+        msg = "docker CLI present but no docker daemon socket/DOCKER_HOST reachable"
         for name, scopes in TOOL_SCOPES.items():
             if "mcp:docker" in scopes or "mcp:docker:admin" in scopes:
                 reasons[name] = msg
