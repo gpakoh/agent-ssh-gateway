@@ -131,6 +131,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "gitea_get_issue": ["mcp:repo"],
     "gitea_list_pull_requests": ["mcp:repo"],
     "gitea_get_pull_request": ["mcp:repo"],
+    "gitea_create_pull_request": ["mcp:admin"],
     "gitea_list_action_runs": ["mcp:repo"],
     "gitea_get_action_run": ["mcp:repo"],
     "gitea_list_action_run_jobs": ["mcp:repo"],

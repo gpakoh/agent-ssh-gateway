@@ -119,6 +119,21 @@ def _minimize_gitea_repo(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _minimize_gitea_pull_request(data: dict[str, Any]) -> dict[str, Any]:
+    """Return only the fields needed to continue the review workflow."""
+    head = data.get("head") or {}
+    base = data.get("base") or {}
+    return {
+        "number": data.get("number"),
+        "title": data.get("title"),
+        "state": data.get("state"),
+        "html_url": data.get("html_url"),
+        "head": head.get("ref") or head.get("label"),
+        "base": base.get("ref") or base.get("label"),
+        "mergeable": data.get("mergeable"),
+    }
+
+
 def _minimize_github_repo(data: dict[str, Any]) -> dict[str, Any]:
     """Trim a GitHub repo payload to non-PII fields (mirrors _minimize_gitea_repo)."""
     owner = data.get("owner") or {}
@@ -309,6 +324,39 @@ async def gitea_get_pull_request(owner: str, repo: str, pull_number: int) -> dic
     except Exception as exc:
         return _remote_api_error("gitea_get_pull_request", "gitea", exc)
     return tool_success("gitea_get_pull_request", result=data, source="gitea")
+
+
+async def gitea_create_pull_request(
+    owner: str,
+    repo: str,
+    title: str,
+    head: str,
+    base: str,
+    body: str = "",
+) -> dict[str, Any]:
+    """Create a same-repository Gitea pull request. Does not merge it."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool="gitea_create_pull_request",
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+    try:
+        async with _server_gitea_client()(token) as client:
+            raw = await client.create_pull_request(
+                owner,
+                repo,
+                title=title,
+                head=head,
+                base=base,
+                body=body,
+            )
+            data = _minimize_gitea_pull_request(raw)
+    except Exception as exc:
+        return _remote_api_error("gitea_create_pull_request", "gitea", exc)
+    return tool_success("gitea_create_pull_request", result=data, source="gitea")
 
 
 async def gitea_list_action_runs(
@@ -572,6 +620,7 @@ def register_all() -> None:
     register_tool("gitea_get_issue")(gitea_get_issue)
     register_tool("gitea_list_pull_requests")(gitea_list_pull_requests)
     register_tool("gitea_get_pull_request")(gitea_get_pull_request)
+    register_tool("gitea_create_pull_request")(gitea_create_pull_request)
     register_tool("gitea_list_action_runs")(gitea_list_action_runs)
     register_tool("gitea_get_action_run")(gitea_get_action_run)
     register_tool("gitea_list_action_run_jobs")(gitea_list_action_run_jobs)
