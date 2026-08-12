@@ -19,10 +19,12 @@ from examples.mcp_server.agent_tasks import validate_task_id
 from examples.mcp_server.agent_tools import (
     TASKS_REL_DIR,
     _build_opencode_script,
+    _isolated_worktree_error,
     _now_iso,
     _read_current_plan,
     _read_task_json,
     _resolve_project_root,
+    _task_string_list,
 )
 
 
@@ -81,9 +83,43 @@ def project_run_opencode(
 
     project_root = _resolve_project_root(project)
     task_json = _read_task_json(run_cmd, project, task_id)
-    worktree_path = (task_json or {}).get("worktree_path") or None
+    worktree_path = ((task_json or {}).get("worktree_path") or "").strip() or None
+    isolation_error = _isolated_worktree_error(project_root, worktree_path)
+    if isolation_error:
+        return {
+            "task_id": task_id,
+            "status": "error",
+            "error": isolation_error,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "started_at": started_at,
+            "finished_at": _now_iso(),
+        }
+    try:
+        allowed_files = _task_string_list(task_json or {}, "allowed_files")
+        forbidden_files = _task_string_list(task_json or {}, "forbidden_files")
+        required_checks = _task_string_list(task_json or {}, "required_checks")
+    except ValueError as exc:
+        return {
+            "task_id": task_id,
+            "status": "error",
+            "error": str(exc),
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "started_at": started_at,
+            "finished_at": _now_iso(),
+        }
     cmd = _build_opencode_script(
-        td, task_id, model, project_root=project_root, worktree_path=worktree_path
+        td,
+        task_id,
+        model,
+        project_root=project_root,
+        worktree_path=worktree_path,
+        allowed_files=allowed_files,
+        forbidden_files=forbidden_files,
+        required_checks=required_checks,
     )
 
     if async_submit:

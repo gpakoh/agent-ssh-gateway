@@ -81,13 +81,22 @@ services:
     image: redis:7-alpine
     container_name: ssh-gateway-redis
     networks:
-      internal_net: {}
+      # P1 trust boundary: Redis never joins the shared external internal_net.
+      # It lives on a project-private internal network shared only with the
+      # gateway -- no other container can even reach it.
+      redis_net: {}
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     volumes:
       - redis_data:/data
     restart: unless-stopped
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    # $$ escapes Compose interpolation so the container shell expands
+    # $REDIS_PASSWORD from the env var above -- never a hardcoded secret.
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass "$$REDIS_PASSWORD"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # Auth via the REDISCLI_AUTH env var so the password never lands in the
+      # healthcheck's argv (never `redis-cli -a <password>`).
+      test: ["CMD-SHELL", 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep PONG']
       interval: 10s
       timeout: 3s
       retries: 3
@@ -322,12 +331,15 @@ services:
     hostname: web-ssh-gateway
     networks:
       internal_net: {}
+      # P1 trust boundary: only the gateway shares the private redis_net
+      # with Redis.
+      redis_net: {}
     ports:
       - "127.0.0.1:8085:8085"
     environment:
       - UVICORN_HOST=0.0.0.0
       - UVICORN_PORT=8085
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       - API_KEY=${API_KEY:?set API_KEY}
       - AGENT_TOKEN=${AGENT_TOKEN:?set AGENT_TOKEN}
       - AGENT_TOKEN_TTL=${AGENT_TOKEN_TTL:-0}
@@ -416,6 +428,11 @@ networks:
   # service comment for why sshd joins it.
   proxy_parser_default:
     external: true
+  # P1 trust boundary: project-private network for Redis only. internal:true
+  # blocks all external egress/ingress; NOT external, so it is created fresh
+  # by this project and never shared with anything else.
+  redis_net:
+    internal: true
 
 volumes:
   mcp_postgres_data:
