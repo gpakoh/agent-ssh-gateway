@@ -466,3 +466,34 @@ class TestPackSmoke:
                      "date", "whoami", "top", "df -h"):
             matches = r.evaluate(cmd)
             assert len(matches) == 0, f"False positive for {cmd!r}: {[m.pattern_name for m in matches]}"
+
+    def test_redis_shutdown_requires_command_position(self):
+        """Redis stop detection must require a real command position."""
+        from app.packs.registry import build_registry
+
+        r = build_registry()
+        for cmd in (
+            "SHUTDOWN",
+            "SHUTDOWN NOSAVE",
+            "redis-cli -a pw SHUTDOWN NOSAVE",
+            "/usr/bin/redis-cli SHUTDOWN",
+            "./bin/redis-cli SHUTDOWN NOSAVE",
+            "/opt/tools/redis-cli -a pw SHUTDOWN NOSAVE",
+        ):
+            matches = r.evaluate_pack("database", cmd)
+            assert any(m.pattern_name == "redis-shutdown" for m in matches), (
+                f"redis-shutdown missing for {cmd!r}: {[m.pattern_name for m in matches]}"
+            )
+        for cmd in (
+            "fix-shutdown-043",
+            "tasks/fix-redis-shutdown-context-043/current-plan.md",
+            "echo shutdown",
+            "printf 'shutdown'",
+            "redis-cli ECHO shutdown",
+            "redis-cli-wrapper SHUTDOWN",
+            "git commit -m 'shutdown the server'",
+        ):
+            matches = r.evaluate_pack("database", cmd)
+            assert not any(m.pattern_name == "redis-shutdown" for m in matches), (
+                f"redis-shutdown false positive for {cmd!r}: {[m.pattern_name for m in matches]}"
+            )

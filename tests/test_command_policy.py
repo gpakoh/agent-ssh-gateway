@@ -2105,6 +2105,18 @@ class TestDatabaseScanTool:
         ("DEBUG SLEEP 30", "redis-debug-sleep"),
         ("SHUTDOWN", "redis-shutdown"),
         ("SHUTDOWN NOSAVE", "redis-shutdown"),
+        ("redis-cli SHUTDOWN", "redis-shutdown"),
+        ("redis-cli SHUTDOWN NOSAVE", "redis-shutdown"),
+        ("redis-cli -a secret SHUTDOWN", "redis-shutdown"),
+        ("redis-cli -h host -p 6379 -a pw SHUTDOWN NOSAVE", "redis-shutdown"),
+        ("redis-cli --user admin --pass pw SHUTDOWN NOSAVE", "redis-shutdown"),
+        ("redis-cli -u redis://user:pass@host:6379/0 SHUTDOWN", "redis-shutdown"),
+        ("redis-cli --port=6380 --db 2 SHUTDOWN", "redis-shutdown"),
+        ("/usr/bin/redis-cli SHUTDOWN", "redis-shutdown"),
+        ("./bin/redis-cli SHUTDOWN NOSAVE", "redis-shutdown"),
+        ("/opt/tools/redis-cli -a pw SHUTDOWN NOSAVE", "redis-shutdown"),
+        ("echo ping; redis-cli SHUTDOWN", "redis-shutdown"),
+        ("echo ping && SHUTDOWN NOSAVE", "redis-shutdown"),
         ("CONFIG SET dir /tmp/evil", "redis-config-dangerous"),
         ("CONFIG SET dbfilename exploit.rdb", "redis-config-dangerous"),
         ("CONFIG SET slaveof attacker 6379", "redis-config-dangerous"),
@@ -2119,6 +2131,38 @@ class TestDatabaseScanTool:
         r = scan_command(cmd)
         names = {f.pattern_name for f in r.findings}
         assert expected in names, f"expected {expected} in {names} for {cmd!r}"
+
+    def test_redis_shutdown_not_matched_as_path_or_prose(self):
+        """Redis stop detection must not fire on incidental text/path tokens."""
+        from app.command_policy import scan_command
+
+        for cmd in (
+            "/tmp/shutdown-agent-043/run.sh",
+            "fix-shutdown-043",
+            "tasks/fix-redis-shutdown-context-043/current-plan.md",
+            "run-task --task-token fix-redis-shutdown-043",
+            "shutdown-agent --dry-run",
+            "shutdown.py --help",
+            "ls shutdown-dir",
+            "cat /var/log/shutdown.log",
+            "echo shutdown",
+            "echo 'shutdown now'",
+            "printf 'shutdown'",
+            "git commit -m 'shutdown the server'",
+            "ls | grep shutdown",
+            "python3 runner.py --task shutdown-check",
+            "redis-cli ECHO shutdown",
+            "redis-cli ECHO 'shutdown now'",
+            "redis-cli -s shutdown",
+            "redis-cli -h shutdown",
+            "redis-cli --scan shutdown",
+            "redis-cli KEYS '*' | xargs redis-cli DEL",
+            "redis-cli-wrapper SHUTDOWN",
+            "/usr/bin/redis-cli-wrapper SHUTDOWN",
+        ):
+            r = scan_command(cmd)
+            names = {f.pattern_name for f in r.findings}
+            assert "redis-shutdown" not in names, f"False positive for {cmd!r}: {names}"
 
     def test_safe_database_commands_not_matched(self):
         from app.command_policy import scan_command

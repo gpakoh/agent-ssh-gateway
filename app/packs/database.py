@@ -3,6 +3,44 @@ from __future__ import annotations
 from app.command_policy import DestructivePattern, PatternSuggestion, Severity, SuggestionKind
 from app.packs import Pack
 
+_REDIS_CLI_OPT_VALUE = r"(?:\S+|'[^']*'|\"[^\"]*\")"
+
+_REDIS_CLI_GLOBAL_OPTIONS = (
+    r"(?:"
+    + r"-h\s+" + _REDIS_CLI_OPT_VALUE + r"|--host(?:\s+|=)" + _REDIS_CLI_OPT_VALUE
+    + r"|-p\s+" + _REDIS_CLI_OPT_VALUE + r"|--port(?:\s+|=)" + _REDIS_CLI_OPT_VALUE
+    + r"|-s\s+" + _REDIS_CLI_OPT_VALUE + r"|--socket(?:\s+|=)" + _REDIS_CLI_OPT_VALUE
+    + r"|-a\s+" + _REDIS_CLI_OPT_VALUE + r"|--(?:pass|auth|password)(?:\s+|=)" + _REDIS_CLI_OPT_VALUE
+    + r"|--user(?:\s+|=)" + _REDIS_CLI_OPT_VALUE
+    + r"|-u\s+" + _REDIS_CLI_OPT_VALUE + r"|--url(?:\s+|=)" + _REDIS_CLI_OPT_VALUE
+    + r"|-n\s+" + _REDIS_CLI_OPT_VALUE + r"|--db(?:\s+|=)" + _REDIS_CLI_OPT_VALUE
+    + r"|--(?:cacert|cacertdir|cert|key)(?:\s+|=)" + _REDIS_CLI_OPT_VALUE
+    + r"|-3\b|--tls\b|--insecure\b"
+    + r"|-c\b|--cluster\b|-x\b|--stdin\b"
+    + r"|-r\s+" + _REDIS_CLI_OPT_VALUE + r"|--repeat(?:\s+|=)" + _REDIS_CLI_OPT_VALUE
+    + r"|-i\s+" + _REDIS_CLI_OPT_VALUE + r"|--interval(?:\s+|=)" + _REDIS_CLI_OPT_VALUE
+    + r"|-d\s+" + _REDIS_CLI_OPT_VALUE + r"|--delimiter(?:\s+|=)" + _REDIS_CLI_OPT_VALUE
+    + r"|--raw\b|--no-raw\b|--csv\b|--json\b|--quoted-json\b|--quoted-input\b"
+    + r"|--no-auth-warning\b|--verbose\b|--show-pushes\b"
+    + r")"
+)
+
+_REDIS_CLI_EXE = (
+    r"(?:"
+    + r"(?:[^\s;|&]+/)?redis-cli\b"
+    + r")"
+)
+
+_REDIS_SHUTDOWN_COMMAND = r"SHUTDOWN\b(?:\s+NOSAVE\b)?(?![\w.-])"
+
+_REDIS_SHUTDOWN_RE = (
+    r"(?i)(?:^|;|\|\||&&|\||\n)\s*"
+    + r"(?:"
+    + _REDIS_CLI_EXE + r"\s+(?:" + _REDIS_CLI_GLOBAL_OPTIONS + r"\s+)*" + _REDIS_SHUTDOWN_COMMAND
+    + r"|" + _REDIS_SHUTDOWN_COMMAND
+    + r")"
+)
+
 DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
     # ---- PostgreSQL (psql) ----
     DestructivePattern(
@@ -342,7 +380,7 @@ DATABASE_PATTERNS: tuple[DestructivePattern, ...] = (
     ),
     DestructivePattern(
         name="redis-shutdown",
-        regex=r"(?i)\bSHUTDOWN\b",
+        regex=_REDIS_SHUTDOWN_RE,
         reason="SHUTDOWN stops the Redis server (SHUTDOWN NOSAVE loses data)",
         severity=Severity.HIGH,
         description="Redis server shut down gracefully (or with NOSAVE, losing data).",
