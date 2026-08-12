@@ -243,14 +243,19 @@ class FleetState:
 
     def __init__(
         self,
-        dsn: str,
+        dsn: str | None = None,
         *,
         min_size: int = 1,
         max_size: int = 5,
         command_timeout: float = 10.0,
     ) -> None:
-        if not dsn:
-            raise ValueError("dsn is required")
+        if dsn is not None and not dsn.strip():
+            raise ValueError("dsn must be non-empty when provided")
+        # asyncpg deliberately accepts dsn=None and then resolves the standard
+        # PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD environment variables.
+        # FleetRuntime validates that the required PG* identity fields exist
+        # before choosing this path, so None here is explicit configuration,
+        # not an accidental localhost fallback.
         self._dsn = dsn
         self._min_size = min_size
         self._max_size = max_size
