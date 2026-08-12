@@ -87,6 +87,19 @@ class TestRegisteredToolIsErrorViaRealFastMCP:
 
         server = importlib.import_module("examples.mcp_server.server")
 
+        def _deterministic_gateway_error(*args, **kwargs):
+            raise server.GatewayClientError(
+                "project not found",
+                status_code=404,
+                body={"detail": "project not found"},
+            )
+
+        monkeypatch.setattr(
+            server.client,
+            "execute_project_command",
+            _deterministic_gateway_error,
+        )
+
         async def _call():
             return await server.mcp.call_tool(
                 "git_status", {"project": "this-project-does-not-exist-xyz"}

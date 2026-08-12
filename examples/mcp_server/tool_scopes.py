@@ -81,6 +81,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "git_status": ["mcp:project"],
     "git_add": ["mcp:project"],
     "git_commit": ["mcp:project"],
+    "git_create_branch": ["mcp:project"],
     "git_push": ["mcp:project"],
     "recent_commits": ["mcp:project"],
     "git_diff_stat": ["mcp:project"],
@@ -114,6 +115,10 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "read_agent_diff": ["mcp:handoff"],
     "list_agent_tasks": ["mcp:handoff"],
     "archive_agent_task": ["mcp:handoff"],
+    # Supervisor-only integration primitives. These are exposed only in
+    # mcp_client_write mode and require the admin capability.
+    "supervisor_integrate_file": ["mcp:admin"],
+    "supervisor_recover_integrations": ["mcp:admin"],
     # agent-run — mcp:agent-run
     "run_opencode": ["mcp:agent-run"],
     "run_agent": ["mcp:agent-run"],
@@ -126,6 +131,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "gitea_get_issue": ["mcp:repo"],
     "gitea_list_pull_requests": ["mcp:repo"],
     "gitea_get_pull_request": ["mcp:repo"],
+    "gitea_create_pull_request": ["mcp:repo", "mcp:admin"],
     "gitea_list_action_runs": ["mcp:repo"],
     "gitea_get_action_run": ["mcp:repo"],
     "gitea_list_action_run_jobs": ["mcp:repo"],

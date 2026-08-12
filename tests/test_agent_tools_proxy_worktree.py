@@ -10,13 +10,21 @@ test_opencode_runner_argv.py.
 
 from __future__ import annotations
 
+import json
+import os
+import shlex
+import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from examples.mcp_server.agent_tools import (
     PROXY_LIMIT_MARKERS,
     _build_opencode_script,
+    _isolated_worktree_error,
+    _parent_prerun_snapshot_script_lines,
     _proxy_report_script_lines,
     _read_task_json,
+    _supervisor_postrun_script_lines,
 )
 
 TD = ".ai-bridge/tasks/a12345678901"
@@ -102,6 +110,20 @@ class TestBuildOpencodeScriptProxy:
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
         assert 'echo "Status: rate-limited" > "$td/agent-status.md"' in script
 
+    def test_worker_status_preserved_before_canonical_final_status(self, monkeypatch):
+        """A worker may write a detailed step log to agent-status.md. The
+        runner must preserve that text before replacing the public status with
+        the canonical one-line terminal state, and surface it in agent-report."""
+        monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+        script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
+
+        snapshot = 'cp "$td/agent-status.md" "$td/worker-status.md"'
+        canonical = 'echo "Status: needs-review" > "$td/agent-status.md"'
+        assert snapshot in script
+        assert script.index(snapshot) < script.index(canonical)
+        assert '## Worker status snapshot' in script
+        assert 'cat "$td/worker-status.md" >> "$td/agent-report.md"' in script
+
 
 class TestBuildOpencodeScriptWorktree:
     def test_worktree_added_when_path_provided(self):
@@ -130,3 +152,478 @@ class TestBuildOpencodeScriptWorktree:
     def test_td_absolute_with_project_root_without_worktree(self):
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
         assert "td='/srv/proj/.ai-bridge/tasks/a12345678901'" in script
+
+    def test_managed_clone_never_uses_source_git_worktree_metadata(self):
+        script = _build_opencode_script(
+            "/var/lib/mcp-agent/state/task",
+            TASK_ID,
+            None,
+            project_root="/srv/proj",
+            worktree_path="/var/lib/mcp-agent/workspaces/task",
+            managed_clone=True,
+        )
+        assert 'git clone --no-hardlinks --no-checkout "$PARENT_ROOT" "$wt"' in script
+        assert 'git -C "$wt" checkout --detach "$PARENT_HEAD_BEFORE"' in script
+        assert "git worktree add" not in script
+        assert "managed clone with baseline drift" in script
+
+
+class TestIsolatedWorktreeGuard:
+    def test_parent_checkout_is_forbidden(self):
+        error = _isolated_worktree_error("/srv/proj", ".")
+        assert error is not None
+        assert "outside the authoritative source checkout" in error
+
+    def test_nested_workspace_inside_source_is_forbidden(self):
+        error = _isolated_worktree_error(
+            "/srv/proj", "/srv/proj/.ai-bridge/worktrees/task-1"
+        )
+        assert error is not None
+        assert "outside the authoritative source checkout" in error
+
+    def test_missing_worktree_is_forbidden_for_resolved_project(self):
+        assert _isolated_worktree_error("/srv/proj", None) is not None
+
+    def test_distinct_worktree_is_allowed(self):
+        assert _isolated_worktree_error("/srv/proj", "../agent-worktrees/t1") is None
+
+    def test_registryless_context_keeps_legacy_behavior(self):
+        assert _isolated_worktree_error(None, None) is None
+
+
+def _git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _init_git_repo(root: Path) -> str:
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "tests@example.invalid")
+    _git(root, "config", "user.name", "Agent Runner Tests")
+    (root / "base.txt").write_text("base\n", encoding="utf-8")
+    (root / ".gitignore").write_text("task-artifacts/\n", encoding="utf-8")
+    _git(root, "add", "base.txt", ".gitignore")
+    _git(root, "commit", "-q", "-m", "base")
+    return _git(root, "rev-parse", "HEAD")
+
+
+def test_managed_clone_executes_without_creating_source_worktree_metadata(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    source_head = _init_git_repo(source)
+    artifacts = tmp_path / "agent-state" / TASK_ID
+    artifacts.mkdir(parents=True)
+    (artifacts / "current-plan.md").write_text("# Do nothing\n", encoding="utf-8")
+    workspace = tmp_path / "managed-workspaces" / TASK_ID
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_opencode = fake_bin / "opencode"
+    fake_opencode.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_opencode.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    source_status_before = _git(source, "status", "--porcelain=v1", "--untracked-files=all")
+    source_refs_before = _git(source, "show-ref")
+    source_index_before = (source / ".git" / "index").read_bytes()
+    objects_dir = source / ".git" / "objects"
+    source_objects_before = {
+        path.relative_to(objects_dir): path.read_bytes()
+        for path in objects_dir.rglob("*")
+        if path.is_file()
+    }
+    assert not (source / ".git" / "worktrees").exists()
+
+    script = _build_opencode_script(
+        str(artifacts),
+        TASK_ID,
+        None,
+        project_root=str(source),
+        worktree_path=str(workspace),
+        managed_clone=True,
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert workspace.is_dir()
+    assert (workspace / ".git").is_dir(), "managed workspace must be an independent clone"
+    assert _git(workspace, "rev-parse", "HEAD") == source_head
+    assert _git(source, "status", "--porcelain=v1", "--untracked-files=all") == source_status_before
+    assert _git(source, "show-ref") == source_refs_before
+    assert (source / ".git" / "index").read_bytes() == source_index_before
+    source_objects_after = {
+        path.relative_to(objects_dir): path.read_bytes()
+        for path in objects_dir.rglob("*")
+        if path.is_file()
+    }
+    assert source_objects_after == source_objects_before
+    assert not (source / ".git" / "worktrees").exists()
+    assert (artifacts / "agent-status.md").read_text(encoding="utf-8").strip() == "Status: needs-review"
+
+
+def test_managed_clone_rejects_symlink_workspace(tmp_path, monkeypatch):
+    source = tmp_path / "source-symlink"
+    source.mkdir()
+    _init_git_repo(source)
+    artifacts = tmp_path / "agent-state-symlink" / TASK_ID
+    artifacts.mkdir(parents=True)
+    (artifacts / "current-plan.md").write_text("# Do nothing\n", encoding="utf-8")
+    workspace = tmp_path / "managed-symlink" / TASK_ID
+    workspace.parent.mkdir(parents=True)
+    workspace.symlink_to(source, target_is_directory=True)
+
+    fake_bin = tmp_path / "bin-symlink"
+    fake_bin.mkdir()
+    marker = tmp_path / "opencode-ran"
+    fake_opencode = fake_bin / "opencode"
+    fake_opencode.write_text(
+        f"#!/bin/sh\nprintf ran > {shlex.quote(str(marker))}\nexit 0\n",
+        encoding="utf-8",
+    )
+    fake_opencode.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    status_before = _git(source, "status", "--porcelain=v1", "--untracked-files=all")
+    refs_before = _git(source, "show-ref")
+    script = _build_opencode_script(
+        str(artifacts),
+        TASK_ID,
+        None,
+        project_root=str(source),
+        worktree_path=str(workspace),
+        managed_clone=True,
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode != 0
+    assert "Refusing symlink workspace" in (artifacts / "agent-status.md").read_text(
+        encoding="utf-8"
+    )
+    assert not marker.exists(), "OpenCode must never run after workspace path rejection"
+    assert _git(source, "status", "--porcelain=v1", "--untracked-files=all") == status_before
+    assert _git(source, "show-ref") == refs_before
+
+
+def test_managed_clone_requires_registry_root_at_git_toplevel(tmp_path, monkeypatch):
+    repo = tmp_path / "monorepo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    nested = repo / "service"
+    nested.mkdir()
+    artifacts = tmp_path / "agent-state-nested" / TASK_ID
+    artifacts.mkdir(parents=True)
+    (artifacts / "current-plan.md").write_text("# Do nothing\n", encoding="utf-8")
+    workspace = tmp_path / "managed-nested" / TASK_ID
+
+    fake_bin = tmp_path / "bin-nested"
+    fake_bin.mkdir()
+    fake_opencode = fake_bin / "opencode"
+    fake_opencode.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_opencode.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    script = _build_opencode_script(
+        str(artifacts),
+        TASK_ID,
+        None,
+        project_root=str(nested),
+        worktree_path=str(workspace),
+        managed_clone=True,
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=nested,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 75
+    assert "Managed clone requires project root at git toplevel" in (
+        artifacts / "agent-status.md"
+    ).read_text(encoding="utf-8")
+    assert not workspace.exists()
+
+
+def _run_supervisor_postrun(
+    root: Path,
+    *,
+    base_head: str,
+    allowed_files: list[str],
+    forbidden_files: list[str] | None = None,
+    required_checks: list[str] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    td = root / "task-artifacts"
+    td.mkdir(exist_ok=True)
+    script = "\n".join(
+        [
+            f"td={shlex.quote(str(td))}",
+            f"BASE_HEAD={shlex.quote(base_head)}",
+            "RC=0",
+            *_supervisor_postrun_script_lines(
+                allowed_files,
+                forbidden_files or [],
+                required_checks or [],
+            ),
+            "exit $FINAL_RC",
+        ]
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, td
+
+
+class TestSupervisorPostrunEvidence:
+    def test_untracked_file_is_in_evidence_without_mutating_real_index(self, tmp_path):
+        base_head = _init_git_repo(tmp_path)
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs" / "new.md").write_text("hello\n", encoding="utf-8")
+        status_before = _git(tmp_path, "status", "--porcelain=v1")
+
+        result, td = _run_supervisor_postrun(
+            tmp_path,
+            base_head=base_head,
+            allowed_files=["docs/**"],
+        )
+
+        assert result.returncode == 0, result.stderr
+        patch = (td / "implementation-diff.patch").read_text(encoding="utf-8")
+        assert "new file mode" in patch
+        assert "docs/new.md" in patch
+        report = json.loads((td / "scope-violations.json").read_text(encoding="utf-8"))
+        assert report["changed_files"] == ["docs/new.md"]
+        assert report["violations"] == []
+        assert _git(tmp_path, "status", "--porcelain=v1") == status_before
+
+    def test_outside_allowed_and_forbidden_path_fails_closed(self, tmp_path):
+        base_head = _init_git_repo(tmp_path)
+        (tmp_path / "app").mkdir()
+        (tmp_path / "app" / "oops.py").write_text("bad = True\n", encoding="utf-8")
+
+        result, td = _run_supervisor_postrun(
+            tmp_path,
+            base_head=base_head,
+            allowed_files=["docs/**"],
+            forbidden_files=["app/**"],
+        )
+
+        assert result.returncode == 71
+        report = json.loads((td / "scope-violations.json").read_text(encoding="utf-8"))
+        kinds = {item["type"] for item in report["violations"]}
+        assert kinds == {"outside-allowed-files", "forbidden-file"}
+
+    def test_single_star_does_not_cross_directory_boundary(self, tmp_path):
+        base_head = _init_git_repo(tmp_path)
+        nested = tmp_path / "app" / "sub"
+        nested.mkdir(parents=True)
+        (nested / "x.py").write_text("x = 1\n", encoding="utf-8")
+
+        result, _ = _run_supervisor_postrun(
+            tmp_path,
+            base_head=base_head,
+            allowed_files=["app/*.py"],
+        )
+
+        assert result.returncode == 71
+
+    def test_worker_commit_cannot_hide_changes_and_is_scope_violation(self, tmp_path):
+        base_head = _init_git_repo(tmp_path)
+        (tmp_path / "base.txt").write_text("changed by worker\n", encoding="utf-8")
+        _git(tmp_path, "add", "base.txt")
+        _git(tmp_path, "commit", "-q", "-m", "worker commit")
+
+        result, td = _run_supervisor_postrun(
+            tmp_path,
+            base_head=base_head,
+            allowed_files=["base.txt"],
+        )
+
+        assert result.returncode == 71
+        patch = (td / "implementation-diff.patch").read_text(encoding="utf-8")
+        assert "changed by worker" in patch
+        report = json.loads((td / "scope-violations.json").read_text(encoding="utf-8"))
+        assert any(item["type"] == "head-changed" for item in report["violations"])
+
+    def test_required_check_failure_controls_final_exit(self, tmp_path):
+        base_head = _init_git_repo(tmp_path)
+        (tmp_path / "base.txt").write_text("changed\n", encoding="utf-8")
+
+        result, td = _run_supervisor_postrun(
+            tmp_path,
+            base_head=base_head,
+            allowed_files=["base.txt"],
+            required_checks=["python3 -c 'import sys; sys.exit(9)'"],
+        )
+
+        assert result.returncode == 72
+        checks = (td / "required-checks.log").read_text(encoding="utf-8")
+        assert "FAIL exit=9" in checks
+
+    def test_required_check_parent_mutation_fails_closed(self, tmp_path):
+        """A required check runs after the first parent guard, so the
+        supervisor must verify the parent checkout again after checks.
+
+        Regression: without the second snapshot this absolute-path write
+        survives while the runner still exits 0.
+        """
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        base_head = _init_git_repo(parent)
+        worker = tmp_path / "worker"
+        _git(parent, "worktree", "add", "--detach", str(worker), "HEAD")
+        td = tmp_path / "artifacts"
+        td.mkdir()
+        parent_file = parent / "base.txt"
+        required_check = f"printf 'tampered by check\\n' > {shlex.quote(str(parent_file))}"
+
+        script = "\n".join(
+            [
+                f"td={shlex.quote(str(td))}",
+                'mkdir -p "$td"',
+                *_parent_prerun_snapshot_script_lines(str(parent)),
+                f"cd {shlex.quote(str(worker))}",
+                f"BASE_HEAD={shlex.quote(base_head)}",
+                "RC=0",
+                *_supervisor_postrun_script_lines(
+                    [],
+                    [],
+                    [required_check],
+                    parent_root=str(parent),
+                ),
+                "exit $FINAL_RC",
+            ]
+        )
+        result = subprocess.run(
+            ["sh", "-c", script],
+            cwd=worker,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode == 74, result.stderr
+        checks = (td / "required-checks.log").read_text(encoding="utf-8")
+        assert "PASS" in checks
+        before = (td / "parent-tree-before.txt").read_text(encoding="utf-8").strip()
+        after = (td / "parent-tree-after.txt").read_text(encoding="utf-8").strip()
+        assert before != after
+        assert parent_file.read_text(encoding="utf-8") == "tampered by check\n"
+
+    def test_parent_checkout_mutation_from_worker_fails_closed(self, tmp_path):
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        base_head = _init_git_repo(parent)
+        worker = tmp_path / "worker"
+        _git(parent, "worktree", "add", "--detach", str(worker), "HEAD")
+        td = tmp_path / "artifacts"
+        td.mkdir()
+
+        script = "\n".join(
+            [
+                f"td={shlex.quote(str(td))}",
+                "mkdir -p \"$td\"",
+                *_parent_prerun_snapshot_script_lines(str(parent)),
+                f"cd {shlex.quote(str(worker))}",
+                f"BASE_HEAD={shlex.quote(base_head)}",
+                "RC=0",
+                f"printf 'tampered\\n' > {shlex.quote(str(parent / 'base.txt'))}",
+                *_supervisor_postrun_script_lines(
+                    [],
+                    [],
+                    [],
+                    parent_root=str(parent),
+                ),
+                "exit $FINAL_RC",
+            ]
+        )
+        result = subprocess.run(
+            ["sh", "-c", script],
+            cwd=worker,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode == 74, result.stderr
+        before = (td / "parent-tree-before.txt").read_text(encoding="utf-8").strip()
+        after = (td / "parent-tree-after.txt").read_text(encoding="utf-8").strip()
+        assert before != after
+
+    def test_parent_index_only_mutation_fails_closed(self, tmp_path):
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        base_head = _init_git_repo(parent)
+        (parent / "base.txt").write_text("preexisting parent edit\n", encoding="utf-8")
+        worker = tmp_path / "worker"
+        _git(parent, "worktree", "add", "--detach", str(worker), "HEAD")
+        td = tmp_path / "artifacts"
+        td.mkdir()
+
+        script = "\n".join(
+            [
+                f"td={shlex.quote(str(td))}",
+                'mkdir -p "$td"',
+                *_parent_prerun_snapshot_script_lines(str(parent)),
+                f"cd {shlex.quote(str(worker))}",
+                f"BASE_HEAD={shlex.quote(base_head)}",
+                "RC=0",
+                f"git -C {shlex.quote(str(parent))} add base.txt",
+                *_supervisor_postrun_script_lines(
+                    [],
+                    [],
+                    [],
+                    parent_root=str(parent),
+                ),
+                "exit $FINAL_RC",
+            ]
+        )
+        result = subprocess.run(
+            ["sh", "-c", script],
+            cwd=worker,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode == 74, result.stderr
+        before = (td / "parent-index-tree-before.txt").read_text(encoding="utf-8").strip()
+        after = (td / "parent-index-tree-after.txt").read_text(encoding="utf-8").strip()
+        assert before != after
+
+    def test_workspace_reuse_requires_clean_git_toplevel(self):
+        script = _build_opencode_script(
+            TD,
+            TASK_ID,
+            None,
+            project_root="/srv/proj",
+            worktree_path="/srv/agent-workspaces/t1",
+        )
+        assert "git -C \"$wt\" rev-parse --show-toplevel" in script
+        assert "Refusing non-worktree-root path" in script
+        assert "Refusing dirty existing workspace" in script

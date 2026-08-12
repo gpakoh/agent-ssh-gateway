@@ -702,25 +702,27 @@ def _build_readonly_fallback_script(
     project_dir: str,
     targets: list[str],
 ) -> str:
-    """Build a script that sets up a writable temp project for read-only mounts.
+    """Build a check script whose mutable environment lives outside source.
 
-    Reuses a cached venv in /tmp/.mcp-test/<name>-<hash>-u<uid>-<user>/ if it
-    already exists and pyproject.toml hasn't changed (by comparing a stamp
-    file).  Only runs ``uv sync`` on first call or when deps change.
+    A read-only source checkout must stay the authoritative project root: test
+    discovery, config lookup, package-base inference, and relative imports all
+    depend on running checks from the real checkout.  Only the uv environment,
+    tool caches, and dependency-resolution state live under ``/tmp/.mcp-test``.
 
-    The cache key is scoped by the remote UID/user identity (not just the
-    project path hash): two SSH identities sharing the same read-only
-    project path must not share a writable venv, or one user's chmod'd
-    interpreter breaks the other's run.  A stale/broken .venv (dangling
-    interpreter symlink, unreadable base python, partial sync) is detected
-    by a probe and removed before the next sync, so a poisoned cache never
-    persists past the following invocation.
+    When ``uv.lock`` exists, uv syncs the *real* project with ``--frozen`` and
+    ``UV_PROJECT_ENVIRONMENT`` pointing at the external venv.  This preserves
+    editable/project installation semantics without creating ``.venv`` or
+    lock/cache files in source.  For projects without a lockfile, dependency
+    metadata is copied to the temp root and synced with ``--no-install-project``
+    so uv is never allowed to create a new lockfile inside the read-only repo.
     """
     project_hash = hashlib.sha1(project_dir.encode("utf-8")).hexdigest()[:8]
+    project_name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(project_dir).name) or "project"
     tmp_root = (
-        f"/tmp/.mcp-test/{Path(project_dir).name}-{project_hash}"
+        f"/tmp/.mcp-test/{project_name}-{project_hash}"
         f"-u${{_MCP_UID}}-${{_MCP_USER}}"
     )
+    project_q = shlex.quote(project_dir)
     abs_targets = []
     for t in targets:
         p = Path(t)
@@ -733,84 +735,93 @@ def _build_readonly_fallback_script(
         "set -eu",
         '_MCP_UID="$(id -u)"',
         '_MCP_USER="$(id -un)"',
-        f"export WORKSPACE_REGISTRY_ROOT={shlex.quote(project_dir)}",
-        f"mkdir -p {tmp_root}",
-    ]
-
-    # Config files beyond pyproject/uv.lock/setup.cfg (pytest.ini, mypy.ini,
-    # ruff.toml, tox.ini, .coveragerc, ...) were never synchronized, so the
-    # temp project ran tools against a different configuration than the real
-    # checkout (audit T31 #4). Copy them on every run — they are tiny and the
-    # venv rebuild stays gated by the pyproject/uv.lock stamp below. Must run
-    # before uv sync: setup.cfg can carry setuptools build metadata.
-    for cfg in (
-        "setup.cfg",
-        "pytest.ini",
-        "mypy.ini",
-        "ruff.toml",
-        ".ruff.toml",
-        "tox.ini",
-        ".coveragerc",
-    ):
-        lines.append(f"test -f {project_dir}/{cfg} && cp {project_dir}/{cfg} {tmp_root}/ || true")
-
-    lines += [
-        f"cp {project_dir}/pyproject.toml {tmp_root}/pyproject.toml.new",
-        f"echo 3.12 > {tmp_root}/.python-version",
-        f"STAMP={tmp_root}/.uv_sync_stamp",
+        f"PROJECT_DIR={project_q}",
+        f"TMP_ROOT={tmp_root}",
+        'export WORKSPACE_REGISTRY_ROOT="$PROJECT_DIR"',
+        'export UV_PROJECT_ENVIRONMENT="$TMP_ROOT/.venv"',
+        'mkdir -p "$TMP_ROOT"',
+        'SOURCE_META="$TMP_ROOT/.source-pyproject.toml"',
+        'SOURCE_META_NEW="$TMP_ROOT/.source-pyproject.toml.new"',
+        'SOURCE_LOCK="$TMP_ROOT/.source-uv.lock"',
+        'STAMP="$TMP_ROOT/.uv_sync_stamp"',
+        'cp "$PROJECT_DIR/pyproject.toml" "$SOURCE_META_NEW"',
         "NEED_SYNC=0",
-        "if [ ! -f $STAMP ]; then NEED_SYNC=1; fi",
-        f"if ! diff -q {tmp_root}/pyproject.toml.new {tmp_root}/pyproject.toml >/dev/null 2>&1; then NEED_SYNC=1; fi",
-        f"if [ -f {project_dir}/uv.lock ] && ! diff -q {project_dir}/uv.lock {tmp_root}/uv.lock >/dev/null 2>&1; then NEED_SYNC=1; fi",
+        'if [ ! -f "$STAMP" ]; then NEED_SYNC=1; fi',
+        'if [ ! -f "$SOURCE_META" ] || ! diff -q "$SOURCE_META_NEW" "$SOURCE_META" >/dev/null 2>&1; then NEED_SYNC=1; fi',
+        'if [ -f "$PROJECT_DIR/uv.lock" ]; then',
+        "  HAS_LOCK=1",
+        '  if [ ! -f "$SOURCE_LOCK" ] || ! diff -q "$PROJECT_DIR/uv.lock" "$SOURCE_LOCK" >/dev/null 2>&1; then NEED_SYNC=1; fi',
+        "else",
+        "  HAS_LOCK=0",
+        '  if [ -f "$SOURCE_LOCK" ]; then NEED_SYNC=1; fi',
+        "  for req in requirements.txt requirements-dev.txt requirements-test.txt; do",
+        '    req_src="$PROJECT_DIR/$req"',
+        '    req_cache="$TMP_ROOT/.source-$req"',
+        '    if [ -f "$req_src" ]; then',
+        '      if [ ! -f "$req_cache" ] || ! diff -q "$req_src" "$req_cache" >/dev/null 2>&1; then NEED_SYNC=1; fi',
+        '    elif [ -f "$req_cache" ]; then',
+        "      NEED_SYNC=1",
+        "    fi",
+        "  done",
+        "fi",
         # Stale/broken venv (dangling interpreter symlink, unreadable base
-        # python, partial sync from a killed run) must not be reused: probe
-        # the interpreter and, when broken, drop the whole cache and resync.
-        f"if [ ! -x {tmp_root}/.venv/bin/python3 ] || [ ! -r {tmp_root}/.venv/bin/python3 ]; then",
+        # python, partial sync from a killed run) must not be reused.
+        'if [ ! -x "$TMP_ROOT/.venv/bin/python3" ] || [ ! -r "$TMP_ROOT/.venv/bin/python3" ]; then',
         "  NEED_SYNC=1",
-        f"  if [ -e {tmp_root}/.venv ]; then rm -rf {tmp_root}/.venv; fi",
-        "  rm -f $STAMP",
+        '  if [ -e "$TMP_ROOT/.venv" ]; then rm -rf "$TMP_ROOT/.venv"; fi',
+        '  rm -f "$STAMP"',
         "fi",
         "if [ $NEED_SYNC -eq 1 ]; then",
-        f"  cp {tmp_root}/pyproject.toml.new {tmp_root}/pyproject.toml",
-        f"  test -f {project_dir}/setup.cfg && cp {project_dir}/setup.cfg {tmp_root}/ || true",
-        f"  if [ -f {project_dir}/uv.lock ]; then cp {project_dir}/uv.lock {tmp_root}/uv.lock; FROZEN=--frozen; else FROZEN=; fi",
-        f"  cd {tmp_root}",
-        "  uv sync --extra dev $FROZEN 2>&1",
-        "  touch $STAMP",
+        "  if [ $HAS_LOCK -eq 1 ]; then",
+        # The real project can be installed into the external venv safely:
+        # --frozen forbids lock mutation and UV_PROJECT_ENVIRONMENT prevents
+        # .venv creation inside the source checkout.
+        '    cd "$PROJECT_DIR"',
+        "    uv sync --all-extras --frozen 2>&1",
+        '    cp "$PROJECT_DIR/uv.lock" "$SOURCE_LOCK"',
+        '    SYNC_PROJECT="$PROJECT_DIR"',
+        "  else",
+        # No source lockfile: resolve from copied metadata in TMP_ROOT.  Do
+        # not install the project itself from an incomplete synthetic tree.
+        '    cp "$SOURCE_META_NEW" "$TMP_ROOT/pyproject.toml"',
+        '    rm -f "$TMP_ROOT/uv.lock"',
+        '    cd "$TMP_ROOT"',
+        "    uv sync --all-extras --no-install-project 2>&1",
+        "    for req in requirements.txt requirements-dev.txt requirements-test.txt; do",
+        '      if [ -f "$PROJECT_DIR/$req" ]; then',
+        '        uv pip install --python "$UV_PROJECT_ENVIRONMENT/bin/python3" -r "$PROJECT_DIR/$req" 2>&1',
+        '        cp "$PROJECT_DIR/$req" "$TMP_ROOT/.source-$req"',
+        "      else",
+        '        rm -f "$TMP_ROOT/.source-$req"',
+        "      fi",
+        "    done",
+        '    rm -f "$SOURCE_LOCK"',
+        '    SYNC_PROJECT="$TMP_ROOT"',
+        "  fi",
+        '  cp "$SOURCE_META_NEW" "$SOURCE_META"',
+        '  touch "$STAMP"',
+        "else",
+        '  if [ $HAS_LOCK -eq 1 ]; then SYNC_PROJECT="$PROJECT_DIR"; else SYNC_PROJECT="$TMP_ROOT"; fi',
         "fi",
-        f"rm -f {tmp_root}/pyproject.toml.new",
+        'rm -f "$SOURCE_META_NEW"',
+        'cd "$PROJECT_DIR"',
     ]
 
-    for entry in ("app", "tests"):
-        src = f"{project_dir}/{entry}"
-        dst = f"{tmp_root}/{entry}"
-        lines.append(f"if [ -e {src} ] && [ ! -e {dst} ]; then ln -sf {src} {dst}; fi")
-
-    lines.append(f"cd {tmp_root}")
-
+    # All tools run from the real checkout. --no-sync is important here:
+    # dependency synchronization was completed above and a subsequent uv run
+    # must not decide to mutate project metadata or recreate a source-local env.
+    run_prefix = 'uv run --project "$SYNC_PROJECT" --no-sync'
     if tool_key == "pytest":
-        lines.append(f"uv run pytest -o cache_dir=/tmp/.mcp-pytest-cache {target_args} 2>&1")
-    elif tool_key == "ruff":
-        lines.append(f"RUFF_CACHE_DIR=/tmp/.mcp-ruff-cache uv run ruff check {target_args} 2>&1")
-    elif tool_key == "mypy":
-        # mypy (explicit_package_bases=true in pyproject.toml) infers each
-        # file's package base relative to CWD. With CWD left at tmp_root
-        # (an unrelated dir holding only symlinked app/tests) and targets
-        # given as project_dir's absolute paths, checking sibling non-
-        # package dirs that each have their own same-named file --
-        # examples/mcp_server/server.py and examples/mcp_client_remote/
-        # server.py, neither dir has __init__.py -- collapses both to the
-        # bare module name "server": "Duplicate module named 'server'",
-        # and mypy refuses to check anything else in the run. Confirmed
-        # live: this exact invocation reproduces the error; running from
-        # project_dir directly does not. Put CWD back at the real
-        # (read-only) project_dir -- matching how mypy resolves correctly
-        # everywhere else -- while still using tmp_root's synced venv via
-        # `uv run --project` (unlike `--directory`, does not chdir) and
-        # redirecting mypy's own cache writes off the read-only mount.
         lines.append(
-            f"cd {project_dir} && uv run --project {tmp_root} "
-            f"mypy --cache-dir /tmp/.mcp-mypy-cache {target_args} 2>&1"
+            f'{run_prefix} pytest -o cache_dir=/tmp/.mcp-pytest-cache {target_args} 2>&1'
+        )
+    elif tool_key == "ruff":
+        lines.append(
+            f'RUFF_CACHE_DIR=/tmp/.mcp-ruff-cache {run_prefix} ruff check {target_args} 2>&1'
+        )
+    elif tool_key == "mypy":
+        lines.append(
+            f'{run_prefix} mypy --cache-dir /tmp/.mcp-mypy-cache {target_args} 2>&1'
         )
 
     return "\n".join(lines)
@@ -1320,6 +1331,24 @@ def _validate_git_name(value: str, field: str) -> str:
     if not value or not _GIT_NAME_RE.match(value):
         raise ValueError(f"INVALID_INPUT: {field} {value!r} is not a valid git remote/branch name")
     return value
+
+
+def git_create_branch(
+    client: GatewayClient,
+    project: str,
+    branch: str,
+) -> dict[str, Any]:
+    """Create and switch to a new non-protected local branch.
+
+    This is deliberately narrower than a generic checkout/switch surface: it
+    cannot move to arbitrary refs and cannot create ``main``/``master``. It
+    exists so protected-master deployments can follow the intended
+    feature-branch -> PR workflow instead of deadlocking after ``git commit``.
+    """
+    branch = _validate_git_name(branch, "branch")
+    if branch in {"main", "master"}:
+        raise ValueError(f"POLICY_DENIED: creating protected branch {branch!r} is not allowed")
+    return run_project_command(client, project, f"git switch -c {shlex.quote(branch)}")
 
 
 def git_push(

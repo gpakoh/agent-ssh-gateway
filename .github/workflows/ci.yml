@@ -251,6 +251,14 @@ jobs:
             -t "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}" \
             -t "$REGISTRY/gpakoh/mcp-server:latest" \
             .
+      - name: Build sshd executor image
+        run: |
+          docker build -f docker/sshd/Dockerfile \
+            --build-arg BUILD_SHA=${{ github.sha }} \
+            --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            -t "$REGISTRY/gpakoh/ssh-gateway-sshd:${{ github.sha }}" \
+            -t "$REGISTRY/gpakoh/ssh-gateway-sshd:latest" \
+            docker/sshd
       - name: Smoke-test built images (before pushing, on a push; standalone, on a PR)
         # M18: until now, the freshly built image was never actually
         # started anywhere before landing in production -- the `test` job
@@ -368,6 +376,14 @@ jobs:
             echo "web-ssh-gateway OK"
           fi
 
+          echo "Validating sshd executor image..."
+          if ! docker run --rm "$REGISTRY/gpakoh/ssh-gateway-sshd:${{ github.sha }}" sshd -t; then
+            echo "::error::sshd executor image failed sshd -t"
+            fail=true
+          else
+            echo "sshd executor OK"
+          fi
+
           if [ "$fail" = "true" ]; then
             exit 1
           fi
@@ -384,6 +400,11 @@ jobs:
         run: |
           docker push "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}"
           docker push "$REGISTRY/gpakoh/mcp-server:latest"
+      - name: Push sshd executor image
+        if: github.event_name == 'push'
+        run: |
+          docker push "$REGISTRY/gpakoh/ssh-gateway-sshd:${{ github.sha }}"
+          docker push "$REGISTRY/gpakoh/ssh-gateway-sshd:latest"
 
   deploy:
     # Runs right after real images are pushed — pulls them, redeploys

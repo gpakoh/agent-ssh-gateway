@@ -175,12 +175,15 @@ class TestReadOnlyFallbackMypyPackageBase:
     `uv run --project` (which, unlike --directory, does not chdir).
     """
 
-    def test_mypy_invocation_cds_back_to_project_dir(self):
+    def test_all_tool_invocations_cd_back_to_project_dir(self):
         from mcp_client_tools import _build_readonly_fallback_script
 
-        script = _build_readonly_fallback_script("mypy", "/project", ["."])
-        mypy_line = [ln for ln in script.splitlines() if "mypy" in ln and "uv run" in ln][-1]
-        assert mypy_line.startswith("cd /project && ")
+        for tool in ("pytest", "ruff", "mypy"):
+            script = _build_readonly_fallback_script(tool, "/project", ["."])
+            lines = script.splitlines()
+            cd_index = lines.index('cd "$PROJECT_DIR"')
+            run_index = max(i for i, ln in enumerate(lines) if "uv run" in ln)
+            assert cd_index < run_index
 
     def test_mypy_invocation_uses_project_flag_not_directory_flag(self):
         """--project (not --directory) is required: --directory would chdir
@@ -192,27 +195,22 @@ class TestReadOnlyFallbackMypyPackageBase:
         assert "--project " in mypy_line
         assert "--directory" not in mypy_line
 
-    def test_mypy_project_flag_points_at_tmp_root_not_project_dir(self):
+    def test_mypy_project_flag_uses_prepared_sync_project(self):
         from mcp_client_tools import _build_readonly_fallback_script
 
         script = _build_readonly_fallback_script("mypy", "/project", ["."])
         mypy_line = [ln for ln in script.splitlines() if "mypy" in ln and "uv run" in ln][-1]
-        assert "--project /tmp/.mcp-test/project-" in mypy_line
+        assert '--project "$SYNC_PROJECT"' in mypy_line
+        assert "--no-sync" in mypy_line
 
-    def test_mypy_project_flag_is_not_shell_quoted(self):
-        """Regression within the fix itself: tmp_root contains literal shell
-        variable refs (${_MCP_UID}/${_MCP_USER}) meant to be expanded by the
-        script at run time. Wrapping tmp_root in shlex.quote() puts it in
-        single quotes, which suppress $-expansion in POSIX shells -- uv then
-        received the literal, unexpanded string as a nonexistent path.
-        """
+    def test_external_venv_path_expands_remote_identity_safely(self):
         from mcp_client_tools import _build_readonly_fallback_script
 
         script = _build_readonly_fallback_script("mypy", "/project", ["."])
         assert "${_MCP_UID}" in script
         assert "${_MCP_USER}" in script
-        # A quoted tmp_root would show up as --project '...literal...'
-        assert "--project '" not in script
+        assert 'export UV_PROJECT_ENVIRONMENT="$TMP_ROOT/.venv"' in script
+        assert 'TMP_ROOT=/tmp/.mcp-test/project-' in script
 
     def test_mypy_uses_cache_dir_since_project_dir_is_read_only(self):
         """mypy's own .mypy_cache write must not land on the read-only
@@ -223,46 +221,50 @@ class TestReadOnlyFallbackMypyPackageBase:
         mypy_line = [ln for ln in script.splitlines() if "mypy" in ln and "uv run" in ln][-1]
         assert "--cache-dir /tmp/.mcp-mypy-cache" in mypy_line
 
-    def test_pytest_and_ruff_still_run_from_tmp_root(self):
-        """Only mypy's CWD changed -- pytest/ruff must keep their existing,
-        already-working behavior untouched."""
+    def test_pytest_and_ruff_use_external_env_without_syncing_again(self):
         from mcp_client_tools import _build_readonly_fallback_script
 
-        pytest_script = _build_readonly_fallback_script("pytest", "/project", ["."])
-        pytest_line = [ln for ln in pytest_script.splitlines() if "uv run pytest" in ln][-1]
-        assert not pytest_line.startswith("cd /project")
+        for tool in ("pytest", "ruff"):
+            script = _build_readonly_fallback_script(tool, "/project", ["."])
+            run_line = [
+                ln for ln in script.splitlines() if tool in ln and "uv run" in ln
+            ][-1]
+            assert '--project "$SYNC_PROJECT"' in run_line
+            assert "--no-sync" in run_line
+        assert "/tmp/.mcp-pytest-cache" in _build_readonly_fallback_script(
+            "pytest", "/project", ["."]
+        )
+        assert "RUFF_CACHE_DIR=/tmp/.mcp-ruff-cache" in _build_readonly_fallback_script(
+            "ruff", "/project", ["."]
+        )
 
-        ruff_script = _build_readonly_fallback_script("ruff", "/project", ["."])
-        ruff_line = [ln for ln in ruff_script.splitlines() if "uv run ruff" in ln][-1]
-        assert not ruff_line.startswith("cd /project")
-
-    def test_readonly_fallback_copies_uv_lock_and_syncs_frozen(self):
-        """Regression: the fallback script copied only pyproject.toml, so
-        `uv sync --extra dev` re-resolved dependencies on every first sync
-        instead of honoring the project's uv.lock — non-deterministic
-        versions, and the temp project could drift from what the real
-        project pins. uv.lock must be copied alongside pyproject.toml and
-        the sync must use --frozen so the lockfile semantics hold.
+    def test_readonly_fallback_uses_locked_real_project_without_dev_extra_assumption(self):
+        """A locked read-only project must sync from its real metadata into
+        the external venv.  The runner must not assume an optional extra is
+        literally named ``dev``; all declared extras are safe to request and
+        uv's normal default dependency group semantics remain intact.
         """
         from mcp_client_tools import _build_readonly_fallback_script
 
         script = _build_readonly_fallback_script("pytest", "/project", ["tests"])
-
         sync_lines = [ln for ln in script.splitlines() if "uv sync" in ln]
-        assert sync_lines, "expected a uv sync invocation"
-        frozen_assign = [
-            ln
-            for ln in script.splitlines()
-            if "uv.lock" in ln and "FROZEN=--frozen" in ln
-        ]
-        assert frozen_assign, (
-            "uv sync must honor the project lockfile: when uv.lock exists "
-            f"FROZEN must be --frozen; got {sync_lines}"
-        )
-        assert any("$FROZEN" in ln for ln in sync_lines), (
-            f"uv sync must consume $FROZEN; got {sync_lines}"
-        )
-        assert "uv.lock" in script, "script must reference uv.lock"
+        assert "    uv sync --all-extras --frozen 2>&1" in sync_lines
+        assert "--extra dev" not in script
+        assert 'export UV_PROJECT_ENVIRONMENT="$TMP_ROOT/.venv"' in script
+        assert 'cd "$PROJECT_DIR"' in script
+        assert 'cp "$PROJECT_DIR/uv.lock" "$SOURCE_LOCK"' in script
+
+    def test_readonly_fallback_no_lock_installs_legacy_requirement_files(self):
+        from mcp_client_tools import _build_readonly_fallback_script
+
+        script = _build_readonly_fallback_script("pytest", "/project", ["tests"])
+        assert "uv sync --all-extras --no-install-project" in script
+        assert "requirements.txt requirements-dev.txt requirements-test.txt" in script
+        assert (
+            'uv pip install --python "$UV_PROJECT_ENVIRONMENT/bin/python3" '
+            '-r "$PROJECT_DIR/$req"'
+        ) in script
+        assert 'diff -q "$req_src" "$req_cache"' in script
 
     def test_readonly_fallback_uv_lock_change_triggers_resync(self):
         """The stamp diff-check must also cover uv.lock: a lockfile change
@@ -289,9 +291,9 @@ class TestReadOnlyFallbackMypyPackageBase:
 
         def tmp_root(script):
             for ln in script.splitlines():
-                if ln.startswith("mkdir -p /tmp/.mcp-test/"):
-                    return ln.split()[-1]
-            raise AssertionError("no tmp_root in script")
+                if ln.startswith("TMP_ROOT=/tmp/.mcp-test/"):
+                    return ln.split("=", 1)[1]
+            raise AssertionError("no TMP_ROOT assignment in script")
 
         root_a1 = tmp_root(_build_readonly_fallback_script("pytest", "/work/a/proj", ["tests"]))
         root_b = tmp_root(_build_readonly_fallback_script("pytest", "/home/b/proj", ["tests"]))
@@ -316,10 +318,10 @@ class TestReadOnlyFallbackMypyPackageBase:
         assert '_MCP_UID="$(id -u)"' in script
         assert '_MCP_USER="$(id -un)"' in script
         root_lines = [
-            ln for ln in script.splitlines() if ln.startswith("mkdir -p /tmp/.mcp-test/")
+            ln for ln in script.splitlines() if ln.startswith("TMP_ROOT=/tmp/.mcp-test/")
         ]
-        assert root_lines, "expected tmp_root mkdir"
-        root = root_lines[0].split()[-1]
+        assert root_lines, "expected external TMP_ROOT assignment"
+        root = root_lines[0].split("=", 1)[1]
         assert "-u${_MCP_UID}-${_MCP_USER}" in root
 
     def test_readonly_fallback_rebuilds_broken_venv(self):
@@ -337,32 +339,19 @@ class TestReadOnlyFallbackMypyPackageBase:
         assert probe, "expected interpreter health probe"
         cleanup = [ln for ln in script.splitlines() if "rm -rf" in ln and ".venv" in ln]
         assert cleanup, "broken .venv must be removed before resync"
-        assert "rm -f $STAMP" in script, "stamp must be cleared with a broken venv"
+        assert 'rm -f "$STAMP"' in script, "stamp must be cleared with a broken venv"
 
-    def test_readonly_fallback_symlinks_use_scoped_tmp_root(self):
-        """The app/tests symlinks must be created inside the scoped tmp_root
-        so a project never links the previous tenant's code from a
-        basename-colliding directory.
+    def test_readonly_fallback_does_not_build_synthetic_source_tree(self):
+        """The fallback must keep the real checkout as source-of-truth.
+        Symlinking only conventional ``app``/``tests`` directories produced
+        incorrect roots for projects with other layouts such as KOJO.
         """
         from mcp_client_tools import _build_readonly_fallback_script
 
         script = _build_readonly_fallback_script("pytest", "/home/b/proj", ["tests"])
-        roots = [
-            ln.split()[-1]
-            for ln in script.splitlines()
-            if ln.startswith("mkdir -p /tmp/.mcp-test/")
-        ]
-        assert len(roots) == 1
-        root = roots[0]
-        symlinks = [ln for ln in script.splitlines() if "ln -sf " in ln]
-        assert symlinks, "expected app/tests symlinks"
-        for ln in symlinks:
-            idx = ln.index("ln -sf ")
-            src, dst = ln[idx:].split()[2:4]
-            assert dst.startswith(root + "/"), (
-                f"symlink dst {dst} escapes scoped root {root}: {ln}"
-            )
-            assert "mcp-test/proj-" in root
+        assert "ln -sf" not in script
+        assert 'cd "$PROJECT_DIR"' in script
+        assert '--project "$SYNC_PROJECT" --no-sync' in script
 
     def test_run_uv_tool_validates_targets_early(self, monkeypatch):
         """_run_uv_tool must validate targets before any SSH call."""
@@ -388,6 +377,154 @@ class TestReadOnlyFallbackMypyPackageBase:
         assert result["ok"] is True
         assert "etc/passwd" in str(call_log)
         assert "/etc/passwd" not in str(call_log)
+
+
+def test_readonly_fallback_locked_project_executes_from_source_with_external_venv(tmp_path):
+    """Execute the generated shell against a fake uv binary.
+
+    This catches shell/CWD/environment regressions that string assertions miss:
+    the source tree must remain byte-for-byte unchanged, uv sync must run from
+    the real checkout with --frozen, and the final tool must reuse the external
+    environment without another synchronization pass.
+    """
+    import os
+    import subprocess
+
+    from mcp_client_tools import _build_readonly_fallback_script
+
+    project = tmp_path / "project with spaces"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0.0.0"\nrequires-python = ">=3.11"\n',
+        encoding="utf-8",
+    )
+    (project / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    (project / "tests").mkdir()
+    (project / "tests" / "test_demo.py").write_text("assert True\n", encoding="utf-8")
+
+    before = {
+        path.relative_to(project): path.read_bytes()
+        for path in project.rglob("*")
+        if path.is_file()
+    }
+
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    log_path = tmp_path / "uv.log"
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "printf 'cwd=%s|env=%s|args=%s\\n' \"$PWD\" \"$UV_PROJECT_ENVIRONMENT\" \"$*\" >> \"$UV_LOG\"\n"
+        "if [ \"$1\" = sync ]; then\n"
+        "  mkdir -p \"$UV_PROJECT_ENVIRONMENT/bin\"\n"
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$UV_PROJECT_ENVIRONMENT/bin/python3\"\n"
+        "  chmod +x \"$UV_PROJECT_ENVIRONMENT/bin/python3\"\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+
+    script = _build_readonly_fallback_script("pytest", str(project), ["tests"])
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+    env["UV_LOG"] = str(log_path)
+    completed = subprocess.run(
+        ["sh", "-c", script],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+    calls = log_path.read_text(encoding="utf-8").splitlines()
+    sync_call = next(line for line in calls if "args=sync " in line)
+    run_call = next(line for line in calls if "args=run " in line)
+    assert f"cwd={project}|" in sync_call
+    assert "--all-extras --frozen" in sync_call
+    assert "/tmp/.mcp-test/" in sync_call and "|args=" in sync_call
+    assert f"cwd={project}|" in run_call
+    assert "--no-sync pytest" in run_call
+
+    after = {
+        path.relative_to(project): path.read_bytes()
+        for path in project.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert not (project / ".venv").exists()
+
+
+def test_readonly_fallback_legacy_requirements_execute_without_source_mutation(tmp_path):
+    """KOJO-shaped regression: no uv.lock/dependency extras, requirements.txt only."""
+    import os
+    import subprocess
+
+    from mcp_client_tools import _build_readonly_fallback_script
+
+    project = tmp_path / "legacy-project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "legacy"\nversion = "0.0.0"\nrequires-python = ">=3.12"\n',
+        encoding="utf-8",
+    )
+    (project / "requirements.txt").write_text("pytest>=8\nruff>=0.11\n", encoding="utf-8")
+    (project / "tests").mkdir()
+    before = {
+        path.relative_to(project): path.read_bytes()
+        for path in project.rglob("*")
+        if path.is_file()
+    }
+
+    fake_bin = tmp_path / "legacy-fake-bin"
+    fake_bin.mkdir()
+    log_path = tmp_path / "legacy-uv.log"
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "printf 'cwd=%s|env=%s|args=%s\\n' \"$PWD\" \"$UV_PROJECT_ENVIRONMENT\" \"$*\" >> \"$UV_LOG\"\n"
+        "if [ \"$1\" = sync ]; then\n"
+        "  mkdir -p \"$UV_PROJECT_ENVIRONMENT/bin\"\n"
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$UV_PROJECT_ENVIRONMENT/bin/python3\"\n"
+        "  chmod +x \"$UV_PROJECT_ENVIRONMENT/bin/python3\"\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+
+    script = _build_readonly_fallback_script("pytest", str(project), ["tests"])
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+    env["UV_LOG"] = str(log_path)
+    completed = subprocess.run(
+        ["sh", "-c", script],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+    calls = log_path.read_text(encoding="utf-8").splitlines()
+    assert any("args=sync --all-extras --no-install-project" in line for line in calls)
+    pip_call = next(line for line in calls if "args=pip install " in line)
+    assert f"-r {project}/requirements.txt" in pip_call
+    run_call = next(line for line in calls if "args=run " in line)
+    assert f"cwd={project}|" in run_call
+    assert "--no-sync pytest" in run_call
+
+    after = {
+        path.relative_to(project): path.read_bytes()
+        for path in project.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert not (project / ".venv").exists()
+    assert not (project / "uv.lock").exists()
 
 
 class _MockJobClient:
@@ -773,7 +910,9 @@ class TestReadOnlyFallbackRejectsAbsoluteTargetsInRealFlow:
         mock = self._make_fallback_mock()
         _run_uv_tool(mock, "proj", "pytest", "run_pytest", target=["/etc/passwd"])
         assert mock.fallback_script is not None, "fallback must be triggered"
-        last_line = [ln for ln in mock.fallback_script.splitlines() if "uv run pytest" in ln][-1]
+        last_line = [
+            ln for ln in mock.fallback_script.splitlines() if "pytest" in ln and "uv run" in ln
+        ][-1]
         assert "/etc/passwd" not in last_line.split() or last_line.endswith("/project/etc/passwd 2>&1"), (
             f"fallback must not use raw absolute /etc/passwd, last line: {last_line}"
         )
@@ -785,7 +924,9 @@ class TestReadOnlyFallbackRejectsAbsoluteTargetsInRealFlow:
         mock = self._make_fallback_mock()
         _run_uv_tool(mock, "proj", "pytest", "run_pytest", target=["tests/"])
         assert mock.fallback_script is not None
-        last_line = [ln for ln in mock.fallback_script.splitlines() if "uv run pytest" in ln][-1]
+        last_line = [
+            ln for ln in mock.fallback_script.splitlines() if "pytest" in ln and "uv run" in ln
+        ][-1]
         assert "/project/tests" in last_line
 
     def test_fallback_receives_sanitized_target_with_traversal_blocked(self, monkeypatch):
@@ -1092,7 +1233,8 @@ class TestAsyncRunTestsReadonlyFallback:
         )
 
         assert result["result"]["job_id"] == "j-fallback"
-        assert "uv run pytest" in captured["script"]
+        assert "pytest" in captured["script"] and "uv run" in captured["script"]
+        assert '--project "$SYNC_PROJECT" --no-sync' in captured["script"]
         assert "/tmp/.mcp-test" in captured["script"]
 
     def test_healthy_venv_still_returns_plain_job_id(self, monkeypatch):
@@ -1171,11 +1313,12 @@ def test_redact_project_root_replaces_abs_paths():
     assert _redact_project_root(None, root) == ""
 
 
-def test_readonly_fallback_syncs_tool_config_files():
-    """pytest.ini/mypy.ini/ruff.toml/etc must be copied on every fallback run,
-    not only on uv resync (audit T31 #4: stale/absent config in temp project)."""
+def test_readonly_fallback_reads_tool_config_from_real_project_root():
+    """Tool config must come directly from the authoritative checkout rather
+    than copied snapshots that can become stale or omit layout-specific files."""
     from mcp_client_tools import _build_readonly_fallback_script
 
     script = _build_readonly_fallback_script("pytest", "/project", ["tests"])
+    assert 'cd "$PROJECT_DIR"' in script
     for cfg in ("setup.cfg", "pytest.ini", "mypy.ini", "ruff.toml", ".ruff.toml", "tox.ini", ".coveragerc"):
-        assert f"/project/{cfg}" in script, f"fallback must sync {cfg}"
+        assert f"cp /project/{cfg}" not in script

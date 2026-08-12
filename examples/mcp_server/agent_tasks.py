@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
+import shlex
 from datetime import UTC, datetime
 from typing import Any
+
+from examples.mcp_server.agent_paths import (
+    task_archive_dir,
+    task_archive_path,
+    task_dir,
+    task_tasks_dir,
+)
 
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{10,120}$")
 FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
 
+# Legacy constants remain import-compatible for callers/tests. Production uses
+# agent_paths.task_* helpers when MCP_AGENT_STATE_ROOT is configured.
 TASKS_REL_DIR = ".ai-bridge/tasks"
 ARCHIVE_REL_DIR = ".ai-bridge/archive"
 
@@ -33,12 +44,12 @@ def validate_filename(filename: str) -> None:
         raise ValueError(f"Invalid filename: {filename!r}. Must match {FILENAME_RE.pattern}")
 
 
-def _task_dir(task_id: str) -> str:
-    return f"{TASKS_REL_DIR}/{task_id}"
-
-
-def _archive_dir(task_id: str) -> str:
-    return f"{ARCHIVE_REL_DIR}/{task_id}"
+def _encoded_write(path: str, content: str) -> str:
+    """Build one shell-safe file write without interpolating raw content."""
+    payload = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    return (
+        f"printf %s {shlex.quote(payload)} | base64 -d > {shlex.quote(path)}"
+    )
 
 
 def build_task_json(
@@ -93,6 +104,7 @@ def build_current_plan(
     acceptance_criteria: list[str] | None = None,
     commit_message: str | None = None,
     constraints: str | None = None,
+    artifact_dir: str | None = None,
 ) -> str:
     """Build human-readable current-plan.md content."""
     validate_task_id(task_id)
@@ -101,6 +113,7 @@ def build_current_plan(
     checks = "\n".join(f"- `{c}`" for c in (required_checks or []))
     criteria = "\n".join(f"- {c}" for c in (acceptance_criteria or []))
     notes = f"\n## Constraints\n\n{constraints}\n" if constraints else ""
+    artifacts = artifact_dir or f"{TASKS_REL_DIR}/{task_id}"
 
     return (
         f"# {task}\n\n"
@@ -116,15 +129,16 @@ def build_current_plan(
         + notes
         + "\n## Agent instructions\n\n"
         + "Read this plan and execute it in small, reviewable steps.\n"
-        + f"After each meaningful change, update `.ai-bridge/tasks/{task_id}/agent-status.md`.\n"
-        + f"Save final diff to `.ai-bridge/tasks/{task_id}/implementation-diff.patch`.\n"
+        + f"After each meaningful change, update `{artifacts}/agent-status.md`.\n"
+        + f"Save final diff to `{artifacts}/implementation-diff.patch`.\n"
         + "Do not commit or push unless explicitly instructed.\n"
     )
 
 
 def list_agent_tasks(run_cmd, *, project: str) -> dict[str, Any]:
-    """List task directories under .ai-bridge/tasks/."""
-    result = run_cmd(project, f"ls -1 {TASKS_REL_DIR}/")
+    """List task directories from the configured coordination plane."""
+    tasks_dir = task_tasks_dir(project)
+    result = run_cmd(project, f"ls -1 {shlex.quote(tasks_dir)}/")
     if result.get("exit_code") != 0:
         return {"stdout": "(no tasks)", "stderr": "", "exit_code": 0}
     lines = result.get("stdout", "").splitlines()[:50]
@@ -133,17 +147,15 @@ def list_agent_tasks(run_cmd, *, project: str) -> dict[str, Any]:
 
 
 def archive_agent_task(run_cmd, *, project: str, task_id: str) -> dict[str, Any]:
-    """Move .ai-bridge/tasks/<task_id>/ -> .ai-bridge/archive/<task_id>/.
-
-    Move, not delete — physical deletion is never performed by this tool.
-    """
+    """Move a task into the configured archive; never physically delete it."""
     validate_task_id(task_id)
-    src = _task_dir(task_id)
-    dst = _archive_dir(task_id)
-    result = run_cmd(project, f"mkdir -p {ARCHIVE_REL_DIR}")
+    src = task_dir(project, task_id)
+    archive_dir = task_archive_dir(project)
+    dst = task_archive_path(project, task_id)
+    result = run_cmd(project, f"mkdir -p {shlex.quote(archive_dir)}")
     if result.get("exit_code") != 0:
         return result
-    result = run_cmd(project, f"mv {src} {dst}")
+    result = run_cmd(project, f"mv {shlex.quote(src)} {shlex.quote(dst)}")
     if result.get("exit_code") != 0:
         return {"stdout": f"task {task_id} not found", "stderr": result.get("stderr", ""), "exit_code": 1}
     return {"stdout": f"archived {task_id}", "stderr": "", "exit_code": 0}
@@ -157,7 +169,8 @@ def read_agent_task_file(run_cmd, *, project: str, task_id: str, filename: str) 
     """
     validate_task_id(task_id)
     validate_filename(filename)
-    result = run_cmd(project, f"cat {_task_dir(task_id)}/{filename}")
+    path = f"{task_dir(project, task_id)}/{filename}"
+    result = run_cmd(project, f"cat {shlex.quote(path)}")
     if result.get("exit_code") != 0:
         return {"stdout": "(not found)", "stderr": "", "exit_code": 0}
     return result
@@ -193,6 +206,7 @@ def write_agent_task(
         required_checks=required_checks,
         worktree_path=worktree_path,
     )
+    td = task_dir(project, task_id)
     current_plan = build_current_plan(
         task_id=task_id,
         task=task,
@@ -203,17 +217,17 @@ def write_agent_task(
         acceptance_criteria=acceptance_criteria,
         commit_message=commit_message,
         constraints=constraints,
+        artifact_dir=td,
     )
     initial_status = build_initial_status(agent=agent, task_id=task_id)
 
-    td = _task_dir(task_id)
     parts = [
-        f"mkdir -p {td}",
-        f"cat > {td}/task.json << 'JEOF'\n{task_json}\nJEOF",
-        f"cat > {td}/current-plan.md << 'PEOF'\n{current_plan}\nPEOF",
-        f"cat > {td}/agent-status.md << 'SEOF'\n{initial_status}\nSEOF",
+        f"mkdir -p {shlex.quote(td)}",
+        _encoded_write(f"{td}/task.json", task_json),
+        _encoded_write(f"{td}/current-plan.md", current_plan),
+        _encoded_write(f"{td}/agent-status.md", initial_status),
     ]
     if worktree_path:
-        parts.append(f"cat > {td}/worktree-path.txt << 'WEOF'\n{worktree_path}\nWEOF")
+        parts.append(_encoded_write(f"{td}/worktree-path.txt", worktree_path))
     cmd = "\n".join(parts)
     return run_cmd(project, cmd)

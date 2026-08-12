@@ -15,14 +15,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from examples.mcp_server.agent_paths import managed_workspace_path, task_dir
 from examples.mcp_server.agent_tasks import validate_task_id
 from examples.mcp_server.agent_tools import (
-    TASKS_REL_DIR,
+    _agent_submission_key,
     _build_opencode_script,
+    _isolated_worktree_error,
     _now_iso,
     _read_current_plan,
     _read_task_json,
     _resolve_project_root,
+    _task_string_list,
 )
 
 
@@ -33,7 +36,7 @@ def project_run_opencode(
     task_id: str,
     model: str | None = None,
     run_script: Callable[[str, str], dict[str, Any]] | None = None,
-    run_script_async: Callable[[str, str], dict[str, Any]] | None = None,
+    run_script_async: Callable[[str, str, str], dict[str, Any]] | None = None,
     async_submit: bool = False,
 ) -> dict[str, Any]:
     """Execute an existing handoff task via OpenCode CLI on the SSH target.
@@ -50,7 +53,7 @@ def project_run_opencode(
         model: optional model override (e.g., "gpt-4o")
         run_script: callable(project, script) for multi-line bash scripts,
             required for the synchronous (async_submit=False) path
-        run_script_async: callable(project, script) -> {"job_id": ...},
+        run_script_async: callable(project, script, submission_key) -> {"job_id": ...},
             submits without waiting -- required when async_submit=True
         async_submit: submit and return a job_id immediately instead of
             waiting for the full run (fleet mode: launch several agents
@@ -64,7 +67,7 @@ def project_run_opencode(
     validate_task_id(task_id)
 
     started_at = _now_iso()
-    td = f"{TASKS_REL_DIR}/{task_id}"
+    td = task_dir(project, task_id)
 
     plan = _read_current_plan(run_cmd, project, task_id)
     if not plan:
@@ -81,9 +84,46 @@ def project_run_opencode(
 
     project_root = _resolve_project_root(project)
     task_json = _read_task_json(run_cmd, project, task_id)
-    worktree_path = (task_json or {}).get("worktree_path") or None
+    managed_path = managed_workspace_path(project, task_id)
+    managed_clone = managed_path is not None
+    worktree_path = managed_path or ((task_json or {}).get("worktree_path") or "").strip() or None
+    isolation_error = _isolated_worktree_error(project_root, worktree_path)
+    if isolation_error:
+        return {
+            "task_id": task_id,
+            "status": "error",
+            "error": isolation_error,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "started_at": started_at,
+            "finished_at": _now_iso(),
+        }
+    try:
+        allowed_files = _task_string_list(task_json or {}, "allowed_files")
+        forbidden_files = _task_string_list(task_json or {}, "forbidden_files")
+        required_checks = _task_string_list(task_json or {}, "required_checks")
+    except ValueError as exc:
+        return {
+            "task_id": task_id,
+            "status": "error",
+            "error": str(exc),
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "started_at": started_at,
+            "finished_at": _now_iso(),
+        }
     cmd = _build_opencode_script(
-        td, task_id, model, project_root=project_root, worktree_path=worktree_path
+        td,
+        task_id,
+        model,
+        project_root=project_root,
+        worktree_path=worktree_path,
+        allowed_files=allowed_files,
+        forbidden_files=forbidden_files,
+        required_checks=required_checks,
+        managed_clone=managed_clone,
     )
 
     if async_submit:
@@ -98,7 +138,7 @@ def project_run_opencode(
                 "started_at": started_at,
                 "finished_at": None,
             }
-        submitted = run_script_async(project, cmd)
+        submitted = run_script_async(project, cmd, _agent_submission_key(project, task_id))
         return {
             "task_id": task_id,
             "status": "running",
