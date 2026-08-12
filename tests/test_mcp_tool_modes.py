@@ -19,6 +19,7 @@ from examples.mcp_server.tool_modes import (
     should_register_tool,
     tools_for_mode,
 )
+from examples.mcp_server.tool_scopes import get_required_scopes
 
 
 @pytest.fixture(autouse=True)
@@ -170,6 +171,25 @@ class TestChatGPTSafeMode:
     def test_safe_tools_exclude_blocked(self):
         safe = get_mcp_client_safe_tools()
         assert len(safe & MCP_CLIENT_BLOCKED_TOOLS) == 0
+
+    def test_supervisor_integration_tools_are_write_mode_only(self):
+        supervisor_tools = {
+            "supervisor_integrate_file",
+            "supervisor_recover_integrations",
+        }
+        assert supervisor_tools <= TOOL_NAMES_BY_MODE["mcp_client_write"]
+        for mode, names in TOOL_NAMES_BY_MODE.items():
+            if mode == "mcp_client_write":
+                continue
+            assert supervisor_tools.isdisjoint(names), mode
+        assert supervisor_tools.isdisjoint(get_mcp_client_safe_tools())
+
+    def test_supervisor_integration_tools_require_admin_scope(self):
+        for name in (
+            "supervisor_integrate_file",
+            "supervisor_recover_integrations",
+        ):
+            assert get_required_scopes(name) == ["mcp:admin"]
 
     def test_safe_mode_filters_registration(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
