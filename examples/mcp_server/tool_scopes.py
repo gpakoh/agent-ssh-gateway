@@ -66,6 +66,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "list_sessions": ["mcp:read"],
     "session_health": ["mcp:read"],
     "execute_restricted": ["mcp:execute"],
+    "execute_argv": ["mcp:execute"],
     "job_status": ["mcp:read"],
     "job_result": ["mcp:read"],
     "wait_job": ["mcp:read"],
