@@ -10,6 +10,7 @@ after runtime.set_mcp) instead of import-time decorator side effects.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from agent_tasks import (
@@ -28,9 +29,10 @@ from agent_tools import project_run_agent as _project_run_agent
 from mcp_client_tools import run_project_command
 from opencode_tools import project_run_opencode as _project_run_opencode
 
+from examples.mcp_server.fleet_runtime import get_fleet_runtime
 from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.adapters.gateway import _split_lines
-from examples.mcp_server.mcp_infra.tool_registry import register_tool, run_tool
+from examples.mcp_server.mcp_infra.tool_registry import register_tool, run_tool, run_tool_async
 
 
 def _server_client():
@@ -179,26 +181,24 @@ def gateway_archive_agent_task(project: str, task_id: str) -> dict[str, Any]:
     )
 
 
-def gateway_run_opencode(
+async def gateway_run_opencode(
     project: str,
     task_id: str,
     model: str | None = None,
     async_submit: bool = False,
 ) -> dict[str, Any]:
-    """Execute an existing handoff task via OpenCode CLI (--dangerously-skip-permissions).
-    Requires write mode handoff or full.
+    """Execute an existing handoff task via OpenCode CLI.
 
-    async_submit=True returns a job_id immediately instead of waiting for
-    the full run -- poll with job_status/job_result/job_wait. Fleet mode:
-    call this repeatedly with async_submit=True to launch several agents
-    without blocking on each one."""
+    When durable fleet admission is enabled, async submissions acquire a
+    shared Postgres lease before the blocking gateway call. The blocking HTTP
+    path runs in a worker thread; asyncpg stays on the FastMCP event loop.
+    """
     from write_modes import assert_handoff_write_allowed
 
     assert_handoff_write_allowed()
-    return run_tool(
-        tool="run_opencode",
-        title="Run opencode task",
-        fn=lambda: _project_run_opencode(
+
+    def _submit() -> dict[str, Any]:
+        return _project_run_opencode(
             lambda p, c: run_project_command(_server_client(), p, c),
             project=project,
             task_id=task_id,
@@ -208,35 +208,40 @@ def gateway_run_opencode(
                 p, s, k
             ),
             async_submit=async_submit,
-        ),
+        )
+
+    async def _fn() -> dict[str, Any]:
+        if async_submit:
+            fleet = await get_fleet_runtime()
+            if fleet is not None:
+                return await fleet.submit(
+                    project=project,
+                    task_id=task_id,
+                    submit_sync=_submit,
+                )
+        return await asyncio.to_thread(_submit)
+
+    return await run_tool_async(
+        tool="run_opencode",
+        title="Run opencode task",
+        fn=_fn,
         success_text="Submitted opencode task.",
     )
 
 
-def gateway_run_agent(
+async def gateway_run_agent(
     project: str,
     task_id: str,
     model: str | None = None,
     async_submit: bool = False,
 ) -> dict[str, Any]:
-    """Execute a handoff task via the agent backend router — selects OpenCode
-    (--dangerously-skip-permissions).
-    Requires write mode handoff or full. Router enabled by MCP_AGENT_BACKEND_ROUTER_ENABLED.
-    Task must have task.json with agent='auto' or agent='opencode'.
-
-    async_submit=True returns a job_id immediately instead of waiting for
-    the full run -- poll with job_status/job_result/job_wait. Fleet mode:
-    call this repeatedly with async_submit=True to launch several agents
-    without blocking on each one; the router's cooldown tracking is not
-    fed by async-submitted jobs (no completion callback into this
-    process), only by synchronous (async_submit=False) runs."""
+    """Execute a handoff task via the backend router with optional fleet admission."""
     from write_modes import assert_handoff_write_allowed
 
     assert_handoff_write_allowed()
-    return run_tool(
-        tool="run_agent",
-        title="Run agent task (router)",
-        fn=lambda: _project_run_agent(
+
+    def _submit() -> dict[str, Any]:
+        return _project_run_agent(
             lambda p, c: run_project_command(_server_client(), p, c),
             project=project,
             task_id=task_id,
@@ -247,7 +252,23 @@ def gateway_run_agent(
                 p, s, k
             ),
             async_submit=async_submit,
-        ),
+        )
+
+    async def _fn() -> dict[str, Any]:
+        if async_submit:
+            fleet = await get_fleet_runtime()
+            if fleet is not None:
+                return await fleet.submit(
+                    project=project,
+                    task_id=task_id,
+                    submit_sync=_submit,
+                )
+        return await asyncio.to_thread(_submit)
+
+    return await run_tool_async(
+        tool="run_agent",
+        title="Run agent task (router)",
+        fn=_fn,
         success_text="Submitted agent task via router.",
     )
 

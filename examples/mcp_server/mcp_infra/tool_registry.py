@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib as _hashlib
 import json
 import time as _time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from command_policy import CommandPolicyError
@@ -290,6 +290,137 @@ def run_tool(
     # sensitive content out of its own raw dict via a "redacted" key --
     # otherwise meta.redacted below would default to False regardless of
     # what actually happened, misreporting real redaction as none.
+    was_redacted = bool(data.pop("redacted", False)) if isinstance(data, dict) else False
+    if isinstance(data, dict) and isinstance(data.get("exit_code"), int) and data["exit_code"] != 0:
+        return tool_error(
+            tool=tool,
+            code="TOOL_EXECUTION_FAILED",
+            message=f"Command exited with code {data['exit_code']}",
+            result=data,
+            duration_ms=_elapsed(),
+            redacted=was_redacted,
+        )
+    return tool_success(
+        tool=tool,
+        result=data,
+        duration_ms=_elapsed(),
+        redacted=was_redacted,
+        success_text=success_text,
+    )
+
+
+async def run_tool_async(
+    *,
+    tool: str,
+    title: str,
+    fn: Callable[[], Awaitable[dict[str, Any]]],
+    success_text: str,
+) -> dict[str, Any]:
+    """Async counterpart to :func:`run_tool` with identical envelopes.
+
+    Fleet coordination uses one asyncpg pool owned by the MCP event loop, so
+    calling ``asyncio.run`` from synchronous tool handlers would bind pool
+    resources to short-lived loops. Native async handlers keep that state on
+    the FastMCP loop while blocking gateway HTTP calls can be delegated with
+    ``asyncio.to_thread`` by the caller.
+    """
+    _server = _server_module()
+    _start = _time.monotonic()
+
+    def _elapsed() -> float:
+        return (_time.monotonic() - _start) * 1000
+
+    try:
+        data = await fn()
+    except Exception as exc:
+        if isinstance(exc, CommandPolicyError | WritePermissionError | WriteModeError):
+            if isinstance(exc, CommandPolicyError):
+                msg = str(exc).lower()
+                if "blocked" in msg and "agent backend" in msg:
+                    error_code = "AGENT_BACKEND_BLOCKED"
+                elif "blocked" in msg and "opencode" in msg:
+                    error_code = "OPENCODE_BLOCKED"
+                elif "readonly" in msg or "allowlist" in msg or "denied" in msg:
+                    error_code = "READONLY_COMMAND"
+                else:
+                    error_code = "POLICY_VIOLATION"
+            elif isinstance(exc, WritePermissionError):
+                error_code = "WRITE_PERMISSION_DENIED"
+            else:
+                error_code = "WRITE_MODE_ERROR"
+            try:
+                audit_logger = _server.get_audit_logger()
+                audit_logger.append(
+                    McpAuditEvent(
+                        event_type="mcp.tool_blocked",
+                        tool=tool,
+                        action=title,
+                        decision="block",
+                        reason=str(exc),
+                        error_code=error_code,
+                    )
+                )
+            except Exception:
+                pass
+            return tool_error(
+                tool=tool,
+                code=error_code,
+                message=str(exc),
+                duration_ms=_elapsed(),
+            )
+        if isinstance(exc, GatewayClientError):
+            code, retryable = _server._classify_gateway_error(exc)
+            details = (
+                {"job_id": exc.body["job_id"]}
+                if isinstance(exc.body, dict) and exc.body.get("job_id")
+                else None
+            )
+            return tool_error(
+                tool=tool,
+                code=code,
+                message=_gateway_error_message(exc),
+                retryable=retryable,
+                hint=_gateway_error_hint(exc, code),
+                details=details,
+                duration_ms=_elapsed(),
+                source="gateway",
+            )
+        if isinstance(exc, ValueError):
+            msg = str(exc).lower()
+            err_code = (
+                "POLICY_DENIED"
+                if "traversal" in msg or "blocked" in msg or "denied" in msg
+                else "INVALID_INPUT"
+            )
+            return tool_error(
+                tool=tool,
+                code=err_code,
+                message=str(exc),
+                duration_ms=_elapsed(),
+            )
+        raise
+
+    if isinstance(data, dict) and data.get("ok") is False:
+        error_info = data.get("error") or {}
+        meta = data.get("meta") or {}
+        return tool_error(
+            tool=tool,
+            code=error_info.get("code", "INTERNAL_ERROR"),
+            message=error_info.get("message", "Tool returned error"),
+            result=data.get("result"),
+            retryable=bool(error_info.get("retryable", False)),
+            hint=error_info.get("hint"),
+            details=error_info.get("details"),
+            duration_ms=_elapsed(),
+            redacted=bool(meta.get("redacted", False)),
+            truncated=bool(meta.get("truncated", False)),
+            source=meta.get("source", "unknown"),
+        )
+    if isinstance(data, dict) and "ok" in data:
+        if "duration_ms" not in data.get("meta", {}) or data["meta"].get("duration_ms", 0) == 0:
+            data.setdefault("meta", {})["duration_ms"] = round(_elapsed(), 1)
+        return data
+
     was_redacted = bool(data.pop("redacted", False)) if isinstance(data, dict) else False
     if isinstance(data, dict) and isinstance(data.get("exit_code"), int) and data["exit_code"] != 0:
         return tool_error(

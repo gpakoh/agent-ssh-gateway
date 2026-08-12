@@ -138,7 +138,7 @@ def _compute_sha256(data: bytes) -> str:
     return _SHA256_PREFIX + hashlib.sha256(data).hexdigest()
 
 
-def _is_valid_sha256(value: str) -> bool:
+def _is_valid_sha256(value: object) -> bool:
     if not isinstance(value, str) or not value.startswith(_SHA256_PREFIX):
         return False
     hex_digest = value[len(_SHA256_PREFIX):]

@@ -145,6 +145,13 @@ FROM fleet_task_outcome
 WHERE task_id = $1
 """
 
+_GET_LEASE_BY_JOB_SQL: Final = """
+SELECT task_id, pool, lease_token::text AS lease_token, coordinator_id,
+       job_id, claimed_at, heartbeat_at
+FROM fleet_worker_lease
+WHERE job_id = $1
+"""
+
 
 class FleetStateError(RuntimeError):
     """Base error for durable fleet state operations."""
@@ -160,6 +167,10 @@ class LeaseNotFoundError(FleetStateError):
 
 class PoolCapacityMismatchError(FleetStateError):
     """Coordinators disagree about the configured capacity for one pool."""
+
+
+class TaskAlreadyTerminalError(FleetStateError):
+    """The task_id already has a durable terminal outcome and cannot be re-admitted."""
 
 
 @dataclass(frozen=True)
@@ -307,6 +318,12 @@ class FleetState:
                     )
                 active = int(await conn.fetchval(_COUNT_LEASES_SQL, pool_name))
                 return AdmissionResult(True, True, effective_capacity, active, lease)
+
+            terminal = await conn.fetchrow(_GET_OUTCOME_SQL, task_id)
+            if terminal is not None:
+                raise TaskAlreadyTerminalError(
+                    f"task {task_id!r} already has terminal status {terminal['status']!r}"
+                )
 
             active = int(await conn.fetchval(_COUNT_LEASES_SQL, pool_name))
             if active >= effective_capacity:
@@ -479,6 +496,32 @@ class FleetState:
             row = await conn.fetchrow(_GET_LEASE_SQL, task_id)
         return _lease_from_row(row) if row is not None else None
 
+    async def get_lease_by_job(self, job_id: str) -> WorkerLease | None:
+        """Return the active lease bound to a gateway job, if any."""
+        job_id = _require_name(job_id, "job_id")
+        pg_pool = await self._ensure_pool()
+        async with pg_pool.acquire() as conn:
+            row = await conn.fetchrow(_GET_LEASE_BY_JOB_SQL, job_id)
+        return _lease_from_row(row) if row is not None else None
+
+    async def get_outcome(self, task_id: str) -> TaskOutcome | None:
+        """Return a durable terminal outcome without mutating fleet state."""
+        task_id = _require_name(task_id, "task_id")
+        pg_pool = await self._ensure_pool()
+        async with pg_pool.acquire() as conn:
+            row = await conn.fetchrow(_GET_OUTCOME_SQL, task_id)
+        if row is None:
+            return None
+        return TaskOutcome(
+            task_id=row["task_id"],
+            pool=row["pool"],
+            job_id=row["job_id"],
+            status=row["status"],
+            exit_code=row["exit_code"],
+            result=row["result_json"],
+            reported_at=row.get("reported_at"),
+        )
+
     async def configure_pool(
         self,
         pool_name: str,
@@ -553,6 +596,7 @@ __all__ = [
     "LeaseNotFoundError",
     "PoolCapacityMismatchError",
     "PoolSnapshot",
+    "TaskAlreadyTerminalError",
     "SCHEMA_SQL",
     "TERMINAL_STATUSES",
     "TaskOutcome",
