@@ -19,6 +19,7 @@ from examples.mcp_server.fleet_state import (
     LeaseConflictError,
     LeaseNotFoundError,
     PoolCapacityMismatchError,
+    TaskAlreadyTerminalError,
 )
 
 
@@ -161,7 +162,7 @@ async def test_pool_uses_read_write_connection_settings(monkeypatch):
 async def test_acquire_new_slot_counts_rows_and_returns_lease():
     inserted = _lease_row()
     conn = _FakeConn(
-        fetchrows=[{"capacity": 2}, None, inserted],
+        fetchrows=[{"capacity": 2}, None, None, inserted],
         fetchvals=[0],
         execute_results=["INSERT 0 1"],
     )
@@ -207,9 +208,34 @@ async def test_acquire_same_task_is_idempotent_without_second_insert():
 
 
 @pytest.mark.asyncio
+async def test_acquire_rejects_task_with_terminal_outcome():
+    outcome = {
+        "task_id": "task-1",
+        "pool": "ssh-gateway/sshd",
+        "job_id": "job-1",
+        "status": "failed",
+        "exit_code": 1,
+        "result_json": {"reason": "done"},
+        "reported_at": NOW,
+    }
+    conn = _FakeConn(
+        fetchrows=[{"capacity": 2}, None, outcome],
+        execute_results=["INSERT 0 0"],
+    )
+    with pytest.raises(TaskAlreadyTerminalError, match="terminal status"):
+        await _state(conn).acquire_slot(
+            pool_name="ssh-gateway/sshd",
+            task_id="task-1",
+            coordinator_id="gpt-a",
+            capacity=2,
+        )
+    assert all(sql != fleet_state_module._INSERT_LEASE_SQL for _, sql, _ in conn.calls)
+
+
+@pytest.mark.asyncio
 async def test_acquire_full_pool_blocks_without_inserting():
     conn = _FakeConn(
-        fetchrows=[{"capacity": 2}, None],
+        fetchrows=[{"capacity": 2}, None, None],
         fetchvals=[2],
         execute_results=["INSERT 0 0"],
     )

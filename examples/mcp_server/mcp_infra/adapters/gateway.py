@@ -14,6 +14,7 @@ instance.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -63,6 +64,7 @@ from tool_results import (
 )
 from write_modes import WriteModeError, WritePermissionError
 
+from examples.mcp_server.fleet_runtime import get_fleet_runtime
 from examples.mcp_server.latency_metrics import get_tracker
 from examples.mcp_server.mcp_audit import McpAuditEvent
 from examples.mcp_server.mcp_infra import gateway_errors
@@ -73,6 +75,7 @@ from examples.mcp_server.mcp_infra.tool_registry import (
     instrumented,
     register_tool,
     run_tool,
+    run_tool_async,
 )
 
 _classify_gateway_error = gateway_errors._classify_gateway_error
@@ -659,6 +662,85 @@ def gateway_job_wait(job_id: str, timeout_sec: int | None = None) -> dict[str, A
     )
 
 
+async def _reconcile_fleet_result(job_id: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Best-effort slot release after authoritative terminal gateway state.
+
+    A reconciliation failure must not hide the gateway result.  Fail closed by
+    retaining the lease and mark the response so an operator can see that
+    capacity cleanup was deferred.
+    """
+    try:
+        fleet = await get_fleet_runtime()
+        if fleet is not None:
+            await fleet.reconcile_gateway_result(job_id=job_id, result=result)
+    except Exception:
+        result = dict(result)
+        result["fleet_reconcile"] = "deferred"
+    return result
+
+
+async def gateway_job_status_protocol(job_id: str) -> dict[str, Any]:
+    async def _fn() -> dict[str, Any]:
+        data = await asyncio.to_thread(_server_client().job_status, job_id)
+        return await _reconcile_fleet_result(job_id, data)
+
+    return await run_tool_async(
+        tool="job_status",
+        title="Job status",
+        fn=_fn,
+        success_text=f"Job {job_id} status retrieved.",
+    )
+
+
+async def gateway_job_result_protocol(
+    job_id: str, redact_output: bool = True
+) -> dict[str, Any]:
+    async def _fn() -> dict[str, Any]:
+        data = await asyncio.to_thread(
+            _server_client().job_result,
+            job_id,
+            redact_output,
+        )
+        return await _reconcile_fleet_result(job_id, data)
+
+    return await run_tool_async(
+        tool="job_result",
+        title="Job result",
+        fn=_fn,
+        success_text=f"Job {job_id} result retrieved.",
+    )
+
+
+async def gateway_wait_job_protocol(
+    job_id: str, timeout_sec: int | None = None
+) -> dict[str, Any]:
+    async def _fn() -> dict[str, Any]:
+        data = await asyncio.to_thread(_server_client().wait_job, job_id, timeout_sec)
+        return await _reconcile_fleet_result(job_id, data)
+
+    return await run_tool_async(
+        tool="wait_job",
+        title="Wait job",
+        fn=_fn,
+        success_text=f"Job {job_id} completed.",
+    )
+
+
+async def gateway_job_wait_protocol(
+    job_id: str, timeout_sec: int | None = None
+) -> dict[str, Any]:
+    async def _fn() -> dict[str, Any]:
+        data = await asyncio.to_thread(_server_client().wait_job, job_id, timeout_sec)
+        return await _reconcile_fleet_result(job_id, data)
+
+    return await run_tool_async(
+        tool="job_wait",
+        title="Job wait",
+        fn=_fn,
+        success_text=f"Job {job_id} completed.",
+    )
+
+
 def gateway_repo_status(
     session_id: str | None = None, project: str | None = None
 ) -> dict[str, Any]:
@@ -1072,10 +1154,10 @@ def register_all() -> None:
     register_tool("execute_restricted")(gateway_execute_restricted)
     register_tool("execute_argv")(gateway_execute_argv)
     register_tool("apply_patch")(instrumented("apply_patch")(gateway_apply_patch))
-    register_tool("job_status")(gateway_job_status)
-    register_tool("job_result")(gateway_job_result)
-    register_tool("wait_job")(gateway_wait_job)
-    register_tool("job_wait")(instrumented("job_wait")(gateway_job_wait))
+    register_tool("job_status")(gateway_job_status_protocol)
+    register_tool("job_result")(gateway_job_result_protocol)
+    register_tool("wait_job")(gateway_wait_job_protocol)
+    register_tool("job_wait")(instrumented("job_wait")(gateway_job_wait_protocol))
     register_tool("repo_status")(gateway_repo_status)
     register_tool("working_directory")(gateway_working_directory)
     register_tool("info")(gateway_info)

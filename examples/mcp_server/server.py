@@ -10,6 +10,8 @@ import os
 import shutil
 import sys
 import time as _time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +51,7 @@ from examples.mcp_client_remote.fleet.shared import (
 )
 
 # OAuth provider and settings
+from examples.mcp_server.fleet_runtime import close_fleet_runtime
 from examples.mcp_server.mcp_audit import (
     McpAuditEvent,  # noqa: F401 (facade: tests import this name)
     get_audit_logger,  # noqa: F401 (facade: tests patch this name)
@@ -57,10 +60,21 @@ from examples.mcp_server.mcp_infra import auth_setup, gateway_errors, runtime, t
 
 _auth_settings, _auth_provider, _agent_router = auth_setup.setup()
 
+
+@asynccontextmanager
+async def _mcp_lifespan(_server: FastMCP) -> AsyncIterator[None]:
+    """Close event-loop-owned fleet resources with the MCP server."""
+    try:
+        yield None
+    finally:
+        await close_fleet_runtime()
+
+
 mcp = FastMCP(
     "agent-ssh-gateway",
     auth=_auth_settings,
     auth_server_provider=_auth_provider if _auth_settings else None,
+    lifespan=_mcp_lifespan,
 )
 runtime.set_mcp(mcp)
 client = GatewayClient()
