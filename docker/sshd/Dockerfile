@@ -1,5 +1,9 @@
 FROM alpine:3.19
 
+ARG BUILD_SHA=unknown
+ARG BUILD_TIME=unknown
+ENV BUILD_SHA=${BUILD_SHA} BUILD_TIME=${BUILD_TIME}
+
 # python3: the generated agent script (agent_tools.py) runs python3 heredocs
 # on the SSH target for proxy lease (fetch) and limit reporting (report).
 # opencode: new opencode.ai CLI (v1.18.16) -- matches the flags the agent

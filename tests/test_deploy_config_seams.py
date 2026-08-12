@@ -797,6 +797,38 @@ class TestCanonicalCiEntrypoints:
         assert "test-smoke: host-smoke" in makefile
 
 
+class TestSshdVersionedArtifact:
+    """The executor image must be built, smoke-tested and pushed by CI."""
+
+    def test_sshd_dockerfile_carries_build_provenance(self):
+        text = SSHD_DOCKERFILE.read_text(encoding="utf-8")
+        assert "ARG BUILD_SHA=unknown" in text
+        assert "ARG BUILD_TIME=unknown" in text
+        assert "ENV BUILD_SHA=${BUILD_SHA} BUILD_TIME=${BUILD_TIME}" in text
+
+    def test_ci_builds_and_smoke_tests_sshd_executor_image(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["build-and-push"]["steps"]
+        build = next(s for s in steps if s.get("name") == "Build sshd executor image")
+        assert "docker/sshd/Dockerfile" in build["run"]
+        assert "ssh-gateway-sshd:${{ github.sha }}" in build["run"]
+        smoke = next(
+            s
+            for s in steps
+            if s.get("name") == "Smoke-test built images (before pushing, on a push; standalone, on a PR)"
+        )
+        assert "ssh-gateway-sshd:${{ github.sha }}" in smoke["run"]
+        assert "sshd -t" in smoke["run"]
+
+    def test_ci_pushes_sshd_only_on_push_events(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["build-and-push"]["steps"]
+        push = next(s for s in steps if s.get("name") == "Push sshd executor image")
+        assert push.get("if") == "github.event_name == 'push'"
+        assert "ssh-gateway-sshd:${{ github.sha }}" in push["run"]
+        assert "ssh-gateway-sshd:latest" in push["run"]
+
+
 class TestAgentExecutorDataRoot:
     """The named agent-data volume must inherit an executor-writable owner.
 
