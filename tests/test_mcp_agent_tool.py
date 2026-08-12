@@ -419,3 +419,38 @@ class TestGatewayWriteAgentTaskScriptTransport:
         assert f"cat > .ai-bridge/tasks/{TASK_ID}/task.json << 'JEOF'" in script
         client.execute_argv.assert_not_called()
         client.execute_project_command.assert_not_called()
+
+    def test_comma_separated_scope_patterns_become_distinct_contract_entries(self, monkeypatch):
+        """The MCP string surface must not silently turn ``a.py,b.py`` into
+        one impossible allowed-files glob. Commas are accepted for scope
+        patterns only; required checks remain newline-separated."""
+        import examples.mcp_server.server as server_mod
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_write_agent_task
+
+        client = MagicMock()
+        client.execute_project_script.return_value = {"exit_code": 0, "stdout": "ok", "stderr": ""}
+        monkeypatch.setattr(server_mod, "client", client)
+
+        gateway_write_agent_task(
+            project="test",
+            task_id=TASK_ID,
+            agent="opencode",
+            task="Do the thing",
+            allowed_files="a.py,b.py",
+            forbidden_files="secret/**,parent/**",
+            required_checks="python -c 'print(1, 2)'",
+        )
+
+        script = client.execute_project_script.call_args[0][1]
+        payload = script.split("<< 'JEOF'\n", 1)[1].split("\nJEOF", 1)[0]
+        contract = json.loads(payload)
+        assert contract["allowed_files"] == ["a.py", "b.py"]
+        assert contract["forbidden_files"] == ["secret/**", "parent/**"]
+        assert contract["required_checks"] == ["python -c 'print(1, 2)'"]
+
+    def test_scope_pattern_parser_preserves_newline_contract(self):
+        from examples.mcp_server.mcp_infra.adapters.agent import _split_scope_patterns
+
+        assert _split_scope_patterns("a.py\nb.py") == ["a.py", "b.py"]
+        assert _split_scope_patterns("a.py, b.py\nc.py") == ["a.py", "b.py", "c.py"]
+        assert _split_scope_patterns(None) is None

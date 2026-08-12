@@ -41,6 +41,23 @@ def _server_agent_router():
     return server_attr("_agent_router")
 
 
+def _split_scope_patterns(value: str | None) -> list[str] | None:
+    """Parse allowed/forbidden file patterns from the MCP string surface.
+
+    Newlines are canonical, but a comma-separated single line is accepted as
+    a convenience because the public MCP schema exposes these fields as strings
+    rather than arrays. Keep this parser scope-only: required_checks may
+    legitimately contain commas and must remain newline-separated.
+    """
+    lines = _split_lines(value)
+    if lines is None:
+        return None
+    patterns: list[str] = []
+    for line in lines:
+        patterns.extend(part.strip() for part in line.split(",") if part.strip())
+    return patterns
+
+
 # ── Agent Handoff v2 tools ──────────────────────────────────────────
 
 
@@ -73,8 +90,8 @@ def gateway_write_agent_task(
             agent=agent,
             task=task,
             scope=scope,
-            allowed_files=_split_lines(allowed_files),
-            forbidden_files=_split_lines(forbidden_files),
+            allowed_files=_split_scope_patterns(allowed_files),
+            forbidden_files=_split_scope_patterns(forbidden_files),
             required_checks=_split_lines(required_checks),
             acceptance_criteria=_split_lines(acceptance_criteria),
             commit_message=commit_message,
