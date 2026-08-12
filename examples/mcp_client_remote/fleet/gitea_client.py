@@ -24,6 +24,7 @@ GITEA_FORWARDED_PROTO = os.environ.get("GITEA_FORWARDED_PROTO", "https")
 
 ALLOWED_ENDPOINTS = frozenset(
     {
+        "/user",
         "/repos/{owner}/{repo}",
         "/repos/{owner}/{repo}/branches",
         "/repos/{owner}/{repo}/commits",
@@ -78,7 +79,6 @@ class GiteaClient:
             headers["Host"] = GITEA_FORWARDED_HOST
         self._client = httpx.AsyncClient(
             base_url=API_BASE,
-            proxy=None,
             headers=headers,
             timeout=REQUEST_TIMEOUT,
         )
@@ -127,6 +127,9 @@ class GiteaClient:
                 response=exc.response,
             ) from None
         return resp.json()
+
+    async def get_user(self) -> dict[str, Any]:
+        return await self._get("/user")
 
     async def _post(
         self,

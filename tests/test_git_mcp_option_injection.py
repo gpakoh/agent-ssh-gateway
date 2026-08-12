@@ -1,4 +1,4 @@
-"""Regression tests: git_add/git_push option-injection validation."""
+"""Regression tests: git_add/create-branch validation and MCP git_push boundary."""
 
 from __future__ import annotations
 
@@ -35,8 +35,12 @@ def test_git_push_rejects_refspec_colon():
 
 def test_git_push_well_formed():
     client = _StubClient()
-    git_push(client, "proj", remote="origin", branch="feature/x")
-    assert client.commands == ["git push origin feature/x"]
+    from unittest.mock import patch
+
+    with patch("mcp_client_tools.git_push_control_plane", return_value={"ok": True}) as push:
+        git_push(client, "proj", remote="origin", branch="feature/x")
+    push.assert_called_once_with(project="proj", remote="origin", branch="feature/x")
+    assert client.commands == []
 
 
 def test_git_create_branch_well_formed():
