@@ -14,6 +14,8 @@ import json
 import os
 import shlex
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -91,6 +93,10 @@ class TestBuildOpencodeScriptProxy:
         assert "PROXYREPORT_EOF" in script
         assert "proxy/report" in script
         assert "RATE_LIMITED=1" in script
+        assert "/tmp/opencode-proxy-leases" in script
+        assert "memory.current" in script
+        assert "memory.max" in script
+        assert "all live proxies are already leased" in script
 
     def test_no_proxy_lines_when_env_unset(self, monkeypatch):
         monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
@@ -98,6 +104,21 @@ class TestBuildOpencodeScriptProxy:
         assert "PROXYFETCH_EOF" not in script
         assert "proxy/report" not in script
         assert "RATE_LIMITED=1" not in script
+
+    def test_proxy_is_required_by_default(self, monkeypatch):
+        monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+        monkeypatch.delenv("OPENCODE_PROXY_REQUIRED", raising=False)
+        monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "0")
+        script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
+        assert "PROXY_BLOCKED=1" in script
+        assert "Proxy provider is not configured" in script
+        assert 'echo "Status: blocked"' in script
+
+    def test_direct_fallback_requires_explicit_opt_out(self, monkeypatch):
+        monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+        monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+        script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
+        assert "PROXY_BLOCKED=1" not in script
 
     def test_opencode_output_captured_for_detection(self, monkeypatch):
         monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", PROVIDER)
@@ -214,6 +235,8 @@ def _init_git_repo(root: Path) -> str:
 
 
 def test_managed_clone_executes_without_creating_source_worktree_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+    monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
     source = tmp_path / "source"
     source.mkdir()
     source_head = _init_git_repo(source)
@@ -364,6 +387,161 @@ def test_managed_clone_requires_registry_root_at_git_toplevel(tmp_path, monkeypa
         artifacts / "agent-status.md"
     ).read_text(encoding="utf-8")
     assert not workspace.exists()
+
+
+def _run_proxy_preflight_script(tmp_path: Path, monkeypatch, *, provider_body: str | None):
+    source = tmp_path / "proxy-source"
+    source.mkdir()
+    _init_git_repo(source)
+    artifacts = tmp_path / "proxy-artifacts"
+    artifacts.mkdir()
+    (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+    fake_bin = tmp_path / "proxy-bin"
+    fake_bin.mkdir()
+    marker = tmp_path / "opencode-ran"
+    fake = fake_bin / "opencode"
+    fake.write_text(
+        f"#!/bin/sh\nprintf ran > {shlex.quote(str(marker))}\nexit 0\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+    monkeypatch.delenv("OPENCODE_PROXY_REQUIRED", raising=False)
+    monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "0")
+    monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+    if provider_body is None:
+        monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+    else:
+        provider = tmp_path / "provider.txt"
+        provider.write_text(provider_body, encoding="utf-8")
+        monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", provider.as_uri())
+    script = _build_opencode_script(
+        str(artifacts), TASK_ID, None, project_root=str(source)
+    )
+    result = subprocess.run(
+        ["sh", "-c", script], cwd=source, text=True, capture_output=True, check=False, timeout=15
+    )
+    return result, artifacts, marker
+
+
+def test_required_proxy_missing_blocks_before_opencode(tmp_path, monkeypatch):
+    result, artifacts, marker = _run_proxy_preflight_script(
+        tmp_path, monkeypatch, provider_body=None
+    )
+    assert result.returncode == 76
+    assert not marker.exists()
+    assert (artifacts / "agent-status.md").read_text().strip() == "Status: blocked"
+    assert "not configured" in (artifacts / "proxy-status.log").read_text()
+
+
+def test_malformed_proxy_blocks_before_opencode(tmp_path, monkeypatch):
+    result, artifacts, marker = _run_proxy_preflight_script(
+        tmp_path, monkeypatch, provider_body="not-a-proxy\n"
+    )
+    assert result.returncode == 76
+    assert not marker.exists()
+    assert (artifacts / "agent-status.md").read_text().strip() == "Status: blocked"
+    assert "rc=3" in (artifacts / "proxy-status.log").read_text()
+
+
+def test_valid_proxy_allows_opencode_and_is_not_logged(tmp_path, monkeypatch):
+    proxy = "http://127.0.0.1:19999"
+    result, artifacts, marker = _run_proxy_preflight_script(
+        tmp_path, monkeypatch, provider_body=proxy + "\n"
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert marker.exists()
+    worker_status = (artifacts / "worker-status.md").read_text()
+    assert "Using exclusive live proxy from configured provider" in worker_status
+    assert proxy not in worker_status
+
+
+class _ProxyPoolHandler(BaseHTTPRequestHandler):
+    proxies = ["http://127.0.0.1:19001", "http://127.0.0.1:19002"]
+
+    def do_GET(self):
+        body = json.dumps({"proxies": self.proxies}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        if length:
+            self.rfile.read(length)
+        body = b'{"status":"ok"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+def test_parallel_runners_receive_distinct_proxy_leases(tmp_path, monkeypatch):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ProxyPoolHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        source = tmp_path / "parallel-source"
+        source.mkdir()
+        _init_git_repo(source)
+        fake_bin = tmp_path / "parallel-bin"
+        fake_bin.mkdir()
+        capture = tmp_path / "proxy-capture.txt"
+        fake = fake_bin / "opencode"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$HTTP_PROXY" >> "$PROXY_CAPTURE"\n'
+            "sleep 1\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("PROXY_CAPTURE", str(capture))
+        monkeypatch.setenv(
+            "OPENCODE_PROXY_PROVIDER_URL",
+            f"http://127.0.0.1:{server.server_port}/proxy?format=provider",
+        )
+        monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "true")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+        monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "5")
+        monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
+
+        processes = []
+        for i in range(2):
+            artifacts = tmp_path / f"parallel-artifacts-{i}"
+            artifacts.mkdir()
+            (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+            script = _build_opencode_script(
+                str(artifacts), f"{TASK_ID}-{i}", None, project_root=str(source)
+            )
+            processes.append(
+                subprocess.Popen(
+                    ["sh", "-c", script],
+                    cwd=source,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=os.environ.copy(),
+                )
+            )
+
+        results = [proc.communicate(timeout=20) + (proc.returncode,) for proc in processes]
+        assert all(item[2] == 0 for item in results), results
+        proxies = capture.read_text(encoding="utf-8").splitlines()
+        assert len(proxies) == 2
+        assert len(set(proxies)) == 2
+        assert set(proxies) == set(_ProxyPoolHandler.proxies)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def _run_supervisor_postrun(

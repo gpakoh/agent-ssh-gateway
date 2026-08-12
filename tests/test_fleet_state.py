@@ -458,3 +458,8 @@ async def test_live_two_coordinators_never_over_admit_same_pool():
                     )
         await state_a.close()
         await state_b.close()
+
+
+def test_resource_exhausted_is_durable_terminal_status():
+    from examples.mcp_server.fleet_state import TERMINAL_STATUSES
+    assert "resource-exhausted" in TERMINAL_STATUSES

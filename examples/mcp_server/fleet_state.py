@@ -33,7 +33,7 @@ import asyncpg
 DEFAULT_POOL_CAPACITY: Final = 2
 MAX_NAME_LENGTH: Final = 200
 TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
-    {"needs-review", "completed", "failed", "cancelled", "rate-limited", "blocked", "error"}
+    {"needs-review", "completed", "failed", "cancelled", "rate-limited", "resource-exhausted", "blocked", "error"}
 )
 
 SCHEMA_SQL: Final = """
