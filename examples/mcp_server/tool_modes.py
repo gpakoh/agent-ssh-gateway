@@ -247,6 +247,11 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     "git_add",
     "git_commit",
     "git_push",
+    # Supervisor-only integration tools are intentionally absent from the
+    # broad mcp_client set and therefore from safe mode. They exist only in
+    # the explicit write/admin mode and still require mcp:admin at runtime.
+    "supervisor_integrate_file",
+    "supervisor_recover_integrations",
 }
 
 

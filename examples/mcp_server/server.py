@@ -275,6 +275,7 @@ from examples.mcp_server.mcp_infra.adapters import (  # noqa: E402
     gateway,
     postgres,
     remote,
+    supervisor,
     workspace,
 )
 
@@ -323,6 +324,7 @@ docker.register_all()
 gateway.register_all()
 remote.register_all()
 postgres.register_all()
+supervisor.register_all()
 
 _run_gateway = gateway._run_gateway
 _split_lines = gateway._split_lines

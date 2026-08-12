@@ -114,6 +114,10 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "read_agent_diff": ["mcp:handoff"],
     "list_agent_tasks": ["mcp:handoff"],
     "archive_agent_task": ["mcp:handoff"],
+    # Supervisor-only integration primitives. These are exposed only in
+    # mcp_client_write mode and require the admin capability.
+    "supervisor_integrate_file": ["mcp:admin"],
+    "supervisor_recover_integrations": ["mcp:admin"],
     # agent-run — mcp:agent-run
     "run_opencode": ["mcp:agent-run"],
     "run_agent": ["mcp:agent-run"],
