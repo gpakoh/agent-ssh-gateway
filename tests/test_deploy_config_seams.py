@@ -20,6 +20,7 @@ COMPOSE_PATH = ROOT / "docker" / "docker-compose.yml"
 ENV_EXAMPLE_PATH = ROOT / "docker" / ".env.example"
 MCP_SERVER_DOCKERFILE = ROOT / "docker" / "Dockerfile.mcp-server"
 GATEWAY_DOCKERFILE = ROOT / "docker" / "Dockerfile"
+SSHD_DOCKERFILE = ROOT / "docker" / "sshd" / "Dockerfile"
 DEPLOY_SCRIPT = ROOT / "scripts" / "deploy-from-registry.sh"
 CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 HOST_SMOKE_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "host-smoke.yml"
@@ -794,6 +795,20 @@ class TestCanonicalCiEntrypoints:
         reimplementation."""
         makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
         assert "test-smoke: host-smoke" in makefile
+
+
+class TestAgentExecutorDataRoot:
+    """The named agent-data volume must inherit an executor-writable owner.
+
+    Docker initializes a fresh named volume from the image path it covers.
+    Pre-creating /var/lib/mcp-agent as mcpuser prevents the persistent task/
+    workspace volume from becoming another root-owned write dead-end.
+    """
+
+    def test_sshd_image_precreates_agent_data_root_for_mcpuser(self):
+        text = SSHD_DOCKERFILE.read_text(encoding="utf-8")
+        assert "mkdir -p /var/lib/mcp-agent/state /var/lib/mcp-agent/workspaces" in text
+        assert "chown -R mcpuser:mcpuser /var/lib/mcp-agent" in text
 
 
 class TestRedisTrustBoundary:
