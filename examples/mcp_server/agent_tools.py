@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 
 from command_policy import CommandPolicyError  # noqa: F401 -- re-exported for tests
 
-from examples.mcp_server.agent_paths import managed_workspace_path, task_dir
+from examples.mcp_server.agent_paths import managed_workspace_path, project_state_key, task_dir
 
 TASKS_REL_DIR = ".ai-bridge/tasks"
 
@@ -46,6 +46,11 @@ PROXY_LIMIT_MARKERS = (
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _agent_submission_key(project: str, task_id: str) -> str:
+    """Stable gateway idempotency key shared by run_agent/run_opencode."""
+    return f"task:{project_state_key(project)}:{task_id}"
 
 
 def _shell_escape(text: str) -> str:
@@ -718,7 +723,7 @@ def project_run_agent(
     model: str | None = None,
     router: Any | None = None,
     run_script: Callable[[str, str], dict[str, Any]] | None = None,
-    run_script_async: Callable[[str, str], dict[str, Any]] | None = None,
+    run_script_async: Callable[[str, str, str], dict[str, Any]] | None = None,
     async_submit: bool = False,
 ) -> dict[str, Any]:
     """Execute a handoff task via the agent backend router.
@@ -734,7 +739,7 @@ def project_run_agent(
         model: optional model override
         router: optional ``AgentBackendRouter`` instance
         run_script: callable(project, script) for multi-line bash scripts
-        run_script_async: callable(project, script) -> {"job_id": ...},
+        run_script_async: callable(project, script, submission_key) -> {"job_id": ...},
             submits without waiting -- required when async_submit=True.
             Fleet mode: call run_agent repeatedly with async_submit=True to
             launch several agents without blocking on each one, then poll
@@ -902,7 +907,7 @@ def project_run_agent(
                 "started_at": started_at,
                 "finished_at": None,
             }
-        submitted = run_script_async(project, cmd)
+        submitted = run_script_async(project, cmd, _agent_submission_key(project, task_id))
         return {
             "task_id": task_id,
             "status": "running",

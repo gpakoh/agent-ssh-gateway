@@ -204,7 +204,9 @@ def gateway_run_opencode(
             task_id=task_id,
             model=model,
             run_script=lambda p, s: _server_client().execute_project_script(p, s),
-            run_script_async=lambda p, s: _server_client().execute_project_script_async(p, s),
+            run_script_async=lambda p, s, k: _server_client().execute_project_script_async(
+                p, s, k
+            ),
             async_submit=async_submit,
         ),
         success_text="Submitted opencode task.",
@@ -241,7 +243,9 @@ def gateway_run_agent(
             model=model,
             router=_server_agent_router(),
             run_script=lambda p, s: _server_client().execute_project_script(p, s),
-            run_script_async=lambda p, s: _server_client().execute_project_script_async(p, s),
+            run_script_async=lambda p, s, k: _server_client().execute_project_script_async(
+                p, s, k
+            ),
             async_submit=async_submit,
         ),
         success_text="Submitted agent task via router.",

@@ -201,6 +201,9 @@ class TestProjectRunAgentAsyncSubmit:
         assert result["exit_code"] is None
         assert result["finished_at"] is None
         run_script_async.assert_called_once()
+        submission_key = run_script_async.call_args.args[2]
+        assert submission_key.startswith("task:test-")
+        assert submission_key.endswith(f":{TASK_ID}")
 
     def test_run_cmd_never_called_for_script_execution(self):
         """Only task.json + current-plan.md are read via run_cmd; the actual
@@ -304,6 +307,30 @@ class TestAgentToolIntegration:
         result = project_run_opencode(rc, project="test", task_id=TASK_ID)
         assert result["status"] == "needs-review"
         assert result["stdout"] == "ok"
+
+    def test_agent_and_direct_opencode_share_submission_identity(self):
+        from examples.mcp_server.opencode_tools import project_run_opencode
+
+        rc = _make_run_cmd(task_json=_make_task_json())
+        agent_submit = _make_run_script_async("job-agent")
+        direct_submit = _make_run_script_async("job-direct")
+
+        project_run_agent(
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            async_submit=True,
+            run_script_async=agent_submit,
+        )
+        project_run_opencode(
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            async_submit=True,
+            run_script_async=direct_submit,
+        )
+
+        assert agent_submit.call_args.args[2] == direct_submit.call_args.args[2]
 
 
 # ── project_run_agent: execution ordering ───────────────────────────────────

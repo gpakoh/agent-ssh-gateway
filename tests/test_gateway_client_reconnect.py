@@ -328,6 +328,44 @@ class TestExecuteProjectScriptResolvesRealDictContract:
         assert not (tmp_path / ".ai-bridge").exists()
 
 
+class TestAsyncSubmissionMetadata:
+    def test_execute_raw_forwards_submission_key_and_timeout(self):
+        client = _client()
+        with patch.object(client, "_post", return_value={"job_id": "job-stable"}) as mock_post:
+            result = client.execute_raw(
+                "sh",
+                stdin="echo hi",
+                submission_key="task:test-123:agent-001",
+                timeout_s=777,
+            )
+
+        assert result == {"job_id": "job-stable"}
+        path, payload = mock_post.call_args.args
+        assert path == "/api/ssh/execute"
+        assert payload["submission_key"] == "task:test-123:agent-001"
+        assert payload["timeout"] == 777
+        assert payload["stdin"] == "echo hi"
+
+    def test_project_script_async_forwards_same_submission_key(self, tmp_path):
+        client = _client()
+        with patch.object(client, "execute_raw", return_value={"job_id": "job-stable"}) as raw:
+            with patch("app.workspace.registry.get_registry") as mock_get_reg:
+                mock_get_reg.return_value.project_info.return_value = {
+                    "project_id": "myapp",
+                    "root": str(tmp_path),
+                }
+                result = client.execute_project_script_async(
+                    "myapp", "echo hi", "task:myapp-123:agent-001", 901
+                )
+
+        assert result == {"job_id": "job-stable"}
+        kwargs = raw.call_args.kwargs
+        assert kwargs["submission_key"] == "task:myapp-123:agent-001"
+        assert kwargs["timeout_s"] == 901
+        assert kwargs["redact_path_prefix"] == str(tmp_path)
+        assert "echo hi" in kwargs["stdin"]
+
+
 # ── Decorator: read_file / write_file ──────────────────────────
 
 

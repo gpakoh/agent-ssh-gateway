@@ -18,6 +18,7 @@ from typing import Any
 from examples.mcp_server.agent_paths import managed_workspace_path, task_dir
 from examples.mcp_server.agent_tasks import validate_task_id
 from examples.mcp_server.agent_tools import (
+    _agent_submission_key,
     _build_opencode_script,
     _isolated_worktree_error,
     _now_iso,
@@ -35,7 +36,7 @@ def project_run_opencode(
     task_id: str,
     model: str | None = None,
     run_script: Callable[[str, str], dict[str, Any]] | None = None,
-    run_script_async: Callable[[str, str], dict[str, Any]] | None = None,
+    run_script_async: Callable[[str, str, str], dict[str, Any]] | None = None,
     async_submit: bool = False,
 ) -> dict[str, Any]:
     """Execute an existing handoff task via OpenCode CLI on the SSH target.
@@ -52,7 +53,7 @@ def project_run_opencode(
         model: optional model override (e.g., "gpt-4o")
         run_script: callable(project, script) for multi-line bash scripts,
             required for the synchronous (async_submit=False) path
-        run_script_async: callable(project, script) -> {"job_id": ...},
+        run_script_async: callable(project, script, submission_key) -> {"job_id": ...},
             submits without waiting -- required when async_submit=True
         async_submit: submit and return a job_id immediately instead of
             waiting for the full run (fleet mode: launch several agents
@@ -137,7 +138,7 @@ def project_run_opencode(
                 "started_at": started_at,
                 "finished_at": None,
             }
-        submitted = run_script_async(project, cmd)
+        submitted = run_script_async(project, cmd, _agent_submission_key(project, task_id))
         return {
             "task_id": task_id,
             "status": "running",
