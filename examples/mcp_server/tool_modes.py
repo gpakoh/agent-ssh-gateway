@@ -242,7 +242,12 @@ MCP_CLIENT_WRITE_BLOCKED_TOOLS: frozenset[str] = frozenset()
 # (never present in any other mode's list).
 TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     TOOL_NAMES_BY_MODE["mcp_client"] - MCP_CLIENT_WRITE_BLOCKED_TOOLS
-) | {"git_add", "git_commit", "git_push"}
+) | {
+    "execute_argv",
+    "git_add",
+    "git_commit",
+    "git_push",
+}
 
 
 def is_mcp_client_safe_mode() -> bool:
