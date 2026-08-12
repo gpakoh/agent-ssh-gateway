@@ -70,3 +70,54 @@ def test_traversal_blocked(tmp_path: Path) -> None:
 def test_absolute_pattern_blocked(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="POLICY_DENIED"):
         _safe_glob(tmp_path, "/etc/*.conf")
+
+
+def test_mcp_file_and_tree_helpers_prune_agent_runtime(monkeypatch, tmp_path):
+    from examples.mcp_server import mcp_client_tools as tools
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "live.py").write_text("pass\n", encoding="utf-8")
+    stale = tmp_path / ".ai-bridge" / "worktrees" / "old"
+    stale.mkdir(parents=True)
+    (stale / "stale.py").write_text("pass\n", encoding="utf-8")
+    egg = tmp_path / "old.egg-info"
+    egg.mkdir()
+    (egg / "metadata.py").write_text("pass\n", encoding="utf-8")
+
+    monkeypatch.setattr(tools, "_resolve_project", lambda project: tmp_path)
+
+    found = tools.find_files("demo", "**/*.py")
+    assert found["result"]["files"] == ["src/live.py"]
+    listed = tools.list_files(None, "demo", "*.py")
+    assert listed["files"] == ["src/live.py"]
+    tree = tools.list_tree(None, "demo", depth=5)
+    assert all(".ai-bridge" not in entry for entry in tree["entries"])
+    assert all(".egg-info" not in entry for entry in tree["entries"])
+
+
+def test_mcp_pruned_walk_never_descends_runtime_dirs(monkeypatch, tmp_path):
+    from examples.mcp_server import mcp_client_tools as tools
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "live.py").write_text("pass\n", encoding="utf-8")
+    runtime = tmp_path / ".ai-bridge" / "worktrees" / "old"
+    runtime.mkdir(parents=True)
+    (runtime / "stale.py").write_text("pass\n", encoding="utf-8")
+    egg = tmp_path / "old.egg-info"
+    egg.mkdir()
+    (egg / "metadata.py").write_text("pass\n", encoding="utf-8")
+
+    real_walk = tools.os.walk
+    visited: list[Path] = []
+
+    def tracking_walk(*args, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(*args, **kwargs):
+            visited.append(Path(dirpath))
+            yield dirpath, dirnames, filenames
+
+    monkeypatch.setattr(tools.os, "walk", tracking_walk)
+    paths = list(tools._iter_pruned_paths(tmp_path))
+
+    assert tmp_path / "src" in paths
+    assert all(".ai-bridge" not in path.parts for path in visited)
+    assert all(not any(part.endswith(".egg-info") for part in path.parts) for path in visited)

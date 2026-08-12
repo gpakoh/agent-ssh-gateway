@@ -22,12 +22,16 @@ logger = logging.getLogger(__name__)
 
 MAX_STDOUT_SIZE = 10 * 1024 * 1024  # 10 MB per job
 TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
+ACTIVE_STATES = frozenset({"pending", "running", "cancelling"})
+SSE_LISTENER_QUEUE_SIZE = 256
 
 
 def _make_job_error_logger(job_id: str):
     """Build a done callback that logs job crashes."""
 
     def _log(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return
         exc = t.exception()
         if exc:
             logger.error("Job %s crashed: %s", job_id, exc)
@@ -47,7 +51,7 @@ class JobRecord:
     job_id: str
     session_id: str
     command: str
-    status: str = "pending"  # pending, running, completed, failed, cancelled
+    status: str = "pending"  # pending, running, cancelling, completed, failed, cancelled
     stdout: str = ""
     stderr: str = ""
     exit_code: int | None = None
@@ -122,16 +126,34 @@ class JobRecord:
             self._listeners.remove(queue)
 
     async def notify_listeners(self, event: dict) -> None:
-        """Notify all SSE listeners."""
+        """Notify listeners without letting slow SSE consumers block jobs.
+
+        Output chunks are best-effort under backpressure. Control events
+        displace one queued item so terminal state remains observable.
+        Each listener receives a private event dict because the HTTP layer
+        may redact payloads per subscriber.
+        """
         async with self._listener_lock:
             dead = []
             for queue in self._listeners:
                 try:
-                    await queue.put(event)
+                    queue.put_nowait(dict(event))
+                except asyncio.QueueFull:
+                    if event.get("type") in {"stdout", "stderr"}:
+                        continue
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                    try:
+                        queue.put_nowait(dict(event))
+                    except asyncio.QueueFull:
+                        dead.append(queue)
                 except Exception:
                     dead.append(queue)
             for q in dead:
-                self._listeners.remove(q)
+                if q in self._listeners:
+                    self._listeners.remove(q)
 
 
 # ---------------------------------------------------------------------------
@@ -210,17 +232,22 @@ class JobManager:
         async with self._lock:
             for job in self._jobs.values():
                 job.cancel_event.set()
+                if job.status in ACTIVE_STATES:
+                    job.status = "cancelled"
+                    job.completed_at = job.completed_at or time.time()
+                    job.completed_at_mono = job.completed_at_mono or time.monotonic()
                 job.completed_event.set()
             tasks = list(self._job_tasks.values())
             self._job_tasks.clear()
             for task in tasks:
                 task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
             count = len(self._jobs)
             self._jobs.clear()
-            logger.warning("Force-cleaned %d jobs (%d tasks cancelled)", count, len(tasks))
-            return count
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        logger.warning("Force-cleaned %d jobs (%d tasks cancelled)", count, len(tasks))
+        return count
 
     # ------------------------------------------------------------------
     # Create And Run Job
@@ -236,11 +263,7 @@ class JobManager:
     ) -> str:
         """Create a new background job."""
         async with self._lock:
-            active_jobs = sum(
-                1
-                for job in self._jobs.values()
-                if job.status in ("pending", "running")
-            )
+            active_jobs = sum(1 for job in self._jobs.values() if job.status in ACTIVE_STATES)
             if active_jobs >= self._max_jobs:
                 raise ExecutionError("Maximum number of jobs reached")
 
@@ -397,8 +420,14 @@ class JobManager:
                         }
                     )
 
-            job.status = "completed" if (job.exit_code == 0) else "failed"
-            if job.exit_code != 0:
+            if job.cancel_event.is_set():
+                job.status = "cancelled"
+                if job.exit_code is None:
+                    job.exit_code = -1
+                job.error_message = None
+            else:
+                job.status = "completed" if (job.exit_code == 0) else "failed"
+            if job.status == "failed" and job.exit_code != 0:
                 job.error_message = f"Exit code: {job.exit_code}"
 
         except SessionNotFoundError as exc:
@@ -485,25 +514,30 @@ class JobManager:
     # Cancel Job
     # ------------------------------------------------------------------
 
-    async def cancel_job(self, job_id: str) -> None:
+    async def cancel_job(self, job_id: str) -> str:
         """Cancel a running job."""
         job = await self.get_job(job_id)
         if not job:
             raise SessionNotFoundError(f"Job {job_id} not found")
 
-        if job.status not in ("pending", "running"):
+        if job.status not in ACTIVE_STATES:
             raise ExecutionError(f"Cannot cancel job with status: {job.status}")
 
-        job.status = "cancelled"
         job.cancel_event.set()
-        job.completed_at = time.time()
-        job.completed_event.set()
+        if job.status == "pending":
+            job.status = "cancelled"
+            job.completed_at = time.time()
+            job.completed_at_mono = time.monotonic()
+            job.completed_event.set()
+        else:
+            job.status = "cancelling"
         await job.notify_listeners(
             {
                 "type": "status",
-                "status": "cancelled",
+                "status": job.status,
             }
         )
+        return job.status
 
     async def wait_for_completion(
         self, job_id: str, identity_sub: str, timeout_s: float
@@ -532,7 +566,7 @@ class JobManager:
         try:
             await asyncio.wait_for(event.wait(), timeout=timeout_s)
         except TimeoutError:
-            return {"job_id": job_id, "status": "running", "wait_timed_out": True}
+            return {"job_id": job_id, "status": job.status, "wait_timed_out": True}
         except asyncio.CancelledError:
             # Client disconnected — job UNCHANGED
             raise
@@ -546,12 +580,12 @@ class JobManager:
                 active_events = [
                     job.completed_event
                     for job in self._jobs.values()
-                    if job.status in ("pending", "running")
+                    if job.status in ACTIVE_STATES
                 ]
             if not active_events:
                 return
             logger.info("Waiting for %d active jobs to complete...", len(active_events))
-            await asyncio.wait(
-                [asyncio.ensure_future(event.wait()) for event in active_events],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            # Wait on the whole snapshot. If the outer shutdown deadline
+            # cancels this coroutine, gather propagates cancellation to every
+            # Event.wait child instead of leaving orphan wait tasks behind.
+            await asyncio.gather(*(event.wait() for event in active_events))

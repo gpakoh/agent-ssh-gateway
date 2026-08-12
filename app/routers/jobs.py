@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app import state as _state
 from app.auth_middleware import AuthIdentity, ensure_session_owner, require_scope
 from app.exceptions import JobNotFoundError, PermissionDeniedError
+from app.job_manager import SSE_LISTENER_QUEUE_SIZE
 from app.job_serializer import serialize_job
 from app.metrics import metrics
 from app.models import (
@@ -270,8 +271,8 @@ async def jobs_list(
 async def jobs_cancel(job_id: str, _identity: AuthIdentity = Depends(require_scope("jobs:run"))):
     """Cancel a running job."""
     await _get_owned_job(job_id, _identity)
-    await _state.job_manager.cancel_job(job_id)
-    return {"status": "cancelled", "job_id": job_id}
+    status = await _state.job_manager.cancel_job(job_id)
+    return {"status": status, "job_id": job_id}
 
 
 @router.get("/api/jobs/{job_id}/wait")
@@ -334,7 +335,7 @@ async def jobs_stream(
     """Stream job output via Server-Sent Events."""
     job = await _get_owned_job(job_id, _identity)
 
-    queue: asyncio.Queue = asyncio.Queue()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=SSE_LISTENER_QUEUE_SIZE)
     job.add_listener(queue)
 
     async def event_generator():
@@ -362,7 +363,7 @@ async def jobs_stream(
                 yield f"data: {json.dumps({'type': 'stderr', 'data': data})}\n\n"
 
             # Stream New Events
-            while job.status in ("pending", "running"):
+            while job.status in ("pending", "running", "cancelling"):
                 if time.time() - stream_start > MAX_SSE_DURATION:
                     yield f"data: {json.dumps({'type': 'error', 'message': 'Stream timeout'})}\n\n"
                     break

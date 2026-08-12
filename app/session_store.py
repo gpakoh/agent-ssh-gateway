@@ -50,6 +50,11 @@ class PersistentSession(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False)
     is_active = Column(Boolean, default=True)
     reconnect_count = Column(Integer, default=0)
+    owner_type = Column(String(32), nullable=False, default="master")
+    owner_name = Column(String(255), nullable=True)
+    owner_token_fingerprint = Column(String(64), nullable=True)
+    source_ip = Column(String(64), nullable=True)
+    tenant_labels = Column(JSON, default=list)
     metadata_json = Column(JSON, default=dict)
 
     def to_dict(self) -> dict:
@@ -63,6 +68,11 @@ class PersistentSession(Base):
             "expires_at": self.expires_at.isoformat() if self.expires_at else None,
             "is_active": self.is_active,
             "reconnect_count": self.reconnect_count,
+            "owner_type": self.owner_type or "master",
+            "owner_name": self.owner_name,
+            "owner_token_fingerprint": self.owner_token_fingerprint,
+            "source_ip": self.source_ip,
+            "tenant_labels": list(self.tenant_labels or []),
         }
 
 
@@ -204,13 +214,8 @@ class SessionStore:
                 self._engine, class_=AsyncSession, expire_on_commit=False
             )
 
-            # Create Tables (DEV Only — Use Alembic In Production)
-            logger.warning(
-                "Auto-creating Tables Via Base.metadata.create_all — Use Alembic For Production Migrations"
-            )
-            async with self._engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-
+            # Persistent-session schema ownership belongs to Alembic.
+            # SessionStore startup must not silently create/reshape ssh_sessions.
             logger.info("Connected To Postgresql Session Store")
         except Exception as exc:
             logger.error("Failed to connect to PostgreSQL: %s", exc)
@@ -232,6 +237,11 @@ class SessionStore:
         private_key: str | None = None,
         key_passphrase: str | None = None,
         ttl: int = 3600,
+        owner_type: str = "master",
+        owner_name: str | None = None,
+        owner_token_fingerprint: str | None = None,
+        source_ip: str | None = None,
+        tenant_labels: tuple[str, ...] | list[str] = (),
     ) -> None:
         """Save session to database."""
         sm = self._session_maker
@@ -250,6 +260,11 @@ class SessionStore:
                 else None,
                 expires_at=datetime.now(UTC) + timedelta(seconds=ttl),
                 is_active=True,
+                owner_type=owner_type,
+                owner_name=owner_name,
+                owner_token_fingerprint=owner_token_fingerprint,
+                source_ip=source_ip,
+                tenant_labels=list(tenant_labels or ()),
             )
 
             await session.merge(db_session)
@@ -295,6 +310,24 @@ class SessionStore:
 
             if db_session:
                 db_session.last_activity = datetime.now(UTC)
+                await session.commit()
+
+    async def refresh_session_expiry(self, session_id: str, ttl: int) -> None:
+        """Extend a restored session lease without rewriting credentials."""
+        sm = self._session_maker
+        assert sm is not None
+        async with sm() as session:
+            from sqlalchemy import select
+
+            result = await session.execute(
+                select(PersistentSession).where(PersistentSession.session_id == session_id)
+            )
+            db_session = result.scalar_one_or_none()
+            if db_session:
+                now = datetime.now(UTC)
+                db_session.last_activity = now
+                db_session.expires_at = now + timedelta(seconds=ttl)
+                db_session.is_active = True
                 await session.commit()
 
     async def deactivate_session(self, session_id: str) -> None:

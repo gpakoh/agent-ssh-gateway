@@ -195,6 +195,7 @@ class SSHSessionManager:
     ) -> None:
         self._sessions: dict[str, SessionRecord] = {}
         self._lock = asyncio.Lock()
+        self._pending_sessions_by_ip: dict[str, int] = {}
         self._session_timeout = session_timeout
         self._cleanup_interval = cleanup_interval
         self._cleanup_task: asyncio.Task | None = None
@@ -320,7 +321,64 @@ class SSHSessionManager:
         session_id: str | None = None,
         pinned_ip: str | None = None,
     ) -> str:
-        """Create a new SSH session and return its session ID.
+        """Create a new SSH session with race-free per-IP admission."""
+        reserved_source_ip: str | None = None
+        if source_ip and settings.max_sessions_per_ip > 0:
+            async with self._lock:
+                active = sum(
+                    1 for record in self._sessions.values() if record.source_ip == source_ip
+                )
+                pending = self._pending_sessions_by_ip.get(source_ip, 0)
+                if active + pending >= settings.max_sessions_per_ip:
+                    raise SessionLimitError(
+                        f"Too many active sessions from {source_ip} "
+                        f"(limit {settings.max_sessions_per_ip})"
+                    )
+                self._pending_sessions_by_ip[source_ip] = pending + 1
+                reserved_source_ip = source_ip
+
+        try:
+            return await self._create_session_unreserved(
+                host=host,
+                port=port,
+                username=username,
+                password=password,
+                private_key=private_key,
+                key_passphrase=key_passphrase,
+                owner_type=owner_type,
+                owner_name=owner_name,
+                owner_token_fingerprint=owner_token_fingerprint,
+                source_ip=source_ip,
+                tenant_labels=tenant_labels,
+                session_id=session_id,
+                pinned_ip=pinned_ip,
+            )
+        finally:
+            if reserved_source_ip is not None:
+                async with self._lock:
+                    pending = self._pending_sessions_by_ip.get(reserved_source_ip, 0)
+                    if pending <= 1:
+                        self._pending_sessions_by_ip.pop(reserved_source_ip, None)
+                    else:
+                        self._pending_sessions_by_ip[reserved_source_ip] = pending - 1
+
+    async def _create_session_unreserved(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        password: str | None = None,
+        private_key: str | None = None,
+        key_passphrase: str | None = None,
+        owner_type: str = "master",
+        owner_name: str | None = None,
+        owner_token_fingerprint: str | None = None,
+        source_ip: str | None = None,
+        tenant_labels: tuple[str, ...] = (),
+        session_id: str | None = None,
+        pinned_ip: str | None = None,
+    ) -> str:
+        """Create a new SSH session after admission has been reserved.
 
         When a connection pool is enabled, an idle transport matching
         (host, port, username, auth_method, credential_fingerprint) is
@@ -351,19 +409,6 @@ class SSHSessionManager:
         auth_method = "password" if password is not None else "key"
         credential_fingerprint = _credential_fingerprint(auth_method, password, private_key, key_passphrase)
         pool_key = (host, port, username, auth_method, credential_fingerprint)
-
-        if source_ip and settings.max_sessions_per_ip > 0:
-            async with self._lock:
-                active = sum(
-                    1
-                    for record in self._sessions.values()
-                    if record.source_ip == source_ip
-                )
-            if active >= settings.max_sessions_per_ip:
-                raise SessionLimitError(
-                    f"Too many active sessions from {source_ip} "
-                    f"(limit {settings.max_sessions_per_ip})"
-                )
 
         pooled_client = None
         if self._pool is not None:
@@ -523,6 +568,42 @@ class SSHSessionManager:
     # Execute
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _remaining_timeout(deadline: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise builtins.TimeoutError
+        return remaining
+
+    async def _drain_command_streams(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        stdout,
+        stderr,
+        *,
+        deadline: float,
+    ) -> tuple[bytes, bytes, int]:
+        """Drain stdout/stderr concurrently under one absolute deadline."""
+        channel = stdout.channel
+        try:
+            out_future = loop.run_in_executor(None, stdout.read)
+            err_future = loop.run_in_executor(None, stderr.read)
+            out_data, err_data = await asyncio.wait_for(
+                asyncio.gather(out_future, err_future),
+                timeout=self._remaining_timeout(deadline),
+            )
+            exit_code = await asyncio.wait_for(
+                loop.run_in_executor(None, channel.recv_exit_status),
+                timeout=self._remaining_timeout(deadline),
+            )
+            return out_data, err_data, exit_code
+        except builtins.TimeoutError:
+            try:
+                channel.close()
+            except Exception:
+                pass
+            raise
+
     async def execute(self, session_id: str, command: str, timeout: int = 30) -> CommandResult:
         """Execute a command and return stdout, stderr, exit_code, duration.
 
@@ -545,8 +626,9 @@ class SSHSessionManager:
         record.touch()
         host, port, username = record.host, record.port, record.username
         client = record.client
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         start = time.time()
+        deadline = time.monotonic() + timeout
 
         _emit(
             "command.started",
@@ -557,25 +639,30 @@ class SSHSessionManager:
             command=command,
         )
 
+        channel = None
         try:
-            stdin, stdout, stderr = await loop.run_in_executor(
-                None,
-                lambda: client.exec_command(command, timeout=timeout),
+            stdin, stdout, stderr = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: client.exec_command(
+                        command,
+                        timeout=max(1.0, self._remaining_timeout(deadline)),
+                    ),
+                ),
+                timeout=self._remaining_timeout(deadline),
             )
+            channel = stdout.channel
             # Close Stdin Immediately Since We Don't Need It
             stdin.channel.shutdown_write()
-
-            # Read Stdout And Stderr With Timeout
-            out_data = await asyncio.wait_for(
-                loop.run_in_executor(None, stdout.read),
-                timeout=timeout,
+            out_data, err_data, exit_code = await self._drain_command_streams(
+                loop, stdout, stderr, deadline=deadline
             )
-            err_data = await asyncio.wait_for(
-                loop.run_in_executor(None, stderr.read),
-                timeout=timeout,
-            )
-            exit_code = stdout.channel.recv_exit_status()
         except builtins.TimeoutError:
+            if channel is not None:
+                try:
+                    channel.close()
+                except Exception:
+                    pass
             raise TimeoutError(f"Command timed out after {timeout}s: {command}") from None
         except SSHException as exc:
             # Try To Reconnect On SSH Errors
@@ -638,8 +725,9 @@ class SSHSessionManager:
         record.touch()
         host, port, username = record.host, record.port, record.username
         client = record.client
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         start = time.time()
+        deadline = time.monotonic() + timeout
 
         _emit(
             "command.started",
@@ -650,28 +738,38 @@ class SSHSessionManager:
             command=command_str,
         )
 
+        channel = None
         try:
-            stdin, stdout, stderr = await loop.run_in_executor(
-                None,
-                lambda: client.exec_command(command_str, timeout=timeout),
+            stdin, stdout, stderr = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: client.exec_command(
+                        command_str,
+                        timeout=max(1.0, self._remaining_timeout(deadline)),
+                    ),
+                ),
+                timeout=self._remaining_timeout(deadline),
             )
+            channel = stdout.channel
 
-            # Write stdin data if any, then shutdown write
+            # Write stdin data if any, then shutdown write. The write shares
+            # the same absolute deadline as command start and output drain.
             if stdin_data:
-                stdin.write(stdin_data)
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, stdin.write, stdin_data),
+                    timeout=self._remaining_timeout(deadline),
+                )
             stdin.channel.shutdown_write()
 
-            # Read stdout and stderr concurrently with timeout
-            out_data = await asyncio.wait_for(
-                loop.run_in_executor(None, stdout.read),
-                timeout=timeout,
+            out_data, err_data, exit_code = await self._drain_command_streams(
+                loop, stdout, stderr, deadline=deadline
             )
-            err_data = await asyncio.wait_for(
-                loop.run_in_executor(None, stderr.read),
-                timeout=timeout,
-            )
-            exit_code = stdout.channel.recv_exit_status()
         except builtins.TimeoutError:
+            if channel is not None:
+                try:
+                    channel.close()
+                except Exception:
+                    pass
             raise TimeoutError(
                 f"Command timed out after {timeout}s: {command_str}"
             ) from None
@@ -749,6 +847,7 @@ class SSHSessionManager:
             command=command,
         )
 
+        out_channel = None
         try:
             stdin, stdout, stderr = await loop.run_in_executor(
                 None,
@@ -803,6 +902,16 @@ class SSHSessionManager:
                 exit_code=exit_code,
             )
 
+        except asyncio.CancelledError:
+            # Force-cleanup can cancel the coroutine before cancel_event is
+            # observed by the polling loop. Close the remote channel here too
+            # so local task cancellation cannot leave the command running.
+            if out_channel is not None:
+                try:
+                    out_channel.close()
+                except Exception:
+                    pass
+            raise
         except SSHException as exc:
             _emit(
                 "command.failed",

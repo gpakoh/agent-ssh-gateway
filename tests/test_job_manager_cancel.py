@@ -42,7 +42,8 @@ class TestCancelPendingJob:
         """
         jm, calls = _make_job_manager()
         job_id = await jm.create_job("s1", "echo hi", owner_id="user:admin")
-        await jm.cancel_job(job_id)
+        status = await jm.cancel_job(job_id)
+        assert status == "cancelled"
 
         # Let the already-scheduled _run_job task actually run.
         await asyncio.sleep(0.05)
@@ -50,3 +51,39 @@ class TestCancelPendingJob:
         assert calls == [], "cancelled pending job must never reach execute_stream()"
         job = await jm.get_job(job_id)
         assert job.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_running_waits_for_remote_ack_before_terminal_state():
+    """A running job is only terminal after execute_stream has stopped."""
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+    mock_ssh = AsyncMock()
+
+    async def _stream(*args, cancel_event=None, **kwargs):
+        started.set()
+        while cancel_event is not None and not cancel_event.is_set():
+            await asyncio.sleep(0.001)
+        # Model a small remote-channel shutdown delay after cancellation.
+        await asyncio.sleep(0.02)
+        stopped.set()
+        yield ("exit", "-1")
+
+    mock_ssh.execute_stream = _stream
+    jm = JobManager(ssh_manager=mock_ssh, max_jobs=10)
+    job_id = await jm.create_job("s1", "echo hi", owner_id="owner-a")
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    status = await jm.cancel_job(job_id)
+    assert status == "cancelling"
+    job = await jm.get_job(job_id)
+    assert job is not None
+    assert job.status == "cancelling"
+    assert not job.completed_event.is_set()
+    assert not stopped.is_set()
+
+    result = await jm.wait_for_completion(job_id, "owner-a", timeout_s=1.0)
+    assert stopped.is_set()
+    assert result["status"] == "cancelled"
+    assert result["exit_code"] == -1
+    assert result["error_message"] is None

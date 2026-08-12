@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.config import settings as _settings
 from app.event_hook_security import validate_destination_ip
 from app.metrics import metrics
-from app.session_store import Base, WebhookDelivery
+from app.session_store import WebhookDelivery
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +48,10 @@ class DeliveryService:
 
     async def create_tables(self):
         logger.warning(
-            "Auto-creating Delivery Tables Via Base.metadata.create_all — Use Alembic For Production Migrations"
+            "Auto-creating WebhookDelivery table for feature bootstrap — use Alembic in production"
         )
         async with self._engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(WebhookDelivery.__table__.create, checkfirst=True)
 
     async def close(self, drain_timeout: float = 10.0):
         """Stop the worker/cleanup loops and drain in-flight deliveries

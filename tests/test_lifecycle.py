@@ -266,3 +266,83 @@ async def test_shutdown_all_sessions_handled():
         pytest.fail("shutdown of 10 dead hosts exceeded 10s timeout")
     finally:
         await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_job_drain_timeout_forces_cleanup_and_returns():
+    from app.main import _drain_jobs_for_shutdown
+
+    job_manager = MagicMock()
+    running = MagicMock(status="running")
+    job_manager._jobs = {"j1": running}
+
+    async def _hang_forever():
+        await asyncio.Event().wait()
+
+    job_manager.wait_for_all_jobs = _hang_forever
+    job_manager.force_cleanup = AsyncMock(return_value=1)
+
+    forced = await _drain_jobs_for_shutdown(job_manager, timeout=0.01)
+    assert forced == 1
+    job_manager.force_cleanup.assert_awaited_once()
+
+@pytest.mark.asyncio
+async def test_execute_stream_task_cancel_closes_remote_channel():
+    from app.ssh_manager import SessionRecord
+
+    manager = SSHSessionManager(cleanup_interval=3600)
+    channel = MagicMock()
+    channel.exit_status_ready.return_value = False
+    channel.recv_ready.return_value = False
+    channel.recv_stderr_ready.return_value = False
+
+    stdin = MagicMock()
+    stdin.channel = channel
+    stdout = MagicMock()
+    stdout.channel = channel
+    stderr = MagicMock()
+    stderr.channel = channel
+    client = MagicMock()
+    client.exec_command.return_value = (stdin, stdout, stderr)
+
+    manager._sessions["stream-cancel"] = SessionRecord(
+        session_id="stream-cancel",
+        client=client,
+        host="127.0.0.1",
+        port=22,
+        username="test",
+    )
+
+    stream = manager.execute_stream("stream-cancel", "sleep 60")
+    pending_read = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0.02)
+    pending_read.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await pending_read
+
+    channel.close.assert_called()
+
+@pytest.mark.asyncio
+async def test_wait_for_all_jobs_cancellation_does_not_leave_event_wait_tasks():
+    from app.job_manager import JobManager, JobRecord
+
+    ssh_manager = MagicMock()
+    job_manager = JobManager(ssh_manager)
+    job_manager._jobs = {
+        "j1": JobRecord(job_id="j1", session_id="s1", command="sleep 60", status="running"),
+        "j2": JobRecord(job_id="j2", session_id="s1", command="sleep 60", status="running"),
+    }
+
+    before = set(asyncio.all_tasks())
+    waiter = asyncio.create_task(job_manager.wait_for_all_jobs())
+    await asyncio.sleep(0)
+    children = set(asyncio.all_tasks()) - before - {waiter}
+    assert children, "wait_for_all_jobs should have active Event.wait children"
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    await asyncio.sleep(0)
+
+    assert all(task.done() for task in children)
