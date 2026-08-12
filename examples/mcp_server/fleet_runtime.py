@@ -67,13 +67,24 @@ def _normalize_asyncpg_dsn(value: str) -> str:
     return value
 
 
-def _configured_dsn() -> str:
+def _configured_dsn() -> str | None:
     raw = os.environ.get(_DSN_ENV, "").strip() or os.environ.get("DATABASE_URL", "").strip()
-    if not raw:
+    if raw:
+        return _normalize_asyncpg_dsn(raw)
+
+    # asyncpg supports the standard libpq-style PG* environment directly
+    # when dsn=None.  Prefer that existing deployment contract over building
+    # a second URI containing PGPASSWORD: mcp-oauth already receives these
+    # variables for its Postgres adapter, so fleet admission can reuse them
+    # without duplicating the database secret into another environment value.
+    required = ("PGHOST", "PGDATABASE", "PGUSER")
+    missing = [name for name in required if not os.environ.get(name, "").strip()]
+    if missing:
         raise FleetRuntimeError(
-            f"{_DSN_ENV} or DATABASE_URL is required when {_ENABLED_ENV}=1"
+            f"{_DSN_ENV}, DATABASE_URL, or PGHOST/PGDATABASE/PGUSER is required "
+            f"when {_ENABLED_ENV}=1 (missing: {', '.join(missing)})"
         )
-    return _normalize_asyncpg_dsn(raw)
+    return None
 
 
 def _configured_capacity() -> int:

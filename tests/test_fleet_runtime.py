@@ -256,3 +256,29 @@ def test_asyncpg_dsn_normalizes_sqlalchemy_driver_prefix():
     assert runtime_module._normalize_asyncpg_dsn(
         "postgresql+asyncpg://user:pass@db/gateway"
     ) == "postgresql://user:pass@db/gateway"
+
+
+def test_configured_dsn_reuses_standard_pg_environment(monkeypatch):
+    monkeypatch.delenv("MCP_FLEET_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("PGHOST", "mcp-postgres")
+    monkeypatch.setenv("PGDATABASE", "gateway")
+    monkeypatch.setenv("PGUSER", "postgres")
+    monkeypatch.setenv("PGPASSWORD", "secret-that-must-not-be-copied-into-a-dsn")
+
+    assert runtime_module._configured_dsn() is None
+
+
+def test_configured_dsn_requires_explicit_target_or_complete_pg_environment(monkeypatch):
+    for name in (
+        "MCP_FLEET_DATABASE_URL",
+        "DATABASE_URL",
+        "PGHOST",
+        "PGDATABASE",
+        "PGUSER",
+        "PGPASSWORD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(FleetRuntimeError, match="missing: PGHOST, PGDATABASE, PGUSER"):
+        runtime_module._configured_dsn()
