@@ -60,7 +60,7 @@ class RedisJobQueue:
         try:
             self._redis = await redis.from_url(self._redis_url, decode_responses=True)
             await self._redis.ping()
-            logger.info("Connected to Redis at %s", self._redis_url)
+            logger.info("Connected to Redis")
         except Exception as exc:
             logger.error("Failed to connect to Redis: %s", exc)
             raise

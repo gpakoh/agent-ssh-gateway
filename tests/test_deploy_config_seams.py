@@ -17,6 +17,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_PATH = ROOT / "docker" / "docker-compose.yml"
+ENV_EXAMPLE_PATH = ROOT / "docker" / ".env.example"
 MCP_SERVER_DOCKERFILE = ROOT / "docker" / "Dockerfile.mcp-server"
 GATEWAY_DOCKERFILE = ROOT / "docker" / "Dockerfile"
 DEPLOY_SCRIPT = ROOT / "scripts" / "deploy-from-registry.sh"
@@ -793,3 +794,86 @@ class TestCanonicalCiEntrypoints:
         reimplementation."""
         makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
         assert "test-smoke: host-smoke" in makefile
+
+
+class TestRedisTrustBoundary:
+    """P1 Redis trust boundary: Redis must move off the shared external
+    internal_net onto a project-private internal network, require a password,
+    never put that password into argv or application logs, and only the
+    gateway may share the private network with it.
+    """
+
+    def test_redis_not_on_shared_external_internal_net(self):
+        assert "internal_net" not in _load_compose()["services"]["redis"]["networks"]
+
+    def test_redis_net_is_internal_and_project_private(self):
+        redis_net = _load_compose()["networks"]["redis_net"]
+        assert redis_net.get("internal") is True
+        assert not redis_net.get("external", False)
+
+    def test_only_redis_and_gateway_attach_to_redis_net(self):
+        compose = _load_compose()
+        members = {
+            name
+            for name, svc in compose["services"].items()
+            if "redis_net" in (svc.get("networks") or {})
+        }
+        assert members == {"redis", "web-ssh-gateway"}
+
+    def test_gateway_keeps_shared_network_and_gains_private_redis_net(self):
+        networks = _load_compose()["services"]["web-ssh-gateway"]["networks"]
+        assert "internal_net" in networks
+        assert "redis_net" in networks
+
+    def test_redis_container_env_requires_password(self):
+        env = _env_dict(_load_compose()["services"]["redis"]["environment"])
+        assert env.get("REDIS_PASSWORD") == "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
+
+    def test_redis_command_sources_requirepass_from_container_env(self):
+        command = _load_compose()["services"]["redis"]["command"]
+        requirepass_value = command.split("--requirepass", 1)[1].split()[0].strip('"')
+        assert requirepass_value == "$$REDIS_PASSWORD", (
+            "redis must start with --requirepass from the (Compose-escaped) "
+            "container env var, not a hardcoded literal"
+        )
+
+    def test_redis_command_has_no_literal_secret(self):
+        command = _load_compose()["services"]["redis"]["command"]
+        requirepass_value = command.split("--requirepass", 1)[1].split()[0].strip('"')
+        assert requirepass_value.startswith("$$")
+
+    def test_redis_healthcheck_auths_via_redisauth_env_not_argv(self):
+        joined = " ".join(_load_compose()["services"]["redis"]["healthcheck"]["test"])
+        assert "REDISCLI_AUTH" in joined
+        assert "$$REDIS_PASSWORD" in joined
+        assert "redis-cli -a" not in joined
+        assert "redis-cli --pass" not in joined
+
+    def test_gateway_redis_url_requires_password(self):
+        env = _env_dict(_load_compose()["services"]["web-ssh-gateway"]["environment"])
+        url = env["REDIS_URL"]
+        assert "REDIS_PASSWORD" in url
+        assert ":?" in url, "gateway REDIS_URL must require REDIS_PASSWORD, not default it"
+        assert url.startswith("redis://:${REDIS_PASSWORD")
+        assert url.endswith("@redis:6379/0")
+
+    def test_env_example_documents_urlsafe_token_hex_redis_password(self):
+        text = ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+        assert "REDIS_PASSWORD=" in text
+        assert "token_hex" in text
+        assert "URL-safe" in text or "url-safe" in text
+        for line in text.splitlines():
+            if line.startswith("REDIS_PASSWORD="):
+                value = line.split("=", 1)[1].strip()
+                assert value.startswith("change-me"), (
+                    f"REDIS_PASSWORD in docker/.env.example looks like a real secret: {value!r}"
+                )
+                return
+        raise AssertionError("REDIS_PASSWORD not found in docker/.env.example")
+
+    def test_redis_queue_connect_log_does_not_expose_url(self):
+        text = (ROOT / "app" / "redis_queue.py").read_text(encoding="utf-8")
+        lines = text.splitlines()
+        log_line = next(line for line in lines if "Connected to Redis" in line)
+        assert "redis_url" not in log_line
+        assert "redis://" not in log_line

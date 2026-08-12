@@ -33,7 +33,11 @@ TD = f"{TASKS_REL}/{TASK_ID}"
 def _make_task_json(agent: str = "auto", allowed: list[str] | None = None, **extra) -> str:
     if allowed is None:
         allowed = ["opencode"]
-    data: dict[str, object] = {"agent": agent, "allowed_backends": allowed}
+    data: dict[str, object] = {
+        "agent": agent,
+        "allowed_backends": allowed,
+        "worktree_path": "../agent-worktrees/test-agent-001",
+    }
     data.update(extra)
     return json.dumps(data)
 

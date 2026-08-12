@@ -236,7 +236,12 @@ class JobManager:
     ) -> str:
         """Create a new background job."""
         async with self._lock:
-            if len(self._jobs) >= self._max_jobs:
+            active_jobs = sum(
+                1
+                for job in self._jobs.values()
+                if job.status in ("pending", "running")
+            )
+            if active_jobs >= self._max_jobs:
                 raise ExecutionError("Maximum number of jobs reached")
 
             job_id = str(uuid.uuid4())
