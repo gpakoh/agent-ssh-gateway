@@ -19,6 +19,7 @@ from examples.mcp_server.tool_modes import (
     should_register_tool,
     tools_for_mode,
 )
+from examples.mcp_server.tool_scopes import get_required_scopes
 
 
 @pytest.fixture(autouse=True)
@@ -171,6 +172,31 @@ class TestChatGPTSafeMode:
         safe = get_mcp_client_safe_tools()
         assert len(safe & MCP_CLIENT_BLOCKED_TOOLS) == 0
 
+    def test_supervisor_integration_tools_are_write_mode_only(self):
+        supervisor_tools = {
+            "supervisor_integrate_file",
+            "supervisor_recover_integrations",
+        }
+        assert supervisor_tools <= TOOL_NAMES_BY_MODE["mcp_client_write"]
+        for mode, names in TOOL_NAMES_BY_MODE.items():
+            if mode == "mcp_client_write":
+                continue
+            assert supervisor_tools.isdisjoint(names), mode
+        assert supervisor_tools.isdisjoint(get_mcp_client_safe_tools())
+
+    def test_supervisor_integration_tools_require_admin_scope(self):
+        for name in (
+            "supervisor_integrate_file",
+            "supervisor_recover_integrations",
+        ):
+            assert get_required_scopes(name) == ["mcp:admin"]
+
+    def test_gitea_pr_create_is_write_mode_only_and_admin_scoped(self):
+        assert "gitea_create_pull_request" in TOOL_NAMES_BY_MODE["mcp_client_write"]
+        assert "gitea_create_pull_request" not in TOOL_NAMES_BY_MODE["mcp_client"]
+        assert "gitea_create_pull_request" not in get_mcp_client_safe_tools()
+        assert get_required_scopes("gitea_create_pull_request") == ["mcp:repo", "mcp:admin"]
+
     def test_safe_mode_filters_registration(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
         monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
@@ -212,18 +238,19 @@ class TestMcpClientWriteMode:
         write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
         assert "git_add" in write_tools
         assert "git_commit" in write_tools
+        assert "git_create_branch" in write_tools
         assert "git_push" in write_tools
 
     def test_git_write_tools_absent_from_every_other_mode(self):
-        """git_add/git_commit/git_push must never leak into any other
-        mode -- they exist in tool_scopes.py's TOOL_SCOPES map (defining
-        what scope *would* be required if ever registered) but were never
-        actually wired into any TOOL_NAMES_BY_MODE entry until this mode."""
+        """Git mutation tools must never leak into any other mode; the
+        protected-master workflow is intentionally available only through the
+        explicit write mode."""
         for mode, names in TOOL_NAMES_BY_MODE.items():
             if mode == "mcp_client_write":
                 continue
             assert "git_add" not in names, mode
             assert "git_commit" not in names, mode
+            assert "git_create_branch" not in names, mode
             assert "git_push" not in names, mode
 
     def test_workspace_write_tools_present(self):
@@ -294,6 +321,7 @@ class TestMcpClientWriteMode:
         assert should_register_tool("execute_argv")
         assert should_register_tool("git_push")
         assert should_register_tool("git_commit")
+        assert should_register_tool("git_create_branch")
         assert should_register_tool("workspace_file_write")
         assert should_register_tool("read_file")
         assert should_register_tool("docker_exec")
@@ -306,6 +334,7 @@ class TestMcpClientWriteMode:
         assert "execute_argv" not in mcp_client_tools
         assert "git_add" not in mcp_client_tools
         assert "git_commit" not in mcp_client_tools
+        assert "git_create_branch" not in mcp_client_tools
         assert "git_push" not in mcp_client_tools
         safe = get_mcp_client_safe_tools()
         assert len(safe & MCP_CLIENT_BLOCKED_TOOLS) == 0

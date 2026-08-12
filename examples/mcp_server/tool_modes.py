@@ -238,15 +238,23 @@ MCP_CLIENT_WRITE_BLOCKED_TOOLS: frozenset[str] = frozenset()
 # "mcp_client_write" starts from the same broad "mcp_client" tool set
 # (project inspection, read-only git, gitea/github, tests/lint, workspace
 # write/patch, docker/agent-launch/handoff-write) and removes only
-# MCP_CLIENT_WRITE_BLOCKED_TOOLS, then adds git_add/git_commit/git_push
-# (never present in any other mode's list).
+# MCP_CLIENT_WRITE_BLOCKED_TOOLS, then adds the explicit git mutation tools
+# (git_add/git_commit/git_create_branch/git_push; never present in any other
+# mode's list).
 TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     TOOL_NAMES_BY_MODE["mcp_client"] - MCP_CLIENT_WRITE_BLOCKED_TOOLS
 ) | {
     "execute_argv",
     "git_add",
     "git_commit",
+    "git_create_branch",
     "git_push",
+    "gitea_create_pull_request",
+    # Supervisor-only integration tools are intentionally absent from the
+    # broad mcp_client set and therefore from safe mode. They exist only in
+    # the explicit write/admin mode and still require mcp:admin at runtime.
+    "supervisor_integrate_file",
+    "supervisor_recover_integrations",
 }
 
 

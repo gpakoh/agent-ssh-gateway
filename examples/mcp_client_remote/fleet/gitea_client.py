@@ -1,8 +1,9 @@
-"""Read-only Gitea REST API client for fleet MCP adapter (incl. Actions/CI)."""
+"""Gitea REST client: read APIs plus one narrow PR-creation write endpoint."""
 
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 import httpx
@@ -39,9 +40,29 @@ ALLOWED_ENDPOINTS = frozenset(
     }
 )
 
+# Keep write access on a separate, deliberately tiny allowlist. The MCP write
+# surface only needs PR creation; it is not a generic Gitea mutation client.
+ALLOWED_WRITE_ENDPOINTS = frozenset({"/repos/{owner}/{repo}/pulls"})
+_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+MAX_PR_TITLE = 200
+MAX_PR_BODY = 20_000
+
+
+def _validate_branch_name(value: str, label: str) -> str:
+    value = value.strip()
+    if (
+        not value
+        or not _BRANCH_RE.fullmatch(value)
+        or ".." in value
+        or "//" in value
+        or value.endswith("/")
+    ):
+        raise ValueError(f"Invalid {label} branch name: {value!r}")
+    return value
+
 
 class GiteaClient:
-    """Stateless async HTTP client for Gitea REST API (read-only)."""
+    """Stateless async Gitea client with a separately allowlisted PR write."""
 
     def __init__(self, token: str) -> None:
         if not token:
@@ -100,6 +121,34 @@ class GiteaClient:
             # specifically to hide from *successful* responses. Re-raise
             # with only the already-sanitized endpoint path, never the
             # resolved base URL.
+            raise httpx.HTTPStatusError(
+                f"gitea api {path}: {resp.status_code} {resp.reason_phrase}",
+                request=exc.request,
+                response=exc.response,
+            ) from None
+        return resp.json()
+
+    async def _post(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        **path_params: Any,
+    ) -> Any:
+        """POST to the tiny mutation allowlist used by explicit write tools."""
+        if endpoint not in ALLOWED_WRITE_ENDPOINTS:
+            raise ValueError(f"Write endpoint not allowed: {endpoint}")
+        if "owner" in path_params:
+            validate_repo_owner_or_name(path_params["owner"], label="owner")
+        if "repo" in path_params:
+            validate_repo_owner_or_name(path_params["repo"], label="repo")
+        path = endpoint.format(**path_params)
+        resp = await self._client.post(path, json=payload)
+        if resp.status_code in (401, 403):
+            detail = resp.json().get("message", "unauthorized")
+            raise PermissionError(f"gitea api {path}: {detail}")
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
             raise httpx.HTTPStatusError(
                 f"gitea api {path}: {resp.status_code} {resp.reason_phrase}",
                 request=exc.request,
@@ -236,6 +285,34 @@ class GiteaClient:
             owner=owner,
             repo=repo,
             number=pull_number,
+        )
+
+    async def create_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        title: str,
+        head: str,
+        base: str,
+        body: str = "",
+    ) -> dict[str, Any]:
+        """Create a same-repository pull request; merge remains out of scope."""
+        title = title.strip()
+        body = body.strip()
+        if not title or len(title) > MAX_PR_TITLE:
+            raise ValueError(f"title must be 1..{MAX_PR_TITLE} characters")
+        if len(body) > MAX_PR_BODY:
+            raise ValueError(f"body exceeds {MAX_PR_BODY} characters")
+        head = _validate_branch_name(head, "head")
+        base = _validate_branch_name(base, "base")
+        if head == base:
+            raise ValueError("head and base branches must differ")
+        return await self._post(
+            "/repos/{owner}/{repo}/pulls",
+            {"title": title, "head": head, "base": base, "body": body},
+            owner=owner,
+            repo=repo,
         )
 
     # ── Gitea Actions (CI/CD) ──────────────────────────────────────

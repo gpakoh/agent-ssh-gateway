@@ -51,7 +51,12 @@ class TestFindOpencodeBin:
             result = find_opencode_bin(f.name)
             assert result == f.name
 
-    def test_returns_default_when_none_given(self):
+    def test_returns_default_when_default_exists(self, monkeypatch):
+        monkeypatch.delenv("OPENCODE_BIN", raising=False)
+        monkeypatch.setattr(
+            "scripts.opencode_runner_wrapper.os.path.isfile",
+            lambda path: path == "/root/.opencode/bin/opencode",
+        )
         result = find_opencode_bin(None)
         assert result == "/root/.opencode/bin/opencode"
 

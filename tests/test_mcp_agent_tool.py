@@ -13,6 +13,7 @@ sets) at the server.py/tool_modes.py layer -- not tested here.
 
 from __future__ import annotations
 
+import base64
 import json
 from unittest.mock import MagicMock
 
@@ -33,7 +34,11 @@ TD = f"{TASKS_REL}/{TASK_ID}"
 def _make_task_json(agent: str = "auto", allowed: list[str] | None = None, **extra) -> str:
     if allowed is None:
         allowed = ["opencode"]
-    data: dict[str, object] = {"agent": agent, "allowed_backends": allowed}
+    data: dict[str, object] = {
+        "agent": agent,
+        "allowed_backends": allowed,
+        "worktree_path": "../agent-worktrees/test-agent-001",
+    }
     data.update(extra)
     return json.dumps(data)
 
@@ -196,6 +201,9 @@ class TestProjectRunAgentAsyncSubmit:
         assert result["exit_code"] is None
         assert result["finished_at"] is None
         run_script_async.assert_called_once()
+        submission_key = run_script_async.call_args.args[2]
+        assert submission_key.startswith("task:test-")
+        assert submission_key.endswith(f":{TASK_ID}")
 
     def test_run_cmd_never_called_for_script_execution(self):
         """Only task.json + current-plan.md are read via run_cmd; the actual
@@ -300,6 +308,30 @@ class TestAgentToolIntegration:
         assert result["status"] == "needs-review"
         assert result["stdout"] == "ok"
 
+    def test_agent_and_direct_opencode_share_submission_identity(self):
+        from examples.mcp_server.opencode_tools import project_run_opencode
+
+        rc = _make_run_cmd(task_json=_make_task_json())
+        agent_submit = _make_run_script_async("job-agent")
+        direct_submit = _make_run_script_async("job-direct")
+
+        project_run_agent(
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            async_submit=True,
+            run_script_async=agent_submit,
+        )
+        project_run_opencode(
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            async_submit=True,
+            run_script_async=direct_submit,
+        )
+
+        assert agent_submit.call_args.args[2] == direct_submit.call_args.args[2]
+
 
 # ── project_run_agent: execution ordering ───────────────────────────────────
 
@@ -363,6 +395,33 @@ class TestProjectRunAgentScriptCwd:
         script = calls[2]
         assert script.startswith("cd '/abs/project/root' || exit 1")
 
+    def test_managed_workspace_env_overrides_task_supplied_worktree(self, monkeypatch):
+        monkeypatch.setenv("MCP_AGENT_WORKSPACE_ROOT", "/var/lib/mcp-agent/workspaces")
+        monkeypatch.setattr(
+            "app.workspace.registry.get_registry",
+            lambda: type("R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}})(),
+        )
+        rc = _make_run_cmd(
+            task_json=_make_task_json(worktree_path="/abs/project/root/attacker-chosen")
+        )
+        run_script_async = _make_run_script_async("job-managed-1")
+
+        result = project_run_agent(
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            async_submit=True,
+            run_script_async=run_script_async,
+        )
+
+        assert result["job_id"] == "job-managed-1"
+        script = run_script_async.call_args[0][1]
+        assert "/abs/project/root/attacker-chosen" not in script
+        assert "/var/lib/mcp-agent/workspaces/test-" in script
+        assert f"/{TASK_ID}" in script
+        assert "git clone --no-hardlinks --no-checkout" in script
+        assert "git worktree add" not in script
+
     def test_no_cd_when_project_root_unresolvable(self, monkeypatch):
         """Registry lookup failure must not crash the whole call -- just
         skip the cd (matching the pre-fix, still-correct-for-sync behavior)."""
@@ -392,10 +451,15 @@ class TestProjectRunAgentScriptCwd:
 
 
 class TestGatewayWriteAgentTaskScriptTransport:
-    """Regression: write_agent_task builds a multi-line heredoc script, so the
-    adapter must ship it through execute_project_script (sh + stdin), never
-    run_project_command (shlex.split shreds heredocs -- live: mkdir saw
-    'cat', '>', 'JEOF' as separate argv entries)."""
+    """Task payloads use shell-safe base64 transport through script stdin."""
+
+    @staticmethod
+    def _decoded_payload(script: str, filename: str) -> str:
+        line = next(
+            line for line in script.splitlines() if line.endswith(f"/{filename}")
+        )
+        encoded = line.split("printf %s ", 1)[1].split(" | base64 -d", 1)[0]
+        return base64.b64decode(encoded).decode("utf-8")
 
     def test_routes_through_execute_project_script(self, monkeypatch):
         import examples.mcp_server.server as server_mod
@@ -412,6 +476,66 @@ class TestGatewayWriteAgentTaskScriptTransport:
         assert result["result"]["exit_code"] == 0
         client.execute_project_script.assert_called_once()
         script = client.execute_project_script.call_args[0][1]
-        assert f"cat > .ai-bridge/tasks/{TASK_ID}/task.json << 'JEOF'" in script
+        assert f"mkdir -p .ai-bridge/tasks/{TASK_ID}" in script
+        contract = json.loads(self._decoded_payload(script, "task.json"))
+        assert contract["task_id"] == TASK_ID
+        assert "<< 'JEOF'" not in script
         client.execute_argv.assert_not_called()
         client.execute_project_command.assert_not_called()
+
+    def test_comma_separated_scope_patterns_become_distinct_contract_entries(self, monkeypatch):
+        """The MCP string surface must not silently turn ``a.py,b.py`` into
+        one impossible allowed-files glob. Commas are accepted for scope
+        patterns only; required checks remain newline-separated."""
+        import examples.mcp_server.server as server_mod
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_write_agent_task
+
+        client = MagicMock()
+        client.execute_project_script.return_value = {"exit_code": 0, "stdout": "ok", "stderr": ""}
+        monkeypatch.setattr(server_mod, "client", client)
+
+        gateway_write_agent_task(
+            project="test",
+            task_id=TASK_ID,
+            agent="opencode",
+            task="Do the thing",
+            allowed_files="a.py,b.py",
+            forbidden_files="secret/**,parent/**",
+            required_checks="python -c 'print(1, 2)'",
+        )
+
+        script = client.execute_project_script.call_args[0][1]
+        contract = json.loads(self._decoded_payload(script, "task.json"))
+        assert contract["allowed_files"] == ["a.py", "b.py"]
+        assert contract["forbidden_files"] == ["secret/**", "parent/**"]
+        assert contract["required_checks"] == ["python -c 'print(1, 2)'"]
+
+    def test_plan_marker_and_shell_text_stay_data_not_script(self, monkeypatch):
+        import examples.mcp_server.server as server_mod
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_write_agent_task
+
+        client = MagicMock()
+        client.execute_project_script.return_value = {"exit_code": 0, "stdout": "ok", "stderr": ""}
+        monkeypatch.setattr(server_mod, "client", client)
+        hostile = "before\nPEOF\nprintf PWNED >/tmp/should-not-run\nafter"
+
+        gateway_write_agent_task(
+            project="test",
+            task_id=TASK_ID,
+            agent="opencode",
+            task="Do the thing",
+            constraints=hostile,
+        )
+
+        script = client.execute_project_script.call_args[0][1]
+        plan = self._decoded_payload(script, "current-plan.md")
+        assert hostile in plan
+        assert "printf PWNED" not in script
+        assert "PEOF" not in script
+
+    def test_scope_pattern_parser_preserves_newline_contract(self):
+        from examples.mcp_server.mcp_infra.adapters.agent import _split_scope_patterns
+
+        assert _split_scope_patterns("a.py\nb.py") == ["a.py", "b.py"]
+        assert _split_scope_patterns("a.py, b.py\nc.py") == ["a.py", "b.py", "c.py"]
+        assert _split_scope_patterns(None) is None

@@ -133,6 +133,7 @@ class GatewayClient:
         self.api_key = api_key or os.environ.get("GATEWAY_API_KEY", "")
         self.session_id = session_id or os.environ.get("GATEWAY_SESSION_ID", "")
         self.command_timeout = int(os.environ.get("MCP_GATEWAY_COMMAND_TIMEOUT", "120"))
+        self.async_job_timeout = int(os.environ.get("MCP_GATEWAY_ASYNC_JOB_TIMEOUT", "3600"))
         self.job_timeout = int(os.environ.get("MCP_GATEWAY_JOB_TIMEOUT", "180"))
         self._http_timeout = int(os.environ.get("MCP_GATEWAY_HTTP_TIMEOUT", "120"))
 
@@ -351,6 +352,8 @@ class GatewayClient:
         command: str,
         redact_path_prefix: str | None = None,
         stdin: str = "",
+        submission_key: str | None = None,
+        timeout_s: int | None = None,
     ) -> dict[str, Any]:
         """Execute a command directly without cd wrapping.
 
@@ -375,12 +378,14 @@ class GatewayClient:
             "command": command,
             "async_mode": True,
             "redact_output": True,
-            "timeout": self.command_timeout,
+            "timeout": timeout_s or self.command_timeout,
         }
         if redact_path_prefix:
             payload["redact_path_prefix"] = redact_path_prefix
         if stdin:
             payload["stdin"] = stdin
+        if submission_key:
+            payload["submission_key"] = submission_key
         return self._post("/api/ssh/execute", payload)
 
     @_retry_on_session_not_found
@@ -452,6 +457,8 @@ class GatewayClient:
         self,
         project: str,
         script: str,
+        submission_key: str | None = None,
+        timeout_s: int | None = None,
     ) -> dict[str, Any]:
         """Submit a wrapped bash script to ``sh`` over SSH, asynchronously.
 
@@ -474,6 +481,8 @@ class GatewayClient:
             "sh",
             stdin=_script_stdin_wrapper(script),
             redact_path_prefix=cwd,
+            submission_key=submission_key,
+            timeout_s=timeout_s or self.async_job_timeout,
         )
 
     @_retry_on_session_not_found

@@ -46,6 +46,20 @@ def test_execute_argv_registered_in_live_write_server():
     assert "execute_argv" in names
 
 
+@patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
+def test_supervisor_tools_registered_in_live_server():
+    """mcp_client_write bootstrap must register both admin-only integration tools."""
+    import importlib
+
+    import examples.mcp_server.server as srv
+
+    importlib.reload(srv)
+    names = {tool.name for tool in srv.mcp._tool_manager.list_tools()}
+    assert "supervisor_integrate_file" in names
+    assert "supervisor_recover_integrations" in names
+    assert "gitea_create_pull_request" in names
+
+
 @patch.dict(os.environ, {"MCP_AUTH_MODE": "token", "MCP_PUBLIC_TOKEN": "test-token"})
 def test_token_mode_initializes_provider():
     """Token mode initializes GatewayOAuthProvider with MCP_PUBLIC_TOKEN."""
