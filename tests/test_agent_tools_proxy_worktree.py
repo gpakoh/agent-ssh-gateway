@@ -109,6 +109,20 @@ class TestBuildOpencodeScriptProxy:
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
         assert 'echo "Status: rate-limited" > "$td/agent-status.md"' in script
 
+    def test_worker_status_preserved_before_canonical_final_status(self, monkeypatch):
+        """A worker may write a detailed step log to agent-status.md. The
+        runner must preserve that text before replacing the public status with
+        the canonical one-line terminal state, and surface it in agent-report."""
+        monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+        script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
+
+        snapshot = 'cp "$td/agent-status.md" "$td/worker-status.md"'
+        canonical = 'echo "Status: needs-review" > "$td/agent-status.md"'
+        assert snapshot in script
+        assert script.index(snapshot) < script.index(canonical)
+        assert '## Worker status snapshot' in script
+        assert 'cat "$td/worker-status.md" >> "$td/agent-report.md"' in script
+
 
 class TestBuildOpencodeScriptWorktree:
     def test_worktree_added_when_path_provided(self):

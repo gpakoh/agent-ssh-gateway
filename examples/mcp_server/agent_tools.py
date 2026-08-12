@@ -602,6 +602,11 @@ def _build_opencode_script(
         '  echo "Error: current-plan.md not found in $td"',
         "  RC=1",
         "fi",
+        # Preserve the detailed worker-authored status before supervisor/proxy
+        # post-processing replaces agent-status.md with its canonical final
+        # one-line state. This survives MCP restarts and keeps the worker's
+        # step log/deliverables available for later review.
+        'if [ -f "$td/agent-status.md" ]; then cp "$td/agent-status.md" "$td/worker-status.md"; fi',
     ])
     if proxy_provider_url:
         parts.extend(_proxy_report_script_lines(proxy_provider_url, proxy_timeout))
@@ -638,6 +643,13 @@ def _build_opencode_script(
         f"- Finished: $(date -u +%Y-%m-%dT%H:%M:%SZ)\n"
         f"REOF"
     )
+    parts.extend([
+        'if [ -s "$td/worker-status.md" ]; then',
+        '  printf "\\n## Worker status snapshot\\n\\n" >> "$td/agent-report.md"',
+        '  cat "$td/worker-status.md" >> "$td/agent-report.md"',
+        '  printf "\\n" >> "$td/agent-report.md"',
+        "fi",
+    ])
     parts.append("exit $FINAL_RC")
     return "\n".join(parts)
 
