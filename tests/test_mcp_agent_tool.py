@@ -13,6 +13,7 @@ sets) at the server.py/tool_modes.py layer -- not tested here.
 
 from __future__ import annotations
 
+import base64
 import json
 from unittest.mock import MagicMock
 
@@ -396,10 +397,15 @@ class TestProjectRunAgentScriptCwd:
 
 
 class TestGatewayWriteAgentTaskScriptTransport:
-    """Regression: write_agent_task builds a multi-line heredoc script, so the
-    adapter must ship it through execute_project_script (sh + stdin), never
-    run_project_command (shlex.split shreds heredocs -- live: mkdir saw
-    'cat', '>', 'JEOF' as separate argv entries)."""
+    """Task payloads use shell-safe base64 transport through script stdin."""
+
+    @staticmethod
+    def _decoded_payload(script: str, filename: str) -> str:
+        line = next(
+            line for line in script.splitlines() if line.endswith(f"/{filename}")
+        )
+        encoded = line.split("printf %s ", 1)[1].split(" | base64 -d", 1)[0]
+        return base64.b64decode(encoded).decode("utf-8")
 
     def test_routes_through_execute_project_script(self, monkeypatch):
         import examples.mcp_server.server as server_mod
@@ -416,7 +422,10 @@ class TestGatewayWriteAgentTaskScriptTransport:
         assert result["result"]["exit_code"] == 0
         client.execute_project_script.assert_called_once()
         script = client.execute_project_script.call_args[0][1]
-        assert f"cat > .ai-bridge/tasks/{TASK_ID}/task.json << 'JEOF'" in script
+        assert f"mkdir -p .ai-bridge/tasks/{TASK_ID}" in script
+        contract = json.loads(self._decoded_payload(script, "task.json"))
+        assert contract["task_id"] == TASK_ID
+        assert "<< 'JEOF'" not in script
         client.execute_argv.assert_not_called()
         client.execute_project_command.assert_not_called()
 
@@ -442,11 +451,33 @@ class TestGatewayWriteAgentTaskScriptTransport:
         )
 
         script = client.execute_project_script.call_args[0][1]
-        payload = script.split("<< 'JEOF'\n", 1)[1].split("\nJEOF", 1)[0]
-        contract = json.loads(payload)
+        contract = json.loads(self._decoded_payload(script, "task.json"))
         assert contract["allowed_files"] == ["a.py", "b.py"]
         assert contract["forbidden_files"] == ["secret/**", "parent/**"]
         assert contract["required_checks"] == ["python -c 'print(1, 2)'"]
+
+    def test_plan_marker_and_shell_text_stay_data_not_script(self, monkeypatch):
+        import examples.mcp_server.server as server_mod
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_write_agent_task
+
+        client = MagicMock()
+        client.execute_project_script.return_value = {"exit_code": 0, "stdout": "ok", "stderr": ""}
+        monkeypatch.setattr(server_mod, "client", client)
+        hostile = "before\nPEOF\nprintf PWNED >/tmp/should-not-run\nafter"
+
+        gateway_write_agent_task(
+            project="test",
+            task_id=TASK_ID,
+            agent="opencode",
+            task="Do the thing",
+            constraints=hostile,
+        )
+
+        script = client.execute_project_script.call_args[0][1]
+        plan = self._decoded_payload(script, "current-plan.md")
+        assert hostile in plan
+        assert "printf PWNED" not in script
+        assert "PEOF" not in script
 
     def test_scope_pattern_parser_preserves_newline_contract(self):
         from examples.mcp_server.mcp_infra.adapters.agent import _split_scope_patterns

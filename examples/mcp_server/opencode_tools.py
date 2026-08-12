@@ -15,9 +15,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from examples.mcp_server.agent_paths import task_dir
 from examples.mcp_server.agent_tasks import validate_task_id
 from examples.mcp_server.agent_tools import (
-    TASKS_REL_DIR,
     _build_opencode_script,
     _isolated_worktree_error,
     _now_iso,
@@ -66,7 +66,7 @@ def project_run_opencode(
     validate_task_id(task_id)
 
     started_at = _now_iso()
-    td = f"{TASKS_REL_DIR}/{task_id}"
+    td = task_dir(project, task_id)
 
     plan = _read_current_plan(run_cmd, project, task_id)
     if not plan:
