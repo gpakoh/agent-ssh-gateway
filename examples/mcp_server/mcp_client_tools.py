@@ -1322,6 +1322,24 @@ def _validate_git_name(value: str, field: str) -> str:
     return value
 
 
+def git_create_branch(
+    client: GatewayClient,
+    project: str,
+    branch: str,
+) -> dict[str, Any]:
+    """Create and switch to a new non-protected local branch.
+
+    This is deliberately narrower than a generic checkout/switch surface: it
+    cannot move to arbitrary refs and cannot create ``main``/``master``. It
+    exists so protected-master deployments can follow the intended
+    feature-branch -> PR workflow instead of deadlocking after ``git commit``.
+    """
+    branch = _validate_git_name(branch, "branch")
+    if branch in {"main", "master"}:
+        raise ValueError(f"POLICY_DENIED: creating protected branch {branch!r} is not allowed")
+    return run_project_command(client, project, f"git switch -c {shlex.quote(branch)}")
+
+
 def git_push(
     client: GatewayClient,
     project: str,
