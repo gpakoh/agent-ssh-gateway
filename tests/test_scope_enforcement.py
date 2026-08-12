@@ -244,6 +244,11 @@ class TestSpecificToolMappings:
         assert get_required_scopes("execute_restricted") == ["mcp:execute"]
         assert not has_required_scope(["mcp:read"], "execute_restricted")
 
+    def test_gateway_execute_argv_requires_execute(self):
+        assert get_required_scopes("execute_argv") == ["mcp:execute"]
+        assert not has_required_scope(["mcp:read"], "execute_argv")
+        assert has_required_scope(["mcp:execute"], "execute_argv")
+
     def test_project_run_opencode_requires_agent_run(self):
         assert get_required_scopes("run_opencode") == ["mcp:agent-run"]
 

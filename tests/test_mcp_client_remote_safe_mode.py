@@ -16,6 +16,7 @@ import os
 from unittest.mock import patch
 
 import pytest
+from starlette.requests import Request
 
 from examples.mcp_server.tool_scopes import ACCESS_PROFILES, get_profile_scopes
 
@@ -138,3 +139,43 @@ class TestDefaultTokenScopeFallback:
                 mock_load.return_value = None
                 scopes = await _reload_srv._get_token_scopes("shared-tok")
         assert scopes == get_profile_scopes("mcp_client_safe")
+
+
+class TestExecuteArgvScopeEnforcement:
+    @pytest.mark.asyncio
+    async def test_execute_argv_denied_without_execute_scope(self, _reload_srv):
+        body = (
+            b'{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+            b'"params":{"name":"execute_argv","arguments":{"argv":["git","rev-parse","HEAD"]}}}'
+        )
+        scope = {"type": "http", "method": "POST", "path": "/mcp", "headers": []}
+        request = Request(scope)
+        request.state.auth_token = "tok"
+
+        with patch.object(_reload_srv, "MCP_SCOPE_ENFORCEMENT", "enforce"):
+            with patch.object(_reload_srv, "_get_token_scopes", return_value=["mcp:read", "mcp:project"]):
+                resp = await _reload_srv._check_tool_scope(request, "/mcp", body)
+
+        assert resp is not None
+        assert resp.status_code == 403
+        assert b"insufficient_scope" in resp.body
+
+    @pytest.mark.asyncio
+    async def test_execute_argv_allowed_with_execute_scope(self, _reload_srv):
+        body = (
+            b'{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+            b'"params":{"name":"execute_argv","arguments":{"argv":["git","rev-parse","HEAD"]}}}'
+        )
+        scope = {"type": "http", "method": "POST", "path": "/mcp", "headers": []}
+        request = Request(scope)
+        request.state.auth_token = "tok"
+
+        with patch.object(_reload_srv, "MCP_SCOPE_ENFORCEMENT", "enforce"):
+            with patch.object(
+                _reload_srv,
+                "_get_token_scopes",
+                return_value=["mcp:read", "mcp:project", "mcp:execute"],
+            ):
+                resp = await _reload_srv._check_tool_scope(request, "/mcp", body)
+
+        assert resp is None
