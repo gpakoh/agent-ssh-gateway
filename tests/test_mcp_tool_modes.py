@@ -191,6 +191,12 @@ class TestChatGPTSafeMode:
         ):
             assert get_required_scopes(name) == ["mcp:admin"]
 
+    def test_gitea_pr_create_is_write_mode_only_and_admin_scoped(self):
+        assert "gitea_create_pull_request" in TOOL_NAMES_BY_MODE["mcp_client_write"]
+        assert "gitea_create_pull_request" not in TOOL_NAMES_BY_MODE["mcp_client"]
+        assert "gitea_create_pull_request" not in get_mcp_client_safe_tools()
+        assert get_required_scopes("gitea_create_pull_request") == ["mcp:admin"]
+
     def test_safe_mode_filters_registration(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
         monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
