@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from examples.mcp_server.agent_paths import (
-    managed_workspace_paths,
+    managed_workspace_path,
     project_state_key,
     task_archive_path,
     task_dir,
@@ -37,12 +37,11 @@ def test_legacy_layout_remains_when_state_root_unset(monkeypatch):
     assert task_archive_path("kojo", TASK_ID) == f".ai-bridge/archive/{TASK_ID}"
 
 
-def test_managed_workspace_paths_are_operator_derived(monkeypatch):
+def test_managed_workspace_path_is_operator_derived(monkeypatch):
     monkeypatch.setenv("MCP_AGENT_WORKSPACE_ROOT", "/var/lib/mcp-agent/workspaces")
-    mirror, worktree = managed_workspace_paths("kojo-bot-service", TASK_ID) or ("", "")
+    worktree = managed_workspace_path("kojo-bot-service", TASK_ID)
     key = project_state_key("kojo-bot-service")
-    assert mirror == f"/var/lib/mcp-agent/workspaces/repos/{key}.git"
-    assert worktree == f"/var/lib/mcp-agent/workspaces/tasks/{key}/{TASK_ID}"
+    assert worktree == f"/var/lib/mcp-agent/workspaces/{key}/{TASK_ID}"
 
 
 def test_write_agent_task_uses_external_state_without_touching_source(tmp_path, monkeypatch):

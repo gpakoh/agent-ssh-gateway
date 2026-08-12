@@ -11,6 +11,7 @@ test_opencode_runner_argv.py.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -152,12 +153,33 @@ class TestBuildOpencodeScriptWorktree:
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
         assert "td='/srv/proj/.ai-bridge/tasks/a12345678901'" in script
 
+    def test_managed_clone_never_uses_source_git_worktree_metadata(self):
+        script = _build_opencode_script(
+            "/var/lib/mcp-agent/state/task",
+            TASK_ID,
+            None,
+            project_root="/srv/proj",
+            worktree_path="/var/lib/mcp-agent/workspaces/task",
+            managed_clone=True,
+        )
+        assert 'git clone --no-hardlinks --no-checkout "$PARENT_ROOT" "$wt"' in script
+        assert 'git -C "$wt" checkout --detach "$PARENT_HEAD_BEFORE"' in script
+        assert "git worktree add" not in script
+        assert "managed clone with baseline drift" in script
+
 
 class TestIsolatedWorktreeGuard:
     def test_parent_checkout_is_forbidden(self):
         error = _isolated_worktree_error("/srv/proj", ".")
         assert error is not None
-        assert "parent checkout" in error
+        assert "outside the authoritative source checkout" in error
+
+    def test_nested_workspace_inside_source_is_forbidden(self):
+        error = _isolated_worktree_error(
+            "/srv/proj", "/srv/proj/.ai-bridge/worktrees/task-1"
+        )
+        assert error is not None
+        assert "outside the authoritative source checkout" in error
 
     def test_missing_worktree_is_forbidden_for_resolved_project(self):
         assert _isolated_worktree_error("/srv/proj", None) is not None
@@ -189,6 +211,159 @@ def _init_git_repo(root: Path) -> str:
     _git(root, "add", "base.txt", ".gitignore")
     _git(root, "commit", "-q", "-m", "base")
     return _git(root, "rev-parse", "HEAD")
+
+
+def test_managed_clone_executes_without_creating_source_worktree_metadata(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    source_head = _init_git_repo(source)
+    artifacts = tmp_path / "agent-state" / TASK_ID
+    artifacts.mkdir(parents=True)
+    (artifacts / "current-plan.md").write_text("# Do nothing\n", encoding="utf-8")
+    workspace = tmp_path / "managed-workspaces" / TASK_ID
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_opencode = fake_bin / "opencode"
+    fake_opencode.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_opencode.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    source_status_before = _git(source, "status", "--porcelain=v1", "--untracked-files=all")
+    source_refs_before = _git(source, "show-ref")
+    source_index_before = (source / ".git" / "index").read_bytes()
+    objects_dir = source / ".git" / "objects"
+    source_objects_before = {
+        path.relative_to(objects_dir): path.read_bytes()
+        for path in objects_dir.rglob("*")
+        if path.is_file()
+    }
+    assert not (source / ".git" / "worktrees").exists()
+
+    script = _build_opencode_script(
+        str(artifacts),
+        TASK_ID,
+        None,
+        project_root=str(source),
+        worktree_path=str(workspace),
+        managed_clone=True,
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert workspace.is_dir()
+    assert (workspace / ".git").is_dir(), "managed workspace must be an independent clone"
+    assert _git(workspace, "rev-parse", "HEAD") == source_head
+    assert _git(source, "status", "--porcelain=v1", "--untracked-files=all") == source_status_before
+    assert _git(source, "show-ref") == source_refs_before
+    assert (source / ".git" / "index").read_bytes() == source_index_before
+    source_objects_after = {
+        path.relative_to(objects_dir): path.read_bytes()
+        for path in objects_dir.rglob("*")
+        if path.is_file()
+    }
+    assert source_objects_after == source_objects_before
+    assert not (source / ".git" / "worktrees").exists()
+    assert (artifacts / "agent-status.md").read_text(encoding="utf-8").strip() == "Status: needs-review"
+
+
+def test_managed_clone_rejects_symlink_workspace(tmp_path, monkeypatch):
+    source = tmp_path / "source-symlink"
+    source.mkdir()
+    _init_git_repo(source)
+    artifacts = tmp_path / "agent-state-symlink" / TASK_ID
+    artifacts.mkdir(parents=True)
+    (artifacts / "current-plan.md").write_text("# Do nothing\n", encoding="utf-8")
+    workspace = tmp_path / "managed-symlink" / TASK_ID
+    workspace.parent.mkdir(parents=True)
+    workspace.symlink_to(source, target_is_directory=True)
+
+    fake_bin = tmp_path / "bin-symlink"
+    fake_bin.mkdir()
+    marker = tmp_path / "opencode-ran"
+    fake_opencode = fake_bin / "opencode"
+    fake_opencode.write_text(
+        f"#!/bin/sh\nprintf ran > {shlex.quote(str(marker))}\nexit 0\n",
+        encoding="utf-8",
+    )
+    fake_opencode.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    status_before = _git(source, "status", "--porcelain=v1", "--untracked-files=all")
+    refs_before = _git(source, "show-ref")
+    script = _build_opencode_script(
+        str(artifacts),
+        TASK_ID,
+        None,
+        project_root=str(source),
+        worktree_path=str(workspace),
+        managed_clone=True,
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode != 0
+    assert "Refusing symlink workspace" in (artifacts / "agent-status.md").read_text(
+        encoding="utf-8"
+    )
+    assert not marker.exists(), "OpenCode must never run after workspace path rejection"
+    assert _git(source, "status", "--porcelain=v1", "--untracked-files=all") == status_before
+    assert _git(source, "show-ref") == refs_before
+
+
+def test_managed_clone_requires_registry_root_at_git_toplevel(tmp_path, monkeypatch):
+    repo = tmp_path / "monorepo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    nested = repo / "service"
+    nested.mkdir()
+    artifacts = tmp_path / "agent-state-nested" / TASK_ID
+    artifacts.mkdir(parents=True)
+    (artifacts / "current-plan.md").write_text("# Do nothing\n", encoding="utf-8")
+    workspace = tmp_path / "managed-nested" / TASK_ID
+
+    fake_bin = tmp_path / "bin-nested"
+    fake_bin.mkdir()
+    fake_opencode = fake_bin / "opencode"
+    fake_opencode.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_opencode.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    script = _build_opencode_script(
+        str(artifacts),
+        TASK_ID,
+        None,
+        project_root=str(nested),
+        worktree_path=str(workspace),
+        managed_clone=True,
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=nested,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 75
+    assert "Managed clone requires project root at git toplevel" in (
+        artifacts / "agent-status.md"
+    ).read_text(encoding="utf-8")
+    assert not workspace.exists()
 
 
 def _run_supervisor_postrun(
@@ -441,14 +616,14 @@ class TestSupervisorPostrunEvidence:
         after = (td / "parent-index-tree-after.txt").read_text(encoding="utf-8").strip()
         assert before != after
 
-    def test_worktree_reuse_requires_clean_git_toplevel(self):
+    def test_workspace_reuse_requires_clean_git_toplevel(self):
         script = _build_opencode_script(
             TD,
             TASK_ID,
             None,
             project_root="/srv/proj",
-            worktree_path="/srv/proj/.ai-bridge/worktrees/t1",
+            worktree_path="/srv/agent-workspaces/t1",
         )
         assert "git -C \"$wt\" rev-parse --show-toplevel" in script
         assert "Refusing non-worktree-root path" in script
-        assert "Refusing dirty existing worktree" in script
+        assert "Refusing dirty existing workspace" in script
