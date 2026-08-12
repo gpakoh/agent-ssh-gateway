@@ -34,6 +34,18 @@ def test_auth_enabled_by_default():
     assert mcp.settings.auth.client_registration_options.enabled is True
 
 
+@patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
+def test_execute_argv_registered_in_live_write_server():
+    """mcp_client_write bootstrap must register execute_argv for live MCP."""
+    import importlib
+
+    import examples.mcp_server.server as srv
+
+    importlib.reload(srv)
+    names = {tool.name for tool in srv.mcp._tool_manager.list_tools()}
+    assert "execute_argv" in names
+
+
 @patch.dict(os.environ, {"MCP_AUTH_MODE": "token", "MCP_PUBLIC_TOKEN": "test-token"})
 def test_token_mode_initializes_provider():
     """Token mode initializes GatewayOAuthProvider with MCP_PUBLIC_TOKEN."""
@@ -79,7 +91,7 @@ def test_oauth_mode_configures_auth():
     importlib.reload(srv)
     assert srv.mcp.settings.auth is not None
     assert srv.mcp.settings.auth.client_registration_options.enabled is True
-    assert "mcp:read" in srv.mcp.settings.auth.client_registration_options.valid_scopes
+    assert "mcp:read" in (srv.mcp.settings.auth.client_registration_options.valid_scopes or [])
 
 
 @patch.dict(

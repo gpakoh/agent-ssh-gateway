@@ -204,6 +204,10 @@ class TestChatGPTSafeMode:
 
 
 class TestMcpClientWriteMode:
+    def test_execute_argv_present(self):
+        write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
+        assert "execute_argv" in write_tools
+
     def test_git_write_tools_present(self):
         write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
         assert "git_add" in write_tools
@@ -287,6 +291,7 @@ class TestMcpClientWriteMode:
 
     def test_registration_via_should_register_tool(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client_write")
+        assert should_register_tool("execute_argv")
         assert should_register_tool("git_push")
         assert should_register_tool("git_commit")
         assert should_register_tool("workspace_file_write")
@@ -298,6 +303,7 @@ class TestMcpClientWriteMode:
         """The new mode must not change plain "mcp_client" mode's own
         tool set or safe-mode filtering in any way."""
         mcp_client_tools = TOOL_NAMES_BY_MODE["mcp_client"]
+        assert "execute_argv" not in mcp_client_tools
         assert "git_add" not in mcp_client_tools
         assert "git_commit" not in mcp_client_tools
         assert "git_push" not in mcp_client_tools
