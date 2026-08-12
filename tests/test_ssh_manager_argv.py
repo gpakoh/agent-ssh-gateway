@@ -1,5 +1,8 @@
 """Tests for execute_argv on SSHSessionManager."""
 
+import asyncio
+import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -65,3 +68,63 @@ async def test_execute_argv_empty_stdin():
     assert result["exit_code"] == 0
     # stdin.write should NOT be called for empty data
     stdin_file.write.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_drain_command_streams_reads_stdout_stderr_concurrently():
+    from app.ssh_manager import SSHSessionManager
+
+    manager = SSHSessionManager()
+    stderr_started = threading.Event()
+    channel = MagicMock()
+    channel.recv_exit_status.return_value = 0
+
+    stdout = MagicMock()
+    stdout.channel = channel
+
+    def _stdout_read():
+        assert stderr_started.wait(timeout=0.5), "stderr read did not start concurrently"
+        return b"out"
+
+    stderr = MagicMock()
+
+    def _stderr_read():
+        stderr_started.set()
+        return b"err"
+
+    stdout.read.side_effect = _stdout_read
+    stderr.read.side_effect = _stderr_read
+
+    out, err, code = await manager._drain_command_streams(
+        asyncio.get_running_loop(),
+        stdout,
+        stderr,
+        deadline=time.monotonic() + 1.0,
+    )
+    assert (out, err, code) == (b"out", b"err", 0)
+
+
+@pytest.mark.asyncio
+async def test_drain_command_streams_closes_channel_on_deadline():
+    from app.ssh_manager import SSHSessionManager
+
+    manager = SSHSessionManager()
+    release = threading.Event()
+    channel = MagicMock()
+    stdout = MagicMock()
+    stdout.channel = channel
+    stderr = MagicMock()
+    stdout.read.side_effect = lambda: release.wait(timeout=1.0) or b""
+    stderr.read.side_effect = lambda: release.wait(timeout=1.0) or b""
+
+    try:
+        with pytest.raises(TimeoutError):
+            await manager._drain_command_streams(
+                asyncio.get_running_loop(),
+                stdout,
+                stderr,
+                deadline=time.monotonic() + 0.02,
+            )
+        channel.close.assert_called()
+    finally:
+        release.set()

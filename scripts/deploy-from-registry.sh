@@ -232,18 +232,20 @@ deploy_services() {
 }
 
 run_migrations() {
-  # M15: app/main.py's startup already runs Base.metadata.create_all()
-  # (create_tables() on audit_log_store/event_hook_store/delivery_service)
-  # as its own startup-resilience mechanism for a DB that somehow never
-  # got migrated -- every existing Alembic migration (001/002/003) checks
-  # before acting specifically so it stays a real no-op once create_all()
-  # already produced that shape. This step's job is only to keep
-  # alembic_version stamped/current going forward, so a *future* migration
-  # gets a real signal instead of depending on every author remembering
-  # the same defensive-guard convention. Runs inside the already-deployed
-  # gateway container -- it already has alembic + the app code + the real
-  # DATABASE_URL, on the same network as mcp-postgres.
+  # Persistent-session schema ownership belongs to Alembic. SessionStore
+  # no longer creates ssh_sessions during startup, so a deploy must migrate
+  # successfully before the new image is considered
+  # healthy/usable. Runs inside the already-deployed gateway container -- it
+  # carries Alembic, the exact application models and the authoritative
+  # DATABASE_URL on the same network as PostgreSQL.
   docker exec web-ssh-gateway alembic upgrade head
+}
+
+restart_gateway_after_migrations() {
+  # The first container start happens before migrations so Alembic can run
+  # from the new image. Restart once after the schema is current so startup
+  # session restoration observes the migrated ownership columns.
+  docker restart web-ssh-gateway >/dev/null
 }
 
 alembic_revision() {
@@ -299,6 +301,8 @@ deploy_services "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE"
 log "Running database migrations (alembic upgrade head)..."
 if ! run_migrations; then
   log "Database migration FAILED."
+elif ! restart_gateway_after_migrations; then
+  log "Gateway restart after database migration FAILED."
 elif smoke; then
   write_state "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE"
   log "Deploy OK — recorded as last known good."

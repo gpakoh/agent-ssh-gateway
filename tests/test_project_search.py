@@ -300,3 +300,47 @@ class TestSearchTextSymlinkEscape:
             result = search_text(project, "SECRET", glob="escape_link/*")
             assert result["count"] == 0
             assert result["matches"] == []
+
+
+def test_search_text_prunes_agent_runtime_and_egg_info(tmp_path):
+    from app.services.project_search import search_text
+
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("UNIQUE_NEEDLE\n", encoding="utf-8")
+    runtime = tmp_path / ".ai-bridge" / "worktrees" / "stale" / "app"
+    runtime.mkdir(parents=True)
+    (runtime / "main.py").write_text("UNIQUE_NEEDLE\n", encoding="utf-8")
+    egg = tmp_path / "stale.egg-info"
+    egg.mkdir()
+    (egg / "copy.py").write_text("UNIQUE_NEEDLE\n", encoding="utf-8")
+
+    result = search_text(tmp_path, "UNIQUE_NEEDLE")
+    assert [m["path"] for m in result["matches"]] == ["app/main.py"]
+
+
+def test_search_text_never_descends_agent_runtime(monkeypatch, tmp_path):
+    import app.services.project_search as search_module
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "live.py").write_text("PRUNE_NEEDLE\n", encoding="utf-8")
+    runtime = tmp_path / ".ai-bridge" / "worktrees" / "old"
+    runtime.mkdir(parents=True)
+    (runtime / "stale.py").write_text("PRUNE_NEEDLE\n", encoding="utf-8")
+    egg = tmp_path / "stale.egg-info"
+    egg.mkdir()
+    (egg / "copy.py").write_text("PRUNE_NEEDLE\n", encoding="utf-8")
+
+    real_walk = search_module.os.walk
+    visited: list[Path] = []
+
+    def tracking_walk(*args, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(*args, **kwargs):
+            visited.append(Path(dirpath))
+            yield dirpath, dirnames, filenames
+
+    monkeypatch.setattr(search_module.os, "walk", tracking_walk)
+    result = search_module.search_text(tmp_path, "PRUNE_NEEDLE")
+
+    assert [match["path"] for match in result["matches"]] == ["src/live.py"]
+    assert all(".ai-bridge" not in path.parts for path in visited)
+    assert all(not any(part.endswith(".egg-info") for part in path.parts) for path in visited)

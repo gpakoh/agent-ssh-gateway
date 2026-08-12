@@ -6,7 +6,9 @@ by wrapping fixed allowlisted commands in semantic functions.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
+import os
 import re
 import shlex
 import time
@@ -164,6 +166,9 @@ _UV_TOOL_MAP: dict[str, list[str]] = {
 # thousands of files. Pruning the dirs list avoids the descent entirely.
 _COMPILEALL_EXCLUDED_DIRS = frozenset({
     ".git",
+    ".ai-bridge",
+    ".hypothesis",
+    ".state",
     ".venv",
     "venv",
     "node_modules",
@@ -212,7 +217,9 @@ def _main() -> int:
                 skipped += 1
             continue
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = sorted(d for d in dirnames if d not in _EXCLUDED)
+            dirnames[:] = sorted(
+                d for d in dirnames if d not in _EXCLUDED and not d.endswith(".egg-info")
+            )
             for name in sorted(filenames):
                 if not name.endswith(".py"):
                     continue
@@ -408,10 +415,75 @@ def search_text(
     )
 
 
-EXCLUDE_DIRS = frozenset({".git", ".venv", "node_modules", "__pycache__"})
+EXCLUDE_DIRS = frozenset(
+    {
+        ".git",
+        ".ai-bridge",
+        ".hypothesis",
+        ".state",
+        ".venv",
+        "venv",
+        "node_modules",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".benchmarks",
+    }
+)
 MAX_GLOB_RESULTS = 200
 MAX_GLOB_DEPTH = 20
 GLOB_TIMEOUT_S = 5
+
+
+def _is_excluded_runtime_name(name: str) -> bool:
+    return name in EXCLUDE_DIRS or name.endswith(".egg-info")
+
+
+def _match_glob_parts(path_parts: tuple[str, ...], pattern_parts: tuple[str, ...]) -> bool:
+    if not pattern_parts:
+        return not path_parts
+    head = pattern_parts[0]
+    if head == "**":
+        return _match_glob_parts(path_parts, pattern_parts[1:]) or (
+            bool(path_parts)
+            and _match_glob_parts(path_parts[1:], pattern_parts)
+        )
+    return bool(path_parts) and fnmatch.fnmatchcase(path_parts[0], head) and _match_glob_parts(
+        path_parts[1:], pattern_parts[1:]
+    )
+
+
+def _glob_path_matches(relative_path: Path, pattern: str, *, rglob: bool = False) -> bool:
+    pattern_parts = tuple(part for part in pattern.split("/") if part not in {"", "."})
+    if rglob:
+        pattern_parts = ("**", *pattern_parts)
+    return _match_glob_parts(relative_path.parts, pattern_parts)
+
+
+def _iter_pruned_paths(project_dir: Path, *, max_depth: int | None = None):
+    """Walk a project without ever descending into generated/runtime trees."""
+    root = project_dir.resolve()
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        current = Path(dirpath)
+        rel_dir = current.relative_to(root)
+        current_depth = 0 if rel_dir == Path(".") else len(rel_dir.parts)
+        entry_depth = current_depth + 1
+
+        allowed_dirs = sorted(
+            name for name in dirnames if not _is_excluded_runtime_name(name)
+        )
+        if max_depth is None or entry_depth <= max_depth:
+            for name in allowed_dirs:
+                yield current / name
+            for name in sorted(filenames):
+                if not _is_excluded_runtime_name(name):
+                    yield current / name
+
+        if max_depth is not None and entry_depth >= max_depth:
+            dirnames[:] = []
+        else:
+            dirnames[:] = allowed_dirs
 
 
 def _safe_glob(
@@ -430,22 +502,23 @@ def _safe_glob(
     start = time.monotonic()
     timed_out = False
 
-    for path in project_root.glob(pattern):
+    for path in _iter_pruned_paths(project_root):
         if time.monotonic() - start > GLOB_TIMEOUT_S:
             timed_out = True
             break
+        structural_rel = path.relative_to(project_root)
+        if not _glob_path_matches(structural_rel, pattern):
+            continue
         try:
             resolved = path.resolve()
             rel = resolved.relative_to(project_root)
-        except ValueError:
+        except (OSError, ValueError):
             continue
         if not resolved.is_file():
             continue
         if len(rel.parts) > MAX_GLOB_DEPTH:
             continue
-        if any(part in EXCLUDE_DIRS for part in rel.parts):
-            continue
-        results.append(str(rel))
+        results.append(str(structural_rel))
         if len(results) >= max_results:
             break
 
@@ -495,36 +568,27 @@ def list_files(client: GatewayClient, project: str, pattern: str) -> dict[str, A
         raise ValueError(f"Invalid pattern: {pattern!r}")
 
     project_dir = _resolve_project(_validate_project(project))
-    exclude_dirs = {
-        ".git",
-        "__pycache__",
-        ".venv",
-        "node_modules",
-        ".mypy_cache",
-        ".ruff_cache",
-        ".pytest_cache",
-    }
 
     files: list[str] = []
     start = time.monotonic()
     timed_out = False
-    for p in project_dir.rglob(pattern):
+    project_root = project_dir.resolve()
+    for p in _iter_pruned_paths(project_root):
         if time.monotonic() - start > GLOB_TIMEOUT_S:
             timed_out = True
             break
-        # rglob() follows symlinks when the pattern explicitly names a
-        # symlinked path segment (e.g. pattern="some_symlink/*"), even
-        # though it doesn't descend into them for bare "*"/"**" wildcards.
-        # relative_to() on the unresolved path is purely structural and
-        # doesn't catch this — resolve first and check real containment.
+        structural_rel = p.relative_to(project_root)
+        if not _glob_path_matches(structural_rel, pattern, rglob=True):
+            continue
+        # Resolve before returning a path so a symlinked file cannot escape
+        # the registered project root. os.walk(followlinks=False) already
+        # prevents descent through symlinked directories.
         try:
-            rel = p.resolve().relative_to(project_dir)
+            p.resolve().relative_to(project_root)
         except (OSError, ValueError):
             continue
-        if any(part in exclude_dirs for part in rel.parts):
-            continue
         if p.is_file():
-            files.append(str(p.relative_to(project_dir)))
+            files.append(str(structural_rel))
 
     total = len(files)
     files.sort()
@@ -545,19 +609,6 @@ def list_files(client: GatewayClient, project: str, pattern: str) -> dict[str, A
     }
 
 
-_EXCLUDE_DIRS = frozenset(
-    {
-        ".git",
-        "__pycache__",
-        ".venv",
-        "node_modules",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".benchmarks",
-    }
-)
-
 
 def list_tree(
     client: GatewayClient,
@@ -575,12 +626,8 @@ def list_tree(
     project_dir = _resolve_project(project)
 
     entries: list[str] = []
-    for p in sorted(project_dir.rglob("*")):
+    for p in sorted(_iter_pruned_paths(project_dir, max_depth=depth)):
         rel = p.relative_to(project_dir)
-        if any(part in _EXCLUDE_DIRS for part in rel.parts):
-            continue
-        if len(rel.parts) > depth:
-            continue
         suffix = "/" if p.is_dir() else ""
         entries.append(f"{rel}{suffix}")
 
@@ -620,12 +667,8 @@ def tree(
     project_dir = _resolve_project(project)
 
     entries: list[str] = []
-    for p in sorted(project_dir.rglob("*")):
+    for p in sorted(_iter_pruned_paths(project_dir, max_depth=depth)):
         rel = p.relative_to(project_dir)
-        if any(part in _EXCLUDE_DIRS for part in rel.parts):
-            continue
-        if len(rel.parts) > depth:
-            continue
         suffix = "/" if p.is_dir() else ""
         name = str(rel)
         if glob and not p.match(glob):

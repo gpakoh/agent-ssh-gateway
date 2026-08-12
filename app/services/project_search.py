@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import fnmatch
+import os
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +12,9 @@ from app.workspace.policy import is_hidden_or_secret_path
 _PRUNE_DIRS = frozenset(
     {
         ".git",
+        ".ai-bridge",
+        ".hypothesis",
+        ".state",
         ".venv",
         "venv",
         "node_modules",
@@ -28,6 +33,38 @@ _PRUNE_DIRS = frozenset(
 _MAX_FILES_DEFAULT = 5000
 _MAX_MATCHES_DEFAULT = 200
 _MAX_FILE_SIZE_BYTES_DEFAULT = 2_000_000
+
+
+def _match_glob_parts(path_parts: tuple[str, ...], pattern_parts: tuple[str, ...]) -> bool:
+    if not pattern_parts:
+        return not path_parts
+    head = pattern_parts[0]
+    if head == "**":
+        return _match_glob_parts(path_parts, pattern_parts[1:]) or (
+            bool(path_parts)
+            and _match_glob_parts(path_parts[1:], pattern_parts)
+        )
+    return bool(path_parts) and fnmatch.fnmatchcase(path_parts[0], head) and _match_glob_parts(
+        path_parts[1:], pattern_parts[1:]
+    )
+
+
+def _matches_rglob_pattern(relative_path: Path, pattern: str) -> bool:
+    pattern_parts = tuple(part for part in pattern.split("/") if part not in {"", "."})
+    return _match_glob_parts(relative_path.parts, ("**", *pattern_parts))
+
+
+def _walk_project_files(root_path: Path):
+    """Yield files while pruning generated/runtime directories before descent."""
+    for dirpath, dirnames, filenames in os.walk(root_path, topdown=True, followlinks=False):
+        dirnames[:] = sorted(
+            name
+            for name in dirnames
+            if name not in _PRUNE_DIRS and not name.endswith(".egg-info")
+        )
+        base = Path(dirpath)
+        for name in sorted(filenames):
+            yield base / name
 
 
 def _is_binary(path: Path) -> bool:
@@ -63,27 +100,23 @@ def search_text(
     truncated = False
     truncated_reason: str | None = None
 
-    iter_pattern = glob if glob else "**/*"
-
-    for p in root_path.rglob(iter_pattern):
+    for p in _walk_project_files(root_path):
         if not p.is_file():
             continue
 
         rel = p.relative_to(root_path)
+        if glob and not _matches_rglob_pattern(rel, glob):
+            continue
 
-        # rglob() follows symlinks when the pattern explicitly names a
-        # symlinked path segment (e.g. glob="some_symlink/*"), even though
-        # it doesn't descend into them for bare "*"/"**" wildcards. The
-        # relative_to() call above is purely structural — it doesn't catch
-        # this, since the returned path still carries root_path's prefix
-        # textually while actually reading through the symlink to wherever
-        # it points.
+        # Resolve the file before reading so a symlinked file cannot escape
+        # the registered project root. Directory symlinks are never followed
+        # by _walk_project_files().
         try:
             p.resolve().relative_to(root_path)
         except (OSError, ValueError):
             continue
 
-        if any(part in _PRUNE_DIRS for part in rel.parts):
+        if any(part in _PRUNE_DIRS or part.endswith(".egg-info") for part in rel.parts):
             continue
 
         if is_hidden_or_secret_path(str(rel)):

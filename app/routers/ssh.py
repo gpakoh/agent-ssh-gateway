@@ -378,6 +378,11 @@ async def ssh_connect(
                 private_key=_private_key,
                 key_passphrase=_passphrase,
                 ttl=settings.session_timeout,
+                owner_type=_identity.token_type,
+                owner_name=_identity.name,
+                owner_token_fingerprint=_identity.fingerprint,
+                source_ip=source_ip,
+                tenant_labels=_identity.tenant_labels,
             )
         except Exception as exc:
             logger.warning("Failed to persist session %s: %s", session_id, exc)
@@ -484,6 +489,11 @@ async def ssh_prewarm(
                         private_key=_private_key,
                         key_passphrase=_passphrase,
                         ttl=settings.session_timeout,
+                        owner_type=_identity.token_type,
+                        owner_name=_identity.name,
+                        owner_token_fingerprint=_identity.fingerprint,
+                        source_ip=source_ip,
+                        tenant_labels=_identity.tenant_labels,
                     )
                 except Exception as exc:
                     logger.warning("Failed to persist prewarmed session %s: %s", session_id, exc)
