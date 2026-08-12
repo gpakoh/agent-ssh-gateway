@@ -68,17 +68,16 @@ def task_archive_path(project: str, task_id: str) -> str:
     return f"{task_archive_dir(project)}/{task_id}"
 
 
-def managed_workspace_paths(project: str, task_id: str) -> tuple[str, str] | None:
-    """Return (bare mirror, task worktree) for the executor-managed plane.
+def managed_workspace_path(project: str, task_id: str) -> str | None:
+    """Return the isolated executor-owned clone path for one task.
 
-    No caller-provided path is accepted here.  Both paths are derived from an
-    operator-controlled absolute root plus validated project/task identities.
+    Every task receives a full independent Git clone.  We intentionally do not
+    use a shared worktree/common Git directory: OpenCode runs as the executor
+    user and must not share writable Git metadata with the source checkout or
+    with another agent task.
     """
     root = _configured_root(_WORKSPACE_ROOT_ENV)
     if root is None:
         return None
     key = project_state_key(project)
-    return (
-        f"{root}/repos/{key}.git",
-        f"{root}/tasks/{key}/{task_id}",
-    )
+    return f"{root}/{key}/{task_id}"

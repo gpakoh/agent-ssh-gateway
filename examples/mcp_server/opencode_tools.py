@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from examples.mcp_server.agent_paths import task_dir
+from examples.mcp_server.agent_paths import managed_workspace_path, task_dir
 from examples.mcp_server.agent_tasks import validate_task_id
 from examples.mcp_server.agent_tools import (
     _build_opencode_script,
@@ -83,7 +83,9 @@ def project_run_opencode(
 
     project_root = _resolve_project_root(project)
     task_json = _read_task_json(run_cmd, project, task_id)
-    worktree_path = ((task_json or {}).get("worktree_path") or "").strip() or None
+    managed_path = managed_workspace_path(project, task_id)
+    managed_clone = managed_path is not None
+    worktree_path = managed_path or ((task_json or {}).get("worktree_path") or "").strip() or None
     isolation_error = _isolated_worktree_error(project_root, worktree_path)
     if isolation_error:
         return {
@@ -120,6 +122,7 @@ def project_run_opencode(
         allowed_files=allowed_files,
         forbidden_files=forbidden_files,
         required_checks=required_checks,
+        managed_clone=managed_clone,
     )
 
     if async_submit:

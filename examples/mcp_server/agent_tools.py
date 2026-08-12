@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 
 from command_policy import CommandPolicyError  # noqa: F401 -- re-exported for tests
 
-from examples.mcp_server.agent_paths import task_dir
+from examples.mcp_server.agent_paths import managed_workspace_path, task_dir
 
 TASKS_REL_DIR = ".ai-bridge/tasks"
 
@@ -241,40 +241,50 @@ def _proxy_report_script_lines(provider_url: str, timeout: str) -> list[str]:
 
 
 def _parent_prerun_snapshot_script_lines(project_root: str) -> list[str]:
-    """Capture the parent checkout's complete non-ignored working-tree state.
+    """Capture parent state without writing to the source repository.
 
-    A temporary index produces a tree object without touching the real Git
-    index.  The post-run supervisor recomputes the same tree and rejects any
-    worker that reached back out of its worktree and mutated the parent.
+    Both the synthetic index and any blobs/trees created while hashing the
+    working tree are redirected into a random temporary object database.
+    Source ``.git/index`` is only hashed and the source object database is
+    mounted as an alternate read-only input.  This keeps the supervisor guard
+    itself from mutating the checkout it is supposed to protect.
     """
     return [
         f"PARENT_ROOT={_shell_escape(project_root)}",
+        'PARENT_ROOT_REAL=$(cd "$PARENT_ROOT" 2>/dev/null && pwd -P) || { echo "Parent root canonicalization FAILED" >> "$td/agent-status.md"; exit 75; }',
         'PARENT_HEAD_BEFORE=$(git -C "$PARENT_ROOT" rev-parse HEAD 2>/dev/null) || { echo "Parent HEAD snapshot FAILED" >> "$td/agent-status.md"; exit 75; }',
-        'PARENT_INDEX_TREE_BEFORE=$(git -C "$PARENT_ROOT" write-tree 2>/dev/null) || { echo "Parent index snapshot FAILED" >> "$td/agent-status.md"; exit 75; }',
+        'PARENT_INDEX_PATH=$(git -C "$PARENT_ROOT" rev-parse --path-format=absolute --git-path index 2>/dev/null) || { echo "Parent index path snapshot FAILED" >> "$td/agent-status.md"; exit 75; }',
+        'PARENT_SOURCE_OBJECTS=$(git -C "$PARENT_ROOT" rev-parse --path-format=absolute --git-path objects 2>/dev/null) || { echo "Parent object path snapshot FAILED" >> "$td/agent-status.md"; exit 75; }',
+        'PARENT_INDEX_TREE_BEFORE=$(sha256sum "$PARENT_INDEX_PATH" 2>/dev/null | awk \'{print $1}\')',
+        'if [ -z "$PARENT_INDEX_TREE_BEFORE" ] || [ ! -d "$PARENT_SOURCE_OBJECTS" ]; then echo "Parent index/object snapshot FAILED" >> "$td/agent-status.md"; exit 75; fi',
         'printf "%s\\n" "$PARENT_HEAD_BEFORE" > "$td/parent-head-before.txt"',
         'printf "%s\\n" "$PARENT_INDEX_TREE_BEFORE" > "$td/parent-index-tree-before.txt"',
-        'PARENT_INDEX="$td/.parent-index-before"',
-        'rm -f "$PARENT_INDEX" "$PARENT_INDEX.lock"',
-        'if GIT_INDEX_FILE="$PARENT_INDEX" git -C "$PARENT_ROOT" read-tree HEAD >/dev/null 2>&1 && \\',
-        '   GIT_INDEX_FILE="$PARENT_INDEX" git -C "$PARENT_ROOT" add -A -- . >/dev/null 2>&1; then',
-        '  PARENT_TREE_BEFORE=$(GIT_INDEX_FILE="$PARENT_INDEX" git -C "$PARENT_ROOT" write-tree 2>/dev/null)',
-        '  [ -n "$PARENT_TREE_BEFORE" ] || { echo "Parent snapshot capture FAILED" >> "$td/agent-status.md"; rm -f "$PARENT_INDEX" "$PARENT_INDEX.lock"; exit 75; }',
+        'PARENT_TMP_BEFORE=$(mktemp -d /tmp/mcp-parent-before.XXXXXX) || { echo "Parent snapshot tempdir FAILED" >> "$td/agent-status.md"; exit 75; }',
+        'PARENT_INDEX="$PARENT_TMP_BEFORE/index"',
+        'PARENT_OBJECTS="$PARENT_TMP_BEFORE/objects"',
+        'mkdir -p "$PARENT_OBJECTS"',
+        'if GIT_INDEX_FILE="$PARENT_INDEX" GIT_OBJECT_DIRECTORY="$PARENT_OBJECTS" GIT_ALTERNATE_OBJECT_DIRECTORIES="$PARENT_SOURCE_OBJECTS" git -C "$PARENT_ROOT" read-tree HEAD >/dev/null 2>&1 && \\',
+        '   GIT_INDEX_FILE="$PARENT_INDEX" GIT_OBJECT_DIRECTORY="$PARENT_OBJECTS" GIT_ALTERNATE_OBJECT_DIRECTORIES="$PARENT_SOURCE_OBJECTS" git -C "$PARENT_ROOT" add -A -- . >/dev/null 2>&1; then',
+        '  PARENT_TREE_BEFORE=$(GIT_INDEX_FILE="$PARENT_INDEX" GIT_OBJECT_DIRECTORY="$PARENT_OBJECTS" GIT_ALTERNATE_OBJECT_DIRECTORIES="$PARENT_SOURCE_OBJECTS" git -C "$PARENT_ROOT" write-tree 2>/dev/null)',
+        '  [ -n "$PARENT_TREE_BEFORE" ] || { echo "Parent snapshot capture FAILED" >> "$td/agent-status.md"; rm -rf "$PARENT_TMP_BEFORE"; exit 75; }',
         '  printf "%s\\n" "$PARENT_TREE_BEFORE" > "$td/parent-tree-before.txt"',
         "else",
         '  echo "Parent snapshot capture FAILED" >> "$td/agent-status.md"',
-        '  rm -f "$PARENT_INDEX" "$PARENT_INDEX.lock"',
+        '  rm -rf "$PARENT_TMP_BEFORE"',
         "  exit 75",
         "fi",
-        'rm -f "$PARENT_INDEX" "$PARENT_INDEX.lock"',
+        'rm -rf "$PARENT_TMP_BEFORE"',
     ]
 
 
 def _isolated_worktree_error(project_root: str | None, worktree_path: str | None) -> str | None:
-    """Return an error when a real project would execute an agent in parent.
+    """Reject missing workspaces and any workspace located inside source.
 
-    Registry-less unit-test/fallback contexts retain the historical behavior;
-    production projects always resolve a root and therefore require an
-    explicit worktree distinct from the parent checkout.
+    A nested ``<source>/.ai-bridge/worktrees/...`` directory is not physical
+    isolation: the worker still writes inside the authoritative checkout and a
+    Git worktree created there also mutates the source repository's common Git
+    metadata.  Production workspaces therefore have to live outside the whole
+    source tree, not merely differ from its root path.
     """
     if not project_root:
         return None
@@ -282,8 +292,14 @@ def _isolated_worktree_error(project_root: str | None, worktree_path: str | None
         return "isolated worktree_path is required for agent execution"
     raw = worktree_path.strip()
     resolved = raw if os.path.isabs(raw) else os.path.join(project_root, raw)
-    if os.path.realpath(resolved) == os.path.realpath(project_root):
-        return "agent execution in the parent checkout is forbidden; use an isolated worktree"
+    parent = os.path.realpath(project_root)
+    candidate = os.path.realpath(resolved)
+    try:
+        inside_parent = os.path.commonpath([parent, candidate]) == parent
+    except ValueError:
+        inside_parent = False
+    if inside_parent:
+        return "agent workspace must be outside the authoritative source checkout"
     return None
 
 
@@ -312,22 +328,26 @@ def _supervisor_postrun_script_lines(
         parent_post_lines = [
             f"PARENT_ROOT={_shell_escape(parent_root)}",
             'PARENT_HEAD_AFTER=$(git -C "$PARENT_ROOT" rev-parse HEAD 2>/dev/null || true)',
-            'PARENT_INDEX_TREE_AFTER=$(git -C "$PARENT_ROOT" write-tree 2>/dev/null || true)',
+            'PARENT_INDEX_PATH_AFTER=$(git -C "$PARENT_ROOT" rev-parse --path-format=absolute --git-path index 2>/dev/null || true)',
+            'PARENT_SOURCE_OBJECTS_AFTER=$(git -C "$PARENT_ROOT" rev-parse --path-format=absolute --git-path objects 2>/dev/null || true)',
+            'PARENT_INDEX_TREE_AFTER=$(sha256sum "$PARENT_INDEX_PATH_AFTER" 2>/dev/null | awk \'{print $1}\')',
             'printf "%s\\n" "$PARENT_HEAD_AFTER" > "$td/parent-head-after.txt"',
             'printf "%s\\n" "$PARENT_INDEX_TREE_AFTER" > "$td/parent-index-tree-after.txt"',
-            'if [ -z "$PARENT_HEAD_AFTER" ] || [ "$PARENT_HEAD_AFTER" != "$PARENT_HEAD_BEFORE" ] || [ -z "$PARENT_INDEX_TREE_AFTER" ] || [ "$PARENT_INDEX_TREE_AFTER" != "$PARENT_INDEX_TREE_BEFORE" ]; then',
+            'if [ -z "$PARENT_HEAD_AFTER" ] || [ "$PARENT_HEAD_AFTER" != "$PARENT_HEAD_BEFORE" ] || [ -z "$PARENT_INDEX_TREE_AFTER" ] || [ "$PARENT_INDEX_TREE_AFTER" != "$PARENT_INDEX_TREE_BEFORE" ] || [ "$PARENT_INDEX_PATH_AFTER" != "$PARENT_INDEX_PATH" ] || [ "$PARENT_SOURCE_OBJECTS_AFTER" != "$PARENT_SOURCE_OBJECTS" ]; then',
             "  PARENT_RC=1",
             "fi",
-            'PARENT_INDEX="$td/.parent-index-after"',
-            'rm -f "$PARENT_INDEX" "$PARENT_INDEX.lock"',
-            'if GIT_INDEX_FILE="$PARENT_INDEX" git -C "$PARENT_ROOT" read-tree HEAD >/dev/null 2>&1 && \\',
-            '   GIT_INDEX_FILE="$PARENT_INDEX" git -C "$PARENT_ROOT" add -A -- . >/dev/null 2>&1; then',
-            '  PARENT_TREE_AFTER=$(GIT_INDEX_FILE="$PARENT_INDEX" git -C "$PARENT_ROOT" write-tree 2>/dev/null)',
+            'PARENT_TMP_AFTER=$(mktemp -d /tmp/mcp-parent-after.XXXXXX || true)',
+            'PARENT_INDEX="$PARENT_TMP_AFTER/index"',
+            'PARENT_OBJECTS="$PARENT_TMP_AFTER/objects"',
+            'if [ -n "$PARENT_TMP_AFTER" ]; then mkdir -p "$PARENT_OBJECTS"; fi',
+            'if [ -n "$PARENT_TMP_AFTER" ] && GIT_INDEX_FILE="$PARENT_INDEX" GIT_OBJECT_DIRECTORY="$PARENT_OBJECTS" GIT_ALTERNATE_OBJECT_DIRECTORIES="$PARENT_SOURCE_OBJECTS_AFTER" git -C "$PARENT_ROOT" read-tree HEAD >/dev/null 2>&1 && \\',
+            '   GIT_INDEX_FILE="$PARENT_INDEX" GIT_OBJECT_DIRECTORY="$PARENT_OBJECTS" GIT_ALTERNATE_OBJECT_DIRECTORIES="$PARENT_SOURCE_OBJECTS_AFTER" git -C "$PARENT_ROOT" add -A -- . >/dev/null 2>&1; then',
+            '  PARENT_TREE_AFTER=$(GIT_INDEX_FILE="$PARENT_INDEX" GIT_OBJECT_DIRECTORY="$PARENT_OBJECTS" GIT_ALTERNATE_OBJECT_DIRECTORIES="$PARENT_SOURCE_OBJECTS_AFTER" git -C "$PARENT_ROOT" write-tree 2>/dev/null)',
             "else",
             "  PARENT_TREE_AFTER=",
             "  PARENT_RC=1",
             "fi",
-            'rm -f "$PARENT_INDEX" "$PARENT_INDEX.lock"',
+            'if [ -n "$PARENT_TMP_AFTER" ]; then rm -rf "$PARENT_TMP_AFTER"; fi',
             'if [ -z "$PARENT_TREE_AFTER" ] || [ "$PARENT_TREE_AFTER" != "$PARENT_TREE_BEFORE" ]; then',
             "  PARENT_RC=1",
             '  echo "Supervisor parent-checkout guard FAILED" >> "$td/agent-status.md"',
@@ -501,6 +521,7 @@ def _build_opencode_script(
     allowed_files: list[str] | None = None,
     forbidden_files: list[str] | None = None,
     required_checks: list[str] | None = None,
+    managed_clone: bool = False,
 ) -> str:
     opencode_flags = "--dangerously-skip-permissions"
     if model:
@@ -511,6 +532,8 @@ def _build_opencode_script(
     allowed_files = list(allowed_files or [])
     forbidden_files = list(forbidden_files or [])
     required_checks = list(required_checks or [])
+    if managed_clone and (not project_root or not worktree_path):
+        raise ValueError("managed_clone requires project_root and worktree_path")
 
     parts = []
     if project_root:
@@ -544,11 +567,41 @@ def _build_opencode_script(
         wt = worktree_path
         if project_root and not os.path.isabs(wt):
             wt = os.path.normpath(os.path.join(project_root, wt))
+        managed_source_lines: list[str] = []
+        managed_reuse_lines: list[str] = []
+        if managed_clone:
+            managed_source_lines = [
+                'parent_git_top=$(git -C "$PARENT_ROOT" rev-parse --show-toplevel 2>/dev/null || true)',
+                'if [ -z "$parent_git_top" ]; then echo "Managed clone source is not a git repository" >> "$td/agent-status.md"; exit 75; fi',
+                'parent_git_top_real=$(cd "$parent_git_top" 2>/dev/null && pwd -P || true)',
+                'if [ "$parent_git_top_real" != "$PARENT_ROOT_REAL" ]; then echo "Managed clone requires project root at git toplevel" >> "$td/agent-status.md"; exit 75; fi',
+            ]
+            managed_reuse_lines = [
+                '  wt_head=$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)',
+                '  if [ -z "$wt_head" ] || [ "$wt_head" != "$PARENT_HEAD_BEFORE" ]; then',
+                '    echo "Refusing managed clone with baseline drift: $wt" >> "$td/agent-status.md"',
+                "    exit 1",
+                "  fi",
+            ]
+            create_workspace_lines = [
+                '  git clone --no-hardlinks --no-checkout "$PARENT_ROOT" "$wt" 2>>"$td/agent-status.md" || { echo "managed clone failed: $wt" >> "$td/agent-status.md"; exit 1; }',
+                '  git -C "$wt" checkout --detach "$PARENT_HEAD_BEFORE" 2>>"$td/agent-status.md" || { echo "managed clone checkout failed: $wt" >> "$td/agent-status.md"; exit 1; }',
+            ]
+        else:
+            create_workspace_lines = [
+                '  git worktree add --detach "$wt" HEAD 2>>"$td/agent-status.md" || { echo "git worktree add failed: $wt" >> "$td/agent-status.md"; exit 1; }'
+            ]
         parts.extend([
             f"wt={_shell_escape(wt)}",
-            'mkdir -p "$(dirname "$wt")"',
+            'wt_parent=$(dirname "$wt")',
+            'mkdir -p "$wt_parent"',
+            'wt_parent_real=$(cd "$wt_parent" 2>/dev/null && pwd -P) || { echo "Workspace parent canonicalization failed: $wt_parent" >> "$td/agent-status.md"; exit 1; }',
+            'case "$wt_parent_real/" in "$PARENT_ROOT_REAL/"*) echo "Refusing workspace parent inside source checkout: $wt_parent_real" >> "$td/agent-status.md"; exit 1;; esac',
+            *managed_source_lines,
+            'if [ -L "$wt" ]; then echo "Refusing symlink workspace: $wt" >> "$td/agent-status.md"; exit 1; fi',
             'if [ -e "$wt" ]; then',
             '  wt_real=$(cd "$wt" 2>/dev/null && pwd -P || true)',
+            '  case "$wt_real/" in "$PARENT_ROOT_REAL/"*) echo "Refusing workspace inside source checkout: $wt_real" >> "$td/agent-status.md"; exit 1;; esac',
             '  wt_top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null || true)',
             '  wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P || true)',
             '  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ]; then',
@@ -556,12 +609,13 @@ def _build_opencode_script(
             "    exit 1",
             "  fi",
             '  if [ -n "$(git -C "$wt" status --porcelain=v1 --untracked-files=all)" ]; then',
-            '    echo "Refusing dirty existing worktree: $wt" >> "$td/agent-status.md"',
+            '    echo "Refusing dirty existing workspace: $wt" >> "$td/agent-status.md"',
             "    exit 1",
             "  fi",
-            '  echo "Worktree already exists, reusing clean root: $wt" >> "$td/agent-status.md"',
+            *managed_reuse_lines,
+            '  echo "Workspace already exists, reusing clean root: $wt" >> "$td/agent-status.md"',
             "else",
-            '  git worktree add --detach "$wt" HEAD 2>>"$td/agent-status.md" || { echo "git worktree add failed: $wt" >> "$td/agent-status.md"; exit 1; }',
+            *create_workspace_lines,
             "fi",
             'cd "$wt" || exit 1',
             # Isolate opencode's storage per run: parallel fleet agents
@@ -783,7 +837,9 @@ def project_run_agent(
                 "finished_at": _now_iso(),
             }
         project_root = _resolve_project_root(project)
-        worktree_path = (task_json.get("worktree_path") or "").strip() or None
+        managed_path = managed_workspace_path(project, task_id)
+        managed_clone = managed_path is not None
+        worktree_path = managed_path or (task_json.get("worktree_path") or "").strip() or None
         isolation_error = _isolated_worktree_error(project_root, worktree_path)
         if isolation_error:
             return {
@@ -820,6 +876,7 @@ def project_run_agent(
             allowed_files=allowed_files,
             forbidden_files=forbidden_files,
             required_checks=required_checks,
+            managed_clone=managed_clone,
         )
     else:
         return {

@@ -368,6 +368,33 @@ class TestProjectRunAgentScriptCwd:
         script = calls[2]
         assert script.startswith("cd '/abs/project/root' || exit 1")
 
+    def test_managed_workspace_env_overrides_task_supplied_worktree(self, monkeypatch):
+        monkeypatch.setenv("MCP_AGENT_WORKSPACE_ROOT", "/var/lib/mcp-agent/workspaces")
+        monkeypatch.setattr(
+            "app.workspace.registry.get_registry",
+            lambda: type("R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}})(),
+        )
+        rc = _make_run_cmd(
+            task_json=_make_task_json(worktree_path="/abs/project/root/attacker-chosen")
+        )
+        run_script_async = _make_run_script_async("job-managed-1")
+
+        result = project_run_agent(
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            async_submit=True,
+            run_script_async=run_script_async,
+        )
+
+        assert result["job_id"] == "job-managed-1"
+        script = run_script_async.call_args[0][1]
+        assert "/abs/project/root/attacker-chosen" not in script
+        assert "/var/lib/mcp-agent/workspaces/test-" in script
+        assert f"/{TASK_ID}" in script
+        assert "git clone --no-hardlinks --no-checkout" in script
+        assert "git worktree add" not in script
+
     def test_no_cd_when_project_root_unresolvable(self, monkeypatch):
         """Registry lookup failure must not crash the whole call -- just
         skip the cd (matching the pre-fix, still-correct-for-sync behavior)."""
