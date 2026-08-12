@@ -28,24 +28,23 @@
 # upload; local runs leave it empty.
 PYTEST_UNIT_ARGS ?=
 test-unit:
-	uv run pytest -m "not host_smoke and not e2e and not integration" --reruns 2 --reruns-delay 2 --only-rerun 'WebSocketDisconnect' --cov=app --cov-report=term-missing --cov-fail-under=69 -q $(PYTEST_UNIT_ARGS)
+	uv run pytest -m "not host_smoke and not e2e and not integration and not smoke" --reruns 2 --reruns-delay 2 --only-rerun 'WebSocketDisconnect' --cov=app --cov-report=term-missing --cov-fail-under=69 -q $(PYTEST_UNIT_ARGS)
 
 test: test-unit
 
-# pytest.ini_options marker "integration" (multi-component tests, e.g.
-# router + registry + policy together) -- excluded from test-unit above
-# so a slower/infra-coupled test doesn't block the fast unit signal;
-# no test currently carries this marker, so this is a no-op today and
-# exists as the canonical place to run them once one does.
+# Multi-component portable integration tests. These are intentionally
+# separated from the coverage-focused unit signal but run in canonical CI.
 test-integration:
 	uv run pytest -m integration -q
 
-# Alias for host-smoke (below) under the canonical name the audit asks
-# for -- kept as two names since `host-smoke` predates this and CLAUDE.md/
-# runbooks already reference it directly.
-test-smoke: host-smoke
+# Portable authenticated black-box contract smokes. Live host/infrastructure
+# checks remain under host-smoke and are exercised by host-smoke.yml/deploy.
+test-smoke:
+	uv run pytest -m smoke -q
 
-ci: check
+# Canonical portable CI entry point: static checks + unit coverage +
+# integration + smoke. Host-only smoke is a separate environment gate.
+ci: check test-integration test-smoke
 
 # Same scope as ci.yml's Ruff/Mypy steps -- the old `lint` target
 # checked examples/ tests/ scripts/, silently missing app/ entirely,

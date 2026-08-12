@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.audit import AuditEvent
 from app.security import redact_secrets
-from app.session_store import AuditLogEntry, Base
+from app.session_store import AuditLogEntry
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +45,12 @@ class AuditLogStore:
         )
 
     async def create_tables(self):
-        """Auto-create tables (dev convenience). Use Alembic in production."""
+        """Auto-create only the audit table (dev/feature bootstrap)."""
         logger.warning(
-            "Auto-creating Audit Log Tables Via Base.metadata.create_all — "
-            "Use Alembic For Production Migrations"
+            "Auto-creating AuditLogEntry table for feature bootstrap — use Alembic in production"
         )
         async with self._engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(AuditLogEntry.__table__.create, checkfirst=True)
 
     async def close(self):
         await self._engine.dispose()

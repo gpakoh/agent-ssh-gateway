@@ -42,6 +42,12 @@ Agent tokens are not intended to access sessions created by other tokens. Sessio
 
 Scopes restrict API surface but do not replace ownership checks. Ownership is enforced at the session level regardless of scope.
 
+### Persistent SSH credentials
+
+By default, `SessionRecord` does not retain reversible SSH credentials after the connection is established. When `PERSISTENT_SESSIONS_ENABLED=true`, restart recovery is an explicit exception: the password, private key, and key passphrase (when supplied) are persisted in PostgreSQL encrypted with `ENCRYPTION_KEY`. Startup fails closed if persistent sessions are enabled without that encryption key.
+
+Persistent records also store the logical `session_id`, owner token fingerprint, owner type/name, source IP, and tenant labels so restart recovery preserves the same authorization and per-IP admission boundary instead of recreating the connection as an unowned/master session. Operators who do not want SSH credentials persisted at all should leave persistent sessions disabled.
+
 ## Threat model
 
 ### In scope

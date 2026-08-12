@@ -76,6 +76,12 @@ jobs:
         # target directly -- the flags exist in exactly one place.
         run: make test-unit PYTEST_UNIT_ARGS="--junitxml=test-results.xml"
 
+      - name: Integration tests
+        run: make test-integration
+
+      - name: Portable smoke tests
+        run: make test-smoke
+
       - name: Verify test count
         run: make test-count
 

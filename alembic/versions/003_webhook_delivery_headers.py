@@ -43,7 +43,24 @@ def _column_exists(table: str, column: str) -> bool:
     return result.fetchone() is not None
 
 
+def _table_exists(table: str) -> bool:
+    conn = op.get_bind()
+    result = conn.execute(
+        text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = :table"
+        ),
+        {"table": table},
+    )
+    return result.fetchone() is not None
+
+
 def upgrade() -> None:
+    # A fresh database may not have event hooks enabled yet. In that case
+    # the current application model will create webhook_deliveries with the
+    # column when the feature is first enabled; there is nothing to alter now.
+    if not _table_exists("webhook_deliveries"):
+        return
     if _column_exists("webhook_deliveries", "headers_json"):
         return
     op.add_column(
@@ -52,5 +69,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    if _column_exists("webhook_deliveries", "headers_json"):
+    if _table_exists("webhook_deliveries") and _column_exists(
+        "webhook_deliveries", "headers_json"
+    ):
         op.drop_column("webhook_deliveries", "headers_json")

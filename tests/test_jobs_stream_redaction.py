@@ -1,8 +1,10 @@
 """Tests for optional output redaction in GET /api/jobs/{job_id}/stream (SSE)."""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from starlette.testclient import TestClient
 
 from app.config import settings
@@ -181,3 +183,43 @@ class TestJobsStreamRedaction:
             if e.get("type") == "stdout":
                 assert "abc123" not in e["data"]
                 assert "[REDACTED]" in e["data"]
+
+
+class TestJobListenerBackpressure:
+    @pytest.mark.asyncio
+    async def test_full_output_queue_never_blocks_job_publisher(self):
+        job = JobRecord(job_id="j", session_id="s", command="echo")
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        queue.put_nowait({"type": "stdout", "data": "already queued"})
+        job.add_listener(queue)
+
+        await asyncio.wait_for(
+            job.notify_listeners({"type": "stdout", "data": "new chunk"}),
+            timeout=0.1,
+        )
+        assert queue.qsize() == 1
+        assert queue.get_nowait()["data"] == "already queued"
+
+    @pytest.mark.asyncio
+    async def test_control_event_displaces_output_when_queue_is_full(self):
+        job = JobRecord(job_id="j", session_id="s", command="echo")
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        queue.put_nowait({"type": "stdout", "data": "old"})
+        job.add_listener(queue)
+
+        await job.notify_listeners({"type": "status", "status": "cancelled"})
+        assert queue.get_nowait() == {"type": "status", "status": "cancelled"}
+
+    @pytest.mark.asyncio
+    async def test_each_listener_receives_independent_event_dict(self):
+        job = JobRecord(job_id="j", session_id="s", command="echo")
+        first: asyncio.Queue = asyncio.Queue(maxsize=2)
+        second: asyncio.Queue = asyncio.Queue(maxsize=2)
+        job.add_listener(first)
+        job.add_listener(second)
+
+        await job.notify_listeners({"type": "stdout", "data": "secret"})
+        first_event = first.get_nowait()
+        second_event = second.get_nowait()
+        first_event["data"] = "[REDACTED]"
+        assert second_event["data"] == "secret"
