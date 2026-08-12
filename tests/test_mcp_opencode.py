@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import anyio
 import pytest
 
 MCP_DIR = str(Path(__file__).resolve().parents[1] / "examples" / "mcp_server")
@@ -196,7 +197,7 @@ class TestServerWrapperWired:
                 return_value={"exit_code": 0, "stdout": "done", "stderr": ""}
             )
 
-            result = tool_fn(project="test", task_id=TASK_ID)
+            result = anyio.run(lambda: tool_fn(project="test", task_id=TASK_ID))
             assert result.get("ok") is True
             server.client.execute_project_script.assert_called_once()
         finally:
