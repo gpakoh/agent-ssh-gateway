@@ -24,6 +24,8 @@ from urllib.parse import urlsplit
 
 from command_policy import CommandPolicyError  # noqa: F401 -- re-exported for tests
 
+from examples.mcp_server.agent_paths import task_dir
+
 TASKS_REL_DIR = ".ai-bridge/tasks"
 
 # Same markers as quart-platform/opencode-adapter's LIMIT_MARKERS (minus
@@ -72,7 +74,7 @@ def _read_task_json(
 ) -> dict[str, Any]:
     import shlex
 
-    cmd = f"cat {shlex.quote(f'{TASKS_REL_DIR}/{task_id}/task.json')}"
+    cmd = f"cat {shlex.quote(f'{task_dir(project, task_id)}/task.json')}"
     result = run_cmd(project, cmd)
     raw = result.get("stdout", "")
     if not raw.strip():
@@ -104,8 +106,8 @@ def _read_current_plan(
 ) -> str | None:
     import shlex
 
-    td = f"{TASKS_REL_DIR}/{task_id}"
-    cmd = f"cat {shlex.quote(td)}/current-plan.md"
+    td = task_dir(project, task_id)
+    cmd = f"cat {shlex.quote(f'{td}/current-plan.md')}"
     result = run_cmd(project, cmd)
     return result.get("stdout", "").strip() or None
 
@@ -701,7 +703,7 @@ def project_run_agent(
     validate_task_id(task_id)
 
     started_at = _now_iso()
-    td = f"{TASKS_REL_DIR}/{task_id}"
+    td = task_dir(project, task_id)
 
     task_json = _read_task_json(run_cmd, project, task_id)
     if not task_json:
