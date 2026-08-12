@@ -59,6 +59,7 @@ def _owned_job(job_id: str = "j-1") -> JobRecord:
 @pytest.fixture(autouse=True)
 def _mock_job_manager(monkeypatch):
     manager = AsyncMock()
+    manager.cancel_job.return_value = "cancelled"
     monkeypatch.setattr(_state, "job_manager", manager)
     return manager
 

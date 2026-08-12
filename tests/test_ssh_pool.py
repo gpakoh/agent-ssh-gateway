@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import paramiko
@@ -564,3 +565,49 @@ def test_prewarm_passes_tenant_labels_to_create_session(monkeypatch):
         "prewarm's create_session() call is missing tenant_labels entirely"
     )
     assert st.manager.create_session.call_args.kwargs["tenant_labels"] == ("team-a",)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_connects_reserve_session_limit_slot(monkeypatch):
+    """In-flight connects count toward MAX_SESSIONS_PER_IP admission."""
+    monkeypatch.setattr(settings, "max_sessions_per_ip", 1)
+    manager = SSHSessionManager(connection_pool_size=0)
+    connect_started = threading.Event()
+    release_connect = threading.Event()
+    original = paramiko.SSHClient
+
+    class SlowClient(original):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.set_missing_host_key_policy = MagicMock()
+
+        def connect(self, *args, **kwargs):
+            connect_started.set()
+            assert release_connect.wait(timeout=2.0)
+
+    paramiko.SSHClient = SlowClient
+    try:
+        first = asyncio.create_task(
+            manager.create_session(
+                host="h", port=22, username="u", password="pw", source_ip="10.0.0.9"
+            )
+        )
+        for _ in range(200):
+            if connect_started.is_set():
+                break
+            await asyncio.sleep(0.005)
+        else:
+            pytest.fail("first connect never entered the in-flight state")
+
+        with pytest.raises(SessionLimitError):
+            await manager.create_session(
+                host="h", port=22, username="u", password="pw", source_ip="10.0.0.9"
+            )
+
+        release_connect.set()
+        sid = await asyncio.wait_for(first, timeout=2.0)
+        await manager.disconnect(sid)
+        assert manager._pending_sessions_by_ip == {}
+    finally:
+        release_connect.set()
+        paramiko.SSHClient = original

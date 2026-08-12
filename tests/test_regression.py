@@ -146,7 +146,16 @@ class TestC3_CidrCheck:
         manager = AsyncMock()
         session_store = AsyncMock()
         session_store.list_active_sessions = AsyncMock(
-            return_value=[{"session_id": "s-1"}]
+            return_value=[
+                {
+                    "session_id": "s-1",
+                    "owner_type": "agent",
+                    "owner_name": "regression-test",
+                    "owner_token_fingerprint": "a" * 64,
+                    "source_ip": "192.0.2.10",
+                    "tenant_labels": [],
+                }
+            ]
         )
         session_store.get_session_credentials = AsyncMock(
             return_value={"host": "172.16.0.99", "port": 22, "username": "test"}
@@ -208,7 +217,16 @@ class TestC4_AgentTokenStore:
         manager.create_session = AsyncMock(return_value="mock-session")
         session_store = AsyncMock()
         session_store.list_active_sessions = AsyncMock(
-            return_value=[{"session_id": "s-1"}]
+            return_value=[
+                {
+                    "session_id": "s-1",
+                    "owner_type": "agent",
+                    "owner_name": "regression-test",
+                    "owner_token_fingerprint": "a" * 64,
+                    "source_ip": "192.0.2.10",
+                    "tenant_labels": [],
+                }
+            ]
         )
         session_store.get_session_credentials = AsyncMock(
             return_value={
@@ -221,7 +239,11 @@ class TestC4_AgentTokenStore:
         assert restored == 1  # 127.0.0.1 is in the allowed target CIDR
         assert failed == 0
         manager.create_session.assert_awaited_once()
-        session_store.deactivate_session.assert_awaited_once_with("s-1")
+        assert manager.create_session.await_args.kwargs["session_id"] == "s-1"
+        session_store.refresh_session_expiry.assert_awaited_once_with(
+            "s-1", settings.session_timeout
+        )
+        session_store.deactivate_session.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_restore_resolves_hostname_targets(self, monkeypatch):
@@ -247,7 +269,16 @@ class TestC4_AgentTokenStore:
         manager.create_session = AsyncMock(return_value="mock-session")
         session_store = AsyncMock()
         session_store.list_active_sessions = AsyncMock(
-            return_value=[{"session_id": "s-1"}]
+            return_value=[
+                {
+                    "session_id": "s-1",
+                    "owner_type": "agent",
+                    "owner_name": "regression-test",
+                    "owner_token_fingerprint": "a" * 64,
+                    "source_ip": "192.0.2.10",
+                    "tenant_labels": [],
+                }
+            ]
         )
         session_store.get_session_credentials = AsyncMock(
             return_value={

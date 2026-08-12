@@ -733,7 +733,8 @@ class TestMakeCheckMirrorsCiExactly:
 
     Fixed at the root instead of just re-syncing the flags a second time:
     ci.yml's steps now call the Makefile targets directly (make lint,
-    make mypy, make test-unit, make test-count, make lockfile-check) --
+    make mypy, make test-unit, make test-integration, make test-smoke,
+    make test-count, make lockfile-check) --
     there is exactly one place these flags are written down, so the two
     can no longer drift apart silently the way they already had once.
     """
@@ -759,6 +760,8 @@ class TestMakeCheckMirrorsCiExactly:
         assert steps.get("Lockfile freshness") == "make lockfile-check"
         assert steps.get("Ruff") == "make lint"
         assert steps.get("Mypy") == "make mypy"
+        assert steps.get("Integration tests") == "make test-integration"
+        assert steps.get("Portable smoke tests") == "make test-smoke"
         assert steps.get("Verify test count") == "make test-count"
 
     def test_make_check_verifies_lockfile_and_test_count(self):
@@ -783,18 +786,21 @@ class TestCanonicalCiEntrypoints:
 
     def test_ci_target_runs_the_full_local_gate(self):
         makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
-        assert "ci: check" in makefile
+        assert "ci: check test-integration test-smoke" in makefile
 
     def test_test_is_a_backward_compatible_alias_for_test_unit(self):
         makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
         assert "test: test-unit" in makefile
 
-    def test_test_smoke_reuses_existing_host_smoke(self):
-        """host-smoke predates this and CLAUDE.md/runbooks already
-        reference it directly -- test-smoke is an alias, not a
-        reimplementation."""
+    def test_test_smoke_is_portable_and_host_smoke_stays_separate(self):
+        """Canonical CI has portable smoke; live host checks stay separate."""
         makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
-        assert "test-smoke: host-smoke" in makefile
+        assert "test-smoke:" in makefile
+        assert "uv run pytest -m smoke -q" in makefile
+        assert "host-smoke:" in makefile
+        assert "uv run pytest -m host_smoke -v" in makefile
+        assert "test-smoke: host-smoke" not in makefile
+
 
 
 class TestSshdVersionedArtifact:

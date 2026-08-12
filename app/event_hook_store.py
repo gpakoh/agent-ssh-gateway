@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.session_store import Base, EventHook
+from app.session_store import EventHook
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +21,10 @@ class EventHookStore:
 
     async def create_tables(self):
         logger.warning(
-            "Auto-creating Event Hook Tables Via Base.metadata.create_all — Use Alembic For Production Migrations"
+            "Auto-creating EventHook table for feature bootstrap — use Alembic in production"
         )
         async with self._engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(EventHook.__table__.create, checkfirst=True)
 
     async def close(self):
         await self._engine.dispose()

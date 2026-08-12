@@ -1,6 +1,7 @@
 """FastAPI entry point for agent-ssh-gateway."""
 
 import asyncio
+import builtins
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -112,6 +113,14 @@ async def _restore_persisted_sessions(
     failed = 0
     for sess in active_sessions:
         try:
+            if not sess.get("owner_token_fingerprint"):
+                logger.warning(
+                    "Refusing to restore legacy session %s without ownership metadata",
+                    sess["session_id"],
+                )
+                await session_store.deactivate_session(sess["session_id"])
+                failed += 1
+                continue
             creds = await session_store.get_session_credentials(sess["session_id"])
             if not creds:
                 continue
@@ -136,9 +145,17 @@ async def _restore_persisted_sessions(
                 password=creds.get("password"),
                 private_key=creds.get("private_key"),
                 key_passphrase=creds.get("key_passphrase"),
+                owner_type=sess.get("owner_type") or "master",
+                owner_name=sess.get("owner_name"),
+                owner_token_fingerprint=sess.get("owner_token_fingerprint"),
+                source_ip=sess.get("source_ip"),
+                tenant_labels=tuple(sess.get("tenant_labels") or ()),
+                session_id=sess["session_id"],
                 pinned_ip=validated_ips[0],
             )
-            await session_store.deactivate_session(sess["session_id"])
+            await session_store.refresh_session_expiry(
+                sess["session_id"], settings.session_timeout
+            )
             restored += 1
         except Exception as exc:
             logger.warning("Failed to restore session %s: %s", sess["session_id"], exc)
@@ -158,6 +175,29 @@ async def _audit_retention_loop(
         except Exception:
             logger.warning("audit retention cleanup failed", exc_info=True)
         await asyncio.sleep(max(1, interval_seconds))
+
+
+async def _drain_jobs_for_shutdown(job_manager: JobManager, timeout: float = 30.0) -> int:
+    """Bound graceful job drain and force-cancel anything that outlives it."""
+    active_jobs = [
+        job
+        for job in job_manager._jobs.values()
+        if job.status in ("pending", "running", "cancelling")
+    ]
+    if not active_jobs:
+        return 0
+
+    logger.info("Waiting for %d active jobs to complete...", len(active_jobs))
+    try:
+        await asyncio.wait_for(job_manager.wait_for_all_jobs(), timeout=timeout)
+        return 0
+    except builtins.TimeoutError:
+        logger.warning(
+            "Job drain exceeded %.1fs; force-cancelling remaining jobs before cleanup",
+            timeout,
+        )
+        return await job_manager.force_cleanup()
+
 
 # ---------------------------------------------------------------------------
 # Lifespan — Initializes Globals In App.state
@@ -316,7 +356,13 @@ async def lifespan(app: FastAPI):
                     "Restored %d sessions from persistent storage (%d failed)", restored, failed
                 )
         except Exception as exc:
-            logger.warning("PostgreSQL not available: %s", exc)
+            logger.warning("Persistent session store not ready: %s", exc)
+            if state.session_store is not None:
+                try:
+                    await state.session_store.disconnect()
+                except Exception:
+                    logger.warning("Failed to close unusable persistent session store", exc_info=True)
+            state.session_store = None
 
     # Initialize Event Hook Components
     if settings.event_hooks_enabled:
@@ -378,12 +424,10 @@ async def lifespan(app: FastAPI):
     # Graceful Shutdown: Drain Active Jobs
     logger.info("Starting Graceful Shutdown...")
 
-    # Wait For Active Jobs To Complete (max 30s)
+    # Wait For Active Jobs To Complete (max 30s). A drain timeout never
+    # aborts the rest of lifespan cleanup.
     if state.job_manager:
-        active_jobs = [j for j in state.job_manager._jobs.values() if j.status == "running"]
-        if active_jobs:
-            logger.info("Waiting for %d active jobs to complete...", len(active_jobs))
-            await asyncio.wait_for(state.job_manager.wait_for_all_jobs(), timeout=30.0)
+        await _drain_jobs_for_shutdown(state.job_manager)
 
     # Cleanup
     await state.context_manager.stop_cleanup_task()
@@ -688,7 +732,15 @@ def custom_openapi():
                 "properties": {
                     "status": {
                         "type": "string",
-                        "enum": ["started", "running", "completed", "cancelled"],
+                        "enum": [
+                            "pending",
+                            "started",
+                            "running",
+                            "cancelling",
+                            "completed",
+                            "failed",
+                            "cancelled",
+                        ],
                     },
                     "job_id": {"type": "string"},
                     "ts": {"type": "number", "description": "Unix timestamp"},

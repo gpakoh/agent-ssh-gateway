@@ -17,6 +17,8 @@ import pytest
 from examples.mcp_server.client_store import ClientStore
 from examples.mcp_server.oauth_provider import GatewayOAuthProvider, StoredClient
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 def store_path():
