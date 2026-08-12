@@ -5,6 +5,7 @@
 | Variable | File | Source |
 |----------|------|--------|
 | `POSTGRES_PASSWORD` | `docker/.env` | `docker-compose.yml` via `${POSTGRES_PASSWORD:?...}` |
+| `REDIS_PASSWORD` | `docker/.env` | `docker-compose.yml` via `${REDIS_PASSWORD:?...}` |
 | `API_KEY` | `docker/.env` | `docker-compose.yml` via `${API_KEY:?...}` |
 | `AGENT_TOKEN` | `docker/.env` | `docker-compose.yml` via `${AGENT_TOKEN:?...}` |
 | `JWT_SECRET` | `docker/.env` | `docker-compose.yml` via `${JWT_SECRET:?...}` |
