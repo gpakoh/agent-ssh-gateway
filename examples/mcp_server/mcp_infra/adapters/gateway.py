@@ -28,6 +28,7 @@ from mcp_client_tools import (
     find_files,
     git_add,
     git_commit,
+    git_create_branch,
     git_diff,
     git_diff_cached,
     git_diff_stat,
@@ -763,6 +764,16 @@ def gateway_git_commit(project: str, message: str) -> dict[str, Any]:
     )
 
 
+def gateway_git_create_branch(project: str, branch: str) -> dict[str, Any]:
+    """Create and switch to a new non-protected local branch."""
+    return run_tool(
+        tool="git_create_branch",
+        title="git create branch",
+        fn=lambda: git_create_branch(_server_client(), project, branch),
+        success_text="Created local feature branch.",
+    )
+
+
 def gateway_git_push(
     project: str,
     remote: str = "origin",
@@ -1074,6 +1085,7 @@ def register_all() -> None:
     register_tool("show_changes")(gateway_show_changes)
     register_tool("git_add")(gateway_git_add)
     register_tool("git_commit")(gateway_git_commit)
+    register_tool("git_create_branch")(gateway_git_create_branch)
     register_tool("git_push")(gateway_git_push)
     register_tool("run_tests")(gateway_run_tests)
     register_tool("run_lint")(gateway_run_lint)

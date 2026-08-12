@@ -232,18 +232,19 @@ class TestMcpClientWriteMode:
         write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
         assert "git_add" in write_tools
         assert "git_commit" in write_tools
+        assert "git_create_branch" in write_tools
         assert "git_push" in write_tools
 
     def test_git_write_tools_absent_from_every_other_mode(self):
-        """git_add/git_commit/git_push must never leak into any other
-        mode -- they exist in tool_scopes.py's TOOL_SCOPES map (defining
-        what scope *would* be required if ever registered) but were never
-        actually wired into any TOOL_NAMES_BY_MODE entry until this mode."""
+        """Git mutation tools must never leak into any other mode; the
+        protected-master workflow is intentionally available only through the
+        explicit write mode."""
         for mode, names in TOOL_NAMES_BY_MODE.items():
             if mode == "mcp_client_write":
                 continue
             assert "git_add" not in names, mode
             assert "git_commit" not in names, mode
+            assert "git_create_branch" not in names, mode
             assert "git_push" not in names, mode
 
     def test_workspace_write_tools_present(self):
@@ -314,6 +315,7 @@ class TestMcpClientWriteMode:
         assert should_register_tool("execute_argv")
         assert should_register_tool("git_push")
         assert should_register_tool("git_commit")
+        assert should_register_tool("git_create_branch")
         assert should_register_tool("workspace_file_write")
         assert should_register_tool("read_file")
         assert should_register_tool("docker_exec")
@@ -326,6 +328,7 @@ class TestMcpClientWriteMode:
         assert "execute_argv" not in mcp_client_tools
         assert "git_add" not in mcp_client_tools
         assert "git_commit" not in mcp_client_tools
+        assert "git_create_branch" not in mcp_client_tools
         assert "git_push" not in mcp_client_tools
         safe = get_mcp_client_safe_tools()
         assert len(safe & MCP_CLIENT_BLOCKED_TOOLS) == 0

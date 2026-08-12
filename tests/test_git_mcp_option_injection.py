@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from mcp_client_tools import git_add, git_push
+from mcp_client_tools import git_add, git_create_branch, git_push
 
 
 class _StubClient:
@@ -37,6 +37,28 @@ def test_git_push_well_formed():
     client = _StubClient()
     git_push(client, "proj", remote="origin", branch="feature/x")
     assert client.commands == ["git push origin feature/x"]
+
+
+def test_git_create_branch_well_formed():
+    client = _StubClient()
+    git_create_branch(client, "proj", branch="ai/fleet-hardening")
+    assert client.commands == ["git switch -c ai/fleet-hardening"]
+
+
+def test_git_create_branch_rejects_protected_names():
+    client = _StubClient()
+    for branch in ("main", "master"):
+        with pytest.raises(ValueError, match="POLICY_DENIED"):
+            git_create_branch(client, "proj", branch=branch)
+    assert client.commands == []
+
+
+def test_git_create_branch_rejects_option_or_refspec_injection():
+    client = _StubClient()
+    for branch in ("--orphan", "HEAD:feature"):
+        with pytest.raises(ValueError, match="INVALID_INPUT"):
+            git_create_branch(client, "proj", branch=branch)
+    assert client.commands == []
 
 
 def test_git_add_rejects_option_paths():
