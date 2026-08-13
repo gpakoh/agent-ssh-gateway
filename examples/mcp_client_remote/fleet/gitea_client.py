@@ -42,9 +42,16 @@ ALLOWED_ENDPOINTS = frozenset(
 )
 
 # Keep write access on a separate, deliberately tiny allowlist. The MCP write
-# surface only needs PR creation; it is not a generic Gitea mutation client.
-ALLOWED_WRITE_ENDPOINTS = frozenset({"/repos/{owner}/{repo}/pulls"})
+# surface exposes only explicit PR lifecycle operations; it is not a generic
+# Gitea mutation client.
+ALLOWED_WRITE_ENDPOINTS = frozenset(
+    {
+        "/repos/{owner}/{repo}/pulls",
+        "/repos/{owner}/{repo}/pulls/{number}/merge",
+    }
+)
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+_SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 MAX_PR_TITLE = 200
 MAX_PR_BODY = 20_000
 
@@ -157,6 +164,8 @@ class GiteaClient:
                 request=exc.request,
                 response=exc.response,
             ) from None
+        if not resp.content:
+            return {}
         return resp.json()
 
     async def get_repo(self, owner: str, repo: str) -> dict[str, Any]:
@@ -316,6 +325,31 @@ class GiteaClient:
             {"title": title, "head": head, "base": base, "body": body},
             owner=owner,
             repo=repo,
+        )
+
+    async def merge_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        pull_number: int,
+        *,
+        expected_head_sha: str,
+        method: str = "merge",
+    ) -> dict[str, Any]:
+        """Merge one PR with an optimistic-lock check on its head commit."""
+        if pull_number < 1:
+            raise ValueError("pull_number must be >= 1")
+        expected_head_sha = expected_head_sha.strip().lower()
+        if not _SHA1_RE.fullmatch(expected_head_sha):
+            raise ValueError("expected_head_sha must be a 40-character SHA-1")
+        if method != "merge":
+            raise ValueError("only merge method 'merge' is allowed")
+        return await self._post(
+            "/repos/{owner}/{repo}/pulls/{number}/merge",
+            {"Do": method, "head_commit_id": expected_head_sha},
+            owner=owner,
+            repo=repo,
+            number=pull_number,
         )
 
     # ── Gitea Actions (CI/CD) ──────────────────────────────────────

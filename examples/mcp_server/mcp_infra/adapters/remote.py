@@ -359,6 +359,127 @@ async def gitea_create_pull_request(
     return tool_success("gitea_create_pull_request", result=data, source="gitea")
 
 
+async def gitea_merge_pull_request(
+    owner: str,
+    repo: str,
+    pull_number: int,
+    expected_head_sha: str,
+    method: str = "merge",
+) -> dict[str, Any]:
+    """Merge an open, mergeable PR only when its expected head has green CI."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool="gitea_merge_pull_request",
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+
+    expected_head_sha = expected_head_sha.strip().lower()
+    if len(expected_head_sha) != 40 or any(c not in "0123456789abcdef" for c in expected_head_sha):
+        return tool_error(
+            tool="gitea_merge_pull_request",
+            code="INVALID_INPUT",
+            message="expected_head_sha must be a 40-character SHA-1",
+            source="gitea",
+        )
+    if method != "merge":
+        return tool_error(
+            tool="gitea_merge_pull_request",
+            code="INVALID_INPUT",
+            message="only merge method 'merge' is allowed",
+            source="gitea",
+        )
+
+    try:
+        async with _server_gitea_client()(token) as client:
+            pr = await client.get_pull_request(owner, repo, pull_number)
+            head = pr.get("head") or {}
+            base = pr.get("base") or {}
+            actual_head_sha = str(head.get("sha") or "").lower()
+            base_ref = str(base.get("ref") or "")
+
+            if pr.get("state") != "open" or pr.get("merged") is True:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="PR_NOT_OPEN",
+                    message=f"pull request #{pull_number} is not open",
+                    source="gitea",
+                )
+            if actual_head_sha != expected_head_sha:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="HEAD_MISMATCH",
+                    message="pull request head changed; re-read the PR and CI before merging",
+                    source="gitea",
+                )
+            if base_ref not in {"main", "master"}:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="POLICY_DENIED",
+                    message=f"merging into base branch {base_ref!r} is not allowed",
+                    source="gitea",
+                )
+            if pr.get("mergeable") is not True:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="PR_NOT_MERGEABLE",
+                    message=f"pull request #{pull_number} is not currently mergeable",
+                    retryable=True,
+                    source="gitea",
+                )
+
+            actions = await client.list_action_runs(owner, repo, status="completed", limit=50)
+            matching_runs = [
+                run
+                for run in actions.get("workflow_runs", [])
+                if run.get("event") == "pull_request" and run.get("head_sha") == expected_head_sha
+            ]
+            latest_run = (
+                max(matching_runs, key=lambda run: int(run.get("id") or -1))
+                if matching_runs
+                else None
+            )
+            if not latest_run or latest_run.get("conclusion") != "success":
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="CI_NOT_GREEN",
+                    message="latest pull_request CI for expected_head_sha is not successful",
+                    retryable=True,
+                    source="gitea",
+                )
+
+            await client.merge_pull_request(
+                owner,
+                repo,
+                pull_number,
+                expected_head_sha=expected_head_sha,
+                method=method,
+            )
+            merged_pr = await client.get_pull_request(owner, repo, pull_number)
+            if merged_pr.get("merged") is not True:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="MERGE_NOT_CONFIRMED",
+                    message="Gitea accepted the merge request but merged=true was not observed",
+                    retryable=True,
+                    source="gitea",
+                )
+            data = {
+                "number": pull_number,
+                "merged": True,
+                "head_sha": expected_head_sha,
+                "base": base_ref,
+                "method": method,
+                "merge_commit_sha": merged_pr.get("merge_commit_sha"),
+                "html_url": merged_pr.get("html_url"),
+            }
+    except Exception as exc:
+        return _remote_api_error("gitea_merge_pull_request", "gitea", exc)
+    return tool_success("gitea_merge_pull_request", result=data, source="gitea")
+
+
 async def gitea_list_action_runs(
     owner: str, repo: str, status: str | None = None, limit: int = 10
 ) -> dict[str, Any]:
@@ -621,6 +742,7 @@ def register_all() -> None:
     register_tool("gitea_list_pull_requests")(gitea_list_pull_requests)
     register_tool("gitea_get_pull_request")(gitea_get_pull_request)
     register_tool("gitea_create_pull_request")(gitea_create_pull_request)
+    register_tool("gitea_merge_pull_request")(gitea_merge_pull_request)
     register_tool("gitea_list_action_runs")(gitea_list_action_runs)
     register_tool("gitea_get_action_run")(gitea_get_action_run)
     register_tool("gitea_list_action_run_jobs")(gitea_list_action_run_jobs)
