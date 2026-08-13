@@ -458,6 +458,7 @@ def test_valid_proxy_allows_opencode_and_is_not_logged(tmp_path, monkeypatch):
 
 class _ProxyPoolHandler(BaseHTTPRequestHandler):
     proxies = ["http://127.0.0.1:19001", "http://127.0.0.1:19002"]
+    reports: list[dict[str, object]] = []
 
     def do_GET(self):
         body = json.dumps({"proxies": self.proxies}).encode()
@@ -469,8 +470,11 @@ class _ProxyPoolHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
-        if length:
-            self.rfile.read(length)
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            self.reports.append(json.loads(raw))
+        except ValueError:
+            self.reports.append({"invalid": raw.decode("utf-8", "replace")})
         body = b'{"status":"ok"}'
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -538,6 +542,75 @@ def test_parallel_runners_receive_distinct_proxy_leases(tmp_path, monkeypatch):
         assert len(proxies) == 2
         assert len(set(proxies)) == 2
         assert set(proxies) == set(_ProxyPoolHandler.proxies)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
+    _ProxyPoolHandler.reports = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ProxyPoolHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        source = tmp_path / "startup-retry-source"
+        source.mkdir()
+        _init_git_repo(source)
+        artifacts = tmp_path / "startup-retry-artifacts"
+        artifacts.mkdir()
+        (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+        fake_bin = tmp_path / "startup-retry-bin"
+        fake_bin.mkdir()
+        capture = tmp_path / "startup-retry-proxies.txt"
+        fake = fake_bin / "opencode"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$HTTP_PROXY" >> "$PROXY_CAPTURE"\n'
+            'case "$HTTP_PROXY" in\n'
+            '  *:19001) printf "\\033[0m\\n> build · big-pickle\\n\\033[0m"; sleep 10 ;;\n'
+            '  *) printf "\\033[0m\\n> build · big-pickle\\n\\033[0m\\nstartup-ok\\n"; exit 0 ;;\n'
+            "esac\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("PROXY_CAPTURE", str(capture))
+        monkeypatch.setenv(
+            "OPENCODE_PROXY_PROVIDER_URL",
+            f"http://127.0.0.1:{server.server_port}/proxy?format=provider",
+        )
+        monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "true")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+        monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "1")
+
+        script = _build_opencode_script(
+            str(artifacts), TASK_ID, None, project_root=str(source)
+        )
+        result = subprocess.run(
+            ["sh", "-c", script],
+            cwd=source,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+
+        assert result.returncode == 0, result.stderr or result.stdout
+        assert capture.read_text(encoding="utf-8").splitlines() == _ProxyPoolHandler.proxies
+        assert any(
+            report.get("proxy") == _ProxyPoolHandler.proxies[0]
+            for report in _ProxyPoolHandler.reports
+        )
+        worker_status = (artifacts / "worker-status.md").read_text(encoding="utf-8")
+        assert "OpenCode startup stalled; rotating proxy" in worker_status
+        assert "startup-ok" in (artifacts / "opencode-output.log").read_text(encoding="utf-8")
+        report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
+        assert "Failure reason: none" in report
     finally:
         server.shutdown()
         server.server_close()
