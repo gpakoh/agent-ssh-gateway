@@ -58,6 +58,7 @@ def test_supervisor_tools_registered_in_live_server():
     assert "supervisor_integrate_file" in names
     assert "supervisor_recover_integrations" in names
     assert "gitea_create_pull_request" in names
+    assert "gitea_merge_pull_request" in names
 
 
 @patch.dict(os.environ, {"MCP_AUTH_MODE": "token", "MCP_PUBLIC_TOKEN": "test-token"})
