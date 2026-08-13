@@ -868,6 +868,10 @@ class SSHSessionManager:
                     yield ("exit", "-1")
                     return
                 if time.monotonic() > deadline:
+                    try:
+                        out_channel.close()
+                    except Exception:
+                        pass
                     raise TimeoutError(f"Command execution timed out after {timeout}s")
                 record.touch()
 

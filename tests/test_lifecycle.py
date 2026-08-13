@@ -323,6 +323,44 @@ async def test_execute_stream_task_cancel_closes_remote_channel():
 
     channel.close.assert_called()
 
+
+@pytest.mark.asyncio
+async def test_execute_stream_deadline_timeout_closes_remote_channel():
+    from app.ssh_manager import SessionRecord
+
+    manager = SSHSessionManager(cleanup_interval=3600)
+    channel = MagicMock()
+    channel.exit_status_ready.return_value = False
+    channel.recv_ready.return_value = False
+    channel.recv_stderr_ready.return_value = False
+
+    stdin = MagicMock()
+    stdin.channel = channel
+    stdout = MagicMock()
+    stdout.channel = channel
+    stderr = MagicMock()
+    stderr.channel = channel
+    client = MagicMock()
+    client.exec_command.return_value = (stdin, stdout, stderr)
+
+    manager._sessions["stream-timeout"] = SessionRecord(
+        session_id="stream-timeout",
+        client=client,
+        host="127.0.0.1",
+        port=22,
+        username="test",
+    )
+
+    events = []
+    async for event in manager.execute_stream("stream-timeout", "sleep 60", timeout=0):
+        events.append(event)
+
+    assert len(events) == 1
+    assert events[0][0] == "error"
+    assert "timed out" in events[0][1]
+    channel.close.assert_called()
+
+
 @pytest.mark.asyncio
 async def test_wait_for_all_jobs_cancellation_does_not_leave_event_wait_tasks():
     from app.job_manager import JobManager, JobRecord
