@@ -203,11 +203,11 @@ validate_image_ref() {
 }
 
 validate_sshd_image_ref() {
-  local ref="$1"
+  local ref="$1" expected_running_id="$2"
   if validate_image_ref "$ref" "$SSHD_REPO"; then
     return 0
   fi
-  [[ "$ref" =~ ^sha256:[0-9a-f]{64}$ ]]
+  [ -n "$expected_running_id" ] && [ "$ref" = "$expected_running_id" ] && [[ "$ref" =~ ^sha256:[0-9a-f]{64}$ ]]
 }
 
 read_state_field() {
@@ -286,12 +286,7 @@ docker pull "$GATEWAY_REPO:$DEPLOY_TAG"
 docker pull "$MCP_REPO:$DEPLOY_TAG"
 docker pull "$SSHD_REPO:$DEPLOY_TAG"
 
-RUNNING_GATEWAY_ID=$(image_id web-ssh-gateway)
-RUNNING_MCP_ID=$(image_id mcp-server)
 RUNNING_SSHD_ID=$(image_id ssh-gateway-sshd)
-PULLED_GATEWAY_ID=$(docker images --no-trunc --format '{{.ID}}' "$GATEWAY_REPO:$DEPLOY_TAG" | head -1)
-PULLED_MCP_ID=$(docker images --no-trunc --format '{{.ID}}' "$MCP_REPO:$DEPLOY_TAG" | head -1)
-
 
 PREVIOUS_GATEWAY_IMAGE=$(read_state_field gateway_image)
 PREVIOUS_MCP_IMAGE=$(read_state_field mcp_server_image)
@@ -316,7 +311,7 @@ NEW_EXECUTOR_IMAGE=$(repo_digest "$SSHD_REPO:$DEPLOY_TAG")
 # implies full reversion when only the application was reverted.
 PRE_DEPLOY_REVISION=$(alembic_revision web-ssh-gateway)
 
-log "New image detected — deploying $NEW_GATEWAY_IMAGE / $NEW_MCP_IMAGE"
+log "Deploying $NEW_GATEWAY_IMAGE / $NEW_MCP_IMAGE / $NEW_EXECUTOR_IMAGE"
 deploy_services "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE" "$NEW_EXECUTOR_IMAGE"
 
 log "Running database migrations (alembic upgrade head)..."
@@ -339,12 +334,12 @@ if [ -z "$PREVIOUS_GATEWAY_IMAGE" ]; then
   exit 1
 fi
 
-if ! validate_image_ref "$PREVIOUS_GATEWAY_IMAGE" "$GATEWAY_REPO" || ! validate_image_ref "$PREVIOUS_MCP_IMAGE" "$MCP_REPO" || ! validate_sshd_image_ref "$PREVIOUS_SSHD_IMAGE"; then
+if ! validate_image_ref "$PREVIOUS_GATEWAY_IMAGE" "$GATEWAY_REPO" || ! validate_image_ref "$PREVIOUS_MCP_IMAGE" "$MCP_REPO" || ! validate_sshd_image_ref "$PREVIOUS_SSHD_IMAGE" "$RUNNING_SSHD_ID"; then
   log "Rollback state in $STATE_FILE does not look like a valid digest-pinned image reference — refusing to roll back to it. Leaving the failed deploy in place for manual investigation."
   exit 1
 fi
 
-log "Rolling back to $PREVIOUS_GATEWAY_IMAGE / $PREVIOUS_MCP_IMAGE"
+log "Rolling back to $PREVIOUS_GATEWAY_IMAGE / $PREVIOUS_MCP_IMAGE / $PREVIOUS_SSHD_IMAGE"
 deploy_services "$PREVIOUS_GATEWAY_IMAGE" "$PREVIOUS_MCP_IMAGE" "$PREVIOUS_SSHD_IMAGE"
 
 SCHEMA_ADVANCED=false
