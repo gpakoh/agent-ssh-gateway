@@ -80,19 +80,30 @@ def test_stage_branch_from_checkout_fetches_local_ref(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(cpg, "_run_git", fake_run)
     cpg._stage_branch_from_checkout(tmp_path, tmp_path / "stage.git", "feature/x")
-    assert seen == [[
+    assert len(seen) == 2
+    bundle_path = Path(seen[0][9])
+    assert seen[0] == [
         "git",
         "-c",
         f"safe.directory={tmp_path}",
         "-c",
         f"safe.directory={tmp_path / '.git'}",
+        "-C",
+        str(tmp_path),
+        "bundle",
+        "create",
+        str(bundle_path),
+        "refs/heads/feature/x",
+    ]
+    assert seen[1] == [
+        "git",
         "--git-dir",
         str(tmp_path / "stage.git"),
         "fetch",
         "--no-tags",
-        str(tmp_path),
+        str(bundle_path),
         "refs/heads/feature/x:refs/heads/feature/x",
-    ]]
+    ]
 
 
 def test_verify_local_branch_trusts_gitdir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
