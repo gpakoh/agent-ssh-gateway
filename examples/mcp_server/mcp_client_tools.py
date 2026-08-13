@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from control_plane_git import git_push_control_plane
 from gateway_client import GatewayClient, GatewayClientError
 from tool_results import build_command_result, tool_error, tool_success
 
@@ -1395,7 +1396,7 @@ def git_create_branch(
 
 
 def git_push(
-    client: GatewayClient,
+    _client: GatewayClient,
     project: str,
     remote: str = "origin",
     branch: str | None = None,
@@ -1403,11 +1404,7 @@ def git_push(
     _validate_git_name(remote, "remote")
     if branch is not None:
         _validate_git_name(branch, "branch")
-    if branch is None:
-        cmd = f"git push {shlex.quote(remote)}"
-    else:
-        cmd = f"git push {shlex.quote(remote)} {shlex.quote(branch)}"
-    return run_project_command(client, project, cmd)
+    return git_push_control_plane(project=project, remote=remote, branch=branch)
 
 
 def run_tests(client: GatewayClient, project: str) -> dict[str, Any]:
