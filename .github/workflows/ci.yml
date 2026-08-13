@@ -433,10 +433,21 @@ jobs:
     container:
       image: nod-ci-docker-e2e:latest
       volumes:
-        - /media/1TB/Python/web_ssh/web-ssh-gateway:/deploy/web-ssh-gateway
+        # Deployment code must come from this workflow's exact checkout, not
+        # from a mutable host working tree. Only runtime-only state is mounted
+        # from the host: the gitignored environment and persistent rollback state.
+        - /media/1TB/Python/web_ssh/web-ssh-gateway/docker/.env:/deploy/web-ssh-gateway.env:ro
+        - /media/1TB/Python/web_ssh/web-ssh-gateway/.state:/deploy/web-ssh-gateway-state
     env:
       REGISTRY: ${{ secrets.REGISTRY_HOST }}
     steps:
+      - uses: actions/checkout@v7
+      - name: Link runtime deployment inputs
+        run: |
+          test ! -e docker/.env
+          test ! -e .state
+          ln -s /deploy/web-ssh-gateway.env docker/.env
+          ln -s /deploy/web-ssh-gateway-state .state
       # Each job gets its own fresh container — build-and-push's docker
       # login doesn't carry over, even on the same runner.
       - name: Log in to the Gitea container registry
@@ -455,6 +466,4 @@ jobs:
         # other than the commit that started this specific run.
         env:
           DEPLOY_SHA: ${{ github.sha }}
-        run: |
-          cd /deploy/web-ssh-gateway
-          bash scripts/deploy-from-registry.sh
+        run: bash scripts/deploy-from-registry.sh
