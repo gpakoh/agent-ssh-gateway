@@ -15,6 +15,9 @@ Safety properties
   launching a second worker.
 * Slots are released only after an authoritative terminal gateway result or a
   definite pre-submit terminal result.  There is no heartbeat-age reaper.
+* Exactly one persistent reconciliation watcher runs per bound gateway
+  job_id; it restores after coordinator restart via the pre-admission sweep
+  and ends only on authoritative terminal reconciliation or runtime close.
 """
 
 from __future__ import annotations
@@ -71,12 +74,6 @@ def _configured_dsn() -> str | None:
     raw = os.environ.get(_DSN_ENV, "").strip() or os.environ.get("DATABASE_URL", "").strip()
     if raw:
         return _normalize_asyncpg_dsn(raw)
-
-    # asyncpg supports the standard libpq-style PG* environment directly
-    # when dsn=None.  Prefer that existing deployment contract over building
-    # a second URI containing PGPASSWORD: mcp-oauth already receives these
-    # variables for its Postgres adapter, so fleet admission can reuse them
-    # without duplicating the database secret into another environment value.
     required = ("PGHOST", "PGDATABASE", "PGUSER")
     missing = [name for name in required if not os.environ.get(name, "").strip()]
     if missing:
@@ -135,6 +132,7 @@ class FleetRuntime:
         pool_name: str,
         capacity: int,
         coordinator_id: str,
+        watch_poll_interval: float = 30.0,
     ) -> None:
         self.state = state
         self.pool_name = pool_name
@@ -142,6 +140,9 @@ class FleetRuntime:
         self.coordinator_id = coordinator_id
         self._schema_ready = False
         self._schema_lock = asyncio.Lock()
+        self._watch_poll_interval = watch_poll_interval
+        self._watchers_by_job: dict[str, asyncio.Task] = {}
+        self._closed = False
 
     async def ensure_ready(self) -> None:
         if self._schema_ready:
@@ -158,16 +159,15 @@ class FleetRuntime:
         project: str,
         task_id: str,
         submit_sync: Callable[[], dict[str, Any]],
+        job_status_fn: Callable[[str], dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Admit then perform one idempotent gateway submission.
-
-        ``submit_sync`` is the existing blocking MCP agent implementation.  It
-        executes in a worker thread so Postgres stays on the FastMCP event loop.
-        Any exception from that blocking submit is intentionally allowed to
-        propagate while the lease remains active: the exception is ambiguous
-        evidence and therefore cannot authorize a release.
-        """
+        """Admit then perform one idempotent gateway submission."""
         await self.ensure_ready()
+        if job_status_fn is not None:
+            try:
+                await self.sweep_bound_leases(job_status_fn)
+            except Exception:
+                pass
         durable_task_id = fleet_task_id(project, task_id)
         try:
             admission = await self.state.acquire_slot(
@@ -189,7 +189,6 @@ class FleetRuntime:
                     "terminal_status": outcome.status if outcome else None,
                 },
             }
-
         if not admission.acquired or admission.lease is None:
             return {
                 "task_id": task_id,
@@ -201,9 +200,10 @@ class FleetRuntime:
                     "active": admission.active,
                 },
             }
-
         lease = admission.lease
         if lease.job_id:
+            if job_status_fn is not None:
+                self._track_watcher(job_id=lease.job_id, job_status_fn=job_status_fn)
             return {
                 "task_id": task_id,
                 "status": "running",
@@ -217,7 +217,6 @@ class FleetRuntime:
                     "capacity": admission.capacity,
                 },
             }
-
         result = await asyncio.to_thread(submit_sync)
         job_id = result.get("job_id") if isinstance(result, dict) else None
         if isinstance(job_id, str) and job_id:
@@ -233,8 +232,9 @@ class FleetRuntime:
                 "active": admission.active,
                 "capacity": admission.capacity,
             }
+            if job_status_fn is not None:
+                self._track_watcher(job_id=job_id, job_status_fn=job_status_fn)
             return result
-
         status = str(result.get("status") or "") if isinstance(result, dict) else ""
         if status in _PRE_SUBMIT_TERMINAL:
             await self.state.complete_task(
@@ -251,17 +251,11 @@ class FleetRuntime:
                 "reason": "definite pre-submit terminal result",
             }
             return result
-
         raise FleetRuntimeError(
             "Agent submit returned neither a job_id nor a terminal pre-submit status"
         )
 
-    async def reconcile_gateway_result(
-        self,
-        *,
-        job_id: str,
-        result: dict[str, Any],
-    ) -> None:
+    async def reconcile_gateway_result(self, *, job_id: str, result: dict[str, Any]) -> None:
         """Release a bound lease only when gateway reports a terminal job."""
         status = str(result.get("status") or "")
         if status not in _GATEWAY_TERMINAL:
@@ -281,6 +275,95 @@ class FleetRuntime:
             result=_small_result(result),
             expected_job_id=job_id,
         )
+
+    async def sweep_bound_leases(
+        self, job_status_fn: Callable[[str], dict[str, Any]]
+    ) -> int:
+        """Reconcile this pool and restore watchers for unresolved jobs."""
+        await self.ensure_ready()
+        leases = await self.state.list_bound_leases(pool_name=self.pool_name)
+        released = 0
+        for lease in leases:
+            job_id = lease.job_id
+            if not job_id:
+                continue
+            try:
+                result = await asyncio.to_thread(job_status_fn, job_id)
+            except Exception:
+                self._track_watcher(job_id=job_id, job_status_fn=job_status_fn)
+                continue
+            status = str(result.get("status") or "")
+            if status not in _GATEWAY_TERMINAL:
+                self._track_watcher(job_id=job_id, job_status_fn=job_status_fn)
+                continue
+            exit_code = result.get("exit_code")
+            if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+                exit_code = None
+            try:
+                await self.state.complete_task(
+                    task_id=lease.task_id,
+                    lease_token=lease.lease_token,
+                    status=status,
+                    exit_code=exit_code,
+                    result=_small_result(result),
+                    expected_job_id=job_id,
+                )
+                released += 1
+            except Exception:
+                self._track_watcher(job_id=job_id, job_status_fn=job_status_fn)
+        return released
+
+    def _track_watcher(
+        self, *, job_id: str, job_status_fn: Callable[[str], dict[str, Any]]
+    ) -> None:
+        """Start exactly one persistent reconciliation watcher per job_id."""
+        if self._closed or job_id in self._watchers_by_job:
+            return
+        task = asyncio.create_task(
+            self._watch_gateway_job(job_id=job_id, job_status_fn=job_status_fn)
+        )
+        self._watchers_by_job[job_id] = task
+
+        def _forget(done: asyncio.Task, _job_id: str = job_id) -> None:
+            if self._watchers_by_job.get(_job_id) is done:
+                self._watchers_by_job.pop(_job_id, None)
+
+        task.add_done_callback(_forget)
+
+    async def _watch_gateway_job(
+        self, *, job_id: str, job_status_fn: Callable[[str], dict[str, Any]]
+    ) -> None:
+        """Poll until terminal reconciliation succeeds or runtime closes."""
+        while not self._closed:
+            try:
+                result = await asyncio.to_thread(job_status_fn, job_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(self._watch_poll_interval)
+                continue
+            status = str(result.get("status") or "")
+            if status in _GATEWAY_TERMINAL:
+                try:
+                    await self.reconcile_gateway_result(job_id=job_id, result=result)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    await asyncio.sleep(self._watch_poll_interval)
+                    continue
+                return
+            await asyncio.sleep(self._watch_poll_interval)
+
+    async def close(self) -> None:
+        """Cancel and await reconciliation watchers before closing state."""
+        self._closed = True
+        watchers = list(self._watchers_by_job.values())
+        for task in watchers:
+            task.cancel()
+        if watchers:
+            await asyncio.gather(*watchers, return_exceptions=True)
+        self._watchers_by_job.clear()
+        await self.state.close()
 
 
 _runtime: FleetRuntime | None = None
@@ -313,10 +396,10 @@ async def get_fleet_runtime() -> FleetRuntime | None:
 
 
 async def close_fleet_runtime() -> None:
-    """Close the asyncpg pool during MCP shutdown/tests."""
+    """Cancel watchers and close the asyncpg pool during MCP shutdown/tests."""
     global _runtime, _runtime_lock
     if _runtime is not None:
-        await _runtime.state.close()
+        await _runtime.close()
     _runtime = None
     _runtime_lock = None
 

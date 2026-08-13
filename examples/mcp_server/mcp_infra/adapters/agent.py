@@ -218,6 +218,7 @@ async def gateway_run_opencode(
                     project=project,
                     task_id=task_id,
                     submit_sync=_submit,
+                    job_status_fn=lambda jid: _server_client().job_status(jid),
                 )
         return await asyncio.to_thread(_submit)
 
@@ -262,6 +263,7 @@ async def gateway_run_agent(
                     project=project,
                     task_id=task_id,
                     submit_sync=_submit,
+                    job_status_fn=lambda jid: _server_client().job_status(jid),
                 )
         return await asyncio.to_thread(_submit)
 

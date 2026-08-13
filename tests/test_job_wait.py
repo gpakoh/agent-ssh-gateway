@@ -87,3 +87,41 @@ class TestJobWaitEndpoint:
         client = self._client(monkeypatch)
         resp = client.get("/api/jobs/job-1/wait?timeout=30")
         assert resp.status_code == 401
+
+    def test_wait_returns_terminal_snapshot_when_job_evicted_from_memory(self, monkeypatch):
+        from app import state as _app_state
+
+        client = self._client(monkeypatch)
+        _app_state.job_manager.get_job = AsyncMock(return_value=None)
+        redis = MagicMock()
+        redis._redis = MagicMock()
+        redis.get_job = AsyncMock(return_value=dict(MOCK_JOB))
+        _app_state.redis_queue = redis
+
+        resp = client.get(
+            "/api/jobs/job-1/wait?timeout=30",
+            headers={"X-API-Key": "secret-42"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["job_id"] == "job-1"
+        assert data["status"] == "completed"
+        assert data["stdout"] == "hi\n"
+
+    def test_wait_fails_closed_to_404_when_redis_job_not_terminal(self, monkeypatch):
+        from app import state as _app_state
+
+        client = self._client(monkeypatch)
+        _app_state.job_manager.get_job = AsyncMock(return_value=None)
+        redis = MagicMock()
+        redis._redis = MagicMock()
+        running = dict(MOCK_JOB)
+        running["status"] = "running"
+        redis.get_job = AsyncMock(return_value=running)
+        _app_state.redis_queue = redis
+
+        resp = client.get(
+            "/api/jobs/job-1/wait?timeout=30",
+            headers={"X-API-Key": "secret-42"},
+        )
+        assert resp.status_code == 404
