@@ -95,6 +95,27 @@ def test_stage_branch_from_checkout_fetches_local_ref(monkeypatch: pytest.Monkey
     ]]
 
 
+def test_verify_local_branch_trusts_gitdir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: list[list[str]] = []
+
+    def fake_run(argv, *, cwd, env=None, timeout=60):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="abc123\n", stderr="")
+
+    monkeypatch.setattr(cpg, "_run_git", fake_run)
+    cpg._verify_local_branch(tmp_path, "feature/x")
+    assert seen == [[
+        "git",
+        "-c",
+        f"safe.directory={tmp_path}",
+        "-c",
+        f"safe.directory={tmp_path / '.git'}",
+        "rev-parse",
+        "--verify",
+        "refs/heads/feature/x",
+    ]]
+
+
 def test_push_staged_ref_uses_bare_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     seen: list[list[str]] = []
 
