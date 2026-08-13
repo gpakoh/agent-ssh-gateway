@@ -44,11 +44,17 @@ services:
       # sshd must resolve/reach the provider by name. External network:
       # created by the quart-platform proxy_parser project; removed if that
       # stack is ever `docker compose down`ed (sshd then loses it until
-      # recreated). Without it, fetch fails open and opencode runs direct.
+      # recreated). OpenCode is fail-closed when this provider is unavailable:
+      # it must never silently burn the direct provider quota.
       proxy_parser_default: {}
     environment:
       - OPENCODE_PROXY_PROVIDER_URL=${OPENCODE_PROXY_PROVIDER_URL:-}
       - OPENCODE_PROXY_PROVIDER_TIMEOUT=${OPENCODE_PROXY_PROVIDER_TIMEOUT:-5}
+      - OPENCODE_PROXY_REQUIRED=${OPENCODE_PROXY_REQUIRED:-true}
+      - OPENCODE_STARTUP_RESERVE_BYTES=${OPENCODE_STARTUP_RESERVE_BYTES:-805306368}
+      - OPENCODE_STARTUP_RESERVE_SECONDS=${OPENCODE_STARTUP_RESERVE_SECONDS:-60}
+      - OPENCODE_ADMISSION_WAIT_SECONDS=${OPENCODE_ADMISSION_WAIT_SECONDS:-300}
+      - OPENCODE_ADMISSION_POLL_SECONDS=${OPENCODE_ADMISSION_POLL_SECONDS:-2}
     volumes:
       - ${WORKSPACE_HOST_PATH:-..}:${WORKSPACE_CONTAINER_PATH:-/workspace}:rw
       # Persistent SSH server host keys: sshd no longer regenerates them on
@@ -63,10 +69,13 @@ services:
     deploy:
       resources:
         limits:
-          # 2 parallel opencode runs (fleet mode) OOM at 512M -- each
-          # opencode process peaks ~300-400MB; verified in the E2E smoke.
+          # 16GiB is only the cgroup ceiling, not a pre-allocation. OpenCode
+          # workers consume memory on demand; executor-local admission checks
+          # live memory.current plus short startup reservations before launch.
+          # The former 2GiB ceiling produced exit 137/SIGKILL with several
+          # concurrent agents on a 96GiB host.
           cpus: '2.0'
-          memory: 2048M
+          memory: 16G
         reservations:
           cpus: '0.1'
           memory: 128M
@@ -214,6 +223,12 @@ services:
       - MCP_HEALTHCHECK_BEARER_TOKEN=${MCP_OAUTH_HEALTHCHECK_BEARER_TOKEN:-}
       - MCP_SCOPE_ENFORCEMENT=enforce
       - MCP_AGENT_BACKEND_ROUTER_ENABLED=true
+      # Durable Postgres admission provides cross-coordinator idempotency and
+      # a catastrophe ceiling. Normal concurrency is governed dynamically by
+      # executor memory headroom and the number of distinct proxy leases.
+      - MCP_AGENT_FLEET_ENABLED=${MCP_AGENT_FLEET_ENABLED:-true}
+      - MCP_AGENT_FLEET_POOL=${MCP_AGENT_FLEET_POOL:-ssh-gateway/sshd}
+      - MCP_AGENT_FLEET_CAPACITY=${MCP_AGENT_FLEET_CAPACITY:-64}
       - MCP_AUTHORIZE_PASSWORD=${MCP_OAUTH_AUTHORIZE_PASSWORD:?set MCP_OAUTH_AUTHORIZE_PASSWORD}
       - MCP_TOKEN_STORE_FILE=/app/data/mcp_tokens.json
       - MCP_CLIENT_STORE_FILE=/app/data/mcp_clients.json
@@ -232,6 +247,11 @@ services:
       - WORKSPACE_READONLY=false
       - OPENCODE_PROXY_PROVIDER_URL=${OPENCODE_PROXY_PROVIDER_URL:-}
       - OPENCODE_PROXY_PROVIDER_TIMEOUT=${OPENCODE_PROXY_PROVIDER_TIMEOUT:-5}
+      - OPENCODE_PROXY_REQUIRED=${OPENCODE_PROXY_REQUIRED:-true}
+      - OPENCODE_STARTUP_RESERVE_BYTES=${OPENCODE_STARTUP_RESERVE_BYTES:-805306368}
+      - OPENCODE_STARTUP_RESERVE_SECONDS=${OPENCODE_STARTUP_RESERVE_SECONDS:-60}
+      - OPENCODE_ADMISSION_WAIT_SECONDS=${OPENCODE_ADMISSION_WAIT_SECONDS:-300}
+      - OPENCODE_ADMISSION_POLL_SECONDS=${OPENCODE_ADMISSION_POLL_SECONDS:-2}
     volumes:
       - ${PROJECTS_YAML_PATH:-../projects.yaml}:/app/projects.yaml:ro
       # Dedicated volume, deliberately NOT shared with mcp-server's

@@ -73,6 +73,20 @@ class TestProjectRunOpencodeExecutes:
         assert result["status"] == "failed"
         assert result["exit_code"] == 1
 
+    def test_proxy_block_exit_reports_blocked(self):
+        rc = _fake_run_cmd()
+        run_script = MagicMock(return_value={"exit_code": 76, "stdout": "", "stderr": ""})
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert result["status"] == "blocked"
+        assert result["exit_code"] == 76
+
+    def test_sigkill_exit_reports_resource_exhausted(self):
+        rc = _fake_run_cmd()
+        run_script = MagicMock(return_value={"exit_code": 137, "stdout": "Killed", "stderr": ""})
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert result["status"] == "resource-exhausted"
+        assert result["exit_code"] == 137
+
     def test_no_current_plan_errors_before_execution(self):
         rc = _fake_run_cmd(current_plan="")
         run_script = MagicMock(return_value={"exit_code": 0, "stdout": "", "stderr": ""})
