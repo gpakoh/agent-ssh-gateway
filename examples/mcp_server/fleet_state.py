@@ -152,6 +152,13 @@ FROM fleet_worker_lease
 WHERE job_id = $1
 """
 
+_GET_BOUND_LEASES_SQL: Final = """
+SELECT task_id, pool, lease_token::text AS lease_token, coordinator_id,
+       job_id, claimed_at, heartbeat_at
+FROM fleet_worker_lease
+WHERE job_id IS NOT NULL AND pool = $1
+"""
+
 
 class FleetStateError(RuntimeError):
     """Base error for durable fleet state operations."""
@@ -508,6 +515,22 @@ class FleetState:
         async with pg_pool.acquire() as conn:
             row = await conn.fetchrow(_GET_LEASE_BY_JOB_SQL, job_id)
         return _lease_from_row(row) if row is not None else None
+
+    async def list_bound_leases(self, pool_name: str) -> list[WorkerLease]:
+        """Return every active lease in ``pool_name`` bound to a gateway job.
+
+        This is the reconciliation sweep surface: a coordinator enumerates
+        only its own pool's bound leases, verifies each against authoritative
+        Gateway terminal state, and only then releases terminal ones via
+        ``complete_task``. Scoping by pool prevents one pool's coordinator
+        from reconciling another pool's leases. Rows are returned as-is with
+        no age-based judgment.
+        """
+        pool_name = _require_name(pool_name, "pool_name")
+        pg_pool = await self._ensure_pool()
+        async with pg_pool.acquire() as conn:
+            rows = await conn.fetch(_GET_BOUND_LEASES_SQL, pool_name)
+        return [_lease_from_row(row) for row in rows]
 
     async def get_outcome(self, task_id: str) -> TaskOutcome | None:
         """Return a durable terminal outcome without mutating fleet state."""

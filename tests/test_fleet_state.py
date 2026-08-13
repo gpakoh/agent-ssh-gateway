@@ -61,10 +61,12 @@ class _FakeConn:
         fetchrows: list[Any] | None = None,
         fetchvals: list[Any] | None = None,
         execute_results: list[str] | None = None,
+        fetchs: list[list[Any]] | None = None,
     ):
         self.fetchrows = deque(fetchrows or [])
         self.fetchvals = deque(fetchvals or [])
         self.execute_results = deque(execute_results or [])
+        self.fetchs = deque(fetchs or [])
         self.calls: list[tuple[str, str, tuple[Any, ...]]] = []
 
     def transaction(self):
@@ -86,6 +88,12 @@ class _FakeConn:
         if not self.fetchvals:
             raise AssertionError(f"unexpected fetchval: {sql}")
         return self.fetchvals.popleft()
+
+    async def fetch(self, sql: str, *args: Any):
+        self.calls.append(("fetch", sql, args))
+        if not self.fetchs:
+            raise AssertionError(f"unexpected fetch: {sql}")
+        return self.fetchs.popleft()
 
 
 NOW = datetime(2026, 8, 12, tzinfo=UTC)
@@ -406,12 +414,6 @@ async def test_heartbeat_wrong_token_never_creates_or_releases_slot():
 
 @pytest.mark.asyncio
 async def test_live_two_coordinators_never_over_admit_same_pool():
-    """Optional real-Postgres concurrency check.
-
-    Unit tests prove the SQL shape; this verifies the row lock actually
-    serializes two independent coordinator connections. It is opt-in because
-    the normal MCP postgres connector is deliberately read-only.
-    """
     dsn = os.environ.get("FLEET_TEST_PG_DSN", "").strip()
     if not dsn:
         pytest.skip("FLEET_TEST_PG_DSN not configured")
@@ -443,8 +445,6 @@ async def test_live_two_coordinators_never_over_admit_same_pool():
         snapshot = await state_a.get_pool_snapshot(pool_name, capacity=1)
         assert snapshot.active == 1
     finally:
-        # Test-only cleanup is intentionally explicit SQL on the internal
-        # write pool. Production FleetState exposes no age-based/reaper API.
         for state in (state_a, state_b):
             if state._pool is not None:
                 async with state._pool.acquire() as conn:
@@ -460,6 +460,39 @@ async def test_live_two_coordinators_never_over_admit_same_pool():
         await state_b.close()
 
 
+@pytest.mark.asyncio
+async def test_list_bound_leases_queries_with_pool_scope():
+    rows = [
+        _lease_row(task_id="task-1", job_id="job-1"),
+        _lease_row(
+            task_id="task-2",
+            job_id="job-2",
+            token="22222222-2222-2222-2222-222222222222",
+        ),
+    ]
+    conn = _FakeConn(fetchs=[rows])
+    leases = await _state(conn).list_bound_leases("ssh-gateway/sshd")
+
+    assert [lease.job_id for lease in leases] == ["job-1", "job-2"]
+    assert [lease.pool for lease in leases] == ["ssh-gateway/sshd", "ssh-gateway/sshd"]
+    fetch_calls = [(sql, args) for kind, sql, args in conn.calls if kind == "fetch"]
+    assert fetch_calls == [(fleet_state_module._GET_BOUND_LEASES_SQL, ("ssh-gateway/sshd",))]
+
+
+def test_list_bound_leases_sql_is_pool_scoped():
+    sql = fleet_state_module._GET_BOUND_LEASES_SQL.lower()
+    assert "job_id is not null" in sql
+    assert "pool = $1" in sql
+
+
+@pytest.mark.asyncio
+async def test_list_bound_leases_requires_non_empty_pool_name():
+    conn = _FakeConn(fetchs=[[]])
+    with pytest.raises(ValueError, match="pool_name"):
+        await _state(conn).list_bound_leases("   ")
+
+
 def test_resource_exhausted_is_durable_terminal_status():
     from examples.mcp_server.fleet_state import TERMINAL_STATUSES
+
     assert "resource-exhausted" in TERMINAL_STATUSES

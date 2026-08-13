@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -286,4 +287,370 @@ def test_configured_dsn_requires_explicit_target_or_complete_pg_environment(monk
 
 def test_resource_exhausted_is_pre_submit_terminal():
     from examples.mcp_server.fleet_runtime import _PRE_SUBMIT_TERMINAL
+
     assert "resource-exhausted" in _PRE_SUBMIT_TERMINAL
+
+
+def _watch_runtime(state, **kwargs) -> FleetRuntime:
+    runtime = FleetRuntime(
+        state,
+        pool_name="ssh-gateway/sshd",
+        capacity=2,
+        coordinator_id="gpt-a",
+        watch_poll_interval=0.01,
+        **kwargs,
+    )
+    runtime._schema_ready = True
+    return runtime
+
+
+async def _wait_until(predicate, *, timeout_s: float = 5.0):
+    waited = 0.0
+    while waited < timeout_s:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+        waited += 0.01
+    return predicate()
+
+
+@pytest.mark.asyncio
+async def test_bound_job_watcher_releases_lease_when_gateway_turns_terminal():
+    lease = _lease()
+    state = MagicMock()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, lease))
+    state.bind_job = AsyncMock(return_value=_lease(job_id="job-42"))
+    state.complete_task = AsyncMock()
+    state.get_lease_by_job = AsyncMock(return_value=_lease(job_id="job-42"))
+    state.list_bound_leases = AsyncMock(return_value=[])
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state)
+
+    statuses = iter(
+        [
+            {"job_id": "job-42", "status": "running"},
+            {"job_id": "job-42", "status": "completed", "exit_code": 0},
+        ]
+    )
+
+    def status_fn(job_id: str) -> dict:
+        try:
+            return next(statuses)
+        except StopIteration:
+            return {"job_id": job_id, "status": "completed", "exit_code": 0}
+
+    result = await runtime.submit(
+        project="demo",
+        task_id="task-1",
+        submit_sync=lambda: {"task_id": "task-1", "status": "running", "job_id": "job-42"},
+        job_status_fn=status_fn,
+    )
+    assert result["job_id"] == "job-42"
+
+    assert await _wait_until(lambda: state.complete_task.await_count >= 1)
+    assert state.complete_task.await_args.kwargs["expected_job_id"] == "job-42"
+    assert state.complete_task.await_args.kwargs["status"] == "completed"
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_watcher_keeps_lease_while_gateway_job_running():
+    state = MagicMock()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
+    state.bind_job = AsyncMock(return_value=_lease(job_id="job-42"))
+    state.complete_task = AsyncMock()
+    state.list_bound_leases = AsyncMock(return_value=[])
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state)
+
+    await runtime.submit(
+        project="demo",
+        task_id="task-1",
+        submit_sync=lambda: {"task_id": "task-1", "status": "running", "job_id": "job-42"},
+        job_status_fn=lambda jid: {"job_id": jid, "status": "running"},
+    )
+    await asyncio.sleep(0.05)
+
+    assert state.complete_task.await_count == 0
+    assert "job-42" in runtime._watchers_by_job
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_watcher_never_releases_on_job_not_found():
+    state = MagicMock()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
+    state.bind_job = AsyncMock(return_value=_lease(job_id="job-42"))
+    state.complete_task = AsyncMock()
+    state.list_bound_leases = AsyncMock(return_value=[])
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state)
+
+    def status_fn(job_id: str) -> dict:
+        raise RuntimeError(f"JOB_NOT_FOUND for {job_id}")
+
+    await runtime.submit(
+        project="demo",
+        task_id="task-1",
+        submit_sync=lambda: {"task_id": "task-1", "status": "running", "job_id": "job-42"},
+        job_status_fn=status_fn,
+    )
+    await asyncio.sleep(0.05)
+
+    assert state.complete_task.await_count == 0
+    assert "job-42" in runtime._watchers_by_job
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_watcher_recovers_after_transient_errors():
+    state = MagicMock()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
+    state.bind_job = AsyncMock(return_value=_lease(job_id="job-42"))
+    state.complete_task = AsyncMock()
+    state.get_lease_by_job = AsyncMock(return_value=_lease(job_id="job-42"))
+    state.list_bound_leases = AsyncMock(return_value=[])
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state)
+
+    calls = {"count": 0}
+
+    def status_fn(job_id: str) -> dict:
+        calls["count"] += 1
+        if calls["count"] <= 3:
+            raise RuntimeError("upstream timeout")
+        return {"job_id": job_id, "status": "completed", "exit_code": 0}
+
+    await runtime.submit(
+        project="demo",
+        task_id="task-1",
+        submit_sync=lambda: {"task_id": "task-1", "status": "running", "job_id": "job-42"},
+        job_status_fn=status_fn,
+    )
+
+    assert await _wait_until(lambda: state.complete_task.await_count >= 1)
+    assert calls["count"] >= 4
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_watcher_retries_terminal_reconciliation_after_transient_state_error():
+    state = MagicMock()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
+    state.bind_job = AsyncMock(return_value=_lease(job_id="job-42"))
+    state.get_lease_by_job = AsyncMock(return_value=_lease(job_id="job-42"))
+    state.complete_task = AsyncMock(side_effect=[RuntimeError("postgres unavailable"), None])
+    state.list_bound_leases = AsyncMock(return_value=[])
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state)
+
+    await runtime.submit(
+        project="demo",
+        task_id="task-1",
+        submit_sync=lambda: {"task_id": "task-1", "status": "running", "job_id": "job-42"},
+        job_status_fn=lambda jid: {"job_id": jid, "status": "completed", "exit_code": 0},
+    )
+
+    assert await _wait_until(lambda: state.complete_task.await_count >= 2)
+    assert state.complete_task.await_count == 2
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_sweep_releases_terminal_bound_lease_before_admission():
+    state = MagicMock()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
+    state.list_bound_leases = AsyncMock(return_value=[_lease(job_id="job-stale")])
+    state.bind_job = AsyncMock(return_value=_lease(job_id="job-new"))
+    state.complete_task = AsyncMock()
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state)
+
+    statuses = {
+        "job-stale": {"job_id": "job-stale", "status": "completed", "exit_code": 0},
+        "job-new": {"job_id": "job-new", "status": "running"},
+    }
+
+    result = await runtime.submit(
+        project="demo",
+        task_id="task-1",
+        submit_sync=lambda: {"task_id": "task-1", "status": "running", "job_id": "job-new"},
+        job_status_fn=lambda jid: statuses[jid],
+    )
+
+    assert result["job_id"] == "job-new"
+    state.complete_task.assert_awaited_once()
+    assert state.complete_task.await_args.kwargs["expected_job_id"] == "job-stale"
+    assert state.complete_task.await_args.kwargs["status"] == "completed"
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_sweep_retains_running_bound_lease():
+    state = MagicMock()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
+    state.list_bound_leases = AsyncMock(return_value=[_lease(job_id="job-running")])
+    state.bind_job = AsyncMock(return_value=_lease(job_id="job-new"))
+    state.complete_task = AsyncMock()
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state)
+
+    statuses = {
+        "job-running": {"job_id": "job-running", "status": "running"},
+        "job-new": {"job_id": "job-new", "status": "running"},
+    }
+
+    await runtime.submit(
+        project="demo",
+        task_id="task-1",
+        submit_sync=lambda: {"task_id": "task-1", "status": "running", "job_id": "job-new"},
+        job_status_fn=lambda jid: statuses[jid],
+    )
+
+    assert state.complete_task.await_count == 0
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_sweep_is_scoped_to_pool():
+    state = MagicMock()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
+    state.list_bound_leases = AsyncMock(return_value=[])
+    state.bind_job = AsyncMock(return_value=_lease(job_id="job-new"))
+    state.complete_task = AsyncMock()
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state)
+
+    await runtime.submit(
+        project="demo",
+        task_id="task-1",
+        submit_sync=lambda: {"task_id": "task-1", "status": "running", "job_id": "job-new"},
+        job_status_fn=lambda jid: {"job_id": jid, "status": "running"},
+    )
+
+    state.list_bound_leases.assert_awaited_once_with(pool_name="ssh-gateway/sshd")
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_sweep_discovered_running_lease_restores_watcher():
+    state = MagicMock()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
+    state.list_bound_leases = AsyncMock(return_value=[_lease(job_id="job-running")])
+    state.bind_job = AsyncMock(return_value=_lease(job_id="job-new"))
+    state.complete_task = AsyncMock()
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state)
+
+    statuses = {
+        "job-running": {"job_id": "job-running", "status": "running"},
+        "job-new": {"job_id": "job-new", "status": "running"},
+    }
+
+    await runtime.submit(
+        project="demo",
+        task_id="task-1",
+        submit_sync=lambda: {"task_id": "task-1", "status": "running", "job_id": "job-new"},
+        job_status_fn=lambda jid: statuses[jid],
+    )
+
+    assert "job-running" in runtime._watchers_by_job
+    assert state.complete_task.await_count == 0
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_sweep_restores_watcher_for_unreachable_bound_lease():
+    state = MagicMock()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
+    state.list_bound_leases = AsyncMock(return_value=[_lease(job_id="job-unreachable")])
+    state.bind_job = AsyncMock(return_value=_lease(job_id="job-new"))
+    state.complete_task = AsyncMock()
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state)
+
+    def status_fn(job_id: str) -> dict:
+        if job_id == "job-unreachable":
+            raise RuntimeError("JOB_NOT_FOUND")
+        return {"job_id": job_id, "status": "running"}
+
+    await runtime.submit(
+        project="demo",
+        task_id="task-1",
+        submit_sync=lambda: {"task_id": "task-1", "status": "running", "job_id": "job-new"},
+        job_status_fn=status_fn,
+    )
+
+    assert "job-unreachable" in runtime._watchers_by_job
+    assert "job-new" in runtime._watchers_by_job
+    assert state.complete_task.await_count == 0
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_existing_bound_lease_restores_watcher_on_submit():
+    state = MagicMock()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, True, 2, 1, _lease(job_id="job-existing")))
+    state.list_bound_leases = AsyncMock(return_value=[])
+    state.complete_task = AsyncMock()
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state)
+
+    submit = MagicMock()
+    result = await runtime.submit(
+        project="demo",
+        task_id="task-1",
+        submit_sync=submit,
+        job_status_fn=lambda jid: {"job_id": jid, "status": "running"},
+    )
+
+    assert result["job_id"] == "job-existing"
+    submit.assert_not_called()
+    assert "job-existing" in runtime._watchers_by_job
+    assert state.complete_task.await_count == 0
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_exactly_one_watcher_per_job_id():
+    state = MagicMock()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, True, 2, 1, _lease(job_id="job-1")))
+    state.list_bound_leases = AsyncMock(return_value=[])
+    state.complete_task = AsyncMock()
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state)
+
+    for _ in range(2):
+        await runtime.submit(
+            project="demo",
+            task_id="task-1",
+            submit_sync=MagicMock(),
+            job_status_fn=lambda jid: {"job_id": jid, "status": "running"},
+        )
+
+    assert list(runtime._watchers_by_job.keys()) == ["job-1"]
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_watchers_then_closes_state():
+    state = MagicMock()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
+    state.bind_job = AsyncMock(return_value=_lease(job_id="job-42"))
+    state.complete_task = AsyncMock()
+    state.list_bound_leases = AsyncMock(return_value=[])
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state)
+
+    await runtime.submit(
+        project="demo",
+        task_id="task-1",
+        submit_sync=lambda: {"task_id": "task-1", "status": "running", "job_id": "job-42"},
+        job_status_fn=lambda jid: {"job_id": jid, "status": "running"},
+    )
+    assert runtime._watchers_by_job
+
+    await runtime.close()
+
+    assert not runtime._watchers_by_job
+    state.close.assert_awaited_once()

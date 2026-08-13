@@ -18,9 +18,23 @@ from examples.mcp_server.agent_paths import (
 
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{10,120}$")
 FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
+ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
-# Legacy constants remain import-compatible for callers/tests. Production uses
-# agent_paths.task_* helpers when MCP_AGENT_STATE_ROOT is configured.
+_SENTENCE_ENDINGS = (".", "?", "!")
+_TRAILING_OPERATORS = frozenset({"&&", "||", "|", ">", ">>", "<", "<&", ">&", "2>"})
+_FUNCTION_WORDS = frozenset(
+    {
+        "a", "an", "and", "any", "are", "as", "at", "be", "been", "being",
+        "but", "by", "can", "could", "did", "do", "does", "for", "from", "has",
+        "have", "having", "he", "her", "his", "how", "i", "if", "in", "into", "is",
+        "it", "its", "me", "my", "no", "not", "of", "on", "only", "or", "our",
+        "please", "shall", "should", "so", "such", "than", "that", "the", "their",
+        "them", "then", "there", "these", "they", "this", "those", "to", "was", "we",
+        "were", "what", "when", "where", "which", "who", "why", "will", "with", "would",
+        "you", "your",
+    }
+)
+
 TASKS_REL_DIR = ".ai-bridge/tasks"
 ARCHIVE_REL_DIR = ".ai-bridge/archive"
 
@@ -32,24 +46,84 @@ def validate_task_id(task_id: str) -> None:
 
 
 def validate_filename(filename: str) -> None:
-    """Raise ValueError if filename is malformed.
-
-    Every current caller of read_agent_task_file() passes a hardcoded
-    literal, but the function interpolates filename directly into a shell
-    command with no escaping — this rejects path separators (path
-    traversal) and shell metacharacters (injection) so it stays safe if a
-    future caller ever passes anything less trusted.
-    """
+    """Raise ValueError if filename is malformed."""
     if not FILENAME_RE.match(filename):
         raise ValueError(f"Invalid filename: {filename!r}. Must match {FILENAME_RE.pattern}")
+
+
+def _is_valid_shell_command(entry: str) -> bool:
+    """Return True if entry tokenizes as a shell command without dangling operators."""
+    try:
+        tokens = shlex.split(entry, posix=True)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    return tokens[-1] not in _TRAILING_OPERATORS
+
+
+def _has_command_shape(tokens: list[str]) -> bool:
+    """Return True if any token looks command-like."""
+    for tok in tokens:
+        if "/" in tok or tok.startswith("-") or ENV_ASSIGNMENT_RE.match(tok):
+            return True
+    return False
+
+
+def _looks_like_prose(entry: str) -> bool:
+    """Return True if entry reads as natural-language prose, not a shell command."""
+    words = entry.split()
+    if len(words) < 4:
+        return False
+    if _has_command_shape(words):
+        return False
+    last = words[-1]
+    if len(last) > 1 and last.endswith(_SENTENCE_ENDINGS):
+        return True
+    function_words = sum(1 for w in words if w.strip(".,;:!?()[]\"'").lower() in _FUNCTION_WORDS)
+    return function_words >= 3
+
+
+def validate_required_checks(required_checks: list[str] | None) -> None:
+    """Reject prose/invalid shell syntax before a worker is launched."""
+    if required_checks is None:
+        return
+    if not isinstance(required_checks, list):
+        raise TypeError("required_checks must be a list of non-empty shell command strings")
+    for idx, check in enumerate(required_checks):
+        label = f"required_checks[{idx}]"
+        if not isinstance(check, str):
+            raise TypeError(f"{label} must be a string, got {type(check).__name__}")
+        stripped = check.strip()
+        if not stripped:
+            raise ValueError(f"{label} must be a non-empty shell command string")
+        if not _is_valid_shell_command(stripped):
+            raise ValueError(f"{label} is not valid shell syntax: {check!r}")
+        if _looks_like_prose(stripped):
+            raise ValueError(
+                f"{label} looks like acceptance prose, not a shell command: {check!r}. "
+                "Put descriptive acceptance criteria in acceptance_criteria, not required_checks."
+            )
+
+
+def validate_scope_contract(
+    allowed_files: list[str] | None,
+    forbidden_files: list[str] | None,
+) -> None:
+    """Reject obviously contradictory file-scope contracts before launch."""
+    allowed = [item.strip() for item in (allowed_files or []) if isinstance(item, str) and item.strip()]
+    forbidden = [item.strip() for item in (forbidden_files or []) if isinstance(item, str) and item.strip()]
+    if allowed and any(pattern in {"**", "**/*", "*"} for pattern in forbidden):
+        raise ValueError("forbidden_files blocks every allowed file; fix the task scope before launch")
+    overlap = sorted(set(allowed).intersection(forbidden))
+    if overlap:
+        raise ValueError(f"allowed_files and forbidden_files overlap: {', '.join(overlap)}")
 
 
 def _encoded_write(path: str, content: str) -> str:
     """Build one shell-safe file write without interpolating raw content."""
     payload = base64.b64encode(content.encode("utf-8")).decode("ascii")
-    return (
-        f"printf %s {shlex.quote(payload)} | base64 -d > {shlex.quote(path)}"
-    )
+    return f"printf %s {shlex.quote(payload)} | base64 -d > {shlex.quote(path)}"
 
 
 def build_task_json(
@@ -65,6 +139,8 @@ def build_task_json(
 ) -> str:
     """Build machine-readable task.json content."""
     validate_task_id(task_id)
+    validate_required_checks(required_checks)
+    validate_scope_contract(allowed_files, forbidden_files)
     data: dict[str, Any] = {
         "task_id": task_id,
         "agent": agent,
@@ -108,6 +184,8 @@ def build_current_plan(
 ) -> str:
     """Build human-readable current-plan.md content."""
     validate_task_id(task_id)
+    validate_required_checks(required_checks)
+    validate_scope_contract(allowed_files, forbidden_files)
     allow = "\n".join(f"- {f}" for f in (allowed_files or []))
     forbid = "\n".join(f"- {f}" for f in (forbidden_files or []))
     checks = "\n".join(f"- `{c}`" for c in (required_checks or []))
@@ -162,11 +240,7 @@ def archive_agent_task(run_cmd, *, project: str, task_id: str) -> dict[str, Any]
 
 
 def read_agent_task_file(run_cmd, *, project: str, task_id: str, filename: str) -> dict[str, Any]:
-    """Read a file from .ai-bridge/tasks/<task_id>/ via shell.
-
-    run_cmd is a callable(project, command) that executes a shell command
-    and returns dict with at least {'stdout': str, 'stderr': str, 'exit_code': int}.
-    """
+    """Read a file from .ai-bridge/tasks/<task_id>/ via shell."""
     validate_task_id(task_id)
     validate_filename(filename)
     path = f"{task_dir(project, task_id)}/{filename}"
@@ -192,10 +266,7 @@ def write_agent_task(
     constraints: str | None = None,
     worktree_path: str | None = None,
 ) -> dict[str, Any]:
-    """Write task.json + current-plan.md + agent-status.md to .ai-bridge/tasks/<task_id>/.
-
-    Also writes worktree-path.txt if worktree_path is provided.
-    """
+    """Write task.json + current-plan.md + agent-status.md to .ai-bridge/tasks/<task_id>/."""
     validate_task_id(task_id)
 
     task_json = build_task_json(
