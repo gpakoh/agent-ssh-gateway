@@ -168,6 +168,10 @@ def project_run_opencode(
         "task_id": task_id,
         "status": "needs-review"
         if exit_code == 0
+        else "blocked"
+        if exit_code == 76
+        else "resource-exhausted"
+        if exit_code == 137
         else "failed"
         if exit_code is not None
         else "error",

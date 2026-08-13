@@ -282,3 +282,8 @@ def test_configured_dsn_requires_explicit_target_or_complete_pg_environment(monk
 
     with pytest.raises(FleetRuntimeError, match="missing: PGHOST, PGDATABASE, PGUSER"):
         runtime_module._configured_dsn()
+
+
+def test_resource_exhausted_is_pre_submit_terminal():
+    from examples.mcp_server.fleet_runtime import _PRE_SUBMIT_TERMINAL
+    assert "resource-exhausted" in _PRE_SUBMIT_TERMINAL

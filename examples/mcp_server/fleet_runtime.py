@@ -40,7 +40,7 @@ _COORDINATOR_ENV: Final = "MCP_AGENT_COORDINATOR_ID"
 _DEFAULT_POOL: Final = "ssh-gateway/sshd"
 _GATEWAY_TERMINAL: Final[frozenset[str]] = frozenset({"completed", "failed", "cancelled"})
 _PRE_SUBMIT_TERMINAL: Final[frozenset[str]] = frozenset(
-    {"needs-review", "completed", "failed", "cancelled", "rate-limited", "blocked", "error"}
+    {"needs-review", "completed", "failed", "cancelled", "rate-limited", "resource-exhausted", "blocked", "error"}
 )
 
 

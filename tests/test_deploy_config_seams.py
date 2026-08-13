@@ -930,3 +930,29 @@ class TestRedisTrustBoundary:
         log_line = next(line for line in lines if "Connected to Redis" in line)
         assert "redis_url" not in log_line
         assert "redis://" not in log_line
+
+
+class TestOpenCodeProductionAdmission:
+    def test_sshd_has_bounded_headroom_for_fleet(self):
+        services = _load_compose()["services"]
+        resources = services["sshd"]["deploy"]["resources"]
+        assert resources["limits"]["memory"] == "16G"
+        assert resources["reservations"]["memory"] == "128M"
+
+    def test_oauth_enables_durable_fleet_admission(self):
+        env = _load_compose()["services"]["mcp-oauth"]["environment"]
+        values = {item.split("=", 1)[0]: item.split("=", 1)[1] for item in env}
+        assert values["MCP_AGENT_FLEET_ENABLED"] == "${MCP_AGENT_FLEET_ENABLED:-true}"
+        assert values["MCP_AGENT_FLEET_CAPACITY"] == "${MCP_AGENT_FLEET_CAPACITY:-64}"
+        assert values["MCP_AGENT_FLEET_POOL"] == "${MCP_AGENT_FLEET_POOL:-ssh-gateway/sshd}"
+
+    def test_proxy_is_fail_closed_for_builder_and_executor(self):
+        services = _load_compose()["services"]
+        for service in ("sshd", "mcp-oauth"):
+            env = services[service]["environment"]
+            assert "OPENCODE_PROXY_REQUIRED=${OPENCODE_PROXY_REQUIRED:-true}" in env
+
+    def test_dynamic_startup_reservation_is_configured(self):
+        env = _load_compose()["services"]["mcp-oauth"]["environment"]
+        assert "OPENCODE_STARTUP_RESERVE_BYTES=${OPENCODE_STARTUP_RESERVE_BYTES:-805306368}" in env
+        assert "OPENCODE_STARTUP_RESERVE_SECONDS=${OPENCODE_STARTUP_RESERVE_SECONDS:-60}" in env
