@@ -33,6 +33,8 @@ fi
 COMPOSE="${COMPOSE:-docker compose -p web-ssh-gateway -f docker/docker-compose.yml}"
 GATEWAY_REPO="${WEB_SSH_GATEWAY_REPO:?set WEB_SSH_GATEWAY_REPO in docker/.env}"
 MCP_REPO="${MCP_SERVER_REPO:?set MCP_SERVER_REPO in docker/.env}"
+# CI publishes the executor next to the gateway artifact.
+SSHD_REPO="${SSH_GATEWAY_SSHD_REPO:-${GATEWAY_REPO%/*}/ssh-gateway-sshd}"
 # CI's deploy job passes DEPLOY_SHA=${{ github.sha }}, the exact commit
 # that passed every other job and triggered this deploy -- build-and-push
 # already tags images with both :latest and :$DEPLOY_SHA. Deploying the
@@ -73,6 +75,14 @@ wait_docker_health() {
     local status
     status=$(docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null || echo "missing")
     if [ "$status" = "healthy" ]; then
+      if [ "$container" = "ssh-gateway-sshd" ]; then
+        local memory_bytes
+        memory_bytes=$(docker inspect --format '{{.HostConfig.Memory}}' "$container" 2>/dev/null || echo "0")
+        if ! [[ "$memory_bytes" =~ ^[0-9]+$ ]] || (( memory_bytes < 17179869184 )); then
+          echo "FAIL (memory ceiling=${memory_bytes:-unknown}, required>=17179869184)"
+          return 1
+        fi
+      fi
       echo "OK"
       return 0
     fi
@@ -86,6 +96,7 @@ wait_docker_health() {
 
 smoke() {
   local ok=true
+  wait_docker_health "ssh-gateway-sshd" ssh-gateway-sshd 120 || ok=false
   # No curl against localhost:8085 here — this script may run from a CI
   # job container whose "localhost" is its own network namespace, not the
   # host's (same class of bug quart-core's deploy script documents).
@@ -191,6 +202,14 @@ validate_image_ref() {
   return 1
 }
 
+validate_sshd_image_ref() {
+  local ref="$1"
+  if validate_image_ref "$ref" "$SSHD_REPO"; then
+    return 0
+  fi
+  [[ "$ref" =~ ^sha256:[0-9a-f]{64}$ ]]
+}
+
 read_state_field() {
   python3 -c "
 import json
@@ -209,6 +228,7 @@ json.dump(
     {
         'gateway_image': '''$1''',
         'mcp_server_image': '''$2''',
+        'sshd_image': '''$3''',
         'deployed_at': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
     },
     open('$STATE_FILE', 'w'),
@@ -225,8 +245,8 @@ deploy_services() {
   # same MCP_SERVER_IMAGE as mcp-server (see docker-compose.yml) -- both
   # must be redeployed together or mcp-oauth silently drifts from what
   # was just pushed/rolled back (see verify_provenance()).
-  local gateway_image="$1" mcp_image="$2"
-  WEB_SSH_GATEWAY_IMAGE="$gateway_image" $COMPOSE up -d --no-deps --no-build web-ssh-gateway
+  local gateway_image="$1" mcp_image="$2" sshd_image="$3"
+  SSH_GATEWAY_SSHD_IMAGE="$sshd_image" WEB_SSH_GATEWAY_IMAGE="$gateway_image" $COMPOSE up -d --no-deps --no-build sshd web-ssh-gateway
   MCP_SERVER_IMAGE="$mcp_image" $COMPOSE up -d --no-deps --no-build mcp-server
   MCP_SERVER_IMAGE="$mcp_image" $COMPOSE up -d --no-deps --no-build mcp-oauth
 }
@@ -264,24 +284,25 @@ log "=== deploy-from-registry: checking for a new image (tag: $DEPLOY_TAG) ==="
 # wrong tag whenever DEPLOY_TAG is a SHA.
 docker pull "$GATEWAY_REPO:$DEPLOY_TAG"
 docker pull "$MCP_REPO:$DEPLOY_TAG"
+docker pull "$SSHD_REPO:$DEPLOY_TAG"
 
 RUNNING_GATEWAY_ID=$(image_id web-ssh-gateway)
 RUNNING_MCP_ID=$(image_id mcp-server)
+RUNNING_SSHD_ID=$(image_id ssh-gateway-sshd)
 PULLED_GATEWAY_ID=$(docker images --no-trunc --format '{{.ID}}' "$GATEWAY_REPO:$DEPLOY_TAG" | head -1)
 PULLED_MCP_ID=$(docker images --no-trunc --format '{{.ID}}' "$MCP_REPO:$DEPLOY_TAG" | head -1)
 
-if [ "$RUNNING_GATEWAY_ID" = "$PULLED_GATEWAY_ID" ] && [ "$RUNNING_MCP_ID" = "$PULLED_MCP_ID" ]; then
-  log "Up to date — nothing to deploy."
-  exit 0
-fi
 
 PREVIOUS_GATEWAY_IMAGE=$(read_state_field gateway_image)
 PREVIOUS_MCP_IMAGE=$(read_state_field mcp_server_image)
+PREVIOUS_SSHD_IMAGE=$(read_state_field sshd_image)
+PREVIOUS_SSHD_IMAGE="${PREVIOUS_SSHD_IMAGE:-$RUNNING_SSHD_ID}"
 
 # Pin by digest for the actual deploy + state recording — never a floating
 # tag (:latest or otherwise).
 NEW_GATEWAY_IMAGE=$(repo_digest "$GATEWAY_REPO:$DEPLOY_TAG")
 NEW_MCP_IMAGE=$(repo_digest "$MCP_REPO:$DEPLOY_TAG")
+NEW_EXECUTOR_IMAGE=$(repo_digest "$SSHD_REPO:$DEPLOY_TAG")
 
 # MAJOR audit finding: rollback below reverts the application images but
 # has never reverted the DB schema -- Alembic has no downgrade step here,
@@ -296,7 +317,7 @@ NEW_MCP_IMAGE=$(repo_digest "$MCP_REPO:$DEPLOY_TAG")
 PRE_DEPLOY_REVISION=$(alembic_revision web-ssh-gateway)
 
 log "New image detected — deploying $NEW_GATEWAY_IMAGE / $NEW_MCP_IMAGE"
-deploy_services "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE"
+deploy_services "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE" "$NEW_EXECUTOR_IMAGE"
 
 log "Running database migrations (alembic upgrade head)..."
 if ! run_migrations; then
@@ -304,7 +325,7 @@ if ! run_migrations; then
 elif ! restart_gateway_after_migrations; then
   log "Gateway restart after database migration FAILED."
 elif smoke; then
-  write_state "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE"
+  write_state "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE" "$NEW_EXECUTOR_IMAGE"
   log "Deploy OK — recorded as last known good."
   exit 0
 else
@@ -318,13 +339,13 @@ if [ -z "$PREVIOUS_GATEWAY_IMAGE" ]; then
   exit 1
 fi
 
-if ! validate_image_ref "$PREVIOUS_GATEWAY_IMAGE" "$GATEWAY_REPO" || ! validate_image_ref "$PREVIOUS_MCP_IMAGE" "$MCP_REPO"; then
+if ! validate_image_ref "$PREVIOUS_GATEWAY_IMAGE" "$GATEWAY_REPO" || ! validate_image_ref "$PREVIOUS_MCP_IMAGE" "$MCP_REPO" || ! validate_sshd_image_ref "$PREVIOUS_SSHD_IMAGE"; then
   log "Rollback state in $STATE_FILE does not look like a valid digest-pinned image reference — refusing to roll back to it. Leaving the failed deploy in place for manual investigation."
   exit 1
 fi
 
 log "Rolling back to $PREVIOUS_GATEWAY_IMAGE / $PREVIOUS_MCP_IMAGE"
-deploy_services "$PREVIOUS_GATEWAY_IMAGE" "$PREVIOUS_MCP_IMAGE"
+deploy_services "$PREVIOUS_GATEWAY_IMAGE" "$PREVIOUS_MCP_IMAGE" "$PREVIOUS_SSHD_IMAGE"
 
 SCHEMA_ADVANCED=false
 if [ -n "$PRE_DEPLOY_REVISION" ] && [ -n "$POST_MIGRATION_REVISION" ] && [ "$PRE_DEPLOY_REVISION" != "$POST_MIGRATION_REVISION" ]; then
