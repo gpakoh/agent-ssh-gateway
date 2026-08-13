@@ -65,6 +65,55 @@ def test_repo_https_target_uses_user_and_clone_url(monkeypatch: pytest.MonkeyPat
     assert calls == ["/user", "/repos/gpakoh/repo"]
 
 
+def test_staging_git_dir_is_stable(tmp_path: Path) -> None:
+    path = cpg._staging_git_dir("proj", tmp_path)
+    assert path.name.endswith(".git")
+    assert path.parent == Path("/app/data/control-plane-git")
+
+
+def test_stage_branch_from_checkout_fetches_local_ref(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: list[list[str]] = []
+
+    def fake_run(argv, *, cwd, env=None, timeout=60):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(cpg, "_run_git", fake_run)
+    cpg._stage_branch_from_checkout(tmp_path, tmp_path / "stage.git", "feature/x")
+    assert seen == [[
+        "git",
+        "-c",
+        f"safe.directory={tmp_path}",
+        "-c",
+        f"safe.directory={tmp_path / '.git'}",
+        "--git-dir",
+        str(tmp_path / "stage.git"),
+        "fetch",
+        "--no-tags",
+        str(tmp_path),
+        "refs/heads/feature/x:refs/heads/feature/x",
+    ]]
+
+
+def test_push_staged_ref_uses_bare_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: list[list[str]] = []
+
+    def fake_run(argv, *, cwd, env=None, timeout=60):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(cpg, "_run_git", fake_run)
+    cpg._push_staged_ref(tmp_path / "stage.git", "https://git.xloud.ru/gpakoh/repo.git", "feature/x", {"GIT_PASSWORD": "tok"})
+    assert seen == [[
+        "git",
+        "--git-dir",
+        str(tmp_path / "stage.git"),
+        "push",
+        "https://git.xloud.ru/gpakoh/repo.git",
+        "refs/heads/feature/x:refs/heads/feature/x",
+    ]]
+
+
 def test_git_push_control_plane_requires_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GITEA_TOKEN", raising=False)
     result = cpg.git_push_control_plane("proj")
@@ -95,6 +144,10 @@ def test_git_push_control_plane_does_not_touch_executor(monkeypatch: pytest.Monk
     monkeypatch.setattr(cpg, "_resolve_project_root", lambda project: tmp_path)
     monkeypatch.setattr(cpg, "_current_branch", lambda cwd: "feature/x")
     monkeypatch.setattr(cpg, "_verify_local_branch", lambda cwd, branch: None)
+    monkeypatch.setattr(cpg, "_staging_git_dir", lambda project, project_root: tmp_path / "stage.git")
+    monkeypatch.setattr(cpg, "_ensure_bare_repo", lambda staging_git_dir: None)
+    monkeypatch.setattr(cpg, "_stage_branch_from_checkout", lambda project_root, staging_git_dir, branch: None)
+    monkeypatch.setattr(cpg, "_verify_staged_ref", lambda staging_git_dir, branch: "abc123")
     monkeypatch.setattr(cpg, "_remote_url", lambda cwd, remote: "git@git.xloud.ru:gpakoh/repo.git")
     monkeypatch.setattr(cpg, "_parse_gitea_remote", lambda url: ("git.xloud.ru", "gpakoh", "repo"))
     monkeypatch.setattr(cpg, "_repo_https_target", lambda owner, repo, token: ("gpakoh", "https://git.xloud.ru/gpakoh/repo.git"))
@@ -110,7 +163,14 @@ def test_git_push_control_plane_does_not_touch_executor(monkeypatch: pytest.Monk
     assert result["ok"] is True
     argv = seen["argv"]
     env = seen["env"]
-    assert argv == ["git", "push", "https://git.xloud.ru/gpakoh/repo.git", "refs/heads/feature/x:refs/heads/feature/x"]
+    assert argv == [
+        "git",
+        "--git-dir",
+        str(tmp_path / "stage.git"),
+        "push",
+        "https://git.xloud.ru/gpakoh/repo.git",
+        "refs/heads/feature/x:refs/heads/feature/x",
+    ]
     assert "tok" not in " ".join(argv)
     assert env["GIT_PASSWORD"] == "tok"
     assert env["GIT_ASKPASS"]
@@ -122,6 +182,10 @@ def test_git_push_control_plane_non_fast_forward(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(cpg, "_resolve_project_root", lambda project: tmp_path)
     monkeypatch.setattr(cpg, "_current_branch", lambda cwd: "feature/x")
     monkeypatch.setattr(cpg, "_verify_local_branch", lambda cwd, branch: None)
+    monkeypatch.setattr(cpg, "_staging_git_dir", lambda project, project_root: tmp_path / "stage.git")
+    monkeypatch.setattr(cpg, "_ensure_bare_repo", lambda staging_git_dir: None)
+    monkeypatch.setattr(cpg, "_stage_branch_from_checkout", lambda project_root, staging_git_dir, branch: None)
+    monkeypatch.setattr(cpg, "_verify_staged_ref", lambda staging_git_dir, branch: "abc123")
     monkeypatch.setattr(cpg, "_remote_url", lambda cwd, remote: "git@git.xloud.ru:gpakoh/repo.git")
     monkeypatch.setattr(cpg, "_parse_gitea_remote", lambda url: ("git.xloud.ru", "gpakoh", "repo"))
     monkeypatch.setattr(cpg, "_repo_https_target", lambda owner, repo, token: ("gpakoh", "https://git.xloud.ru/gpakoh/repo.git"))
@@ -140,6 +204,10 @@ def test_git_push_control_plane_invalid_remote(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setattr(cpg, "_resolve_project_root", lambda project: tmp_path)
     monkeypatch.setattr(cpg, "_current_branch", lambda cwd: "feature/x")
     monkeypatch.setattr(cpg, "_verify_local_branch", lambda cwd, branch: None)
+    monkeypatch.setattr(cpg, "_staging_git_dir", lambda project, project_root: tmp_path / "stage.git")
+    monkeypatch.setattr(cpg, "_ensure_bare_repo", lambda staging_git_dir: None)
+    monkeypatch.setattr(cpg, "_stage_branch_from_checkout", lambda project_root, staging_git_dir, branch: None)
+    monkeypatch.setattr(cpg, "_verify_staged_ref", lambda staging_git_dir, branch: "abc123")
     monkeypatch.setattr(cpg, "_remote_url", lambda cwd, remote: (_ for _ in ()).throw(RuntimeError("GIT_REMOTE_NOT_ALLOWED")))
     result = cpg.git_push_control_plane("proj", remote="evil", branch="feature/x")
     assert result["ok"] is False
@@ -162,6 +230,10 @@ def test_git_push_control_plane_redacts_token_on_failure(monkeypatch: pytest.Mon
     monkeypatch.setattr(cpg, "_resolve_project_root", lambda project: tmp_path)
     monkeypatch.setattr(cpg, "_current_branch", lambda cwd: "feature/x")
     monkeypatch.setattr(cpg, "_verify_local_branch", lambda cwd, branch: None)
+    monkeypatch.setattr(cpg, "_staging_git_dir", lambda project, project_root: tmp_path / "stage.git")
+    monkeypatch.setattr(cpg, "_ensure_bare_repo", lambda staging_git_dir: None)
+    monkeypatch.setattr(cpg, "_stage_branch_from_checkout", lambda project_root, staging_git_dir, branch: None)
+    monkeypatch.setattr(cpg, "_verify_staged_ref", lambda staging_git_dir, branch: "abc123")
     monkeypatch.setattr(cpg, "_remote_url", lambda cwd, remote: "https://user:tok-secret@git.xloud.ru/gpakoh/repo.git")
     monkeypatch.setattr(cpg, "_parse_gitea_remote", lambda url: ("git.xloud.ru", "gpakoh", "repo"))
     monkeypatch.setattr(cpg, "_repo_https_target", lambda owner, repo, token: ("gpakoh", "https://git.xloud.ru/gpakoh/repo.git"))
@@ -181,6 +253,10 @@ def test_git_push_control_plane_gitea_unavailable(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(cpg, "_resolve_project_root", lambda project: tmp_path)
     monkeypatch.setattr(cpg, "_current_branch", lambda cwd: "feature/x")
     monkeypatch.setattr(cpg, "_verify_local_branch", lambda cwd, branch: None)
+    monkeypatch.setattr(cpg, "_staging_git_dir", lambda project, project_root: tmp_path / "stage.git")
+    monkeypatch.setattr(cpg, "_ensure_bare_repo", lambda staging_git_dir: None)
+    monkeypatch.setattr(cpg, "_stage_branch_from_checkout", lambda project_root, staging_git_dir, branch: None)
+    monkeypatch.setattr(cpg, "_verify_staged_ref", lambda staging_git_dir, branch: "abc123")
     monkeypatch.setattr(cpg, "_remote_url", lambda cwd, remote: "git@git.xloud.ru:gpakoh/repo.git")
     monkeypatch.setattr(cpg, "_parse_gitea_remote", lambda url: ("git.xloud.ru", "gpakoh", "repo"))
     monkeypatch.setattr(cpg, "_repo_https_target", lambda owner, repo, token: (_ for _ in ()).throw(RuntimeError("GIT_REMOTE_UNAVAILABLE")))
