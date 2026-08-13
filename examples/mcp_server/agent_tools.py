@@ -150,6 +150,11 @@ def _proxy_fetch_script_lines(
     return [
         "",
         "# Exclusive proxy + dynamic cgroup-headroom admission for OpenCode",
+        "PROXY_BLOCKED=0",
+        "PROXY_FETCH_RESULT=",
+        "OPENCODE_PROXY_URL=",
+        "OPENCODE_PROXY_LEASE_FILE=",
+        "OPENCODE_PROXY_DIGEST=",
         "PROXY_LEASE_ROOT=/tmp/opencode-proxy-leases",
         "PROXY_OWNER_PID=$$",
         'PROXY_OWNER_START=$(awk \'{print $22}\' "/proc/$PROXY_OWNER_PID/stat" 2>/dev/null || true)',
@@ -160,16 +165,17 @@ def _proxy_fetch_script_lines(
         f"OPENCODE_ADMISSION_POLL_SECONDS={admission_poll_seconds}",
         "PROXY_ADMISSION_STARTED=$(date +%s)",
         "while :; do",
-        f"PROXY_FETCH_RESULT=$(python3 - {_shell_escape(provider_url)} {_shell_escape(timeout)} \"$PROXY_OWNER_PID\" \"$PROXY_OWNER_START\" \"$PROXY_LEASE_ROOT\" \"$OPENCODE_STARTUP_RESERVE_BYTES\" \"$OPENCODE_STARTUP_RESERVE_SECONDS\" <<'PROXYFETCH_EOF'",
+        f"PROXY_FETCH_RESULT=$(python3 - {_shell_escape(provider_url)} {_shell_escape(timeout)} \"$PROXY_OWNER_PID\" \"$PROXY_OWNER_START\" \"$PROXY_LEASE_ROOT\" \"$OPENCODE_STARTUP_RESERVE_BYTES\" \"$OPENCODE_STARTUP_RESERVE_SECONDS\" \"${{OPENCODE_REJECTED_PROXY_DIGESTS:-}}\" <<'PROXYFETCH_EOF'",
         "import fcntl, hashlib, json, os, sys, time, urllib.request",
         "from pathlib import Path",
         "from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit",
         "",
-        "provider_url, timeout_raw, owner_pid_raw, owner_start, lease_root_raw, reserve_raw, reserve_seconds_raw = sys.argv[1:]",
+        "provider_url, timeout_raw, owner_pid_raw, owner_start, lease_root_raw, reserve_raw, reserve_seconds_raw, rejected_raw = sys.argv[1:]",
         "timeout = float(timeout_raw)",
         "owner_pid = int(owner_pid_raw)",
         "reserve_bytes = int(reserve_raw)",
         "reserve_seconds = int(reserve_seconds_raw)",
+        "rejected = {item for item in rejected_raw.split(',') if item}",
         "lease_root = Path(lease_root_raw)",
         "lease_root.mkdir(mode=0o700, parents=True, exist_ok=True)",
         "try:",
@@ -238,7 +244,7 @@ def _proxy_fetch_script_lines(
         "        break",
         "if not candidates:",
         "    print('proxy provider returned no usable proxy (' + ','.join(errors) + ')', file=sys.stderr)",
-        "    sys.exit(3)",
+        "    sys.exit(7 if rejected else 3)",
         "",
         "def _proc_start(pid):",
         "    try:",
@@ -289,7 +295,11 @@ def _proxy_fetch_script_lines(
         "            print(f'cgroup headroom unavailable: projected={projected} max={memory_max}', file=sys.stderr)",
         "            sys.exit(6)",
         "",
-        "    selected = next((proxy for proxy in candidates if proxy not in leased), None)",
+        "    eligible = [proxy for proxy in candidates if hashlib.sha256(proxy.encode('utf-8')).hexdigest() not in rejected]",
+        "    if not eligible:",
+        "        print('no alternative live proxy remains after startup rejection', file=sys.stderr)",
+        "        sys.exit(7)",
+        "    selected = next((proxy for proxy in eligible if proxy not in leased), None)",
         "    if selected is None:",
         "        print('all live proxies are already leased by active OpenCode workers', file=sys.stderr)",
         "        sys.exit(5)",
@@ -309,6 +319,7 @@ def _proxy_fetch_script_lines(
         "    os.replace(tmp_path, lease_path)",
         "    print(selected)",
         "    print(str(lease_path))",
+        "    print(digest)",
         "finally:",
         "    try:",
         "        fcntl.flock(lock_fd, fcntl.LOCK_UN)",
@@ -317,13 +328,14 @@ def _proxy_fetch_script_lines(
         "PROXYFETCH_EOF",
         ")",
         "PROXY_FETCH_RC=$?",
-        'if [ "$PROXY_FETCH_RC" -eq 0 ]; then break; fi',
+        'if [ "$PROXY_FETCH_RC" -eq 0 ] || [ "$PROXY_FETCH_RC" -eq 7 ]; then break; fi',
         'PROXY_ADMISSION_NOW=$(date +%s)',
         'if [ $((PROXY_ADMISSION_NOW - PROXY_ADMISSION_STARTED)) -ge "$OPENCODE_ADMISSION_WAIT_SECONDS" ]; then break; fi',
         'sleep "$OPENCODE_ADMISSION_POLL_SECONDS"',
         "done",
         'OPENCODE_PROXY_URL=$(printf "%s\\n" "$PROXY_FETCH_RESULT" | sed -n \'1p\')',
         'OPENCODE_PROXY_LEASE_FILE=$(printf "%s\\n" "$PROXY_FETCH_RESULT" | sed -n \'2p\')',
+        'OPENCODE_PROXY_DIGEST=$(printf "%s\\n" "$PROXY_FETCH_RESULT" | sed -n \'3p\')',
         'if [ "$PROXY_FETCH_RC" -eq 0 ] && [ -n "$OPENCODE_PROXY_URL" ] && [ -n "$OPENCODE_PROXY_LEASE_FILE" ]; then',
         '  export HTTP_PROXY="$OPENCODE_PROXY_URL" HTTPS_PROXY="$OPENCODE_PROXY_URL" ALL_PROXY="$OPENCODE_PROXY_URL"',
         '  export http_proxy="$OPENCODE_PROXY_URL" https_proxy="$OPENCODE_PROXY_URL" all_proxy="$OPENCODE_PROXY_URL"',
@@ -441,6 +453,105 @@ def _proxy_report_script_lines(provider_url: str, timeout: str) -> list[str]:
         "  fi",
         "fi",
         "",
+    ]
+
+
+def _proxy_startup_cooldown_script_lines(provider_url: str, timeout: str) -> list[str]:
+    """Best-effort cooldown for a proxy that never produced model output."""
+    base = urlsplit(provider_url)
+    report_url = f"{base.scheme}://{base.netloc}/proxy/report"
+    return [
+        'if [ -n "${OPENCODE_PROXY_URL:-}" ]; then',
+        '  python3 - "$OPENCODE_PROXY_URL" <<\'PROXYSTARTUPREPORT_EOF\'',
+        "import json, sys, urllib.request",
+        "proxy_url = sys.argv[1]",
+        f"report_url = {report_url!r}",
+        "try:",
+        "    req = urllib.request.Request(",
+        "        report_url,",
+        "        data=json.dumps({'proxy': proxy_url, 'retry_after_seconds': 300}).encode(),",
+        "        headers={'Content-Type': 'application/json'},",
+        "    )",
+        f"    urllib.request.urlopen(req, timeout={timeout})",
+        "except Exception:",
+        "    pass",
+        "PROXYSTARTUPREPORT_EOF",
+        "fi",
+    ]
+
+
+def _opencode_startup_watchdog_script_lines(
+    opencode_flags: str,
+    startup_timeout_seconds: int,
+    kill_grace_seconds: int,
+) -> list[str]:
+    prompt = (
+        "Read the plan at $td/current-plan.md and execute it fully. "
+        "Save the implementation diff to $td/implementation-diff.patch. "
+        "Update $td/agent-status.md as you complete each step. "
+        "Do not commit, do not push, do not create branches."
+    )
+    return [
+        f"OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS={startup_timeout_seconds}",
+        f"OPENCODE_STARTUP_KILL_GRACE_SECONDS={kill_grace_seconds}",
+        "OPENCODE_STARTUP_STALLED=0",
+        "run_opencode_attempt() {",
+        '  : > "$td/opencode-output.log"',
+        "  OPENCODE_STARTUP_STALLED=0",
+        "  FAILURE_REASON=",
+        '  if command -v setsid >/dev/null 2>&1; then',
+        f'    setsid "$OPCODE_BIN" run {opencode_flags} < /dev/null "{prompt}" > "$td/opencode-output.log" 2>&1 &',
+        "    OPENCODE_PID=$!",
+        "    OPENCODE_PROCESS_GROUP=1",
+        "  else",
+        f'    "$OPCODE_BIN" run {opencode_flags} < /dev/null "{prompt}" > "$td/opencode-output.log" 2>&1 &',
+        "    OPENCODE_PID=$!",
+        "    OPENCODE_PROCESS_GROUP=0",
+        "  fi",
+        "  OPENCODE_STARTUP_STARTED=$(date +%s)",
+        '  while kill -0 "$OPENCODE_PID" 2>/dev/null; do',
+        '    if python3 - "$td/opencode-output.log" <<\'OPENCODEPROGRESS_EOF\'',
+        "import re, sys",
+        "text = open(sys.argv[1], encoding='utf-8', errors='replace').read()",
+        "text = re.sub(r'\\x1b\\[[0-?]*[ -/]*[@-~]', '', text)",
+        "for raw in text.splitlines():",
+        "    line = raw.strip()",
+        "    if not line:",
+        "        continue",
+        "    if re.match(r'^>\\s*build\\s*[·:-]', line, re.I):",
+        "        continue",
+        "    raise SystemExit(0)",
+        "raise SystemExit(1)",
+        "OPENCODEPROGRESS_EOF",
+        "    then",
+        '      wait "$OPENCODE_PID"; RC=$?',
+        '      cat "$td/opencode-output.log"',
+        "      return",
+        "    fi",
+        "    OPENCODE_STARTUP_NOW=$(date +%s)",
+        '    if [ $((OPENCODE_STARTUP_NOW - OPENCODE_STARTUP_STARTED)) -ge "$OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS" ]; then',
+        "      OPENCODE_STARTUP_STALLED=1",
+        '      if [ "$OPENCODE_PROCESS_GROUP" -eq 1 ]; then kill -TERM "-$OPENCODE_PID" 2>/dev/null || true; else kill -TERM "$OPENCODE_PID" 2>/dev/null || true; fi',
+        "      OPENCODE_KILL_STARTED=$(date +%s)",
+        '      while kill -0 "$OPENCODE_PID" 2>/dev/null; do',
+        "        OPENCODE_KILL_NOW=$(date +%s)",
+        '        if [ $((OPENCODE_KILL_NOW - OPENCODE_KILL_STARTED)) -ge "$OPENCODE_STARTUP_KILL_GRACE_SECONDS" ]; then',
+        '          if [ "$OPENCODE_PROCESS_GROUP" -eq 1 ]; then kill -KILL "-$OPENCODE_PID" 2>/dev/null || true; else kill -KILL "$OPENCODE_PID" 2>/dev/null || true; fi',
+        "          break",
+        "        fi",
+        "        sleep 1",
+        "      done",
+        '      wait "$OPENCODE_PID" 2>/dev/null || true',
+        "      RC=78",
+        '      FAILURE_REASON="opencode-startup-timeout"',
+        '      cat "$td/opencode-output.log"',
+        "      return",
+        "    fi",
+        "    sleep 1",
+        "  done",
+        '  wait "$OPENCODE_PID"; RC=$?',
+        '  cat "$td/opencode-output.log"',
+        "}",
     ]
 
 
@@ -742,11 +853,15 @@ def _build_opencode_script(
     startup_reserve_seconds = int(os.environ.get("OPENCODE_STARTUP_RESERVE_SECONDS", "60"))
     admission_wait_seconds = int(os.environ.get("OPENCODE_ADMISSION_WAIT_SECONDS", "300"))
     admission_poll_seconds = int(os.environ.get("OPENCODE_ADMISSION_POLL_SECONDS", "2"))
+    startup_response_timeout_seconds = int(os.environ.get("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "60"))
+    startup_kill_grace_seconds = int(os.environ.get("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "5"))
     if (
         startup_reserve_bytes < 0
         or startup_reserve_seconds < 0
         or admission_wait_seconds < 0
         or admission_poll_seconds <= 0
+        or startup_response_timeout_seconds <= 0
+        or startup_kill_grace_seconds < 0
     ):
         raise ValueError("OpenCode admission timing/reserve values are invalid")
     allowed_files = list(allowed_files or [])
@@ -865,7 +980,15 @@ def _build_opencode_script(
         "FAILURE_REASON=",
         "OOM_KILL_BEFORE=$(awk '$1 == \"oom_kill\" {print $2}' /sys/fs/cgroup/memory.events 2>/dev/null || true)",
     ])
+    parts.extend(
+        _opencode_startup_watchdog_script_lines(
+            opencode_flags,
+            startup_response_timeout_seconds,
+            startup_kill_grace_seconds,
+        )
+    )
     if proxy_provider_url:
+        parts.append("acquire_opencode_proxy() {")
         parts.extend(
             _proxy_fetch_script_lines(
                 proxy_provider_url,
@@ -877,6 +1000,16 @@ def _build_opencode_script(
                 admission_poll_seconds=admission_poll_seconds,
             )
         )
+        parts.append("}")
+        parts.append("release_opencode_proxy() {")
+        parts.extend(_proxy_local_release_script_lines())
+        parts.append("}")
+        parts.append("cooldown_opencode_proxy() {")
+        parts.extend(_proxy_startup_cooldown_script_lines(proxy_provider_url, proxy_timeout))
+        parts.append("}")
+        parts.append("report_rate_limited_proxy() {")
+        parts.extend(_proxy_report_script_lines(proxy_provider_url, proxy_timeout))
+        parts.append("}")
     elif proxy_required:
         parts.extend(
             [
@@ -885,6 +1018,26 @@ def _build_opencode_script(
                 'echo "Proxy required; OpenCode launch blocked" >> "$td/agent-status.md"',
             ]
         )
+    if proxy_provider_url:
+        parts.append("acquire_opencode_proxy")
+    startup_retry_lines: list[str] = []
+    if proxy_provider_url:
+        startup_retry_lines = [
+            'if [ "${OPENCODE_STARTUP_STALLED:-0}" -eq 1 ] && [ "$PROXY_BLOCKED" -eq 0 ]; then',
+            '  echo "OpenCode startup stalled; rotating proxy" >> "$td/agent-status.md"',
+            "  cooldown_opencode_proxy",
+            '  if [ -n "${OPENCODE_PROXY_DIGEST:-}" ]; then',
+            '    OPENCODE_REJECTED_PROXY_DIGESTS="${OPENCODE_REJECTED_PROXY_DIGESTS:+$OPENCODE_REJECTED_PROXY_DIGESTS,}$OPENCODE_PROXY_DIGEST"',
+            "  fi",
+            "  release_opencode_proxy",
+            "  acquire_opencode_proxy",
+            '  if [ "$PROXY_BLOCKED" -eq 0 ]; then',
+            "    run_opencode_attempt",
+            "  else",
+            "    RC=76",
+            "  fi",
+            "fi",
+        ]
     parts.extend([
         'if [ "$PROXY_BLOCKED" -eq 1 ]; then',
         "  RC=76",
@@ -897,13 +1050,12 @@ def _build_opencode_script(
         # seen live in the E2E smoke) and aborts before the post-run
         # status/report block. Children inherit /dev/null, so this covers
         # the whole opencode subtree.
-        f'  $OPCODE_BIN run {opencode_flags} < /dev/null "Read the plan at $td/current-plan.md and execute it fully. Save the implementation diff to $td/implementation-diff.patch. Update $td/agent-status.md as you complete each step. Do not commit, do not push, do not create branches." > "$td/opencode-output.log" 2>&1',
-        "  RC=$?",
-        '  cat "$td/opencode-output.log"',
+        "  run_opencode_attempt",
         "else",
         '  echo "Error: current-plan.md not found in $td"',
         "  RC=1",
         "fi",
+        *startup_retry_lines,
         "OOM_KILL_AFTER=$(awk '$1 == \"oom_kill\" {print $2}' /sys/fs/cgroup/memory.events 2>/dev/null || true)",
         'if [ "$RC" -eq 137 ]; then',
         "  RESOURCE_EXHAUSTED=1",
@@ -921,8 +1073,13 @@ def _build_opencode_script(
         'if [ -f "$td/agent-status.md" ]; then cp "$td/agent-status.md" "$td/worker-status.md"; fi',
     ])
     if proxy_provider_url:
-        parts.extend(_proxy_report_script_lines(proxy_provider_url, proxy_timeout))
-        parts.extend(_proxy_local_release_script_lines())
+        parts.extend(
+            [
+                'if [ "${OPENCODE_STARTUP_STALLED:-0}" -eq 1 ]; then cooldown_opencode_proxy; fi',
+                "report_rate_limited_proxy",
+                "release_opencode_proxy",
+            ]
+        )
     parts.extend(
         _supervisor_postrun_script_lines(
             allowed_files,
