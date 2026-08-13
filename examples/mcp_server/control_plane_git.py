@@ -57,7 +57,7 @@ def _run_git(argv: list[str], *, cwd: Path, env: dict[str, str] | None = None, t
     if env:
         base_env.update(env)
     return subprocess.run(
-        argv,
+        ["git", "-c", f"safe.directory={cwd}", *argv[1:]] if argv and argv[0] == "git" else argv,
         cwd=str(cwd),
         env=base_env,
         capture_output=True,
