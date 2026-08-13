@@ -90,8 +90,8 @@ class FakeMergeClient:
             "html_url": "https://git.example/pr/25",
         }
 
-    async def list_action_runs(self, owner: str, repo: str, status: str, limit: int):
-        assert status == "completed"
+    async def list_action_runs(self, owner: str, repo: str, status: str | None, limit: int):
+        assert status is None
         assert limit == 50
         return {
             "workflow_runs": [
@@ -173,7 +173,8 @@ async def test_adapter_uses_newest_matching_ci_run(monkeypatch):
     monkeypatch.setenv("GITEA_TOKEN", "token")
     client = FakeMergeClient("token")
 
-    async def list_runs(owner: str, repo: str, status: str, limit: int):
+    async def list_runs(owner: str, repo: str, status: str | None, limit: int):
+        assert status is None
         return {
             "workflow_runs": [
                 {

@@ -430,7 +430,7 @@ async def gitea_merge_pull_request(
                     source="gitea",
                 )
 
-            actions = await client.list_action_runs(owner, repo, status="completed", limit=50)
+            actions = await client.list_action_runs(owner, repo, status=None, limit=50)
             matching_runs = [
                 run
                 for run in actions.get("workflow_runs", [])
@@ -441,7 +441,11 @@ async def gitea_merge_pull_request(
                 if matching_runs
                 else None
             )
-            if not latest_run or latest_run.get("conclusion") != "success":
+            if (
+                not latest_run
+                or latest_run.get("status") != "completed"
+                or latest_run.get("conclusion") != "success"
+            ):
                 return tool_error(
                     tool="gitea_merge_pull_request",
                     code="CI_NOT_GREEN",
