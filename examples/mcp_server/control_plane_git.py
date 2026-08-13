@@ -120,24 +120,42 @@ def _ensure_bare_repo(staging_git_dir: Path) -> None:
 
 
 def _stage_branch_from_checkout(project_root: Path, staging_git_dir: Path, branch: str) -> None:
-    result = _run_git(
-        [
-            "git",
-            "-c",
-            f"safe.directory={project_root}",
-            "-c",
-            f"safe.directory={project_root / '.git'}",
-            "--git-dir",
-            str(staging_git_dir),
-            "fetch",
-            "--no-tags",
-            str(project_root),
-            f"refs/heads/{branch}:refs/heads/{branch}",
-        ],
-        cwd=project_root,
-    )
-    if result.returncode != 0:
-        raise RuntimeError("GIT_LOCAL_REF_MISSING")
+    git_dir = project_root / ".git"
+    with tempfile.TemporaryDirectory(prefix="git-stage-bundle-") as temp_dir:
+        bundle_path = Path(temp_dir) / f"{branch.replace('/', '_')}.bundle"
+        bundle_result = _run_git(
+            [
+                "git",
+                "-c",
+                f"safe.directory={project_root}",
+                "-c",
+                f"safe.directory={git_dir}",
+                "-C",
+                str(project_root),
+                "bundle",
+                "create",
+                str(bundle_path),
+                f"refs/heads/{branch}",
+            ],
+            cwd=project_root,
+        )
+        if bundle_result.returncode != 0:
+            raise RuntimeError("GIT_LOCAL_REF_MISSING")
+
+        fetch_result = _run_git(
+            [
+                "git",
+                "--git-dir",
+                str(staging_git_dir),
+                "fetch",
+                "--no-tags",
+                str(bundle_path),
+                f"refs/heads/{branch}:refs/heads/{branch}",
+            ],
+            cwd=staging_git_dir.parent,
+        )
+        if fetch_result.returncode != 0:
+            raise RuntimeError("GIT_LOCAL_REF_MISSING")
 
 
 def _verify_staged_ref(staging_git_dir: Path, branch: str) -> str:
