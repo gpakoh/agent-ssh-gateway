@@ -88,7 +88,19 @@ def _remote_url(cwd: Path, remote: str) -> str:
 
 
 def _verify_local_branch(cwd: Path, branch: str) -> None:
-    result = _run_git(["git", "rev-parse", "--verify", f"refs/heads/{branch}"], cwd=cwd)
+    result = _run_git(
+        [
+            "git",
+            "-c",
+            f"safe.directory={cwd}",
+            "-c",
+            f"safe.directory={cwd / '.git'}",
+            "rev-parse",
+            "--verify",
+            f"refs/heads/{branch}",
+        ],
+        cwd=cwd,
+    )
     if result.returncode != 0:
         raise RuntimeError("GIT_LOCAL_REF_MISSING")
 
