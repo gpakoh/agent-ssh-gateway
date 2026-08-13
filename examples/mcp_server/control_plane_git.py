@@ -17,7 +17,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-
 from tool_results import build_command_result, tool_error, tool_success
 
 _GIT_TIMEOUT = 60
