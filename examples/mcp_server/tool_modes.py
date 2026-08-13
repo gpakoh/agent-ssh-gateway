@@ -250,6 +250,7 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     "git_create_branch",
     "git_push",
     "gitea_create_pull_request",
+    "gitea_merge_pull_request",
     # Supervisor-only integration tools are intentionally absent from the
     # broad mcp_client set and therefore from safe mode. They exist only in
     # the explicit write/admin mode and still require mcp:admin at runtime.
