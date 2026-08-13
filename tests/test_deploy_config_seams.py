@@ -956,3 +956,22 @@ class TestOpenCodeProductionAdmission:
         env = _load_compose()["services"]["mcp-oauth"]["environment"]
         assert "OPENCODE_STARTUP_RESERVE_BYTES=${OPENCODE_STARTUP_RESERVE_BYTES:-805306368}" in env
         assert "OPENCODE_STARTUP_RESERVE_SECONDS=${OPENCODE_STARTUP_RESERVE_SECONDS:-60}" in env
+
+
+class TestDeploySourceIsolation:
+    def test_deploy_uses_exact_workflow_checkout(self):
+        workflow = _load_workflow(CI_WORKFLOW_PATH)
+        steps = workflow["jobs"]["deploy"]["steps"]
+        assert any(step.get("uses") == "actions/checkout@v7" for step in steps)
+
+    def test_deploy_does_not_mount_mutable_host_checkout(self):
+        text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        assert "/media/1TB/Python/web_ssh/web-ssh-gateway:/deploy/web-ssh-gateway" not in text
+        assert "/docker/.env:/deploy/web-ssh-gateway.env:ro" in text
+        assert "/.state:/deploy/web-ssh-gateway-state" in text
+
+    def test_runtime_inputs_are_linked_into_ephemeral_checkout(self):
+        text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        assert "ln -s /deploy/web-ssh-gateway.env docker/.env" in text
+        assert "ln -s /deploy/web-ssh-gateway-state .state" in text
+        assert "bash scripts/deploy-from-registry.sh" in text
