@@ -14,6 +14,8 @@ from examples.mcp_server.agent_tasks import (
     list_agent_tasks,
     read_agent_task_file,
     validate_filename,
+    validate_required_checks,
+    validate_scope_contract,
     validate_task_id,
 )
 
@@ -28,9 +30,107 @@ class TestValidateTaskId:
             validate_task_id(tid)
 
     def test_invalid_ids(self):
-        for tid in ["", "too-short", "UPPERCASE", "has spaces", "\xe4", None]:
+        for tid in ["", "too-short", "UPPERCASE", "has spaces", "ä", None]:
             with pytest.raises((ValueError, TypeError)):
                 validate_task_id(tid)  # type: ignore[arg-type]
+
+
+class TestValidateRequiredChecks:
+    def test_rejects_acceptance_prose_with_clear_message(self):
+        prose = [
+            "No file modifications; report findings only.",
+            "Run targeted tests and Ruff for changed files.",
+        ]
+        for entry in prose:
+            with pytest.raises(ValueError) as exc_info:
+                validate_required_checks([entry])
+            assert "looks like acceptance prose" in str(exc_info.value)
+            assert "acceptance_criteria" in str(exc_info.value)
+
+    def test_accepts_legitimate_commands(self):
+        legit = [
+            "tox -q",
+            "poetry run pytest -q",
+            "uv run pytest -q",
+            "FOO=1 BAR=2 pytest -q",
+            "PYTHONPATH=. .venv/bin/python -m pytest tests -q",
+            "./scripts/check.sh",
+            "pytest -q",
+            "ruff check",
+            "pytest tests/test_agent_tasks.py tests/test_agent_paths.py -q",
+            "pytest && ruff check tests/",
+            "ruff check . && pytest -q | tee pytest.log",
+            "git add .",
+            "make check",
+        ]
+        for entry in legit:
+            validate_required_checks([entry])
+
+    def test_rejects_non_string_and_empty_entries(self):
+        for bad in [None, "", "   ", "   \n\t", 42, ["nested"]]:
+            with pytest.raises((TypeError, ValueError)):
+                validate_required_checks([bad])  # type: ignore[list-item]
+
+    def test_rejects_invalid_shell_syntax(self):
+        for bad in ["pytest 'unterminated", "ruff check &&", "pytest |", "tox >"]:
+            with pytest.raises(ValueError):
+                validate_required_checks([bad])
+
+    def test_rejects_non_list_input(self):
+        with pytest.raises(TypeError):
+            validate_required_checks("pytest -q")  # type: ignore[arg-type]
+
+    def test_accepts_none_and_empty_list(self):
+        validate_required_checks(None)
+        validate_required_checks([])
+
+    def test_build_task_json_rejects_prose(self):
+        with pytest.raises(ValueError) as exc_info:
+            build_task_json(
+                task_id="a12345678901",
+                agent="opencode",
+                required_checks=["No file modifications; report findings only."],
+            )
+        assert "acceptance_criteria" in str(exc_info.value)
+
+    def test_build_current_plan_rejects_prose(self):
+        with pytest.raises(ValueError):
+            build_current_plan(
+                task_id="a12345678901",
+                task="Fix tests",
+                required_checks=["Run targeted tests and Ruff for changed files."],
+            )
+
+    def test_acceptance_criteria_remains_unrestricted(self):
+        result = build_current_plan(
+            task_id="a12345678901",
+            task="Fix tests",
+            acceptance_criteria=["No file modifications; report findings only."],
+        )
+        assert "No file modifications; report findings only." in result
+
+
+class TestValidateScopeContract:
+    def test_rejects_global_forbidden_with_nonempty_allowlist(self):
+        for pattern in ["*", "**", "**/*"]:
+            with pytest.raises(ValueError):
+                validate_scope_contract(["app/**"], [pattern])
+
+    def test_rejects_exact_overlap(self):
+        with pytest.raises(ValueError):
+            validate_scope_contract(["app/routers/jobs.py"], ["app/routers/jobs.py"])
+
+    def test_accepts_nonconflicting_scope(self):
+        validate_scope_contract(["app/**", "tests/**"], ["migrations/**"])
+
+    def test_build_task_json_rejects_contradictory_scope(self):
+        with pytest.raises(ValueError):
+            build_task_json(
+                task_id="a12345678901",
+                agent="opencode",
+                allowed_files=["app/routers/jobs.py"],
+                forbidden_files=["**/*"],
+            )
 
 
 class TestBuildTaskJson:
@@ -44,9 +144,6 @@ class TestBuildTaskJson:
         assert "created" in data
 
     def test_full(self):
-        """agent accepts an arbitrary string, not just "opencode" -- this
-        module doesn't restrict it to a fixed backend enum.
-        """
         result = build_task_json(
             task_id="b23456789012",
             agent="custom-agent",
@@ -71,7 +168,6 @@ class TestBuildInitialStatus:
         assert "a12345678901" in result
 
     def test_different_agent(self):
-        """agent accepts an arbitrary string, not just "opencode"."""
         result = build_initial_status(agent="custom-agent", task_id="b23456789012")
         assert "Status: created" in result
         assert "custom-agent" in result
@@ -106,7 +202,6 @@ class TestBuildCurrentPlan:
 
 class TestReadAgentTaskFile:
     def test_returns_callable_result(self):
-        """Verify read_agent_task_file passes args to run_cmd correctly."""
         calls = []
 
         def fake_run_cmd(project: str, command: str) -> dict:
@@ -125,11 +220,6 @@ class TestReadAgentTaskFile:
         assert "a12345678901/agent-status.md" in calls[0][1]
 
     def test_rejects_shell_injection_in_filename(self):
-        """Regression: filename was interpolated raw into a shell command
-        with zero escaping or validation. Every current caller passes a
-        hardcoded literal, but the function itself was a command-injection
-        and path-traversal landmine for any future caller that doesn't.
-        """
         calls = []
 
         def fake_run_cmd(project: str, command: str) -> dict:
@@ -150,7 +240,7 @@ class TestReadAgentTaskFile:
                     task_id="a12345678901",
                     filename=malicious,
                 )
-        assert calls == [], "run_cmd must never be invoked with an unvalidated filename"
+        assert calls == []
 
     def test_accepts_safe_filenames(self):
         for name in ["agent-status.md", "agent-report.md", "implementation-diff.patch"]:

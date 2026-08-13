@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app import state as _state
 from app.auth_middleware import AuthIdentity, ensure_session_owner, require_scope
 from app.exceptions import JobNotFoundError, PermissionDeniedError
-from app.job_manager import SSE_LISTENER_QUEUE_SIZE
+from app.job_manager import SSE_LISTENER_QUEUE_SIZE, TERMINAL_STATES
 from app.job_serializer import serialize_job
 from app.metrics import metrics
 from app.models import (
@@ -102,11 +102,45 @@ async def _get_owned_job(job_id: str, identity: AuthIdentity):
     return job
 
 
+async def _get_owned_job_or_redis(job_id: str, identity: AuthIdentity):
+    """Fetch an owned job, falling back to the Redis terminal snapshot.
+
+    JobManager drops finished jobs from memory after its retention window,
+    but the same terminal job was mirrored to Redis by
+    ``RedisJobQueue.save_terminal_job`` (keyed ``id``/``error`` in legacy
+    rows). Keep status/result/wait queryable from that snapshot with the
+    same ownership and redaction semantics as in-memory jobs. Only terminal
+    snapshots are honored -- a running or missing Redis job must never
+    surface as finished state, so lookups fail closed (404) instead.
+    """
+    job = await _state.job_manager.get_job(job_id)
+    if job is None and _state.redis_queue is not None:
+        try:
+            snapshot = await _state.redis_queue.get_job(job_id)
+        except Exception:
+            snapshot = None
+        if snapshot is not None and str(snapshot.get("status", "")) in TERMINAL_STATES:
+            job = snapshot
+    if not job:
+        raise HTTPException(status_code=404, detail=_err(404, f"Job {job_id} not found"))
+    if not job_visible_to(job, identity):
+        raise HTTPException(status_code=403, detail=_err(403, "Job belongs to a different owner"))
+    return job
+
+
 @router.get("/api/jobs/{job_id}/status", response_model=JobStatusResponse)
 async def jobs_status(job_id: str, _identity: AuthIdentity = Depends(require_scope("jobs:read"))):
     """Get job status."""
-    await _get_owned_job(job_id, _identity)
-    status = await _state.job_manager.get_job_status(job_id)
+    job = await _get_owned_job_or_redis(job_id, _identity)
+    if isinstance(job, dict):
+        status = {
+            "job_id": job.get("job_id", job.get("id", job_id)),
+            "status": job.get("status", ""),
+            "progress": job.get("progress") or {},
+            "duration": job.get("duration"),
+        }
+    else:
+        status = await _state.job_manager.get_job_status(job_id)
     return JobStatusResponse(**status)
 
 
@@ -120,7 +154,7 @@ async def jobs_result(
     _identity: AuthIdentity = Depends(require_scope("jobs:read")),
 ):
     """Get full job result."""
-    job = await _get_owned_job(job_id, _identity)
+    job = await _get_owned_job_or_redis(job_id, _identity)
     result = serialize_job(
         job,
         redact=should_redact_command_output(redact_output),
@@ -176,7 +210,6 @@ async def bulk_execute(
         )
     ensure_session_owner(session, _identity)
 
-    # Access control + command policy gate for every command (single impl)
     for cmd in req.commands:
         evaluate_with_access_gate(
             request,
@@ -195,7 +228,6 @@ async def bulk_execute(
     for _cmd in req.commands:
         record_allowed(profile=resolve_effective_profile(_identity))
 
-    # Convert To Response Format
     response_results = []
     successful = 0
     failed = 0
@@ -292,33 +324,32 @@ async def jobs_wait(
             },
         )
 
-    try:
-        result = await _state.job_manager.wait_for_completion(
-            job_id=job_id,
-            identity_sub=_identity.fingerprint,
-            timeout_s=timeout,
-        )
-    except JobNotFoundError:
-        raise HTTPException(
-            status_code=404,
-            detail=_err(404, f"Job {job_id} not found"),
-        ) from None
-    except PermissionDeniedError:
-        raise HTTPException(
-            status_code=403,
-            detail=_err(403, "Job belongs to a different owner"),
-        ) from None
+    job = await _get_owned_job_or_redis(job_id, _identity)
+    if isinstance(job, dict):
+        result = dict(job)
+    else:
+        try:
+            result = await _state.job_manager.wait_for_completion(
+                job_id=job_id,
+                identity_sub=_identity.fingerprint,
+                timeout_s=timeout,
+            )
+        except JobNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail=_err(404, f"Job {job_id} not found"),
+            ) from None
+        except PermissionDeniedError:
+            raise HTTPException(
+                status_code=403,
+                detail=_err(403, "Job belongs to a different owner"),
+            ) from None
 
     return serialize_job(
         result,
         redact=should_redact_command_output(None),
         include_output=True,
     )
-
-
-# ---------------------------------------------------------------------------
-# Job Stream (SSE)
-# ---------------------------------------------------------------------------
 
 
 @router.get("/api/jobs/{job_id}/stream", response_class=StreamingResponse)
@@ -343,10 +374,8 @@ async def jobs_stream(
             stream_start = time.time()
             MAX_SSE_DURATION = 3600
 
-            # Send Initial Status
             yield f"data: {json.dumps({'type': 'status', 'status': job.status})}\n\n"
 
-            # Send Buffered Output If Job Already Completed
             if job.stdout:
                 data = (
                     redact_secrets(job.stdout)
@@ -362,7 +391,6 @@ async def jobs_stream(
                 )
                 yield f"data: {json.dumps({'type': 'stderr', 'data': data})}\n\n"
 
-            # Stream New Events
             while job.status in ("pending", "running", "cancelling"):
                 if time.time() - stream_start > MAX_SSE_DURATION:
                     yield f"data: {json.dumps({'type': 'error', 'message': 'Stream timeout'})}\n\n"
@@ -377,11 +405,9 @@ async def jobs_stream(
                         event["data"] = redact_secrets(event["data"])
                     yield f"data: {json.dumps(event)}\n\n"
                 except TimeoutError:
-                    # Send Keepalive Comment
                     yield ":keepalive\n\n"
                     continue
 
-            # Send Final Status
             yield f"data: {json.dumps({'type': 'status', 'status': job.status, 'exit_code': job.exit_code})}\n\n"
         finally:
             job.remove_listener(queue)
