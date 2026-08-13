@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.job_manager import JobRecord
+from app.job_manager import TERMINAL_STATES, JobRecord
 from app.security import redact_secrets
 
 
@@ -43,17 +43,20 @@ def serialize_job(
             data["job_id"] = data.pop("id")
         if "error" in data and "error_message" not in data:
             data["error_message"] = data.pop("error")
+        if str(data.get("status", "")) in TERMINAL_STATES:
+            if "created_at" not in data:
+                completed_at = data.get("completed_at")
+                data["created_at"] = (
+                    completed_at if isinstance(completed_at, (int, float)) else 0.0
+                )
+            data.setdefault("session_id", "")
+            data.setdefault("command", "")
+            data.setdefault("progress", {})
 
     def _redact(value: Any) -> Any:
         if not redact or not isinstance(value, str):
             return value
         if redact_path_prefix:
-            # Same replacement + marker as mcp_client_tools.py's
-            # _redact_project_root() (".", not a placeholder token) --
-            # callers on that path already apply it a second time on their
-            # own synchronous results, so this stays idempotent whichever
-            # order the two run in, instead of producing two different
-            # markers depending on which code path a caller happened to hit.
             prefix = redact_path_prefix.rstrip("/")
             if prefix and prefix != "/":
                 value = value.replace(f"{prefix}/", "./").replace(prefix, ".")
