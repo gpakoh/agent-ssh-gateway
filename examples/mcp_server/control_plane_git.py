@@ -7,6 +7,7 @@ project root using an ephemeral HTTPS credential boundary.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -16,12 +17,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+
 from tool_results import build_command_result, tool_error, tool_success
 
 _GIT_TIMEOUT = 60
 _GIT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/-]*$")
 _REDACTED = "***"
 _PROTECTED_BRANCHES = {"main", "master"}
+_STAGING_ROOT = Path("/app/data/control-plane-git")
 
 
 def _validate_name(value: str, field: str) -> str:
@@ -89,6 +92,51 @@ def _verify_local_branch(cwd: Path, branch: str) -> None:
     result = _run_git(["git", "rev-parse", "--verify", f"refs/heads/{branch}"], cwd=cwd)
     if result.returncode != 0:
         raise RuntimeError("GIT_LOCAL_REF_MISSING")
+
+
+def _staging_git_dir(project: str, project_root: Path) -> Path:
+    digest = hashlib.sha256(f"{project}\0{project_root}".encode()).hexdigest()
+    return _STAGING_ROOT / f"{digest}.git"
+
+
+def _ensure_bare_repo(staging_git_dir: Path) -> None:
+    staging_git_dir.parent.mkdir(parents=True, exist_ok=True)
+    if staging_git_dir.is_dir() and (staging_git_dir / "HEAD").exists():
+        return
+    result = _run_git(["git", "init", "--bare", str(staging_git_dir)], cwd=staging_git_dir.parent)
+    if result.returncode != 0:
+        raise RuntimeError("GIT_PUSH_FAILED")
+
+
+def _stage_branch_from_checkout(project_root: Path, staging_git_dir: Path, branch: str) -> None:
+    result = _run_git(
+        [
+            "git",
+            "-c",
+            f"safe.directory={project_root}",
+            "-c",
+            f"safe.directory={project_root / '.git'}",
+            "--git-dir",
+            str(staging_git_dir),
+            "fetch",
+            "--no-tags",
+            str(project_root),
+            f"refs/heads/{branch}:refs/heads/{branch}",
+        ],
+        cwd=project_root,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("GIT_LOCAL_REF_MISSING")
+
+
+def _verify_staged_ref(staging_git_dir: Path, branch: str) -> str:
+    result = _run_git(
+        ["git", "--git-dir", str(staging_git_dir), "rev-parse", "--verify", f"refs/heads/{branch}"],
+        cwd=staging_git_dir.parent,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError("GIT_LOCAL_REF_MISSING")
+    return result.stdout.strip()
 
 
 def _parse_gitea_remote(remote_url: str) -> tuple[str, str, str]:
@@ -192,6 +240,16 @@ def _write_askpass() -> str:
     return path
 
 
+def _push_staged_ref(staging_git_dir: Path, clone_url: str, branch: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    refspec = f"refs/heads/{branch}:refs/heads/{branch}"
+    return _run_git(
+        ["git", "--git-dir", str(staging_git_dir), "push", clone_url, refspec],
+        cwd=staging_git_dir.parent,
+        env=env,
+        timeout=_GIT_TIMEOUT,
+    )
+
+
 def git_push_control_plane(project: str, remote: str = "origin", branch: str | None = None) -> dict[str, Any]:
     remote = _validate_name(remote, "remote")
     token = os.environ.get("GITEA_TOKEN", "").strip()
@@ -215,6 +273,10 @@ def git_push_control_plane(project: str, remote: str = "origin", branch: str | N
 
     try:
         _verify_local_branch(project_root, branch_name)
+        staging_git_dir = _staging_git_dir(project, project_root)
+        _ensure_bare_repo(staging_git_dir)
+        _stage_branch_from_checkout(project_root, staging_git_dir, branch_name)
+        _verify_staged_ref(staging_git_dir, branch_name)
         remote_url = _remote_url(project_root, remote)
         _host, owner, repo = _parse_gitea_remote(remote_url)
         username, clone_url = _repo_https_target(owner, repo, token=token)
@@ -237,8 +299,7 @@ def git_push_control_plane(project: str, remote: str = "origin", branch: str | N
             "GIT_PASSWORD": token,
             "GIT_TERMINAL_PROMPT": "0",
         }
-        refspec = f"refs/heads/{branch_name}:refs/heads/{branch_name}"
-        result = _run_git(["git", "push", clone_url, refspec], cwd=project_root, env=env, timeout=_GIT_TIMEOUT)
+        result = _push_staged_ref(staging_git_dir, clone_url, branch_name, env)
     except FileNotFoundError:
         return tool_error(tool="git_push", code="GIT_DEPENDENCY_MISSING", message="git binary not found in MCP control plane image.", retryable=False)
     except subprocess.TimeoutExpired:
