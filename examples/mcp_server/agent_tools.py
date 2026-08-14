@@ -788,6 +788,30 @@ def _supervisor_postrun_script_lines(
         'if [ "$RC" -eq 0 ] && [ "$PARENT_RC" -eq 0 ] && [ "$EVIDENCE_RC" -eq 0 ] && [ "$SCOPE_RC" -eq 0 ]; then',
         "  CHECKS_RAN=1",
         '  : > "$td/required-checks.log"',
+        '  CHECK_ROOT=$(mktemp -d /tmp/mcp-required-checks.XXXXXX) || { echo "Supervisor required-check workspace create FAILED" >> "$td/agent-status.md"; CHECKS_RC=1; }',
+        '  if [ "$CHECKS_RC" -eq 0 ]; then',
+        '    echo "Supervisor required-check workspace: $CHECK_ROOT" >> "$td/required-checks.log"',
+        '    if git clone --no-hardlinks --no-checkout "$PWD" "$CHECK_ROOT" >> "$td/required-checks.log" 2>&1; then',
+        '      if git -C "$CHECK_ROOT" checkout --detach "$BASE_HEAD" >> "$td/required-checks.log" 2>&1; then',
+        '        if [ -s "$td/implementation-diff.patch" ]; then',
+        '          if git -C "$CHECK_ROOT" apply --binary "$td/implementation-diff.patch" >> "$td/required-checks.log" 2>&1; then',
+        '            echo "Supervisor required-check workspace ready (BASE_HEAD + implementation diff)" >> "$td/required-checks.log"',
+        "          else",
+        "            CHECKS_RC=1",
+        '            echo "Supervisor required-check patch apply FAILED" >> "$td/agent-status.md"',
+        "          fi",
+        "        else",
+        '          echo "Supervisor required-check workspace ready (BASE_HEAD, no changes)" >> "$td/required-checks.log"',
+        "        fi",
+        "      else",
+        "        CHECKS_RC=1",
+        '        echo "Supervisor required-check clone checkout FAILED" >> "$td/agent-status.md"',
+        "      fi",
+        "    else",
+        "      CHECKS_RC=1",
+        '      echo "Supervisor required-check clone FAILED" >> "$td/agent-status.md"',
+        "    fi",
+        "  fi",
     ]
 
     for check in required_checks:
@@ -795,7 +819,7 @@ def _supervisor_postrun_script_lines(
             [
                 '  if [ "$CHECKS_RC" -eq 0 ]; then',
                 f'    echo {_shell_escape("$ " + check)} >> "$td/required-checks.log"',
-                f"    if sh -c {_shell_escape(check)} >> \"$td/required-checks.log\" 2>&1; then",
+                f'    if ( cd "$CHECK_ROOT" && env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV sh -c {_shell_escape(check)} ) >> "$td/required-checks.log" 2>&1; then',
                 '      echo "PASS" >> "$td/required-checks.log"',
                 "    else",
                 "      CHECKS_RC=$?",
@@ -807,6 +831,7 @@ def _supervisor_postrun_script_lines(
 
     lines.extend(
         [
+            '  if [ -n "${CHECK_ROOT:-}" ]; then rm -rf "$CHECK_ROOT"; fi',
             "fi",
             'if [ "$CHECKS_RAN" -eq 0 ]; then',
             '  echo "Supervisor required checks skipped" >> "$td/agent-status.md"',
@@ -842,6 +867,7 @@ def _build_opencode_script(
     forbidden_files: list[str] | None = None,
     required_checks: list[str] | None = None,
     managed_clone: bool = False,
+    base_ref: str | None = None,
 ) -> str:
     opencode_flags = "--dangerously-skip-permissions"
     if model:
@@ -904,11 +930,19 @@ def _build_opencode_script(
     if project_root and worktree_path:
         parts.extend(_parent_prerun_snapshot_script_lines(project_root))
     if worktree_path:
+        if base_ref:
+            parts.extend([
+                f"TASK_BASE_REF={_shell_escape(base_ref)}",
+                'TASK_BASE_COMMIT=$(git rev-parse --verify "$TASK_BASE_REF^{commit}" 2>/dev/null) || { echo "Requested base_ref is unavailable locally" >> "$td/agent-status.md"; exit 73; }',
+            ])
+        elif project_root:
+            parts.append('TASK_BASE_COMMIT="$PARENT_HEAD_BEFORE"')
+        else:
+            parts.append('TASK_BASE_COMMIT=$(git rev-parse HEAD 2>/dev/null) || { echo "Workspace baseline resolution FAILED" >> "$td/agent-status.md"; exit 73; }')
         wt = worktree_path
         if project_root and not os.path.isabs(wt):
             wt = os.path.normpath(os.path.join(project_root, wt))
         managed_source_lines: list[str] = []
-        managed_reuse_lines: list[str] = []
         if managed_clone:
             managed_source_lines = [
                 'parent_git_top=$(git -C "$PARENT_ROOT" rev-parse --show-toplevel 2>/dev/null || true)',
@@ -916,21 +950,21 @@ def _build_opencode_script(
                 'parent_git_top_real=$(cd "$parent_git_top" 2>/dev/null && pwd -P || true)',
                 'if [ "$parent_git_top_real" != "$PARENT_ROOT_REAL" ]; then echo "Managed clone requires project root at git toplevel" >> "$td/agent-status.md"; exit 75; fi',
             ]
-            managed_reuse_lines = [
-                '  wt_head=$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)',
-                '  if [ -z "$wt_head" ] || [ "$wt_head" != "$PARENT_HEAD_BEFORE" ]; then',
-                '    echo "Refusing managed clone with baseline drift: $wt" >> "$td/agent-status.md"',
-                "    exit 1",
-                "  fi",
-            ]
             create_workspace_lines = [
                 '  git clone --no-hardlinks --no-checkout "$PARENT_ROOT" "$wt" 2>>"$td/agent-status.md" || { echo "managed clone failed: $wt" >> "$td/agent-status.md"; exit 1; }',
-                '  git -C "$wt" checkout --detach "$PARENT_HEAD_BEFORE" 2>>"$td/agent-status.md" || { echo "managed clone checkout failed: $wt" >> "$td/agent-status.md"; exit 1; }',
+                '  git -C "$wt" checkout --detach "$TASK_BASE_COMMIT" 2>>"$td/agent-status.md" || { echo "managed clone checkout failed: $wt" >> "$td/agent-status.md"; exit 1; }',
             ]
         else:
             create_workspace_lines = [
-                '  git worktree add --detach "$wt" HEAD 2>>"$td/agent-status.md" || { echo "git worktree add failed: $wt" >> "$td/agent-status.md"; exit 1; }'
+                '  git worktree add --detach "$wt" "$TASK_BASE_COMMIT" 2>>"$td/agent-status.md" || { echo "git worktree add failed: $wt" >> "$td/agent-status.md"; exit 1; }'
             ]
+        baseline_reuse_lines = [
+            '  wt_head=$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)',
+            '  if [ -z "$wt_head" ] || [ "$wt_head" != "$TASK_BASE_COMMIT" ]; then',
+            '    echo "Refusing workspace with baseline drift: $wt" >> "$td/agent-status.md"',
+            "    exit 1",
+            "  fi",
+        ]
         parts.extend([
             f"wt={_shell_escape(wt)}",
             'wt_parent=$(dirname "$wt")',
@@ -952,7 +986,7 @@ def _build_opencode_script(
             '    echo "Refusing dirty existing workspace: $wt" >> "$td/agent-status.md"',
             "    exit 1",
             "  fi",
-            *managed_reuse_lines,
+            *baseline_reuse_lines,
             '  echo "Workspace already exists, reusing clean root: $wt" >> "$td/agent-status.md"',
             "else",
             *create_workspace_lines,
@@ -1177,7 +1211,7 @@ def project_run_agent(
         started_at, finished_at (async: status="running", job_id set,
         exit_code/stdout/stderr/finished_at are None/empty until polled)
     """
-    from examples.mcp_server.agent_tasks import validate_task_id
+    from examples.mcp_server.agent_tasks import validate_base_ref, validate_task_id
 
     validate_task_id(task_id)
 
@@ -1278,6 +1312,9 @@ def project_run_agent(
                 "finished_at": _now_iso(),
             }
         try:
+            raw_base_ref = task_json.get("base_ref")
+            validate_base_ref(raw_base_ref)
+            base_ref = raw_base_ref if isinstance(raw_base_ref, str) and raw_base_ref else None
             allowed_files = _task_string_list(task_json, "allowed_files")
             forbidden_files = _task_string_list(task_json, "forbidden_files")
             required_checks = _task_string_list(task_json, "required_checks")
@@ -1302,6 +1339,7 @@ def project_run_agent(
             forbidden_files=forbidden_files,
             required_checks=required_checks,
             managed_clone=managed_clone,
+            base_ref=base_ref,
         )
     else:
         return {
