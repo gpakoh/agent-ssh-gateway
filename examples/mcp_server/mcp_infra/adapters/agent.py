@@ -76,6 +76,7 @@ def gateway_write_agent_task(
     commit_message: str | None = None,
     constraints: str | None = None,
     worktree_path: str | None = None,
+    base_ref: str | None = None,
 ) -> dict[str, Any]:
     """Write task.json + current-plan.md to .ai-bridge/tasks/<task_id>/."""
 
@@ -99,6 +100,7 @@ def gateway_write_agent_task(
             commit_message=commit_message,
             constraints=constraints,
             worktree_path=worktree_path,
+            base_ref=base_ref,
         )
 
     return run_tool(

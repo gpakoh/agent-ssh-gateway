@@ -184,9 +184,10 @@ class TestBuildOpencodeScriptWorktree:
             managed_clone=True,
         )
         assert 'git clone --no-hardlinks --no-checkout "$PARENT_ROOT" "$wt"' in script
-        assert 'git -C "$wt" checkout --detach "$PARENT_HEAD_BEFORE"' in script
+        assert 'TASK_BASE_COMMIT="$PARENT_HEAD_BEFORE"' in script
+        assert 'git -C "$wt" checkout --detach "$TASK_BASE_COMMIT"' in script
         assert "git worktree add" not in script
-        assert "managed clone with baseline drift" in script
+        assert "workspace with baseline drift" in script
 
 
 class TestIsolatedWorktreeGuard:
@@ -232,6 +233,99 @@ def _init_git_repo(root: Path) -> str:
     _git(root, "add", "base.txt", ".gitignore")
     _git(root, "commit", "-q", "-m", "base")
     return _git(root, "rev-parse", "HEAD")
+
+
+def test_explicit_base_ref_checks_out_pinned_commit(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+    monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+    source = tmp_path / "source-pinned"
+    source.mkdir()
+    pinned_head = _init_git_repo(source)
+    (source / "base.txt").write_text("newer\n", encoding="utf-8")
+    _git(source, "add", "base.txt")
+    _git(source, "commit", "-q", "-m", "newer")
+    current_head = _git(source, "rev-parse", "HEAD")
+    assert current_head != pinned_head
+
+    artifacts = tmp_path / "pinned-artifacts" / TASK_ID
+    artifacts.mkdir(parents=True)
+    (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+    workspace = tmp_path / "pinned-workspaces" / TASK_ID
+    fake_bin = tmp_path / "pinned-bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "opencode"
+    fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    script = _build_opencode_script(
+        str(artifacts),
+        TASK_ID,
+        None,
+        project_root=str(source),
+        worktree_path=str(workspace),
+        base_ref=pinned_head,
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert _git(workspace, "rev-parse", "HEAD") == pinned_head
+    assert _git(source, "rev-parse", "HEAD") == current_head
+
+
+def test_existing_clean_workspace_rejects_base_ref_drift(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+    monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+    source = tmp_path / "source-drift"
+    source.mkdir()
+    pinned_head = _init_git_repo(source)
+    (source / "base.txt").write_text("newer\n", encoding="utf-8")
+    _git(source, "add", "base.txt")
+    _git(source, "commit", "-q", "-m", "newer")
+    current_head = _git(source, "rev-parse", "HEAD")
+    workspace = tmp_path / "drift-workspaces" / TASK_ID
+    workspace.parent.mkdir(parents=True)
+    _git(source, "worktree", "add", "--detach", str(workspace), current_head)
+
+    artifacts = tmp_path / "drift-artifacts" / TASK_ID
+    artifacts.mkdir(parents=True)
+    (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+    fake_bin = tmp_path / "drift-bin"
+    fake_bin.mkdir()
+    marker = tmp_path / "drift-opencode-ran"
+    fake = fake_bin / "opencode"
+    fake.write_text(f"#!/bin/sh\nprintf ran > {shlex.quote(str(marker))}\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    script = _build_opencode_script(
+        str(artifacts),
+        TASK_ID,
+        None,
+        project_root=str(source),
+        worktree_path=str(workspace),
+        base_ref=pinned_head,
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode != 0
+    assert not marker.exists()
+    assert "baseline drift" in (artifacts / "agent-status.md").read_text(encoding="utf-8")
+    assert _git(workspace, "rev-parse", "HEAD") == current_head
 
 
 def test_managed_clone_executes_without_creating_source_worktree_metadata(tmp_path, monkeypatch):
@@ -746,6 +840,60 @@ class TestSupervisorPostrunEvidence:
         assert result.returncode == 72
         checks = (td / "required-checks.log").read_text(encoding="utf-8")
         assert "FAIL exit=9" in checks
+
+    def test_required_check_ignored_worker_venv_cannot_change_result(self, tmp_path, monkeypatch):
+        root = tmp_path / "repo"
+        root.mkdir()
+        _git(root, "init", "-q")
+        _git(root, "config", "user.email", "tests@example.invalid")
+        _git(root, "config", "user.name", "Agent Runner Tests")
+        (root / "base.txt").write_text("base\n", encoding="utf-8")
+        (root / ".gitignore").write_text("task-artifacts/\n.venv/\n", encoding="utf-8")
+        _git(root, "add", "base.txt", ".gitignore")
+        _git(root, "commit", "-q", "-m", "base")
+        base_head = _git(root, "rev-parse", "HEAD")
+
+        (root / "base.txt").write_text("changed by worker\n", encoding="utf-8")
+        venv = root / ".venv"
+        venv.mkdir()
+        (venv / "sitecustomize.py").write_text(
+            "raise SystemExit('worker venv active')\n", encoding="utf-8"
+        )
+        assert ".venv" not in _git(root, "status", "--porcelain=v1", "--untracked-files=all")
+
+        python_home = subprocess.run(
+            ["python3", "-c", "import sys; print(sys.base_prefix)"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        monkeypatch.setenv("PYTHONPATH", str(tmp_path / "pythonpath-extra"))
+        monkeypatch.setenv("PYTHONHOME", python_home)
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+
+        check = (
+            "python3 -c \"import os; "
+            "assert open('base.txt').read() == 'changed by worker\\n'; "
+            "assert not os.path.isdir('.venv'); "
+            "assert 'PYTHONPATH' not in os.environ; "
+            "assert 'PYTHONHOME' not in os.environ; "
+            "assert 'VIRTUAL_ENV' not in os.environ; "
+            "print('ok')\""
+        )
+        result, td = _run_supervisor_postrun(
+            root,
+            base_head=base_head,
+            allowed_files=["base.txt"],
+            required_checks=[check],
+        )
+
+        assert result.returncode == 0, result.stderr
+        patch = (td / "implementation-diff.patch").read_text(encoding="utf-8")
+        assert "base.txt" in patch
+        assert ".venv" not in patch
+        checks = (td / "required-checks.log").read_text(encoding="utf-8")
+        assert "PASS" in checks
+        assert "ok" in checks
 
     def test_required_check_parent_mutation_fails_closed(self, tmp_path):
         """A required check runs after the first parent guard, so the

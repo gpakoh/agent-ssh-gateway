@@ -15,7 +15,7 @@ app/routers/jobs.py without the overhead of a full HTTP+JWT round trip.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -25,6 +25,7 @@ from app import state as _state
 from app.auth_middleware import AuthIdentity, token_fingerprint
 from app.job_manager import JobRecord
 from app.routers import jobs as jobs_router
+from app.services.command_gate import CommandGateDecision
 
 OWNER_TOKEN = "agent-token-owner"
 OTHER_TOKEN = "agent-token-other"
@@ -163,6 +164,13 @@ class TestJobsRunAndBulkExecuteSessionOwnership:
         sess.tenant_labels = ()
         return sess
 
+    def _owned_session(self):
+        sess = MagicMock()
+        sess.owner_type = "agent"
+        sess.owner_token_fingerprint = token_fingerprint(OWNER_TOKEN)
+        sess.tenant_labels = ()
+        return sess
+
     @pytest.mark.asyncio
     async def test_jobs_run_rejects_foreign_session(self, _mock_manager):
         from app.models import JobRunRequest
@@ -173,6 +181,56 @@ class TestJobsRunAndBulkExecuteSessionOwnership:
         with pytest.raises(HTTPException) as exc:
             await jobs_router.jobs_run(req, request, _identity(OWNER_TOKEN))
         assert exc.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_jobs_run_forwards_timeout_to_create_job(self, _mock_manager, _mock_job_manager):
+        from app.models import JobRunRequest
+
+        _mock_manager.get_session.return_value = self._owned_session()
+        _mock_job_manager.create_job.return_value = "job-123"
+        req = JobRunRequest(session_id="s-1", command="echo hi", timeout=300)
+        request = _fake_request()
+        with patch("app.routers.jobs.evaluate_with_access_gate") as mock_gate:
+            mock_gate.return_value = CommandGateDecision(
+                allowed=True,
+                reason="allowed",
+                command_root="echo",
+                effective_profile="default",
+                policy_mode="enforce",
+            )
+            result = await jobs_router.jobs_run(req, request, _identity(OWNER_TOKEN))
+        assert result.job_id == "job-123"
+        _mock_job_manager.create_job.assert_awaited_once_with(
+            session_id="s-1",
+            command="echo hi",
+            owner_id=token_fingerprint(OWNER_TOKEN),
+            timeout=300,
+        )
+
+    @pytest.mark.asyncio
+    async def test_jobs_run_defaults_timeout_to_3600(self, _mock_manager, _mock_job_manager):
+        from app.models import JobRunRequest
+
+        _mock_manager.get_session.return_value = self._owned_session()
+        _mock_job_manager.create_job.return_value = "job-123"
+        req = JobRunRequest(session_id="s-1", command="echo hi")
+        request = _fake_request()
+        with patch("app.routers.jobs.evaluate_with_access_gate") as mock_gate:
+            mock_gate.return_value = CommandGateDecision(
+                allowed=True,
+                reason="allowed",
+                command_root="echo",
+                effective_profile="default",
+                policy_mode="enforce",
+            )
+            result = await jobs_router.jobs_run(req, request, _identity(OWNER_TOKEN))
+        assert result.job_id == "job-123"
+        _mock_job_manager.create_job.assert_awaited_once_with(
+            session_id="s-1",
+            command="echo hi",
+            owner_id=token_fingerprint(OWNER_TOKEN),
+            timeout=3600,
+        )
 
     @pytest.mark.asyncio
     async def test_bulk_execute_rejects_foreign_session(self, _mock_manager):

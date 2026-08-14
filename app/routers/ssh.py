@@ -613,6 +613,7 @@ async def ssh_execute(
             owner_id=_identity.fingerprint,
             redact_path_prefix=req.redact_path_prefix,
             stdin=req.stdin.encode("utf-8") if req.stdin else b"",
+            timeout=req.timeout,
         )
         await _persist_command_audit(
             session_id=req.session_id,
