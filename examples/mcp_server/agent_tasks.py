@@ -19,6 +19,7 @@ from examples.mcp_server.agent_paths import (
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{10,120}$")
 FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+BASE_REF_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 
 _SENTENCE_ENDINGS = (".", "?", "!")
 _TRAILING_OPERATORS = frozenset({"&&", "||", "|", ">", ">>", "<", "<&", ">&", "2>"})
@@ -49,6 +50,20 @@ def validate_filename(filename: str) -> None:
     """Raise ValueError if filename is malformed."""
     if not FILENAME_RE.match(filename):
         raise ValueError(f"Invalid filename: {filename!r}. Must match {FILENAME_RE.pattern}")
+
+
+def validate_base_ref(base_ref: str | None) -> None:
+    """Reject a non-empty base_ref that is not a full 40- or 64-hex commit id."""
+    if base_ref is None:
+        return
+    if not isinstance(base_ref, str):
+        raise TypeError(f"base_ref must be a string or None, got {type(base_ref).__name__}")
+    if not base_ref:
+        return
+    if not BASE_REF_RE.fullmatch(base_ref):
+        raise ValueError(
+            f"Invalid base_ref: {base_ref!r}. Must be a full 40- or 64-character hex commit id"
+        )
 
 
 def _is_valid_shell_command(entry: str) -> bool:
@@ -136,11 +151,13 @@ def build_task_json(
     worktree_path: str | None = None,
     commit_allowed: bool = False,
     push_allowed: bool = False,
+    base_ref: str | None = None,
 ) -> str:
     """Build machine-readable task.json content."""
     validate_task_id(task_id)
     validate_required_checks(required_checks)
     validate_scope_contract(allowed_files, forbidden_files)
+    validate_base_ref(base_ref)
     data: dict[str, Any] = {
         "task_id": task_id,
         "agent": agent,
@@ -148,6 +165,7 @@ def build_task_json(
         "forbidden_files": forbidden_files or [],
         "required_checks": required_checks or [],
         "worktree_path": worktree_path or "",
+        "base_ref": base_ref or "",
         "commit_allowed": commit_allowed,
         "push_allowed": push_allowed,
         "created": datetime.now(UTC).isoformat(),
@@ -216,11 +234,14 @@ def build_current_plan(
 def list_agent_tasks(run_cmd, *, project: str) -> dict[str, Any]:
     """List task directories from the configured coordination plane."""
     tasks_dir = task_tasks_dir(project)
-    result = run_cmd(project, f"ls -1 {shlex.quote(tasks_dir)}/")
+    result = run_cmd(project, f"ls -1t {shlex.quote(tasks_dir)}/")
     if result.get("exit_code") != 0:
         return {"stdout": "(no tasks)", "stderr": "", "exit_code": 0}
-    lines = result.get("stdout", "").splitlines()[:50]
-    result["stdout"] = "\n".join(lines)
+    all_lines = result.get("stdout", "").splitlines()
+    visible = all_lines[:50]
+    if len(all_lines) > len(visible):
+        visible.append(f"(truncated: showing {len(visible)} of {len(all_lines)} tasks)")
+    result["stdout"] = "\n".join(visible)
     return result
 
 
@@ -265,6 +286,7 @@ def write_agent_task(
     commit_message: str | None = None,
     constraints: str | None = None,
     worktree_path: str | None = None,
+    base_ref: str | None = None,
 ) -> dict[str, Any]:
     """Write task.json + current-plan.md + agent-status.md to .ai-bridge/tasks/<task_id>/."""
     validate_task_id(task_id)
@@ -276,6 +298,7 @@ def write_agent_task(
         forbidden_files=forbidden_files,
         required_checks=required_checks,
         worktree_path=worktree_path,
+        base_ref=base_ref,
     )
     td = task_dir(project, task_id)
     current_plan = build_current_plan(
@@ -300,5 +323,7 @@ def write_agent_task(
     ]
     if worktree_path:
         parts.append(_encoded_write(f"{td}/worktree-path.txt", worktree_path))
+    if base_ref:
+        parts.append(_encoded_write(f"{td}/base-ref.txt", base_ref))
     cmd = "\n".join(parts)
     return run_cmd(project, cmd)
