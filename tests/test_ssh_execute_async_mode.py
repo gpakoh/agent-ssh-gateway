@@ -132,6 +132,7 @@ class TestExecuteAsyncMode:
             redact_path_prefix=None,
             stdin=b"",
             timeout=30,
+            submission_key=None,
         )
         _app_state.manager.execute.assert_not_called()
 
@@ -169,6 +170,7 @@ class TestExecuteAsyncMode:
             redact_path_prefix=None,
             stdin=b"set -eu\necho hi\n",
             timeout=30,
+            submission_key=None,
         )
 
     def test_async_mode_forwards_request_timeout_to_create_job(self, monkeypatch):
@@ -202,8 +204,94 @@ class TestExecuteAsyncMode:
             redact_path_prefix=None,
             stdin=b"",
             timeout=300,
+            submission_key=None,
         )
         _app_state.manager.execute.assert_not_called()
+
+    def test_async_mode_forwards_submission_key(self, monkeypatch):
+        monkeypatch.setattr(settings, "api_auth_enabled", True)
+        monkeypatch.setattr(settings, "api_key", "secret-42")
+        monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
+        monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
+
+        with TestClient(app) as client:
+            self._setup_state()
+            from app import state as _app_state
+
+            resp = client.post(
+                "/api/ssh/execute",
+                headers={"X-API-Key": "secret-42"},
+                json={
+                    "session_id": "s-1",
+                    "command": "sh",
+                    "async_mode": True,
+                    "stdin": "echo hi\n",
+                    "submission_key": "task:project-1:agent-1",
+                },
+            )
+        assert resp.status_code == 200
+        assert _app_state.job_manager.create_job.await_args.kwargs["submission_key"] == (
+            "task:project-1:agent-1"
+        )
+
+    def test_async_submission_conflict_maps_to_409(self, monkeypatch):
+        from app.exceptions import SubmissionConflictError
+
+        monkeypatch.setattr(settings, "api_auth_enabled", True)
+        monkeypatch.setattr(settings, "api_key", "secret-42")
+        monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
+        monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
+
+        with TestClient(app) as client:
+            self._setup_state()
+            from app import state as _app_state
+
+            _app_state.job_manager.create_job.side_effect = SubmissionConflictError(
+                "submission_key is already bound to a different request"
+            )
+            resp = client.post(
+                "/api/ssh/execute",
+                headers={"X-API-Key": "secret-42"},
+                json={
+                    "session_id": "s-1",
+                    "command": "sh",
+                    "async_mode": True,
+                    "submission_key": "task:project-1:agent-1",
+                },
+            )
+        assert resp.status_code == 409
+        assert "different request" in resp.text
+
+    def test_async_submission_redis_unavailable_maps_to_503(self, monkeypatch):
+        from app.exceptions import SubmissionUnavailableError
+
+        monkeypatch.setattr(settings, "api_auth_enabled", True)
+        monkeypatch.setattr(settings, "api_key", "secret-42")
+        monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
+        monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
+
+        with TestClient(app) as client:
+            self._setup_state()
+            from app import state as _app_state
+
+            _app_state.job_manager.create_job.side_effect = SubmissionUnavailableError(
+                "Durable submission requires Redis"
+            )
+            resp = client.post(
+                "/api/ssh/execute",
+                headers={"X-API-Key": "secret-42"},
+                json={
+                    "session_id": "s-1",
+                    "command": "sh",
+                    "async_mode": True,
+                    "submission_key": "task:project-1:agent-1",
+                },
+            )
+        assert resp.status_code == 503
+        assert "requires Redis" in resp.text
 
     # ------------------------------------------------------------------
     # Policy — still enforced before job creation
@@ -339,6 +427,7 @@ class TestExecuteAsyncMode:
                 redact_path_prefix=None,
                 stdin=b"",
                 timeout=30,
+                submission_key=None,
             )
             _app_state.manager.execute.assert_not_called()
             _app_state.job_manager.get_job_status.assert_awaited_once_with("mock-job-id")

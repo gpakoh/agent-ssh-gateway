@@ -35,6 +35,7 @@ from app.auth_middleware import (
     ws_auth_check,
 )
 from app.config import settings
+from app.exceptions import SubmissionConflictError, SubmissionUnavailableError
 from app.models import (
     AgentTokenRefreshRequest,
     AgentTokenRefreshResponse,
@@ -607,14 +608,20 @@ async def ssh_execute(
     ensure_session_owner(session, _identity)
 
     if req.async_mode:
-        job_id = await _state.job_manager.create_job(
-            session_id=req.session_id,
-            command=sanitized,
-            owner_id=_identity.fingerprint,
-            redact_path_prefix=req.redact_path_prefix,
-            stdin=req.stdin.encode("utf-8") if req.stdin else b"",
-            timeout=req.timeout,
-        )
+        try:
+            job_id = await _state.job_manager.create_job(
+                session_id=req.session_id,
+                command=sanitized,
+                owner_id=_identity.fingerprint,
+                redact_path_prefix=req.redact_path_prefix,
+                stdin=req.stdin.encode("utf-8") if req.stdin else b"",
+                timeout=req.timeout,
+                submission_key=req.submission_key,
+            )
+        except SubmissionConflictError as exc:
+            raise HTTPException(status_code=409, detail=_err(409, str(exc))) from exc
+        except SubmissionUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=_err(503, str(exc))) from exc
         await _persist_command_audit(
             session_id=req.session_id,
             command=req.command,

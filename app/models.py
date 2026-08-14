@@ -62,6 +62,16 @@ class ExecuteRequest(BaseModel):
         default=False,
         description="Start command as an async background job instead of waiting for completion.",
     )
+    submission_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=512,
+        description=(
+            "Optional durable idempotency key for async submission. Repeating the "
+            "same key with the same authenticated owner and execution payload "
+            "returns the original job_id instead of launching a duplicate."
+        ),
+    )
     stdin: str = Field(
         default="",
         max_length=1_048_576,

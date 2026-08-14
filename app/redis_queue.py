@@ -1,6 +1,7 @@
 """Redis-backed job queue for distributed processing."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -8,6 +9,7 @@ import uuid
 
 import redis.asyncio as redis
 
+from .exceptions import SubmissionConflictError, SubmissionUnavailableError
 from .metrics import metrics
 from .redis_compat import close_redis_client
 
@@ -42,6 +44,8 @@ class RedisJobQueue:
         self._dead_letter_key = "ssh_gateway:jobs:dead"
         self._job_prefix = "ssh_gateway:job:"
         self._lease_prefix = "ssh_gateway:lease:"
+        self._submission_prefix = "ssh_gateway:submission:"
+        self._submission_ttl_seconds = 7 * 86400
 
     async def _update_queue_depth_metrics(self):
         """Update Prometheus queue depth gauge from current Redis state."""
@@ -70,6 +74,72 @@ class RedisJobQueue:
         if self._redis:
             await close_redis_client(self._redis)
             logger.info("Disconnected From Redis")
+
+    def _submission_storage_key(self, submission_key: str) -> str:
+        digest = hashlib.sha256(submission_key.encode("utf-8")).hexdigest()
+        return f"{self._submission_prefix}{digest}"
+
+    async def find_submission(
+        self,
+        submission_key: str,
+        *,
+        owner_id: str,
+        payload_hash: str,
+    ) -> str | None:
+        """Resolve an existing durable async submission without creating one."""
+        if not self._redis:
+            raise SubmissionUnavailableError("Durable submission requires Redis")
+        raw = await self._redis.get(self._submission_storage_key(submission_key))
+        if raw is None:
+            return None
+        try:
+            claim = json.loads(raw)
+            job_id = str(claim["job_id"])
+            stored_owner = str(claim["owner_id"])
+            stored_payload = str(claim["payload_hash"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise SubmissionUnavailableError("Durable submission record is invalid") from exc
+        if stored_owner != owner_id or stored_payload != payload_hash:
+            raise SubmissionConflictError(
+                "submission_key is already bound to a different request"
+            )
+        return job_id
+
+    async def claim_submission(
+        self,
+        submission_key: str,
+        *,
+        job_id: str,
+        owner_id: str,
+        payload_hash: str,
+    ) -> tuple[str, bool]:
+        """Atomically reserve a stable async submission identity in Redis."""
+        if not self._redis:
+            raise SubmissionUnavailableError("Durable submission requires Redis")
+        key = self._submission_storage_key(submission_key)
+        claim = json.dumps(
+            {
+                "version": 1,
+                "job_id": job_id,
+                "owner_id": owner_id,
+                "payload_hash": payload_hash,
+                "created_at": time.time(),
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        for _ in range(3):
+            created = await self._redis.set(
+                key, claim, nx=True, ex=self._submission_ttl_seconds
+            )
+            if created:
+                return job_id, True
+            existing = await self.find_submission(
+                submission_key, owner_id=owner_id, payload_hash=payload_hash
+            )
+            if existing is not None:
+                return existing, False
+        raise SubmissionUnavailableError("Unable to reserve durable submission")
 
     async def save_terminal_job(
         self,
