@@ -120,3 +120,59 @@ class TestTerminalHistoryRetained:
         assert old.to_dict()["job_id"] == "old"
 
         assert [j.job_id for j in await jm.list_jobs()] == ["old", job_id]
+
+
+class TestJobTimeoutPropagation:
+    """Regression: background jobs must use the per-job timeout, not
+    execute_stream's hard-coded 600s default."""
+
+    @staticmethod
+    def _make_capturing_manager():
+        """JobManager whose execute_stream records its call kwargs."""
+        mock_ssh = AsyncMock()
+        calls: list[dict] = []
+
+        async def _stream(*args, **kwargs):
+            calls.append(kwargs)
+            if False:
+                yield  # pragma: no cover — makes this an async generator
+
+        mock_ssh.execute_stream = _stream
+        jm = JobManager(ssh_manager=mock_ssh)
+        return jm, calls
+
+    @pytest.mark.asyncio
+    async def test_create_job_defaults_timeout_to_3600(self):
+        """create_job without a timeout keeps the 3600s default."""
+        jm, calls = self._make_capturing_manager()
+
+        job_id = await jm.create_job("s1", "echo hi", owner_id="u1")
+        job = await jm.get_job(job_id)
+        assert job.timeout == 3600
+
+        await asyncio.wait_for(job.completed_event.wait(), timeout=5)
+        assert calls[-1]["timeout"] == 3600
+
+    @pytest.mark.asyncio
+    async def test_create_job_stores_explicit_timeout(self):
+        """create_job stores the caller-provided timeout on the job."""
+        jm, calls = self._make_capturing_manager()
+
+        job_id = await jm.create_job("s1", "echo hi", owner_id="u1", timeout=120)
+        job = await jm.get_job(job_id)
+        assert job.timeout == 120
+
+        await asyncio.wait_for(job.completed_event.wait(), timeout=5)
+        assert calls[-1]["timeout"] == 120
+        assert calls[-1]["cancel_event"] is job.cancel_event
+        assert calls[-1]["stdin_data"] == b""
+
+    @pytest.mark.asyncio
+    async def test_default_job_timeout_does_not_override_explicit(self):
+        """The manager-level default only applies when the caller omits timeout."""
+        jm, _ = self._make_capturing_manager()
+        jm._job_timeout = 999
+
+        job_id = await jm.create_job("s1", "echo hi", owner_id="u1", timeout=42)
+        job = await jm.get_job(job_id)
+        assert job.timeout == 42

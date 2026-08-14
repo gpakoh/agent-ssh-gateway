@@ -84,6 +84,7 @@ async def jobs_run(
         session_id=req.session_id,
         command=req.command,
         owner_id=_identity.fingerprint,
+        timeout=req.timeout,
     )
     return JobRunResponse(job_id=job_id)
 

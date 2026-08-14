@@ -131,6 +131,7 @@ class TestExecuteAsyncMode:
             owner_id=token_fingerprint("secret-42"),
             redact_path_prefix=None,
             stdin=b"",
+            timeout=30,
         )
         _app_state.manager.execute.assert_not_called()
 
@@ -167,7 +168,42 @@ class TestExecuteAsyncMode:
             owner_id=token_fingerprint("secret-42"),
             redact_path_prefix=None,
             stdin=b"set -eu\necho hi\n",
+            timeout=30,
         )
+
+    def test_async_mode_forwards_request_timeout_to_create_job(self, monkeypatch):
+        """Regression: async_mode jobs must inherit the validated request
+        timeout instead of always using execute_stream's 600s default."""
+        monkeypatch.setattr(settings, "api_auth_enabled", True)
+        monkeypatch.setattr(settings, "api_key", "secret-42")
+        monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
+        monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+        monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
+
+        with TestClient(app) as client:
+            self._setup_state()
+            from app import state as _app_state
+
+            resp = client.post(
+                "/api/ssh/execute",
+                headers={"X-API-Key": "secret-42"},
+                json={
+                    "session_id": "s-1",
+                    "command": "sleep 60",
+                    "async_mode": True,
+                    "timeout": 300,
+                },
+            )
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+        _app_state.job_manager.create_job.assert_awaited_once_with(
+            session_id="s-1",
+            command="sleep 60",
+            owner_id=token_fingerprint("secret-42"),
+            redact_path_prefix=None,
+            stdin=b"",
+            timeout=300,
+        )
+        _app_state.manager.execute.assert_not_called()
 
     # ------------------------------------------------------------------
     # Policy — still enforced before job creation
@@ -302,6 +338,7 @@ class TestExecuteAsyncMode:
                 owner_id=token_fingerprint("secret-42"),
                 redact_path_prefix=None,
                 stdin=b"",
+                timeout=30,
             )
             _app_state.manager.execute.assert_not_called()
             _app_state.job_manager.get_job_status.assert_awaited_once_with("mock-job-id")
