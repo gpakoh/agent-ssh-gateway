@@ -37,6 +37,7 @@ SUPPORTED_SCOPES: list[str] = [
     "mcp:execute",
     "mcp:repo",
     "mcp:docker",
+    "mcp:docker:admin",
     "mcp:postgres",
     "mcp:docs",
     "mcp:admin",

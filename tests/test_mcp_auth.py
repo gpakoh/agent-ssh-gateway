@@ -137,3 +137,49 @@ def test_oauth_endpoints_public_without_token(token_client):
     """OAuth discovery endpoints must work without any auth."""
     resp = token_client.get("/.well-known/oauth-authorization-server")
     assert resp.status_code not in (401, 403)
+
+
+def test_openid_configuration_exposes_docker_admin_scope(token_client):
+    """OAuth discovery metadata must advertise mcp:docker:admin so a
+    connector can request/register it (ACCESS_PROFILES['full'] includes it)."""
+    resp = token_client.get("/.well-known/openid-configuration")
+    assert resp.status_code not in (401, 403)
+    scopes = resp.json()["scopes_supported"]
+    assert "mcp:docker:admin" in scopes
+
+
+def test_oauth_authorization_server_metadata_exposes_docker_admin_scope():
+    """Cover the actual FastMCP authorization-server metadata path: the public
+    proxy forwards /.well-known/oauth-authorization-server to the internal
+    FastMCP server, whose create_auth_routes()/build_metadata() advertises
+    valid_scopes (= SUPPORTED_SCOPES). Both discovery surfaces must expose
+    mcp:docker:admin."""
+    from mcp.server.auth.routes import create_auth_routes
+    from mcp.server.auth.settings import ClientRegistrationOptions
+    from pydantic import AnyHttpUrl
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    from examples.mcp_server.oauth_provider import (
+        SUPPORTED_SCOPES,
+        GatewayOAuthProvider,
+    )
+
+    provider = GatewayOAuthProvider()
+    options = ClientRegistrationOptions(
+        enabled=True,
+        valid_scopes=SUPPORTED_SCOPES,
+        default_scopes=list(SUPPORTED_SCOPES),
+    )
+    routes = create_auth_routes(
+        provider=provider,
+        issuer_url=AnyHttpUrl("https://gateway.example.com"),
+        service_documentation_url=AnyHttpUrl("https://github.com/gpakoh/agent-ssh-gateway"),
+        client_registration_options=options,
+    )
+    app = Starlette(routes=routes)
+    resp = TestClient(app).get("/.well-known/oauth-authorization-server")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "scopes_supported" in body
+    assert "mcp:docker:admin" in body["scopes_supported"]

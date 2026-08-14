@@ -506,8 +506,8 @@ async def openid_configuration(request: Request) -> JSONResponse:
     if scopes is None:
         scopes = [
             "mcp:read", "mcp:project", "mcp:handoff", "mcp:agent-run",
-            "mcp:execute", "mcp:repo", "mcp:docker", "mcp:postgres",
-            "mcp:docs", "mcp:admin",
+            "mcp:execute", "mcp:repo", "mcp:docker", "mcp:docker:admin",
+            "mcp:postgres", "mcp:docs", "mcp:admin",
         ]
     return JSONResponse({
         "issuer": f"{base}/",
