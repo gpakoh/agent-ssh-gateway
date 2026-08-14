@@ -139,6 +139,30 @@ async def test_identical_retry_returns_same_job_and_executes_once():
 
 
 @pytest.mark.asyncio
+async def test_concurrent_identical_submissions_launch_only_one_job():
+    queue = _queue()
+    calls = [0]
+    manager = _manager(queue, calls)
+
+    async def submit():
+        return await manager.create_job(
+            "session-a",
+            "sh",
+            owner_id="owner-a",
+            stdin=b"echo hi\n",
+            timeout=300,
+            submission_key="task:project-1:agent-race",
+        )
+
+    first, second = await asyncio.gather(submit(), submit())
+    assert first == second
+    job = await manager.get_job(first)
+    assert job is not None
+    await asyncio.wait_for(job.completed_event.wait(), timeout=2)
+    assert calls[0] == 1
+
+
+@pytest.mark.asyncio
 async def test_retry_after_manager_restart_returns_original_job_id():
     queue = _queue()
     calls1 = [0]
