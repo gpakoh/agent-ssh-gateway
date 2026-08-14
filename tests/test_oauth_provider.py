@@ -109,6 +109,83 @@ def test_scope_constants():
     assert "mcp:admin" not in DEFAULT_SCOPES
 
 
+def test_supported_scopes_cover_full_profile():
+    """Regression: ACCESS_PROFILES['full'] (which includes mcp:docker:admin)
+    must not drift outside the capability set OAuth advertises/accepts for
+    connector clients. DEFAULT_SCOPES must meanwhile stay non-admin."""
+    from examples.mcp_server.tool_scopes import ACCESS_PROFILES
+
+    assert "mcp:docker:admin" in SUPPORTED_SCOPES
+    assert set(ACCESS_PROFILES["full"]) <= set(SUPPORTED_SCOPES)
+    assert "mcp:docker:admin" not in DEFAULT_SCOPES
+    assert "mcp:admin" not in DEFAULT_SCOPES
+
+
+def test_parse_scopes_accepts_docker_admin():
+    """mcp:docker:admin must be a first-class, separately-requestable scope
+    (no prefix inheritance from mcp:docker)."""
+    scopes = _parse_scopes("mcp:docker mcp:docker:admin")
+    assert scopes == ["mcp:docker", "mcp:docker:admin"]
+
+
+def test_create_authorization_code_rejects_docker_admin_escalation(provider):
+    """Consent must not grant mcp:docker:admin to a client whose registered
+    grants only cover mcp:read."""
+    provider._clients["cid_docker_read_only"] = type(
+        "S",
+        (),
+        {
+            "client_id": "cid_docker_read_only",
+            "redirect_uris": ["https://example.com/cb"],
+            "client_name": "T",
+            "scopes": ["mcp:read"],
+        },
+    )()
+    cv = secrets.token_urlsafe(64)
+    cc = _generate_code_challenge(cv)
+    with pytest.raises(ValueError, match="exceed client grants"):
+        provider.create_authorization_code(
+            "cid_docker_read_only", "https://example.com/cb", cc, "s",
+            ["mcp:read", "mcp:docker:admin"],
+        )
+
+
+@pytest.mark.anyio
+async def test_dcr_client_with_docker_admin_scope_receives_admin_token(provider):
+    """Regression: a client explicitly registered with mcp:docker:admin must
+    be able to obtain an access token that carries it end-to-end."""
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    client_info = OAuthClientInformationFull(
+        redirect_uris=["https://chatgpt.com/callback"],
+        client_name="Docker Admin Client",
+        token_endpoint_auth_method="none",
+        scope="mcp:read mcp:docker mcp:docker:admin",
+    )
+    await provider.register_client(client_info)
+
+    code_verifier = secrets.token_urlsafe(64)
+    code_challenge = _generate_code_challenge(code_verifier)
+    auth = provider.create_authorization_code(
+        client_id=client_info.client_id,
+        redirect_uri="https://chatgpt.com/callback",
+        code_challenge=code_challenge,
+        state="s",
+        scopes=["mcp:read", "mcp:docker", "mcp:docker:admin"],
+    )
+    tokens = provider.exchange_code_for_token(
+        client_id=client_info.client_id,
+        code=auth["code"],
+        code_verifier=code_verifier,
+        redirect_uri="https://chatgpt.com/callback",
+    )
+    assert "mcp:docker:admin" in tokens["scope"].split()
+
+    stored = provider.verify_access_token(tokens["access_token"])
+    assert stored is not None
+    assert "mcp:docker:admin" in stored.scopes
+
+
 @pytest.fixture
 def provider():
     return GatewayOAuthProvider()
