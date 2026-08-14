@@ -8,6 +8,7 @@ import time
 import uuid
 
 import redis.asyncio as redis
+from redis.exceptions import RedisError
 
 from .exceptions import SubmissionConflictError, SubmissionUnavailableError
 from .metrics import metrics
@@ -89,7 +90,12 @@ class RedisJobQueue:
         """Resolve an existing durable async submission without creating one."""
         if not self._redis:
             raise SubmissionUnavailableError("Durable submission requires Redis")
-        raw = await self._redis.get(self._submission_storage_key(submission_key))
+        try:
+            raw = await self._redis.get(self._submission_storage_key(submission_key))
+        except RedisError as exc:
+            raise SubmissionUnavailableError(
+                "Durable submission backend is unavailable"
+            ) from exc
         if raw is None:
             return None
         try:
@@ -129,9 +135,14 @@ class RedisJobQueue:
             sort_keys=True,
         )
         for _ in range(3):
-            created = await self._redis.set(
-                key, claim, nx=True, ex=self._submission_ttl_seconds
-            )
+            try:
+                created = await self._redis.set(
+                    key, claim, nx=True, ex=self._submission_ttl_seconds
+                )
+            except RedisError as exc:
+                raise SubmissionUnavailableError(
+                    "Durable submission backend is unavailable"
+                ) from exc
             if created:
                 return job_id, True
             existing = await self.find_submission(

@@ -6,6 +6,7 @@ import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.exceptions import SubmissionConflictError, SubmissionUnavailableError
 from app.job_manager import JobManager
@@ -241,3 +242,48 @@ async def test_same_key_different_execution_payload_fails_without_second_run():
             submission_key="task:project-1:agent-1",
         )
     assert calls[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_redis_read_transport_failure_fails_before_execution():
+    queue = RedisJobQueue("redis://unused")
+    backend = AsyncMock()
+    backend.get.side_effect = RedisConnectionError("redis down")
+    queue._redis = backend
+    calls = [0]
+    manager = _manager(queue, calls)
+
+    with pytest.raises(SubmissionUnavailableError, match="backend is unavailable"):
+        await manager.create_job(
+            "session-a",
+            "sh",
+            owner_id="owner-a",
+            stdin=b"echo hi\n",
+            timeout=300,
+            submission_key="task:project-1:redis-read-down",
+        )
+    await asyncio.sleep(0)
+    assert calls[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_redis_claim_transport_failure_fails_before_execution():
+    queue = RedisJobQueue("redis://unused")
+    backend = AsyncMock()
+    backend.get.return_value = None
+    backend.set.side_effect = RedisConnectionError("redis down")
+    queue._redis = backend
+    calls = [0]
+    manager = _manager(queue, calls)
+
+    with pytest.raises(SubmissionUnavailableError, match="backend is unavailable"):
+        await manager.create_job(
+            "session-a",
+            "sh",
+            owner_id="owner-a",
+            stdin=b"echo hi\n",
+            timeout=300,
+            submission_key="task:project-1:redis-write-down",
+        )
+    await asyncio.sleep(0)
+    assert calls[0] == 0
