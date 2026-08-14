@@ -11,3 +11,11 @@ class JobNotFoundError(Exception):
 
 class PermissionDeniedError(Exception):
     """Raised when the caller does not own the requested resource."""
+
+
+class SubmissionConflictError(Exception):
+    """Raised when an idempotency key is reused for a different request."""
+
+
+class SubmissionUnavailableError(Exception):
+    """Raised when a durable idempotent submission cannot be recorded."""

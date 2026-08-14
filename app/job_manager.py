@@ -1,6 +1,7 @@
 """Background job management for long-running SSH commands."""
 
 import asyncio
+import hashlib
 import logging
 import time
 import uuid
@@ -8,7 +9,11 @@ from dataclasses import dataclass, field
 
 from app.command_policy import evaluate_command_policy
 from app.config import settings
-from app.exceptions import JobNotFoundError, PermissionDeniedError
+from app.exceptions import (
+    JobNotFoundError,
+    PermissionDeniedError,
+    SubmissionUnavailableError,
+)
 from app.output_redaction import should_redact_command_output
 from app.redis_queue import RedisJobQueue
 from app.security import redact_secrets
@@ -24,6 +29,17 @@ MAX_STDOUT_SIZE = 10 * 1024 * 1024  # 10 MB per job
 TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
 ACTIVE_STATES = frozenset({"pending", "running", "cancelling"})
 SSE_LISTENER_QUEUE_SIZE = 256
+
+
+def _submission_payload_hash(command: str, stdin: bytes, timeout: int) -> str:
+    """Hash execution semantics without persisting command/stdin in the claim."""
+    digest = hashlib.sha256()
+    digest.update(command.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(stdin)
+    digest.update(b"\0")
+    digest.update(str(timeout).encode("ascii"))
+    return digest.hexdigest()
 
 
 def _make_job_error_logger(job_id: str):
@@ -265,14 +281,52 @@ class JobManager:
         redact_path_prefix: str | None = None,
         stdin: bytes = b"",
         timeout: int | None = None,
+        submission_key: str | None = None,
     ) -> str:
-        """Create a new background job."""
+        """Create a background job, optionally under a durable idempotency key.
+
+        Keyed submissions fail closed: Redis must be available and the key is
+        atomically reserved before any SSH command is scheduled. Repeating an
+        identical request returns the original job_id, including after a
+        coordinator/Gateway retry or process restart.
+        """
+        resolved_timeout = self._job_timeout if timeout is None else timeout
+        payload_hash = _submission_payload_hash(command, stdin, resolved_timeout)
+
+        if submission_key:
+            if self.redis_queue is None:
+                raise SubmissionUnavailableError("Durable submission requires Redis")
+            existing = await self.redis_queue.find_submission(
+                submission_key, owner_id=owner_id, payload_hash=payload_hash
+            )
+            if existing is not None:
+                return existing
+
         async with self._lock:
             active_jobs = sum(1 for job in self._jobs.values() if job.status in ACTIVE_STATES)
             if active_jobs >= self._max_jobs:
+                if submission_key and self.redis_queue is not None:
+                    existing = await self.redis_queue.find_submission(
+                        submission_key, owner_id=owner_id, payload_hash=payload_hash
+                    )
+                    if existing is not None:
+                        return existing
                 raise ExecutionError("Maximum number of jobs reached")
 
             job_id = str(uuid.uuid4())
+            if submission_key:
+                if self.redis_queue is None:
+                    raise SubmissionUnavailableError("Durable submission requires Redis")
+                reserved_job_id, created = await self.redis_queue.claim_submission(
+                    submission_key,
+                    job_id=job_id,
+                    owner_id=owner_id,
+                    payload_hash=payload_hash,
+                )
+                if not created:
+                    return reserved_job_id
+                job_id = reserved_job_id
+
             job = JobRecord(
                 job_id=job_id,
                 session_id=session_id,
@@ -280,12 +334,12 @@ class JobManager:
                 owner_id=owner_id,
                 redact_path_prefix=redact_path_prefix,
                 stdin=stdin,
-                timeout=self._job_timeout if timeout is None else timeout,
+                timeout=resolved_timeout,
             )
             job.queued_at_mono = time.monotonic()
             self._jobs[job_id] = job
 
-        # Start The Job In Background
+        # Schedule only after a keyed submission is durably reserved.
         task = asyncio.create_task(self._run_job(job_id))
         task.add_done_callback(_make_job_error_logger(job_id))
         self._job_tasks[job_id] = task
