@@ -479,9 +479,54 @@ class TestGatewayWriteAgentTaskScriptTransport:
         assert f"mkdir -p .ai-bridge/tasks/{TASK_ID}" in script
         contract = json.loads(self._decoded_payload(script, "task.json"))
         assert contract["task_id"] == TASK_ID
+        assert contract["base_ref"] == ""
+        assert "base-ref.txt" not in script
         assert "<< 'JEOF'" not in script
         client.execute_argv.assert_not_called()
         client.execute_project_command.assert_not_called()
+
+    def test_forwards_base_ref_into_contract_and_base_ref_txt(self, monkeypatch):
+        import examples.mcp_server.server as server_mod
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_write_agent_task
+
+        client = MagicMock()
+        client.execute_project_script.return_value = {"exit_code": 0, "stdout": "ok", "stderr": ""}
+        monkeypatch.setattr(server_mod, "client", client)
+        sha = "0" * 40
+
+        result = gateway_write_agent_task(
+            project="test",
+            task_id=TASK_ID,
+            agent="opencode",
+            task="Do the thing",
+            base_ref=sha,
+        )
+
+        assert result["result"]["exit_code"] == 0
+        script = client.execute_project_script.call_args[0][1]
+        contract = json.loads(self._decoded_payload(script, "task.json"))
+        assert contract["base_ref"] == sha
+        assert self._decoded_payload(script, "base-ref.txt") == sha
+
+    def test_rejects_invalid_base_ref_before_script(self, monkeypatch):
+        import examples.mcp_server.server as server_mod
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_write_agent_task
+
+        client = MagicMock()
+        client.execute_project_script.return_value = {"exit_code": 0, "stdout": "ok", "stderr": ""}
+        monkeypatch.setattr(server_mod, "client", client)
+
+        result = gateway_write_agent_task(
+            project="test",
+            task_id=TASK_ID,
+            agent="opencode",
+            task="Do the thing",
+            base_ref="main",
+        )
+
+        assert result["ok"] is False
+        assert "INVALID_INPUT" in result["error"]["code"]
+        client.execute_project_script.assert_not_called()
 
     def test_comma_separated_scope_patterns_become_distinct_contract_entries(self, monkeypatch):
         """The MCP string surface must not silently turn ``a.py,b.py`` into

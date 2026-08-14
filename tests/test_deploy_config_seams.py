@@ -834,6 +834,13 @@ class TestSshdVersionedArtifact:
         assert "ssh-gateway-sshd:${{ github.sha }}" in push["run"]
         assert "ssh-gateway-sshd:latest" in push["run"]
 
+    def test_sshd_dockerfile_installs_ripgrep(self):
+        """The agent's grep tool shells out to `rg` on the SSH target, so
+        the executor image must install ripgrep in its apk add line."""
+        text = SSHD_DOCKERFILE.read_text(encoding="utf-8")
+        apk_line = next(line for line in text.splitlines() if "apk add" in line)
+        assert "ripgrep" in apk_line
+
 
 class TestAgentExecutorDataRoot:
     """The named agent-data volume must inherit an executor-writable owner.

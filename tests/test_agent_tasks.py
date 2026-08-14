@@ -13,10 +13,12 @@ from examples.mcp_server.agent_tasks import (
     build_task_json,
     list_agent_tasks,
     read_agent_task_file,
+    validate_base_ref,
     validate_filename,
     validate_required_checks,
     validate_scope_contract,
     validate_task_id,
+    write_agent_task,
 )
 
 
@@ -33,6 +35,48 @@ class TestValidateTaskId:
         for tid in ["", "too-short", "UPPERCASE", "has spaces", "ä", None]:
             with pytest.raises((ValueError, TypeError)):
                 validate_task_id(tid)  # type: ignore[arg-type]
+
+
+class TestValidateBaseRef:
+    SHA1 = "a" * 40
+    SHA256 = "b" * 64
+
+    def test_none_and_empty_accepted(self):
+        validate_base_ref(None)
+        validate_base_ref("")
+
+    def test_full_40_hex_accepted(self):
+        validate_base_ref(self.SHA1)
+
+    def test_full_64_hex_accepted(self):
+        validate_base_ref(self.SHA256)
+
+    def test_mixed_case_full_hex_accepted(self):
+        validate_base_ref("A" * 40)
+        validate_base_ref("aBcDeF" * 6 + "aBcD")
+
+    def test_rejects_short_or_partial_hex(self):
+        for bad in ["a" * 39, "a" * 41, "b" * 63, "b" * 65]:
+            with pytest.raises(ValueError):
+                validate_base_ref(bad)
+
+    def test_rejects_non_hex(self):
+        for bad in ["g" * 40, "a" * 39 + "x", "z" * 64]:
+            with pytest.raises(ValueError):
+                validate_base_ref(bad)
+
+    def test_rejects_refs_and_fragments(self):
+        for bad in ["HEAD", "main", "main~1", "origin/main", "a" * 7]:
+            with pytest.raises(ValueError):
+                validate_base_ref(bad)
+
+    def test_rejects_non_string(self):
+        with pytest.raises(TypeError):
+            validate_base_ref(123)  # type: ignore[arg-type]
+
+    def test_build_task_json_rejects_invalid_base_ref(self):
+        with pytest.raises(ValueError):
+            build_task_json(task_id="a12345678901", agent="opencode", base_ref="main")
 
 
 class TestValidateRequiredChecks:
@@ -143,6 +187,10 @@ class TestBuildTaskJson:
         assert data["commit_allowed"] is False
         assert "created" in data
 
+    def test_minimal_base_ref_defaults_to_empty_string(self):
+        data = json.loads(build_task_json(task_id="a12345678901", agent="opencode"))
+        assert data["base_ref"] == ""
+
     def test_full(self):
         result = build_task_json(
             task_id="b23456789012",
@@ -158,6 +206,58 @@ class TestBuildTaskJson:
         assert data["agent"] == "custom-agent"
         assert "src/**" in data["allowed_files"]
         assert data["required_checks"] == ["pytest -q", "ruff check"]
+
+    def test_accepts_base_ref(self):
+        sha = "c" * 40
+        data = json.loads(build_task_json(task_id="b23456789012", agent="opencode", base_ref=sha))
+        assert data["base_ref"] == sha
+
+    def test_accepts_64_hex_base_ref(self):
+        sha = "d" * 64
+        data = json.loads(build_task_json(task_id="b23456789012", agent="opencode", base_ref=sha))
+        assert data["base_ref"] == sha
+
+
+class TestWriteAgentTask:
+    def _fake_run_cmd(self):
+        calls = []
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            calls.append((project, command))
+            return {"stdout": "ok", "stderr": "", "exit_code": 0}
+
+        return fake_run_cmd, calls
+
+    @staticmethod
+    def _decoded_payload(script: str, filename: str) -> str:
+        import base64
+
+        line = next(line for line in script.splitlines() if line.endswith(f"/{filename}"))
+        encoded = line.split("printf %s ", 1)[1].split(" | base64 -d", 1)[0]
+        return base64.b64decode(encoded).decode("utf-8")
+
+    def test_writes_base_ref_to_task_json_and_base_ref_txt(self):
+        sha = "e" * 40
+        fake_run_cmd, calls = self._fake_run_cmd()
+        write_agent_task(fake_run_cmd, project="my-proj", task_id="a12345678901", agent="opencode", task="Pin base ref", base_ref=sha)
+        script = calls[0][1]
+        contract = json.loads(self._decoded_payload(script, "task.json"))
+        assert contract["base_ref"] == sha
+        assert self._decoded_payload(script, "base-ref.txt") == sha
+
+    def test_omitted_base_ref_stays_backward_compatible(self):
+        fake_run_cmd, calls = self._fake_run_cmd()
+        write_agent_task(fake_run_cmd, project="my-proj", task_id="a12345678901", agent="opencode", task="No base ref")
+        script = calls[0][1]
+        contract = json.loads(self._decoded_payload(script, "task.json"))
+        assert contract["base_ref"] == ""
+        assert "base-ref.txt" not in script
+
+    def test_invalid_base_ref_raises_before_script(self):
+        fake_run_cmd, calls = self._fake_run_cmd()
+        with pytest.raises(ValueError):
+            write_agent_task(fake_run_cmd, project="my-proj", task_id="a12345678901", agent="opencode", task="Bad base ref", base_ref="main")
+        assert calls == []
 
 
 class TestBuildInitialStatus:
@@ -248,16 +348,29 @@ class TestReadAgentTaskFile:
 
 
 class TestListAgentTasks:
-    def test_passes_project(self):
+    def test_passes_project_and_requests_newest_first(self):
         calls = []
 
         def fake_run_cmd(project: str, command: str) -> dict:
             calls.append((project, command))
-            return {"stdout": "## Tasks\ntask-1\ntask-2", "stderr": "", "exit_code": 0}
+            return {"stdout": "task-2\ntask-1", "stderr": "", "exit_code": 0}
 
-        list_agent_tasks(fake_run_cmd, project="my-proj")
+        result = list_agent_tasks(fake_run_cmd, project="my-proj")
         assert calls[0][0] == "my-proj"
+        assert "ls -1t" in calls[0][1]
         assert ".ai-bridge/tasks/" in calls[0][1]
+        assert result["stdout"] == "task-2\ntask-1"
+
+    def test_marks_truncated_task_list(self):
+        tasks = [f"task-{idx:02d}" for idx in range(55)]
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            return {"stdout": "\n".join(tasks), "stderr": "", "exit_code": 0}
+
+        result = list_agent_tasks(fake_run_cmd, project="my-proj")
+        lines = result["stdout"].splitlines()
+        assert lines[:50] == tasks[:50]
+        assert lines[50] == "(truncated: showing 50 of 55 tasks)"
 
 
 class TestArchiveAgentTask:

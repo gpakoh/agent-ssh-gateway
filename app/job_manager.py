@@ -68,6 +68,10 @@ class JobRecord:
     # Data written to the command's stdin before shutdown_write (mirrors
     # execute-argv's stdin). Never returned to API callers.
     stdin: bytes = b""
+    # Per-job command timeout (seconds) forwarded to execute_stream. Defaults
+    # to the manager's job_timeout (3600) when create_job omits it. Never
+    # returned to API callers via to_dict().
+    timeout: int = 3600
 
     # Monotonic timestamps (relative to process start; do NOT survive restart)
     queued_at_mono: float | None = None
@@ -260,6 +264,7 @@ class JobManager:
         owner_id: str = "",
         redact_path_prefix: str | None = None,
         stdin: bytes = b"",
+        timeout: int | None = None,
     ) -> str:
         """Create a new background job."""
         async with self._lock:
@@ -275,6 +280,7 @@ class JobManager:
                 owner_id=owner_id,
                 redact_path_prefix=redact_path_prefix,
                 stdin=stdin,
+                timeout=self._job_timeout if timeout is None else timeout,
             )
             job.queued_at_mono = time.monotonic()
             self._jobs[job_id] = job
@@ -381,6 +387,7 @@ class JobManager:
             async for msg_type, msg_data in self._ssh_manager.execute_stream(
                 job.session_id,
                 job.command,
+                timeout=job.timeout,
                 cancel_event=job.cancel_event,
                 stdin_data=job.stdin,
             ):
