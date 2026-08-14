@@ -459,8 +459,15 @@ def test_valid_proxy_allows_opencode_and_is_not_logged(tmp_path, monkeypatch):
 class _ProxyPoolHandler(BaseHTTPRequestHandler):
     proxies = ["http://127.0.0.1:19001", "http://127.0.0.1:19002"]
     reports: list[dict[str, object]] = []
+    get_count = 0
+    fail_get_after_first = False
 
     def do_GET(self):
+        type(self).get_count += 1
+        if self.fail_get_after_first and self.get_count > 1:
+            self.send_response(503)
+            self.end_headers()
+            return
         body = json.dumps({"proxies": self.proxies}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -550,6 +557,8 @@ def test_parallel_runners_receive_distinct_proxy_leases(tmp_path, monkeypatch):
 
 def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
     _ProxyPoolHandler.reports = []
+    _ProxyPoolHandler.get_count = 0
+    _ProxyPoolHandler.fail_get_after_first = True
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ProxyPoolHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -601,6 +610,7 @@ def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
         )
 
         assert result.returncode == 0, result.stderr or result.stdout
+        assert _ProxyPoolHandler.get_count == 1
         assert capture.read_text(encoding="utf-8").splitlines() == _ProxyPoolHandler.proxies
         assert any(
             report.get("proxy") == _ProxyPoolHandler.proxies[0]
@@ -612,6 +622,7 @@ def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
         report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
         assert "Failure reason: none" in report
     finally:
+        _ProxyPoolHandler.fail_get_after_first = False
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
