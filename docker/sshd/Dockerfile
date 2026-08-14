@@ -13,7 +13,9 @@ ENV BUILD_SHA=${BUILD_SHA} BUILD_TIME=${BUILD_TIME}
 # useless for mcpuser (root's home is 0700, untraversable), so copy the binary:
 # `command -v opencode` then resolves for mcpuser's SSH session (PATH includes
 # /usr/local/bin, same as uv).
-RUN apk add --no-cache openssh-server git curl bash python3 && \
+# ripgrep: OpenCode's repo tools (grep/search) shell out to `rg`; the agent's
+# SSH session needs the binary on PATH to search the executor workspace.
+RUN apk add --no-cache openssh-server git curl bash python3 ripgrep && \
     adduser -D mcpuser && \
     mkdir -p /home/mcpuser/.ssh && \
     chmod 700 /home/mcpuser/.ssh && \
