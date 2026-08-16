@@ -15,8 +15,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from examples.mcp_server.agent_paths import managed_workspace_path, task_dir
-from examples.mcp_server.agent_tasks import validate_task_id
+from examples.mcp_server.agent_paths import (
+    managed_source_bundle_path,
+    managed_workspace_path,
+    task_dir,
+)
+from examples.mcp_server.agent_tasks import validate_base_ref, validate_task_id
 from examples.mcp_server.agent_tools import (
     _agent_submission_key,
     _build_opencode_script,
@@ -100,10 +104,20 @@ def project_run_opencode(
             "finished_at": _now_iso(),
         }
     try:
+        raw_base_ref = (task_json or {}).get("base_ref")
+        validate_base_ref(raw_base_ref)
+        base_ref = raw_base_ref if isinstance(raw_base_ref, str) and raw_base_ref else None
+        managed_source_path = None
+        if managed_clone:
+            if not base_ref:
+                raise ValueError("managed OpenCode execution requires an exact base_ref")
+            managed_source_path = managed_source_bundle_path(project, base_ref)
+            if not managed_source_path:
+                raise ValueError("MCP_AGENT_SOURCE_ROOT is required for managed OpenCode execution")
         allowed_files = _task_string_list(task_json or {}, "allowed_files")
         forbidden_files = _task_string_list(task_json or {}, "forbidden_files")
         required_checks = _task_string_list(task_json or {}, "required_checks")
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         return {
             "task_id": task_id,
             "status": "error",
@@ -124,6 +138,8 @@ def project_run_opencode(
         forbidden_files=forbidden_files,
         required_checks=required_checks,
         managed_clone=managed_clone,
+        base_ref=base_ref,
+        managed_source_path=managed_source_path,
     )
 
     if async_submit:

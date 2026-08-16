@@ -48,6 +48,53 @@ def _env_dict(env_list: list[str]) -> dict[str, str]:
     return result
 
 
+class TestAgentRuntimeIsolationWiring:
+    def test_oauth_and_sshd_share_managed_agent_runtime_volume(self):
+        compose = _load_compose()
+        oauth = compose["services"]["mcp-oauth"]
+        sshd = compose["services"]["sshd"]
+        oauth_env = _env_dict(oauth["environment"])
+
+        assert "MCP_AGENT_STATE_ROOT" in oauth_env
+        assert "MCP_AGENT_WORKSPACE_ROOT" in oauth_env
+        assert "MCP_AGENT_SOURCE_ROOT" in oauth_env
+        assert "/var/lib/mcp-agent/state" in oauth_env["MCP_AGENT_STATE_ROOT"]
+        assert "/var/lib/mcp-agent/workspaces" in oauth_env["MCP_AGENT_WORKSPACE_ROOT"]
+        assert "/var/lib/mcp-agent/sources" in oauth_env["MCP_AGENT_SOURCE_ROOT"]
+        mount = "agent_runtime:/var/lib/mcp-agent"
+        assert mount in oauth["volumes"]
+        assert mount in sshd["volumes"]
+        assert "agent_sources:/var/lib/mcp-agent/sources" in oauth["volumes"]
+        assert "agent_sources:/var/lib/mcp-agent/sources:ro" in sshd["volumes"]
+        assert "agent_runtime" in compose["volumes"]
+        assert "agent_sources" in compose["volumes"]
+
+    def test_sshd_image_installs_git_ssh_transport(self):
+        text = SSHD_DOCKERFILE.read_text(encoding="utf-8")
+        assert "openssh-client-default" in text
+
+    def test_images_prepare_shared_agent_source_directory(self):
+        assert "/var/lib/mcp-agent/sources" in SSHD_DOCKERFILE.read_text(encoding="utf-8")
+        assert "/var/lib/mcp-agent/sources" in MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+
+    def test_deploy_publishes_exact_ci_sha_source_only_after_smoke(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        assert 'checkout_sha=$(git rev-parse HEAD' in text
+        assert 'if [ "$checkout_sha" != "$DEPLOY_TAG" ]' in text
+        assert 'git bundle create "$bundle_tmp" HEAD' in text
+        assert 'git bundle list-heads "$bundle_tmp" HEAD' in text
+        publish_fn = text[text.index("publish_agent_source_bundle()") : text.index("run_migrations()")]
+        assert "if ! docker exec mcp-oauth python3 -c 'import os,sys; os.replace" in publish_fn
+        assert 'git bundle list-heads "$container_path" HEAD' in publish_fn
+        assert "final verification mismatch" in publish_fn
+        assert publish_fn.rstrip().endswith("}") and "return 0\n}" in publish_fn
+        smoke_gate = text.rfind("elif smoke; then")
+        publish = text.rfind("if publish_agent_source_bundle; then")
+        record = text.rfind('write_state "$NEW_GATEWAY_IMAGE"')
+        assert -1 < smoke_gate < publish < record
+
+
+
 class TestStrictHostKeyCheckingNeedsAStore:
     """Regression: SSH_STRICT_HOST_KEY_CHECKING=true with no KNOWN_HOSTS_STORE
     configured silently falls back to NullHostKeyStore + paramiko.RejectPolicy

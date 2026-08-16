@@ -251,6 +251,74 @@ deploy_services() {
   MCP_SERVER_IMAGE="$mcp_image" $COMPOSE up -d --no-deps --no-build mcp-oauth
 }
 
+publish_agent_source_bundle() {
+  # Agents must never clone from the mutable host checkout. CI checked out the
+  # exact DEPLOY_SHA that passed the workflow, so publish that Git object graph
+  # as an immutable bundle into a dedicated volume. sshd sees this volume
+  # read-only; mcp-oauth is the only runtime writer.
+  if [ "$DEPLOY_TAG" = "latest" ]; then
+    log "Agent source bundle: skipped for unpinned manual :latest deploy."
+    return 0
+  fi
+  if ! [[ "$DEPLOY_TAG" =~ ^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$ ]]; then
+    log "Agent source bundle: invalid deploy SHA '$DEPLOY_TAG'."
+    return 1
+  fi
+
+  local checkout_sha project_key bundle_tmp container_dir container_path container_tmp bundle_head
+  checkout_sha=$(git rev-parse HEAD 2>/dev/null || true)
+  if [ "$checkout_sha" != "$DEPLOY_TAG" ]; then
+    log "Agent source bundle: checkout SHA mismatch ($checkout_sha != $DEPLOY_TAG)."
+    return 1
+  fi
+  project_key=$(python3 -c 'from examples.mcp_server.agent_paths import project_state_key; print(project_state_key("web-ssh-gateway"))')
+  bundle_tmp=$(mktemp /tmp/mcp-agent-source.XXXXXX.bundle)
+  if ! git bundle create "$bundle_tmp" HEAD; then
+    rm -f "$bundle_tmp"
+    return 1
+  fi
+  bundle_head=$(git bundle list-heads "$bundle_tmp" HEAD 2>/dev/null | awk 'NR==1 {print $1}')
+  if [ "$bundle_head" != "$DEPLOY_TAG" ]; then
+    log "Agent source bundle: generated HEAD mismatch ($bundle_head != $DEPLOY_TAG)."
+    rm -f "$bundle_tmp"
+    return 1
+  fi
+
+  container_dir="/var/lib/mcp-agent/sources/$project_key"
+  container_path="$container_dir/${DEPLOY_TAG,,}.bundle"
+  container_tmp="$container_path.tmp.$$"
+  if ! docker exec mcp-oauth mkdir -p "$container_dir"; then
+    rm -f "$bundle_tmp"
+    return 1
+  fi
+  if ! docker exec -i mcp-oauth python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(sys.stdin.buffer.read())' "$container_tmp" < "$bundle_tmp"; then
+    rm -f "$bundle_tmp"
+    return 1
+  fi
+  rm -f "$bundle_tmp"
+
+  bundle_head=$(docker exec mcp-oauth git bundle list-heads "$container_tmp" HEAD 2>/dev/null | awk 'NR==1 {print $1}')
+  if [ "$bundle_head" != "$DEPLOY_TAG" ]; then
+    log "Agent source bundle: container verification mismatch ($bundle_head != $DEPLOY_TAG)."
+    docker exec mcp-oauth python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).unlink(missing_ok=True)' "$container_tmp" || true
+    return 1
+  fi
+  if ! docker exec mcp-oauth python3 -c 'import os,sys; os.replace(sys.argv[1], sys.argv[2])' "$container_tmp" "$container_path"; then
+    log "Agent source bundle: atomic publication failed."
+    docker exec mcp-oauth python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).unlink(missing_ok=True)' "$container_tmp" || true
+    return 1
+  fi
+  bundle_head=$(docker exec mcp-oauth git bundle list-heads "$container_path" HEAD 2>/dev/null | awk 'NR==1 {print $1}')
+  if [ "$bundle_head" != "$DEPLOY_TAG" ]; then
+    log "Agent source bundle: final verification mismatch ($bundle_head != $DEPLOY_TAG)."
+    docker exec mcp-oauth python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).unlink(missing_ok=True)' "$container_path" || true
+    return 1
+  fi
+  log "Agent source bundle published: $container_path"
+  return 0
+}
+
+
 run_migrations() {
   # Persistent-session schema ownership belongs to Alembic. SessionStore
   # no longer creates ssh_sessions during startup, so a deploy must migrate
@@ -320,9 +388,12 @@ if ! run_migrations; then
 elif ! restart_gateway_after_migrations; then
   log "Gateway restart after database migration FAILED."
 elif smoke; then
-  write_state "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE" "$NEW_EXECUTOR_IMAGE"
-  log "Deploy OK — recorded as last known good."
-  exit 0
+  if publish_agent_source_bundle; then
+    write_state "$NEW_GATEWAY_IMAGE" "$NEW_MCP_IMAGE" "$NEW_EXECUTOR_IMAGE"
+    log "Deploy OK — recorded as last known good."
+    exit 0
+  fi
+  log "Agent source publication FAILED."
 else
   log "Smoke test FAILED."
 fi

@@ -128,6 +128,12 @@ class TestProjectRunAgentDisabled:
         assert result["status"] == "error"
         assert "current-plan.md" in result["error"]
 
+    def test_non_string_base_ref_errors_instead_of_escaping_wrapper(self):
+        rc = _make_run_cmd(task_json=_make_task_json(base_ref=123))
+        result = project_run_agent(rc, project="test", task_id=TASK_ID)
+        assert result["status"] == "error"
+        assert "base_ref must be a string or None" in result["error"]
+
 
 # ── project_run_agent: router enabled ───────────────────────────────────────
 
@@ -397,12 +403,16 @@ class TestProjectRunAgentScriptCwd:
 
     def test_managed_workspace_env_overrides_task_supplied_worktree(self, monkeypatch):
         monkeypatch.setenv("MCP_AGENT_WORKSPACE_ROOT", "/var/lib/mcp-agent/workspaces")
+        monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", "/var/lib/mcp-agent/sources")
+        base_ref = "b" * 40
         monkeypatch.setattr(
             "app.workspace.registry.get_registry",
             lambda: type("R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}})(),
         )
         rc = _make_run_cmd(
-            task_json=_make_task_json(worktree_path="/abs/project/root/attacker-chosen")
+            task_json=_make_task_json(
+                worktree_path="/abs/project/root/attacker-chosen", base_ref=base_ref
+            )
         )
         run_script_async = _make_run_script_async("job-managed-1")
 
@@ -419,6 +429,7 @@ class TestProjectRunAgentScriptCwd:
         assert "/abs/project/root/attacker-chosen" not in script
         assert "/var/lib/mcp-agent/workspaces/test-" in script
         assert f"/{TASK_ID}" in script
+        assert f"/{base_ref}.bundle" in script
         assert "git clone --no-hardlinks --no-checkout" in script
         assert "git worktree add" not in script
 
