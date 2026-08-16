@@ -126,3 +126,75 @@ def test_git_timeout_fails_closed(monkeypatch):
 
     with pytest.raises(ManagedSourceBundleError, match="timed out during git fetch"):
         _run_git(["fetch", "source"])
+
+
+def test_registry_project_root_is_the_only_safe_directory_exception(monkeypatch, tmp_path):
+    captured: list[list[str]] = []
+
+    class _Result:
+        returncode = 0
+        stdout = ""
+
+    def fake_run(argv, **kwargs):
+        captured.append(argv)
+        return _Result()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    project_root = tmp_path / "mounted-project"
+
+    _run_git(
+        ["cat-file", "-e", "a" * 40 + "^{commit}"],
+        cwd=project_root,
+        safe_directory=project_root,
+    )
+
+    assert captured == [[
+        "git",
+        "-c",
+        f"safe.directory={project_root}",
+        "cat-file",
+        "-e",
+        "a" * 40 + "^{commit}",
+    ]]
+    assert "safe.directory=*" not in captured[0]
+
+
+def test_source_repo_access_is_scoped_to_registered_root(tmp_path, monkeypatch):
+    repo, sha = _repo(tmp_path)
+    monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", str(tmp_path / "sources"))
+    monkeypatch.setattr(
+        "examples.mcp_server.agent_sources.get_registry", lambda: _Registry(repo)
+    )
+
+    calls: list[tuple[list[str], Path | None, Path | None]] = []
+
+    def fake_run_git(args, *, cwd=None, safe_directory=None):
+        calls.append((args, cwd, safe_directory))
+        if "rev-parse" in args:
+            return sha
+        return ""
+
+    monkeypatch.setattr("examples.mcp_server.agent_sources._run_git", fake_run_git)
+    monkeypatch.setattr(
+        "examples.mcp_server.agent_sources._bundle_head", lambda path: sha
+    )
+    monkeypatch.setattr(os, "replace", lambda src, dst: None)
+
+    published = ensure_managed_source_bundle("nod", sha)
+    assert published is not None
+
+    source_calls = [
+        (args, cwd, safe_directory)
+        for args, cwd, safe_directory in calls
+        if "cat-file" in args or "fetch" in args
+    ]
+    assert len(source_calls) == 2
+    assert all(safe_directory == repo for _, _, safe_directory in source_calls)
+    assert source_calls[0][1] == repo
+
+    non_source_calls = [
+        safe_directory
+        for args, _cwd, safe_directory in calls
+        if "cat-file" not in args and "fetch" not in args
+    ]
+    assert all(safe_directory is None for safe_directory in non_source_calls)
