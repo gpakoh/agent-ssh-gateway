@@ -75,7 +75,7 @@ wait_docker_health() {
     local status
     status=$(docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null || echo "missing")
     if [ "$status" = "healthy" ]; then
-      if [ "$container" = "ssh-gateway-sshd" ]; then
+      if [ "$container" = "ssh-gateway-sshd" ] || [ "$container" = "ssh-gateway-agent-sshd" ]; then
         local memory_bytes
         memory_bytes=$(docker inspect --format '{{.HostConfig.Memory}}' "$container" 2>/dev/null || echo "0")
         if ! [[ "$memory_bytes" =~ ^[0-9]+$ ]] || (( memory_bytes < 17179869184 )); then
@@ -96,7 +96,8 @@ wait_docker_health() {
 
 smoke() {
   local ok=true
-  wait_docker_health "ssh-gateway-sshd" ssh-gateway-sshd 120 || ok=false
+  wait_docker_health "ssh-gateway-sshd"       ssh-gateway-sshd       120 || ok=false
+  wait_docker_health "ssh-gateway-agent-sshd" ssh-gateway-agent-sshd 120 || ok=false
   # No curl against localhost:8085 here — this script may run from a CI
   # job container whose "localhost" is its own network namespace, not the
   # host's (same class of bug quart-core's deploy script documents).
@@ -247,6 +248,7 @@ deploy_services() {
   # was just pushed/rolled back (see verify_provenance()).
   local gateway_image="$1" mcp_image="$2" sshd_image="$3"
   SSH_GATEWAY_SSHD_IMAGE="$sshd_image" WEB_SSH_GATEWAY_IMAGE="$gateway_image" $COMPOSE up -d --no-deps --no-build sshd web-ssh-gateway
+  SSH_GATEWAY_SSHD_IMAGE="$sshd_image" $COMPOSE up -d --no-deps --no-build agent-sshd
   MCP_SERVER_IMAGE="$mcp_image" $COMPOSE up -d --no-deps --no-build mcp-server
   MCP_SERVER_IMAGE="$mcp_image" $COMPOSE up -d --no-deps --no-build mcp-oauth
 }
