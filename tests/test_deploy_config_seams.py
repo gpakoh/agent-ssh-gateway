@@ -1085,6 +1085,14 @@ class TestAgentExecutorIsPartOfTheDeployPipeline:
         assert text.index('wait_docker_health "web-ssh-gateway"') < text.index(bootstrap)
         assert text.index(bootstrap) < text.index('web-ssh-gateway (authenticated)')
 
+    def test_mcp_health_check_runs_after_known_host_condition_closes(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        sequence = (
+            'echo "FAIL"; ok=false\n    fi\n  fi\n'
+            '  wait_docker_health "mcp-server"      mcp-server      120 || ok=false'
+        )
+        assert sequence in text
+
     def test_executor_memory_gate_applies_to_both_sshd_containers(self):
         text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
         fn = text.split("wait_docker_health() {", 1)[1].split("\n}\n", 1)[0]
