@@ -301,11 +301,11 @@ class TestCiSmokeGatewayUsesHttpCheckNotHealthStatus:
     matter how long the loop waits. Confirmed live: the app boots and
     /health already answers 200 within ~30s, but `docker inspect
     --format '{{.State.Health.Status}}'` stayed "starting" for the full
-    poll window regardless. mcp-server's own HEALTHCHECK has no such
-    coupling and is unaffected -- only the gateway's check needed to
-    change, to a direct `docker exec ... urlopen(...)` HTTP-200 check
-    matching this step's own original stated intent ("confirm it boots
-    and answers its own health path with HTTP 200").
+    poll window regardless. mcp-server has a different flake: its 30s
+    HEALTHCHECK cadence can race the standalone smoke's 60s poll window
+    under runner load. Both standalone checks therefore use direct
+    `docker exec ... urlopen(...)` HTTP-200 readiness probes; production
+    deploy still enforces the stricter Docker health states separately.
     """
 
     def test_gateway_check_does_not_use_health_status(self):
@@ -323,13 +323,12 @@ class TestCiSmokeGatewayUsesHttpCheckNotHealthStatus:
         assert "State.Health.Status" not in window
         assert "docker exec" in window and "urlopen" in window
 
-    def test_mcp_server_check_still_uses_health_status(self):
-        """Unaffected -- mcp-server's own HEALTHCHECK has no SSH/Redis
-        coupling and reports healthy fine standalone."""
+    def test_mcp_server_check_uses_direct_http_readiness(self):
+        """Probe app readiness directly instead of Docker's 30s health cadence."""
         text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
         lines = text.splitlines()
         mcp_section_start = next(
-            i for i, line in enumerate(lines) if "Waiting for mcp-server to report healthy" in line
+            i for i, line in enumerate(lines) if "Waiting for mcp-server to answer /healthz" in line
         )
         mcp_section_end = next(
             i
@@ -337,7 +336,8 @@ class TestCiSmokeGatewayUsesHttpCheckNotHealthStatus:
             if line.strip() == 'echo "mcp-server OK"'
         )
         window = "\n".join(lines[mcp_section_start:mcp_section_end])
-        assert "State.Health.Status" in window
+        assert "State.Health.Status" not in window
+        assert "docker exec" in window and "urlopen" in window and "/healthz" in window
 
 
 class TestProductionSmokeIsAuthenticatedBlackBox:
