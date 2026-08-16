@@ -1053,3 +1053,21 @@ class TestDeploySourceIsolation:
         assert "ln -s /deploy/web-ssh-gateway.env docker/.env" in text
         assert "ln -s /deploy/web-ssh-gateway-state .state" in text
         assert "bash scripts/deploy-from-registry.sh" in text
+
+class TestAgentExecutorIsPartOfTheDeployPipeline:
+    def test_deploy_services_recreates_agent_sshd_with_pinned_executor_image(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        deploy_fn = text.split("deploy_services() {", 1)[1].split("\n}\n", 1)[0]
+        line = next(line for line in deploy_fn.splitlines() if "up -d --no-deps --no-build agent-sshd" in line)
+        assert 'SSH_GATEWAY_SSHD_IMAGE="$sshd_image"' in line
+
+    def test_smoke_requires_agent_sshd_health(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        assert 'wait_docker_health "ssh-gateway-agent-sshd" ssh-gateway-agent-sshd 120' in text
+
+    def test_executor_memory_gate_applies_to_both_sshd_containers(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        fn = text.split("wait_docker_health() {", 1)[1].split("\n}\n", 1)[0]
+        assert '"ssh-gateway-sshd"' in fn
+        assert '"ssh-gateway-agent-sshd"' in fn
+        assert "17179869184" in fn
