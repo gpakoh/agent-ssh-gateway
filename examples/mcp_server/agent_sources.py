@@ -106,6 +106,16 @@ def ensure_managed_source_bundle(project: str, base_ref: str | None) -> str | No
         cwd=project_root,
         safe_directory=project_root,
     )
+    source_objects_raw = _run_git(
+        ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+        cwd=project_root,
+        safe_directory=project_root,
+    ).strip()
+    source_objects = Path(source_objects_raw)
+    if not source_objects.is_dir():
+        raise ManagedSourceBundleError(
+            "registered source object database is unavailable"
+        )
 
     temp_fd, temp_name = tempfile.mkstemp(
         prefix=f".{expected}.", suffix=".bundle.tmp", dir=bundle_path.parent
@@ -117,10 +127,10 @@ def ensure_managed_source_bundle(project: str, base_ref: str | None) -> str | No
     try:
         with tempfile.TemporaryDirectory(prefix="mcp-agent-source-") as bare_dir:
             bare = Path(bare_dir) / "source.git"
-            _run_git(
-                ["clone", "--bare", "--shared", str(project_root), str(bare)],
-                safe_directory=project_root,
-            )
+            _run_git(["init", "--bare", str(bare)])
+            alternates = bare / "objects" / "info" / "alternates"
+            alternates.parent.mkdir(parents=True, exist_ok=True)
+            alternates.write_text(f"{source_objects}\n", encoding="utf-8")
             _run_git(
                 [f"--git-dir={bare}", "update-ref", "refs/heads/source", base_ref]
             )

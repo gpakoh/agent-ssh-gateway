@@ -170,6 +170,8 @@ def test_source_repo_access_is_scoped_to_registered_root(tmp_path, monkeypatch):
 
     def fake_run_git(args, *, cwd=None, safe_directory=None):
         calls.append((args, cwd, safe_directory))
+        if "--git-path" in args:
+            return str(repo / ".git" / "objects")
         if "rev-parse" in args:
             return sha
         return ""
@@ -186,14 +188,12 @@ def test_source_repo_access_is_scoped_to_registered_root(tmp_path, monkeypatch):
     source_calls = [
         (args, cwd, safe_directory)
         for args, cwd, safe_directory in calls
-        if "cat-file" in args or "clone" in args
+        if "cat-file" in args or "--git-path" in args
     ]
     assert len(source_calls) == 2
     assert all(safe_directory == repo for _, _, safe_directory in source_calls)
-    assert source_calls[0][1] == repo
-    clone_args = source_calls[1][0]
-    assert clone_args[:3] == ["clone", "--bare", "--shared"]
-    assert str(repo) in clone_args
+    assert all(cwd == repo for _, cwd, _ in source_calls)
+    assert not any("clone" in args for args, _, _ in calls)
     assert not any("fetch" in args for args, _, _ in calls)
 
     update_ref_calls = [args for args, _, _ in calls if "update-ref" in args]
@@ -203,6 +203,6 @@ def test_source_repo_access_is_scoped_to_registered_root(tmp_path, monkeypatch):
     non_source_calls = [
         safe_directory
         for args, _cwd, safe_directory in calls
-        if "cat-file" not in args and "clone" not in args
+        if "cat-file" not in args and "--git-path" not in args
     ]
     assert all(safe_directory is None for safe_directory in non_source_calls)
