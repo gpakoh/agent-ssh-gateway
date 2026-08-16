@@ -128,6 +128,12 @@ class TestProjectRunAgentDisabled:
         assert result["status"] == "error"
         assert "current-plan.md" in result["error"]
 
+    def test_non_string_base_ref_errors_instead_of_escaping_wrapper(self):
+        rc = _make_run_cmd(task_json=_make_task_json(base_ref=123))
+        result = project_run_agent(rc, project="test", task_id=TASK_ID)
+        assert result["status"] == "error"
+        assert "base_ref must be a string or None" in result["error"]
+
 
 # ── project_run_agent: router enabled ───────────────────────────────────────
 
