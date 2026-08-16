@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from examples.mcp_server.agent_paths import (
+    managed_source_bundle_path,
     managed_workspace_path,
     project_state_key,
     task_archive_path,
@@ -42,6 +43,26 @@ def test_managed_workspace_path_is_operator_derived(monkeypatch):
     worktree = managed_workspace_path("kojo-bot-service", TASK_ID)
     key = project_state_key("kojo-bot-service")
     assert worktree == f"/var/lib/mcp-agent/workspaces/{key}/{TASK_ID}"
+
+
+def test_managed_source_bundle_path_is_exact_sha_and_operator_derived(monkeypatch):
+    monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", "/var/lib/mcp-agent/sources")
+    sha = "A" * 40
+    key = project_state_key("kojo-bot-service")
+    assert managed_source_bundle_path("kojo-bot-service", sha) == (
+        f"/var/lib/mcp-agent/sources/{key}/{sha.lower()}.bundle"
+    )
+
+
+def test_managed_source_bundle_requires_full_commit_id(monkeypatch):
+    monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", "/var/lib/mcp-agent/sources")
+    with pytest.raises(ValueError, match="full commit id"):
+        managed_source_bundle_path("kojo-bot-service", "master")
+
+
+def test_managed_source_bundle_is_disabled_without_source_root(monkeypatch):
+    monkeypatch.delenv("MCP_AGENT_SOURCE_ROOT", raising=False)
+    assert managed_source_bundle_path("kojo-bot-service", "a" * 40) is None
 
 
 def test_write_agent_task_uses_external_state_without_touching_source(tmp_path, monkeypatch):

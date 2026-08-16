@@ -22,7 +22,7 @@ RUN apk add --no-cache openssh-server openssh-client-default git curl bash pytho
     curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh && \
     curl -fsSL https://opencode.ai/install | bash -s -- --version 1.18.16 --no-modify-path && \
     install -Dm 0755 /root/.opencode/bin/opencode /usr/local/bin/opencode && \
-    mkdir -p /var/lib/mcp-agent/state /var/lib/mcp-agent/workspaces && \
+    mkdir -p /var/lib/mcp-agent/state /var/lib/mcp-agent/workspaces /var/lib/mcp-agent/sources && \
     chown -R mcpuser:mcpuser /var/lib/mcp-agent
 
 COPY authorized_keys /home/mcpuser/.ssh/authorized_keys

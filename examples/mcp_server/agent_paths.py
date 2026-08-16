@@ -18,6 +18,7 @@ from pathlib import PurePosixPath
 
 _STATE_ROOT_ENV = "MCP_AGENT_STATE_ROOT"
 _WORKSPACE_ROOT_ENV = "MCP_AGENT_WORKSPACE_ROOT"
+_SOURCE_ROOT_ENV = "MCP_AGENT_SOURCE_ROOT"
 _PROJECT_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -81,3 +82,14 @@ def managed_workspace_path(project: str, task_id: str) -> str | None:
         return None
     key = project_state_key(project)
     return f"{root}/{key}/{task_id}"
+
+
+def managed_source_bundle_path(project: str, base_ref: str) -> str | None:
+    """Return the immutable deploy-published Git bundle for one exact commit."""
+    root = _configured_root(_SOURCE_ROOT_ENV)
+    if root is None:
+        return None
+    if not re.fullmatch(r"[0-9A-Fa-f]{40}|[0-9A-Fa-f]{64}", base_ref):
+        raise ValueError("base_ref must be a full commit id for managed source lookup")
+    key = project_state_key(project)
+    return f"{root}/{key}/{base_ref.lower()}.bundle"
