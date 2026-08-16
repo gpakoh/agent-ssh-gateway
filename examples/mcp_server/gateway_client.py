@@ -126,27 +126,42 @@ class GatewayClient:
         base_url: str | None = None,
         api_key: str | None = None,
         session_id: str | None = None,
+        ssh_host: str | None = None,
+        ssh_port: int | None = None,
+        ssh_user: str | None = None,
+        ssh_password: str | None = None,
+        ssh_private_key: str | None = None,
+        ssh_key_path: str | None = None,
     ) -> None:
         self.base_url = (
             base_url or os.environ.get("GATEWAY_BASE_URL", "http://localhost:8085")
         ).rstrip("/")
         self.api_key = api_key or os.environ.get("GATEWAY_API_KEY", "")
-        self.session_id = session_id or os.environ.get("GATEWAY_SESSION_ID", "")
+        self.session_id = (
+            session_id if session_id is not None else os.environ.get("GATEWAY_SESSION_ID", "")
+        )
         self.command_timeout = int(os.environ.get("MCP_GATEWAY_COMMAND_TIMEOUT", "120"))
         self.async_job_timeout = int(os.environ.get("MCP_GATEWAY_ASYNC_JOB_TIMEOUT", "3600"))
         self.job_timeout = int(os.environ.get("MCP_GATEWAY_JOB_TIMEOUT", "180"))
         self._http_timeout = int(os.environ.get("MCP_GATEWAY_HTTP_TIMEOUT", "120"))
 
         self._reconnect_lock = threading.Lock()
-        self._ssh_host = os.environ.get("GATEWAY_SSH_HOST", "")
-        self._ssh_port = int(os.environ.get("GATEWAY_SSH_PORT", "22"))
-        self._ssh_user = os.environ.get("GATEWAY_SSH_USER", "") or os.environ.get(
-            "GATEWAY_SSH_USERNAME", ""
+        self._ssh_host = ssh_host if ssh_host is not None else os.environ.get("GATEWAY_SSH_HOST", "")
+        self._ssh_port = ssh_port if ssh_port is not None else int(os.environ.get("GATEWAY_SSH_PORT", "22"))
+        self._ssh_user = ssh_user if ssh_user is not None else (
+            os.environ.get("GATEWAY_SSH_USER", "")
+            or os.environ.get("GATEWAY_SSH_USERNAME", "")
         )
-        self._ssh_password = os.environ.get("GATEWAY_SSH_PASSWORD", "")
-        self._ssh_private_key = os.environ.get("GATEWAY_SSH_PRIVATE_KEY", "")
+        self._ssh_password = (
+            ssh_password if ssh_password is not None else os.environ.get("GATEWAY_SSH_PASSWORD", "")
+        )
+        self._ssh_private_key = (
+            ssh_private_key
+            if ssh_private_key is not None
+            else os.environ.get("GATEWAY_SSH_PRIVATE_KEY", "")
+        )
         if not self._ssh_private_key:
-            key_path = os.environ.get("GATEWAY_SSH_KEY_PATH", "")
+            key_path = ssh_key_path if ssh_key_path is not None else os.environ.get("GATEWAY_SSH_KEY_PATH", "")
             if key_path:
                 try:
                     with open(key_path) as f:
@@ -413,6 +428,32 @@ class GatewayClient:
         return self._post(
             "/api/ssh/execute-argv",
             payload,
+        )
+
+    def execute_script(
+        self,
+        script: str,
+        timeout_s: int | None = None,
+    ) -> dict[str, Any]:
+        """Execute a wrapped script on this client's SSH target without project cwd."""
+        return self.execute_argv(
+            ["sh"],
+            stdin=_script_stdin_wrapper(script),
+            timeout_s=timeout_s or self.command_timeout,
+        )
+
+    def execute_script_async(
+        self,
+        script: str,
+        submission_key: str | None = None,
+        timeout_s: int | None = None,
+    ) -> dict[str, Any]:
+        """Submit a wrapped script to this client's SSH target without project cwd."""
+        return self.execute_raw(
+            "sh",
+            stdin=_script_stdin_wrapper(script),
+            submission_key=submission_key,
+            timeout_s=timeout_s or self.async_job_timeout,
         )
 
     @_retry_on_session_not_found

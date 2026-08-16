@@ -17,6 +17,10 @@ from examples.mcp_server.fleet_state import (
 )
 
 
+def test_default_pool_targets_dedicated_agent_executor():
+    assert runtime_module._DEFAULT_POOL == "ssh-gateway/agent-sshd"
+
+
 def _lease(*, job_id: str | None = None) -> WorkerLease:
     return WorkerLease(
         task_id=fleet_task_id("demo", "task-1"),

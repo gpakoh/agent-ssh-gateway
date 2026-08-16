@@ -512,6 +512,8 @@ def test_managed_clone_rejects_symlink_workspace(tmp_path, monkeypatch):
 
 
 def test_managed_clone_requires_registry_root_at_git_toplevel(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+    monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
     repo = tmp_path / "monorepo"
     repo.mkdir()
     repo_head = _init_git_repo(repo)
@@ -549,11 +551,11 @@ def test_managed_clone_requires_registry_root_at_git_toplevel(tmp_path, monkeypa
         timeout=15,
     )
 
-    assert result.returncode == 75
-    assert "Managed clone requires project root at git toplevel" in (
-        artifacts / "agent-status.md"
-    ).read_text(encoding="utf-8")
-    assert not workspace.exists()
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert str(nested) not in script
+    assert workspace.is_dir()
+    assert _git(workspace, "rev-parse", "HEAD") == repo_head
+    assert _git(workspace, "remote") == ""
 
 
 def _run_proxy_preflight_script(tmp_path: Path, monkeypatch, *, provider_body: str | None):
@@ -1110,3 +1112,48 @@ class TestSupervisorPostrunEvidence:
         assert "git -C \"$wt\" rev-parse --show-toplevel" in script
         assert "Refusing non-worktree-root path" in script
         assert "Refusing dirty existing workspace" in script
+
+    def test_managed_clone_runs_without_authoritative_source_mount(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+        monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+        source = tmp_path / "source-only-for-bundle-construction"
+        source.mkdir()
+        source_head = _init_git_repo(source)
+        source_bundle = _make_source_bundle(source, tmp_path / "immutable-source.bundle")
+        artifacts = tmp_path / "agent-state" / TASK_ID
+        artifacts.mkdir(parents=True)
+        (artifacts / "current-plan.md").write_text("# Do nothing\n", encoding="utf-8")
+        workspace = tmp_path / "managed-workspaces" / TASK_ID
+
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        fake_opencode = fake_bin / "opencode"
+        fake_opencode.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake_opencode.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+        script = _build_opencode_script(
+            str(artifacts),
+            TASK_ID,
+            None,
+            project_root=None,
+            worktree_path=str(workspace),
+            managed_clone=True,
+            base_ref=source_head,
+            managed_source_path=str(source_bundle),
+        )
+
+        assert str(source) not in script
+        result = subprocess.run(
+            ["sh", "-c", script],
+            cwd=tmp_path,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+
+        assert result.returncode == 0, result.stderr or result.stdout
+        assert _git(workspace, "rev-parse", "HEAD") == source_head
+        assert _git(workspace, "remote") == ""
+        assert (artifacts / "agent-status.md").read_text(encoding="utf-8").strip() == "Status: needs-review"

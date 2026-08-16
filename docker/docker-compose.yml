@@ -92,6 +92,48 @@ services:
       retries: 3
       start_period: 5s
 
+  agent-sshd:
+    # Dedicated OpenCode executor. Unlike the general project sshd service,
+    # this container deliberately has NO authoritative host workspace bind.
+    image: ${SSH_GATEWAY_SSHD_IMAGE:-web-ssh-gateway-sshd:latest}
+    build:
+      context: sshd
+      dockerfile: Dockerfile
+    container_name: ssh-gateway-agent-sshd
+    hostname: agent-sshd
+    networks:
+      internal_net: {}
+      proxy_parser_default: {}
+    environment:
+      - OPENCODE_PROXY_PROVIDER_URL=${OPENCODE_PROXY_PROVIDER_URL:-}
+      - OPENCODE_PROXY_PROVIDER_TIMEOUT=${OPENCODE_PROXY_PROVIDER_TIMEOUT:-5}
+      - OPENCODE_PROXY_REQUIRED=${OPENCODE_PROXY_REQUIRED:-true}
+      - OPENCODE_STARTUP_RESERVE_BYTES=${OPENCODE_STARTUP_RESERVE_BYTES:-805306368}
+      - OPENCODE_STARTUP_RESERVE_SECONDS=${OPENCODE_STARTUP_RESERVE_SECONDS:-60}
+      - OPENCODE_ADMISSION_WAIT_SECONDS=${OPENCODE_ADMISSION_WAIT_SECONDS:-300}
+      - OPENCODE_ADMISSION_POLL_SECONDS=${OPENCODE_ADMISSION_POLL_SECONDS:-2}
+    volumes:
+      - agent_runtime:/var/lib/mcp-agent
+      - agent_sources:/var/lib/mcp-agent/sources:ro
+      - agent_sshd_host_keys:/etc/ssh/hostkeys
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 16G
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "sshd", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
   redis:
     image: redis:7-alpine
     container_name: ssh-gateway-redis
@@ -212,6 +254,10 @@ services:
       - GATEWAY_SSH_PORT=${MCP_OAUTH_SSH_PORT:?set MCP_OAUTH_SSH_PORT}
       - GATEWAY_SSH_USERNAME=${MCP_OAUTH_SSH_USERNAME:?set MCP_OAUTH_SSH_USERNAME}
       - GATEWAY_SSH_KEY_PATH=/app/ssh_key
+      - MCP_AGENT_EXECUTOR_SSH_HOST=${MCP_AGENT_EXECUTOR_SSH_HOST:-agent-sshd}
+      - MCP_AGENT_EXECUTOR_SSH_PORT=${MCP_AGENT_EXECUTOR_SSH_PORT:-2222}
+      - MCP_AGENT_EXECUTOR_SSH_USERNAME=${MCP_OAUTH_SSH_USERNAME:?set MCP_OAUTH_SSH_USERNAME}
+      - MCP_AGENT_EXECUTOR_SSH_KEY_PATH=/app/ssh_key
       - MCP_GATEWAY_PROJECT_ROOT=${MCP_OAUTH_PROJECT_ROOT:-}
       - MCP_PROJECT_MAP_JSON=${MCP_OAUTH_PROJECT_MAP_JSON:-}
       - MCP_GATEWAY_TOOL_MODE=mcp_client_write
@@ -233,7 +279,7 @@ services:
       # a catastrophe ceiling. Normal concurrency is governed dynamically by
       # executor memory headroom and the number of distinct proxy leases.
       - MCP_AGENT_FLEET_ENABLED=${MCP_AGENT_FLEET_ENABLED:-true}
-      - MCP_AGENT_FLEET_POOL=${MCP_AGENT_FLEET_POOL:-ssh-gateway/sshd}
+      - MCP_AGENT_FLEET_POOL=${MCP_AGENT_FLEET_POOL:-ssh-gateway/agent-sshd}
       - MCP_AGENT_FLEET_CAPACITY=${MCP_AGENT_FLEET_CAPACITY:-64}
       - MCP_AGENT_STATE_ROOT=${MCP_AGENT_STATE_ROOT:-/var/lib/mcp-agent/state}
       - MCP_AGENT_WORKSPACE_ROOT=${MCP_AGENT_WORKSPACE_ROOT:-/var/lib/mcp-agent/workspaces}
@@ -342,6 +388,8 @@ services:
           memory: 128M
     depends_on:
       web-ssh-gateway:
+        condition: service_healthy
+      agent-sshd:
         condition: service_healthy
       mcp-postgres:
         condition: service_healthy
@@ -475,6 +523,8 @@ volumes:
   redis_data:
     driver: local
   sshd_host_keys:
+    driver: local
+  agent_sshd_host_keys:
     driver: local
   known_hosts:
     driver: local
