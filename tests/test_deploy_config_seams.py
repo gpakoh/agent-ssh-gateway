@@ -1065,6 +1065,15 @@ class TestAgentExecutorIsPartOfTheDeployPipeline:
         text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
         assert 'wait_docker_health "ssh-gateway-agent-sshd" ssh-gateway-agent-sshd 120' in text
 
+    def test_deploy_smoke_bootstraps_agent_known_host_before_authenticated_checks(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        bootstrap = "scripts/ensure-agent-known-host.py"
+        assert bootstrap in text
+        assert 'AGENT_SSH_HOST="${MCP_AGENT_EXECUTOR_SSH_HOST:-agent-sshd}"' in text
+        assert 'AGENT_SSH_PORT="${MCP_AGENT_EXECUTOR_SSH_PORT:-2222}"' in text
+        assert text.index('wait_docker_health "web-ssh-gateway"') < text.index(bootstrap)
+        assert text.index(bootstrap) < text.index('web-ssh-gateway (authenticated)')
+
     def test_executor_memory_gate_applies_to_both_sshd_containers(self):
         text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
         fn = text.split("wait_docker_health() {", 1)[1].split("\n}\n", 1)[0]

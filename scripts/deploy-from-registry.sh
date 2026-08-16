@@ -107,6 +107,18 @@ smoke() {
   # 120s: the gateway HEALTHCHECK is interval 30s / retries 3, so a cold
   # first boot can legitimately take ~60-90s before reporting healthy.
   wait_docker_health "web-ssh-gateway" web-ssh-gateway 120 || ok=false
+  # The dedicated executor has its own hostname. Strict KnownHostsPolicy
+  # intentionally rejects any hostname that has not been explicitly trusted,
+  # so merely starting a healthy agent-sshd is not enough to make it usable.
+  # Bootstrap trust through the gateway's authenticated known-hosts API from
+  # inside the gateway container. API_KEY stays in the container environment;
+  # only the non-secret executor host/port are supplied to docker exec.
+  if $ok; then
+    echo -n "  agent-sshd (known host): "
+    if docker exec -e AGENT_SSH_HOST="${MCP_AGENT_EXECUTOR_SSH_HOST:-agent-sshd}" -e AGENT_SSH_PORT="${MCP_AGENT_EXECUTOR_SSH_PORT:-2222}" web-ssh-gateway python3 scripts/ensure-agent-known-host.py; then
+      echo "OK"
+    else
+      echo "FAIL"; ok=false
   wait_docker_health "mcp-server"      mcp-server      120 || ok=false
   # mcp-oauth (the public ChatGPT-facing OAuth endpoint, port 8788) reuses
   # the same mcp-server image but was, until this check existed, never
