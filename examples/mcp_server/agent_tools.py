@@ -904,12 +904,19 @@ def _build_opencode_script(
     allowed_files = list(allowed_files or [])
     forbidden_files = list(forbidden_files or [])
     required_checks = list(required_checks or [])
-    if managed_clone and (not project_root or not worktree_path):
-        raise ValueError("managed_clone requires project_root and worktree_path")
+    if managed_clone and not worktree_path:
+        raise ValueError("managed_clone requires worktree_path")
+    if managed_clone and not os.path.isabs(td):
+        raise ValueError("managed_clone requires an absolute task state path")
     if managed_clone and not base_ref:
         raise ValueError("managed_clone requires an exact base_ref")
     if managed_clone and not managed_source_path:
         raise ValueError("managed_clone requires an immutable managed source")
+
+    # Managed workers trust the immutable bundle, never the authoritative
+    # checkout. Drop the parent path even if a caller supplied it.
+    if managed_clone:
+        project_root = None
 
     parts = []
     if project_root:
@@ -937,7 +944,7 @@ def _build_opencode_script(
         'echo "Status: running" > "$td/agent-status.md"',
         "OPCODE_BIN=$(command -v opencode 2>/dev/null || echo '/root/.opencode/bin/opencode')",
     ])
-    if project_root and worktree_path:
+    if project_root and worktree_path and not managed_clone:
         parts.extend(_parent_prerun_snapshot_script_lines(project_root))
     if worktree_path:
         if base_ref:
@@ -958,10 +965,6 @@ def _build_opencode_script(
         managed_source_lines: list[str] = []
         if managed_clone:
             managed_source_lines = [
-                'parent_git_top=$(git -C "$PARENT_ROOT" rev-parse --show-toplevel 2>/dev/null || true)',
-                'if [ -z "$parent_git_top" ]; then echo "Authoritative source is not a git repository" >> "$td/agent-status.md"; exit 75; fi',
-                'parent_git_top_real=$(cd "$parent_git_top" 2>/dev/null && pwd -P || true)',
-                'if [ "$parent_git_top_real" != "$PARENT_ROOT_REAL" ]; then echo "Managed clone requires project root at git toplevel" >> "$td/agent-status.md"; exit 75; fi',
                 f"MANAGED_SOURCE_BUNDLE={_shell_escape(managed_source_path or '')}",
                 'if [ -L "$MANAGED_SOURCE_BUNDLE" ] || [ ! -f "$MANAGED_SOURCE_BUNDLE" ]; then echo "Immutable managed source bundle is unavailable" >> "$td/agent-status.md"; exit 73; fi',
                 'MANAGED_SOURCE_HEAD=$(git bundle list-heads "$MANAGED_SOURCE_BUNDLE" HEAD 2>/dev/null | cut -d" " -f1)',
@@ -988,12 +991,12 @@ def _build_opencode_script(
             'wt_parent=$(dirname "$wt")',
             'mkdir -p "$wt_parent"',
             'wt_parent_real=$(cd "$wt_parent" 2>/dev/null && pwd -P) || { echo "Workspace parent canonicalization failed: $wt_parent" >> "$td/agent-status.md"; exit 1; }',
-            'case "$wt_parent_real/" in "$PARENT_ROOT_REAL/"*) echo "Refusing workspace parent inside source checkout: $wt_parent_real" >> "$td/agent-status.md"; exit 1;; esac',
+            *(['case "$wt_parent_real/" in "$PARENT_ROOT_REAL/"*) echo "Refusing workspace parent inside source checkout: $wt_parent_real" >> "$td/agent-status.md"; exit 1;; esac'] if project_root else []),
             *managed_source_lines,
             'if [ -L "$wt" ]; then echo "Refusing symlink workspace: $wt" >> "$td/agent-status.md"; exit 1; fi',
             'if [ -e "$wt" ]; then',
             '  wt_real=$(cd "$wt" 2>/dev/null && pwd -P || true)',
-            '  case "$wt_real/" in "$PARENT_ROOT_REAL/"*) echo "Refusing workspace inside source checkout: $wt_real" >> "$td/agent-status.md"; exit 1;; esac',
+            *(['  case "$wt_real/" in "$PARENT_ROOT_REAL/"*) echo "Refusing workspace inside source checkout: $wt_real" >> "$td/agent-status.md"; exit 1;; esac'] if project_root else []),
             '  wt_top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null || true)',
             '  wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P || true)',
             '  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ]; then',
@@ -1148,7 +1151,7 @@ def _build_opencode_script(
             allowed_files,
             forbidden_files,
             required_checks,
-            parent_root=project_root if worktree_path else None,
+            parent_root=project_root if worktree_path and not managed_clone else None,
         )
     )
     parts.extend(
@@ -1364,7 +1367,7 @@ def project_run_agent(
             td,
             task_id,
             model,
-            project_root=project_root,
+            project_root=None if managed_clone else project_root,
             worktree_path=worktree_path,
             allowed_files=allowed_files,
             forbidden_files=forbidden_files,

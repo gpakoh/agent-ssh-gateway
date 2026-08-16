@@ -78,6 +78,22 @@ mcp = FastMCP(
 )
 runtime.set_mcp(mcp)
 client = GatewayClient()
+_agent_executor_host = os.environ.get("MCP_AGENT_EXECUTOR_SSH_HOST", "").strip()
+_agent_client_configured = bool(_agent_executor_host)
+agent_client = (
+    GatewayClient(
+        base_url=client.base_url,
+        api_key=client.api_key,
+        session_id="",
+        ssh_host=_agent_executor_host,
+        ssh_port=int(os.environ.get("MCP_AGENT_EXECUTOR_SSH_PORT", "2222")),
+        ssh_user=os.environ.get("MCP_AGENT_EXECUTOR_SSH_USERNAME", "").strip(),
+        ssh_key_path=os.environ.get("MCP_AGENT_EXECUTOR_SSH_KEY_PATH", "").strip()
+        or os.environ.get("GATEWAY_SSH_KEY_PATH", "").strip(),
+    )
+    if _agent_client_configured
+    else client
+)
 
 register_tool = tool_registry.register_tool
 instrumented = tool_registry.instrumented

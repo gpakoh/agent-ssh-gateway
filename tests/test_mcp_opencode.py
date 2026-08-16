@@ -165,6 +165,7 @@ class TestProjectRunOpencodeExecutes:
     def test_managed_mode_uses_immutable_source_bundle(self, monkeypatch):
         base_ref = "c" * 40
         monkeypatch.setenv("MCP_AGENT_WORKSPACE_ROOT", "/var/lib/mcp-agent/workspaces")
+        monkeypatch.setenv("MCP_AGENT_STATE_ROOT", "/var/lib/mcp-agent/state")
         monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", "/var/lib/mcp-agent/sources")
         monkeypatch.setattr(
             "app.workspace.registry.get_registry",
@@ -189,6 +190,7 @@ class TestProjectRunOpencodeExecutes:
 
     def test_managed_mode_requires_pinned_base_ref(self, monkeypatch):
         monkeypatch.setenv("MCP_AGENT_WORKSPACE_ROOT", "/var/lib/mcp-agent/workspaces")
+        monkeypatch.setenv("MCP_AGENT_STATE_ROOT", "/var/lib/mcp-agent/state")
         monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", "/var/lib/mcp-agent/sources")
         monkeypatch.setattr(
             "app.workspace.registry.get_registry",
@@ -282,13 +284,17 @@ class TestServerWrapperWired:
             server.client.execute_project_command = MagicMock(
                 return_value={"exit_code": 0, "stdout": "# Plan", "stderr": ""}
             )
-            server.client.execute_project_script = MagicMock(
+            server.client.execute_script = MagicMock(
                 return_value={"exit_code": 0, "stdout": "done", "stderr": ""}
+            )
+            server.client.execute_project_script = MagicMock(
+                side_effect=AssertionError("managed runner must not use project-bound execution")
             )
 
             result = anyio.run(lambda: tool_fn(project="test", task_id=TASK_ID))
             assert result.get("ok") is True
-            server.client.execute_project_script.assert_called_once()
+            server.client.execute_script.assert_called_once()
+            server.client.execute_project_script.assert_not_called()
         finally:
             for name in [
                 n

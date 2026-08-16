@@ -132,7 +132,7 @@ def project_run_opencode(
         td,
         task_id,
         model,
-        project_root=project_root,
+        project_root=None if managed_clone else project_root,
         worktree_path=worktree_path,
         allowed_files=allowed_files,
         forbidden_files=forbidden_files,
