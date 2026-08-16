@@ -53,6 +53,7 @@ class TestAgentRuntimeIsolationWiring:
         compose = _load_compose()
         oauth = compose["services"]["mcp-oauth"]
         sshd = compose["services"]["sshd"]
+        agent_sshd = compose["services"]["agent-sshd"]
         oauth_env = _env_dict(oauth["environment"])
 
         assert "MCP_AGENT_STATE_ROOT" in oauth_env
@@ -64,10 +65,33 @@ class TestAgentRuntimeIsolationWiring:
         mount = "agent_runtime:/var/lib/mcp-agent"
         assert mount in oauth["volumes"]
         assert mount in sshd["volumes"]
+        assert mount in agent_sshd["volumes"]
         assert "agent_sources:/var/lib/mcp-agent/sources" in oauth["volumes"]
         assert "agent_sources:/var/lib/mcp-agent/sources:ro" in sshd["volumes"]
+        assert "agent_sources:/var/lib/mcp-agent/sources:ro" in agent_sshd["volumes"]
         assert "agent_runtime" in compose["volumes"]
         assert "agent_sources" in compose["volumes"]
+
+    def test_dedicated_agent_executor_has_no_authoritative_workspace_mount(self):
+        compose = _load_compose()
+        agent_sshd = compose["services"]["agent-sshd"]
+        volumes = agent_sshd["volumes"]
+        assert not any("WORKSPACE_HOST_PATH" in volume for volume in volumes)
+        assert not any(":/workspace" in volume for volume in volumes)
+        assert "agent_runtime:/var/lib/mcp-agent" in volumes
+        assert "agent_sources:/var/lib/mcp-agent/sources:ro" in volumes
+
+    def test_oauth_routes_agent_execution_to_dedicated_executor(self):
+        compose = _load_compose()
+        oauth = compose["services"]["mcp-oauth"]
+        env = _env_dict(oauth["environment"])
+        assert env["MCP_AGENT_EXECUTOR_SSH_HOST"] == "${MCP_AGENT_EXECUTOR_SSH_HOST:-agent-sshd}"
+        assert env["MCP_AGENT_EXECUTOR_SSH_PORT"] == "${MCP_AGENT_EXECUTOR_SSH_PORT:-2222}"
+        assert env["MCP_AGENT_EXECUTOR_SSH_USERNAME"] == (
+            "${MCP_OAUTH_SSH_USERNAME:?set MCP_OAUTH_SSH_USERNAME}"
+        )
+        assert env["MCP_AGENT_EXECUTOR_SSH_KEY_PATH"] == "/app/ssh_key"
+        assert "agent-sshd" in oauth["depends_on"]
 
     def test_sshd_image_installs_git_ssh_transport(self):
         text = SSHD_DOCKERFILE.read_text(encoding="utf-8")
@@ -989,7 +1013,7 @@ class TestRedisTrustBoundary:
 class TestOpenCodeProductionAdmission:
     def test_sshd_has_bounded_headroom_for_fleet(self):
         services = _load_compose()["services"]
-        resources = services["sshd"]["deploy"]["resources"]
+        resources = services["agent-sshd"]["deploy"]["resources"]
         assert resources["limits"]["memory"] == "16G"
         assert resources["reservations"]["memory"] == "128M"
 
@@ -998,11 +1022,11 @@ class TestOpenCodeProductionAdmission:
         values = {item.split("=", 1)[0]: item.split("=", 1)[1] for item in env}
         assert values["MCP_AGENT_FLEET_ENABLED"] == "${MCP_AGENT_FLEET_ENABLED:-true}"
         assert values["MCP_AGENT_FLEET_CAPACITY"] == "${MCP_AGENT_FLEET_CAPACITY:-64}"
-        assert values["MCP_AGENT_FLEET_POOL"] == "${MCP_AGENT_FLEET_POOL:-ssh-gateway/sshd}"
+        assert values["MCP_AGENT_FLEET_POOL"] == "${MCP_AGENT_FLEET_POOL:-ssh-gateway/agent-sshd}"
 
     def test_proxy_is_fail_closed_for_builder_and_executor(self):
         services = _load_compose()["services"]
-        for service in ("sshd", "mcp-oauth"):
+        for service in ("agent-sshd", "mcp-oauth"):
             env = services[service]["environment"]
             assert "OPENCODE_PROXY_REQUIRED=${OPENCODE_PROXY_REQUIRED:-true}" in env
 

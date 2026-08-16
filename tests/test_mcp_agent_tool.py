@@ -403,6 +403,7 @@ class TestProjectRunAgentScriptCwd:
 
     def test_managed_workspace_env_overrides_task_supplied_worktree(self, monkeypatch):
         monkeypatch.setenv("MCP_AGENT_WORKSPACE_ROOT", "/var/lib/mcp-agent/workspaces")
+        monkeypatch.setenv("MCP_AGENT_STATE_ROOT", "/var/lib/mcp-agent/state")
         monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", "/var/lib/mcp-agent/sources")
         base_ref = "b" * 40
         monkeypatch.setattr(
