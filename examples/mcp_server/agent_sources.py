@@ -117,17 +117,12 @@ def ensure_managed_source_bundle(project: str, base_ref: str | None) -> str | No
     try:
         with tempfile.TemporaryDirectory(prefix="mcp-agent-source-") as bare_dir:
             bare = Path(bare_dir) / "source.git"
-            _run_git(["init", "--bare", str(bare)])
             _run_git(
-                [
-                    f"--git-dir={bare}",
-                    "fetch",
-                    "--no-tags",
-                    "--no-recurse-submodules",
-                    str(project_root),
-                    f"{base_ref}:refs/heads/source",
-                ],
+                ["clone", "--bare", "--shared", str(project_root), str(bare)],
                 safe_directory=project_root,
+            )
+            _run_git(
+                [f"--git-dir={bare}", "update-ref", "refs/heads/source", base_ref]
             )
             fetched = _run_git(
                 [f"--git-dir={bare}", "rev-parse", "refs/heads/source^{commit}"]
