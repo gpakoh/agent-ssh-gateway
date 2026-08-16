@@ -120,6 +120,8 @@ smoke() {
     else
       echo "FAIL"; ok=false
   wait_docker_health "mcp-server"      mcp-server      120 || ok=false
+    fi
+  fi
   # mcp-oauth (the public ChatGPT-facing OAuth endpoint, port 8788) reuses
   # the same mcp-server image but was, until this check existed, never
   # actually redeployed by this script at all -- deploy_services() below
