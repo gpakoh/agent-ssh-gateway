@@ -40,6 +40,12 @@ def _server_client():
     return server_attr("client")
 
 
+def _server_agent_client():
+    if server_attr("_agent_client_configured"):
+        return server_attr("agent_client")
+    return _server_client()
+
+
 def _server_agent_router():
     return server_attr("_agent_router")
 
@@ -210,9 +216,9 @@ async def gateway_run_opencode(
             project=project,
             task_id=task_id,
             model=model,
-            run_script=lambda p, s: _server_client().execute_project_script(p, s),
-            run_script_async=lambda p, s, k: _server_client().execute_project_script_async(
-                p, s, k
+            run_script=lambda _p, s: _server_agent_client().execute_script(s),
+            run_script_async=lambda _p, s, k: _server_agent_client().execute_script_async(
+                s, k
             ),
             async_submit=async_submit,
         )
@@ -255,9 +261,9 @@ async def gateway_run_agent(
             task_id=task_id,
             model=model,
             router=_server_agent_router(),
-            run_script=lambda p, s: _server_client().execute_project_script(p, s),
-            run_script_async=lambda p, s, k: _server_client().execute_project_script_async(
-                p, s, k
+            run_script=lambda _p, s: _server_agent_client().execute_script(s),
+            run_script_async=lambda _p, s, k: _server_agent_client().execute_script_async(
+                s, k
             ),
             async_submit=async_submit,
         )

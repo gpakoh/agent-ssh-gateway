@@ -125,6 +125,32 @@ class TestReconnectSession:
         client = _client(GATEWAY_SSH_PORT="2222")
         assert client._ssh_port == 2222
 
+    def test_explicit_ssh_target_overrides_generic_environment(self):
+        with patch.dict(os.environ, _BASE_ENV, clear=True):
+            client = GatewayClient(
+                ssh_host="agent-sshd",
+                session_id="",
+                ssh_port=2222,
+                ssh_user="mcpuser",
+                ssh_password="",
+                ssh_private_key="agent-private-key",
+            )
+
+        assert client.session_id == ""
+        with patch("gateway_client.httpx.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {"session_id": "agent-session"}
+            client._reconnect_session()
+        assert client.session_id == "agent-session"
+
+        payload = mock_post.call_args.kwargs["json"]
+        assert payload == {
+            "host": "agent-sshd",
+            "port": 2222,
+            "username": "mcpuser",
+            "private_key": "agent-private-key",
+        }
+
     def test_empty_private_key_omitted_from_payload(self):
         client = _client(GATEWAY_SSH_PRIVATE_KEY="")
         with patch("gateway_client.httpx.post") as mock_post:
