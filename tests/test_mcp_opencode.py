@@ -162,6 +162,45 @@ class TestProjectRunOpencodeExecutes:
         run_script.assert_not_called()
 
 
+    def test_managed_mode_uses_immutable_source_bundle(self, monkeypatch):
+        base_ref = "c" * 40
+        monkeypatch.setenv("MCP_AGENT_WORKSPACE_ROOT", "/var/lib/mcp-agent/workspaces")
+        monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", "/var/lib/mcp-agent/sources")
+        monkeypatch.setattr(
+            "app.workspace.registry.get_registry",
+            lambda: type("R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}})(),
+        )
+        rc = _fake_run_cmd(
+            task_json={"worktree_path": "/attacker/path", "base_ref": base_ref}
+        )
+        captured: dict[str, str] = {}
+
+        def run_script(project, script):
+            captured["script"] = script
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert result["status"] == "needs-review"
+        script = captured["script"]
+        assert "/attacker/path" not in script
+        assert f"/{base_ref}.bundle" in script
+        assert 'git clone --no-hardlinks --no-checkout "$MANAGED_SOURCE_BUNDLE" "$wt"' in script
+        assert 'git clone --no-hardlinks --no-checkout "$PARENT_ROOT" "$wt"' not in script
+
+    def test_managed_mode_requires_pinned_base_ref(self, monkeypatch):
+        monkeypatch.setenv("MCP_AGENT_WORKSPACE_ROOT", "/var/lib/mcp-agent/workspaces")
+        monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", "/var/lib/mcp-agent/sources")
+        monkeypatch.setattr(
+            "app.workspace.registry.get_registry",
+            lambda: type("R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}})(),
+        )
+        rc = _fake_run_cmd(task_json={"worktree_path": "/attacker/path"})
+        run_script = MagicMock(return_value={"exit_code": 0, "stdout": "", "stderr": ""})
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert result["status"] == "error"
+        assert "exact base_ref" in result["error"]
+        run_script.assert_not_called()
+
     def test_dangerously_skip_permissions_present_in_generated_script(self):
         """This is the whole point of the tool -- opencode's own safety
         confirmations must be disabled for unattended execution."""

@@ -24,7 +24,12 @@ from urllib.parse import urlsplit
 
 from command_policy import CommandPolicyError  # noqa: F401 -- re-exported for tests
 
-from examples.mcp_server.agent_paths import managed_workspace_path, project_state_key, task_dir
+from examples.mcp_server.agent_paths import (
+    managed_source_bundle_path,
+    managed_workspace_path,
+    project_state_key,
+    task_dir,
+)
 
 TASKS_REL_DIR = ".ai-bridge/tasks"
 
@@ -868,6 +873,7 @@ def _build_opencode_script(
     required_checks: list[str] | None = None,
     managed_clone: bool = False,
     base_ref: str | None = None,
+    managed_source_path: str | None = None,
 ) -> str:
     opencode_flags = "--dangerously-skip-permissions"
     if model:
@@ -900,6 +906,10 @@ def _build_opencode_script(
     required_checks = list(required_checks or [])
     if managed_clone and (not project_root or not worktree_path):
         raise ValueError("managed_clone requires project_root and worktree_path")
+    if managed_clone and not base_ref:
+        raise ValueError("managed_clone requires an exact base_ref")
+    if managed_clone and not managed_source_path:
+        raise ValueError("managed_clone requires an immutable managed source")
 
     parts = []
     if project_root:
@@ -931,10 +941,13 @@ def _build_opencode_script(
         parts.extend(_parent_prerun_snapshot_script_lines(project_root))
     if worktree_path:
         if base_ref:
-            parts.extend([
-                f"TASK_BASE_REF={_shell_escape(base_ref)}",
-                'TASK_BASE_COMMIT=$(git rev-parse --verify "$TASK_BASE_REF^{commit}" 2>/dev/null) || { echo "Requested base_ref is unavailable locally" >> "$td/agent-status.md"; exit 73; }',
-            ])
+            parts.append(f"TASK_BASE_REF={_shell_escape(base_ref)}")
+            if managed_clone:
+                parts.append('TASK_BASE_COMMIT="$TASK_BASE_REF"')
+            else:
+                parts.append(
+                    'TASK_BASE_COMMIT=$(git rev-parse --verify "$TASK_BASE_REF^{commit}" 2>/dev/null) || { echo "Requested base_ref is unavailable locally" >> "$td/agent-status.md"; exit 73; }'
+                )
         elif project_root:
             parts.append('TASK_BASE_COMMIT="$PARENT_HEAD_BEFORE"')
         else:
@@ -946,12 +959,16 @@ def _build_opencode_script(
         if managed_clone:
             managed_source_lines = [
                 'parent_git_top=$(git -C "$PARENT_ROOT" rev-parse --show-toplevel 2>/dev/null || true)',
-                'if [ -z "$parent_git_top" ]; then echo "Managed clone source is not a git repository" >> "$td/agent-status.md"; exit 75; fi',
+                'if [ -z "$parent_git_top" ]; then echo "Authoritative source is not a git repository" >> "$td/agent-status.md"; exit 75; fi',
                 'parent_git_top_real=$(cd "$parent_git_top" 2>/dev/null && pwd -P || true)',
                 'if [ "$parent_git_top_real" != "$PARENT_ROOT_REAL" ]; then echo "Managed clone requires project root at git toplevel" >> "$td/agent-status.md"; exit 75; fi',
+                f"MANAGED_SOURCE_BUNDLE={_shell_escape(managed_source_path or '')}",
+                'if [ -L "$MANAGED_SOURCE_BUNDLE" ] || [ ! -f "$MANAGED_SOURCE_BUNDLE" ]; then echo "Immutable managed source bundle is unavailable" >> "$td/agent-status.md"; exit 73; fi',
+                'MANAGED_SOURCE_HEAD=$(git bundle list-heads "$MANAGED_SOURCE_BUNDLE" HEAD 2>/dev/null | cut -d" " -f1)',
+                'if [ -z "$MANAGED_SOURCE_HEAD" ] || [ "$MANAGED_SOURCE_HEAD" != "$TASK_BASE_COMMIT" ]; then echo "Immutable managed source bundle does not match base_ref" >> "$td/agent-status.md"; exit 73; fi',
             ]
             create_workspace_lines = [
-                '  git clone --no-hardlinks --no-checkout "$PARENT_ROOT" "$wt" 2>>"$td/agent-status.md" || { echo "managed clone failed: $wt" >> "$td/agent-status.md"; exit 1; }',
+                '  git clone --no-hardlinks --no-checkout "$MANAGED_SOURCE_BUNDLE" "$wt" 2>>"$td/agent-status.md" || { echo "managed clone failed: $wt" >> "$td/agent-status.md"; exit 1; }',
                 '  git -C "$wt" checkout --detach "$TASK_BASE_COMMIT" 2>>"$td/agent-status.md" || { echo "managed clone checkout failed: $wt" >> "$td/agent-status.md"; exit 1; }',
                 '  git -C "$wt" remote remove origin 2>>"$td/agent-status.md" || { echo "managed clone source remote removal failed: $wt" >> "$td/agent-status.md"; exit 1; }',
             ]
@@ -1322,6 +1339,13 @@ def project_run_agent(
             raw_base_ref = task_json.get("base_ref")
             validate_base_ref(raw_base_ref)
             base_ref = raw_base_ref if isinstance(raw_base_ref, str) and raw_base_ref else None
+            managed_source_path = None
+            if managed_clone:
+                if not base_ref:
+                    raise ValueError("managed OpenCode execution requires an exact base_ref")
+                managed_source_path = managed_source_bundle_path(project, base_ref)
+                if not managed_source_path:
+                    raise ValueError("MCP_AGENT_SOURCE_ROOT is required for managed OpenCode execution")
             allowed_files = _task_string_list(task_json, "allowed_files")
             forbidden_files = _task_string_list(task_json, "forbidden_files")
             required_checks = _task_string_list(task_json, "required_checks")
@@ -1347,6 +1371,7 @@ def project_run_agent(
             required_checks=required_checks,
             managed_clone=managed_clone,
             base_ref=base_ref,
+            managed_source_path=managed_source_path,
         )
     else:
         return {

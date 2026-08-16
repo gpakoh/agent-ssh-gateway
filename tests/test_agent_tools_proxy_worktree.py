@@ -175,6 +175,8 @@ class TestBuildOpencodeScriptWorktree:
         assert "td='/srv/proj/.ai-bridge/tasks/a12345678901'" in script
 
     def test_managed_clone_never_uses_source_git_worktree_metadata(self):
+        base_ref = "a" * 40
+        bundle = f"/var/lib/mcp-agent/sources/project/{base_ref}.bundle"
         script = _build_opencode_script(
             "/var/lib/mcp-agent/state/task",
             TASK_ID,
@@ -182,9 +184,13 @@ class TestBuildOpencodeScriptWorktree:
             project_root="/srv/proj",
             worktree_path="/var/lib/mcp-agent/workspaces/task",
             managed_clone=True,
+            base_ref=base_ref,
+            managed_source_path=bundle,
         )
-        assert 'git clone --no-hardlinks --no-checkout "$PARENT_ROOT" "$wt"' in script
-        assert 'TASK_BASE_COMMIT="$PARENT_HEAD_BEFORE"' in script
+        assert 'git clone --no-hardlinks --no-checkout "$MANAGED_SOURCE_BUNDLE" "$wt"' in script
+        assert f"TASK_BASE_REF='{base_ref}'" in script
+        assert 'TASK_BASE_COMMIT="$TASK_BASE_REF"' in script
+        assert bundle in script
         assert 'git -C "$wt" checkout --detach "$TASK_BASE_COMMIT"' in script
         assert "git worktree add" not in script
         assert "workspace with baseline drift" in script
@@ -233,6 +239,11 @@ def _init_git_repo(root: Path) -> str:
     _git(root, "add", "base.txt", ".gitignore")
     _git(root, "commit", "-q", "-m", "base")
     return _git(root, "rev-parse", "HEAD")
+
+
+def _make_source_bundle(source: Path, destination: Path) -> Path:
+    _git(source, "bundle", "create", str(destination), "HEAD")
+    return destination
 
 
 def test_explicit_base_ref_checks_out_pinned_commit(tmp_path, monkeypatch):
@@ -334,6 +345,7 @@ def test_managed_clone_executes_without_creating_source_worktree_metadata(tmp_pa
     source = tmp_path / "source"
     source.mkdir()
     source_head = _init_git_repo(source)
+    source_bundle = _make_source_bundle(source, tmp_path / "source.bundle")
     artifacts = tmp_path / "agent-state" / TASK_ID
     artifacts.mkdir(parents=True)
     (artifacts / "current-plan.md").write_text("# Do nothing\n", encoding="utf-8")
@@ -364,6 +376,8 @@ def test_managed_clone_executes_without_creating_source_worktree_metadata(tmp_pa
         project_root=str(source),
         worktree_path=str(workspace),
         managed_clone=True,
+        base_ref=source_head,
+        managed_source_path=str(source_bundle),
     )
     result = subprocess.run(
         ["sh", "-c", script],
@@ -398,6 +412,7 @@ def test_managed_clone_rejects_existing_workspace_with_remote(tmp_path, monkeypa
     source = tmp_path / "source-existing-remote"
     source.mkdir()
     source_head = _init_git_repo(source)
+    source_bundle = _make_source_bundle(source, tmp_path / "source-existing-remote.bundle")
     artifacts = tmp_path / "agent-state-existing-remote" / TASK_ID
     artifacts.mkdir(parents=True)
     (artifacts / "current-plan.md").write_text("# Do nothing\n", encoding="utf-8")
@@ -425,6 +440,8 @@ def test_managed_clone_rejects_existing_workspace_with_remote(tmp_path, monkeypa
         project_root=str(source),
         worktree_path=str(workspace),
         managed_clone=True,
+        base_ref=source_head,
+        managed_source_path=str(source_bundle),
     )
     result = subprocess.run(
         ["sh", "-c", script],
@@ -444,7 +461,8 @@ def test_managed_clone_rejects_existing_workspace_with_remote(tmp_path, monkeypa
 def test_managed_clone_rejects_symlink_workspace(tmp_path, monkeypatch):
     source = tmp_path / "source-symlink"
     source.mkdir()
-    _init_git_repo(source)
+    source_head = _init_git_repo(source)
+    source_bundle = _make_source_bundle(source, tmp_path / "source-symlink.bundle")
     artifacts = tmp_path / "agent-state-symlink" / TASK_ID
     artifacts.mkdir(parents=True)
     (artifacts / "current-plan.md").write_text("# Do nothing\n", encoding="utf-8")
@@ -472,6 +490,8 @@ def test_managed_clone_rejects_symlink_workspace(tmp_path, monkeypatch):
         project_root=str(source),
         worktree_path=str(workspace),
         managed_clone=True,
+        base_ref=source_head,
+        managed_source_path=str(source_bundle),
     )
     result = subprocess.run(
         ["sh", "-c", script],
@@ -494,7 +514,8 @@ def test_managed_clone_rejects_symlink_workspace(tmp_path, monkeypatch):
 def test_managed_clone_requires_registry_root_at_git_toplevel(tmp_path, monkeypatch):
     repo = tmp_path / "monorepo"
     repo.mkdir()
-    _init_git_repo(repo)
+    repo_head = _init_git_repo(repo)
+    source_bundle = _make_source_bundle(repo, tmp_path / "monorepo.bundle")
     nested = repo / "service"
     nested.mkdir()
     artifacts = tmp_path / "agent-state-nested" / TASK_ID
@@ -516,6 +537,8 @@ def test_managed_clone_requires_registry_root_at_git_toplevel(tmp_path, monkeypa
         project_root=str(nested),
         worktree_path=str(workspace),
         managed_clone=True,
+        base_ref=repo_head,
+        managed_source_path=str(source_bundle),
     )
     result = subprocess.run(
         ["sh", "-c", script],
