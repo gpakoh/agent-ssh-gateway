@@ -71,8 +71,8 @@ COPY --chown=appuser:appuser examples/ ./examples/
 COPY --chown=appuser:appuser scripts/ ./scripts/
 
 # Security: Create necessary directories
-RUN mkdir -p /app/data /tmp && \
-    chown -R appuser:appuser /app /tmp
+RUN mkdir -p /app/data /tmp /var/lib/mcp-agent/sources && \
+    chown -R appuser:appuser /app /tmp /var/lib/mcp-agent
 
 RUN chmod -R 755 /app
 
