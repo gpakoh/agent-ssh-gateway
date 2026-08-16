@@ -11,6 +11,7 @@ content can.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -22,6 +23,16 @@ MCP_SERVER_DOCKERFILE = ROOT / "docker" / "Dockerfile.mcp-server"
 GATEWAY_DOCKERFILE = ROOT / "docker" / "Dockerfile"
 SSHD_DOCKERFILE = ROOT / "docker" / "sshd" / "Dockerfile"
 DEPLOY_SCRIPT = ROOT / "scripts" / "deploy-from-registry.sh"
+
+def test_deploy_script_is_valid_bash() -> None:
+    result = subprocess.run(
+        ["bash", "-n", str(DEPLOY_SCRIPT)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
 CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 HOST_SMOKE_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "host-smoke.yml"
 MAKEFILE_PATH = ROOT / "Makefile"
@@ -1074,9 +1085,21 @@ class TestAgentExecutorIsPartOfTheDeployPipeline:
         assert text.index('wait_docker_health "web-ssh-gateway"') < text.index(bootstrap)
         assert text.index(bootstrap) < text.index('web-ssh-gateway (authenticated)')
 
+    def test_mcp_health_check_runs_after_known_host_condition_closes(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        sequence = (
+            'echo "FAIL"; ok=false\n    fi\n  fi\n'
+            '  wait_docker_health "mcp-server"      mcp-server      120 || ok=false'
+        )
+        assert sequence in text
+
     def test_executor_memory_gate_applies_to_both_sshd_containers(self):
         text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
         fn = text.split("wait_docker_health() {", 1)[1].split("\n}\n", 1)[0]
         assert '"ssh-gateway-sshd"' in fn
         assert '"ssh-gateway-agent-sshd"' in fn
         assert "17179869184" in fn
+
+    def test_gateway_image_packages_agent_known_host_bootstrap(self):
+        text = GATEWAY_DOCKERFILE.read_text(encoding="utf-8")
+        assert "scripts/ensure-agent-known-host.py ./scripts/ensure-agent-known-host.py" in text
