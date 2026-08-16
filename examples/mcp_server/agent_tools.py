@@ -953,6 +953,7 @@ def _build_opencode_script(
             create_workspace_lines = [
                 '  git clone --no-hardlinks --no-checkout "$PARENT_ROOT" "$wt" 2>>"$td/agent-status.md" || { echo "managed clone failed: $wt" >> "$td/agent-status.md"; exit 1; }',
                 '  git -C "$wt" checkout --detach "$TASK_BASE_COMMIT" 2>>"$td/agent-status.md" || { echo "managed clone checkout failed: $wt" >> "$td/agent-status.md"; exit 1; }',
+                '  git -C "$wt" remote remove origin 2>>"$td/agent-status.md" || { echo "managed clone source remote removal failed: $wt" >> "$td/agent-status.md"; exit 1; }',
             ]
         else:
             create_workspace_lines = [
@@ -987,6 +988,12 @@ def _build_opencode_script(
             "    exit 1",
             "  fi",
             *baseline_reuse_lines,
+            *([
+                '  if [ -n "$(git -C "$wt" remote)" ]; then',
+                '    echo "Refusing managed clone with source remote metadata: $wt" >> "$td/agent-status.md"',
+                "    exit 1",
+                "  fi",
+            ] if managed_clone else []),
             '  echo "Workspace already exists, reusing clean root: $wt" >> "$td/agent-status.md"',
             "else",
             *create_workspace_lines,
@@ -1318,7 +1325,7 @@ def project_run_agent(
             allowed_files = _task_string_list(task_json, "allowed_files")
             forbidden_files = _task_string_list(task_json, "forbidden_files")
             required_checks = _task_string_list(task_json, "required_checks")
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             return {
                 "task_id": task_id,
                 "status": "error",

@@ -377,6 +377,7 @@ def test_managed_clone_executes_without_creating_source_worktree_metadata(tmp_pa
     assert result.returncode == 0, result.stderr or result.stdout
     assert workspace.is_dir()
     assert (workspace / ".git").is_dir(), "managed workspace must be an independent clone"
+    assert _git(workspace, "remote") == "", "managed workspace must not retain source remotes"
     assert _git(workspace, "rev-parse", "HEAD") == source_head
     assert _git(source, "status", "--porcelain=v1", "--untracked-files=all") == source_status_before
     assert _git(source, "show-ref") == source_refs_before
@@ -389,6 +390,55 @@ def test_managed_clone_executes_without_creating_source_worktree_metadata(tmp_pa
     assert source_objects_after == source_objects_before
     assert not (source / ".git" / "worktrees").exists()
     assert (artifacts / "agent-status.md").read_text(encoding="utf-8").strip() == "Status: needs-review"
+
+
+def test_managed_clone_rejects_existing_workspace_with_remote(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+    monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+    source = tmp_path / "source-existing-remote"
+    source.mkdir()
+    source_head = _init_git_repo(source)
+    artifacts = tmp_path / "agent-state-existing-remote" / TASK_ID
+    artifacts.mkdir(parents=True)
+    (artifacts / "current-plan.md").write_text("# Do nothing\n", encoding="utf-8")
+    workspace = tmp_path / "managed-existing-remote" / TASK_ID
+    workspace.parent.mkdir(parents=True)
+    _git(tmp_path, "clone", "--no-hardlinks", str(source), str(workspace))
+    _git(workspace, "checkout", "--detach", source_head)
+    assert _git(workspace, "remote") == "origin"
+
+    fake_bin = tmp_path / "bin-existing-remote"
+    fake_bin.mkdir()
+    marker = tmp_path / "opencode-ran-existing-remote"
+    fake_opencode = fake_bin / "opencode"
+    fake_opencode.write_text(
+        f"#!/bin/sh\nprintf ran > {shlex.quote(str(marker))}\nexit 0\n",
+        encoding="utf-8",
+    )
+    fake_opencode.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    script = _build_opencode_script(
+        str(artifacts),
+        TASK_ID,
+        None,
+        project_root=str(source),
+        worktree_path=str(workspace),
+        managed_clone=True,
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode != 0
+    assert not marker.exists()
+    status = (artifacts / "agent-status.md").read_text(encoding="utf-8")
+    assert "Refusing managed clone with source remote metadata" in status
 
 
 def test_managed_clone_rejects_symlink_workspace(tmp_path, monkeypatch):

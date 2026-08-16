@@ -29,14 +29,15 @@ from examples.mcp_server.opencode_tools import project_run_opencode  # noqa: E40
 TASK_ID = "2026-06-25-fix-auth-opencode"
 
 
-def _fake_run_cmd(current_plan: str = "# Plan\n\n1. Do the thing") -> MagicMock:
+def _fake_run_cmd(current_plan: str = "# Plan\n\n1. Do the thing", task_json: dict | None = None) -> MagicMock:
+    if task_json is None:
+        task_json = {"worktree_path": "../agent-worktrees/test-opencode"}
+
     def fn(project: str, command: str) -> dict:
         if command.startswith("cat ") and "task.json" in command:
             return {
                 "exit_code": 0,
-                "stdout": json.dumps(
-                    {"worktree_path": "../agent-worktrees/test-opencode"}
-                ),
+                "stdout": json.dumps(task_json),
                 "stderr": "",
             }
         if command.startswith("cat ") and "current-plan.md" in command:
@@ -125,6 +126,41 @@ class TestProjectRunOpencodeExecutes:
 
         project_run_opencode(rc, project="test", task_id=TASK_ID, model="gpt-4o", run_script=run_script)
         assert "--model 'gpt-4o'" in captured["script"]
+
+    def test_task_base_ref_reaches_generated_script(self):
+        base_ref = "a" * 40
+        rc = _fake_run_cmd(
+            task_json={"worktree_path": "../agent-worktrees/test-opencode", "base_ref": base_ref}
+        )
+        captured: dict[str, str] = {}
+
+        def run_script(project, script):
+            captured["script"] = script
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert result["status"] == "needs-review"
+        assert f"TASK_BASE_REF='{base_ref}'" in captured["script"]
+
+    def test_invalid_task_base_ref_errors_before_execution(self):
+        rc = _fake_run_cmd(
+            task_json={"worktree_path": "../agent-worktrees/test-opencode", "base_ref": "master"}
+        )
+        run_script = MagicMock(return_value={"exit_code": 0, "stdout": "", "stderr": ""})
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert result["status"] == "error"
+        assert "Invalid base_ref" in result["error"]
+        run_script.assert_not_called()
+    def test_non_string_task_base_ref_errors_before_execution(self):
+        rc = _fake_run_cmd(
+            task_json={"worktree_path": "../agent-worktrees/test-opencode", "base_ref": 123}
+        )
+        run_script = MagicMock(return_value={"exit_code": 0, "stdout": "", "stderr": ""})
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert result["status"] == "error"
+        assert "base_ref must be a string or None" in result["error"]
+        run_script.assert_not_called()
+
 
     def test_dangerously_skip_permissions_present_in_generated_script(self):
         """This is the whole point of the tool -- opencode's own safety

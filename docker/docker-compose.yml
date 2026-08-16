@@ -61,6 +61,7 @@ services:
       - OPENCODE_ADMISSION_POLL_SECONDS=${OPENCODE_ADMISSION_POLL_SECONDS:-2}
     volumes:
       - ${WORKSPACE_HOST_PATH:-..}:${WORKSPACE_CONTAINER_PATH:-/workspace}:rw
+      - agent_runtime:/var/lib/mcp-agent
       # Persistent SSH server host keys: sshd no longer regenerates them on
       # every image build (that rotated the fingerprint and broke the
       # gateway's strict known_hosts check with a 502). Keys live in a named
@@ -233,6 +234,8 @@ services:
       - MCP_AGENT_FLEET_ENABLED=${MCP_AGENT_FLEET_ENABLED:-true}
       - MCP_AGENT_FLEET_POOL=${MCP_AGENT_FLEET_POOL:-ssh-gateway/sshd}
       - MCP_AGENT_FLEET_CAPACITY=${MCP_AGENT_FLEET_CAPACITY:-64}
+      - MCP_AGENT_STATE_ROOT=${MCP_AGENT_STATE_ROOT:-/var/lib/mcp-agent/state}
+      - MCP_AGENT_WORKSPACE_ROOT=${MCP_AGENT_WORKSPACE_ROOT:-/var/lib/mcp-agent/workspaces}
       - MCP_AUTHORIZE_PASSWORD=${MCP_OAUTH_AUTHORIZE_PASSWORD:?set MCP_OAUTH_AUTHORIZE_PASSWORD}
       - MCP_TOKEN_STORE_FILE=/app/data/mcp_tokens.json
       - MCP_CLIENT_STORE_FILE=/app/data/mcp_clients.json
@@ -262,6 +265,7 @@ services:
       # mcp_server_tokens -- keeps the OAuth client/token store
       # independent of the bearer-only service's.
       - mcp_oauth_data:/app/data
+      - agent_runtime:/var/lib/mcp-agent
       - type: bind
         source: ${MCP_OAUTH_SSH_KEY_PATH:?set MCP_OAUTH_SSH_KEY_PATH}
         target: /app/ssh_key
@@ -474,4 +478,6 @@ volumes:
   mcp_server_tokens:
     driver: local
   mcp_oauth_data:
+    driver: local
+  agent_runtime:
     driver: local
