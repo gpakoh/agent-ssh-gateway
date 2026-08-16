@@ -315,26 +315,26 @@ jobs:
           # were never actually reachable this way.
           fail=false
 
-          # mcp-server: docker inspect's own HEALTHCHECK status works fine
-          # standalone -- its /healthz check has no dependency on SSH/Redis
-          # being reachable (confirmed live: this container alone reports
-          # healthy in this exact standalone setup every run).
-          echo "Waiting for mcp-server to report healthy..."
+          # mcp-server: probe /healthz directly inside the container instead
+          # of waiting on Docker's HEALTHCHECK scheduler. The image healthcheck
+          # runs every 30s; if startup misses the first probe, a 60s polling
+          # window races the next probe and becomes flaky under runner load.
+          # Production deploy still requires the real Docker health status.
+          echo "Waiting for mcp-server to answer /healthz..."
           up=false
           for _ in $(seq 1 30); do
-            status=$(docker inspect --format '{{.State.Health.Status}}' "$MCP_NAME" 2>/dev/null || echo missing)
-            if [ "$status" = "healthy" ]; then
-              up=true
+            if ! docker inspect --format '{{.State.Running}}' "$MCP_NAME" 2>/dev/null | grep -q true; then
+              echo "::error::mcp-server container exited early"
               break
             fi
-            if [ "$status" = "missing" ] && ! docker inspect --format '{{.State.Running}}' "$MCP_NAME" 2>/dev/null | grep -q true; then
-              echo "::error::mcp-server container exited early"
+            if docker exec "$MCP_NAME" python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8087/healthz', timeout=4)" 2>/dev/null; then
+              up=true
               break
             fi
             sleep 2
           done
           if [ "$up" != "true" ]; then
-            echo "::error::mcp-server image failed to become healthy (last status: ${status:-unknown})"
+            echo "::error::mcp-server image never answered /healthz with HTTP 200"
             docker logs "$MCP_NAME" 2>&1 | tail -80
             fail=true
           else
