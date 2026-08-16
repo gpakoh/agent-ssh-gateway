@@ -83,6 +83,11 @@ class TestAgentRuntimeIsolationWiring:
         assert 'if [ "$checkout_sha" != "$DEPLOY_TAG" ]' in text
         assert 'git bundle create "$bundle_tmp" HEAD' in text
         assert 'git bundle list-heads "$bundle_tmp" HEAD' in text
+        publish_fn = text[text.index("publish_agent_source_bundle()") : text.index("run_migrations()")]
+        assert "if ! docker exec mcp-oauth python3 -c 'import os,sys; os.replace" in publish_fn
+        assert 'git bundle list-heads "$container_path" HEAD' in publish_fn
+        assert "final verification mismatch" in publish_fn
+        assert publish_fn.rstrip().endswith("}") and "return 0\n}" in publish_fn
         smoke_gate = text.rfind("elif smoke; then")
         publish = text.rfind("if publish_agent_source_bundle; then")
         record = text.rfind('write_state "$NEW_GATEWAY_IMAGE"')

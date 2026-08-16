@@ -29,6 +29,7 @@ from agent_tools import project_run_agent as _project_run_agent
 from mcp_client_tools import run_project_command
 from opencode_tools import project_run_opencode as _project_run_opencode
 
+from examples.mcp_server.agent_sources import ensure_managed_source_bundle
 from examples.mcp_server.fleet_runtime import get_fleet_runtime
 from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.adapters.gateway import _split_lines
@@ -81,6 +82,10 @@ def gateway_write_agent_task(
     """Write task.json + current-plan.md to .ai-bridge/tasks/<task_id>/."""
 
     def _fn() -> dict[str, Any]:
+        # Publish exact committed source in the trusted control plane before
+        # the task becomes runnable. The executor only consumes this root RO.
+        ensure_managed_source_bundle(project, base_ref)
+
         return _write_agent_task(
             # Script transport (sh + stdin), NOT run_project_command: the
             # generated command is a multi-line heredoc script that

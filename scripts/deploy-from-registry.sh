@@ -303,8 +303,19 @@ publish_agent_source_bundle() {
     docker exec mcp-oauth python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).unlink(missing_ok=True)' "$container_tmp" || true
     return 1
   fi
-  docker exec mcp-oauth python3 -c 'import os,sys; os.replace(sys.argv[1], sys.argv[2])' "$container_tmp" "$container_path"
+  if ! docker exec mcp-oauth python3 -c 'import os,sys; os.replace(sys.argv[1], sys.argv[2])' "$container_tmp" "$container_path"; then
+    log "Agent source bundle: atomic publication failed."
+    docker exec mcp-oauth python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).unlink(missing_ok=True)' "$container_tmp" || true
+    return 1
+  fi
+  bundle_head=$(docker exec mcp-oauth git bundle list-heads "$container_path" HEAD 2>/dev/null | awk 'NR==1 {print $1}')
+  if [ "$bundle_head" != "$DEPLOY_TAG" ]; then
+    log "Agent source bundle: final verification mismatch ($bundle_head != $DEPLOY_TAG)."
+    docker exec mcp-oauth python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).unlink(missing_ok=True)' "$container_path" || true
+    return 1
+  fi
   log "Agent source bundle published: $container_path"
+  return 0
 }
 
 
