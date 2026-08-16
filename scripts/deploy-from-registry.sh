@@ -96,7 +96,7 @@ wait_docker_health() {
 
 smoke() {
   local ok=true
-  wait_docker_health "ssh-gateway-sshd"       ssh-gateway-sshd       120 || ok=false
+  wait_docker_health "ssh-gateway-sshd" ssh-gateway-sshd 120 || ok=false
   wait_docker_health "ssh-gateway-agent-sshd" ssh-gateway-agent-sshd 120 || ok=false
   # No curl against localhost:8085 here — this script may run from a CI
   # job container whose "localhost" is its own network namespace, not the
