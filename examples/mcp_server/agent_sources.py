@@ -26,10 +26,19 @@ class ManagedSourceBundleError(RuntimeError):
     """Raised when trusted source publication cannot prove the requested SHA."""
 
 
-def _run_git(args: list[str], *, cwd: Path | None = None) -> str:
+def _run_git(
+    args: list[str],
+    *,
+    cwd: Path | None = None,
+    safe_directory: Path | None = None,
+) -> str:
+    command = ["git"]
+    if safe_directory is not None:
+        command.extend(["-c", f"safe.directory={safe_directory}"])
+    command.extend(args)
     try:
         result = subprocess.run(
-            ["git", *args],
+            command,
             cwd=str(cwd) if cwd is not None else None,
             text=True,
             capture_output=True,
@@ -92,7 +101,11 @@ def ensure_managed_source_bundle(project: str, base_ref: str | None) -> str | No
         return str(bundle_path)
 
     project_root = Path(get_registry().project_info(project)["root"])
-    _run_git(["cat-file", "-e", f"{base_ref}^{{commit}}"], cwd=project_root)
+    _run_git(
+        ["cat-file", "-e", f"{base_ref}^{{commit}}"],
+        cwd=project_root,
+        safe_directory=project_root,
+    )
 
     temp_fd, temp_name = tempfile.mkstemp(
         prefix=f".{expected}.", suffix=".bundle.tmp", dir=bundle_path.parent
@@ -113,7 +126,8 @@ def ensure_managed_source_bundle(project: str, base_ref: str | None) -> str | No
                     "--no-recurse-submodules",
                     str(project_root),
                     f"{base_ref}:refs/heads/source",
-                ]
+                ],
+                safe_directory=project_root,
             )
             fetched = _run_git(
                 [f"--git-dir={bare}", "rev-parse", "refs/heads/source^{commit}"]
