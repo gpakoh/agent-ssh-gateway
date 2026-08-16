@@ -1091,3 +1091,7 @@ class TestAgentExecutorIsPartOfTheDeployPipeline:
         assert '"ssh-gateway-sshd"' in fn
         assert '"ssh-gateway-agent-sshd"' in fn
         assert "17179869184" in fn
+
+    def test_gateway_image_packages_agent_known_host_bootstrap(self):
+        text = GATEWAY_DOCKERFILE.read_text(encoding="utf-8")
+        assert "scripts/ensure-agent-known-host.py ./scripts/ensure-agent-known-host.py" in text
