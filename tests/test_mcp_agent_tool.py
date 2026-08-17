@@ -29,6 +29,29 @@ TASK_ID = "test-agent-001"
 TASKS_REL = ".ai-bridge/tasks"
 TD = f"{TASKS_REL}/{TASK_ID}"
 
+def test_read_agent_log_redacts_obvious_secrets(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setattr(
+        agent_adapter,
+        "_read_agent_log_tail",
+        lambda *args, **kwargs: {
+            "stdout": "password=hunter2\ntoken=abc123\nworking\n",
+            "stderr": "",
+            "exit_code": 0,
+            "truncated": False,
+        },
+    )
+
+    result = agent_adapter.gateway_read_agent_log("test", TASK_ID, tail_lines=20)
+
+    assert result["ok"] is True
+    assert "hunter2" not in result["result"]["stdout"]
+    assert "abc123" not in result["result"]["stdout"]
+    assert "[REDACTED]" in result["result"]["stdout"]
+    assert result["meta"]["redacted"] is True
+
+
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
