@@ -251,6 +251,7 @@ class TestSpecificToolMappings:
 
     def test_project_run_opencode_requires_agent_run(self):
         assert get_required_scopes("run_opencode") == ["mcp:agent-run"]
+        assert get_required_scopes("run_agents") == ["mcp:agent-run"]
 
     def test_all_gitea_fleet_requires_repo(self):
         for tool in TOOL_SCOPES:

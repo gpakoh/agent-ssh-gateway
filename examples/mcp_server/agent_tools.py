@@ -892,6 +892,7 @@ def _build_opencode_script(
     admission_poll_seconds = int(os.environ.get("OPENCODE_ADMISSION_POLL_SECONDS", "2"))
     startup_response_timeout_seconds = int(os.environ.get("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "60"))
     startup_kill_grace_seconds = int(os.environ.get("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "5"))
+    startup_max_proxy_attempts = int(os.environ.get("OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS", "4"))
     if (
         startup_reserve_bytes < 0
         or startup_reserve_seconds < 0
@@ -899,6 +900,7 @@ def _build_opencode_script(
         or admission_poll_seconds <= 0
         or startup_response_timeout_seconds <= 0
         or startup_kill_grace_seconds < 0
+        or startup_max_proxy_attempts <= 0
     ):
         raise ValueError("OpenCode admission timing/reserve values are invalid")
     allowed_files = list(allowed_files or [])
@@ -1089,19 +1091,26 @@ def _build_opencode_script(
     startup_retry_lines: list[str] = []
     if proxy_provider_url:
         startup_retry_lines = [
-            'if [ "${OPENCODE_STARTUP_STALLED:-0}" -eq 1 ] && [ "$PROXY_BLOCKED" -eq 0 ]; then',
-            '  echo "OpenCode startup stalled; rotating proxy" >> "$td/agent-status.md"',
+            f"OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS={startup_max_proxy_attempts}",
+            "OPENCODE_PROXY_ATTEMPT=1",
+            'while [ "${OPENCODE_STARTUP_STALLED:-0}" -eq 1 ] && [ "$PROXY_BLOCKED" -eq 0 ] && [ "$OPENCODE_PROXY_ATTEMPT" -lt "$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS" ]; do',
+            '  echo "OpenCode startup stalled; rotating proxy (attempt $OPENCODE_PROXY_ATTEMPT/$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS)" >> "$td/agent-status.md"',
             "  cooldown_opencode_proxy",
             '  if [ -n "${OPENCODE_PROXY_DIGEST:-}" ]; then',
             '    OPENCODE_REJECTED_PROXY_DIGESTS="${OPENCODE_REJECTED_PROXY_DIGESTS:+$OPENCODE_REJECTED_PROXY_DIGESTS,}$OPENCODE_PROXY_DIGEST"',
             "  fi",
             "  release_opencode_proxy",
+            "  OPENCODE_PROXY_ATTEMPT=$((OPENCODE_PROXY_ATTEMPT + 1))",
             "  acquire_opencode_proxy",
             '  if [ "$PROXY_BLOCKED" -eq 0 ]; then',
             "    run_opencode_attempt",
             "  else",
             "    RC=76",
+            "    break",
             "  fi",
+            "done",
+            'if [ "${OPENCODE_STARTUP_STALLED:-0}" -eq 1 ] && [ "$PROXY_BLOCKED" -eq 0 ] && [ "$OPENCODE_PROXY_ATTEMPT" -ge "$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS" ]; then',
+            '  echo "OpenCode startup attempts exhausted ($OPENCODE_PROXY_ATTEMPT/$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS)" >> "$td/agent-status.md"',
             "fi",
         ]
     parts.extend([

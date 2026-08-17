@@ -172,6 +172,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "archive_agent_task",
         "run_opencode",
         "run_agent",
+        "run_agents",
         "workspace_file_write",
         "workspace_file_edit",
         "workspace_apply_patch",
@@ -193,6 +194,7 @@ MCP_CLIENT_BLOCKED_TOOLS: frozenset[str] = frozenset({
     # Agent launch — never safe for first attach
     "run_opencode",
     "run_agent",
+    "run_agents",
     # Write/patch mutations
     "apply_patch",
     "workspace_file_write",

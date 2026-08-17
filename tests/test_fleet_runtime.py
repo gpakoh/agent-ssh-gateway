@@ -637,6 +637,29 @@ async def test_exactly_one_watcher_per_job_id():
 
 
 @pytest.mark.asyncio
+async def test_submit_can_skip_redundant_pre_sweep_but_still_tracks_new_job():
+    state = MagicMock()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
+    state.list_bound_leases = AsyncMock(return_value=[])
+    state.bind_job = AsyncMock(return_value=_lease(job_id="job-batch"))
+    state.complete_task = AsyncMock()
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state)
+
+    await runtime.submit(
+        project="demo",
+        task_id="task-1",
+        submit_sync=lambda: {"task_id": "task-1", "status": "running", "job_id": "job-batch"},
+        job_status_fn=lambda jid: {"job_id": jid, "status": "running"},
+        sweep_before_submit=False,
+    )
+
+    state.list_bound_leases.assert_not_awaited()
+    assert "job-batch" in runtime._watchers_by_job
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_close_cancels_watchers_then_closes_state():
     state = MagicMock()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))

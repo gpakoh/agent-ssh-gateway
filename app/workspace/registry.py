@@ -48,7 +48,13 @@ def resolve_registry_root() -> Path:
       2. Repo-root ``projects.yaml`` (this module lives at
          ``<repo>/app/workspace/registry.py``) — the same file the MCP
          server uses, so both surfaces always agree.
-      3. Current working directory — dev fallback.
+
+    Raises:
+      WorkspacePolicyError: if neither the env var nor the repo-root
+        ``projects.yaml`` can determine a registry root.  A silent
+        ``Path.cwd()`` fallback was removed because it silently selected
+        an unrelated directory when the expected repo-root file was
+        absent.
     """
     env_root = os.environ.get("WORKSPACE_REGISTRY_ROOT", "")
     if env_root:
@@ -56,7 +62,12 @@ def resolve_registry_root() -> Path:
     repo_root = Path(__file__).resolve().parent.parent.parent
     if (repo_root / "projects.yaml").exists():
         return repo_root
-    return Path.cwd()
+    raise WorkspacePolicyError(
+        "Cannot determine workspace registry root: "
+        "WORKSPACE_REGISTRY_ROOT is not set and "
+        f"{repo_root / 'projects.yaml'} does not exist. "
+        "Set WORKSPACE_REGISTRY_ROOT to the directory containing projects.yaml."
+    )
 
 
 def get_registry_root() -> Path:
