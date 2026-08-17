@@ -192,7 +192,7 @@ class TestChatGPTSafeMode:
             assert get_required_scopes(name) == ["mcp:admin"]
 
     def test_gitea_pr_writes_are_write_mode_only_and_admin_scoped(self):
-        for name in ("gitea_create_pull_request", "gitea_merge_pull_request"):
+        for name in ("gitea_create_pull_request", "gitea_merge_pull_request", "gitea_push_local_ref"):
             assert name in TOOL_NAMES_BY_MODE["mcp_client_write"]
             assert name not in TOOL_NAMES_BY_MODE["mcp_client"]
             assert name not in get_mcp_client_safe_tools()
