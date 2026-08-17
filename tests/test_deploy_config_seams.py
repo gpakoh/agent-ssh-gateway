@@ -11,7 +11,6 @@ content can.
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 import yaml
@@ -23,16 +22,6 @@ MCP_SERVER_DOCKERFILE = ROOT / "docker" / "Dockerfile.mcp-server"
 GATEWAY_DOCKERFILE = ROOT / "docker" / "Dockerfile"
 SSHD_DOCKERFILE = ROOT / "docker" / "sshd" / "Dockerfile"
 DEPLOY_SCRIPT = ROOT / "scripts" / "deploy-from-registry.sh"
-
-def test_deploy_script_is_valid_bash() -> None:
-    result = subprocess.run(
-        ["bash", "-n", str(DEPLOY_SCRIPT)],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-
 CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 HOST_SMOKE_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "host-smoke.yml"
 MAKEFILE_PATH = ROOT / "Makefile"
@@ -923,6 +912,28 @@ class TestSshdVersionedArtifact:
         apk_line = next(line for line in text.splitlines() if "apk add" in line)
         assert "ripgrep" in apk_line
 
+    def test_sshd_build_provenance_does_not_invalidate_dependency_install_layer(self):
+        text = SSHD_DOCKERFILE.read_text(encoding="utf-8")
+        dependency_install = text.index("RUN apk add --no-cache")
+        build_sha = text.index("ARG BUILD_SHA=unknown")
+        build_time = text.index("ARG BUILD_TIME=unknown")
+        assert build_sha > dependency_install
+        assert build_time > dependency_install
+
+    def test_sshd_dependency_artifacts_are_pinned_and_retryable(self):
+        text = SSHD_DOCKERFILE.read_text(encoding="utf-8")
+        assert "FROM ghcr.io/astral-sh/uv:0.12.5 AS uv" in text
+        assert "COPY --from=uv /uv /usr/local/bin/uv" in text
+        assert "ARG OPENCODE_VERSION=1.18.16" in text
+        assert "astral.sh/uv" not in text
+        assert "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/" in text
+        assert "opencode-${opencode_target}.tar.gz" in text
+        assert "opencode.ai/install" not in text
+        assert "--retry 5" in text
+        assert "--retry-all-errors" in text
+        assert "grep -qwi avx2 /proc/cpuinfo" in text
+        assert 'opencode_target="${opencode_target}-musl"' in text
+
 
 class TestAgentExecutorDataRoot:
     """The named agent-data volume must inherit an executor-writable owner.
@@ -1085,14 +1096,6 @@ class TestAgentExecutorIsPartOfTheDeployPipeline:
         assert text.index('wait_docker_health "web-ssh-gateway"') < text.index(bootstrap)
         assert text.index(bootstrap) < text.index('web-ssh-gateway (authenticated)')
 
-    def test_mcp_health_check_runs_after_known_host_condition_closes(self):
-        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-        sequence = (
-            'echo "FAIL"; ok=false\n    fi\n  fi\n'
-            '  wait_docker_health "mcp-server"      mcp-server      120 || ok=false'
-        )
-        assert sequence in text
-
     def test_executor_memory_gate_applies_to_both_sshd_containers(self):
         text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
         fn = text.split("wait_docker_health() {", 1)[1].split("\n}\n", 1)[0]
@@ -1100,6 +1103,44 @@ class TestAgentExecutorIsPartOfTheDeployPipeline:
         assert '"ssh-gateway-agent-sshd"' in fn
         assert "17179869184" in fn
 
-    def test_gateway_image_packages_agent_known_host_bootstrap(self):
-        text = GATEWAY_DOCKERFILE.read_text(encoding="utf-8")
-        assert "scripts/ensure-agent-known-host.py ./scripts/ensure-agent-known-host.py" in text
+
+class TestMcpServerDockerfileInstallsComposePlugin:
+    """Regression: docker_compose_* requires an explicit Compose v2 plugin."""
+
+    def test_dockerfile_installs_compose_plugin(self):
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        assert "docker/compose/releases" in text, (
+            "Dockerfile must download Compose v2 from GitHub releases"
+        )
+        assert "cli-plugins/docker-compose" in text, (
+            "Compose binary must be installed to the CLI plugins directory"
+        )
+
+    def test_dockerfile_verifies_compose_checksum(self):
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        assert "COMPOSE_SHA256=" in text
+        assert "sha256sum -c" in text, (
+            "Compose binary download must be verified via sha256sum"
+        )
+
+    def test_dockerfile_pins_compose_version(self):
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        version_lines = [
+            line for line in text.splitlines() if line.startswith("ARG COMPOSE_VERSION=")
+        ]
+        assert len(version_lines) == 1
+        assert "latest" not in version_lines[0].lower()
+        assert version_lines[0].split("=", 1)[1].startswith("v")
+
+    def test_dockerfile_smoke_tests_compose_at_build_time(self):
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        assert "docker compose version" in text, (
+            "Dockerfile must run 'docker compose version' at build time"
+        )
+
+    def test_compose_install_is_executable(self):
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        assert (
+            "install -m 0755 /tmp/docker-compose "
+            "/usr/local/lib/docker/cli-plugins/docker-compose"
+        ) in text

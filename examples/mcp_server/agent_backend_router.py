@@ -69,6 +69,27 @@ _DEFAULT_COOLDOWN_PATTERNS_SERIALIZED: str = ""
 # ── Selection policies ──────────────────────────────────────────────────────
 
 
+def _entry_is_available(entry: BackendEntry) -> bool:
+    """Return whether *entry* may be selected, recovering expired temporary states.
+
+    FAILED is recoverable only when it carries a cooldown deadline (the shape
+    produced by ``record_result`` for transient execution errors). A manually
+    FAILED backend with no deadline remains failed until explicitly reset.
+    DISABLED is always sticky and never auto-recovers.
+    """
+    if entry.status == BackendStatus.DISABLED:
+        return False
+    if entry.status == BackendStatus.AVAILABLE:
+        return True
+    if entry.status in (BackendStatus.COOLDOWN, BackendStatus.FAILED):
+        if entry.cooldown_until is not None and time.time() >= entry.cooldown_until:
+            entry.status = BackendStatus.AVAILABLE
+            entry.cooldown_until = None
+            return True
+        return False
+    return False
+
+
 class SelectionPolicy(ABC):
     @abstractmethod
     def select(
@@ -90,17 +111,7 @@ class TryPrimaryFallback(SelectionPolicy):
     ) -> str | None:
         def _is_available(name: str) -> bool:
             entry = backends.get(name)
-            if not entry:
-                return False
-            if entry.status in (BackendStatus.FAILED, BackendStatus.DISABLED):
-                return False
-            if entry.status == BackendStatus.COOLDOWN:
-                if entry.cooldown_until and time.time() >= entry.cooldown_until:
-                    entry.status = BackendStatus.AVAILABLE
-                    entry.cooldown_until = None
-                    return True
-                return False
-            return True
+            return entry is not None and _entry_is_available(entry)
 
         if preferred and _is_available(preferred):
             return preferred
@@ -126,7 +137,7 @@ class RoundRobin(SelectionPolicy):
         preferred: str | None = None,
     ) -> str | None:
         available = sorted(
-            [name for name, entry in backends.items() if entry.status == BackendStatus.AVAILABLE]
+            [name for name, entry in backends.items() if _entry_is_available(entry)]
         )
         if not available:
             return None

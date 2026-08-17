@@ -518,6 +518,28 @@ class TestResolveRegistryRoot:
         assert (repo_root / "projects.yaml").exists()
         assert resolve_registry_root() == repo_root
 
+    def test_fails_closed_when_repo_registry_is_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        import app.workspace.registry as registry_module
+        from app.workspace.registry import resolve_registry_root
+
+        monkeypatch.delenv("WORKSPACE_REGISTRY_ROOT", raising=False)
+        monkeypatch.chdir(tmp_path)
+        repo_root = Path(registry_module.__file__).resolve().parent.parent.parent
+        expected_registry = repo_root / "projects.yaml"
+        original_exists = Path.exists
+
+        def exists_without_repo_registry(path: Path) -> bool:
+            if path == expected_registry:
+                return False
+            return original_exists(path)
+
+        monkeypatch.setattr(Path, "exists", exists_without_repo_registry)
+
+        with pytest.raises(WorkspacePolicyError, match="Cannot determine workspace registry root"):
+            resolve_registry_root()
+
     def test_registry_from_resolved_root_contains_web_ssh_gateway(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:

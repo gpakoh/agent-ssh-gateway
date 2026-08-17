@@ -160,10 +160,16 @@ class FleetRuntime:
         task_id: str,
         submit_sync: Callable[[], dict[str, Any]],
         job_status_fn: Callable[[str], dict[str, Any]] | None = None,
+        sweep_before_submit: bool = True,
     ) -> dict[str, Any]:
-        """Admit then perform one idempotent gateway submission."""
+        """Admit then perform one idempotent gateway submission.
+
+        ``sweep_before_submit=False`` is reserved for callers that already
+        performed one shared reconciliation sweep for a batch. Watcher setup
+        for this submission is unchanged.
+        """
         await self.ensure_ready()
-        if job_status_fn is not None:
+        if job_status_fn is not None and sweep_before_submit:
             try:
                 await self.sweep_bound_leases(job_status_fn)
             except Exception:

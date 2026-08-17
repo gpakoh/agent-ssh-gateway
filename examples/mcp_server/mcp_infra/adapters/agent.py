@@ -11,6 +11,7 @@ after runtime.set_mcp) instead of import-time decorator side effects.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Any
 
 from agent_tasks import (
@@ -243,16 +244,14 @@ async def gateway_run_opencode(
     )
 
 
-async def gateway_run_agent(
+def _build_agent_submit(
+    *,
     project: str,
     task_id: str,
-    model: str | None = None,
-    async_submit: bool = False,
-) -> dict[str, Any]:
-    """Execute a handoff task via the backend router with optional fleet admission."""
-    from write_modes import assert_handoff_write_allowed
-
-    assert_handoff_write_allowed()
+    model: str | None,
+    async_submit: bool,
+) -> Callable[[], dict[str, Any]]:
+    """Build the synchronous gateway submit used by single and batch paths."""
 
     def _submit() -> dict[str, Any]:
         return _project_run_agent(
@@ -268,17 +267,54 @@ async def gateway_run_agent(
             async_submit=async_submit,
         )
 
+    return _submit
+
+
+async def _submit_agent_with_fleet(
+    *,
+    project: str,
+    task_id: str,
+    submit_sync: Callable[[], dict[str, Any]],
+    sweep_before_submit: bool = True,
+) -> dict[str, Any]:
+    """Use durable fleet admission when enabled, otherwise submit directly."""
+    fleet = await get_fleet_runtime()
+    if fleet is None:
+        return await asyncio.to_thread(submit_sync)
+    return await fleet.submit(
+        project=project,
+        task_id=task_id,
+        submit_sync=submit_sync,
+        job_status_fn=lambda jid: _server_client().job_status(jid),
+        sweep_before_submit=sweep_before_submit,
+    )
+
+
+async def gateway_run_agent(
+    project: str,
+    task_id: str,
+    model: str | None = None,
+    async_submit: bool = False,
+) -> dict[str, Any]:
+    """Execute a handoff task via the backend router with optional fleet admission."""
+    from write_modes import assert_handoff_write_allowed
+
+    assert_handoff_write_allowed()
+    submit_sync = _build_agent_submit(
+        project=project,
+        task_id=task_id,
+        model=model,
+        async_submit=async_submit,
+    )
+
     async def _fn() -> dict[str, Any]:
         if async_submit:
-            fleet = await get_fleet_runtime()
-            if fleet is not None:
-                return await fleet.submit(
-                    project=project,
-                    task_id=task_id,
-                    submit_sync=_submit,
-                    job_status_fn=lambda jid: _server_client().job_status(jid),
-                )
-        return await asyncio.to_thread(_submit)
+            return await _submit_agent_with_fleet(
+                project=project,
+                task_id=task_id,
+                submit_sync=submit_sync,
+            )
+        return await asyncio.to_thread(submit_sync)
 
     return await run_tool_async(
         tool="run_agent",
@@ -286,6 +322,73 @@ async def gateway_run_agent(
         fn=_fn,
         success_text="Submitted agent task via router.",
     )
+
+
+_MAX_AGENT_BATCH = 64
+
+
+async def gateway_run_agents(project: str, task_ids: str) -> dict[str, Any]:
+    """Submit multiple prepared agent tasks in one MCP call."""
+    from write_modes import assert_handoff_write_allowed
+
+    assert_handoff_write_allowed()
+
+    async def _fn() -> dict[str, Any]:
+        ids = _split_lines(task_ids) or []
+        if not ids:
+            raise ValueError("task_ids must contain at least one task ID")
+        if len(ids) > _MAX_AGENT_BATCH:
+            raise ValueError(f"task_ids may contain at most {_MAX_AGENT_BATCH} items")
+        if len(ids) != len(set(ids)):
+            raise ValueError("task_ids must not contain duplicates")
+
+        fleet = await get_fleet_runtime()
+
+        def status_fn(job_id: str) -> dict[str, Any]:
+            return _server_client().job_status(job_id)
+
+        if fleet is not None:
+            try:
+                await fleet.sweep_bound_leases(status_fn)
+            except Exception:
+                pass
+
+        async def submit_one(task_id: str) -> dict[str, Any]:
+            submit_sync = _build_agent_submit(
+                project=project,
+                task_id=task_id,
+                model=None,
+                async_submit=True,
+            )
+            try:
+                if fleet is None:
+                    result = await asyncio.to_thread(submit_sync)
+                else:
+                    result = await fleet.submit(
+                        project=project,
+                        task_id=task_id,
+                        submit_sync=submit_sync,
+                        job_status_fn=status_fn,
+                        sweep_before_submit=False,
+                    )
+                return result
+            except Exception as exc:
+                return {
+                    "task_id": task_id,
+                    "status": "error",
+                    "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+                }
+
+        results = await asyncio.gather(*(submit_one(task_id) for task_id in ids))
+        return {"items": results, "count": len(results)}
+
+    return await run_tool_async(
+        tool="run_agents",
+        title="Run agent tasks",
+        fn=_fn,
+        success_text="Submitted agent tasks via router.",
+    )
+
 
 def register_all() -> None:
     register_tool("write_agent_task")(gateway_write_agent_task)
@@ -296,3 +399,4 @@ def register_all() -> None:
     register_tool("archive_agent_task")(gateway_archive_agent_task)
     register_tool("run_opencode")(gateway_run_opencode)
     register_tool("run_agent")(gateway_run_agent)
+    register_tool("run_agents")(gateway_run_agents)

@@ -19,6 +19,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from examples.mcp_server.agent_tools import (
     PROXY_LIMIT_MARKERS,
     _build_opencode_script,
@@ -130,6 +132,22 @@ class TestBuildOpencodeScriptProxy:
         monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", PROVIDER)
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
         assert 'echo "Status: rate-limited" > "$td/agent-status.md"' in script
+
+    def test_proxy_startup_retry_default_is_bounded_to_four_attempts(self, monkeypatch):
+        monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", PROVIDER)
+        monkeypatch.delenv("OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS", raising=False)
+
+        script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
+
+        assert "OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS=4" in script
+        assert '"$OPENCODE_PROXY_ATTEMPT" -lt "$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS"' in script
+
+    def test_proxy_startup_retry_rejects_nonpositive_attempt_count(self, monkeypatch):
+        monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", PROVIDER)
+        monkeypatch.setenv("OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS", "0")
+
+        with pytest.raises(ValueError, match="timing/reserve values are invalid"):
+            _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
 
     def test_worker_status_preserved_before_canonical_final_status(self, monkeypatch):
         """A worker may write a detailed step log to agent-status.md. The
@@ -798,6 +816,164 @@ def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
         thread.join(timeout=5)
 
 
+def test_startup_stall_can_reach_third_distinct_proxy(tmp_path, monkeypatch):
+    original_proxies = list(_ProxyPoolHandler.proxies)
+    _ProxyPoolHandler.proxies = [
+        "http://127.0.0.1:19001",
+        "http://127.0.0.1:19002",
+        "http://127.0.0.1:19003",
+    ]
+    _ProxyPoolHandler.reports = []
+    _ProxyPoolHandler.get_count = 0
+    _ProxyPoolHandler.fail_get_after_first = True
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ProxyPoolHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        source = tmp_path / "startup-third-source"
+        source.mkdir()
+        _init_git_repo(source)
+        artifacts = tmp_path / "startup-third-artifacts"
+        artifacts.mkdir()
+        (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+        fake_bin = tmp_path / "startup-third-bin"
+        fake_bin.mkdir()
+        capture = tmp_path / "startup-third-proxies.txt"
+        fake = fake_bin / "opencode"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$HTTP_PROXY" >> "$PROXY_CAPTURE"\n'
+            'case "$HTTP_PROXY" in\n'
+            '  *:19001|*:19002) printf "\\033[0m\\n> build · big-pickle\\n\\033[0m"; sleep 10 ;;\n'
+            '  *) printf "\\033[0m\\n> build · big-pickle\\n\\033[0m\\nthird-proxy-ok\\n"; exit 0 ;;\n'
+            "esac\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("PROXY_CAPTURE", str(capture))
+        monkeypatch.setenv(
+            "OPENCODE_PROXY_PROVIDER_URL",
+            f"http://127.0.0.1:{server.server_port}/proxy?format=provider",
+        )
+        monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "true")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+        monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "1")
+
+        script = _build_opencode_script(
+            str(artifacts), TASK_ID, None, project_root=str(source)
+        )
+        result = subprocess.run(
+            ["sh", "-c", script],
+            cwd=source,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+
+        assert result.returncode == 0, result.stderr or result.stdout
+        used_proxies = capture.read_text(encoding="utf-8").splitlines()
+        assert used_proxies == _ProxyPoolHandler.proxies
+        assert len(set(used_proxies)) == 3
+        reported = {report.get("proxy") for report in _ProxyPoolHandler.reports}
+        assert _ProxyPoolHandler.proxies[0] in reported
+        assert _ProxyPoolHandler.proxies[1] in reported
+        assert "third-proxy-ok" in (artifacts / "opencode-output.log").read_text(
+            encoding="utf-8"
+        )
+        worker_status = (artifacts / "worker-status.md").read_text(encoding="utf-8")
+        assert "attempt 1/4" in worker_status
+        assert "attempt 2/4" in worker_status
+        for proxy in _ProxyPoolHandler.proxies:
+            assert proxy not in worker_status
+    finally:
+        _ProxyPoolHandler.proxies = original_proxies
+        _ProxyPoolHandler.fail_get_after_first = False
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_startup_retry_stops_at_configured_attempt_limit(tmp_path, monkeypatch):
+    original_proxies = list(_ProxyPoolHandler.proxies)
+    _ProxyPoolHandler.proxies = [
+        "http://127.0.0.1:19001",
+        "http://127.0.0.1:19002",
+        "http://127.0.0.1:19003",
+    ]
+    _ProxyPoolHandler.reports = []
+    _ProxyPoolHandler.get_count = 0
+    _ProxyPoolHandler.fail_get_after_first = True
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ProxyPoolHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        source = tmp_path / "startup-exhausted-source"
+        source.mkdir()
+        _init_git_repo(source)
+        artifacts = tmp_path / "startup-exhausted-artifacts"
+        artifacts.mkdir()
+        (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+        fake_bin = tmp_path / "startup-exhausted-bin"
+        fake_bin.mkdir()
+        capture = tmp_path / "startup-exhausted-proxies.txt"
+        fake = fake_bin / "opencode"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$HTTP_PROXY" >> "$PROXY_CAPTURE"\n'
+            'printf "\\033[0m\\n> build · big-pickle\\n\\033[0m"\n'
+            "sleep 10\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("PROXY_CAPTURE", str(capture))
+        monkeypatch.setenv(
+            "OPENCODE_PROXY_PROVIDER_URL",
+            f"http://127.0.0.1:{server.server_port}/proxy?format=provider",
+        )
+        monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "true")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+        monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS", "3")
+
+        script = _build_opencode_script(
+            str(artifacts), TASK_ID, None, project_root=str(source)
+        )
+        result = subprocess.run(
+            ["sh", "-c", script],
+            cwd=source,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+
+        assert result.returncode == 78
+        used_proxies = capture.read_text(encoding="utf-8").splitlines()
+        assert used_proxies == _ProxyPoolHandler.proxies
+        assert len(set(used_proxies)) == 3
+        worker_status = (artifacts / "worker-status.md").read_text(encoding="utf-8")
+        assert "startup attempts exhausted (3/3)" in worker_status
+        for proxy in _ProxyPoolHandler.proxies:
+            assert proxy not in worker_status
+    finally:
+        _ProxyPoolHandler.proxies = original_proxies
+        _ProxyPoolHandler.fail_get_after_first = False
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def _run_supervisor_postrun(
     root: Path,
     *,
@@ -1158,3 +1334,87 @@ class TestSupervisorPostrunEvidence:
         assert _git(workspace, "rev-parse", "HEAD") == source_head
         assert _git(workspace, "remote") == ""
         assert (artifacts / "agent-status.md").read_text(encoding="utf-8").strip() == "Status: needs-review"
+
+
+class TestSupervisorRequiredCheckDevExtraBootstrap:
+    @staticmethod
+    def _commit_uv_project(root: Path, *, dev_extra: bool) -> str:
+        pyproject = "[project]\nname = \"verification-fixture\"\nversion = \"0.0.0\"\n"
+        if dev_extra:
+            pyproject += "\n[project.optional-dependencies]\ndev = []\n"
+        (root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+        (root / "uv.lock").write_text(
+            "version = 1\nrevision = 1\nrequires-python = \">=3.11\"\n", encoding="utf-8"
+        )
+        _git(root, "add", "pyproject.toml", "uv.lock")
+        _git(root, "commit", "-m", "add uv fixture")
+        return _git(root, "rev-parse", "HEAD")
+
+    def test_declared_dev_extra_bootstraps_clean_verification_clone(self, tmp_path, monkeypatch):
+        _init_git_repo(tmp_path)
+        base_head = self._commit_uv_project(tmp_path, dev_extra=True)
+        fake_bin = tmp_path.parent / f"{tmp_path.name}-fake-bin"
+        fake_bin.mkdir()
+        marker = tmp_path / "uv-called"
+        uv = fake_bin / "uv"
+        uv.write_text(
+            f"#!/bin/sh\nprintf called > {shlex.quote(str(marker))}\nexit 0\n", encoding="utf-8"
+        )
+        uv.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+        result, td = _run_supervisor_postrun(
+            tmp_path, base_head=base_head, allowed_files=[], required_checks=["true"]
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert marker.exists()
+        log = (td / "required-checks.log").read_text(encoding="utf-8")
+        assert "bootstrapping declared dev extra" in log
+        assert "dev extra bootstrap succeeded" in log
+
+    def test_uv_project_without_dev_extra_preserves_existing_check_behavior(self, tmp_path, monkeypatch):
+        _init_git_repo(tmp_path)
+        base_head = self._commit_uv_project(tmp_path, dev_extra=False)
+        fake_bin = tmp_path.parent / f"{tmp_path.name}-fake-bin"
+        fake_bin.mkdir()
+        marker = tmp_path / "uv-called"
+        uv = fake_bin / "uv"
+        uv.write_text(
+            f"#!/bin/sh\nprintf called > {shlex.quote(str(marker))}\nexit 99\n", encoding="utf-8"
+        )
+        uv.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+        result, td = _run_supervisor_postrun(
+            tmp_path, base_head=base_head, allowed_files=[], required_checks=["true"]
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert not marker.exists()
+        log = (td / "required-checks.log").read_text(encoding="utf-8")
+        assert "bootstrapping declared dev extra" not in log
+        assert "PASS" in log
+
+    def test_declared_dev_extra_bootstrap_failure_fails_closed(self, tmp_path, monkeypatch):
+        _init_git_repo(tmp_path)
+        base_head = self._commit_uv_project(tmp_path, dev_extra=True)
+        fake_bin = tmp_path.parent / f"{tmp_path.name}-fake-bin"
+        fake_bin.mkdir()
+        uv = fake_bin / "uv"
+        uv.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+        uv.chmod(0o755)
+        check_marker = tmp_path / "required-check-ran"
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+        result, td = _run_supervisor_postrun(
+            tmp_path,
+            base_head=base_head,
+            allowed_files=[],
+            required_checks=[f"touch {shlex.quote(str(check_marker))}"],
+        )
+
+        assert result.returncode == 72, result.stderr
+        assert not check_marker.exists()
+        status = (td / "agent-status.md").read_text(encoding="utf-8")
+        assert "dev extra bootstrap FAILED" in status

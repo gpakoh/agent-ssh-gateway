@@ -1,7 +1,9 @@
 """Read-only git inspection tools for workspace projects.
 
-All git commands use fixed argv, shell=False, timeout=10, and GIT_TERMINAL_PROMPT=0.
-Network-capable git operations (fetch, pull, push, remote) are excluded.
+All git commands use fixed argv, shell=False, timeout=10, and a constrained
+environment. Network-capable git operations (fetch, pull, push, remote) are
+excluded. Repository-configured executable integrations used by these
+operations are disabled at the adapter boundary.
 """
 
 from __future__ import annotations
@@ -21,9 +23,19 @@ logger = logging.getLogger(__name__)
 _GIT_TIMEOUT = 10
 _SAFE_ENV: dict[str, str] = {
     "GIT_TERMINAL_PROMPT": "0",
+    "GIT_OPTIONAL_LOCKS": "0",
+    "GIT_PAGER": "cat",
+    "PAGER": "cat",
     "LC_ALL": "C",
     "PATH": "/usr/bin:/usr/local/bin",
 }
+
+_SAFE_GIT_CONFIG: tuple[str, ...] = (
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+)
 
 
 # ── Internal helpers ─────────────────────────────────────────────
@@ -36,10 +48,10 @@ def _git_run(
     timeout: int = _GIT_TIMEOUT,
     max_bytes: int = 200_000,
 ) -> dict[str, Any]:
-    """Run a fixed git command. Returns {stdout, stderr, returncode}."""
+    """Run a fixed git command with executable repo hooks disabled."""
     try:
         result = subprocess.run(
-            argv,
+            [argv[0], *_SAFE_GIT_CONFIG, *argv[1:]],
             cwd=str(cwd),
             shell=False,
             capture_output=True,
@@ -310,7 +322,9 @@ def project_git_diff(
     if not _is_git_repo(project_root):
         return {"project_id": project_id, "is_git_repo": False}
 
-    argv = ["git", "diff"]
+    # Never honor repo-local external/textconv diff commands. Both can turn a
+    # read-only diff request into arbitrary process execution.
+    argv = ["git", "diff", "--no-ext-diff", "--no-textconv"]
     if staged:
         argv.append("--staged")
 
