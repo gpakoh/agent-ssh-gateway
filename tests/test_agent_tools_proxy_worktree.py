@@ -1334,3 +1334,87 @@ class TestSupervisorPostrunEvidence:
         assert _git(workspace, "rev-parse", "HEAD") == source_head
         assert _git(workspace, "remote") == ""
         assert (artifacts / "agent-status.md").read_text(encoding="utf-8").strip() == "Status: needs-review"
+
+
+class TestSupervisorRequiredCheckDevExtraBootstrap:
+    @staticmethod
+    def _commit_uv_project(root: Path, *, dev_extra: bool) -> str:
+        pyproject = "[project]\nname = \"verification-fixture\"\nversion = \"0.0.0\"\n"
+        if dev_extra:
+            pyproject += "\n[project.optional-dependencies]\ndev = []\n"
+        (root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+        (root / "uv.lock").write_text(
+            "version = 1\nrevision = 1\nrequires-python = \">=3.11\"\n", encoding="utf-8"
+        )
+        _git(root, "add", "pyproject.toml", "uv.lock")
+        _git(root, "commit", "-m", "add uv fixture")
+        return _git(root, "rev-parse", "HEAD")
+
+    def test_declared_dev_extra_bootstraps_clean_verification_clone(self, tmp_path, monkeypatch):
+        _init_git_repo(tmp_path)
+        base_head = self._commit_uv_project(tmp_path, dev_extra=True)
+        fake_bin = tmp_path.parent / f"{tmp_path.name}-fake-bin"
+        fake_bin.mkdir()
+        marker = tmp_path / "uv-called"
+        uv = fake_bin / "uv"
+        uv.write_text(
+            f"#!/bin/sh\nprintf called > {shlex.quote(str(marker))}\nexit 0\n", encoding="utf-8"
+        )
+        uv.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+        result, td = _run_supervisor_postrun(
+            tmp_path, base_head=base_head, allowed_files=[], required_checks=["true"]
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert marker.exists()
+        log = (td / "required-checks.log").read_text(encoding="utf-8")
+        assert "bootstrapping declared dev extra" in log
+        assert "dev extra bootstrap succeeded" in log
+
+    def test_uv_project_without_dev_extra_preserves_existing_check_behavior(self, tmp_path, monkeypatch):
+        _init_git_repo(tmp_path)
+        base_head = self._commit_uv_project(tmp_path, dev_extra=False)
+        fake_bin = tmp_path.parent / f"{tmp_path.name}-fake-bin"
+        fake_bin.mkdir()
+        marker = tmp_path / "uv-called"
+        uv = fake_bin / "uv"
+        uv.write_text(
+            f"#!/bin/sh\nprintf called > {shlex.quote(str(marker))}\nexit 99\n", encoding="utf-8"
+        )
+        uv.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+        result, td = _run_supervisor_postrun(
+            tmp_path, base_head=base_head, allowed_files=[], required_checks=["true"]
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert not marker.exists()
+        log = (td / "required-checks.log").read_text(encoding="utf-8")
+        assert "bootstrapping declared dev extra" not in log
+        assert "PASS" in log
+
+    def test_declared_dev_extra_bootstrap_failure_fails_closed(self, tmp_path, monkeypatch):
+        _init_git_repo(tmp_path)
+        base_head = self._commit_uv_project(tmp_path, dev_extra=True)
+        fake_bin = tmp_path.parent / f"{tmp_path.name}-fake-bin"
+        fake_bin.mkdir()
+        uv = fake_bin / "uv"
+        uv.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+        uv.chmod(0o755)
+        check_marker = tmp_path / "required-check-ran"
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+        result, td = _run_supervisor_postrun(
+            tmp_path,
+            base_head=base_head,
+            allowed_files=[],
+            required_checks=[f"touch {shlex.quote(str(check_marker))}"],
+        )
+
+        assert result.returncode == 72, result.stderr
+        assert not check_marker.exists()
+        status = (td / "agent-status.md").read_text(encoding="utf-8")
+        assert "dev extra bootstrap FAILED" in status

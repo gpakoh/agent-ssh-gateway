@@ -817,6 +817,22 @@ def _supervisor_postrun_script_lines(
         '      echo "Supervisor required-check clone FAILED" >> "$td/agent-status.md"',
         "    fi",
         "  fi",
+        '  if [ "$CHECKS_RC" -eq 0 ] && [ -f "$CHECK_ROOT/uv.lock" ] && [ -f "$CHECK_ROOT/pyproject.toml" ]; then',
+        "    DEV_EXTRA=$(cd \"$CHECK_ROOT\" && env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV python3 -c 'import tomllib; data=tomllib.load(open(\"pyproject.toml\", \"rb\")); print(\"1\" if \"dev\" in data.get(\"project\", {}).get(\"optional-dependencies\", {}) else \"0\")' 2>>\"$td/required-checks.log\")",
+        '    DEV_EXTRA_RC=$?',
+        '    if [ "$DEV_EXTRA_RC" -ne 0 ]; then',
+        "      CHECKS_RC=1",
+        '      echo "Supervisor required-check dev-extra detection FAILED" >> "$td/agent-status.md"',
+        '    elif [ "$DEV_EXTRA" = "1" ]; then',
+        '      echo "Supervisor required-check: bootstrapping declared dev extra" >> "$td/required-checks.log"',
+        '      if ( cd "$CHECK_ROOT" && env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV uv sync --frozen --extra dev ) >> "$td/required-checks.log" 2>&1; then',
+        '        echo "Supervisor required-check: dev extra bootstrap succeeded" >> "$td/required-checks.log"',
+        "      else",
+        "        CHECKS_RC=1",
+        '        echo "Supervisor required-check dev extra bootstrap FAILED" >> "$td/agent-status.md"',
+        "      fi",
+        "    fi",
+        "  fi",
     ]
 
     for check in required_checks:
