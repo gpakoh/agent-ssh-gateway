@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from examples.mcp_server.agent_paths import (
+    managed_workspace_path,
     task_archive_dir,
     task_archive_path,
     task_dir,
@@ -23,6 +24,7 @@ BASE_REF_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 AGENT_LOG_FILENAME = "opencode-output.log"
 AGENT_LOG_MAX_BYTES = 64 * 1024
 AGENT_LOG_MAX_TAIL_LINES = 1000
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 _SENTENCE_ENDINGS = (".", "?", "!")
 _TRAILING_OPERATORS = frozenset({"&&", "||", "|", ">", ">>", "<", "<&", ">&", "2>"})
@@ -274,6 +276,19 @@ def read_agent_task_file(run_cmd, *, project: str, task_id: str, filename: str) 
     return result
 
 
+def _normalize_agent_log_text(project: str, task_id: str, text: str) -> str:
+    """Remove terminal control sequences and executor-owned absolute paths."""
+    normalized = _ANSI_ESCAPE_RE.sub("", text)
+    prefixes = [
+        (task_dir(project, task_id), "<agent-task>"),
+        (managed_workspace_path(project, task_id), "<agent-workspace>"),
+    ]
+    for prefix, replacement in prefixes:
+        if prefix:
+            normalized = normalized.replace(prefix, replacement)
+    return normalized
+
+
 def read_agent_log_tail(
     run_cmd,
     *,
@@ -313,6 +328,7 @@ def read_agent_log_tail(
     byte_truncated = len(encoded) > AGENT_LOG_MAX_BYTES
     if byte_truncated:
         stdout = encoded[-AGENT_LOG_MAX_BYTES:].decode("utf-8", errors="replace")
+    stdout = _normalize_agent_log_text(project, task_id, stdout)
     lines = stdout.splitlines(keepends=True)
     line_truncated = len(lines) > tail_lines
     stdout = "".join(lines[-tail_lines:])
