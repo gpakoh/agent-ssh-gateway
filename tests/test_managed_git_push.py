@@ -149,7 +149,7 @@ class _Registry:
 
     def project_info(self, project: str) -> dict[str, Any]:
         assert project == "gpt-browser-bridge-hardening"
-        return {"root": str(self.root)}
+        return {"root": str(self.root), "type": "supervisor-workspace"}
 
 
 class _FakeGiteaClient:
@@ -202,3 +202,32 @@ async def test_adapter_verifies_remote_branch_after_managed_push(
     assert result["result"]["sha"] == SHA
     assert captured["project_root"] == str(tmp_path)
     assert captured["token"] == "managed-token"
+
+
+@pytest.mark.asyncio
+async def test_adapter_rejects_non_supervisor_workspace_before_remote_access(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class NonSupervisorRegistry:
+        def project_info(self, project: str) -> dict[str, Any]:
+            assert project == "gpt-browser-bridge-hardening"
+            return {"root": str(tmp_path), "type": "repository"}
+
+    def remote_client_must_not_run() -> Any:
+        raise AssertionError("Gitea client must not be created for a non-supervisor project")
+
+    monkeypatch.setenv("GITEA_TOKEN", "managed-token")
+    monkeypatch.setattr(remote, "_server_workspace_registry", lambda: NonSupervisorRegistry())
+    monkeypatch.setattr(remote, "_server_gitea_client", remote_client_must_not_run)
+
+    result = await remote.gitea_push_local_ref(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_sha=SHA,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert "supervisor-workspace" in result["error"]["message"]

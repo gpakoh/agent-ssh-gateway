@@ -599,6 +599,14 @@ async def gitea_push_local_ref(
             source="gitea",
         )
 
+    if info.get("type") != "supervisor-workspace":
+        return tool_error(
+            tool="gitea_push_local_ref",
+            code="INVALID_INPUT",
+            message="Managed Git push requires a supervisor-workspace project",
+            source="gitea",
+        )
+
     try:
         git_base = configured_gitea_git_base()
         async with _server_gitea_client()(token) as client:
