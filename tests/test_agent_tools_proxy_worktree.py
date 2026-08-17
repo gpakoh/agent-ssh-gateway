@@ -260,7 +260,8 @@ def _init_git_repo(root: Path) -> str:
 
 
 def _make_source_bundle(source: Path, destination: Path) -> Path:
-    _git(source, "bundle", "create", str(destination), "HEAD")
+    _git(source, "update-ref", "refs/heads/source", "HEAD")
+    _git(source, "bundle", "create", str(destination), "refs/heads/source")
     return destination
 
 
