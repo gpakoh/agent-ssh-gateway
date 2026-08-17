@@ -204,17 +204,30 @@ async def _drain_jobs_for_shutdown(job_manager: JobManager, timeout: float = 30.
 # ---------------------------------------------------------------------------
 
 
+
+def _pin_workspace_registry_root() -> None:
+    """Pin configured workspace state without making it a core boot dependency.
+
+    Workspace operations remain fail-closed: if no deterministic registry root
+    is configured, their lazy ``get_registry()`` path raises the same
+    ``WorkspacePolicyError``. The SSH gateway itself can still boot and serve
+    core surfaces when the optional workspace subsystem is absent.
+    """
+    from app.workspace.policy import WorkspacePolicyError
+    from app.workspace.registry import resolve_registry_root, set_registry_root
+
+    try:
+        root = resolve_registry_root()
+    except WorkspacePolicyError as exc:
+        logger.warning("Workspace registry unavailable at startup: %s", exc)
+        return
+    set_registry_root(root)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    # Pin the workspace registry root to the same deterministic resolution
-    # the MCP server uses (WORKSPACE_REGISTRY_ROOT -> repo projects.yaml ->
-    # cwd). Without this the REST process silently fell back to
-    # Path.cwd(), which desynced it from the MCP registry (apply_patch ->
-    # PROJECT_NOT_FOUND for a project MCP tools could see).
-    from app.workspace.registry import resolve_registry_root, set_registry_root
-
-    set_registry_root(resolve_registry_root())
+    _pin_workspace_registry_root()
     build_info.set_started_at()
     await init_auth_db()
     state.host_key_store = create_host_key_store(settings)
