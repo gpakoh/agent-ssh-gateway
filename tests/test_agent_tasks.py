@@ -12,6 +12,7 @@ from examples.mcp_server.agent_tasks import (
     build_initial_status,
     build_task_json,
     list_agent_tasks,
+    read_agent_log_tail,
     read_agent_task_file,
     validate_base_ref,
     validate_filename,
@@ -345,6 +346,51 @@ class TestReadAgentTaskFile:
     def test_accepts_safe_filenames(self):
         for name in ["agent-status.md", "agent-report.md", "implementation-diff.patch"]:
             validate_filename(name)
+
+
+class TestReadAgentLogTail:
+    def test_reads_fixed_bounded_log_and_tails_lines(self):
+        calls = []
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            calls.append((project, command))
+            return {"stdout": "one\ntwo\nthree\n", "stderr": "", "exit_code": 0}
+
+        result = read_agent_log_tail(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            tail_lines=2,
+        )
+
+        assert result["stdout"] == "two\nthree\n"
+        assert result["truncated"] is True
+        assert calls == [(
+            "my-proj",
+            "tail -c 65537 -- .ai-bridge/tasks/a12345678901/opencode-output.log",
+        )]
+
+    @pytest.mark.parametrize("tail_lines", [0, 1001, -1, True])
+    def test_rejects_invalid_line_count_before_command(self, tail_lines):
+        calls = []
+        with pytest.raises((TypeError, ValueError)):
+            read_agent_log_tail(
+                lambda project, command: calls.append((project, command)),
+                project="my-proj",
+                task_id="a12345678901",
+                tail_lines=tail_lines,
+            )
+        assert calls == []
+
+    def test_missing_log_is_not_an_error(self):
+        result = read_agent_log_tail(
+            lambda _p, _c: {"stdout": "", "stderr": "missing", "exit_code": 1},
+            project="my-proj",
+            task_id="a12345678901",
+        )
+        assert result["stdout"] == "(not found)"
+        assert result["exit_code"] == 0
+        assert result["truncated"] is False
 
 
 class TestListAgentTasks:

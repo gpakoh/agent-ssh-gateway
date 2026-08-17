@@ -20,6 +20,9 @@ TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{10,120}$")
 FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 BASE_REF_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
+AGENT_LOG_FILENAME = "opencode-output.log"
+AGENT_LOG_MAX_BYTES = 64 * 1024
+AGENT_LOG_MAX_TAIL_LINES = 1000
 
 _SENTENCE_ENDINGS = (".", "?", "!")
 _TRAILING_OPERATORS = frozenset({"&&", "||", "|", ">", ">>", "<", "<&", ">&", "2>"})
@@ -269,6 +272,58 @@ def read_agent_task_file(run_cmd, *, project: str, task_id: str, filename: str) 
     if result.get("exit_code") != 0:
         return {"stdout": "(not found)", "stderr": "", "exit_code": 0}
     return result
+
+
+def read_agent_log_tail(
+    run_cmd,
+    *,
+    project: str,
+    task_id: str,
+    tail_lines: int = 200,
+) -> dict[str, Any]:
+    """Read a bounded tail of the live OpenCode stdout/stderr log.
+
+    The filename is fixed so callers can never choose an arbitrary path under
+    the coordination directory. Remote output is byte-bounded before it crosses
+    the gateway boundary.
+    """
+    validate_task_id(task_id)
+    if isinstance(tail_lines, bool) or not isinstance(tail_lines, int):
+        raise TypeError("tail_lines must be an integer")
+    if not 1 <= tail_lines <= AGENT_LOG_MAX_TAIL_LINES:
+        raise ValueError(
+            f"tail_lines must be between 1 and {AGENT_LOG_MAX_TAIL_LINES}"
+        )
+
+    path = f"{task_dir(project, task_id)}/{AGENT_LOG_FILENAME}"
+    result = run_cmd(
+        project,
+        f"tail -c {AGENT_LOG_MAX_BYTES + 1} -- {shlex.quote(path)}",
+    )
+    if result.get("exit_code") != 0:
+        return {
+            "stdout": "(not found)",
+            "stderr": "",
+            "exit_code": 0,
+            "truncated": False,
+        }
+
+    stdout = str(result.get("stdout", ""))
+    encoded = stdout.encode("utf-8", errors="replace")
+    byte_truncated = len(encoded) > AGENT_LOG_MAX_BYTES
+    if byte_truncated:
+        stdout = encoded[-AGENT_LOG_MAX_BYTES:].decode("utf-8", errors="replace")
+    lines = stdout.splitlines(keepends=True)
+    line_truncated = len(lines) > tail_lines
+    stdout = "".join(lines[-tail_lines:])
+    return {
+        "stdout": stdout,
+        "stderr": str(result.get("stderr", "")),
+        "exit_code": 0,
+        "truncated": byte_truncated or line_truncated,
+        "tail_lines": tail_lines,
+        "max_bytes": AGENT_LOG_MAX_BYTES,
+    }
 
 
 def write_agent_task(

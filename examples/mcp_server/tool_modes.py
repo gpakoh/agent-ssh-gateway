@@ -168,6 +168,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "read_agent_status",
         "read_agent_report",
         "read_agent_diff",
+        "read_agent_log",
         "list_agent_tasks",
         "archive_agent_task",
         "run_opencode",
