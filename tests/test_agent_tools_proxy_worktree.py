@@ -1418,3 +1418,139 @@ class TestSupervisorRequiredCheckDevExtraBootstrap:
         assert not check_marker.exists()
         status = (td / "agent-status.md").read_text(encoding="utf-8")
         assert "dev extra bootstrap FAILED" in status
+
+
+class TestRuntimeTimeout:
+    """TEST-09: A fake OpenCode that emits non-build progress and then
+    hangs is killed by the runtime watchdog before the test timeout.
+
+    Without the fix, the old unbounded ``wait "$OPENCODE_PID"`` in
+    run_opencode_attempt would hang forever after progress was detected,
+    making this test deadlock at the subprocess timeout.  With the fix,
+    the runtime watchdog fires, the process is TERM'd then KILL'd, and
+    the final report records ``opencode-run-timeout`` with exit code 79.
+    """
+
+    def test_fake_opencode_hanging_after_progress_is_terminated(self, tmp_path, monkeypatch):
+        source = tmp_path / "runtime-source"
+        source.mkdir()
+        _init_git_repo(source)
+        artifacts = tmp_path / "runtime-artifacts"
+        artifacts.mkdir()
+        (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+        fake_bin = tmp_path / "runtime-bin"
+        fake_bin.mkdir()
+        fake = fake_bin / "opencode"
+        # Emit real (non-build) progress then hang forever.
+        fake.write_text(
+            "#!/bin/sh\n"
+            'printf "\\033[0m\\n> big-pickle\\n\\033[0m"\n'
+            "sleep 3600\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+        monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+        monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+        monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "2")
+
+        script = _build_opencode_script(
+            str(artifacts), TASK_ID, None, project_root=str(source)
+        )
+        result = subprocess.run(
+            ["sh", "-c", script],
+            cwd=source,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+
+        assert result.returncode == 79, result.stderr or result.stdout
+        report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
+        assert "Failure reason: opencode-run-timeout" in report
+        status = (artifacts / "agent-status.md").read_text(encoding="utf-8")
+        assert status.strip() == "Status: failed"
+
+    def test_default_runtime_timeout_is_600_seconds(self, monkeypatch):
+        monkeypatch.delenv("OPENCODE_RUN_TIMEOUT_SECONDS", raising=False)
+        monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+        script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
+        assert "OPENCODE_RUNTIME_TIMEOUT_SECONDS=600" in script
+
+    def test_runtime_timeout_rejects_nonpositive_value(self, monkeypatch):
+        monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "0")
+        with pytest.raises(ValueError, match="timing/reserve values are invalid"):
+            _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
+
+    def test_negative_runtime_timeout_rejected(self, monkeypatch):
+        monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "-10")
+        with pytest.raises(ValueError, match="timing/reserve values are invalid"):
+            _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
+
+    def test_no_proxy_retry_after_progress_runtime_timeout(self, tmp_path, monkeypatch):
+        """Runtime timeout after progress must NOT trigger startup proxy
+        rotation — the workspace may already be mutated."""
+        _ProxyPoolHandler.reports = []
+        _ProxyPoolHandler.get_count = 0
+        _ProxyPoolHandler.fail_get_after_first = False
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _ProxyPoolHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            source = tmp_path / "runtime-retry-source"
+            source.mkdir()
+            _init_git_repo(source)
+            artifacts = tmp_path / "runtime-retry-artifacts"
+            artifacts.mkdir()
+            (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+            fake_bin = tmp_path / "runtime-retry-bin"
+            fake_bin.mkdir()
+            fake = fake_bin / "opencode"
+            # Emit progress (non-build line) then hang — same as above but
+            # with a proxy configured so startup retry is in play.
+            fake.write_text(
+                "#!/bin/sh\n"
+                'printf "\\033[0m\\n> big-pickle\\n\\033[0m"\n'
+                "sleep 3600\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+            monkeypatch.setenv(
+                "OPENCODE_PROXY_PROVIDER_URL",
+                f"http://127.0.0.1:{server.server_port}/proxy?format=provider",
+            )
+            monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "true")
+            monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+            monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "1")
+            monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
+            monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "1")
+            monkeypatch.setenv("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "1")
+            monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "2")
+
+            script = _build_opencode_script(
+                str(artifacts), TASK_ID, None, project_root=str(source)
+            )
+            result = subprocess.run(
+                ["sh", "-c", script],
+                cwd=source,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=15,
+            )
+
+            assert result.returncode == 79, result.stderr or result.stdout
+            report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
+            assert "Failure reason: opencode-run-timeout" in report
+            # Only one proxy GET — no retry after progress
+            assert _ProxyPoolHandler.get_count == 1
+        finally:
+            _ProxyPoolHandler.reports = []
+            _ProxyPoolHandler.get_count = 0
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
