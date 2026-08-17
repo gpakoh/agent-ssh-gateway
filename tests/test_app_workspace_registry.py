@@ -521,8 +521,8 @@ class TestResolveRegistryRoot:
     def test_fails_closed_when_repo_registry_is_unavailable(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
-        from app.workspace.registry import resolve_registry_root
         import app.workspace.registry as registry_module
+        from app.workspace.registry import resolve_registry_root
 
         monkeypatch.delenv("WORKSPACE_REGISTRY_ROOT", raising=False)
         monkeypatch.chdir(tmp_path)
