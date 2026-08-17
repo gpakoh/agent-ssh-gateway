@@ -240,6 +240,58 @@ class TestRoundRobin:
         chosen = policy.select(backends, [])
         assert chosen == "b"
 
+    def test_expired_cooldown_recovers(self, monkeypatch):
+        monkeypatch.setattr(
+            "examples.mcp_server.agent_backend_router.time.time", lambda: 1000.0
+        )
+        policy = RoundRobin()
+        backends = {
+            "a": BackendEntry(
+                name="a",
+                priority=0,
+                status=BackendStatus.COOLDOWN,
+                cooldown_until=999.0,
+            ),
+        }
+
+        assert policy.select(backends, []) == "a"
+        assert backends["a"].status == BackendStatus.AVAILABLE
+        assert backends["a"].cooldown_until is None
+
+    def test_expired_temporary_failure_recovers(self, monkeypatch):
+        monkeypatch.setattr(
+            "examples.mcp_server.agent_backend_router.time.time", lambda: 1000.0
+        )
+        policy = RoundRobin()
+        backends = {
+            "a": BackendEntry(
+                name="a",
+                priority=0,
+                status=BackendStatus.FAILED,
+                cooldown_until=999.0,
+            ),
+        }
+
+        assert policy.select(backends, []) == "a"
+        assert backends["a"].status == BackendStatus.AVAILABLE
+
+    def test_disabled_never_auto_recovers(self, monkeypatch):
+        monkeypatch.setattr(
+            "examples.mcp_server.agent_backend_router.time.time", lambda: 1000.0
+        )
+        policy = RoundRobin()
+        backends = {
+            "a": BackendEntry(
+                name="a",
+                priority=0,
+                status=BackendStatus.DISABLED,
+                cooldown_until=999.0,
+            ),
+        }
+
+        assert policy.select(backends, []) is None
+        assert backends["a"].status == BackendStatus.DISABLED
+
 
 # ── Policy: TryPrimaryFallback ──────────────────────────────────────────────
 
@@ -281,6 +333,61 @@ class TestTryPrimaryFallback:
             "high": BackendEntry(name="high", priority=0),
         }
         assert policy.select(backends, []) == "high"
+
+    def test_temporary_failure_waits_for_deadline(self, monkeypatch):
+        monkeypatch.setattr(
+            "examples.mcp_server.agent_backend_router.time.time", lambda: 1000.0
+        )
+        policy = TryPrimaryFallback()
+        backends = {
+            "primary": BackendEntry(
+                name="primary",
+                priority=0,
+                status=BackendStatus.FAILED,
+                cooldown_until=1001.0,
+            ),
+            "fallback": BackendEntry(name="fallback", priority=1),
+        }
+
+        assert policy.select(backends, [], "primary") == "fallback"
+        assert backends["primary"].status == BackendStatus.FAILED
+
+    def test_expired_temporary_failure_recovers(self, monkeypatch):
+        monkeypatch.setattr(
+            "examples.mcp_server.agent_backend_router.time.time", lambda: 1000.0
+        )
+        policy = TryPrimaryFallback()
+        backends = {
+            "primary": BackendEntry(
+                name="primary",
+                priority=0,
+                status=BackendStatus.FAILED,
+                cooldown_until=999.0,
+            ),
+            "fallback": BackendEntry(name="fallback", priority=1),
+        }
+
+        assert policy.select(backends, [], "primary") == "primary"
+        assert backends["primary"].status == BackendStatus.AVAILABLE
+        assert backends["primary"].cooldown_until is None
+
+    def test_disabled_never_auto_recovers(self, monkeypatch):
+        monkeypatch.setattr(
+            "examples.mcp_server.agent_backend_router.time.time", lambda: 1000.0
+        )
+        policy = TryPrimaryFallback()
+        backends = {
+            "primary": BackendEntry(
+                name="primary",
+                priority=0,
+                status=BackendStatus.DISABLED,
+                cooldown_until=999.0,
+            ),
+            "fallback": BackendEntry(name="fallback", priority=1),
+        }
+
+        assert policy.select(backends, [], "primary") == "fallback"
+        assert backends["primary"].status == BackendStatus.DISABLED
 
 
 # ── Router: get_status / get_cooldowns / reset ──────────────────────────────
