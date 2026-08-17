@@ -225,6 +225,16 @@ def _unavailable_tool_reasons() -> dict[str, str]:
     """
     from tool_scopes import TOOL_SCOPES
 
+    COMPOSE_TOOLS = {
+        "docker_compose_ps",
+        "docker_compose_services",
+        "docker_compose_up",
+        "docker_compose_restart",
+        "docker_compose_build",
+        "docker_compose_logs",
+        "docker_compose_down",
+    }
+
     reasons: dict[str, str] = {}
     docker_cli = shutil.which("docker")
     docker_connectable = (
@@ -241,6 +251,24 @@ def _unavailable_tool_reasons() -> dict[str, str]:
         for name, scopes in TOOL_SCOPES.items():
             if "mcp:docker" in scopes or "mcp:docker:admin" in scopes:
                 reasons[name] = msg
+    else:
+        # Docker CLI present and daemon reachable — now verify compose plugin
+        # for compose-specific tools.  Without the plugin `docker compose`
+        # fails with "docker: 'compose' is not a docker command".
+        compose_plugin_paths = (
+            Path("/usr/local/lib/docker/cli-plugins/docker-compose"),
+            Path("/usr/local/libexec/docker/cli-plugins/docker-compose"),
+            Path("/usr/lib/docker/cli-plugins/docker-compose"),
+            Path("/usr/libexec/docker/cli-plugins/docker-compose"),
+        )
+        compose_ok = any(
+            path.is_file() and os.access(path, os.X_OK) for path in compose_plugin_paths
+        )
+        if not compose_ok:
+            msg = "Docker Compose v2 plugin not installed in this image"
+            for name in COMPOSE_TOOLS:
+                if name in TOOL_SCOPES:
+                    reasons[name] = msg
     if shutil.which("npx") is None:
         msg = "npx not present in this image"
         for name, scopes in TOOL_SCOPES.items():

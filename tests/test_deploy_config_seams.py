@@ -1080,3 +1080,45 @@ class TestAgentExecutorIsPartOfTheDeployPipeline:
         assert '"ssh-gateway-sshd"' in fn
         assert '"ssh-gateway-agent-sshd"' in fn
         assert "17179869184" in fn
+
+
+class TestMcpServerDockerfileInstallsComposePlugin:
+    """Regression: docker_compose_* requires an explicit Compose v2 plugin."""
+
+    def test_dockerfile_installs_compose_plugin(self):
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        assert "docker/compose/releases" in text, (
+            "Dockerfile must download Compose v2 from GitHub releases"
+        )
+        assert "cli-plugins/docker-compose" in text, (
+            "Compose binary must be installed to the CLI plugins directory"
+        )
+
+    def test_dockerfile_verifies_compose_checksum(self):
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        assert "COMPOSE_SHA256=" in text
+        assert "sha256sum -c" in text, (
+            "Compose binary download must be verified via sha256sum"
+        )
+
+    def test_dockerfile_pins_compose_version(self):
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        version_lines = [
+            line for line in text.splitlines() if line.startswith("ARG COMPOSE_VERSION=")
+        ]
+        assert len(version_lines) == 1
+        assert "latest" not in version_lines[0].lower()
+        assert version_lines[0].split("=", 1)[1].startswith("v")
+
+    def test_dockerfile_smoke_tests_compose_at_build_time(self):
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        assert "docker compose version" in text, (
+            "Dockerfile must run 'docker compose version' at build time"
+        )
+
+    def test_compose_install_is_executable(self):
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        assert (
+            "install -m 0755 /tmp/docker-compose "
+            "/usr/local/lib/docker/cli-plugins/docker-compose"
+        ) in text
