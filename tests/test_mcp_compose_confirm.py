@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -26,6 +27,7 @@ def _mcp_started():
     yield
 
 
+from examples.mcp_client_remote.fleet.docker_client import RunResult  # noqa: E402
 from examples.mcp_server.docker_confirm import ConfirmAction  # noqa: E402
 from examples.mcp_server.server import (  # noqa: E402
     _CONFIRM_HANDLERS,
@@ -214,6 +216,55 @@ class TestComposeConfirmFlow:
             assert confirm_result["ok"] is True
             assert confirm_result["result"]["output"] == "built"
             mock_instance.compose_build.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_run_result_success_is_json_serializable(self, clean_confirm_store):
+        action = _confirm_store.create_action(
+            "docker_rm",
+            {"container": "web", "force": False},
+            "Remove container web",
+        )
+        with patch.dict(
+            _CONFIRM_HANDLERS,
+            {"docker_rm": AsyncMock(return_value=RunResult("removed\n", "", 0))},
+        ):
+            result = await confirm_operation(token=action.confirm_token)
+
+        assert result["ok"] is True
+        assert result["result"] == {
+            "stdout": "removed\n",
+            "stderr": "",
+            "exit_code": 0,
+        }
+        json.dumps(result)
+
+    @pytest.mark.asyncio
+    async def test_run_result_failure_is_structured_and_json_serializable(
+        self, clean_confirm_store
+    ):
+        action = _confirm_store.create_action(
+            "docker_rm",
+            {"container": "missing", "force": False},
+            "Remove container missing",
+        )
+        with patch.dict(
+            _CONFIRM_HANDLERS,
+            {
+                "docker_rm": AsyncMock(
+                    return_value=RunResult("", "Error: no such container", 1)
+                )
+            },
+        ):
+            result = await confirm_operation(token=action.confirm_token)
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "DOCKER_COMMAND_FAILED"
+        assert result["result"] == {
+            "stdout": "",
+            "stderr": "Error: no such container",
+            "exit_code": 1,
+        }
+        json.dumps(result)
 
     @pytest.mark.asyncio
     async def test_invalid_token_rejected(self, clean_confirm_store):
