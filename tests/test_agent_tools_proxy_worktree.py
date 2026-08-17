@@ -743,6 +743,125 @@ def test_parallel_runners_receive_distinct_proxy_leases(tmp_path, monkeypatch):
         thread.join(timeout=5)
 
 
+
+def test_proxy_transport_expired_certificate_retries_next_proxy(tmp_path, monkeypatch):
+    """TEST-09: pre-model TLS failure must not be mistaken for model progress."""
+    _ProxyPoolHandler.reports = []
+    _ProxyPoolHandler.get_count = 0
+    _ProxyPoolHandler.fail_get_after_first = False
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ProxyPoolHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        source = tmp_path / "proxy-transport-source"
+        source.mkdir()
+        _init_git_repo(source)
+        artifacts = tmp_path / "proxy-transport-artifacts"
+        artifacts.mkdir()
+        (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+        fake_bin = tmp_path / "proxy-transport-bin"
+        fake_bin.mkdir()
+        capture = tmp_path / "proxy-transport-used.txt"
+        fake = fake_bin / "opencode"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$HTTP_PROXY" >> "$PROXY_CAPTURE"\n'
+            'case "$HTTP_PROXY" in\n'
+            '  *:19001) printf "\\033[91mError: \\033[0mcertificate has expired\\n"; exit 1 ;;\n'
+            '  *) printf "\\033[0m\\n> build · big-pickle\\n\\033[0m\\nstartup-ok\\n"; exit 0 ;;\n'
+            "esac\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("PROXY_CAPTURE", str(capture))
+        monkeypatch.setenv(
+            "OPENCODE_PROXY_PROVIDER_URL",
+            f"http://127.0.0.1:{server.server_port}/proxy?format=provider",
+        )
+        monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "true")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+        monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "5")
+        monkeypatch.setenv("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "1")
+
+        script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
+        result = subprocess.run(
+            ["sh", "-c", script], cwd=source, text=True, capture_output=True, check=False, timeout=15
+        )
+
+        assert result.returncode == 0, result.stderr or result.stdout
+        assert capture.read_text(encoding="utf-8").splitlines() == _ProxyPoolHandler.proxies
+        assert any(report.get("proxy") == _ProxyPoolHandler.proxies[0] for report in _ProxyPoolHandler.reports)
+        assert "startup-ok" in (artifacts / "opencode-output.log").read_text(encoding="utf-8")
+        worker_status = (artifacts / "worker-status.md").read_text(encoding="utf-8")
+        assert "rotating proxy (attempt 1/4)" in worker_status
+        for proxy in _ProxyPoolHandler.proxies:
+            assert proxy not in worker_status
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_proxy_transport_marker_after_real_progress_does_not_retry(tmp_path, monkeypatch):
+    """TEST-09: a TLS-looking line is not retryable once genuine progress exists."""
+    _ProxyPoolHandler.reports = []
+    _ProxyPoolHandler.get_count = 0
+    _ProxyPoolHandler.fail_get_after_first = False
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ProxyPoolHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        source = tmp_path / "proxy-transport-progress-source"
+        source.mkdir()
+        _init_git_repo(source)
+        artifacts = tmp_path / "proxy-transport-progress-artifacts"
+        artifacts.mkdir()
+        (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+        fake_bin = tmp_path / "proxy-transport-progress-bin"
+        fake_bin.mkdir()
+        capture = tmp_path / "proxy-transport-progress-used.txt"
+        fake = fake_bin / "opencode"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$HTTP_PROXY" >> "$PROXY_CAPTURE"\n'
+            'printf "\\033[0m\\n> build · big-pickle\\n\\033[0m\\nRead current-plan.md\\n"\n'
+            'printf "\\033[91mError: \\033[0mcertificate has expired\\n"\n'
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("PROXY_CAPTURE", str(capture))
+        monkeypatch.setenv(
+            "OPENCODE_PROXY_PROVIDER_URL",
+            f"http://127.0.0.1:{server.server_port}/proxy?format=provider",
+        )
+        monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "true")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+        monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "5")
+
+        script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
+        result = subprocess.run(
+            ["sh", "-c", script], cwd=source, text=True, capture_output=True, check=False, timeout=15
+        )
+
+        assert result.returncode == 1
+        assert capture.read_text(encoding="utf-8").splitlines() == [_ProxyPoolHandler.proxies[0]]
+        worker_status = (artifacts / "worker-status.md").read_text(encoding="utf-8")
+        assert "rotating proxy" not in worker_status
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
     _ProxyPoolHandler.reports = []
     _ProxyPoolHandler.get_count = 0
