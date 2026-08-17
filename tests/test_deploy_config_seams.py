@@ -1096,6 +1096,14 @@ class TestAgentExecutorIsPartOfTheDeployPipeline:
         assert text.index('wait_docker_health "web-ssh-gateway"') < text.index(bootstrap)
         assert text.index(bootstrap) < text.index('web-ssh-gateway (authenticated)')
 
+    def test_gateway_image_packages_agent_known_host_bootstrap_used_by_deploy_smoke(self):
+        dockerfile = GATEWAY_DOCKERFILE.read_text(encoding="utf-8")
+        bootstrap = "scripts/ensure-agent-known-host.py"
+        assert bootstrap in dockerfile, (
+            "deploy smoke executes ensure-agent-known-host.py inside web-ssh-gateway, "
+            "so the shipped gateway image must package that script"
+        )
+
     def test_executor_memory_gate_applies_to_both_sshd_containers(self):
         text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
         fn = text.split("wait_docker_health() {", 1)[1].split("\n}\n", 1)[0]
