@@ -277,3 +277,43 @@ class TestSharedBehavior:
         assert callable(project_git_branch)
         assert callable(project_git_log)
         assert callable(project_git_diff)
+
+
+class TestGitExecutionSafety:
+    def test_status_does_not_execute_repo_fsmonitor(self, git_project, git_registry):
+        project_dir = git_project["project_dir"]
+        marker = project_dir / "fsmonitor-ran"
+        hook = project_dir / "fsmonitor.sh"
+        hook.write_text(f"#!/bin/sh\n: > {marker}\nprintf '1\\n'\n")
+        hook.chmod(0o755)
+        subprocess.run(
+            ["git", "config", "core.fsmonitor", str(hook)],
+            cwd=str(project_dir),
+            capture_output=True,
+            check=True,
+        )
+
+        result = project_git_status("git-project", registry=git_registry)
+
+        assert result["is_git_repo"] is True
+        assert marker.exists() is False
+
+    def test_diff_does_not_execute_repo_external_diff(self, git_project, git_registry):
+        project_dir = git_project["project_dir"]
+        marker = project_dir / "external-diff-ran"
+        helper = project_dir / "external-diff.sh"
+        helper.write_text(f"#!/bin/sh\n: > {marker}\nexit 0\n")
+        helper.chmod(0o755)
+        subprocess.run(
+            ["git", "config", "diff.external", str(helper)],
+            cwd=str(project_dir),
+            capture_output=True,
+            check=True,
+        )
+        (project_dir / "README.md").write_text("modified safely\n")
+
+        result = project_git_diff("git-project", registry=git_registry)
+
+        assert result["is_git_repo"] is True
+        assert marker.exists() is False
+        assert "modified safely" in result["diff"]

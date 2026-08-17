@@ -122,6 +122,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     # agent-run — mcp:agent-run
     "run_opencode": ["mcp:agent-run"],
     "run_agent": ["mcp:agent-run"],
+    "run_agents": ["mcp:agent-run"],
     # repo — mcp:repo
     "gitea_get_repo": ["mcp:repo"],
     "gitea_list_branches": ["mcp:repo"],

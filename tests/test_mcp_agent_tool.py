@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import base64
 import json
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from examples.mcp_server.agent_backend_router import AgentBackendRouter
 from examples.mcp_server.agent_tools import CommandPolicyError as AgentCommandPolicyError
@@ -596,3 +598,173 @@ class TestGatewayWriteAgentTaskScriptTransport:
         assert _split_scope_patterns("a.py\nb.py") == ["a.py", "b.py"]
         assert _split_scope_patterns("a.py, b.py\nc.py") == ["a.py", "b.py", "c.py"]
         assert _split_scope_patterns(None) is None
+
+
+def test_agent_adapter_registers_run_agents_tool(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as adapter
+
+    registered: dict[str, object] = {}
+
+    def fake_register(name: str):
+        def decorator(func):
+            registered[name] = func
+            return func
+
+        return decorator
+
+    monkeypatch.setattr(adapter, "register_tool", fake_register)
+    adapter.register_all()
+
+    assert registered["run_agents"] is adapter.gateway_run_agents
+
+
+class TestGatewayRunAgents:
+    @pytest.fixture(autouse=True)
+    def _handoff_write_mode(self, monkeypatch):
+        monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
+
+    @pytest.mark.asyncio
+    async def test_batch_uses_one_shared_sweep_and_durable_submit_per_task(self, monkeypatch):
+        import examples.mcp_server.server as server_mod
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_run_agents
+
+        fleet = MagicMock()
+        fleet.sweep_bound_leases = AsyncMock(return_value=0)
+
+        async def submit(**kwargs):
+            return {
+                "task_id": kwargs["task_id"],
+                "status": "running",
+                "job_id": f"job-{kwargs['task_id']}",
+            }
+
+        fleet.submit = AsyncMock(side_effect=submit)
+
+        async def get_fleet():
+            return fleet
+
+        monkeypatch.setattr(
+            "examples.mcp_server.mcp_infra.adapters.agent.get_fleet_runtime",
+            get_fleet,
+        )
+        monkeypatch.setattr(server_mod, "client", MagicMock())
+
+        result = await gateway_run_agents("test", "task-a\ntask-b")
+
+        assert result["ok"] is True
+        assert [item["task_id"] for item in result["result"]["items"]] == [
+            "task-a",
+            "task-b",
+        ]
+        fleet.sweep_bound_leases.assert_awaited_once()
+        assert fleet.submit.await_count == 2
+        assert all(
+            call.kwargs["sweep_before_submit"] is False
+            for call in fleet.submit.await_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_batch_admissions_start_concurrently(self, monkeypatch):
+        import asyncio
+
+        import examples.mcp_server.server as server_mod
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_run_agents
+
+        both_started = asyncio.Event()
+        started: set[str] = set()
+        fleet = MagicMock()
+        fleet.sweep_bound_leases = AsyncMock(return_value=0)
+
+        async def submit(**kwargs):
+            started.add(kwargs["task_id"])
+            if len(started) == 2:
+                both_started.set()
+            await asyncio.wait_for(both_started.wait(), timeout=0.5)
+            return {"task_id": kwargs["task_id"], "status": "running", "job_id": "job"}
+
+        fleet.submit = AsyncMock(side_effect=submit)
+
+        async def get_fleet():
+            return fleet
+
+        monkeypatch.setattr(
+            "examples.mcp_server.mcp_infra.adapters.agent.get_fleet_runtime",
+            get_fleet,
+        )
+        monkeypatch.setattr(server_mod, "client", MagicMock())
+
+        result = await gateway_run_agents("test", "task-a\ntask-b")
+
+        assert result["ok"] is True
+        assert started == {"task-a", "task-b"}
+
+    @pytest.mark.asyncio
+    async def test_batch_isolates_one_submission_error(self, monkeypatch):
+        import examples.mcp_server.server as server_mod
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_run_agents
+
+        fleet = MagicMock()
+        fleet.sweep_bound_leases = AsyncMock(return_value=0)
+
+        async def submit(**kwargs):
+            if kwargs["task_id"] == "bad":
+                raise RuntimeError("simulated admission failure")
+            return {"task_id": kwargs["task_id"], "status": "running", "job_id": "job-ok"}
+
+        fleet.submit = AsyncMock(side_effect=submit)
+
+        async def get_fleet():
+            return fleet
+
+        monkeypatch.setattr(
+            "examples.mcp_server.mcp_infra.adapters.agent.get_fleet_runtime",
+            get_fleet,
+        )
+        monkeypatch.setattr(server_mod, "client", MagicMock())
+
+        result = await gateway_run_agents("test", "good\nbad")
+        items = result["result"]["items"]
+
+        assert items[0]["status"] == "running"
+        assert items[1]["task_id"] == "bad"
+        assert items[1]["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_batch_rejects_duplicate_task_ids_before_fleet_access(self, monkeypatch):
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_run_agents
+
+        get_fleet = AsyncMock()
+        monkeypatch.setattr(
+            "examples.mcp_server.mcp_infra.adapters.agent.get_fleet_runtime",
+            get_fleet,
+        )
+
+        result = await gateway_run_agents("test", "same\nsame")
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "INVALID_INPUT"
+        get_fleet.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_single_async_run_agent_keeps_normal_pre_submit_sweep(self, monkeypatch):
+        import examples.mcp_server.server as server_mod
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_run_agent
+
+        fleet = MagicMock()
+        fleet.submit = AsyncMock(
+            return_value={"task_id": "single", "status": "running", "job_id": "job-single"}
+        )
+
+        async def get_fleet():
+            return fleet
+
+        monkeypatch.setattr(
+            "examples.mcp_server.mcp_infra.adapters.agent.get_fleet_runtime",
+            get_fleet,
+        )
+        monkeypatch.setattr(server_mod, "client", MagicMock())
+
+        result = await gateway_run_agent("test", "single", async_submit=True)
+
+        assert result["ok"] is True
+        assert fleet.submit.await_args.kwargs["sweep_before_submit"] is True
