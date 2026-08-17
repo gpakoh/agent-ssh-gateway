@@ -14,6 +14,7 @@ instance.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
@@ -27,6 +28,11 @@ from examples.mcp_client_remote.fleet.shared import (
     list_pagination_meta,
     minimize_issue_payload,
 )
+from examples.mcp_server.managed_git import (
+    ManagedGitError,
+    configured_gitea_git_base,
+    push_exact_sha,
+)
 from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.tool_registry import register_tool
 
@@ -37,6 +43,10 @@ def _server_gitea_client():
 
 def _server_github_client():
     return server_attr("GitHubClient")
+
+def _server_workspace_registry():
+    return server_attr("_get_workspace_registry")()
+
 
 
 # ── Gitea/GitHub tools ───────────────────────────────────────────
@@ -562,6 +572,112 @@ async def gitea_list_workflows(owner: str, repo: str) -> dict[str, Any]:
 # ── GitHub tools ─────────────────────────────────────────────────
 
 
+async def gitea_push_local_ref(
+    project: str,
+    owner: str,
+    repo: str,
+    destination_branch: str,
+    expected_sha: str,
+) -> dict[str, Any]:
+    """Push one exact local commit through the trusted MCP credential boundary."""
+
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool="gitea_push_local_ref",
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+    try:
+        info = _server_workspace_registry().project_info(project)
+    except Exception:
+        return tool_error(
+            tool="gitea_push_local_ref",
+            code="INVALID_INPUT",
+            message=f"Unknown registered project: {project!r}",
+            source="gitea",
+        )
+
+    if info.get("type") != "supervisor-workspace":
+        return tool_error(
+            tool="gitea_push_local_ref",
+            code="INVALID_INPUT",
+            message="Managed Git push requires a supervisor-workspace project",
+            source="gitea",
+        )
+
+    try:
+        git_base = configured_gitea_git_base()
+        async with _server_gitea_client()(token) as client:
+            user = await client.get_user()
+            metadata = await client.get_repo(owner, repo)
+            permissions = metadata.get("permissions") or {}
+            if not permissions.get("push"):
+                return tool_error(
+                    tool="gitea_push_local_ref",
+                    code="AUTH_ERROR",
+                    message="Configured Gitea identity does not have push access to repository",
+                    source="gitea",
+                )
+            username = str(user.get("login") or user.get("username") or "").strip()
+            if not username:
+                return tool_error(
+                    tool="gitea_push_local_ref",
+                    code="AUTH_ERROR",
+                    message="Configured Gitea identity has no usable username",
+                    source="gitea",
+                )
+
+            await asyncio.to_thread(
+                push_exact_sha,
+                project_root=info["root"],
+                owner=owner,
+                repo=repo,
+                destination_branch=destination_branch,
+                expected_sha=expected_sha,
+                username=username,
+                token=token,
+                git_base=git_base,
+            )
+            branches = await client.list_branches(owner, repo, limit=50)
+    except ManagedGitError as exc:
+        return tool_error(
+            tool="gitea_push_local_ref",
+            code="GIT_PUSH_FAILED",
+            message=str(exc),
+            source="gitea",
+        )
+    except Exception as exc:
+        return _remote_api_error("gitea_push_local_ref", "gitea", exc)
+
+    expected = expected_sha.strip().lower()
+    for branch in branches:
+        if branch.get("name") != destination_branch:
+            continue
+        commit = branch.get("commit") or {}
+        if str(commit.get("id") or "").lower() == expected:
+            return tool_success(
+                "gitea_push_local_ref",
+                result={
+                    "project": project,
+                    "owner": owner,
+                    "repo": repo,
+                    "branch": destination_branch,
+                    "sha": expected,
+                    "verified": True,
+                },
+                source="gitea",
+            )
+        break
+    return tool_error(
+        tool="gitea_push_local_ref",
+        code="REMOTE_VERIFY_FAILED",
+        message="Remote branch does not resolve to expected_sha after push",
+        source="gitea",
+    )
+
+
 async def github_get_repo(owner: str, repo: str) -> dict[str, Any]:
     """Get GitHub repository metadata (login, visibility, default branch, permissions, counters, topics)."""
     token = os.environ.get("GITHUB_TOKEN", "")
@@ -747,6 +863,7 @@ def register_all() -> None:
     register_tool("gitea_get_pull_request")(gitea_get_pull_request)
     register_tool("gitea_create_pull_request")(gitea_create_pull_request)
     register_tool("gitea_merge_pull_request")(gitea_merge_pull_request)
+    register_tool("gitea_push_local_ref")(gitea_push_local_ref)
     register_tool("gitea_list_action_runs")(gitea_list_action_runs)
     register_tool("gitea_get_action_run")(gitea_get_action_run)
     register_tool("gitea_list_action_run_jobs")(gitea_list_action_run_jobs)
