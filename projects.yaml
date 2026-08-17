@@ -20,6 +20,13 @@ projects:
     description: "Quart platform umbrella"
     tags: [quart, platform]
 
+  gpt-browser-bridge-hardening:
+    root: quart-platform/.supervisor-workspaces/gpt-browser-bridge-hardening
+    parent: quart-platform
+    type: supervisor-workspace
+    description: "Pinned supervisor workspace for gpt-browser-bridge hardening delivery"
+    tags: [quart, browser, supervisor]
+
   quart-core:
     root: quart-platform/quart-core
     parent: quart-platform
