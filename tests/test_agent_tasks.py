@@ -370,6 +370,30 @@ class TestReadAgentLogTail:
             "tail -c 65537 -- .ai-bridge/tasks/a12345678901/opencode-output.log",
         )]
 
+    def test_strips_ansi_and_executor_owned_paths(self, monkeypatch):
+        from examples.mcp_server.agent_paths import managed_workspace_path, task_dir
+
+        monkeypatch.setenv("MCP_AGENT_STATE_ROOT", "/var/lib/mcp-agent/state")
+        monkeypatch.setenv("MCP_AGENT_WORKSPACE_ROOT", "/var/lib/mcp-agent/workspaces")
+        project = "my-proj"
+        task_id = "a12345678901"
+        td = task_dir(project, task_id)
+        wt = managed_workspace_path(project, task_id)
+        assert wt is not None
+
+        result = read_agent_log_tail(
+            lambda _p, _c: {
+                "stdout": f"\x1b[0m→ Read {td}/current-plan.md\ncd {wt}\n",
+                "stderr": "",
+                "exit_code": 0,
+            },
+            project=project,
+            task_id=task_id,
+        )
+
+        assert "\x1b" not in result["stdout"]
+        assert "/var/lib/mcp-agent" not in result["stdout"]
+        assert "<agent-task>/current-plan.md" in result["stdout"]
     @pytest.mark.parametrize("tail_lines", [0, 1001, -1, True])
     def test_rejects_invalid_line_count_before_command(self, tail_lines):
         calls = []
