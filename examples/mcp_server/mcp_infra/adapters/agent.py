@@ -21,12 +21,16 @@ from agent_tasks import (
     list_agent_tasks as _list_agent_tasks,
 )
 from agent_tasks import (
+    read_agent_log_tail as _read_agent_log_tail,
+)
+from agent_tasks import (
     read_agent_task_file as _read_agent_task_file,
 )
 from agent_tasks import (
     write_agent_task as _write_agent_task,
 )
 from agent_tools import project_run_agent as _project_run_agent
+from mcp_audit import redact_secrets
 from mcp_client_tools import run_project_command
 from opencode_tools import project_run_opencode as _project_run_opencode
 
@@ -165,6 +169,37 @@ def gateway_read_agent_diff(project: str, task_id: str) -> dict[str, Any]:
             filename="implementation-diff.patch",
         ),
         success_text="Read agent diff.",
+    )
+
+
+def gateway_read_agent_log(
+    project: str,
+    task_id: str,
+    tail_lines: int = 200,
+) -> dict[str, Any]:
+    """Read a bounded tail of a running OpenCode agent's stdout/stderr log."""
+
+    def _fn() -> dict[str, Any]:
+        result = _read_agent_log_tail(
+            lambda p, c: run_project_command(_server_client(), p, c),
+            project=project,
+            task_id=task_id,
+            tail_lines=tail_lines,
+        )
+        stdout = str(result.get("stdout", ""))
+        stderr = str(result.get("stderr", ""))
+        redacted_stdout = str(redact_secrets(stdout))
+        redacted_stderr = str(redact_secrets(stderr))
+        result["stdout"] = redacted_stdout
+        result["stderr"] = redacted_stderr
+        result["redacted"] = redacted_stdout != stdout or redacted_stderr != stderr
+        return result
+
+    return run_tool(
+        tool="read_agent_log",
+        title="Read agent live log",
+        fn=_fn,
+        success_text="Read agent live log.",
     )
 
 
@@ -395,6 +430,7 @@ def register_all() -> None:
     register_tool("read_agent_status")(gateway_read_agent_status)
     register_tool("read_agent_report")(gateway_read_agent_report)
     register_tool("read_agent_diff")(gateway_read_agent_diff)
+    register_tool("read_agent_log")(gateway_read_agent_log)
     register_tool("list_agent_tasks")(gateway_list_agent_tasks)
     register_tool("archive_agent_task")(gateway_archive_agent_task)
     register_tool("run_opencode")(gateway_run_opencode)
