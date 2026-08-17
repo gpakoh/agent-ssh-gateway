@@ -912,6 +912,28 @@ class TestSshdVersionedArtifact:
         apk_line = next(line for line in text.splitlines() if "apk add" in line)
         assert "ripgrep" in apk_line
 
+    def test_sshd_build_provenance_does_not_invalidate_dependency_install_layer(self):
+        text = SSHD_DOCKERFILE.read_text(encoding="utf-8")
+        dependency_install = text.index("RUN apk add --no-cache")
+        build_sha = text.index("ARG BUILD_SHA=unknown")
+        build_time = text.index("ARG BUILD_TIME=unknown")
+        assert build_sha > dependency_install
+        assert build_time > dependency_install
+
+    def test_sshd_dependency_artifacts_are_pinned_and_retryable(self):
+        text = SSHD_DOCKERFILE.read_text(encoding="utf-8")
+        assert "FROM ghcr.io/astral-sh/uv:0.12.5 AS uv" in text
+        assert "COPY --from=uv /uv /usr/local/bin/uv" in text
+        assert "ARG OPENCODE_VERSION=1.18.16" in text
+        assert "astral.sh/uv" not in text
+        assert "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/" in text
+        assert "opencode-${opencode_target}.tar.gz" in text
+        assert "opencode.ai/install" not in text
+        assert "--retry 5" in text
+        assert "--retry-all-errors" in text
+        assert "grep -qwi avx2 /proc/cpuinfo" in text
+        assert 'opencode_target="${opencode_target}-musl"' in text
+
 
 class TestAgentExecutorDataRoot:
     """The named agent-data volume must inherit an executor-writable owner.
