@@ -47,6 +47,7 @@ COPY --chown=appuser:appuser alembic/ ./alembic/
 # scripts/ directory -- most of it is MCP-specific and not meaningful
 # (or importable, given this image's leaner dependency set) here.
 COPY --chown=appuser:appuser scripts/gateway_black_box_smoke.py ./scripts/gateway_black_box_smoke.py
+COPY --chown=appuser:appuser scripts/ensure-agent-known-host.py ./scripts/ensure-agent-known-host.py
 
 # Security: Create necessary directories
 RUN mkdir -p /app/ssh_keys /app/logs /app/data /tmp && \
