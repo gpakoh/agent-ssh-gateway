@@ -969,7 +969,7 @@ def _build_opencode_script(
             managed_source_lines = [
                 f"MANAGED_SOURCE_BUNDLE={_shell_escape(managed_source_path or '')}",
                 'if [ -L "$MANAGED_SOURCE_BUNDLE" ] || [ ! -f "$MANAGED_SOURCE_BUNDLE" ]; then echo "Immutable managed source bundle is unavailable" >> "$td/agent-status.md"; exit 73; fi',
-                'MANAGED_SOURCE_HEAD=$(git bundle list-heads "$MANAGED_SOURCE_BUNDLE" HEAD 2>/dev/null | cut -d" " -f1)',
+                'MANAGED_SOURCE_HEAD=$(git bundle list-heads "$MANAGED_SOURCE_BUNDLE" refs/heads/source 2>/dev/null | cut -d" " -f1)',
                 'if [ -z "$MANAGED_SOURCE_HEAD" ] || [ "$MANAGED_SOURCE_HEAD" != "$TASK_BASE_COMMIT" ]; then echo "Immutable managed source bundle does not match base_ref" >> "$td/agent-status.md"; exit 73; fi',
             ]
             create_workspace_lines = [
