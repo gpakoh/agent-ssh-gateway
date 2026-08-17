@@ -384,3 +384,34 @@ async def test_wait_for_all_jobs_cancellation_does_not_leave_event_wait_tasks():
     await asyncio.sleep(0)
 
     assert all(task.done() for task in children)
+
+
+def test_workspace_registry_root_is_pinned_when_available(monkeypatch, tmp_path):
+    import app.main as main_module
+    import app.workspace.registry as registry_module
+
+    pinned = []
+    monkeypatch.setattr(registry_module, "resolve_registry_root", lambda: tmp_path)
+    monkeypatch.setattr(registry_module, "set_registry_root", pinned.append)
+
+    main_module._pin_workspace_registry_root()
+
+    assert pinned == [tmp_path]
+
+
+def test_missing_workspace_registry_does_not_abort_core_startup_helper(monkeypatch):
+    import app.main as main_module
+    import app.workspace.registry as registry_module
+    from app.workspace.policy import WorkspacePolicyError
+
+    pinned = []
+
+    def missing_registry():
+        raise WorkspacePolicyError("registry unavailable")
+
+    monkeypatch.setattr(registry_module, "resolve_registry_root", missing_registry)
+    monkeypatch.setattr(registry_module, "set_registry_root", pinned.append)
+
+    main_module._pin_workspace_registry_root()
+
+    assert pinned == []

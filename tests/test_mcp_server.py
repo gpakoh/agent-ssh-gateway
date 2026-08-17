@@ -265,7 +265,67 @@ class TestUnavailableToolReasons:
         monkeypatch.setattr(srv.shutil, "which", lambda name: f"/usr/bin/{name}")
         monkeypatch.setattr(srv.os, "environ", {"DOCKER_HOST": "unix:///var/run/docker.sock"})
         monkeypatch.setattr(srv, "PG_DSN", "postgresql://u:p@h:5432/d")
+        plugin = "/usr/local/lib/docker/cli-plugins/docker-compose"
+        monkeypatch.setattr(srv.Path, "is_file", lambda path: str(path) == plugin)
+        monkeypatch.setattr(
+            srv.os, "access", lambda path, mode: str(path) == plugin and mode == srv.os.X_OK
+        )
         assert srv._unavailable_tool_reasons() == {}
+
+    def test_marks_compose_tools_unavailable_when_plugin_missing(self, monkeypatch):
+        """Regression: docker_compose_* tools must be marked unavailable
+        when the Docker Compose v2 plugin is not installed, even if the
+        docker CLI itself is present and the daemon is reachable.
+        """
+        import examples.mcp_server.server as srv
+
+        # Docker CLI present and daemon reachable
+        monkeypatch.setattr(srv.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(srv.os, "environ", {"DOCKER_HOST": "unix:///var/run/docker.sock"})
+        monkeypatch.setattr(srv, "PG_DSN", "postgresql://u:p@h:5432/d")
+        # A legacy /usr/bin/docker-compose may exist, but the tools invoke
+        # `docker compose`, so only an executable CLI plugin counts.
+        monkeypatch.setattr(srv.Path, "is_file", lambda path: False)
+        monkeypatch.setattr(srv.os, "access", lambda path, mode: False)
+        assert srv.shutil.which("docker-compose") == "/usr/bin/docker-compose"
+        reasons = srv._unavailable_tool_reasons()
+        assert "docker_compose_ps" in reasons
+        assert "docker_compose_up" in reasons
+        assert "docker_compose_down" in reasons
+        assert "Docker Compose v2 plugin" in reasons["docker_compose_ps"]
+        # Non-compose docker tools must NOT be affected
+        assert "docker_ps" not in reasons
+        assert "docker_exec" not in reasons
+
+    def test_compose_tools_available_when_plugin_installed(self, monkeypatch):
+        """Compose tools must be available when the plugin exists at the
+        standard CLI-plugins path."""
+        import examples.mcp_server.server as srv
+
+        monkeypatch.setattr(srv.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(srv.os, "environ", {"DOCKER_HOST": "unix:///var/run/docker.sock"})
+        monkeypatch.setattr(srv, "PG_DSN", "postgresql://u:p@h:5432/d")
+        plugin = "/usr/local/lib/docker/cli-plugins/docker-compose"
+        monkeypatch.setattr(srv.Path, "is_file", lambda path: str(path) == plugin)
+        monkeypatch.setattr(
+            srv.os, "access", lambda path, mode: str(path) == plugin and mode == srv.os.X_OK
+        )
+        reasons = srv._unavailable_tool_reasons()
+        assert "docker_compose_ps" not in reasons
+        assert "docker_compose_up" not in reasons
+
+    def test_non_executable_compose_plugin_is_unavailable(self, monkeypatch):
+        import examples.mcp_server.server as srv
+
+        monkeypatch.setattr(srv.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(srv.os, "environ", {"DOCKER_HOST": "unix:///var/run/docker.sock"})
+        monkeypatch.setattr(srv, "PG_DSN", "postgresql://u:p@h:5432/d")
+        monkeypatch.setattr(srv.Path, "is_file", lambda path: True)
+        monkeypatch.setattr(srv.os, "access", lambda path, mode: False)
+
+        reasons = srv._unavailable_tool_reasons()
+        assert "docker_compose_ps" in reasons
+        assert "Docker Compose v2 plugin" in reasons["docker_compose_ps"]
 
     def test_unrelated_tools_never_marked_unavailable(self, monkeypatch):
         import examples.mcp_server.server as srv

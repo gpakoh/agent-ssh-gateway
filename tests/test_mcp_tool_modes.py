@@ -144,6 +144,7 @@ class TestChatGPTSafeMode:
     def test_blocked_tools_excludes_agent_launch(self):
         assert "run_opencode" in MCP_CLIENT_BLOCKED_TOOLS
         assert "run_agent" in MCP_CLIENT_BLOCKED_TOOLS
+        assert "run_agents" in MCP_CLIENT_BLOCKED_TOOLS
 
     def test_blocked_tools_excludes_docker(self):
         for name in ("docker_exec", "docker_compose_up", "docker_compose_down", "docker_prune"):
@@ -303,6 +304,7 @@ class TestMcpClientWriteMode:
         write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
         assert "run_opencode" in write_tools
         assert "run_agent" in write_tools
+        assert "run_agents" in write_tools
 
     def test_handoff_and_agent_task_write_allowed(self):
         write_tools = TOOL_NAMES_BY_MODE["mcp_client_write"]
@@ -327,6 +329,7 @@ class TestMcpClientWriteMode:
         assert should_register_tool("read_file")
         assert should_register_tool("docker_exec")
         assert should_register_tool("run_agent")
+        assert should_register_tool("run_agents")
 
     def test_plain_mcp_client_mode_is_unaffected(self):
         """The new mode must not change plain "mcp_client" mode's own

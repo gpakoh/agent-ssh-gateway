@@ -859,6 +859,27 @@ async def confirm_operation(token: str) -> dict[str, Any]:
             source="docker",
         )
 
+    if isinstance(result, RunResult):
+        payload = {
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exit_code": result.exit_code,
+        }
+        if result.exit_code != 0:
+            return tool_error(
+                tool=action.tool,
+                code="DOCKER_COMMAND_FAILED",
+                message="Docker command failed",
+                result=payload,
+                source="docker",
+                retryable=False,
+            )
+        return tool_success(
+            tool=action.tool,
+            result=payload,
+            source="docker",
+        )
+
     return tool_success(
         tool=action.tool,
         result=result,
