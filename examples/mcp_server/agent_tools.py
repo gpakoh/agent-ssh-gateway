@@ -494,6 +494,7 @@ def _opencode_startup_watchdog_script_lines(
     opencode_flags: str,
     startup_timeout_seconds: int,
     kill_grace_seconds: int,
+    runtime_timeout_seconds: int,
 ) -> list[str]:
     prompt = (
         "Read the plan at $td/current-plan.md and execute it fully. "
@@ -504,7 +505,11 @@ def _opencode_startup_watchdog_script_lines(
     return [
         f"OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS={startup_timeout_seconds}",
         f"OPENCODE_STARTUP_KILL_GRACE_SECONDS={kill_grace_seconds}",
+        f"OPENCODE_RUNTIME_TIMEOUT_SECONDS={runtime_timeout_seconds}",
         "OPENCODE_STARTUP_STALLED=0",
+        "_kill_opencode_process() {",
+        '  if [ "$OPENCODE_PROCESS_GROUP" -eq 1 ]; then kill "$1" "-$OPENCODE_PID" 2>/dev/null || true; else kill "$1" "$OPENCODE_PID" 2>/dev/null || true; fi',
+        "}",
         "run_opencode_attempt() {",
         '  : > "$td/opencode-output.log"',
         "  OPENCODE_STARTUP_STALLED=0",
@@ -534,6 +539,28 @@ def _opencode_startup_watchdog_script_lines(
         "raise SystemExit(1)",
         "OPENCODEPROGRESS_EOF",
         "    then",
+        '      OPENCODE_RUNTIME_STARTED=$(date +%s)',
+        '      while kill -0 "$OPENCODE_PID" 2>/dev/null; do',
+        "        OPENCODE_RUNTIME_NOW=$(date +%s)",
+        '        if [ $((OPENCODE_RUNTIME_NOW - OPENCODE_RUNTIME_STARTED)) -ge "$OPENCODE_RUNTIME_TIMEOUT_SECONDS" ]; then',
+        '          _kill_opencode_process -TERM',
+        "          OPENCODE_RUNTIME_KILL_STARTED=$(date +%s)",
+        '          while kill -0 "$OPENCODE_PID" 2>/dev/null; do',
+        "            OPENCODE_RUNTIME_KILL_NOW=$(date +%s)",
+        '            if [ $((OPENCODE_RUNTIME_KILL_NOW - OPENCODE_RUNTIME_KILL_STARTED)) -ge "$OPENCODE_STARTUP_KILL_GRACE_SECONDS" ]; then',
+        '              _kill_opencode_process -KILL',
+        "              break",
+        "            fi",
+        "            sleep 1",
+        "          done",
+        '          wait "$OPENCODE_PID" 2>/dev/null || true',
+        "          RC=79",
+        '          FAILURE_REASON="opencode-run-timeout"',
+        '          cat "$td/opencode-output.log"',
+        "          return",
+        "        fi",
+        "        sleep 1",
+        "      done",
         '      wait "$OPENCODE_PID"; RC=$?',
         '      cat "$td/opencode-output.log"',
         "      return",
@@ -541,12 +568,12 @@ def _opencode_startup_watchdog_script_lines(
         "    OPENCODE_STARTUP_NOW=$(date +%s)",
         '    if [ $((OPENCODE_STARTUP_NOW - OPENCODE_STARTUP_STARTED)) -ge "$OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS" ]; then',
         "      OPENCODE_STARTUP_STALLED=1",
-        '      if [ "$OPENCODE_PROCESS_GROUP" -eq 1 ]; then kill -TERM "-$OPENCODE_PID" 2>/dev/null || true; else kill -TERM "$OPENCODE_PID" 2>/dev/null || true; fi',
+        '      _kill_opencode_process -TERM',
         "      OPENCODE_KILL_STARTED=$(date +%s)",
         '      while kill -0 "$OPENCODE_PID" 2>/dev/null; do',
         "        OPENCODE_KILL_NOW=$(date +%s)",
         '        if [ $((OPENCODE_KILL_NOW - OPENCODE_KILL_STARTED)) -ge "$OPENCODE_STARTUP_KILL_GRACE_SECONDS" ]; then',
-        '          if [ "$OPENCODE_PROCESS_GROUP" -eq 1 ]; then kill -KILL "-$OPENCODE_PID" 2>/dev/null || true; else kill -KILL "$OPENCODE_PID" 2>/dev/null || true; fi',
+        '          _kill_opencode_process -KILL',
         "          break",
         "        fi",
         "        sleep 1",
@@ -909,6 +936,7 @@ def _build_opencode_script(
     startup_response_timeout_seconds = int(os.environ.get("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "60"))
     startup_kill_grace_seconds = int(os.environ.get("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "5"))
     startup_max_proxy_attempts = int(os.environ.get("OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS", "4"))
+    runtime_timeout_seconds = int(os.environ.get("OPENCODE_RUN_TIMEOUT_SECONDS", "600"))
     if (
         startup_reserve_bytes < 0
         or startup_reserve_seconds < 0
@@ -917,6 +945,7 @@ def _build_opencode_script(
         or startup_response_timeout_seconds <= 0
         or startup_kill_grace_seconds < 0
         or startup_max_proxy_attempts <= 0
+        or runtime_timeout_seconds <= 0
     ):
         raise ValueError("OpenCode admission timing/reserve values are invalid")
     allowed_files = list(allowed_files or [])
@@ -1069,6 +1098,7 @@ def _build_opencode_script(
             opencode_flags,
             startup_response_timeout_seconds,
             startup_kill_grace_seconds,
+            runtime_timeout_seconds,
         )
     )
     if proxy_provider_url:
