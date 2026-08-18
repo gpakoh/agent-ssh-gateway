@@ -177,6 +177,7 @@ class TestChatGPTSafeMode:
         supervisor_tools = {
             "supervisor_integrate_file",
             "supervisor_recover_integrations",
+            "supervisor_register_project",
         }
         assert supervisor_tools <= TOOL_NAMES_BY_MODE["mcp_client_write"]
         for mode, names in TOOL_NAMES_BY_MODE.items():
@@ -189,8 +190,28 @@ class TestChatGPTSafeMode:
         for name in (
             "supervisor_integrate_file",
             "supervisor_recover_integrations",
+            "supervisor_register_project",
         ):
             assert get_required_scopes(name) == ["mcp:admin"]
+
+    def test_supervisor_register_project_write_mode_only_and_admin(self):
+        name = "supervisor_register_project"
+        assert name in TOOL_NAMES_BY_MODE["mcp_client_write"]
+        for mode, names in TOOL_NAMES_BY_MODE.items():
+            if mode == "mcp_client_write":
+                continue
+            assert name not in names, mode
+        assert name not in get_mcp_client_safe_tools()
+        assert get_required_scopes(name) == ["mcp:admin"]
+
+    def test_supervisor_register_project_not_in_safe_mode(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
+        monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
+        assert not should_register_tool("supervisor_register_project")
+
+    def test_supervisor_register_project_registered_in_write_mode(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client_write")
+        assert should_register_tool("supervisor_register_project")
 
     def test_gitea_pr_writes_are_write_mode_only_and_admin_scoped(self):
         for name in ("gitea_create_pull_request", "gitea_merge_pull_request", "gitea_push_local_ref"):

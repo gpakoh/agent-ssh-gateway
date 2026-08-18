@@ -260,6 +260,7 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     # the explicit write/admin mode and still require mcp:admin at runtime.
     "supervisor_integrate_file",
     "supervisor_recover_integrations",
+    "supervisor_register_project",
 }
 
 

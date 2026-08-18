@@ -283,3 +283,9 @@ projects:
     type: unknown
     description: "MiniApp builder template — source of truth"
     tags: []
+
+  web-ssh-gateway-delivery:
+    root: .supervisor-workspaces/web-ssh-gateway-delivery
+    type: supervisor-workspace
+    description: "Pinned supervisor workspace for web-ssh-gateway trusted delivery"
+    tags: [gateway, supervisor, delivery]
