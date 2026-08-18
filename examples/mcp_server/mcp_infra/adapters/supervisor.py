@@ -22,6 +22,10 @@ from examples.mcp_server.mcp_infra.tool_registry import (
     register_tool,
     run_tool,
 )
+from examples.mcp_server.project_registry_control import (
+    ProjectRegistrationError,
+    register_project,
+)
 from examples.mcp_server.supervisor_integration import (
     HashMismatchError,
     JournalPendingError,
@@ -135,6 +139,120 @@ def _integration_error(tool: str, exc: SupervisorIntegrationError) -> dict[str, 
         code="TOOL_EXECUTION_FAILED",
         message="Supervisor integration failed.",
         retryable=False,
+    )
+
+
+def _resolve_registry_config_dir() -> Path:
+    """Resolve the server-owned directory containing projects.yaml."""
+    from app.workspace.registry import resolve_registry_root
+
+    config_dir = resolve_registry_root().resolve()
+    if not (config_dir / "projects.yaml").is_file():
+        raise ValueError("workspace registry is unavailable")
+    return config_dir
+
+
+def _reset_project_registry_caches() -> bool:
+    """Reset both registry singletons; report partial failure explicitly."""
+    ok = True
+    try:
+        from app.workspace.registry import reset_registry
+
+        reset_registry()
+    except Exception:
+        logger.exception("App workspace registry cache reset failed")
+        ok = False
+    try:
+        from examples.mcp_server.mcp_infra.adapters.workspace import (
+            reset_workspace_registry_cache,
+        )
+
+        reset_workspace_registry_cache()
+    except Exception:
+        logger.exception("MCP workspace registry cache reset failed")
+        ok = False
+    return ok
+
+
+def _register_project_impl(
+    project_id: str,
+    root: str,
+    project_type: str,
+    description: str,
+    tags: list[str] | None,
+    parent: str | None,
+) -> dict[str, Any]:
+    tool = "supervisor_register_project"
+    try:
+        config_dir = _resolve_registry_config_dir()
+        journal_root = _journal_root_for_project("workspace-registry", config_dir)
+        result = register_project(
+            config_dir=config_dir,
+            journal_root=journal_root,
+            project_id=project_id,
+            root=root,
+            project_type=project_type,
+            description=description,
+            tags=tags,
+            parent=parent,
+        )
+    except ProjectRegistrationError as exc:
+        return tool_error(
+            tool=tool,
+            code=exc.code,
+            message=exc.message,
+            retryable=False,
+        )
+    except SupervisorIntegrationError as exc:
+        return _integration_error(tool, exc)
+    except ValueError:
+        return tool_error(
+            tool=tool,
+            code="INVALID_INPUT",
+            message="Workspace registry control plane is misconfigured.",
+            retryable=False,
+        )
+    except (OSError, UnicodeError) as exc:
+        logger.warning("Project registration failed", exc_info=exc)
+        return tool_error(
+            tool=tool,
+            code="TOOL_EXECUTION_FAILED",
+            message="Project registration could not be persisted.",
+            retryable=False,
+        )
+
+    cache_reset = _reset_project_registry_caches()
+    return tool_success(
+        tool=tool,
+        result={
+            "project_id": result.project_id,
+            "root": result.root,
+            "type": result.project_type,
+            "description": result.description,
+            "tags": result.tags,
+            "parent": result.parent,
+            "registry_hash": result.registry_hash,
+            "cache_reset": cache_reset,
+        },
+    )
+
+
+def supervisor_register_project(
+    project_id: str,
+    root: str,
+    project_type: str = "unknown",
+    description: str = "",
+    tags: list[str] | None = None,
+    parent: str | None = None,
+) -> dict[str, Any]:
+    """Register one existing directory in the server-owned workspace registry."""
+    return run_tool(
+        tool="supervisor_register_project",
+        title="Supervisor register project",
+        fn=lambda: _register_project_impl(
+            project_id, root, project_type, description, tags, parent
+        ),
+        success_text="Project registration completed.",
     )
 
 
@@ -293,10 +411,14 @@ def register_all() -> None:
     register_tool("supervisor_recover_integrations")(
         instrumented("supervisor_recover_integrations")(supervisor_recover_integrations)
     )
+    register_tool("supervisor_register_project")(
+        instrumented("supervisor_register_project")(supervisor_register_project)
+    )
 
 
 __all__ = [
     "register_all",
     "supervisor_integrate_file",
     "supervisor_recover_integrations",
+    "supervisor_register_project",
 ]
