@@ -172,6 +172,24 @@ def _split_lines(value: str | None) -> list[str] | None:
     return [line.strip() for line in value.split("\n") if line.strip()]
 
 
+def _split_csv_or_lines(value: str | None) -> list[str] | None:
+    """Split on newlines and/or commas, stripping whitespace and empty fragments.
+
+    Backward-compatible: newline-separated input still works exactly as
+    before. Comma-separated (``"a,b,c"``) and mixed formats are accepted for
+    task-id string surfaces. ``None`` or empty input returns ``None``.
+    """
+    if value is None:
+        return None
+    items: list[str] = []
+    for line in value.split("\n"):
+        for part in line.split(","):
+            stripped = part.strip()
+            if stripped:
+                items.append(stripped)
+    return items or None
+
+
 def gateway_health() -> dict[str, Any]:
     """Check gateway + MCP health with build metadata and toolset hash."""
     from datetime import UTC, datetime
