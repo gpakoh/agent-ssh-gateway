@@ -265,6 +265,98 @@ def _make_source_bundle(source: Path, destination: Path) -> Path:
     return destination
 
 
+def _run_managed_bundle_case(
+    tmp_path: Path,
+    monkeypatch,
+    source_bundle: Path,
+    base_ref: str,
+) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
+    monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+    monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+    artifacts = tmp_path / "managed-bundle-artifacts" / TASK_ID
+    artifacts.mkdir(parents=True)
+    (artifacts / "current-plan.md").write_text("# Do nothing\n", encoding="utf-8")
+    workspace = tmp_path / "managed-bundle-workspace" / TASK_ID
+
+    fake_bin = tmp_path / "managed-bundle-bin"
+    fake_bin.mkdir()
+    marker = tmp_path / "opencode-ran"
+    fake_opencode = fake_bin / "opencode"
+    fake_opencode.write_text(
+        f"#!/bin/sh\nprintf ran > {shlex.quote(str(marker))}\nexit 0\n",
+        encoding="utf-8",
+    )
+    fake_opencode.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    script = _build_opencode_script(
+        str(artifacts),
+        TASK_ID,
+        None,
+        project_root=None,
+        worktree_path=str(workspace),
+        managed_clone=True,
+        base_ref=base_ref,
+        managed_source_path=str(source_bundle),
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    return result, artifacts, workspace, marker
+
+
+def test_managed_clone_accepts_single_exact_head_bundle(tmp_path, monkeypatch):
+    source = tmp_path / "deploy-style-source"
+    source.mkdir()
+    source_head = _init_git_repo(source)
+    source_bundle = tmp_path / "deploy-style-head.bundle"
+    _git(source, "bundle", "create", str(source_bundle), "HEAD")
+
+    result, artifacts, workspace, marker = _run_managed_bundle_case(
+        tmp_path, monkeypatch, source_bundle, source_head
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert marker.exists(), "OpenCode must run for an exact one-head immutable bundle"
+    assert _git(workspace, "rev-parse", "HEAD") == source_head
+    assert _git(workspace, "remote") == ""
+    assert (artifacts / "agent-status.md").read_text(encoding="utf-8").strip() == (
+        "Status: needs-review"
+    )
+
+
+def test_managed_clone_rejects_multiple_advertised_heads(tmp_path, monkeypatch):
+    source = tmp_path / "multi-head-source"
+    source.mkdir()
+    source_head = _init_git_repo(source)
+    _git(source, "update-ref", "refs/heads/source", source_head)
+    _git(source, "update-ref", "refs/heads/extra", source_head)
+    source_bundle = tmp_path / "multi-head.bundle"
+    _git(
+        source,
+        "bundle",
+        "create",
+        str(source_bundle),
+        "refs/heads/source",
+        "refs/heads/extra",
+    )
+
+    result, artifacts, _workspace, marker = _run_managed_bundle_case(
+        tmp_path, monkeypatch, source_bundle, source_head
+    )
+
+    assert result.returncode == 73, result.stderr or result.stdout
+    assert not marker.exists(), "OpenCode must not run for an ambiguous multi-head bundle"
+    assert "Immutable managed source bundle does not match base_ref" in (
+        artifacts / "agent-status.md"
+    ).read_text(encoding="utf-8")
+
+
 def test_explicit_base_ref_checks_out_pinned_commit(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
     monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
