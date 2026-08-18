@@ -14,7 +14,7 @@ from mcp_client_tools import _build_uv_argv, _validate_targets  # noqa: E402
 def test_build_ruff_argv():
     argv = _build_uv_argv("ruff", "/project", ["src/"])
     assert argv == [
-        "uv", "run", "--frozen", "--directory", "/project", "--",
+        "uv", "run", "--frozen", "--all-extras", "--directory", "/project", "--",
         "ruff", "check", "--", "src/",
     ]
 
@@ -22,7 +22,7 @@ def test_build_ruff_argv():
 def test_build_mypy_argv():
     argv = _build_uv_argv("mypy", "/project", ["src/main.py"])
     assert argv == [
-        "uv", "run", "--frozen", "--directory", "/project", "--",
+        "uv", "run", "--frozen", "--all-extras", "--directory", "/project", "--",
         "mypy", "--", "src/main.py",
     ]
 
@@ -30,7 +30,7 @@ def test_build_mypy_argv():
 def test_build_pytest_argv():
     argv = _build_uv_argv("pytest", "/project", ["tests/"])
     assert argv == [
-        "uv", "run", "--frozen", "--directory", "/project", "--",
+        "uv", "run", "--frozen", "--all-extras", "--directory", "/project", "--",
         "pytest", "--", "tests/",
     ]
 
