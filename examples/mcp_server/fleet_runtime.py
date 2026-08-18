@@ -26,6 +26,7 @@ import asyncio
 import os
 import socket
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Final
 
 from examples.mcp_server.agent_paths import project_state_key
@@ -41,6 +42,7 @@ _POOL_ENV: Final = "MCP_AGENT_FLEET_POOL"
 _CAPACITY_ENV: Final = "MCP_AGENT_FLEET_CAPACITY"
 _COORDINATOR_ENV: Final = "MCP_AGENT_COORDINATOR_ID"
 _DEFAULT_POOL: Final = "ssh-gateway/agent-sshd"
+_DEFAULT_GATEWAY_IO_CONCURRENCY: Final = 4
 _GATEWAY_TERMINAL: Final[frozenset[str]] = frozenset({"completed", "failed", "cancelled"})
 _PRE_SUBMIT_TERMINAL: Final[frozenset[str]] = frozenset(
     {"needs-review", "completed", "failed", "cancelled", "rate-limited", "resource-exhausted", "blocked", "error"}
@@ -133,7 +135,10 @@ class FleetRuntime:
         capacity: int,
         coordinator_id: str,
         watch_poll_interval: float = 30.0,
+        gateway_io_concurrency: int = _DEFAULT_GATEWAY_IO_CONCURRENCY,
     ) -> None:
+        if gateway_io_concurrency <= 0:
+            raise FleetRuntimeError("gateway_io_concurrency must be a positive integer")
         self.state = state
         self.pool_name = pool_name
         self.capacity = capacity
@@ -141,6 +146,11 @@ class FleetRuntime:
         self._schema_ready = False
         self._schema_lock = asyncio.Lock()
         self._watch_poll_interval = watch_poll_interval
+        self._gateway_io_gate = asyncio.Semaphore(gateway_io_concurrency)
+        self._gateway_executor = ThreadPoolExecutor(
+            max_workers=gateway_io_concurrency,
+            thread_name_prefix="fleet-gateway",
+        )
         self._watchers_by_job: dict[str, asyncio.Task] = {}
         self._closed = False
 
@@ -175,6 +185,7 @@ class FleetRuntime:
             except Exception:
                 pass
         durable_task_id = fleet_task_id(project, task_id)
+        await self._gateway_io_gate.acquire()
         try:
             admission = await self.state.acquire_slot(
                 pool_name=self.pool_name,
@@ -183,6 +194,7 @@ class FleetRuntime:
                 capacity=self.capacity,
             )
         except TaskAlreadyTerminalError as exc:
+            self._gateway_io_gate.release()
             outcome = await self.state.get_outcome(durable_task_id)
             return {
                 "task_id": task_id,
@@ -195,7 +207,11 @@ class FleetRuntime:
                     "terminal_status": outcome.status if outcome else None,
                 },
             }
+        except BaseException:
+            self._gateway_io_gate.release()
+            raise
         if not admission.acquired or admission.lease is None:
+            self._gateway_io_gate.release()
             return {
                 "task_id": task_id,
                 "status": "blocked",
@@ -208,6 +224,7 @@ class FleetRuntime:
             }
         lease = admission.lease
         if lease.job_id:
+            self._gateway_io_gate.release()
             if job_status_fn is not None:
                 self._track_watcher(job_id=lease.job_id, job_status_fn=job_status_fn)
             return {
@@ -223,7 +240,7 @@ class FleetRuntime:
                     "capacity": admission.capacity,
                 },
             }
-        result = await asyncio.to_thread(submit_sync)
+        result = await self._run_gateway_io(submit_sync, permit_held=True)
         job_id = result.get("job_id") if isinstance(result, dict) else None
         if isinstance(job_id, str) and job_id:
             bound = await self.state.bind_job(
@@ -282,6 +299,34 @@ class FleetRuntime:
             expected_job_id=job_id,
         )
 
+    async def _run_gateway_io(
+        self,
+        fn: Callable[..., dict[str, Any]],
+        *args: Any,
+        permit_held: bool = False,
+    ) -> dict[str, Any]:
+        """Bound blocking control-plane I/O without reducing worker capacity.
+
+        Cancellation must not release capacity while the underlying sync call
+        is still running: cancelling an await does not stop a worker thread.
+        """
+        if not permit_held:
+            await self._gateway_io_gate.acquire()
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict[str, Any]] | None = None
+        try:
+            future = loop.run_in_executor(self._gateway_executor, fn, *args)
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            if future is not None:
+                try:
+                    await asyncio.shield(future)
+                finally:
+                    raise
+            raise
+        finally:
+            self._gateway_io_gate.release()
+
     async def sweep_bound_leases(
         self, job_status_fn: Callable[[str], dict[str, Any]]
     ) -> int:
@@ -294,7 +339,7 @@ class FleetRuntime:
             if not job_id:
                 continue
             try:
-                result = await asyncio.to_thread(job_status_fn, job_id)
+                result = await self._run_gateway_io(job_status_fn, job_id)
             except Exception:
                 self._track_watcher(job_id=job_id, job_status_fn=job_status_fn)
                 continue
@@ -342,7 +387,7 @@ class FleetRuntime:
         """Poll until terminal reconciliation succeeds or runtime closes."""
         while not self._closed:
             try:
-                result = await asyncio.to_thread(job_status_fn, job_id)
+                result = await self._run_gateway_io(job_status_fn, job_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -369,6 +414,7 @@ class FleetRuntime:
         if watchers:
             await asyncio.gather(*watchers, return_exceptions=True)
         self._watchers_by_job.clear()
+        self._gateway_executor.shutdown(wait=False, cancel_futures=True)
         await self.state.close()
 
 
