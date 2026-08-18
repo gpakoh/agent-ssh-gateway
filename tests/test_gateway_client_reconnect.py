@@ -89,6 +89,7 @@ class TestReconnectSession:
                 "host": "sshd-host",
                 "port": 22,
                 "username": "root",
+                "reuse_existing": True,
                 "password": "secret",
             },
             headers={"X-API-Key": "test-api-key"},
@@ -148,6 +149,7 @@ class TestReconnectSession:
             "host": "agent-sshd",
             "port": 2222,
             "username": "mcpuser",
+            "reuse_existing": True,
             "private_key": "agent-private-key",
         }
 

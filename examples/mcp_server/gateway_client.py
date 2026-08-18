@@ -183,6 +183,7 @@ class GatewayClient:
             "host": self._ssh_host,
             "port": self._ssh_port,
             "username": self._ssh_user,
+            "reuse_existing": True,
         }
         if self._ssh_password:
             payload["password"] = self._ssh_password
