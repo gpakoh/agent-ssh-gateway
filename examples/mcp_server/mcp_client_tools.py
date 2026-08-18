@@ -284,7 +284,13 @@ def _build_uv_argv(tool: str, project_dir: str, targets: list[str]) -> list[str]
         raise ValueError("INVALID_INPUT: at least one target required")
     validated = _validate_targets(project_dir, targets)
     cmd = _compileall_command() if tool == "compileall" else _UV_TOOL_MAP[tool]
-    return ["uv", "run", "--frozen", "--directory", project_dir, "--"] + cmd + ["--"] + validated
+    uv_args = ["uv", "run", "--frozen"]
+    if tool != "compileall":
+        # Project-backed tooling commonly lives in optional extras. Request
+        # all declared extras without assuming a project-specific extra name,
+        # matching the read-only fallback's dependency provisioning.
+        uv_args.append("--all-extras")
+    return uv_args + ["--directory", project_dir, "--"] + cmd + ["--"] + validated
 
 
 def _build_uvx_argv(tool: str, targets: list[str]) -> list[str]:
