@@ -120,6 +120,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     # mcp_client_write mode and require the admin capability.
     "supervisor_integrate_file": ["mcp:admin"],
     "supervisor_recover_integrations": ["mcp:admin"],
+    "supervisor_register_project": ["mcp:admin"],
     # agent-run — mcp:agent-run
     "run_opencode": ["mcp:agent-run"],
     "run_agent": ["mcp:agent-run"],

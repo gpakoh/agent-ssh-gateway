@@ -366,6 +366,12 @@ def gateway_workspace_verify(
             message=str(exc),
         )
 
+def reset_workspace_registry_cache() -> None:
+    """Drop the MCP workspace-registry cache after a registry mutation."""
+    global _workspace_registry_cache
+    _workspace_registry_cache = None
+
+
 def register_all() -> None:
     register_tool("workspace_file_write")(instrumented("workspace_file_write")(gateway_workspace_file_write))
     register_tool("workspace_file_edit")(instrumented("workspace_file_edit")(gateway_workspace_file_edit))

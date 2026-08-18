@@ -223,7 +223,7 @@ def test_recovery_unknown_project_fails_closed(monkeypatch, immediate_run_tool):
     assert result["error"]["code"] == "PROJECT_NOT_FOUND"
 
 
-def test_register_all_registers_exactly_two_tools(monkeypatch):
+def test_register_all_registers_exactly_three_tools(monkeypatch):
     registered: list[str] = []
 
     def _register(name):
@@ -241,4 +241,19 @@ def test_register_all_registers_exactly_two_tools(monkeypatch):
     assert registered == [
         "supervisor_integrate_file",
         "supervisor_recover_integrations",
+        "supervisor_register_project",
     ]
+
+
+def test_register_project_signature_does_not_expose_server_paths():
+    signature = inspect.signature(supervisor.supervisor_register_project)
+    assert list(signature.parameters) == [
+        "project_id",
+        "root",
+        "project_type",
+        "description",
+        "tags",
+        "parent",
+    ]
+    assert "registry_path" not in signature.parameters
+    assert "journal_root" not in signature.parameters
