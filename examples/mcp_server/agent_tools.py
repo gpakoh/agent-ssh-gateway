@@ -1035,8 +1035,10 @@ def _build_opencode_script(
             managed_source_lines = [
                 f"MANAGED_SOURCE_BUNDLE={_shell_escape(managed_source_path or '')}",
                 'if [ -L "$MANAGED_SOURCE_BUNDLE" ] || [ ! -f "$MANAGED_SOURCE_BUNDLE" ]; then echo "Immutable managed source bundle is unavailable" >> "$td/agent-status.md"; exit 73; fi',
-                'MANAGED_SOURCE_HEAD=$(git bundle list-heads "$MANAGED_SOURCE_BUNDLE" refs/heads/source 2>/dev/null | cut -d" " -f1)',
-                'if [ -z "$MANAGED_SOURCE_HEAD" ] || [ "$MANAGED_SOURCE_HEAD" != "$TASK_BASE_COMMIT" ]; then echo "Immutable managed source bundle does not match base_ref" >> "$td/agent-status.md"; exit 73; fi',
+                'MANAGED_SOURCE_HEADS=$(git bundle list-heads "$MANAGED_SOURCE_BUNDLE" 2>/dev/null) || MANAGED_SOURCE_HEADS=""',
+                'MANAGED_SOURCE_HEAD=$(printf "%s\\n" "$MANAGED_SOURCE_HEADS" | awk \'NF { print $1; exit }\')',
+                'MANAGED_SOURCE_EXTRA_HEAD=$(printf "%s\\n" "$MANAGED_SOURCE_HEADS" | awk \'NF { count++; if (count == 2) { print $1; exit } }\')',
+                'if [ -z "$MANAGED_SOURCE_HEAD" ] || [ -n "$MANAGED_SOURCE_EXTRA_HEAD" ] || [ "$MANAGED_SOURCE_HEAD" != "$TASK_BASE_COMMIT" ]; then echo "Immutable managed source bundle does not match base_ref" >> "$td/agent-status.md"; exit 73; fi',
             ]
             create_workspace_lines = [
                 '  git clone --no-hardlinks --no-checkout "$MANAGED_SOURCE_BUNDLE" "$wt" 2>>"$td/agent-status.md" || { echo "managed clone failed: $wt" >> "$td/agent-status.md"; exit 1; }',
