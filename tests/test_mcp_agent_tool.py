@@ -791,3 +791,51 @@ class TestGatewayRunAgents:
 
         assert result["ok"] is True
         assert fleet.submit.await_args.kwargs["sweep_before_submit"] is True
+
+
+class TestSplitCsvOrLines:
+    """Regression: task-id string surface accepts newline and CSV forms."""
+
+    def _fn(self):
+        from examples.mcp_server.mcp_infra.adapters.gateway import _split_csv_or_lines
+
+        return _split_csv_or_lines
+
+    def test_none_returns_none(self):
+        assert self._fn()(None) is None
+
+    def test_empty_string_returns_none(self):
+        assert self._fn()("") is None
+
+    def test_whitespace_only_returns_none(self):
+        assert self._fn()("   \n  \n  ") is None
+
+    def test_single_id(self):
+        assert self._fn()("task-1") == ["task-1"]
+
+    def test_newline_separated(self):
+        assert self._fn()("a\nb\nc") == ["a", "b", "c"]
+
+    def test_csv_separated(self):
+        assert self._fn()("a,b,c") == ["a", "b", "c"]
+
+    def test_csv_with_spaces(self):
+        assert self._fn()("a , b , c") == ["a", "b", "c"]
+
+    def test_mixed_newline_and_comma(self):
+        assert self._fn()("a,b\nc,d") == ["a", "b", "c", "d"]
+
+    def test_trailing_delimiters_ignored(self):
+        assert self._fn()("a,b,\n") == ["a", "b"]
+
+    def test_empty_fragments_ignored(self):
+        assert self._fn()("a,,b\n\n,c") == ["a", "b", "c"]
+
+    def test_whitespace_stripped(self):
+        assert self._fn()("  task-1  ,  task-2  ") == ["task-1", "task-2"]
+
+    def test_single_with_trailing_comma(self):
+        assert self._fn()("task-1,") == ["task-1"]
+
+    def test_newline_csv_mixed_with_blanks(self):
+        assert self._fn()("a, b\n\nc, d\n") == ["a", "b", "c", "d"]
