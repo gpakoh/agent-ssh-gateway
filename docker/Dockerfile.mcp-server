@@ -5,9 +5,6 @@ LABEL description="agent-ssh-gateway MCP server (streamable-http, read/audit-fir
 ARG BUILD_SHA
 ARG BUILD_TIME
 
-ENV BUILD_SHA=${BUILD_SHA}
-ENV BUILD_TIME=${BUILD_TIME}
-
 # Security: Install only necessary packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -28,7 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # NOTE: even with the CLI present, docker_* tools stay honestly unavailable
 # in deployments without the socket mount or DOCKER_HOST -- that's decided
 # at runtime by _unavailable_tool_reasons in examples/mcp_server/server.py.
-RUN curl -fsSL --max-time 300 -o /tmp/docker.tgz \
+RUN curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 --retry-max-time 180 \
+    --connect-timeout 15 --max-time 120 -o /tmp/docker.tgz \
     https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
     && tar -xzf /tmp/docker.tgz -C /tmp docker/docker \
     && install -m 0755 /tmp/docker/docker /usr/bin/docker \
@@ -42,7 +40,8 @@ RUN curl -fsSL --max-time 300 -o /tmp/docker.tgz \
 ARG COMPOSE_VERSION=v2.36.2
 ARG COMPOSE_SHA256=9040bd35b2cc0783ce6c5de491de7e52e24d4137dbfc5de8a524f718fc23556c
 RUN mkdir -p /usr/local/lib/docker/cli-plugins \
-    && curl -fsSL --max-time 300 -o /tmp/docker-compose \
+    && curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 --retry-max-time 180 \
+       --connect-timeout 15 --max-time 120 -o /tmp/docker-compose \
        "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64" \
     && echo "${COMPOSE_SHA256}  /tmp/docker-compose" | sha256sum -c - \
     && install -m 0755 /tmp/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose \
@@ -54,7 +53,8 @@ RUN mkdir -p /usr/local/lib/docker/cli-plugins \
 # nodejs+npm pull a 250MB+ layer of build tooling; the tarball adds ~110MB
 # (bin+lib only; include/ is C headers only needed for native addon
 # compilation, which this image never does).
-RUN curl -fsSL --max-time 300 -o /tmp/node.tar.xz \
+RUN curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 --retry-max-time 180 \
+    --connect-timeout 15 --max-time 120 -o /tmp/node.tar.xz \
     https://nodejs.org/dist/v20.19.2/node-v20.19.2-linux-x64.tar.xz \
     && tar -xJf /tmp/node.tar.xz -C /opt \
     && rm -rf /opt/node-v20.19.2-linux-x64/include \
@@ -90,6 +90,13 @@ RUN mkdir -p /app/data /tmp /var/lib/mcp-agent/sources && \
     chown -R appuser:appuser /app /tmp /var/lib/mcp-agent
 
 RUN chmod -R 755 /app
+
+# Build metadata is intentionally applied only after all expensive/static
+# dependency and application layers. BUILD_TIME changes on every CI run;
+# placing these ENV instructions near the top would invalidate the cache for
+# apt, Docker CLI, Compose, Node, Python dependencies, and application COPYs.
+ENV BUILD_SHA=${BUILD_SHA}
+ENV BUILD_TIME=${BUILD_TIME}
 
 # Switch to non-root user
 USER appuser

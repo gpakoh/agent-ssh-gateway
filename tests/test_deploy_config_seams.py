@@ -1152,3 +1152,35 @@ class TestMcpServerDockerfileInstallsComposePlugin:
             "install -m 0755 /tmp/docker-compose "
             "/usr/local/lib/docker/cli-plugins/docker-compose"
         ) in text
+
+
+class TestMcpServerBuildMetadataCacheBoundary:
+    """Per-run provenance must not invalidate expensive Docker build layers."""
+
+    def test_build_metadata_is_applied_after_expensive_build_layers(self):
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        build_sha = text.index("ENV BUILD_SHA=${BUILD_SHA}")
+        build_time = text.index("ENV BUILD_TIME=${BUILD_TIME}")
+        assert build_time > build_sha
+        for marker in (
+            "apt-get update",
+            "download.docker.com",
+            "docker/compose/releases",
+            "nodejs.org/dist",
+            "uv sync --frozen",
+            "COPY --chown=appuser:appuser scripts/ ./scripts/",
+            "RUN chmod -R 755 /app",
+        ):
+            assert build_sha > text.index(marker), marker
+
+    def test_build_metadata_remains_in_final_image(self):
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        assert "ENV BUILD_SHA=${BUILD_SHA}" in text
+        assert "ENV BUILD_TIME=${BUILD_TIME}" in text
+
+    def test_external_download_retries_have_a_bounded_total_budget(self):
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        assert text.count("--retry 3 --retry-all-errors") == 3
+        assert text.count("--retry-max-time 180") == 3
+        assert text.count("--connect-timeout 15 --max-time 120") == 3
+        assert "--retry 5" not in text
