@@ -1052,6 +1052,10 @@ class TestOpenCodeProductionAdmission:
             env = services[service]["environment"]
             assert "OPENCODE_PROXY_REQUIRED=${OPENCODE_PROXY_REQUIRED:-true}" in env
 
+    def test_oauth_wires_bounded_opencode_runtime_timeout(self):
+        env = _load_compose()["services"]["mcp-oauth"]["environment"]
+        assert "OPENCODE_RUN_TIMEOUT_SECONDS=${OPENCODE_RUN_TIMEOUT_SECONDS:-1800}" in env
+
     def test_dynamic_startup_reservation_is_configured(self):
         env = _load_compose()["services"]["mcp-oauth"]["environment"]
         assert "OPENCODE_STARTUP_RESERVE_BYTES=${OPENCODE_STARTUP_RESERVE_BYTES:-805306368}" in env
