@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -316,6 +317,141 @@ async def _wait_until(predicate, *, timeout_s: float = 5.0):
         await asyncio.sleep(0.01)
         waited += 0.01
     return predicate()
+
+
+@pytest.mark.asyncio
+async def test_gateway_io_concurrency_is_bounded():
+    state = MagicMock()
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state, gateway_io_concurrency=2)
+    lock = threading.Lock()
+    release = threading.Event()
+    active = 0
+    max_active = 0
+
+    def status_fn(job_id: str) -> dict:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        release.wait(timeout=2)
+        with lock:
+            active -= 1
+        return {"job_id": job_id, "status": "running"}
+
+    polls = [
+        asyncio.create_task(runtime._run_gateway_io(status_fn, f"job-{index}"))
+        for index in range(8)
+    ]
+    assert await _wait_until(lambda: max_active == 2)
+    await asyncio.sleep(0.05)
+    assert max_active == 2
+
+    release.set()
+    await asyncio.gather(*polls)
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_gateway_io_keeps_capacity_until_worker_finishes():
+    state = MagicMock()
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state, gateway_io_concurrency=2)
+    lock = threading.Lock()
+    release = threading.Event()
+    active = 0
+    max_active = 0
+
+    def status_fn(job_id: str) -> dict:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        release.wait(timeout=2)
+        with lock:
+            active -= 1
+        return {"job_id": job_id, "status": "running"}
+
+    first = [
+        asyncio.create_task(runtime._run_gateway_io(status_fn, f"first-{index}"))
+        for index in range(2)
+    ]
+    assert await _wait_until(lambda: max_active == 2)
+    for task in first:
+        task.cancel()
+    await asyncio.sleep(0.05)
+    assert not any(task.done() for task in first)
+
+    second = [
+        asyncio.create_task(runtime._run_gateway_io(status_fn, f"second-{index}"))
+        for index in range(2)
+    ]
+    await asyncio.sleep(0.05)
+    assert max_active == 2
+
+    release.set()
+    first_results = await asyncio.gather(*first, return_exceptions=True)
+    assert all(isinstance(result, asyncio.CancelledError) for result in first_results)
+    await asyncio.gather(*second)
+    assert max_active == 2
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_parallel_submissions_share_gateway_io_bound():
+    state = MagicMock()
+    state.acquire_slot = AsyncMock(
+        return_value=AdmissionResult(True, False, 64, 8, _lease())
+    )
+    state.complete_task = AsyncMock()
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state, gateway_io_concurrency=2)
+    lock = threading.Lock()
+    release = threading.Event()
+    active = 0
+    max_active = 0
+
+    def submit_sync() -> dict:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        release.wait(timeout=2)
+        with lock:
+            active -= 1
+        return {"status": "blocked", "exit_code": None}
+
+    submissions = [
+        asyncio.create_task(
+            runtime.submit(
+                project="demo",
+                task_id=f"task-{index}",
+                submit_sync=submit_sync,
+                sweep_before_submit=False,
+            )
+        )
+        for index in range(8)
+    ]
+    assert await _wait_until(lambda: max_active == 2)
+    await asyncio.sleep(0.05)
+    assert max_active == 2
+    assert state.acquire_slot.await_count == 2
+
+    release.set()
+    results = await asyncio.gather(*submissions)
+    assert all(result["status"] == "blocked" for result in results)
+    await runtime.close()
+
+
+def test_gateway_io_concurrency_must_be_positive():
+    with pytest.raises(FleetRuntimeError, match="gateway_io_concurrency"):
+        FleetRuntime(
+            MagicMock(),
+            pool_name="ssh-gateway/sshd",
+            capacity=2,
+            coordinator_id="gpt-a",
+            gateway_io_concurrency=0,
+        )
 
 
 @pytest.mark.asyncio
