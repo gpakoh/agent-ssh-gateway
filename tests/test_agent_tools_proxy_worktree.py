@@ -1684,11 +1684,11 @@ class TestRuntimeTimeout:
         status = (artifacts / "agent-status.md").read_text(encoding="utf-8")
         assert status.strip() == "Status: failed"
 
-    def test_default_runtime_timeout_is_600_seconds(self, monkeypatch):
+    def test_default_runtime_timeout_is_1800_seconds(self, monkeypatch):
         monkeypatch.delenv("OPENCODE_RUN_TIMEOUT_SECONDS", raising=False)
         monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
-        assert "OPENCODE_RUNTIME_TIMEOUT_SECONDS=600" in script
+        assert "OPENCODE_RUNTIME_TIMEOUT_SECONDS=1800" in script
 
     def test_runtime_timeout_rejects_nonpositive_value(self, monkeypatch):
         monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "0")

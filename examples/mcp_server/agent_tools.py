@@ -957,7 +957,7 @@ def _build_opencode_script(
     startup_response_timeout_seconds = int(os.environ.get("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "60"))
     startup_kill_grace_seconds = int(os.environ.get("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "5"))
     startup_max_proxy_attempts = int(os.environ.get("OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS", "4"))
-    runtime_timeout_seconds = int(os.environ.get("OPENCODE_RUN_TIMEOUT_SECONDS", "600"))
+    runtime_timeout_seconds = int(os.environ.get("OPENCODE_RUN_TIMEOUT_SECONDS", "1800"))
     if (
         startup_reserve_bytes < 0
         or startup_reserve_seconds < 0
