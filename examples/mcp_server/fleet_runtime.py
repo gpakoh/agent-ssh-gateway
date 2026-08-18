@@ -26,6 +26,7 @@ import asyncio
 import os
 import socket
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Final
 
 from examples.mcp_server.agent_paths import project_state_key
@@ -146,6 +147,10 @@ class FleetRuntime:
         self._schema_lock = asyncio.Lock()
         self._watch_poll_interval = watch_poll_interval
         self._gateway_io_gate = asyncio.Semaphore(gateway_io_concurrency)
+        self._gateway_executor = ThreadPoolExecutor(
+            max_workers=gateway_io_concurrency,
+            thread_name_prefix="fleet-gateway",
+        )
         self._watchers_by_job: dict[str, asyncio.Task] = {}
         self._closed = False
 
@@ -235,10 +240,7 @@ class FleetRuntime:
                     "capacity": admission.capacity,
                 },
             }
-        try:
-            result = await asyncio.to_thread(submit_sync)
-        finally:
-            self._gateway_io_gate.release()
+        result = await self._run_gateway_io(submit_sync, permit_held=True)
         job_id = result.get("job_id") if isinstance(result, dict) else None
         if isinstance(job_id, str) and job_id:
             bound = await self.state.bind_job(
@@ -298,11 +300,32 @@ class FleetRuntime:
         )
 
     async def _run_gateway_io(
-        self, fn: Callable[..., dict[str, Any]], *args: Any
+        self,
+        fn: Callable[..., dict[str, Any]],
+        *args: Any,
+        permit_held: bool = False,
     ) -> dict[str, Any]:
-        """Bound blocking control-plane I/O without reducing worker capacity."""
-        async with self._gateway_io_gate:
-            return await asyncio.to_thread(fn, *args)
+        """Bound blocking control-plane I/O without reducing worker capacity.
+
+        Cancellation must not release capacity while the underlying sync call
+        is still running: cancelling an await does not stop a worker thread.
+        """
+        if not permit_held:
+            await self._gateway_io_gate.acquire()
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict[str, Any]] | None = None
+        try:
+            future = loop.run_in_executor(self._gateway_executor, fn, *args)
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            if future is not None:
+                try:
+                    await asyncio.shield(future)
+                finally:
+                    raise
+            raise
+        finally:
+            self._gateway_io_gate.release()
 
     async def sweep_bound_leases(
         self, job_status_fn: Callable[[str], dict[str, Any]]
@@ -391,6 +414,7 @@ class FleetRuntime:
         if watchers:
             await asyncio.gather(*watchers, return_exceptions=True)
         self._watchers_by_job.clear()
+        self._gateway_executor.shutdown(wait=False, cancel_futures=True)
         await self.state.close()
 
 
