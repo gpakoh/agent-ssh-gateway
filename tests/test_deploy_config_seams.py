@@ -1117,28 +1117,27 @@ class TestMcpServerDockerfileInstallsComposePlugin:
 
     def test_dockerfile_installs_compose_plugin(self):
         text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
-        assert "docker/compose/releases" in text, (
-            "Dockerfile must download Compose v2 from GitHub releases"
-        )
-        assert "cli-plugins/docker-compose" in text, (
-            "Compose binary must be installed to the CLI plugins directory"
-        )
+        assert "FROM docker/compose-bin:v2.36.2 AS compose-bin" in text
+        assert (
+            "COPY --from=compose-bin /docker-compose "
+            "/usr/local/lib/docker/cli-plugins/docker-compose"
+        ) in text, "Compose must be copied into the Docker CLI plugins directory"
 
-    def test_dockerfile_verifies_compose_checksum(self):
+    def test_dockerfile_avoids_unverified_compose_release_download(self):
         text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
-        assert "COMPOSE_SHA256=" in text
-        assert "sha256sum -c" in text, (
-            "Compose binary download must be verified via sha256sum"
-        )
+        assert "https://github.com/docker/compose/releases" not in text
+        assert "/tmp/docker-compose" not in text
+        assert "COPY --from=compose-bin" in text
 
     def test_dockerfile_pins_compose_version(self):
         text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
-        version_lines = [
-            line for line in text.splitlines() if line.startswith("ARG COMPOSE_VERSION=")
+        stage_lines = [
+            line
+            for line in text.splitlines()
+            if line.startswith("FROM docker/compose-bin:")
         ]
-        assert len(version_lines) == 1
-        assert "latest" not in version_lines[0].lower()
-        assert version_lines[0].split("=", 1)[1].startswith("v")
+        assert stage_lines == ["FROM docker/compose-bin:v2.36.2 AS compose-bin"]
+        assert "latest" not in stage_lines[0].lower()
 
     def test_dockerfile_smoke_tests_compose_at_build_time(self):
         text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
@@ -1146,10 +1145,11 @@ class TestMcpServerDockerfileInstallsComposePlugin:
             "Dockerfile must run 'docker compose version' at build time"
         )
 
-    def test_compose_install_is_executable(self):
+    def test_compose_install_comes_from_pinned_oci_stage(self):
         text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        assert "FROM docker/compose-bin:v2.36.2 AS compose-bin" in text
         assert (
-            "install -m 0755 /tmp/docker-compose "
+            "COPY --from=compose-bin /docker-compose "
             "/usr/local/lib/docker/cli-plugins/docker-compose"
         ) in text
 
@@ -1164,9 +1164,9 @@ class TestMcpServerBuildMetadataCacheBoundary:
         assert build_time > build_sha
         for marker in (
             "apt-get update",
-            "download.docker.com",
-            "docker/compose/releases",
-            "nodejs.org/dist",
+            "COPY --from=docker-cli /usr/local/bin/docker /usr/bin/docker",
+            "COPY --from=compose-bin /docker-compose",
+            "COPY --from=node-runtime /usr/local/bin/node",
             "uv sync --frozen",
             "COPY --chown=appuser:appuser scripts/ ./scripts/",
             "RUN chmod -R 755 /app",
@@ -1178,9 +1178,20 @@ class TestMcpServerBuildMetadataCacheBoundary:
         assert "ENV BUILD_SHA=${BUILD_SHA}" in text
         assert "ENV BUILD_TIME=${BUILD_TIME}" in text
 
-    def test_external_download_retries_have_a_bounded_total_budget(self):
+    def test_toolchains_use_pinned_oci_stages_without_ad_hoc_downloads(self):
         text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
-        assert text.count("--retry 3 --retry-all-errors") == 3
-        assert text.count("--retry-max-time 180") == 3
-        assert text.count("--connect-timeout 15 --max-time 120") == 3
-        assert "--retry 5" not in text
+        assert (
+            "FROM docker:27.5.1-cli@sha256:"
+            "851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c "
+            "AS docker-cli"
+        ) in text
+        assert "FROM docker/compose-bin:v2.36.2 AS compose-bin" in text
+        assert (
+            "FROM node:20.19.2-slim@sha256:"
+            "7cd3fbc830c75c92256fe1122002add9a1c025831af8770cd0bf8e45688ef661 "
+            "AS node-runtime"
+        ) in text
+        assert "https://download.docker.com" not in text
+        assert "https://github.com/docker/compose/releases" not in text
+        assert "https://nodejs.org/dist" not in text
+        assert "--retry-all-errors" not in text

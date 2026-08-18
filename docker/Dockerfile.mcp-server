@@ -1,4 +1,11 @@
 # agent-ssh-gateway MCP server — Streamable HTTP entrypoint image
+# Toolchain binaries come from version-pinned OCI stages instead of ad-hoc
+# runtime downloads. Registry layers are content-addressed/cacheable and avoid
+# CI depending on three independent HTTPS artifact hosts during every rebuild.
+FROM docker:27.5.1-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c AS docker-cli
+FROM docker/compose-bin:v2.36.2 AS compose-bin
+FROM node:20.19.2-slim@sha256:7cd3fbc830c75c92256fe1122002add9a1c025831af8770cd0bf8e45688ef661 AS node-runtime
+
 FROM python:3.12-slim
 LABEL description="agent-ssh-gateway MCP server (streamable-http, read/audit-first)"
 
@@ -10,60 +17,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     openssh-client \
     curl \
-    xz-utils \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# docker CLI (client only) so docker_* tools actually work. Static tarball
-# from download.docker.com instead of Debian packages: Debian's docker.io
-# pulls the full daemon stack; the static CLI tarball is one self-contained
-# binary (~39MB). We extract only docker/docker -> /usr/bin/docker (matches
-# DOCKER_BIN in examples/mcp_client_remote/fleet/docker_client.py) and drop
-# the rest (dockerd/containerd/runc/ctr -- the daemon never runs inside this
-# container; the tools talk to the host daemon via the mounted
-# /var/run/docker.sock or DOCKER_HOST).
-# NOTE: even with the CLI present, docker_* tools stay honestly unavailable
-# in deployments without the socket mount or DOCKER_HOST -- that's decided
-# at runtime by _unavailable_tool_reasons in examples/mcp_server/server.py.
-RUN curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 --retry-max-time 180 \
-    --connect-timeout 15 --max-time 120 -o /tmp/docker.tgz \
-    https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
-    && tar -xzf /tmp/docker.tgz -C /tmp docker/docker \
-    && install -m 0755 /tmp/docker/docker /usr/bin/docker \
-    && rm -rf /tmp/docker /tmp/docker.tgz
-
-# Docker Compose v2 plugin — required by docker_compose_* tools.  The
-# static CLI tarball above does NOT include Compose (it was extracted only
-# as a client binary).  Compose is a standalone Go binary published at
-# https://github.com/docker/compose/releases; installed as a CLI plugin so
-# `docker compose` subcommand works.  SHA256 verified against upstream.
-ARG COMPOSE_VERSION=v2.36.2
-ARG COMPOSE_SHA256=9040bd35b2cc0783ce6c5de491de7e52e24d4137dbfc5de8a524f718fc23556c
-RUN mkdir -p /usr/local/lib/docker/cli-plugins \
-    && curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 --retry-max-time 180 \
-       --connect-timeout 15 --max-time 120 -o /tmp/docker-compose \
-       "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64" \
-    && echo "${COMPOSE_SHA256}  /tmp/docker-compose" | sha256sum -c - \
-    && install -m 0755 /tmp/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose \
-    && rm -f /tmp/docker-compose \
-    && docker compose version
-
-# nodejs/npm provide npx for the context7 docs tools (resolve_library_id,
-# query_docs). Official Node tarball instead of Debian packages: apt's
-# nodejs+npm pull a 250MB+ layer of build tooling; the tarball adds ~110MB
-# (bin+lib only; include/ is C headers only needed for native addon
-# compilation, which this image never does).
-RUN curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 --retry-max-time 180 \
-    --connect-timeout 15 --max-time 120 -o /tmp/node.tar.xz \
-    https://nodejs.org/dist/v20.19.2/node-v20.19.2-linux-x64.tar.xz \
-    && tar -xJf /tmp/node.tar.xz -C /opt \
-    && rm -rf /opt/node-v20.19.2-linux-x64/include \
-      /opt/node-v20.19.2-linux-x64/share \
-      /opt/node-v20.19.2-linux-x64/CHANGELOG.md \
-      /opt/node-v20.19.2-linux-x64/LICENSE \
-      /opt/node-v20.19.2-linux-x64/README.md \
-    && rm -f /tmp/node.tar.xz
-ENV PATH="/opt/node-v20.19.2-linux-x64/bin:$PATH"
+# docker CLI (client only), Compose v2, and Node/npm/npx are copied from
+# official OCI images. This keeps the runtime image daemon-free while making
+# CI independent of download.docker.com, GitHub release assets, and nodejs.org.
+# NOTE: docker_* tools still remain honestly unavailable at runtime when the
+# host socket/DOCKER_HOST is absent; tool availability is decided separately.
+COPY --from=docker-cli /usr/local/bin/docker /usr/bin/docker
+COPY --from=compose-bin /docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && docker --version \
+    && docker compose version \
+    && node --version \
+    && npx --version
 
 # Security: Create non-root user
 RUN groupadd -r -g 1000 appuser && \
