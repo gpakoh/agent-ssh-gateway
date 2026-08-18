@@ -64,3 +64,20 @@ def test_no_access_token_no_env_var_returns_empty():
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("MCP_TOKEN_SCOPES", None)
         assert _get_token_scopes() == []
+
+
+def test_supervisor_register_project_requires_admin_scope():
+    from examples.mcp_server.tool_scopes import get_required_scopes, has_required_scope
+
+    assert get_required_scopes("supervisor_register_project") == ["mcp:admin"]
+    assert not has_required_scope(["mcp:read"], "supervisor_register_project")
+    assert not has_required_scope(["mcp:project"], "supervisor_register_project")
+    assert not has_required_scope(["mcp:read", "mcp:project"], "supervisor_register_project")
+    assert has_required_scope(["mcp:admin"], "supervisor_register_project")
+    assert has_required_scope(["mcp:read", "mcp:admin"], "supervisor_register_project")
+
+
+def test_supervisor_register_project_fail_closed_for_unknown_tool():
+    from examples.mcp_server.tool_scopes import FAIL_CLOSED_SCOPE, get_required_scopes
+
+    assert get_required_scopes("nonexistent_tool_xyz") == [FAIL_CLOSED_SCOPE]
