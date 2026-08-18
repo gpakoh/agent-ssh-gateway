@@ -37,7 +37,7 @@ from opencode_tools import project_run_opencode as _project_run_opencode
 from examples.mcp_server.agent_sources import ensure_managed_source_bundle
 from examples.mcp_server.fleet_runtime import get_fleet_runtime
 from examples.mcp_server.mcp_infra._server_ref import server_attr
-from examples.mcp_server.mcp_infra.adapters.gateway import _split_lines
+from examples.mcp_server.mcp_infra.adapters.gateway import _split_csv_or_lines, _split_lines
 from examples.mcp_server.mcp_infra.tool_registry import register_tool, run_tool, run_tool_async
 
 
@@ -369,7 +369,7 @@ async def gateway_run_agents(project: str, task_ids: str) -> dict[str, Any]:
     assert_handoff_write_allowed()
 
     async def _fn() -> dict[str, Any]:
-        ids = _split_lines(task_ids) or []
+        ids = _split_csv_or_lines(task_ids) or []
         if not ids:
             raise ValueError("task_ids must contain at least one task ID")
         if len(ids) > _MAX_AGENT_BATCH:
