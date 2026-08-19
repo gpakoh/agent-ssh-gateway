@@ -1,4 +1,4 @@
-from examples.mcp_server.docker_confirm import ConfirmStatus, ConfirmStore
+from examples.mcp_server.docker_confirm import CONFIRM_TTL_SECONDS, ConfirmStatus, ConfirmStore
 
 
 class TestConfirmFlow:
@@ -24,7 +24,7 @@ class TestConfirmFlow:
         store = ConfirmStore()
         action = store.create_action("docker_stop", {"container": "web"}, summary="Stop web", risk="high")
         token = action.confirm_token
-        monkeypatch.setattr("time.monotonic", lambda: 999999.0)
+        monkeypatch.setattr("time.monotonic", lambda: action.created_at + CONFIRM_TTL_SECONDS + 1.0)
         result, status = store.confirm_action(token)
         assert status == ConfirmStatus.EXPIRED
         assert result is None
@@ -68,7 +68,7 @@ class TestConfirmStore:
     def test_confirm_expired_token(self, monkeypatch):
         store = ConfirmStore()
         action = store.create_action("docker_rm", {"container": "foo"}, "Remove container foo")
-        monkeypatch.setattr("time.monotonic", lambda: 999999.0)
+        monkeypatch.setattr("time.monotonic", lambda: action.created_at + CONFIRM_TTL_SECONDS + 1.0)
         result, status = store.confirm_action(action.confirm_token)
         assert result is None
         assert status == ConfirmStatus.EXPIRED
@@ -92,8 +92,8 @@ class TestConfirmStore:
 
     def test_cleanup_expired(self, monkeypatch):
         store = ConfirmStore()
-        store.create_action("docker_rm", {"container": "foo"}, "Remove container foo")
-        monkeypatch.setattr("time.monotonic", lambda: 999999.0)
+        action = store.create_action("docker_rm", {"container": "foo"}, "Remove container foo")
+        monkeypatch.setattr("time.monotonic", lambda: action.created_at + CONFIRM_TTL_SECONDS + 1.0)
         removed = store.cleanup_expired()
         assert removed == 1
         assert len(store.list_pending()) == 0
