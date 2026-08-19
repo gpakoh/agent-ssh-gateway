@@ -278,3 +278,182 @@ class TestReadHandoffErrorDistinction:
         result = mod.read_handoff(_FakeClient(), "demo")
         assert result["exit_code"] == 1
         assert "Permission denied" in result["stderr"]
+
+
+class TestProjectAwareHandoffWrite:
+    class _NoSshClient:
+        def __getattr__(self, name: str):
+            raise AssertionError(f"handoff write must not use SSH client method {name}")
+
+    @staticmethod
+    def _registry(tmp_path: Path):
+        from app.workspace.policy import ALL_SCOPES
+        from app.workspace.registry import WorkspaceRegistry
+
+        project_root = tmp_path / "host-project"
+        project_root.mkdir()
+        registry_path = tmp_path / "projects.yaml"
+        registry_path.write_text(
+            f"""registry_root: {tmp_path}\nprojects:\n  demo:\n    root: host-project\n""",
+            encoding="utf-8",
+        )
+        return (
+            WorkspaceRegistry.load(
+                registry_path,
+                granted_scopes=ALL_SCOPES,
+            ),
+            project_root,
+        )
+
+    @staticmethod
+    def _enable_handoff(monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.config import settings
+
+        monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
+        monkeypatch.setattr(settings, "workspace_readonly", False)
+
+    def test_fresh_project_writes_host_workspace_without_ssh(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._enable_handoff(monkeypatch)
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        registry, project_root = self._registry(tmp_path)
+
+        result = mod.write_handoff_plan(
+            self._NoSshClient(),
+            "demo",
+            "Fix the host workspace",
+            registry=registry,
+        )
+
+        plan_path = project_root / ".ai-bridge" / "current-plan.md"
+        assert result["outcome"] == "passed"
+        assert result["exit_code"] == 0
+        assert "Fix the host workspace" in plan_path.read_text(encoding="utf-8")
+
+    def test_direct_caller_without_write_registry_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import app.workspace.registry as registry_module
+        from app.workspace.registry import WorkspaceRegistry
+
+        self._enable_handoff(monkeypatch)
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        write_registry, project_root = self._registry(tmp_path)
+        registry_path = tmp_path / "projects.yaml"
+        read_registry = WorkspaceRegistry.load(registry_path)
+        monkeypatch.setattr(registry_module, "_registry", read_registry)
+
+        result = mod.write_handoff_plan(
+            self._NoSshClient(),
+            "demo",
+            "Must not gain write scope",
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "POLICY_DENIED"
+        assert not (project_root / ".ai-bridge").exists()
+        assert write_registry is not read_registry
+
+    def test_existing_handoff_directory_is_reused(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._enable_handoff(monkeypatch)
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        registry, project_root = self._registry(tmp_path)
+        (project_root / ".ai-bridge").mkdir()
+
+        result = mod.write_handoff_plan(
+            self._NoSshClient(),
+            "demo",
+            "Reuse coordination directory",
+            registry=registry,
+        )
+
+        assert result["exit_code"] == 0
+        assert (project_root / ".ai-bridge" / "current-plan.md").is_file()
+
+    def test_symlinked_handoff_directory_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._enable_handoff(monkeypatch)
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        registry, project_root = self._registry(tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (project_root / ".ai-bridge").symlink_to(outside, target_is_directory=True)
+
+        result = mod.write_handoff_plan(
+            self._NoSshClient(),
+            "demo",
+            "Must not escape",
+            registry=registry,
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "POLICY_DENIED"
+        assert str(tmp_path) not in result["error"]["message"]
+        assert not (outside / "current-plan.md").exists()
+
+    def test_regular_file_at_handoff_directory_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._enable_handoff(monkeypatch)
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        registry, project_root = self._registry(tmp_path)
+        (project_root / ".ai-bridge").write_text("not a directory", encoding="utf-8")
+
+        result = mod.write_handoff_plan(
+            self._NoSshClient(),
+            "demo",
+            "Must fail closed",
+            registry=registry,
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "POLICY_DENIED"
+        assert str(tmp_path) not in result["error"]["message"]
+
+    def test_workspace_readonly_blocks_before_mutation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from write_modes import WritePermissionError
+
+        from app.config import settings
+
+        monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
+        monkeypatch.setattr(settings, "workspace_readonly", True)
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        registry, project_root = self._registry(tmp_path)
+
+        with pytest.raises(WritePermissionError, match="read-only"):
+            mod.write_handoff_plan(
+                self._NoSshClient(),
+                "demo",
+                "Blocked write",
+                registry=registry,
+            )
+
+        assert not (project_root / ".ai-bridge").exists()
+
+    def test_write_mode_off_blocks_before_mutation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from write_modes import WritePermissionError
+
+        from app.config import settings
+
+        monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "off")
+        monkeypatch.setattr(settings, "workspace_readonly", False)
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        registry, project_root = self._registry(tmp_path)
+
+        with pytest.raises(WritePermissionError):
+            mod.write_handoff_plan(
+                self._NoSshClient(),
+                "demo",
+                "Blocked by mode",
+                registry=registry,
+            )
+
+        assert not (project_root / ".ai-bridge").exists()
