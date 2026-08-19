@@ -1143,6 +1143,8 @@ class TestAsyncRunTestsReadonlyFallback:
         calls: list[tuple[str, str]] = []
 
         class FakeClient:
+            async_job_timeout = 3600
+
             def execute_raw(self, cmd, **kw):
                 calls.append(("execute_raw", cmd))
                 if cmd == "command -v uv":
@@ -1274,6 +1276,8 @@ class TestAsyncRunTestsReadonlyFallback:
         captured_kwargs: dict[str, dict] = {}
 
         class CapturingClient:
+            async_job_timeout = 1234
+
             def execute_raw(self, cmd, **kw):
                 if cmd == "command -v uv" or cmd.startswith("test -x "):
                     return {"job_id": "j-precheck"}
@@ -1296,6 +1300,7 @@ class TestAsyncRunTestsReadonlyFallback:
         assert len(captured_kwargs) == 1
         ((_cmd, kw),) = captured_kwargs.items()
         assert kw.get("redact_path_prefix") == str(project_dir)
+        assert kw.get("timeout_s") == CapturingClient.async_job_timeout
 
 
 def test_redact_project_root_replaces_abs_paths():
