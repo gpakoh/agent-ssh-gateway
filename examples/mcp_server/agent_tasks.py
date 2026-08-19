@@ -44,6 +44,8 @@ _FUNCTION_WORDS = frozenset(
 TASKS_REL_DIR = ".ai-bridge/tasks"
 ARCHIVE_REL_DIR = ".ai-bridge/archive"
 
+KNOWN_CONCRETE_BACKENDS = frozenset({"opencode"})
+
 
 def validate_task_id(task_id: str) -> None:
     """Raise ValueError if task_id is malformed."""
@@ -146,6 +148,44 @@ def _encoded_write(path: str, content: str) -> str:
     return f"printf %s {shlex.quote(payload)} | base64 -d > {shlex.quote(path)}"
 
 
+def _validate_allowed_backends(
+    agent: str,
+    allowed_backends: list[str] | None,
+) -> list[str]:
+    """Validate and normalize allowed_backends at task creation time.
+
+    ``agent="auto"`` is a selection mode, not a concrete backend.  An empty
+    allowlist must NOT be treated as a wildcard — it means no backends are
+    permitted.  Unknown concrete backend names are rejected at creation.
+    """
+    if allowed_backends is not None:
+        unknown = sorted(set(allowed_backends) - KNOWN_CONCRETE_BACKENDS)
+        if unknown:
+            raise ValueError(
+                f"unknown backend(s) in allowed_backends: {', '.join(unknown)}; "
+                f"known concrete backends: {', '.join(sorted(KNOWN_CONCRETE_BACKENDS))}"
+            )
+
+    if agent != "auto" and agent not in KNOWN_CONCRETE_BACKENDS:
+        raise ValueError(
+            f"agent={agent!r} is not a known concrete backend; "
+            f"known: {', '.join(sorted(KNOWN_CONCRETE_BACKENDS))}"
+        )
+
+    if allowed_backends is None:
+        if agent == "auto":
+            return ["opencode"]
+        return [agent]
+
+    if not allowed_backends:
+        raise ValueError(
+            "allowed_backends is empty; an explicit empty allowlist cannot "
+            "become a wildcard — provide at least one concrete backend"
+        )
+
+    return list(allowed_backends)
+
+
 def build_task_json(
     *,
     task_id: str,
@@ -157,15 +197,18 @@ def build_task_json(
     commit_allowed: bool = False,
     push_allowed: bool = False,
     base_ref: str | None = None,
+    allowed_backends: list[str] | None = None,
 ) -> str:
     """Build machine-readable task.json content."""
     validate_task_id(task_id)
     validate_required_checks(required_checks)
     validate_scope_contract(allowed_files, forbidden_files)
     validate_base_ref(base_ref)
+    normalized_backends = _validate_allowed_backends(agent, allowed_backends)
     data: dict[str, Any] = {
         "task_id": task_id,
         "agent": agent,
+        "allowed_backends": normalized_backends,
         "allowed_files": allowed_files or [],
         "forbidden_files": forbidden_files or [],
         "required_checks": required_checks or [],
@@ -358,6 +401,7 @@ def write_agent_task(
     constraints: str | None = None,
     worktree_path: str | None = None,
     base_ref: str | None = None,
+    allowed_backends: list[str] | None = None,
 ) -> dict[str, Any]:
     """Write task.json + current-plan.md + agent-status.md to .ai-bridge/tasks/<task_id>/."""
     validate_task_id(task_id)
@@ -370,6 +414,7 @@ def write_agent_task(
         required_checks=required_checks,
         worktree_path=worktree_path,
         base_ref=base_ref,
+        allowed_backends=allowed_backends,
     )
     td = task_dir(project, task_id)
     current_plan = build_current_plan(

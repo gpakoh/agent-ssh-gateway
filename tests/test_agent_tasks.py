@@ -184,6 +184,7 @@ class TestBuildTaskJson:
         data = json.loads(result)
         assert data["task_id"] == "a12345678901"
         assert data["agent"] == "opencode"
+        assert data["allowed_backends"] == ["opencode"]
         assert data["allowed_files"] == []
         assert data["commit_allowed"] is False
         assert "created" in data
@@ -195,7 +196,7 @@ class TestBuildTaskJson:
     def test_full(self):
         result = build_task_json(
             task_id="b23456789012",
-            agent="custom-agent",
+            agent="opencode",
             allowed_files=["src/**", "tests/**"],
             forbidden_files=["migrations/**"],
             required_checks=["pytest -q", "ruff check"],
@@ -204,7 +205,8 @@ class TestBuildTaskJson:
             push_allowed=False,
         )
         data = json.loads(result)
-        assert data["agent"] == "custom-agent"
+        assert data["agent"] == "opencode"
+        assert data["allowed_backends"] == ["opencode"]
         assert "src/**" in data["allowed_files"]
         assert data["required_checks"] == ["pytest -q", "ruff check"]
 
