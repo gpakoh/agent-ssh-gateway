@@ -56,9 +56,11 @@ COPY --chown=appuser:appuser app/ ./app/
 COPY --chown=appuser:appuser examples/ ./examples/
 COPY --chown=appuser:appuser scripts/ ./scripts/
 
-# Security: Create necessary directories
-RUN mkdir -p /app/data /tmp /var/lib/mcp-agent/sources && \
-    chown -R appuser:appuser /app /tmp /var/lib/mcp-agent
+# Security: Create necessary directories.  The supervisor journal target is
+# pre-owned by appuser so a fresh named volume inherits a writable root when
+# Docker initializes it from the image; only mcp-oauth mounts that volume.
+RUN mkdir -p /app/data /tmp /var/lib/mcp-agent/sources /var/lib/mcp-supervisor && \
+    chown -R appuser:appuser /app /tmp /var/lib/mcp-agent /var/lib/mcp-supervisor
 
 RUN chmod -R 755 /app
 
