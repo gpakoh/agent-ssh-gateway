@@ -305,6 +305,52 @@ class SSHSessionManager:
     # Create Session
     # ------------------------------------------------------------------
 
+    async def find_reusable_session(
+        self,
+        *,
+        host: str,
+        port: int,
+        username: str,
+        password: str | None = None,
+        private_key: str | None = None,
+        key_passphrase: str | None = None,
+        owner_type: str,
+        owner_token_fingerprint: str | None,
+        source_ip: str | None,
+    ) -> SessionRecord | None:
+        """Return a live session only for an exact caller/target/credential match.
+
+        This is intentionally stricter than session visibility.  In particular,
+        master/admin callers must never adopt an arbitrary visible session after a
+        process restart.  The presented credential is compared only through the
+        same one-way fingerprint used by the connection pool.
+        """
+        if not owner_token_fingerprint or not source_ip:
+            return None
+
+        auth_method = "password" if password is not None else "key"
+        credential_fingerprint = _credential_fingerprint(
+            auth_method, password, private_key, key_passphrase
+        )
+        async with self._lock:
+            for record in self._sessions.values():
+                if (
+                    record.owner_type != owner_type
+                    or record.owner_token_fingerprint != owner_token_fingerprint
+                    or record.source_ip != source_ip
+                    or record.host != host
+                    or record.port != port
+                    or record.username != username
+                    or record.auth_method != auth_method
+                    or record.credential_fingerprint != credential_fingerprint
+                ):
+                    continue
+                if not record.is_connected():
+                    continue
+                record.touch()
+                return record
+        return None
+
     async def create_session(
         self,
         host: str,

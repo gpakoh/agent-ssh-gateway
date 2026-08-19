@@ -10,7 +10,12 @@ import paramiko
 import pytest
 
 from app.config import settings
-from app.ssh_manager import SessionLimitError, SSHSessionManager, _credential_fingerprint
+from app.ssh_manager import (
+    SessionLimitError,
+    SessionRecord,
+    SSHSessionManager,
+    _credential_fingerprint,
+)
 from app.ssh_pool import ConnectionPool
 
 _PW_FINGERPRINT = _credential_fingerprint("password", "pw", None, None)
@@ -315,6 +320,124 @@ async def test_create_session_enforces_max_sessions_per_ip(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_find_reusable_session_precedes_full_ip_admission(monkeypatch):
+    """A restored exact live session is reusable even when its IP pool is full."""
+    monkeypatch.setattr(settings, "max_sessions_per_ip", 1)
+    manager = SSHSessionManager(connection_pool_size=0)
+    record = SessionRecord(
+        session_id="s-restored",
+        client=_mock_client(alive=True),
+        host="h",
+        port=22,
+        username="u",
+        owner_type="master",
+        owner_token_fingerprint="owner-fp",
+        source_ip="10.0.0.5",
+        auth_method="password",
+        credential_fingerprint=_PW_FINGERPRINT,
+    )
+    manager._sessions[record.session_id] = record
+
+    reused = await manager.find_reusable_session(
+        host="h",
+        port=22,
+        username="u",
+        password="pw",
+        owner_type="master",
+        owner_token_fingerprint="owner-fp",
+        source_ip="10.0.0.5",
+    )
+    assert reused is record
+
+    # The ordinary create path still fails closed at the configured cap.
+    with pytest.raises(SessionLimitError):
+        await manager.create_session(
+            host="h",
+            port=22,
+            username="u",
+            password="pw",
+            owner_type="master",
+            owner_token_fingerprint="owner-fp",
+            source_ip="10.0.0.5",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"host": "other-host"},
+        {"port": 2222},
+        {"username": "other-user"},
+        {"password": "wrong-password"},
+        {"owner_type": "agent"},
+        {"owner_token_fingerprint": "other-owner"},
+        {"owner_token_fingerprint": None},
+        {"source_ip": "10.0.0.6"},
+        {"source_ip": None},
+    ],
+)
+async def test_find_reusable_session_requires_exact_identity_target_and_credential(overrides):
+    manager = SSHSessionManager(connection_pool_size=0)
+    record = SessionRecord(
+        session_id="s-restored",
+        client=_mock_client(alive=True),
+        host="h",
+        port=22,
+        username="u",
+        owner_type="master",
+        owner_token_fingerprint="owner-fp",
+        source_ip="10.0.0.5",
+        auth_method="password",
+        credential_fingerprint=_PW_FINGERPRINT,
+    )
+    manager._sessions[record.session_id] = record
+    lookup = {
+        "host": "h",
+        "port": 22,
+        "username": "u",
+        "password": "pw",
+        "owner_type": "master",
+        "owner_token_fingerprint": "owner-fp",
+        "source_ip": "10.0.0.5",
+    }
+    lookup.update(overrides)
+
+    assert await manager.find_reusable_session(**lookup) is None
+
+
+@pytest.mark.asyncio
+async def test_find_reusable_session_rejects_disconnected_exact_match():
+    manager = SSHSessionManager(connection_pool_size=0)
+    record = SessionRecord(
+        session_id="s-dead",
+        client=_mock_client(alive=False),
+        host="h",
+        port=22,
+        username="u",
+        owner_type="master",
+        owner_token_fingerprint="owner-fp",
+        source_ip="10.0.0.5",
+        auth_method="password",
+        credential_fingerprint=_PW_FINGERPRINT,
+    )
+    manager._sessions[record.session_id] = record
+
+    assert (
+        await manager.find_reusable_session(
+            host="h",
+            port=22,
+            username="u",
+            password="pw",
+            owner_type="master",
+            owner_token_fingerprint="owner-fp",
+            source_ip="10.0.0.5",
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_create_session_limit_skipped_when_no_source_ip(monkeypatch):
     monkeypatch.setattr(settings, "max_sessions_per_ip", 1)
 
@@ -446,6 +569,55 @@ async def test_await_prewarm_waits_for_task():
     # task still running — _await_prewarm must block until done
     await _await_prewarm("s1")
     assert "s1" not in st.prewarm_tasks
+
+
+def test_connect_reuses_exact_live_session_without_creating_an_eleventh(monkeypatch):
+    """Opt-in reconnect adopts an exact live restored session before IP admission."""
+    from starlette.testclient import TestClient
+
+    from app.config import settings
+    from app.main import app
+
+    monkeypatch.setattr(settings, "api_auth_enabled", True)
+    monkeypatch.setattr(settings, "api_key", "secret-42")
+    monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
+    monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
+    monkeypatch.setattr("app.auth_middleware.get_client_ip", lambda req, trusted: "127.0.0.1")
+
+    from app import state as st
+
+    with TestClient(app) as client:
+        st.manager = AsyncMock()
+        st.audit_logger = MagicMock()
+        st.event_audit_logger = MagicMock()
+        session_store = AsyncMock()
+        st.session_store = session_store
+        st.access_control_store = None
+        restored = MagicMock()
+        restored.session_id = "sess-restored"
+        st.manager.find_reusable_session = AsyncMock(return_value=restored)
+        st.manager.create_session = AsyncMock(return_value="sess-new")
+
+        resp = client.post(
+            "/api/ssh/connect",
+            headers={"X-API-Key": "secret-42"},
+            json={
+                "host": "10.0.0.1",
+                "port": 22,
+                "username": "root",
+                "password": "pw",
+                "reuse_existing": True,
+            },
+        )
+
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    assert resp.json()["session_id"] == "sess-restored"
+    st.manager.find_reusable_session.assert_awaited_once()
+    st.manager.create_session.assert_not_awaited()
+    session_store.refresh_session_expiry.assert_awaited_once_with(
+        "sess-restored", settings.session_timeout
+    )
+    session_store.save_session.assert_not_awaited()
 
 
 def test_prewarm_endpoint_returns_session_id_immediately(monkeypatch):

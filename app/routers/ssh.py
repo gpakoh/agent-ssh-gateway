@@ -339,52 +339,76 @@ async def ssh_connect(
     _private_key = req.private_key.get_secret_value() if req.private_key else None
     _passphrase = req.key_passphrase.get_secret_value() if req.key_passphrase else None
 
-    session_id = await _state.manager.create_session(
-        host=req.host,
-        port=req.port,
-        username=req.username,
-        password=_password,
-        private_key=_private_key,
-        key_passphrase=_passphrase,
-        owner_type=_identity.token_type,
-        owner_name=_identity.name,
-        owner_token_fingerprint=_identity.fingerprint,
-        source_ip=source_ip,
-        tenant_labels=_identity.tenant_labels,
-        pinned_ip=validated_ips[0],
-    )
+    reusable = None
+    if req.reuse_existing:
+        reusable = await _state.manager.find_reusable_session(
+            host=req.host,
+            port=req.port,
+            username=req.username,
+            password=_password,
+            private_key=_private_key,
+            key_passphrase=_passphrase,
+            owner_type=_identity.token_type,
+            owner_token_fingerprint=_identity.fingerprint,
+            source_ip=source_ip,
+        )
+
+    if reusable is not None:
+        session_id = reusable.session_id
+        logger.info("Reusing live SSH session %s for %s@%s", session_id, req.username, req.host)
+    else:
+        session_id = await _state.manager.create_session(
+            host=req.host,
+            port=req.port,
+            username=req.username,
+            password=_password,
+            private_key=_private_key,
+            key_passphrase=_passphrase,
+            owner_type=_identity.token_type,
+            owner_name=_identity.name,
+            owner_token_fingerprint=_identity.fingerprint,
+            source_ip=source_ip,
+            tenant_labels=_identity.tenant_labels,
+            pinned_ip=validated_ips[0],
+        )
 
     from app.audit import emit_session_lifecycle_event as _emit_session
 
-    _emit_session(
-        event_logger=_state.event_audit_logger,
-        connected=True,
-        session_id=session_id,
-        actor_type=_identity.token_type,
-        actor_name=_identity.name or "",
-        actor_fingerprint=_identity.fingerprint[:12],
-        source_ip=request.client.host if request.client else "unknown",
-        route="POST /api/ssh/connect",
-        request_id=getattr(request.state, "request_id", ""),
-    )
+    if reusable is None:
+        _emit_session(
+            event_logger=_state.event_audit_logger,
+            connected=True,
+            session_id=session_id,
+            actor_type=_identity.token_type,
+            actor_name=_identity.name or "",
+            actor_fingerprint=_identity.fingerprint[:12],
+            source_ip=request.client.host if request.client else "unknown",
+            route="POST /api/ssh/connect",
+            request_id=getattr(request.state, "request_id", ""),
+        )
 
     if _state.session_store:
         try:
-            await _state.session_store.save_session(
-                session_id=session_id,
-                host=req.host,
-                port=req.port,
-                username=req.username,
-                password=_password,
-                private_key=_private_key,
-                key_passphrase=_passphrase,
-                ttl=settings.session_timeout,
-                owner_type=_identity.token_type,
-                owner_name=_identity.name,
-                owner_token_fingerprint=_identity.fingerprint,
-                source_ip=source_ip,
-                tenant_labels=_identity.tenant_labels,
-            )
+            if reusable is not None:
+                await _state.session_store.refresh_session_expiry(
+                    session_id, settings.session_timeout
+                )
+            else:
+                await _state.session_store.save_session(
+                    session_id=session_id,
+                    host=req.host,
+                    port=req.port,
+                    username=req.username,
+                    password=_password,
+                    private_key=_private_key,
+                    key_passphrase=_passphrase,
+                    ttl=settings.session_timeout,
+                    owner_type=_identity.token_type,
+                    owner_name=_identity.name,
+                    owner_token_fingerprint=_identity.fingerprint,
+                    source_ip=source_ip,
+                    tenant_labels=_identity.tenant_labels,
+                )
         except Exception as exc:
             logger.warning("Failed to persist session %s: %s", session_id, exc)
 
