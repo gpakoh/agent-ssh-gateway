@@ -1088,7 +1088,14 @@ def gateway_write_handoff_plan(
     return run_tool(
         tool="write_handoff_plan",
         title="write handoff",
-        fn=lambda: write_handoff_plan(_server_client(), project, task, agent=agent, notes=notes),
+        fn=lambda: write_handoff_plan(
+            _server_client(),
+            project,
+            task,
+            agent=agent,
+            notes=notes,
+            registry=_server_workspace_registry(),
+        ),
         success_text="Wrote project handoff plan.",
     )
 
