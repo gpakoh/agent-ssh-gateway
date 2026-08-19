@@ -503,6 +503,51 @@ class TestMcpOauthServiceCoherence:
         env = _env_dict(_load_compose()["services"]["mcp-oauth"]["environment"])
         assert env.get("MCP_AUTH_MODE") == "oauth"
 
+    def test_supervisor_registry_writes_are_narrowly_wired_to_oauth(self):
+        compose = _load_compose()
+        services = compose["services"]
+        oauth = services["mcp-oauth"]
+        env = _env_dict(oauth["environment"])
+
+        assert env.get("MCP_SUPERVISOR_JOURNAL_ROOT") == "/var/lib/mcp-supervisor"
+        assert "mcp_supervisor_journal" in compose["volumes"]
+        assert "mcp_supervisor_journal:/var/lib/mcp-supervisor" in oauth["volumes"]
+
+        oauth_registry = next(
+            v
+            for v in oauth["volumes"]
+            if isinstance(v, str) and ":/app/projects.yaml:" in v
+        )
+        assert oauth_registry.endswith(":rw")
+
+        for service_name in ("mcp-server", "web-ssh-gateway"):
+            service = services[service_name]
+            registry_mount = next(
+                v
+                for v in service["volumes"]
+                if isinstance(v, str) and ":/app/projects.yaml:" in v
+            )
+            assert registry_mount.endswith(":ro"), service_name
+
+        for service_name, service in services.items():
+            if service_name == "mcp-oauth":
+                continue
+            assert not any(
+                isinstance(v, str) and v.startswith("mcp_supervisor_journal:")
+                for v in service.get("volumes", [])
+            ), service_name
+
+    def test_supervisor_journal_volume_target_is_preowned_by_appuser(self):
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        mkdir_line = next(
+            line for line in text.splitlines() if line.startswith("RUN mkdir -p /app/data")
+        )
+        chown_line = next(
+            line for line in text.splitlines() if "chown -R appuser:appuser" in line
+        )
+        assert "/var/lib/mcp-supervisor" in mkdir_line
+        assert "/var/lib/mcp-supervisor" in chown_line
+
     def test_has_its_own_dedicated_volume_not_shared_with_mcp_server(self):
         """Sharing mcp_server_tokens would couple the OAuth client/token
         store to the unrelated bearer-only service's -- must be its own
