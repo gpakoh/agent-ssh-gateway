@@ -248,15 +248,33 @@ class JobManager:
         return len(to_remove)
 
     async def force_cleanup(self) -> int:
-        """Cancel all active tasks and remove all jobs."""
+        """Cancel local job tasks without inventing unproven remote outcomes.
+
+        A still-pending job can be declared cancelled here because holding the
+        manager lock while cancelling its scheduled Task guarantees that
+        ``_run_job`` cannot transition it to running or reach the remote host.
+        Once a job is running, cancelling the local asyncio Task is not proof
+        that an executor thread / SSH command has stopped, so it remains
+        non-terminal unless the normal execution path proves otherwise.
+        """
+        proven_terminal: list[JobRecord] = []
         async with self._lock:
             for job in self._jobs.values():
                 job.cancel_event.set()
-                if job.status in ACTIVE_STATES:
+                if job.status == "pending":
                     job.status = "cancelled"
                     job.completed_at = job.completed_at or time.time()
                     job.completed_at_mono = job.completed_at_mono or time.monotonic()
-                job.completed_event.set()
+                    job.completed_event.set()
+                    proven_terminal.append(job)
+                elif job.status in {"running", "cancelling"}:
+                    job.status = "cancelling"
+                elif job.status in TERMINAL_STATES:
+                    # The result was already decided before forced shutdown.
+                    # Re-persisting after local task cancellation is safe and
+                    # prevents cancelling an in-flight Redis write from losing
+                    # a proven terminal snapshot.
+                    proven_terminal.append(job)
             tasks = list(self._job_tasks.values())
             self._job_tasks.clear()
             for task in tasks:
@@ -266,6 +284,8 @@ class JobManager:
 
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        for job in proven_terminal:
+            await self._persist_terminal_job(job)
         logger.warning("Force-cleaned %d jobs (%d tasks cancelled)", count, len(tasks))
         return count
 
@@ -352,7 +372,7 @@ class JobManager:
         Must never raise — a Redis hiccup is not allowed to affect the
         in-process job outcome that's already been decided.
         """
-        if self.redis_queue is None:
+        if self.redis_queue is None or job.status not in TERMINAL_STATES:
             return
         try:
             await self.redis_queue.save_terminal_job(
@@ -510,18 +530,22 @@ class JobManager:
                 }
             )
         finally:
-            job.completed_at = time.time()
-            job.completed_at_mono = time.monotonic()
-            job.completed_event.set()
-            await job.notify_listeners(
-                {
-                    "type": "status",
-                    "status": job.status,
-                    "duration": job.duration,
-                    "exit_code": job.exit_code,
-                }
-            )
-            await self._persist_terminal_job(job)
+            # Cancellation of the local asyncio Task is not itself a terminal
+            # remote outcome.  Only publish completion when the execution path
+            # has actually resolved the job into a terminal state.
+            if job.status in TERMINAL_STATES:
+                job.completed_at = time.time()
+                job.completed_at_mono = time.monotonic()
+                job.completed_event.set()
+                await job.notify_listeners(
+                    {
+                        "type": "status",
+                        "status": job.status,
+                        "duration": job.duration,
+                        "exit_code": job.exit_code,
+                    }
+                )
+                await self._persist_terminal_job(job)
 
     # ------------------------------------------------------------------
     # Get Job
