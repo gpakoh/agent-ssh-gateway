@@ -998,7 +998,11 @@ def _run_uv_tool(
                 ],
             )
 
-    result = client.execute_raw(command, redact_path_prefix=str(project_dir))
+    result = client.execute_raw(
+        command,
+        redact_path_prefix=str(project_dir),
+        timeout_s=client.async_job_timeout if async_submit else None,
+    )
 
     if async_submit:
         return tool_success(
