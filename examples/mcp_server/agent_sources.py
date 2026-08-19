@@ -26,6 +26,14 @@ class ManagedSourceBundleError(RuntimeError):
     """Raised when trusted source publication cannot prove the requested SHA."""
 
 
+def _git_subcommand(args: list[str]) -> str:
+    """Return the first non-option arg so error messages name the subcommand."""
+    for arg in args:
+        if not arg.startswith("-") and arg != "git":
+            return arg
+    return args[0] if args else "git"
+
+
 def _run_git(
     args: list[str],
     *,
@@ -36,6 +44,7 @@ def _run_git(
     if safe_directory is not None:
         command.extend(["-c", f"safe.directory={safe_directory}"])
     command.extend(args)
+    subcmd = _git_subcommand(args)
     try:
         result = subprocess.run(
             command,
@@ -47,7 +56,7 @@ def _run_git(
         )
     except subprocess.TimeoutExpired as exc:
         raise ManagedSourceBundleError(
-            f"managed source publication timed out during git {args[0]}"
+            f"managed source publication timed out during git {subcmd}"
         ) from exc
     except OSError as exc:
         raise ManagedSourceBundleError(
@@ -57,7 +66,7 @@ def _run_git(
         # Git failures commonly include the authoritative host path. Keep the
         # MCP error useful without reflecting that path to a worker/client.
         raise ManagedSourceBundleError(
-            f"managed source publication failed during git {args[0]}"
+            f"managed source publication failed during git {subcmd}"
         )
     return result.stdout
 

@@ -128,6 +128,52 @@ def test_git_timeout_fails_closed(monkeypatch):
         _run_git(["fetch", "source"])
 
 
+class TestGitErrorMessage:
+    """Error messages must name the git subcommand, not a leading --option."""
+
+    @staticmethod
+    def _run_failing_git(args: list[str]) -> None:
+        """Helper: call _run_git with a fake subprocess that always exits 1."""
+        import unittest.mock
+
+        fake_result = unittest.mock.Mock(returncode=1, stdout="", stderr="")
+        with unittest.mock.patch("subprocess.run", return_value=fake_result):
+            _run_git(args)
+
+    def test_reports_bundle_not_git_dir_option(self):
+        with pytest.raises(ManagedSourceBundleError, match=r"git bundle"):
+            self._run_failing_git(
+                ["--git-dir=/tmp/x", "bundle", "create", "refs/heads/source"]
+            )
+
+    def test_reports_cat_file_not_git_dir_option(self):
+        with pytest.raises(ManagedSourceBundleError, match=r"git cat-file"):
+            self._run_failing_git(
+                ["--git-dir=/tmp/x", "cat-file", "-e", "abc123^{commit}"]
+            )
+
+    def test_reports_simple_subcommand_without_git_dir(self):
+        with pytest.raises(ManagedSourceBundleError, match=r"git status"):
+            self._run_failing_git(["git", "status"])
+
+    def test_reports_subcommand_when_only_options_present(self):
+        """Edge case: only options, no subcommand — reports first option."""
+        with pytest.raises(ManagedSourceBundleError, match=r"git --oneline"):
+            self._run_failing_git(["--oneline"])
+
+    def test_timeout_message_also_uses_subcommand(self):
+        import unittest.mock
+
+        def timeout_run(*a, **kw):
+            raise subprocess.TimeoutExpired(cmd=["git"], timeout=120)
+
+        with unittest.mock.patch("subprocess.run", side_effect=timeout_run):
+            with pytest.raises(
+                ManagedSourceBundleError, match=r"timed out during git bundle"
+            ):
+                _run_git(["--git-dir=/tmp/x", "bundle", "create", "out.bndl"])
+
+
 def test_registry_project_root_is_the_only_safe_directory_exception(monkeypatch, tmp_path):
     captured: list[list[str]] = []
 
