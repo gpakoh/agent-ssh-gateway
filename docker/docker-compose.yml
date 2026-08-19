@@ -299,6 +299,11 @@ services:
       - PGPASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       - PGSSLMODE=${MCP_OAUTH_PGSSLMODE:-disable}
       - PGAPPNAME=${MCP_OAUTH_PGAPPNAME:-mcp-oauth}
+      # Supervisor registry integration journals must live outside /app: the
+      # integration guard deliberately rejects a journal nested under the
+      # registry config directory (/app) to prevent self-overwrite/rollback
+      # aliasing. Keep this admin-only state on its own persistent volume.
+      - MCP_SUPERVISOR_JOURNAL_ROOT=/var/lib/mcp-supervisor
       - WORKSPACE_READONLY=false
       - OPENCODE_PROXY_PROVIDER_URL=${OPENCODE_PROXY_PROVIDER_URL:-}
       - OPENCODE_PROXY_PROVIDER_TIMEOUT=${OPENCODE_PROXY_PROVIDER_TIMEOUT:-5}
@@ -309,11 +314,15 @@ services:
       - OPENCODE_ADMISSION_POLL_SECONDS=${OPENCODE_ADMISSION_POLL_SECONDS:-2}
       - OPENCODE_RUN_TIMEOUT_SECONDS=${OPENCODE_RUN_TIMEOUT_SECONDS:-1800}
     volumes:
-      - ${PROJECTS_YAML_PATH:-../projects.yaml}:/app/projects.yaml:ro
+      # Registration mutates the existing registry file through a pinned
+      # O_NOFOLLOW fd + hash/CAS guard. Only the OAuth/admin service gets this
+      # narrow RW bind; mcp-server and the gateway keep the same registry RO.
+      - ${PROJECTS_YAML_PATH:-../projects.yaml}:/app/projects.yaml:rw
       # Dedicated volume, deliberately NOT shared with mcp-server's
       # mcp_server_tokens -- keeps the OAuth client/token store
       # independent of the bearer-only service's.
       - mcp_oauth_data:/app/data
+      - mcp_supervisor_journal:/var/lib/mcp-supervisor
       - agent_runtime:/var/lib/mcp-agent
       - agent_sources:/var/lib/mcp-agent/sources
       - type: bind
@@ -532,6 +541,8 @@ volumes:
   mcp_server_tokens:
     driver: local
   mcp_oauth_data:
+    driver: local
+  mcp_supervisor_journal:
     driver: local
   agent_runtime:
     driver: local
