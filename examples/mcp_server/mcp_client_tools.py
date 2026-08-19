@@ -1188,31 +1188,95 @@ def read_handoff(
     return result
 
 
+def _handoff_write_registry(registry: Any | None = None):
+    """Return the registry used for the fixed handoff write path.
+
+    The live MCP adapter injects its server-owned write-scoped registry after
+    ``mcp:handoff`` / write-mode authorization.  Direct Python callers do not
+    get an implicit privilege upgrade: without an injected registry they see
+    the normal read-scoped singleton, whose write policy fails closed.
+    """
+    if registry is not None:
+        return registry
+
+    from app.workspace.registry import get_registry
+
+    return get_registry()
+
+
 def write_handoff_plan(
     client: GatewayClient,
     project: str,
     task: str,
     agent: str = "opencode",
     notes: str | None = None,
+    *,
+    registry: Any | None = None,
 ) -> dict[str, Any]:
-    from handoff import assert_handoff_write_allowed, build_handoff_plan
+    """Write the project handoff plan in the host workspace namespace."""
+    from handoff import build_handoff_plan
+    from write_modes import WritePermissionError, assert_handoff_write_allowed
+
+    from app.config import settings
+    from app.workspace.edit import project_file_write
 
     assert_handoff_write_allowed()
+    if settings.workspace_readonly:
+        raise WritePermissionError("Workspace is in read-only mode")
+
+    # ``client`` is intentionally unused here.  Project IDs belong to the
+    # host workspace registry; SSH/file APIs operate in the target session's
+    # filesystem namespace and cannot safely translate host project roots.
+    _ = client
+    from app.workspace.policy import WorkspacePolicyError
+
+    handoff_path = ".ai-bridge/current-plan.md"
     plan = build_handoff_plan(task=task, agent=agent, notes=notes)
-    project_dir = str(_resolve_project(project))
-    result = client.execute_argv(
-        argv=["bash", "-c", "mkdir -p .ai-bridge && cat > .ai-bridge/current-plan.md"],
-        stdin=plan,
-        timeout_s=30,
-        cwd=project_dir,
-    )
-    if result.get("exit_code", 1) != 0:
-        return build_command_result(
-            outcome="failed",
-            exit_code=result.get("exit_code", -1),
-            stdout=result.get("stdout") or result.get("output", ""),
-            stderr=result.get("stderr", ""),
+    try:
+        write_registry = _handoff_write_registry(registry)
+
+        # project_file_write deliberately does not create arbitrary parents.
+        # Handoff needs exactly one fixed coordination directory, so validate
+        # the fixed target first and create only that one directory (never a
+        # caller-provided mkdir -p surface).  The subsequent write revalidates
+        # symlinks/path policy after this potential race.
+        target = write_registry._policy.validate_write(project, handoff_path)
+        parent = target.parent
+        if not parent.exists():
+            try:
+                parent.mkdir(mode=0o755, parents=False)
+            except FileExistsError:
+                # A concurrent creator won the race. Revalidation below
+                # decides whether the resulting path is acceptable.
+                pass
+        if not parent.is_dir():
+            raise WorkspacePolicyError("Handoff coordination path is not a directory")
+
+        project_file_write(
+            project_id=project,
+            relative_path=handoff_path,
+            content=plan,
+            registry=write_registry,
         )
+    except WorkspacePolicyError:
+        # Workspace policy messages can contain absolute server paths.  The
+        # MCP surface only needs the classification; keep host topology out of
+        # the response.
+        return tool_error(
+            tool="write_handoff_plan",
+            code="POLICY_DENIED",
+            message="Handoff path rejected by workspace policy",
+            retryable=False,
+        )
+    except OSError as exc:
+        safe_reason = getattr(exc, "strerror", None) or type(exc).__name__
+        return tool_error(
+            tool="write_handoff_plan",
+            code="HANDOFF_WRITE_FAILED",
+            message=f"Handoff plan write failed: {safe_reason}",
+            retryable=False,
+        )
+
     return build_command_result(
         outcome="passed", exit_code=0, stdout="Handoff plan written", stderr=""
     )
