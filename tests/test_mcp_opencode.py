@@ -172,7 +172,7 @@ class TestProjectRunOpencodeExecutes:
             lambda: type("R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}})(),
         )
         rc = _fake_run_cmd(
-            task_json={"worktree_path": "/attacker/path", "base_ref": base_ref}
+            task_json={"base_ref": base_ref}
         )
         captured: dict[str, str] = {}
 
@@ -183,10 +183,46 @@ class TestProjectRunOpencodeExecutes:
         result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
         assert result["status"] == "needs-review"
         script = captured["script"]
-        assert "/attacker/path" not in script
         assert f"/{base_ref}.bundle" in script
         assert 'git clone --no-hardlinks --no-checkout "$MANAGED_SOURCE_BUNDLE" "$wt"' in script
         assert 'git clone --no-hardlinks --no-checkout "$PARENT_ROOT" "$wt"' not in script
+
+    def test_managed_mode_with_user_worktree_path_errors(self, monkeypatch):
+        """Regression: managed mode silently replaced a valid user-supplied
+        worktree_path with the executor-owned managed path, ignoring the
+        caller's explicit isolation choice.  Fail-closed: error out instead
+        of silently substituting."""
+        base_ref = "c" * 40
+        monkeypatch.setenv("MCP_AGENT_WORKSPACE_ROOT", "/var/lib/mcp-agent/workspaces")
+        monkeypatch.setenv("MCP_AGENT_STATE_ROOT", "/var/lib/mcp-agent/state")
+        monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", "/var/lib/mcp-agent/sources")
+        monkeypatch.setattr(
+            "app.workspace.registry.get_registry",
+            lambda: type("R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}})(),
+        )
+        rc = _fake_run_cmd(
+            task_json={"worktree_path": "/tmp/valid-user-worktree", "base_ref": base_ref}
+        )
+        run_script = MagicMock(return_value={"exit_code": 0, "stdout": "", "stderr": ""})
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert result["status"] == "error"
+        run_script.assert_not_called()
+
+    def test_non_managed_mode_honors_user_worktree_path(self):
+        """Regression: when MCP_AGENT_WORKSPACE_ROOT is NOT set, a valid
+        user-supplied worktree_path from task.json must appear in the
+        generated script (not silently replaced or dropped)."""
+        user_wt = "/tmp/external-agent-workspace"
+        rc = _fake_run_cmd(task_json={"worktree_path": user_wt})
+        captured: dict[str, str] = {}
+
+        def run_script(project, script):
+            captured["script"] = script
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert result["status"] == "needs-review"
+        assert user_wt in captured["script"]
 
     def test_managed_mode_requires_pinned_base_ref(self, monkeypatch):
         monkeypatch.setenv("MCP_AGENT_WORKSPACE_ROOT", "/var/lib/mcp-agent/workspaces")
@@ -196,7 +232,7 @@ class TestProjectRunOpencodeExecutes:
             "app.workspace.registry.get_registry",
             lambda: type("R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}})(),
         )
-        rc = _fake_run_cmd(task_json={"worktree_path": "/attacker/path"})
+        rc = _fake_run_cmd(task_json={})
         run_script = MagicMock(return_value={"exit_code": 0, "stdout": "", "stderr": ""})
         result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
         assert result["status"] == "error"
