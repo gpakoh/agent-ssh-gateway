@@ -25,6 +25,13 @@ class ConnectRequest(BaseModel):
         default=None,
         description="Private key passphrase. Hidden from repr/model dumps.",
     )
+    reuse_existing: bool = Field(
+        default=False,
+        description=(
+            "Reuse a live session only when caller identity, source IP, target, "
+            "authentication method, and credential fingerprint all match exactly."
+        ),
+    )
 
     @model_validator(mode="after")
     def check_auth_method(self):
