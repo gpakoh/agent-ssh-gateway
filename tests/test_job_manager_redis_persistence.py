@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.job_manager import JobManager
+from app.job_manager import JobManager, JobRecord
 
 
 def _make_stream(events):
@@ -65,6 +65,42 @@ class TestJobManagerPersistsToRedis:
 
         redis_queue.save_terminal_job.assert_awaited_once()
         assert redis_queue.save_terminal_job.call_args.kwargs["status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_nonterminal_state_is_never_written_as_terminal_snapshot(self):
+        redis_queue = AsyncMock()
+        jm = _make_job_manager(_make_stream([]), redis_queue=redis_queue)
+        job = JobRecord(
+            job_id="j-running",
+            session_id="s1",
+            command="echo hi",
+            owner_id="fp-a",
+            status="cancelling",
+        )
+
+        await jm._persist_terminal_job(job)
+
+        redis_queue.save_terminal_job.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_force_cleanup_repairs_persistence_for_already_terminal_job(self):
+        redis_queue = AsyncMock()
+        jm = _make_job_manager(
+            _make_stream([("exit", "0")]), redis_queue=redis_queue
+        )
+        job_id = await jm.create_job("s1", "echo hi", owner_id="fp-a")
+        job = await jm.get_job(job_id)
+        assert job is not None
+        await asyncio.wait_for(job.completed_event.wait(), timeout=5)
+        assert job.status == "completed"
+        redis_queue.save_terminal_job.assert_awaited_once()
+
+        redis_queue.save_terminal_job.reset_mock()
+        assert await jm.force_cleanup() == 1
+
+        redis_queue.save_terminal_job.assert_awaited_once()
+        assert redis_queue.save_terminal_job.call_args.args[0] == job_id
+        assert redis_queue.save_terminal_job.call_args.kwargs["status"] == "completed"
 
     @pytest.mark.asyncio
     async def test_no_redis_queue_configured_is_a_noop(self):
