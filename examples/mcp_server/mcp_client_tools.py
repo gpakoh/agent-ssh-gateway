@@ -1189,26 +1189,19 @@ def read_handoff(
 
 
 def _handoff_write_registry(registry: Any | None = None):
-    """Return a write-capable registry only for the fixed handoff write path.
+    """Return the registry used for the fixed handoff write path.
 
-    The public MCP capability is still controlled by ``mcp:handoff`` plus
-    ``MCP_GATEWAY_WRITE_MODE``; this registry is an internal filesystem
-    enforcement object, not a grant of generic ``project:write`` to callers.
-    The live gateway adapter injects its server-owned registry.  The fallback
-    keeps direct Python callers project-aware without using an SSH namespace.
+    The live MCP adapter injects its server-owned write-scoped registry after
+    ``mcp:handoff`` / write-mode authorization.  Direct Python callers do not
+    get an implicit privilege upgrade: without an injected registry they see
+    the normal read-scoped singleton, whose write policy fails closed.
     """
     if registry is not None:
         return registry
 
-    from app.workspace.policy import ALL_SCOPES
-    from app.workspace.registry import WorkspaceRegistry, get_registry
+    from app.workspace.registry import get_registry
 
-    base = get_registry()
-    return WorkspaceRegistry(
-        base._projects,
-        base._allowed_roots,
-        granted_scopes=ALL_SCOPES,
-    )
+    return get_registry()
 
 
 def write_handoff_plan(
