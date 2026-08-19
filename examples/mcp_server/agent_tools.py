@@ -1403,7 +1403,20 @@ def project_run_agent(
         project_root = _resolve_project_root(project)
         managed_path = managed_workspace_path(project, task_id)
         managed_clone = managed_path is not None
-        worktree_path = managed_path or (task_json.get("worktree_path") or "").strip() or None
+        user_worktree = (task_json.get("worktree_path") or "").strip() or None
+        if managed_clone and user_worktree:
+            return {
+                "task_id": task_id,
+                "status": "error",
+                "error": "managed execution is active but task.json supplies an explicit worktree_path; "
+                "remove worktree_path from the task or disable MCP_AGENT_WORKSPACE_ROOT",
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "started_at": started_at,
+                "finished_at": _now_iso(),
+            }
+        worktree_path = managed_path or user_worktree
         isolation_error = _isolated_worktree_error(project_root, worktree_path)
         if isolation_error:
             return {

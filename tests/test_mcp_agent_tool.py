@@ -426,7 +426,10 @@ class TestProjectRunAgentScriptCwd:
         script = calls[2]
         assert script.startswith("cd '/abs/project/root' || exit 1")
 
-    def test_managed_workspace_env_overrides_task_supplied_worktree(self, monkeypatch):
+    def test_managed_workspace_env_rejects_task_supplied_worktree(self, monkeypatch):
+        """Regression: managed mode silently replaced a valid user-supplied
+        worktree_path with the executor-owned managed path.  Fail-closed:
+        error out instead of silently substituting."""
         monkeypatch.setenv("MCP_AGENT_WORKSPACE_ROOT", "/var/lib/mcp-agent/workspaces")
         monkeypatch.setenv("MCP_AGENT_STATE_ROOT", "/var/lib/mcp-agent/state")
         monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", "/var/lib/mcp-agent/sources")
@@ -450,14 +453,9 @@ class TestProjectRunAgentScriptCwd:
             run_script_async=run_script_async,
         )
 
-        assert result["job_id"] == "job-managed-1"
-        script = run_script_async.call_args[0][1]
-        assert "/abs/project/root/attacker-chosen" not in script
-        assert "/var/lib/mcp-agent/workspaces/test-" in script
-        assert f"/{TASK_ID}" in script
-        assert f"/{base_ref}.bundle" in script
-        assert "git clone --no-hardlinks --no-checkout" in script
-        assert "git worktree add" not in script
+        assert result["status"] == "error"
+        assert "worktree_path" in result["error"].lower() or "managed" in result["error"].lower()
+        run_script_async.assert_not_called()
 
     def test_no_cd_when_project_root_unresolvable(self, monkeypatch):
         """Registry lookup failure must not crash the whole call -- just
@@ -469,6 +467,25 @@ class TestProjectRunAgentScriptCwd:
         rc = _make_run_cmd(task_json=_make_task_json(), exit_code=0)
         result = project_run_agent(rc, project="test", task_id=TASK_ID)
         assert result["status"] == "needs-review"
+
+    def test_non_managed_mode_honors_user_worktree_path(self):
+        """Regression: when MCP_AGENT_WORKSPACE_ROOT is NOT set, a valid
+        user-supplied worktree_path from task.json must appear in the
+        generated script."""
+        user_wt = "/tmp/external-agent-workspace"
+        captured: list[str] = []
+
+        def counting_run(project, command):
+            captured.append(command)
+            if "task.json" in command:
+                return {"exit_code": 0, "stdout": _make_task_json(worktree_path=user_wt), "stderr": ""}
+            if "current-plan.md" in command:
+                return {"exit_code": 0, "stdout": "# Plan", "stderr": ""}
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+        project_run_agent(counting_run, project="test", task_id=TASK_ID)
+        script = captured[2]
+        assert user_wt in script
 
     def test_async_submit_script_also_cds_into_project_root(self, monkeypatch):
         monkeypatch.setattr(
