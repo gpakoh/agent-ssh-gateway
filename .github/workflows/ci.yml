@@ -290,13 +290,18 @@ jobs:
           }
           trap cleanup EXIT
 
-          docker run -d --name "$GW_NAME" -p 18085:8085 \
+          # No -p port mappings: health probes use docker exec inside the
+          # container's own namespace (see comments above), and hardcoded
+          # host ports collide when two CI runs share a runner — the step
+          # completes in ~1s with bind-address-in-use instead of the
+          # expected 60s polling loop.
+          docker run -d --name "$GW_NAME" \
             -e API_KEY=ci-smoke-only-not-a-real-secret \
             -e AGENT_TOKEN=ci-smoke-only-not-a-real-secret \
             -e JWT_SECRET=ci-smoke-only-not-a-real-secret \
             "$REGISTRY/gpakoh/agent-ssh-gateway:${{ github.sha }}"
 
-          docker run -d --name "$MCP_NAME" -p 18087:8087 \
+          docker run -d --name "$MCP_NAME" \
             -e MCP_CLIENT_SAFE_MODE=true \
             -e MCP_GATEWAY_TOOL_MODE=mcp_client \
             -e MCP_STREAMABLE_HTTP_HOST=0.0.0.0 \
