@@ -331,6 +331,30 @@ class TestProjectAwareHandoffWrite:
         assert result["exit_code"] == 0
         assert "Fix the host workspace" in plan_path.read_text(encoding="utf-8")
 
+    def test_direct_caller_without_write_registry_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import app.workspace.registry as registry_module
+        from app.workspace.registry import WorkspaceRegistry
+
+        self._enable_handoff(monkeypatch)
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        write_registry, project_root = self._registry(tmp_path)
+        registry_path = tmp_path / "projects.yaml"
+        read_registry = WorkspaceRegistry.load(registry_path)
+        monkeypatch.setattr(registry_module, "_registry", read_registry)
+
+        result = mod.write_handoff_plan(
+            self._NoSshClient(),
+            "demo",
+            "Must not gain write scope",
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "POLICY_DENIED"
+        assert not (project_root / ".ai-bridge").exists()
+        assert write_registry is not read_registry
+
     def test_existing_handoff_directory_is_reused(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
