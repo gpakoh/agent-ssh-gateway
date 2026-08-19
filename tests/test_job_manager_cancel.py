@@ -87,3 +87,63 @@ async def test_cancel_running_waits_for_remote_ack_before_terminal_state():
     assert result["status"] == "cancelled"
     assert result["exit_code"] == -1
     assert result["error_message"] is None
+
+
+@pytest.mark.asyncio
+async def test_force_cleanup_persists_pending_cancel_without_remote_execution():
+    """A task prevented from ever starting has a provable cancelled outcome."""
+    redis_queue = AsyncMock()
+    remote_calls: list[tuple] = []
+    mock_ssh = AsyncMock()
+
+    async def _stream(*args, **kwargs):
+        remote_calls.append(args)
+        if False:
+            yield  # pragma: no cover
+
+    mock_ssh.execute_stream = _stream
+    jm = JobManager(ssh_manager=mock_ssh, max_jobs=10, redis_queue=redis_queue)
+    job_id = await jm.create_job("s1", "echo hi", owner_id="owner-a")
+    job = await jm.get_job(job_id)
+    assert job is not None
+    assert job.status == "pending"
+
+    assert await jm.force_cleanup() == 1
+
+    assert remote_calls == []
+    assert job.status == "cancelled"
+    assert job.completed_event.is_set()
+    redis_queue.save_terminal_job.assert_awaited_once()
+    assert redis_queue.save_terminal_job.call_args.args[0] == job_id
+    assert redis_queue.save_terminal_job.call_args.kwargs["status"] == "cancelled"
+    assert await jm.get_job(job_id) is None
+
+
+@pytest.mark.asyncio
+async def test_force_cleanup_does_not_synthesize_terminal_for_running_job():
+    """Local Task cancellation is not proof that an already-started remote stopped."""
+    redis_queue = AsyncMock()
+    started = asyncio.Event()
+    block_forever = asyncio.Event()
+    mock_ssh = AsyncMock()
+
+    async def _stream(*args, **kwargs):
+        started.set()
+        await block_forever.wait()
+        if False:
+            yield  # pragma: no cover
+
+    mock_ssh.execute_stream = _stream
+    jm = JobManager(ssh_manager=mock_ssh, max_jobs=10, redis_queue=redis_queue)
+    job_id = await jm.create_job("s1", "echo hi", owner_id="owner-a")
+    job = await jm.get_job(job_id)
+    assert job is not None
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert job.status == "running"
+
+    assert await jm.force_cleanup() == 1
+
+    assert job.status == "cancelling"
+    assert not job.completed_event.is_set()
+    redis_queue.save_terminal_job.assert_not_awaited()
+    assert await jm.get_job(job_id) is None
