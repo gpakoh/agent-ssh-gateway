@@ -15,8 +15,11 @@ no structured ``components`` dict).  After the fix each test must pass.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 from starlette.testclient import TestClient
 
@@ -249,6 +252,131 @@ class TestLiveDependencyFaultInjection:
         assert data["components"]["redis"]["required"] is False
         assert data["components"]["postgres"]["status"] == "ok"
         assert data["components"]["postgres"]["required"] is False
+
+
+class TestAggregateHealthBudget:
+    """The public health response must stay inside Docker's 4s caller budget."""
+
+    def test_internal_aggregate_deadline_has_one_second_external_margin(self):
+        from app.routers.system import HEALTH_AGGREGATE_TIMEOUT_SECONDS
+
+        assert HEALTH_AGGREGATE_TIMEOUT_SECONDS <= 3.0
+        assert HEALTH_AGGREGATE_TIMEOUT_SECONDS < 4.0
+
+    @pytest.mark.asyncio
+    async def test_aggregate_deadline_converts_hung_probe_to_component_timeout(self, monkeypatch):
+        from app.routers import system
+
+        async def hung_probe() -> tuple[bool, str | None]:
+            await asyncio.sleep(0.25)
+            return True, None
+
+        async def healthy_probe(*_args) -> tuple[bool, str | None]:
+            return True, None
+
+        monkeypatch.setattr(system, "HEALTH_AGGREGATE_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(system, "_probe_redis", hung_probe)
+        monkeypatch.setattr(system, "_probe_postgres", healthy_probe)
+        monkeypatch.setattr(system, "_probe_ssh", healthy_probe)
+
+        results = await system._run_health_probes(
+            redis_required=True,
+            postgres_required=True,
+            ssh_host="sshd",
+            ssh_port=22,
+        )
+
+        assert results["redis"] == (False, "timeout")
+        assert results["postgres"] == (True, None)
+        assert results["ssh"] == (True, None)
+
+    def test_simultaneous_timeouts_return_before_external_four_second_deadline(self):
+        async def slow_timeout_probe() -> tuple[bool, str | None]:
+            await asyncio.sleep(1.05)
+            return False, "timeout"
+
+        def stalled_ssh_connect(*_args, **_kwargs):
+            time.sleep(2.05)
+            raise TimeoutError("simulated ssh timeout")
+
+        with (
+            patch("app.routers.system._probe_redis", side_effect=slow_timeout_probe),
+            patch("app.routers.system._probe_postgres", side_effect=slow_timeout_probe),
+            patch("app.routers.system.socket.create_connection", side_effect=stalled_ssh_connect),
+            patch("app.routers.system._deep_ssh_check", new=AsyncMock(return_value=None)),
+            patch("app.routers.system._state", _healthy_state()),
+            patch(
+                "app.routers.system.settings",
+                _healthy_settings(persistent_sessions_enabled=True),
+            ),
+            TestClient(app) as client,
+        ):
+            started = time.monotonic()
+            response = client.get("/health")
+            elapsed = time.monotonic() - started
+
+        assert elapsed < 4.0, f"/health exceeded Docker caller timeout: {elapsed:.3f}s"
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "degraded"
+        assert data["ready"] is False
+        assert data["components"]["redis"]["failure_class"] == "timeout"
+        assert data["components"]["postgres"]["failure_class"] == "timeout"
+        assert data["components"]["ssh"]["failure_class"] == "timeout"
+
+    @pytest.mark.asyncio
+    async def test_stalled_ssh_tcp_probe_does_not_block_event_loop(self):
+        from app.routers.system import health_check
+
+        async def healthy_probe() -> tuple[bool, str | None]:
+            return True, None
+
+        def stalled_ssh_connect(*_args, **_kwargs):
+            time.sleep(0.25)
+            raise TimeoutError("simulated ssh timeout")
+
+        with (
+            patch("app.routers.system._probe_redis", side_effect=healthy_probe),
+            patch("app.routers.system._probe_postgres", side_effect=healthy_probe),
+            patch("app.routers.system.socket.create_connection", side_effect=stalled_ssh_connect),
+            patch("app.routers.system._deep_ssh_check", new=AsyncMock(return_value=None)),
+            patch("app.routers.system._state", _healthy_state()),
+            patch("app.routers.system.settings", _healthy_settings()),
+        ):
+            health_task = asyncio.create_task(health_check())
+            started = time.monotonic()
+            await asyncio.sleep(0.05)
+            loop_delay = time.monotonic() - started
+            result = await health_task
+
+        assert loop_delay < 0.15, f"SSH TCP probe blocked event loop for {loop_delay:.3f}s"
+        assert result.components["ssh"].failure_class == "timeout"
+
+    @pytest.mark.asyncio
+    async def test_stalled_deep_ssh_probe_does_not_block_event_loop(self):
+        from app.routers.system import _deep_ssh_check
+
+        mock_client = MagicMock()
+
+        def stalled_connect(*_args, **_kwargs):
+            time.sleep(0.25)
+            raise TimeoutError("simulated deep ssh timeout")
+
+        mock_client.connect.side_effect = stalled_connect
+        with (
+            patch("app.routers.system.settings") as mock_settings,
+            patch("paramiko.SSHClient", return_value=mock_client),
+        ):
+            mock_settings.ssh_health_user = "health"
+            mock_settings.ssh_health_password = "pass"
+            probe_task = asyncio.create_task(_deep_ssh_check("localhost", 22))
+            started = time.monotonic()
+            await asyncio.sleep(0.05)
+            loop_delay = time.monotonic() - started
+            result = await probe_task
+
+        assert loop_delay < 0.15, f"deep SSH probe blocked event loop for {loop_delay:.3f}s"
+        assert result is False
 
 
 class TestBackwardCompatibility:

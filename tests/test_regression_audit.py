@@ -62,9 +62,9 @@ class TestDeepSshCheck:
         assert result is True
         mock_client.connect.assert_called_once_with(
             "localhost", port=22, username="health", password="pass",
-            timeout=5, allow_agent=False, look_for_keys=False,
+            timeout=1.0, allow_agent=False, look_for_keys=False,
         )
-        mock_client.exec_command.assert_called_once_with("true", timeout=5)
+        mock_client.exec_command.assert_called_once_with("true", timeout=1.0)
         mock_client.close.assert_called_once()
 
     @pytest.mark.asyncio
@@ -99,40 +99,46 @@ class TestDeepSshCheck:
         assert result is False
 
     def test_health_endpoint_uses_tcp_when_no_ssh_creds(self):
-        """When ssh_health_user is empty, health relies on TCP ping only."""
+        """Without deep credentials, the offloaded TCP probe is authoritative."""
         import asyncio
         with (
             patch("app.routers.system.settings") as mock_settings,
             patch("app.routers.system.socket") as mock_socket,
-            patch("app.routers.system._deep_ssh_check") as mock_deep,
+            patch("app.routers.system._probe_deep_ssh") as mock_deep,
         ):
             mock_settings.ssh_health_user = ""
             mock_settings.ssh_health_password = ""
+            mock_settings.redis_url = ""
+            mock_settings.persistent_sessions_enabled = False
+            mock_settings.api_auth_enabled = False
+            mock_settings.api_key = ""
             mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
             mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
-            mock_deep.return_value = None
             from app.routers.system import health_check
             result = asyncio.run(health_check())
         assert result.ssh_server_reachable is True
-        mock_deep.assert_awaited_once()
+        mock_deep.assert_not_awaited()
 
     def test_health_endpoint_uses_deep_check_when_creds_set(self):
-        """When ssh_health_user is set, deep SSH check overrides TCP ping."""
+        """Configured deep SSH probe subsumes the shallow TCP probe."""
         import asyncio
         with (
             patch("app.routers.system.settings") as mock_settings,
             patch("app.routers.system.socket") as mock_socket,
-            patch("app.routers.system._deep_ssh_check") as mock_deep,
+            patch("app.routers.system._probe_deep_ssh") as mock_deep,
         ):
             mock_settings.ssh_health_user = "health"
             mock_settings.ssh_health_password = "pass"
-            mock_socket.create_connection.return_value.__enter__ = lambda s: MagicMock()
-            mock_socket.create_connection.return_value.__exit__ = MagicMock(return_value=False)
-            mock_deep.return_value = True
+            mock_settings.redis_url = ""
+            mock_settings.persistent_sessions_enabled = False
+            mock_settings.api_auth_enabled = False
+            mock_settings.api_key = ""
+            mock_deep.return_value = (True, None)
             from app.routers.system import health_check
             result = asyncio.run(health_check())
         assert result.ssh_server_reachable is True
-        mock_deep.assert_awaited_once()
+        mock_deep.assert_awaited_once_with("sshd", 22, "health", "pass")
+        mock_socket.create_connection.assert_not_called()
 
 
 # ── Issue 4: Error model — gateway code passthrough ─────────────
