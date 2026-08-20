@@ -856,3 +856,26 @@ class TestSplitCsvOrLines:
 
     def test_newline_csv_mixed_with_blanks(self):
         assert self._fn()("a, b\n\nc, d\n") == ["a", "b", "c", "d"]
+
+
+class TestGatewayArchiveAgentTaskScriptTransport:
+    def test_routes_archive_through_generated_script(self, monkeypatch):
+        import examples.mcp_server.server as server_mod
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_archive_agent_task
+
+        client = MagicMock()
+        client.execute_project_script.return_value = {
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "",
+        }
+        monkeypatch.setattr(server_mod, "client", client)
+
+        result = gateway_archive_agent_task(project="test", task_id=TASK_ID)
+
+        assert result["result"]["exit_code"] == 0
+        client.execute_project_script.assert_called_once()
+        script = client.execute_project_script.call_args.args[1]
+        assert 'mv -T -- "$src" "$dst"' in script
+        client.execute_project_command.assert_not_called()
+        client.execute_argv.assert_not_called()
