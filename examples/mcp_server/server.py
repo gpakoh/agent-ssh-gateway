@@ -25,6 +25,7 @@ from docker_confirm import ConfirmStore
 from gateway_client import (
     GatewayClient,
     GatewayClientError,  # noqa: F401 (facade: tests raise this class by server-module identity)
+    GatewayClientSessionPool,
 )
 from mcp.server.fastmcp import FastMCP
 from mcp_client_tools import (
@@ -94,6 +95,44 @@ agent_client = (
     if _agent_client_configured
     else client
 )
+
+_gateway_client_sessions = GatewayClientSessionPool()
+_agent_client_sessions = GatewayClientSessionPool()
+
+
+def _current_mcp_session() -> Any | None:
+    """Return the SDK-owned MCP ServerSession for the active request, if any.
+
+    MCP SDK v1.29 does not expose the wire ``Mcp-Session-Id`` to handlers,
+    and trusting that raw client-supplied header would be an identity bug.
+    ``FastMCP.get_context().session`` is the server-created session object and
+    stays stable for the lifetime of a stateful Streamable HTTP transport.
+    Outside a request (stdio helpers, unit tests, startup code), retain the
+    historical process-global client behavior.
+    """
+    try:
+        return mcp.get_context().session
+    except (LookupError, ValueError):
+        return None
+
+
+def get_gateway_client() -> Any:
+    """Resolve gateway client state for the current logical MCP transport."""
+    session = _current_mcp_session()
+    if session is None:
+        return client
+    return _gateway_client_sessions.get(client, session)
+
+
+def get_agent_client() -> Any:
+    """Resolve dedicated executor client state for the current MCP transport."""
+    if not _agent_client_configured:
+        return get_gateway_client()
+    session = _current_mcp_session()
+    if session is None:
+        return agent_client
+    return _agent_client_sessions.get(agent_client, session)
+
 
 register_tool = tool_registry.register_tool
 instrumented = tool_registry.instrumented

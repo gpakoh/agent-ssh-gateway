@@ -42,13 +42,11 @@ from examples.mcp_server.mcp_infra.tool_registry import register_tool, run_tool,
 
 
 def _server_client():
-    return server_attr("client")
+    return server_attr("get_gateway_client")()
 
 
 def _server_agent_client():
-    if server_attr("_agent_client_configured"):
-        return server_attr("agent_client")
-    return _server_client()
+    return server_attr("get_agent_client")()
 
 
 def _server_agent_router():
