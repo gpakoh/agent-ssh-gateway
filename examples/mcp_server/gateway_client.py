@@ -9,6 +9,7 @@ import time
 import weakref
 from typing import Any
 
+import anyio
 import httpx
 from command_policy import validate_readonly_command
 
@@ -306,22 +307,30 @@ class GatewayClient:
         if sid == self.session_id:
             self.session_id = ""
 
-    def release(self) -> None:
-        """Release resources owned by an MCP-scoped fork exactly once.
+    def prepare_release(self) -> str:
+        """Atomically end local ownership and return the owned SID to clean up.
 
-        A fork initially borrows the configured seed SID and must never destroy it.
-        Once the fork creates/reconnects its own unique SID, lifecycle release closes
-        that SID deterministically. Direct/global GatewayClient instances keep their
-        historical explicit ``disconnect()`` contract and are not release-managed.
+        This is the lifecycle state transition. It performs no network I/O, so once
+        it returns no later cleanup operation is allowed to mutate this client's
+        ownership/session state. Borrowed seed SIDs are never returned for cleanup.
         """
         with self._reconnect_lock:
             if not self._release_managed or self._released:
-                return
+                return ""
             self._released = True
             sid = self.session_id if self._owns_session else ""
             self.session_id = ""
             self._owns_session = False
+            return sid
 
+    def release(self) -> None:
+        """Release resources owned by an MCP-scoped fork exactly once.
+
+        Synchronous callers keep the historical best-effort behavior. MCP lifespan
+        teardown uses ``prepare_release()`` plus ``release_sid_async()`` so network
+        cleanup remains cancellable and cannot escape the owning lifecycle.
+        """
+        sid = self.prepare_release()
         if not sid:
             return
         try:
@@ -333,6 +342,47 @@ class GatewayClient:
         except Exception:
             # Lifecycle cleanup is best-effort. Gateway idle cleanup remains the
             # final safety net if teardown happens during a gateway outage.
+            pass
+
+    async def _post_async(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float | int,
+    ) -> dict[str, Any]:
+        try:
+            async with httpx.AsyncClient() as async_client:
+                response = await async_client.post(
+                    f"{self.base_url}{path}",
+                    json=payload,
+                    headers=self._headers(),
+                    timeout=timeout,
+                )
+        except httpx.RequestError as exc:
+            raise _transport_error(exc) from exc
+        if response.status_code >= 400:
+            raise GatewayClientError(
+                f"POST {path} failed: {response.status_code} {response.text}",
+                status_code=response.status_code,
+            )
+        data = response.json()
+        return data if isinstance(data, dict) else {}
+
+    async def release_sid_async(self, sid: str) -> None:
+        """Best-effort cancellable disconnect for a SID already detached locally."""
+        if not sid:
+            return
+        try:
+            with anyio.move_on_after(self._release_http_timeout):
+                await self._post_async(
+                    "/api/ssh/disconnect",
+                    {"session_id": sid},
+                    timeout=self._release_http_timeout,
+                )
+        except Exception:
+            # Request failures are best-effort. Cancellation classes inherit
+            # BaseException and therefore still propagate to the owning task group.
             pass
 
     @staticmethod
@@ -846,15 +896,29 @@ class GatewayClientSessionPool:
             self._clients[mcp_session] = (base, scoped, lifecycle_owner)
             return scoped
 
-    def release_owner(self, lifecycle_owner: Any) -> int:
-        """Remove and release all scoped clients belonging to one MCP lifespan."""
-        released: list[GatewayClient] = []
+    def detach_owner(self, lifecycle_owner: Any) -> list[tuple[GatewayClient, str]]:
+        """Detach one lifecycle's clients and atomically end their local ownership."""
+        detached: list[tuple[GatewayClient, str]] = []
         with self._lock:
             for mcp_session, entry in list(self._clients.items()):
                 if entry[2] is lifecycle_owner:
                     self._clients.pop(mcp_session, None)
-                    released.append(entry[1])
+                    scoped = entry[1]
+                    detached.append((scoped, scoped.prepare_release()))
+        return detached
 
-        for scoped in released:
-            scoped.release()
-        return len(released)
+    def release_owner(self, lifecycle_owner: Any) -> int:
+        """Synchronously release all scoped clients belonging to one MCP lifespan."""
+        detached = self.detach_owner(lifecycle_owner)
+        for scoped, sid in detached:
+            if not sid:
+                continue
+            try:
+                scoped._post(
+                    "/api/ssh/disconnect",
+                    {"session_id": sid},
+                    timeout=scoped._release_http_timeout,
+                )
+            except Exception:
+                pass
+        return len(detached)

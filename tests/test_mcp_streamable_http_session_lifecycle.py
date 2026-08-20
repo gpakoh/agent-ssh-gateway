@@ -52,6 +52,20 @@ class _FakeGateway:
             return self._execute(payload)
         raise AssertionError(f"unexpected fake gateway URL: {url}")
 
+    async def post_async(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float | int,
+    ) -> dict[str, Any]:
+        assert path == "/api/ssh/disconnect"
+        assert timeout > 0
+        response = self._disconnect(payload)
+        if response.status_code >= 400:
+            raise RuntimeError(f"disconnect failed: {response.status_code}")
+        return response.json()
+
     def _connect(self, payload: dict[str, Any]) -> _Response:
         reuse = bool(payload.get("reuse_existing"))
         with self._lock:
@@ -159,6 +173,7 @@ async def test_five_real_mcp_transports_reconnect_and_disconnect_without_sid_cro
     monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
     monkeypatch.setenv("MCP_ACCESS_PROFILE", "mcp_client_safe")
     monkeypatch.setattr("gateway_client.httpx.post", fake.post)
+    monkeypatch.setattr("gateway_client.GatewayClient._post_async", fake.post_async)
 
     app = build_streamable_http_app()
     import examples.mcp_server.server as srv
@@ -283,6 +298,7 @@ async def test_fifty_streamable_http_connect_disconnect_cycles_release_owned_gat
     monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
     monkeypatch.setenv("MCP_ACCESS_PROFILE", "mcp_client_safe")
     monkeypatch.setattr("gateway_client.httpx.post", fake.post)
+    monkeypatch.setattr("gateway_client.GatewayClient._post_async", fake.post_async)
 
     app = build_streamable_http_app()
     import examples.mcp_server.server as srv
@@ -446,6 +462,7 @@ async def test_five_real_mcp_transports_dual_pool_fill_cap_reconnect_and_disconn
     monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
     monkeypatch.setenv("MCP_ACCESS_PROFILE", "mcp_client_safe")
     monkeypatch.setattr("gateway_client.httpx.post", fake.post)
+    monkeypatch.setattr("gateway_client.GatewayClient._post_async", fake.post_async)
 
     app = build_streamable_http_app()
     import examples.mcp_server.server as srv
@@ -540,6 +557,7 @@ async def test_partial_dual_pool_materialization_races_with_stale_normal_without
     monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
     monkeypatch.setenv("MCP_ACCESS_PROFILE", "mcp_client_safe")
     monkeypatch.setattr("gateway_client.httpx.post", fake.post)
+    monkeypatch.setattr("gateway_client.GatewayClient._post_async", fake.post_async)
 
     app = build_streamable_http_app()
     import examples.mcp_server.server as srv
@@ -603,6 +621,7 @@ async def test_fifty_streamable_http_dual_pool_cycles_release_two_sids_each(
     monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
     monkeypatch.setenv("MCP_ACCESS_PROFILE", "mcp_client_safe")
     monkeypatch.setattr("gateway_client.httpx.post", fake.post)
+    monkeypatch.setattr("gateway_client.GatewayClient._post_async", fake.post_async)
 
     app = build_streamable_http_app()
     import examples.mcp_server.server as srv
@@ -640,6 +659,7 @@ async def test_abrupt_client_task_cancellation_still_releases_both_owned_sids(
     monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
     monkeypatch.setenv("MCP_ACCESS_PROFILE", "mcp_client_safe")
     monkeypatch.setattr("gateway_client.httpx.post", fake.post)
+    monkeypatch.setattr("gateway_client.GatewayClient._post_async", fake.post_async)
 
     app = build_streamable_http_app()
     import examples.mcp_server.server as srv

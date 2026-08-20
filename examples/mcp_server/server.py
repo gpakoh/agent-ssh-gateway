@@ -80,21 +80,26 @@ async def _mcp_lifespan(_server: FastMCP) -> AsyncIterator[Any]:
         gateway_pool = globals().get("_gateway_client_sessions")
         agent_pool = globals().get("_agent_client_sessions")
 
-        async def _release_pool(pool: GatewayClientSessionPool) -> None:
-            await anyio.to_thread.run_sync(
-                pool.release_owner,
-                lifecycle_owner,
-                abandon_on_cancel=True,
-            )
+        # End local ownership synchronously before any cancellable network I/O.
+        # Once detached, this lifecycle can no longer mutate pool membership or
+        # client ownership/session state, even if its network cleanup is cancelled.
+        detached: list[tuple[GatewayClient, str]] = []
+        if isinstance(gateway_pool, GatewayClientSessionPool):
+            detached.extend(gateway_pool.detach_owner(lifecycle_owner))
+        if isinstance(agent_pool, GatewayClientSessionPool):
+            detached.extend(agent_pool.detach_owner(lifecycle_owner))
+
+        async def _release_sid(scoped: GatewayClient, sid: str) -> None:
+            await scoped.release_sid_async(sid)
 
         # Transport teardown itself may be cancelled. Shield only this bounded
-        # release window; every disconnect also has its own short network timeout.
+        # task group. Unlike an abandoned worker thread, every cleanup coroutine
+        # remains owned by this task group and is cancelled/joined before exit.
         with anyio.move_on_after(_MCP_SESSION_RELEASE_DEADLINE_SECONDS, shield=True):
             async with anyio.create_task_group() as task_group:
-                if isinstance(gateway_pool, GatewayClientSessionPool):
-                    task_group.start_soon(_release_pool, gateway_pool)
-                if isinstance(agent_pool, GatewayClientSessionPool):
-                    task_group.start_soon(_release_pool, agent_pool)
+                for scoped, sid in detached:
+                    if sid:
+                        task_group.start_soon(_release_sid, scoped, sid)
         await close_fleet_runtime()
 
 
