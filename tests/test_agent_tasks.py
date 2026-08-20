@@ -319,9 +319,13 @@ class TestReadAgentTaskFile:
             filename="agent-status.md",
         )
         assert result["stdout"] == "file content"
-        assert len(calls) == 1
-        assert calls[0][0] == "my-proj"
-        assert "a12345678901/agent-status.md" in calls[0][1]
+        assert calls == [
+            ("my-proj", "ls -ld -- .ai-bridge"),
+            ("my-proj", "ls -ld -- .ai-bridge/tasks"),
+            ("my-proj", "ls -ld -- .ai-bridge/tasks/a12345678901"),
+            ("my-proj", "ls -ld -- .ai-bridge/tasks/a12345678901/agent-status.md"),
+            ("my-proj", "cat .ai-bridge/tasks/a12345678901/agent-status.md"),
+        ]
 
     def test_rejects_shell_injection_in_filename(self):
         calls = []
@@ -368,10 +372,16 @@ class TestReadAgentLogTail:
 
         assert result["stdout"] == "two\nthree\n"
         assert result["truncated"] is True
-        assert calls == [(
-            "my-proj",
-            "tail -c 65537 -- .ai-bridge/tasks/a12345678901/opencode-output.log",
-        )]
+        assert calls == [
+            ("my-proj", "ls -ld -- .ai-bridge"),
+            ("my-proj", "ls -ld -- .ai-bridge/tasks"),
+            ("my-proj", "ls -ld -- .ai-bridge/tasks/a12345678901"),
+            ("my-proj", "ls -ld -- .ai-bridge/tasks/a12345678901/opencode-output.log"),
+            (
+                "my-proj",
+                "tail -c 65537 -- .ai-bridge/tasks/a12345678901/opencode-output.log",
+            ),
+        ]
 
     def test_strips_ansi_and_executor_owned_paths(self, monkeypatch):
         from examples.mcp_server.agent_paths import managed_workspace_path, task_dir
@@ -397,6 +407,37 @@ class TestReadAgentLogTail:
         assert "\x1b" not in result["stdout"]
         assert "/var/lib/mcp-agent" not in result["stdout"]
         assert "<agent-task>/current-plan.md" in result["stdout"]
+
+    def test_strips_executor_owned_paths_from_success_stderr(self, monkeypatch):
+        from examples.mcp_server.agent_paths import task_dir
+
+        monkeypatch.setenv("MCP_AGENT_STATE_ROOT", "/var/lib/mcp-agent/state")
+        project = "my-proj"
+        task_id = "a12345678901"
+        td = task_dir(project, task_id)
+
+        def fake_run(_project, command):
+            if command.startswith("ls -ld -- "):
+                return {
+                    "stdout": "drwxr-xr-x 1 user user 0 path\n",
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            return {
+                "stdout": "ok\n",
+                "stderr": f"warning while reading {td}/opencode-output.log",
+                "exit_code": 0,
+            }
+
+        result = read_agent_log_tail(
+            fake_run,
+            project=project,
+            task_id=task_id,
+        )
+
+        assert "/var/lib/mcp-agent" not in result["stderr"]
+        assert "<agent-task>/opencode-output.log" in result["stderr"]
+
     @pytest.mark.parametrize("tail_lines", [0, 1001, -1, True])
     def test_rejects_invalid_line_count_before_command(self, tail_lines):
         calls = []
@@ -429,9 +470,11 @@ class TestListAgentTasks:
             return {"stdout": "task-2\ntask-1", "stderr": "", "exit_code": 0}
 
         result = list_agent_tasks(fake_run_cmd, project="my-proj")
-        assert calls[0][0] == "my-proj"
-        assert "ls -1t" in calls[0][1]
-        assert ".ai-bridge/tasks/" in calls[0][1]
+        assert calls == [
+            ("my-proj", "ls -ld -- .ai-bridge"),
+            ("my-proj", "ls -ld -- .ai-bridge/tasks"),
+            ("my-proj", "ls -1t .ai-bridge/tasks/"),
+        ]
         assert result["stdout"] == "task-2\ntask-1"
 
     def test_marks_truncated_task_list(self):
