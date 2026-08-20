@@ -34,6 +34,12 @@ def _fake_run_cmd(current_plan: str = "# Plan\n\n1. Do the thing", task_json: di
         task_json = {"worktree_path": "../agent-worktrees/test-opencode"}
 
     def fn(project: str, command: str) -> dict:
+        if command.startswith("ls -ld -- "):
+            return {
+                "exit_code": 0,
+                "stdout": "drwxr-xr-x 1 user user 0 path\n",
+                "stderr": "",
+            }
         if command.startswith("cat ") and "task.json" in command:
             return {
                 "exit_code": 0,
