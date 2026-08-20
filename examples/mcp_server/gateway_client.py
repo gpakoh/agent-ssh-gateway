@@ -170,6 +170,10 @@ class GatewayClient:
         self._http_timeout = int(os.environ.get("MCP_GATEWAY_HTTP_TIMEOUT", "120"))
 
         self._reconnect_lock = threading.Lock()
+        self._reuse_existing = True
+        self._release_managed = False
+        self._owns_session = False
+        self._released = False
         self._ssh_host = ssh_host if ssh_host is not None else os.environ.get("GATEWAY_SSH_HOST", "")
         self._ssh_port = ssh_port if ssh_port is not None else int(os.environ.get("GATEWAY_SSH_PORT", "22"))
         self._ssh_user = ssh_user if ssh_user is not None else (
@@ -205,10 +209,14 @@ class GatewayClient:
         ``self.session_id`` between those logical clients makes an auto-reconnect in
         one transport mutate the default session selected by every other transport.
         The current session id is copied as an initial immutable value so deployments
-        that intentionally provide only ``GATEWAY_SESSION_ID`` keep working. Later
-        reconnects mutate only the fork's field. If that copied session is stale, the
-        existing retry/reconnect path can replace it independently; gateway-side
-        ``reuse_existing`` still permits SSH transport multiplexing.
+        that intentionally provide only ``GATEWAY_SESSION_ID`` keep working. It is a
+        borrowed seed: releasing the MCP transport must not disconnect it. Any later
+        connect/reconnect creates a distinct gateway logical SID for this MCP transport.
+
+        Gateway ``reuse_existing=True`` returns the same logical SID, and disconnecting
+        that SID removes it for every holder. Scoped clients therefore deliberately
+        disable SID reuse rather than trying to implement a process-local refcount that
+        could not protect holders in another MCP server process.
         """
         fork = GatewayClient(
             base_url=self.base_url,
@@ -224,9 +232,17 @@ class GatewayClient:
         fork.async_job_timeout = self.async_job_timeout
         fork.job_timeout = self.job_timeout
         fork._http_timeout = self._http_timeout
+        fork._reuse_existing = False
+        fork._release_managed = True
+        fork._owns_session = False
         return fork
 
     def _reconnect_session(self) -> None:
+        if self._released:
+            raise GatewayClientError("MCP session is closed")
+        old_owned_sid = (
+            self.session_id if self._release_managed and self._owns_session else ""
+        )
         if not self._ssh_host or not self._ssh_user:
             raise GatewayClientError(
                 "GATEWAY_SSH_HOST and GATEWAY_SSH_USER are required for auto-reconnect"
@@ -235,7 +251,7 @@ class GatewayClient:
             "host": self._ssh_host,
             "port": self._ssh_port,
             "username": self._ssh_user,
-            "reuse_existing": True,
+            "reuse_existing": self._reuse_existing,
         }
         if self._ssh_password:
             payload["password"] = self._ssh_password
@@ -255,12 +271,20 @@ class GatewayClient:
             raise GatewayClientError(f"auto-reconnect failed: {response.status_code}")
         data = response.json()
         self.session_id = data["session_id"]
+        if self._release_managed:
+            self._owns_session = True
+        if old_owned_sid and old_owned_sid != self.session_id:
+            try:
+                self._post("/api/ssh/disconnect", {"session_id": old_owned_sid})
+            except Exception:
+                pass
 
     def connect(self) -> str:
         """Establish SSH session and return session_id."""
-        self._reconnect_session()
-        assert self.session_id is not None
-        return self.session_id
+        with self._reconnect_lock:
+            self._reconnect_session()
+            assert self.session_id is not None
+            return self.session_id
 
     def disconnect(self, session_id: str | None = None) -> None:
         """Close SSH session. Best-effort — never raises."""
@@ -273,6 +297,31 @@ class GatewayClient:
             pass
         if sid == self.session_id:
             self.session_id = ""
+
+    def release(self) -> None:
+        """Release resources owned by an MCP-scoped fork exactly once.
+
+        A fork initially borrows the configured seed SID and must never destroy it.
+        Once the fork creates/reconnects its own unique SID, lifecycle release closes
+        that SID deterministically. Direct/global GatewayClient instances keep their
+        historical explicit ``disconnect()`` contract and are not release-managed.
+        """
+        with self._reconnect_lock:
+            if not self._release_managed or self._released:
+                return
+            self._released = True
+            sid = self.session_id if self._owns_session else ""
+            self.session_id = ""
+            self._owns_session = False
+
+        if not sid:
+            return
+        try:
+            self._post("/api/ssh/disconnect", {"session_id": sid})
+        except Exception:
+            # Lifecycle cleanup is best-effort. Gateway idle cleanup remains the
+            # final safety net if teardown happens during a gateway outage.
+            pass
 
     @staticmethod
     def _retry_on_session_not_found(
@@ -742,22 +791,28 @@ class GatewayClient:
 
 
 class GatewayClientSessionPool:
-    """Weakly bind mutable GatewayClient state to a server-side MCP session.
+    """Bind mutable GatewayClient state to a server-side MCP session lifecycle.
 
     The key is the SDK-created ``ServerSession`` object, never a client-supplied
-    header or bearer token. Weak keys ensure a closed MCP transport does not
-    become an unbounded process-lifetime cache. If a future SDK changes the
-    session object so it can no longer be used as a weak key, resolution fails
-    closed instead of silently falling back to shared mutable session state.
+    header or bearer token. Explicit lifecycle-owner release is the resource
+    contract; weak keys are only a cache-safety fallback and do not substitute for
+    disconnecting an owned gateway SID. If a future SDK changes the session object
+    so it can no longer be used as a weak key, resolution fails closed instead of
+    silently falling back to shared mutable session state.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._clients: weakref.WeakKeyDictionary[Any, tuple[GatewayClient, GatewayClient]] = (
-            weakref.WeakKeyDictionary()
-        )
+        self._clients: weakref.WeakKeyDictionary[
+            Any, tuple[GatewayClient, GatewayClient, Any | None]
+        ] = weakref.WeakKeyDictionary()
 
-    def get(self, base: Any, mcp_session: Any) -> Any:
+    def get(
+        self,
+        base: Any,
+        mcp_session: Any,
+        lifecycle_owner: Any | None = None,
+    ) -> Any:
         if not isinstance(base, GatewayClient):
             # Tests and embedding applications deliberately replace the server
             # facade client with a stub/mock. Preserve that exact object rather
@@ -770,5 +825,18 @@ class GatewayClientSessionPool:
                 return existing[1]
 
             scoped = base.fork_session()
-            self._clients[mcp_session] = (base, scoped)
+            self._clients[mcp_session] = (base, scoped, lifecycle_owner)
             return scoped
+
+    def release_owner(self, lifecycle_owner: Any) -> int:
+        """Remove and release all scoped clients belonging to one MCP lifespan."""
+        released: list[GatewayClient] = []
+        with self._lock:
+            for mcp_session, entry in list(self._clients.items()):
+                if entry[2] is lifecycle_owner:
+                    self._clients.pop(mcp_session, None)
+                    released.append(entry[1])
+
+        for scoped in released:
+            scoped.release()
+        return len(released)

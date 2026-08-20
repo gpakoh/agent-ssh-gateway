@@ -6,6 +6,7 @@ This server is intentionally kept outside the gateway core.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import sys
@@ -63,11 +64,23 @@ _auth_settings, _auth_provider, _agent_router = auth_setup.setup()
 
 
 @asynccontextmanager
-async def _mcp_lifespan(_server: FastMCP) -> AsyncIterator[None]:
-    """Close event-loop-owned fleet resources with the MCP server."""
+async def _mcp_lifespan(_server: FastMCP) -> AsyncIterator[Any]:
+    """Own resources for one SDK ServerSession and release them on transport close.
+
+    MCP SDK 1.29 enters this lifespan once per ``Server.run()`` / ``ServerSession``.
+    Its handler task group is cancelled before this context exits, so releasing the
+    scoped gateway client here cannot race an in-flight tool from the same transport.
+    """
+    lifecycle_owner = object()
     try:
-        yield None
+        yield lifecycle_owner
     finally:
+        gateway_pool = globals().get("_gateway_client_sessions")
+        agent_pool = globals().get("_agent_client_sessions")
+        if isinstance(gateway_pool, GatewayClientSessionPool):
+            await asyncio.to_thread(gateway_pool.release_owner, lifecycle_owner)
+        if isinstance(agent_pool, GatewayClientSessionPool):
+            await asyncio.to_thread(agent_pool.release_owner, lifecycle_owner)
         await close_fleet_runtime()
 
 
@@ -116,12 +129,22 @@ def _current_mcp_session() -> Any | None:
         return None
 
 
+def _current_mcp_lifecycle_owner() -> Any | None:
+    """Return the per-ServerSession lifespan owner for deterministic cleanup."""
+    try:
+        return mcp.get_context().request_context.lifespan_context
+    except (AttributeError, LookupError, ValueError):
+        return None
+
+
 def get_gateway_client() -> Any:
     """Resolve gateway client state for the current logical MCP transport."""
     session = _current_mcp_session()
     if session is None:
         return client
-    return _gateway_client_sessions.get(client, session)
+    return _gateway_client_sessions.get(
+        client, session, _current_mcp_lifecycle_owner()
+    )
 
 
 def get_agent_client() -> Any:
@@ -131,7 +154,9 @@ def get_agent_client() -> Any:
     session = _current_mcp_session()
     if session is None:
         return agent_client
-    return _agent_client_sessions.get(agent_client, session)
+    return _agent_client_sessions.get(
+        agent_client, session, _current_mcp_lifecycle_owner()
+    )
 
 
 register_tool = tool_registry.register_tool
