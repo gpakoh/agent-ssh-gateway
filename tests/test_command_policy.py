@@ -640,6 +640,48 @@ class TestCombinedFlags:
         assert ok is True
         assert "bash" in reason
 
+    @pytest.mark.parametrize("cmd", ["bash -n script.sh", "bash -n -- script.sh"])
+    def test_bash_n_single_script_allowed(self, cmd):
+        from app.command_policy import check_argument_shape
+
+        dangerous, reason = check_argument_shape(cmd)
+        assert dangerous is False, reason
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "bash -n",
+            "bash -n -",
+            "bash -n script.sh extra.sh",
+            "bash -ni script.sh",
+            "bash -in script.sh",
+            "bash -nc 'echo pwn'",
+            "bash -n -c 'echo pwn'",
+            "bash -n --noprofile script.sh",
+            "bash --noprofile -n script.sh",
+            "bash -n --rcfile evilrc script.sh",
+            "bash -n --init-file evilrc script.sh",
+            "bash -n -l script.sh",
+        ],
+    )
+    def test_bash_n_other_shapes_blocked(self, cmd):
+        from app.command_policy import check_argument_shape
+
+        dangerous, _reason = check_argument_shape(cmd)
+        assert dangerous is True, cmd
+
+    def test_perl_n_remains_blocked(self):
+        from app.command_policy import check_argument_shape
+
+        dangerous, reason = check_argument_shape("perl -n script.pl")
+        assert dangerous is True
+        assert "perl" in reason
+
+    @pytest.mark.parametrize("cmd", ["bash -n script.sh", "bash -n -- script.sh"])
+    def test_bash_n_passes_full_enforce_default_policy(self, cmd):
+        decision = evaluate_command_policy(cmd, mode="enforce", profile="default")
+        assert decision.allowed is True, decision.reason
+
     def test_python_u_only_allowed(self):
         """-u alone is not in EXEC_FLAGS — should not be blocked by arg shape."""
         from app.command_policy import check_argument_shape
