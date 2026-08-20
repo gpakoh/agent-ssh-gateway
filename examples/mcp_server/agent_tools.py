@@ -82,12 +82,16 @@ def _read_task_json(
     project: str,
     task_id: str,
 ) -> dict[str, Any]:
-    import shlex
+    from examples.mcp_server.agent_tasks import read_agent_task_file
 
-    cmd = f"cat {shlex.quote(f'{task_dir(project, task_id)}/task.json')}"
-    result = run_cmd(project, cmd)
+    result = read_agent_task_file(
+        run_cmd,
+        project=project,
+        task_id=task_id,
+        filename="task.json",
+    )
     raw = result.get("stdout", "")
-    if not raw.strip():
+    if raw == "(not found)" or not raw.strip():
         return {}
     try:
         return json.loads(raw)
@@ -114,12 +118,18 @@ def _read_current_plan(
     project: str,
     task_id: str,
 ) -> str | None:
-    import shlex
+    from examples.mcp_server.agent_tasks import read_agent_task_file
 
-    td = task_dir(project, task_id)
-    cmd = f"cat {shlex.quote(f'{td}/current-plan.md')}"
-    result = run_cmd(project, cmd)
-    return result.get("stdout", "").strip() or None
+    result = read_agent_task_file(
+        run_cmd,
+        project=project,
+        task_id=task_id,
+        filename="current-plan.md",
+    )
+    raw = result.get("stdout", "")
+    if raw == "(not found)":
+        return None
+    return raw.strip() or None
 
 
 def _proxy_fetch_script_lines(
