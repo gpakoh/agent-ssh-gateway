@@ -84,7 +84,7 @@ _gateway_error_hint = gateway_errors._gateway_error_hint
 
 
 def _server_client():
-    return server_attr("client")
+    return server_attr("get_gateway_client")()
 
 
 def _server_read_file():
