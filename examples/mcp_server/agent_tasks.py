@@ -7,6 +7,7 @@ import json
 import re
 import shlex
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from typing import Any
 
 from examples.mcp_server.agent_paths import (
@@ -148,25 +149,81 @@ def _encoded_write(path: str, content: str) -> str:
     return f"printf %s {shlex.quote(payload)} | base64 -d > {shlex.quote(path)}"
 
 
+def _coordination_path_prefixes(path: str) -> list[str]:
+    """Return every lexical component from the trust anchor to ``path``.
+
+    Legacy relative paths are anchored at the gateway-selected project cwd, so
+    ``.ai-bridge`` is the first component that must be protected. Configured
+    absolute paths are stricter: every component below ``/`` must be a real
+    path object, including the configured state root and its parents. This
+    deliberately rejects symlink-based aliases for the coordination root.
+    """
+    parsed = PurePosixPath(path)
+    if any(part == ".." for part in parsed.parts):
+        raise ValueError("coordination paths must not contain '..'")
+
+    prefixes: list[str] = []
+    if parsed.is_absolute():
+        current = PurePosixPath("/")
+        parts = parsed.parts[1:]
+    else:
+        current = PurePosixPath()
+        parts = parsed.parts
+
+    for part in parts:
+        if part in {"", "."}:
+            continue
+        current /= part
+        prefixes.append(str(current))
+    return prefixes
+
+
+def _coordination_guard_paths(paths: list[str]) -> list[str]:
+    """Return de-duplicated path prefixes for one coordination operation."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for path in paths:
+        for prefix in _coordination_path_prefixes(path):
+            if prefix not in seen:
+                seen.add(prefix)
+                ordered.append(prefix)
+    return ordered
+
+
+def _symlink_guard_lines(paths: list[str]) -> list[str]:
+    """Build trusted-script guards for every component in ``paths``."""
+    return [
+        f"if [ -L {shlex.quote(prefix)} ]; then exit 46; fi"
+        for prefix in _coordination_guard_paths(paths)
+    ]
+
+
 def _readonly_path_is_safe(
     run_cmd,
     *,
     project: str,
     path: str,
 ) -> bool:
-    """Return True only for an existing non-symlink coordination path.
+    """Return True only when the full coordination path chain is non-symlink.
 
-    Keep readonly agent-task operations on the generic project-command
-    transport. ``ls -ld`` is a literal readonly probe: unlike ``test && cat``
-    it does not require shell control syntax, and ``-d`` reports the link
-    itself instead of following it. A missing path or unexpected result fails
-    closed.
+    Readonly operations stay on the generic project-command transport. One
+    literal ``ls -ld`` probes every lexical prefix; ``-d`` reports each named
+    object without following that final component. Naming every ancestor as a
+    separate operand exposes an ancestor symlink that would otherwise be hidden
+    by an ordinary descendant. Missing paths, malformed output, or any symlink
+    fail closed.
     """
-    result = run_cmd(project, f"ls -ld -- {shlex.quote(path)}")
-    if result.get("exit_code") != 0:
+    prefixes = _coordination_path_prefixes(path)
+    if not prefixes:
         return False
-    stdout = str(result.get("stdout", ""))
-    return bool(stdout) and not stdout.startswith("l")
+    for prefix in prefixes:
+        result = run_cmd(project, f"ls -ld -- {shlex.quote(prefix)}")
+        if result.get("exit_code") != 0:
+            return False
+        stdout = str(result.get("stdout", ""))
+        if not stdout or stdout.startswith("l"):
+            return False
+    return True
 
 
 def _validate_allowed_backends(
@@ -322,14 +379,13 @@ def archive_agent_task(run_script, *, project: str, task_id: str) -> dict[str, A
     src = task_dir(project, task_id)
     archive_dir = task_archive_dir(project)
     dst = task_archive_path(project, task_id)
+    guard_lines = _symlink_guard_lines([src, archive_dir, dst])
     script = "\n".join(
         [
             f"src={shlex.quote(src)}",
             f"archive_dir={shlex.quote(archive_dir)}",
             f"dst={shlex.quote(dst)}",
-            # Coordination paths must never be symlinks. Check before any
-            # filesystem mutation and again immediately before the rename.
-            'if [ -L "$src" ] || [ -L "$archive_dir" ] || [ -L "$dst" ]; then exit 46; fi',
+            *guard_lines,
             # A repeated archive is idempotent only when the source is gone
             # and the destination is an existing directory. Any other partial
             # state fails closed instead of guessing which copy is canonical.
@@ -341,7 +397,7 @@ def archive_agent_task(run_script, *, project: str, task_id: str) -> dict[str, A
             'if [ ! -d "$src" ]; then exit 46; fi',
             'if [ -e "$dst" ]; then exit 48; fi',
             'mkdir -p "$archive_dir" || exit 47',
-            'if [ -L "$src" ] || [ -L "$archive_dir" ] || [ -L "$dst" ]; then exit 46; fi',
+            *guard_lines,
             'if [ -e "$dst" ]; then exit 48; fi',
             # -T prevents a raced-in destination directory from changing mv
             # semantics into "move src inside dst". -- terminates options.
@@ -367,8 +423,6 @@ def read_agent_task_file(run_cmd, *, project: str, task_id: str, filename: str) 
     validate_filename(filename)
     td = task_dir(project, task_id)
     path = f"{td}/{filename}"
-    if not _readonly_path_is_safe(run_cmd, project=project, path=td):
-        return {"stdout": "(not found)", "stderr": "", "exit_code": 0}
     if not _readonly_path_is_safe(run_cmd, project=project, path=path):
         return {"stdout": "(not found)", "stderr": "", "exit_code": 0}
     result = run_cmd(project, f"cat {shlex.quote(path)}")
@@ -413,13 +467,6 @@ def read_agent_log_tail(
 
     td = task_dir(project, task_id)
     path = f"{td}/{AGENT_LOG_FILENAME}"
-    if not _readonly_path_is_safe(run_cmd, project=project, path=td):
-        return {
-            "stdout": "(not found)",
-            "stderr": "",
-            "exit_code": 0,
-            "truncated": False,
-        }
     if not _readonly_path_is_safe(run_cmd, project=project, path=path):
         return {
             "stdout": "(not found)",
@@ -521,18 +568,16 @@ def write_agent_task(
         targets.append(f"{td}/base-ref.txt")
 
     # This operation is deliberately a trusted generated script: it mutates
-    # several server-owned files and needs pipes/redirections. Guard every
-    # coordination path before mutation and every target before redirection so
-    # a pre-existing symlink cannot turn that trust into an arbitrary write.
+    # several server-owned files and needs pipes/redirections. The same full
+    # ancestry invariant as readonly operations applies before and after mkdir.
+    guard_lines = _symlink_guard_lines([tasks_dir, td, *targets])
     parts = [
         f"tasks_dir={shlex.quote(tasks_dir)}",
         f"td={shlex.quote(td)}",
-        'if [ -L "$tasks_dir" ] || [ -L "$td" ]; then exit 46; fi',
+        *guard_lines,
         'mkdir -p "$td" || exit 47',
-        'if [ -L "$tasks_dir" ] || [ -L "$td" ]; then exit 46; fi',
+        *guard_lines,
     ]
-    for target in targets:
-        parts.append(f"if [ -L {shlex.quote(target)} ]; then exit 46; fi")
     parts.extend(
         [
             _encoded_write(f"{td}/task.json", task_json),

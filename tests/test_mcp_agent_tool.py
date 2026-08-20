@@ -263,7 +263,13 @@ class TestProjectRunAgentAsyncSubmit:
             run_script_async=run_script_async,
         )
         assert result["job_id"] == "job-99"
-        assert len(calls) == 6
+        assert sum(call.startswith("cat ") for call in calls) == 2
+        assert all(
+            call.startswith("ls -ld -- ") or call.startswith("cat ")
+            for call in calls
+        )
+        assert any(call.startswith("cat ") and "task.json" in call for call in calls)
+        assert any(call.startswith("cat ") and "current-plan.md" in call for call in calls)
         assert all("--dangerously-skip-permissions" not in call for call in calls)
 
     def test_missing_run_script_async_errors(self):
@@ -390,12 +396,23 @@ class TestProjectRunAgentExecutionOrdering:
 
         result = project_run_agent(counting_run, project="test", task_id=TASK_ID)
         assert result["status"] == "needs-review"
-        assert len(calls) == 7
-        assert "task.json" in calls[1] and calls[1].startswith("ls -ld -- ")
-        assert calls[2].startswith("cat ") and "task.json" in calls[2]
-        assert "current-plan.md" in calls[4] and calls[4].startswith("ls -ld -- ")
-        assert calls[5].startswith("cat ") and "current-plan.md" in calls[5]
-        assert "--dangerously-skip-permissions" in calls[6]
+        task_cat = next(
+            i for i, call in enumerate(calls)
+            if call.startswith("cat ") and "task.json" in call
+        )
+        plan_probe = next(
+            i for i, call in enumerate(calls)
+            if call.startswith("ls -ld -- ") and "current-plan.md" in call
+        )
+        plan_cat = next(
+            i for i, call in enumerate(calls)
+            if call.startswith("cat ") and "current-plan.md" in call
+        )
+        script_idx = next(
+            i for i, call in enumerate(calls)
+            if "--dangerously-skip-permissions" in call
+        )
+        assert task_cat < plan_probe < plan_cat < script_idx
 
 
 # ── project_run_agent: script cd's into the project root ────────────────────
@@ -434,7 +451,7 @@ class TestProjectRunAgentScriptCwd:
             return {"exit_code": 0, "stdout": "", "stderr": ""}
 
         project_run_agent(counting_run, project="test", task_id=TASK_ID)
-        script = calls[6]
+        script = calls[-1]
         assert script.startswith("cd '/abs/project/root' || exit 1")
 
     def test_managed_workspace_env_rejects_task_supplied_worktree(self, monkeypatch):
@@ -497,7 +514,7 @@ class TestProjectRunAgentScriptCwd:
             return {"exit_code": 0, "stdout": "", "stderr": ""}
 
         project_run_agent(counting_run, project="test", task_id=TASK_ID)
-        script = captured[6]
+        script = captured[-1]
         assert user_wt in script
 
     def test_async_submit_script_also_cds_into_project_root(self, monkeypatch):
@@ -544,7 +561,9 @@ class TestGatewayWriteAgentTaskScriptTransport:
         client.execute_project_script.assert_called_once()
         script = client.execute_project_script.call_args[0][1]
         assert 'mkdir -p "$td"' in script
-        assert 'if [ -L "$tasks_dir" ] || [ -L "$td" ]; then exit 46; fi' in script
+        assert "if [ -L .ai-bridge ]; then exit 46; fi" in script
+        assert f"if [ -L {TD} ]; then exit 46; fi" in script
+        assert f"if [ -L {TD}/task.json ]; then exit 46; fi" in script
         contract = json.loads(self._decoded_payload(script, "task.json"))
         assert contract["task_id"] == TASK_ID
         assert contract["base_ref"] == ""
