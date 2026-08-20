@@ -1,8 +1,8 @@
 """Connection pooling for idle SSH transports.
 
 Reuses idle SSH connections per (host, port, username, auth_method,
-credential_fingerprint) tuple instead of paying the TCP handshake cost on
-every connect. The credential fingerprint (see
+credential_fingerprint, destination_ip) tuple instead of paying the TCP
+handshake cost on every connect. The credential fingerprint (see
 app.ssh_manager._credential_fingerprint) is a one-way hash of the presented
 password/key — a caller who doesn't already know the exact credential that
 authenticated the pooled transport simply misses the pool and goes through
@@ -39,9 +39,9 @@ class PooledConnection:
 class ConnectionPool:
     """In-memory pool of idle SSH clients.
 
-    Key: (host, port, username, auth_method, credential_fingerprint) where
-    auth_method is "password" or "key" and credential_fingerprint is a
-    one-way hash of the actual credential presented (see
+    Key: (host, port, username, auth_method, credential_fingerprint,
+    destination_ip) where auth_method is "password" or "key",
+    credential_fingerprint is a one-way hash of the actual credential presented (see
     app.ssh_manager._credential_fingerprint) — two different credentials
     for the same host/port/username never share a pool entry. Supports LRU
     eviction (oldest idle connection is dropped when the pool exceeds its

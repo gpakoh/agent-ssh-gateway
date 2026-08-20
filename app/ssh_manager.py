@@ -4,6 +4,7 @@ import asyncio
 import builtins
 import hashlib
 import io
+import ipaddress
 import logging
 import socket
 import time
@@ -156,6 +157,7 @@ class SessionRecord:
     source_ip: str | None = None
     auth_method: str = "password"
     credential_fingerprint: str = ""
+    destination_ip: str | None = None
     tenant_labels: tuple[str, ...] = ()
 
     def touch(self) -> None:
@@ -317,6 +319,7 @@ class SSHSessionManager:
         owner_type: str,
         owner_token_fingerprint: str | None,
         source_ip: str | None,
+        validated_ips: tuple[str, ...] | list[str] | None = None,
     ) -> SessionRecord | None:
         """Return a live session only for an exact caller/target/credential match.
 
@@ -325,9 +328,10 @@ class SSHSessionManager:
         process restart.  The presented credential is compared only through the
         same one-way fingerprint used by the connection pool.
         """
-        if not owner_token_fingerprint or not source_ip:
+        if not owner_token_fingerprint or not source_ip or not validated_ips:
             return None
 
+        validated_destinations = {str(ipaddress.ip_address(ip)) for ip in validated_ips}
         auth_method = "password" if password is not None else "key"
         credential_fingerprint = _credential_fingerprint(
             auth_method, password, private_key, key_passphrase
@@ -343,6 +347,7 @@ class SSHSessionManager:
                     or record.username != username
                     or record.auth_method != auth_method
                     or record.credential_fingerprint != credential_fingerprint
+                    or record.destination_ip not in validated_destinations
                 ):
                     continue
                 if not record.is_connected():
@@ -454,10 +459,18 @@ class SSHSessionManager:
         """
         auth_method = "password" if password is not None else "key"
         credential_fingerprint = _credential_fingerprint(auth_method, password, private_key, key_passphrase)
-        pool_key = (host, port, username, auth_method, credential_fingerprint)
+        destination_ip = str(ipaddress.ip_address(pinned_ip)) if pinned_ip is not None else None
+        pool_key = (
+            host,
+            port,
+            username,
+            auth_method,
+            credential_fingerprint,
+            destination_ip,
+        )
 
         pooled_client = None
-        if self._pool is not None:
+        if self._pool is not None and destination_ip is not None:
             pooled_client = await self._pool.acquire(pool_key)
 
         breaker = None
@@ -486,10 +499,14 @@ class SSHSessionManager:
 
             def _connect() -> None:
                 sock = None
-                if pinned_ip is not None:
+                if destination_ip is not None:
                     # Dial the pre-validated IP directly — see pinned_ip
                     # docstring above for why this must not re-resolve host.
-                    sock = socket.create_connection((pinned_ip, port), timeout=30)
+                    sock = socket.create_connection((destination_ip, port), timeout=30)
+                    actual_peer_ip = str(ipaddress.ip_address(str(sock.getpeername()[0])))
+                    if actual_peer_ip != destination_ip:
+                        sock.close()
+                        raise OSError("Connected SSH peer did not match pinned destination")
                 client.connect(
                     hostname=host,
                     port=port,
@@ -546,6 +563,7 @@ class SSHSessionManager:
             source_ip=source_ip,
             auth_method=auth_method,
             credential_fingerprint=credential_fingerprint,
+            destination_ip=destination_ip,
             tenant_labels=tuple(tenant_labels or ()),
         )
 
@@ -1025,10 +1043,18 @@ class SSHSessionManager:
         except Exception:
             alive = False
 
-        if self._pool is not None and alive:
+        if self._pool is not None and alive and record.destination_ip is not None:
             # Return the idle transport to the pool for reuse instead of
-            # tearing down the TCP connection.
-            pool_key = (host, port, username, record.auth_method, record.credential_fingerprint)
+            # tearing down the TCP connection. The actual validated destination
+            # is part of the identity so a later DNS answer cannot adopt it.
+            pool_key = (
+                host,
+                port,
+                username,
+                record.auth_method,
+                record.credential_fingerprint,
+                record.destination_ip,
+            )
             await self._pool.release(pool_key, record.client)
         else:
             try:
