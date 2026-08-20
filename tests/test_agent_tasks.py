@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -449,14 +450,150 @@ class TestArchiveAgentTask:
     def test_passes_project_and_task_id(self):
         calls = []
 
-        def fake_run_cmd(project: str, command: str) -> dict:
-            calls.append((project, command))
+        def fake_run_script(project: str, script: str) -> dict:
+            calls.append((project, script))
             return {"stdout": "ok", "stderr": "", "exit_code": 0}
 
-        result = archive_agent_task(fake_run_cmd, project="my-proj", task_id="a12345678901")
+        result = archive_agent_task(fake_run_script, project="my-proj", task_id="a12345678901")
         assert result["stdout"] == "archived a12345678901"
-        assert any("mv" in cmd for _, cmd in calls)
+        assert calls[0][0] == "my-proj"
+        script = calls[0][1]
+        assert "mv -T -- \"$src\" \"$dst\"" in script
+        assert "mkdir -p \"$archive_dir\"" in script
+        assert ".ai-bridge/tasks/a12345678901" in script
+        assert ".ai-bridge/archive/a12345678901" in script
+
+    @pytest.mark.parametrize(
+        ("runner_exit", "expected"),
+        [(44, "not found"), (46, "failed to archive"), (48, "already contains")],
+    )
+    def test_maps_script_failures_without_exposing_internal_paths(self, runner_exit, expected):
+        result = archive_agent_task(
+            lambda _p, _s: {
+                "stdout": "/internal/state/path",
+                "stderr": "/internal/state/path",
+                "exit_code": runner_exit,
+            },
+            project="my-proj",
+            task_id="a12345678901",
+        )
+        combined = f"{result['stdout']} {result['stderr']}"
+        assert expected in combined
+        assert "/internal/state/path" not in combined
+        assert result["exit_code"] == 1
 
     def test_invalid_task_id_raises(self):
         with pytest.raises(ValueError):
             archive_agent_task(lambda p, c: {}, project="p", task_id="bad")
+
+    @staticmethod
+    def _shell_runner(cwd):
+        def run_script(_project: str, script: str) -> dict:
+            result = subprocess.run(
+                ["sh", "-c", script],
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            return {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exit_code": result.returncode,
+            }
+
+        return run_script
+
+    def test_source_symlink_fails_closed_without_touching_target(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        tasks = tmp_path / ".ai-bridge" / "tasks"
+        tasks.mkdir(parents=True)
+        outside = tmp_path / "outside-source"
+        outside.mkdir()
+        marker = outside / "marker.txt"
+        marker.write_text("keep", encoding="utf-8")
+        (tasks / task_id).symlink_to(outside, target_is_directory=True)
+
+        result = archive_agent_task(self._shell_runner(tmp_path), project="p", task_id=task_id)
+
+        assert result["exit_code"] == 1
+        assert marker.read_text(encoding="utf-8") == "keep"
+        assert (tasks / task_id).is_symlink()
+        assert not (tmp_path / ".ai-bridge" / "archive" / task_id).exists()
+
+    def test_archive_dir_symlink_fails_closed_without_external_write(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        source = tmp_path / ".ai-bridge" / "tasks" / task_id
+        source.mkdir(parents=True)
+        (source / "marker.txt").write_text("source", encoding="utf-8")
+        outside_archive = tmp_path / "outside-archive"
+        outside_archive.mkdir()
+        archive_link = tmp_path / ".ai-bridge" / "archive"
+        archive_link.symlink_to(outside_archive, target_is_directory=True)
+
+        result = archive_agent_task(self._shell_runner(tmp_path), project="p", task_id=task_id)
+
+        assert result["exit_code"] == 1
+        assert source.is_dir()
+        assert not (outside_archive / task_id).exists()
+        assert archive_link.is_symlink()
+
+    def test_destination_symlink_fails_closed_without_overwrite(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        source = tmp_path / ".ai-bridge" / "tasks" / task_id
+        source.mkdir(parents=True)
+        archive = tmp_path / ".ai-bridge" / "archive"
+        archive.mkdir(parents=True)
+        outside = tmp_path / "outside-destination"
+        outside.mkdir()
+        marker = outside / "marker.txt"
+        marker.write_text("keep", encoding="utf-8")
+        (archive / task_id).symlink_to(outside, target_is_directory=True)
+
+        result = archive_agent_task(self._shell_runner(tmp_path), project="p", task_id=task_id)
+
+        assert result["exit_code"] == 1
+        assert source.is_dir()
+        assert (archive / task_id).is_symlink()
+        assert marker.read_text(encoding="utf-8") == "keep"
+
+    def test_repeated_archive_is_idempotent_after_first_move(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        source = tmp_path / ".ai-bridge" / "tasks" / task_id
+        source.mkdir(parents=True)
+        (source / "source.txt").write_text("source", encoding="utf-8")
+        runner = self._shell_runner(tmp_path)
+
+        first = archive_agent_task(runner, project="p", task_id=task_id)
+        second = archive_agent_task(runner, project="p", task_id=task_id)
+
+        destination = tmp_path / ".ai-bridge" / "archive" / task_id
+        assert first == {"stdout": f"archived {task_id}", "stderr": "", "exit_code": 0}
+        assert second == {
+            "stdout": f"already archived {task_id}",
+            "stderr": "",
+            "exit_code": 0,
+        }
+        assert not source.exists()
+        assert (destination / "source.txt").read_text(encoding="utf-8") == "source"
+
+    def test_existing_archive_entry_is_bounded_and_preserves_both_trees(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        source = tmp_path / ".ai-bridge" / "tasks" / task_id
+        source.mkdir(parents=True)
+        (source / "source.txt").write_text("source", encoding="utf-8")
+        destination = tmp_path / ".ai-bridge" / "archive" / task_id
+        destination.mkdir(parents=True)
+        (destination / "archived.txt").write_text("archive", encoding="utf-8")
+
+        result = archive_agent_task(self._shell_runner(tmp_path), project="p", task_id=task_id)
+
+        assert result["exit_code"] == 1
+        assert "already contains" in result["stderr"]
+        assert (source / "source.txt").read_text(encoding="utf-8") == "source"
+        assert (destination / "archived.txt").read_text(encoding="utf-8") == "archive"

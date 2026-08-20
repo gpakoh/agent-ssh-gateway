@@ -293,18 +293,48 @@ def list_agent_tasks(run_cmd, *, project: str) -> dict[str, Any]:
     return result
 
 
-def archive_agent_task(run_cmd, *, project: str, task_id: str) -> dict[str, Any]:
+def archive_agent_task(run_script, *, project: str, task_id: str) -> dict[str, Any]:
     """Move a task into the configured archive; never physically delete it."""
     validate_task_id(task_id)
     src = task_dir(project, task_id)
     archive_dir = task_archive_dir(project)
     dst = task_archive_path(project, task_id)
-    result = run_cmd(project, f"mkdir -p {shlex.quote(archive_dir)}")
-    if result.get("exit_code") != 0:
-        return result
-    result = run_cmd(project, f"mv {shlex.quote(src)} {shlex.quote(dst)}")
-    if result.get("exit_code") != 0:
-        return {"stdout": f"task {task_id} not found", "stderr": result.get("stderr", ""), "exit_code": 1}
+    script = "\n".join(
+        [
+            f"src={shlex.quote(src)}",
+            f"archive_dir={shlex.quote(archive_dir)}",
+            f"dst={shlex.quote(dst)}",
+            # Coordination paths must never be symlinks. Check before any
+            # filesystem mutation and again immediately before the rename.
+            'if [ -L "$src" ] || [ -L "$archive_dir" ] || [ -L "$dst" ]; then exit 46; fi',
+            # A repeated archive is idempotent only when the source is gone
+            # and the destination is an existing directory. Any other partial
+            # state fails closed instead of guessing which copy is canonical.
+            'if [ ! -e "$src" ]; then',
+            '  if [ -d "$dst" ]; then exit 45; fi',
+            '  if [ -e "$dst" ]; then exit 46; fi',
+            '  exit 44',
+            'fi',
+            'if [ ! -d "$src" ]; then exit 46; fi',
+            'if [ -e "$dst" ]; then exit 48; fi',
+            'mkdir -p "$archive_dir" || exit 47',
+            'if [ -L "$src" ] || [ -L "$archive_dir" ] || [ -L "$dst" ]; then exit 46; fi',
+            'if [ -e "$dst" ]; then exit 48; fi',
+            # -T prevents a raced-in destination directory from changing mv
+            # semantics into "move src inside dst". -- terminates options.
+            'mv -T -- "$src" "$dst" || exit 47',
+        ]
+    )
+    result = run_script(project, script)
+    exit_code = result.get("exit_code")
+    if exit_code == 44:
+        return {"stdout": f"task {task_id} not found", "stderr": "", "exit_code": 1}
+    if exit_code == 45:
+        return {"stdout": f"already archived {task_id}", "stderr": "", "exit_code": 0}
+    if exit_code == 48:
+        return {"stdout": "", "stderr": f"archive already contains task {task_id}", "exit_code": 1}
+    if exit_code != 0:
+        return {"stdout": "", "stderr": f"failed to archive task {task_id}", "exit_code": 1}
     return {"stdout": f"archived {task_id}", "stderr": "", "exit_code": 0}
 
 

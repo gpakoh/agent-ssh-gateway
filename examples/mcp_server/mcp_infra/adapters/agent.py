@@ -220,7 +220,7 @@ def gateway_archive_agent_task(project: str, task_id: str) -> dict[str, Any]:
         tool="archive_agent_task",
         title="Archive agent task",
         fn=lambda: _archive_agent_task(
-            lambda p, c: run_project_command(_server_client(), p, c),
+            lambda p, s: _server_client().execute_project_script(p, s),
             project=project,
             task_id=task_id,
         ),
