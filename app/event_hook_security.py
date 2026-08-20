@@ -66,8 +66,8 @@ def validate_webhook_url(url: str, allow_http: bool = False) -> UrlValidationRes
         # Not a literal IP -- resolve it, since a hostname like "localhost"
         # or one that merely *resolves* to 127.0.0.1/169.254.169.254/an
         # RFC1918 address must be blocked exactly like the literal IP would
-        # be (see event_hook_delivery._blocked_destination_reason, which
-        # re-checks this at every delivery attempt for the same reason).
+        # be. Delivery-time protection is enforced again inside the aiohttp
+        # connector against the exact addresses used for the TCP connection.
         try:
             infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
         except socket.gaierror as exc:

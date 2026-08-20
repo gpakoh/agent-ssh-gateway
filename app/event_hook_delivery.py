@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import json
 import logging
 import random
+import socket
 import uuid
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 import aiohttp
+from aiohttp.abc import AbstractResolver, ResolveResult
+from aiohttp.resolver import DefaultResolver
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -33,6 +37,47 @@ def _compute_retry_at(attempts: int, base_sec: float, max_sec: float) -> datetim
     return _now() + timedelta(seconds=jitter)
 
 
+class _BlockedWebhookDestinationError(aiohttp.ClientConnectionError):
+    """A resolved webhook destination is outside the allowed network policy."""
+
+
+class _ValidatedWebhookResolver(AbstractResolver):
+    """Validate the exact DNS answers returned to aiohttp's connector."""
+
+    def __init__(self) -> None:
+        self._resolver = DefaultResolver()
+
+    async def resolve(
+        self,
+        host: str,
+        port: int = 0,
+        family: socket.AddressFamily = socket.AF_INET,
+    ) -> list[ResolveResult]:
+        resolved = await self._resolver.resolve(host, port, family)
+        for result in resolved:
+            validation = validate_destination_ip(result["host"])
+            if not validation.valid:
+                raise _BlockedWebhookDestinationError(
+                    f"Blocked destination ({validation.reason})"
+                )
+        return resolved
+
+    async def close(self) -> None:
+        await self._resolver.close()
+
+
+def _blocked_literal_destination_reason(url: str) -> str | None:
+    host = urlparse(url).hostname
+    if not host:
+        return "no hostname"
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    validation = validate_destination_ip(host)
+    return None if validation.valid else validation.reason
+
+
 class DeliveryService:
     def __init__(self, database_url: str, instance_id: str):
         self._instance_id = instance_id
@@ -41,6 +86,7 @@ class DeliveryService:
             self._engine, class_=AsyncSession, expire_on_commit=False
         )
         self._http_session: aiohttp.ClientSession | None = None
+        self._http_resolver: _ValidatedWebhookResolver | None = None
         self._worker_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
         self._inflight: set[asyncio.Task] = set()
@@ -81,6 +127,9 @@ class DeliveryService:
                 await asyncio.wait(pending)
         if self._http_session:
             await self._http_session.close()
+        if self._http_resolver:
+            await self._http_resolver.close()
+            self._http_resolver = None
         await self._engine.dispose()
 
     async def start(
@@ -96,10 +145,16 @@ class DeliveryService:
         retention_dead_days: int,
     ):
         self._running = True
+        self._http_resolver = _ValidatedWebhookResolver()
         self._http_session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(
                 total=connect_timeout + read_timeout,
                 connect=connect_timeout,
+            ),
+            connector=aiohttp.TCPConnector(
+                resolver=self._http_resolver,
+                use_dns_cache=False,
+                force_close=True,
             ),
         )
         self._worker_task = asyncio.create_task(
@@ -293,7 +348,7 @@ class DeliveryService:
         d_url: str = delivery.url
         d_event: str = delivery.event_type
 
-        blocked_reason = await self._blocked_destination_reason(d_url)
+        blocked_reason = _blocked_literal_destination_reason(d_url)
         if blocked_reason:
             await self.fail(
                 d_id,
@@ -354,31 +409,6 @@ class DeliveryService:
         finally:
             elapsed = (datetime.now(UTC) - start).total_seconds()
             metrics.record_event_hook_latency(elapsed)
-
-    async def _blocked_destination_reason(self, url: str) -> str | None:
-        """Resolve the delivery URL's hostname and check every resolved
-        address against the SSRF blocklist.
-
-        validate_webhook_url() (checked only at hook-creation time) rejects a
-        hostname only when it is itself a literal IP in a blocked range —
-        ipaddress.ip_address() raises on any real hostname, so validation is
-        silently skipped for it. A hook URL using a hostname that merely
-        *resolves* to 127.0.0.1 / 169.254.169.254 / an RFC1918 address was
-        never re-checked before this connected to it. Redirects are already
-        disabled (allow_redirects=False) so this is the one remaining gap.
-        """
-        host = urlparse(url).hostname
-        if not host:
-            return "no hostname"
-        try:
-            addrs = await asyncio.get_running_loop().getaddrinfo(host, None)
-        except OSError as exc:
-            return f"DNS resolution failed: {exc}"
-        for _family, _type, _proto, _canonname, sockaddr in addrs:
-            ip = str(sockaddr[0])
-            if not validate_destination_ip(ip).valid:
-                return f"resolves to blocked address {ip}"
-        return None
 
     async def _cleanup_loop(self, interval: float, sent_days: int, dead_days: int):
         while self._running:
