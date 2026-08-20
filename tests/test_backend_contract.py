@@ -46,6 +46,8 @@ def _run_cmd_factory(task_json: dict[str, Any], plan: str = "# Plan"):
     """Create a run_cmd that returns task.json and current-plan.md content."""
 
     def _run_cmd(project: str, command: str) -> dict[str, Any]:
+        if command.startswith("ls -ld -- "):
+            return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
         if "task.json" in command:
             return {"stdout": json.dumps(task_json), "stderr": "", "exit_code": 0}
         if "current-plan.md" in command:

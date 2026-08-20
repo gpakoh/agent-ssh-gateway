@@ -84,6 +84,8 @@ def _make_run_cmd(
     """
 
     def fake_run_cmd(project: str, command: str) -> dict:
+        if command.startswith("ls -ld -- "):
+            return {"exit_code": 0, "stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": ""}
         # startswith("cat "), not a bare substring check -- the generated
         # opencode script itself legitimately contains the substring
         # "current-plan.md" (it checks for the file's existence), so a
@@ -244,6 +246,8 @@ class TestProjectRunAgentAsyncSubmit:
 
         def fake_run_cmd(project, command):
             calls.append(command)
+            if command.startswith("ls -ld -- "):
+                return {"exit_code": 0, "stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": ""}
             if "task.json" in command:
                 return {"exit_code": 0, "stdout": _make_task_json(), "stderr": ""}
             if "current-plan.md" in command:
@@ -259,7 +263,8 @@ class TestProjectRunAgentAsyncSubmit:
             run_script_async=run_script_async,
         )
         assert result["job_id"] == "job-99"
-        assert len(calls) == 2  # task.json read, current-plan.md read -- nothing else via run_cmd
+        assert len(calls) == 6
+        assert all("--dangerously-skip-permissions" not in call for call in calls)
 
     def test_missing_run_script_async_errors(self):
         """async_submit=True with no async callable provided must error,
@@ -375,6 +380,8 @@ class TestProjectRunAgentExecutionOrdering:
 
         def counting_run(project, command):
             calls.append(command)
+            if command.startswith("ls -ld -- "):
+                return {"exit_code": 0, "stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": ""}
             if "task.json" in command:
                 return {"exit_code": 0, "stdout": _make_task_json(agent="opencode"), "stderr": ""}
             if "current-plan.md" in command:
@@ -383,10 +390,12 @@ class TestProjectRunAgentExecutionOrdering:
 
         result = project_run_agent(counting_run, project="test", task_id=TASK_ID)
         assert result["status"] == "needs-review"
-        assert len(calls) == 3
-        assert "task.json" in calls[0]
-        assert "current-plan.md" in calls[1]
-        assert "--dangerously-skip-permissions" in calls[2]
+        assert len(calls) == 7
+        assert "task.json" in calls[1] and calls[1].startswith("ls -ld -- ")
+        assert calls[2].startswith("cat ") and "task.json" in calls[2]
+        assert "current-plan.md" in calls[4] and calls[4].startswith("ls -ld -- ")
+        assert calls[5].startswith("cat ") and "current-plan.md" in calls[5]
+        assert "--dangerously-skip-permissions" in calls[6]
 
 
 # ── project_run_agent: script cd's into the project root ────────────────────
@@ -416,6 +425,8 @@ class TestProjectRunAgentScriptCwd:
 
         def counting_run(project, command):
             calls.append(command)
+            if command.startswith("ls -ld -- "):
+                return {"exit_code": 0, "stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": ""}
             if "task.json" in command:
                 return {"exit_code": 0, "stdout": _make_task_json(), "stderr": ""}
             if "current-plan.md" in command:
@@ -423,7 +434,7 @@ class TestProjectRunAgentScriptCwd:
             return {"exit_code": 0, "stdout": "", "stderr": ""}
 
         project_run_agent(counting_run, project="test", task_id=TASK_ID)
-        script = calls[2]
+        script = calls[6]
         assert script.startswith("cd '/abs/project/root' || exit 1")
 
     def test_managed_workspace_env_rejects_task_supplied_worktree(self, monkeypatch):
@@ -477,6 +488,8 @@ class TestProjectRunAgentScriptCwd:
 
         def counting_run(project, command):
             captured.append(command)
+            if command.startswith("ls -ld -- "):
+                return {"exit_code": 0, "stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": ""}
             if "task.json" in command:
                 return {"exit_code": 0, "stdout": _make_task_json(worktree_path=user_wt), "stderr": ""}
             if "current-plan.md" in command:
@@ -484,7 +497,7 @@ class TestProjectRunAgentScriptCwd:
             return {"exit_code": 0, "stdout": "", "stderr": ""}
 
         project_run_agent(counting_run, project="test", task_id=TASK_ID)
-        script = captured[2]
+        script = captured[6]
         assert user_wt in script
 
     def test_async_submit_script_also_cds_into_project_root(self, monkeypatch):
@@ -530,7 +543,8 @@ class TestGatewayWriteAgentTaskScriptTransport:
         assert result["result"]["exit_code"] == 0
         client.execute_project_script.assert_called_once()
         script = client.execute_project_script.call_args[0][1]
-        assert f"mkdir -p .ai-bridge/tasks/{TASK_ID}" in script
+        assert 'mkdir -p "$td"' in script
+        assert 'if [ -L "$tasks_dir" ] || [ -L "$td" ]; then exit 46; fi' in script
         contract = json.loads(self._decoded_payload(script, "task.json"))
         assert contract["task_id"] == TASK_ID
         assert contract["base_ref"] == ""
