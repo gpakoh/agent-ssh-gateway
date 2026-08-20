@@ -320,11 +320,10 @@ class TestReadAgentTaskFile:
         )
         assert result["stdout"] == "file content"
         assert calls == [
+            ("my-proj", "ls -ld -- .ai-bridge"),
+            ("my-proj", "ls -ld -- .ai-bridge/tasks"),
             ("my-proj", "ls -ld -- .ai-bridge/tasks/a12345678901"),
-            (
-                "my-proj",
-                "ls -ld -- .ai-bridge/tasks/a12345678901/agent-status.md",
-            ),
+            ("my-proj", "ls -ld -- .ai-bridge/tasks/a12345678901/agent-status.md"),
             ("my-proj", "cat .ai-bridge/tasks/a12345678901/agent-status.md"),
         ]
 
@@ -374,11 +373,10 @@ class TestReadAgentLogTail:
         assert result["stdout"] == "two\nthree\n"
         assert result["truncated"] is True
         assert calls == [
+            ("my-proj", "ls -ld -- .ai-bridge"),
+            ("my-proj", "ls -ld -- .ai-bridge/tasks"),
             ("my-proj", "ls -ld -- .ai-bridge/tasks/a12345678901"),
-            (
-                "my-proj",
-                "ls -ld -- .ai-bridge/tasks/a12345678901/opencode-output.log",
-            ),
+            ("my-proj", "ls -ld -- .ai-bridge/tasks/a12345678901/opencode-output.log"),
             (
                 "my-proj",
                 "tail -c 65537 -- .ai-bridge/tasks/a12345678901/opencode-output.log",
@@ -473,6 +471,7 @@ class TestListAgentTasks:
 
         result = list_agent_tasks(fake_run_cmd, project="my-proj")
         assert calls == [
+            ("my-proj", "ls -ld -- .ai-bridge"),
             ("my-proj", "ls -ld -- .ai-bridge/tasks"),
             ("my-proj", "ls -1t .ai-bridge/tasks/"),
         ]
