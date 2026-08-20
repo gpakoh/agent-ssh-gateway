@@ -6,6 +6,7 @@ import functools
 import os
 import threading
 import time
+import weakref
 from typing import Any
 
 import httpx
@@ -196,6 +197,34 @@ class GatewayClient:
         if not self.api_key:
             raise GatewayClientError("GATEWAY_API_KEY is required")
         return {"X-API-Key": self.api_key}
+
+    def fork_session(self) -> GatewayClient:
+        """Clone connection/auth configuration with independent mutable session state.
+
+        MCP transports may execute concurrently inside one server process.  Sharing
+        ``self.session_id`` between those logical clients makes an auto-reconnect in
+        one transport mutate the default session selected by every other transport.
+        The current session id is copied as an initial immutable value so deployments
+        that intentionally provide only ``GATEWAY_SESSION_ID`` keep working. Later
+        reconnects mutate only the fork's field. If that copied session is stale, the
+        existing retry/reconnect path can replace it independently; gateway-side
+        ``reuse_existing`` still permits SSH transport multiplexing.
+        """
+        fork = GatewayClient(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            session_id=self.session_id,
+            ssh_host=self._ssh_host,
+            ssh_port=self._ssh_port,
+            ssh_user=self._ssh_user,
+            ssh_password=self._ssh_password,
+            ssh_private_key=self._ssh_private_key,
+        )
+        fork.command_timeout = self.command_timeout
+        fork.async_job_timeout = self.async_job_timeout
+        fork.job_timeout = self.job_timeout
+        fork._http_timeout = self._http_timeout
+        return fork
 
     def _reconnect_session(self) -> None:
         if not self._ssh_host or not self._ssh_user:
@@ -710,3 +739,36 @@ class GatewayClient:
         if all_failed:
             output["ok"] = False
         return output
+
+
+class GatewayClientSessionPool:
+    """Weakly bind mutable GatewayClient state to a server-side MCP session.
+
+    The key is the SDK-created ``ServerSession`` object, never a client-supplied
+    header or bearer token. Weak keys ensure a closed MCP transport does not
+    become an unbounded process-lifetime cache. If a future SDK changes the
+    session object so it can no longer be used as a weak key, resolution fails
+    closed instead of silently falling back to shared mutable session state.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._clients: weakref.WeakKeyDictionary[Any, tuple[GatewayClient, GatewayClient]] = (
+            weakref.WeakKeyDictionary()
+        )
+
+    def get(self, base: Any, mcp_session: Any) -> Any:
+        if not isinstance(base, GatewayClient):
+            # Tests and embedding applications deliberately replace the server
+            # facade client with a stub/mock. Preserve that exact object rather
+            # than attempting to clone an unknown implementation.
+            return base
+
+        with self._lock:
+            existing = self._clients.get(mcp_session)
+            if existing is not None and existing[0] is base:
+                return existing[1]
+
+            scoped = base.fork_session()
+            self._clients[mcp_session] = (base, scoped)
+            return scoped
