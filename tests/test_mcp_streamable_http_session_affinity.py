@@ -52,7 +52,10 @@ async def test_two_real_streamable_http_clients_keep_gateway_session_state_isola
 
         @srv.mcp.tool(name="_test_session_affinity_probe")
         def _test_session_affinity_probe(set_session_id: str | None = None) -> dict[str, Any]:
-            scoped = srv.get_gateway_client()
+            # Compatibility seam is deliberate for TEST-09 sensitivity: on the
+            # pre-fix master there is no resolver, so the probe observes the old
+            # process-global client that production adapters used directly.
+            scoped = srv.get_gateway_client() if hasattr(srv, "get_gateway_client") else srv.client
             if set_session_id is not None:
                 scoped.session_id = set_session_id
             return {
