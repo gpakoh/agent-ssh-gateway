@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import paramiko
 import pytest
@@ -169,7 +169,9 @@ async def test_manager_acquire_pooled_client_on_create():
     manager = SSHSessionManager(connection_pool_size=4)
     assert manager.pool_stats is not None
     pooled = _mock_client(alive=True)
-    await manager._pool.release(("h", 22, "u", "password", _PW_FINGERPRINT), pooled)
+    await manager._pool.release(
+        ("h", 22, "u", "password", _PW_FINGERPRINT, "192.0.2.10"), pooled
+    )
 
     # Patch create so the fresh-connect path never runs (pooled path used).
     manager._load_private_key = MagicMock()
@@ -191,7 +193,11 @@ async def test_manager_acquire_pooled_client_on_create():
     paramiko.SSHClient = FakeClient
     try:
         sid = await manager.create_session(
-            host="h", port=22, username="u", password="pw"
+            host="h",
+            port=22,
+            username="u",
+            password="pw",
+            pinned_ip="192.0.2.10",
         )
     finally:
         paramiko.SSHClient = original
@@ -208,9 +214,13 @@ async def test_manager_disconnect_releases_to_pool():
 
     manager = SSHSessionManager(connection_pool_size=4)
     pooled = _mock_client(alive=True)
-    await manager._pool.release(("h", 22, "u", "password", _PW_FINGERPRINT), pooled)
+    await manager._pool.release(
+        ("h", 22, "u", "password", _PW_FINGERPRINT, "192.0.2.10"), pooled
+    )
 
-    sid = await manager.create_session(host="h", port=22, username="u", password="pw")
+    sid = await manager.create_session(
+        host="h", port=22, username="u", password="pw", pinned_ip="192.0.2.10"
+    )
     await manager.disconnect(sid)
     # transport returned to pool, not closed
     assert manager._pool.idle_count() == 1
@@ -247,7 +257,9 @@ async def test_manager_create_session_does_not_reuse_pool_on_different_password(
     """
     manager = SSHSessionManager(connection_pool_size=4)
     pooled = _mock_client(alive=True)
-    await manager._pool.release(("h", 22, "u", "password", _PW_FINGERPRINT), pooled)
+    await manager._pool.release(
+        ("h", 22, "u", "password", _PW_FINGERPRINT, "192.0.2.10"), pooled
+    )
 
     import paramiko
 
@@ -264,9 +276,14 @@ async def test_manager_create_session_does_not_reuse_pool_on_different_password(
 
     paramiko.SSHClient = FakeClient
     try:
-        sid = await manager.create_session(
-            host="h", port=22, username="u", password="a-completely-different-password"
-        )
+        with patch("app.ssh_manager.socket.create_connection", return_value=MagicMock(getpeername=MagicMock(return_value=("192.0.2.10", 22)))):
+            sid = await manager.create_session(
+                host="h",
+                port=22,
+                username="u",
+                password="a-completely-different-password",
+                pinned_ip="192.0.2.10",
+            )
     finally:
         paramiko.SSHClient = original
 
@@ -335,6 +352,7 @@ async def test_find_reusable_session_precedes_full_ip_admission(monkeypatch):
         source_ip="10.0.0.5",
         auth_method="password",
         credential_fingerprint=_PW_FINGERPRINT,
+        destination_ip="192.0.2.10",
     )
     manager._sessions[record.session_id] = record
 
@@ -346,6 +364,7 @@ async def test_find_reusable_session_precedes_full_ip_admission(monkeypatch):
         owner_type="master",
         owner_token_fingerprint="owner-fp",
         source_ip="10.0.0.5",
+        validated_ips=("192.0.2.10",),
     )
     assert reused is record
 
@@ -390,6 +409,7 @@ async def test_find_reusable_session_requires_exact_identity_target_and_credenti
         source_ip="10.0.0.5",
         auth_method="password",
         credential_fingerprint=_PW_FINGERPRINT,
+        destination_ip="192.0.2.10",
     )
     manager._sessions[record.session_id] = record
     lookup = {
@@ -400,6 +420,7 @@ async def test_find_reusable_session_requires_exact_identity_target_and_credenti
         "owner_type": "master",
         "owner_token_fingerprint": "owner-fp",
         "source_ip": "10.0.0.5",
+        "validated_ips": ("192.0.2.10",),
     }
     lookup.update(overrides)
 
@@ -420,6 +441,7 @@ async def test_find_reusable_session_rejects_disconnected_exact_match():
         source_ip="10.0.0.5",
         auth_method="password",
         credential_fingerprint=_PW_FINGERPRINT,
+        destination_ip="192.0.2.10",
     )
     manager._sessions[record.session_id] = record
 
@@ -432,6 +454,7 @@ async def test_find_reusable_session_rejects_disconnected_exact_match():
             owner_type="master",
             owner_token_fingerprint="owner-fp",
             source_ip="10.0.0.5",
+            validated_ips=("192.0.2.10",),
         )
         is None
     )
@@ -491,9 +514,10 @@ async def test_manager_pool_ttl_applied_on_acquire():
 
     manager = SSHSessionManager(connection_pool_size=4, connection_pool_ttl_seconds=1)
     stale = _mock_client(alive=True)
-    await manager._pool.release(("h", 22, "u", "password", _PW_FINGERPRINT), stale)
+    pool_key = ("h", 22, "u", "password", _PW_FINGERPRINT, "192.0.2.10")
+    await manager._pool.release(pool_key, stale)
     # make it stale
-    for conn in manager._pool._idle[("h", 22, "u", "password", _PW_FINGERPRINT)]:
+    for conn in manager._pool._idle[pool_key]:
         conn.last_used -= 10
 
     # fresh-connect path must not do real networking — mock SSHClient
@@ -513,7 +537,16 @@ async def test_manager_pool_ttl_applied_on_acquire():
 
     paramiko.SSHClient = FakeClient
     try:
-        sid = await manager.create_session(host="h", port=22, username="u", password="pw")
+        fake_socket = MagicMock()
+        fake_socket.getpeername.return_value = ("192.0.2.10", 22)
+        with patch("app.ssh_manager.socket.create_connection", return_value=fake_socket):
+            sid = await manager.create_session(
+                host="h",
+                port=22,
+                username="u",
+                password="pw",
+                pinned_ip="192.0.2.10",
+            )
     finally:
         paramiko.SSHClient = original
 
@@ -613,6 +646,7 @@ def test_connect_reuses_exact_live_session_without_creating_an_eleventh(monkeypa
     assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
     assert resp.json()["session_id"] == "sess-restored"
     st.manager.find_reusable_session.assert_awaited_once()
+    assert st.manager.find_reusable_session.call_args.kwargs["validated_ips"] == ["10.0.0.1"]
     st.manager.create_session.assert_not_awaited()
     session_store.refresh_session_expiry.assert_awaited_once_with(
         "sess-restored", settings.session_timeout
