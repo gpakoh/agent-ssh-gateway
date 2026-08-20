@@ -345,6 +345,26 @@ def _extract_single_flags(arg: str) -> list[str]:
     return ["-" + ch for ch in arg[1:]]
 
 
+def _is_safe_bash_syntax_check(effective: list[str]) -> bool:
+    """Return True only for the narrow non-executing ``bash -n`` form.
+
+    Bash's ``-n`` parses a script without executing commands, but it is not
+    safe to treat ``-n`` generically because combined/additional flags can
+    re-enable execution or interactive/startup-file behavior.  Allow only:
+    ``bash -n script`` and ``bash -n -- script``.
+    """
+    if not effective or effective[0] != "bash":
+        return False
+    args = effective[1:]
+    if len(args) == 2:
+        flag, script = args
+        return flag == "-n" and script != "-" and not script.startswith("-")
+    if len(args) == 3:
+        flag, separator, script = args
+        return flag == "-n" and separator == "--" and script != "-"
+    return False
+
+
 def check_argument_shape(command: str) -> tuple[bool, str]:
     """Check for dangerous argument patterns.
 
@@ -365,8 +385,10 @@ def check_argument_shape(command: str) -> tuple[bool, str]:
     if not effective:
         return False, ""
 
-    # Check language interpreters with exec flags (anywhere in args)
-    if effective[0] in BLOCKED_INTERPRETERS:
+    # Check language interpreters with exec flags (anywhere in args).
+    # Bash has one deliberately narrow syntax-check exception; all other
+    # interpreter/flag combinations keep the generic fail-closed behavior.
+    if effective[0] in BLOCKED_INTERPRETERS and not _is_safe_bash_syntax_check(effective):
         for arg in effective[1:]:
             # Combined: python3 -uc → "-uc" contains "-c"
             if any(flag in EXEC_FLAGS for flag in _extract_single_flags(arg)):
