@@ -63,19 +63,16 @@ def _run_git(
             "git is unavailable for managed source publication"
         ) from exc
     if result.returncode != 0:
-        # Git failures commonly include the authoritative host path. Keep the
-        # MCP error useful without reflecting that path to a worker/client.
-        raise ManagedSourceBundleError(
-            f"managed source publication failed during git {subcmd}"
-        )
+        detail = (result.stderr or "").strip()
+        msg = f"managed source publication failed during git {subcmd}"
+        if detail:
+            msg = f"{msg}: {detail}"
+        raise ManagedSourceBundleError(msg)
     return result.stdout
 
 
 def _bundle_head(path: Path) -> str | None:
-    try:
-        output = _run_git(["bundle", "list-heads", str(path)])
-    except ManagedSourceBundleError:
-        return None
+    output = _run_git(["bundle", "list-heads", str(path)])
     heads = [
         line.split(maxsplit=1)[0].lower()
         for line in output.splitlines()
