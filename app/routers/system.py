@@ -1,5 +1,6 @@
 """System and meta routes: health, capabilities, config, help, metrics, SDK, circuit-breaker, UI."""
 
+import asyncio
 import os
 import socket
 from pathlib import Path
@@ -19,6 +20,7 @@ from app.config import settings
 from app.metrics import metrics
 from app.models import (
     CapabilitiesResponse,
+    HealthComponentStatus,
     HealthResponse,
 )
 from app.state import _err
@@ -61,42 +63,142 @@ async def _deep_ssh_check(host: str, port: int) -> bool | None:
         return False
 
 
+def _component_status(
+    *,
+    ok: bool,
+    required: bool,
+    failure_class: str | None = None,
+) -> HealthComponentStatus:
+    return HealthComponentStatus(
+        status="ok" if (ok or not required) else "degraded",
+        required=required,
+        failure_class=None if ok else failure_class,
+    )
+
+
+def _classify_health_failure(exc: BaseException) -> str:
+    """Map dependency failures to a bounded, non-sensitive public class."""
+    from redis.exceptions import ConnectionError as RedisConnectionError
+    from redis.exceptions import TimeoutError as RedisTimeoutError
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (TimeoutError, RedisTimeoutError, SqlAlchemyTimeoutError)):
+            return "timeout"
+        if isinstance(current, (OSError, RedisConnectionError, OperationalError)):
+            return "connect_error"
+        cause = current.__cause__ or current.__context__
+        current = cause if isinstance(cause, BaseException) else None
+    return "unavailable"
+
+
+async def _probe_redis() -> tuple[bool, str | None]:
+    """Actively verify Redis when configured; never leak backend exception text."""
+    queue = _state.redis_queue
+    client = queue._redis if queue is not None else None
+    if client is None:
+        return False, "unavailable"
+    try:
+        await asyncio.wait_for(client.ping(), timeout=1.0)
+        return True, None
+    except Exception as exc:
+        return False, _classify_health_failure(exc)
+
+
+async def _probe_postgres() -> tuple[bool, str | None]:
+    """Actively verify the persistent-session PostgreSQL engine."""
+    from sqlalchemy import text
+
+    store = _state.session_store
+    engine = store._engine if store is not None else None
+    if engine is None:
+        return False, "unavailable"
+
+    async def _select_one() -> None:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+
+    try:
+        await asyncio.wait_for(_select_one(), timeout=1.0)
+        return True, None
+    except Exception as exc:
+        return False, _classify_health_failure(exc)
+
+
 @router.get("/health", tags=["system"], response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint.
-
-    Reports readiness based on all critical subsystems: Redis,
-    PostgreSQL, API key configuration, and SSH server reachability.
-    """
+    """Return bounded aggregate health while preserving per-component truth."""
     from app import build_info
-    from app.version import APP_VERSION
 
-    redis_ok = _state.redis_queue is not None and _state.redis_queue._redis is not None
-    persistent_sessions_ok = _state.session_store is not None
     meta = build_info.get_build_metadata()
 
+    redis_required = bool(settings.redis_url)
+    if redis_required:
+        redis_ok, redis_failure = await _probe_redis()
+    else:
+        redis_ok = _state.redis_queue is not None and _state.redis_queue._redis is not None
+        redis_failure = None if redis_ok else "not_configured"
+
+    postgres_required = bool(settings.persistent_sessions_enabled)
+    if postgres_required:
+        persistent_sessions_ok, postgres_failure = await _probe_postgres()
+    else:
+        persistent_sessions_ok = _state.session_store is not None
+        postgres_failure = None if persistent_sessions_ok else "not_configured"
+
     api_key_ok = bool(settings.api_key)
+    auth_required = bool(settings.api_auth_enabled)
+    auth_ok = api_key_ok or not auth_required
+    auth_failure = None if auth_ok else "unavailable"
 
     ssh_host = os.environ.get("GATEWAY_SSH_HOST", "sshd")
     ssh_port = int(os.environ.get("GATEWAY_SSH_PORT", "22"))
 
-    # TCP-level check (always)
     ssh_tcp_ok = False
+    ssh_failure: str | None = None
     try:
         with socket.create_connection((ssh_host, ssh_port), timeout=2):
             ssh_tcp_ok = True
-    except (OSError, TimeoutError):
-        pass
+    except TimeoutError:
+        ssh_failure = "timeout"
+    except OSError:
+        ssh_failure = "connect_error"
 
-    # Deep SSH check (only when test credentials configured)
     ssh_deep_ok = await _deep_ssh_check(ssh_host, ssh_port)
     ssh_ok = ssh_tcp_ok if ssh_deep_ok is None else ssh_deep_ok
+    if ssh_ok:
+        ssh_failure = None
+    elif ssh_failure is None:
+        ssh_failure = "unavailable"
 
-    redis_degraded = not redis_ok and settings.redis_url
-    sessions_degraded = settings.persistent_sessions_enabled and not persistent_sessions_ok
-    auth_degraded = settings.api_auth_enabled and not api_key_ok
-    ssh_degraded = not ssh_ok
-    status = "degraded" if (redis_degraded or sessions_degraded or auth_degraded or ssh_degraded) else "ok"
+    components: dict[str, HealthComponentStatus] = {
+        "redis": _component_status(
+            ok=redis_ok, required=redis_required, failure_class=redis_failure
+        ),
+        "postgres": _component_status(
+            ok=persistent_sessions_ok,
+            required=postgres_required,
+            failure_class=postgres_failure,
+        ),
+        # Backward-compatible structured alias for the existing flat field.
+        "persistent_sessions": _component_status(
+            ok=persistent_sessions_ok,
+            required=postgres_required,
+            failure_class=postgres_failure,
+        ),
+        "auth": _component_status(
+            ok=auth_ok, required=auth_required, failure_class=auth_failure
+        ),
+        "ssh": _component_status(ok=ssh_ok, required=True, failure_class=ssh_failure),
+    }
+
+    degraded = any(component.status == "degraded" for component in components.values())
+    status = "degraded" if degraded else "ok"
+
     return HealthResponse(
         status=status,
         redis=redis_ok,
@@ -109,6 +211,7 @@ async def health_check():
         build_time=meta["build_time"],
         started_at=meta["started_at"],
         version=APP_VERSION,
+        components=components,
     )
 
 
