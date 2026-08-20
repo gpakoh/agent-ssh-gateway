@@ -168,6 +168,9 @@ class GatewayClient:
         self.async_job_timeout = int(os.environ.get("MCP_GATEWAY_ASYNC_JOB_TIMEOUT", "3600"))
         self.job_timeout = int(os.environ.get("MCP_GATEWAY_JOB_TIMEOUT", "180"))
         self._http_timeout = int(os.environ.get("MCP_GATEWAY_HTTP_TIMEOUT", "120"))
+        self._release_http_timeout = float(
+            os.environ.get("MCP_GATEWAY_RELEASE_HTTP_TIMEOUT", "2")
+        )
 
         self._reconnect_lock = threading.Lock()
         self._reuse_existing = True
@@ -232,6 +235,7 @@ class GatewayClient:
         fork.async_job_timeout = self.async_job_timeout
         fork.job_timeout = self.job_timeout
         fork._http_timeout = self._http_timeout
+        fork._release_http_timeout = self._release_http_timeout
         fork._reuse_existing = False
         fork._release_managed = True
         fork._owns_session = False
@@ -275,7 +279,11 @@ class GatewayClient:
             self._owns_session = True
         if old_owned_sid and old_owned_sid != self.session_id:
             try:
-                self._post("/api/ssh/disconnect", {"session_id": old_owned_sid})
+                self._post(
+                    "/api/ssh/disconnect",
+                    {"session_id": old_owned_sid},
+                    timeout=self._release_http_timeout,
+                )
             except Exception:
                 pass
 
@@ -317,7 +325,11 @@ class GatewayClient:
         if not sid:
             return
         try:
-            self._post("/api/ssh/disconnect", {"session_id": sid})
+            self._post(
+                "/api/ssh/disconnect",
+                {"session_id": sid},
+                timeout=self._release_http_timeout,
+            )
         except Exception:
             # Lifecycle cleanup is best-effort. Gateway idle cleanup remains the
             # final safety net if teardown happens during a gateway outage.
@@ -379,13 +391,19 @@ class GatewayClient:
             )
         return data
 
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float | int | None = None,
+    ) -> dict[str, Any]:
         try:
             response = httpx.post(
                 f"{self.base_url}{path}",
                 json=payload,
                 headers=self._headers(),
-                timeout=self._http_timeout,
+                timeout=self._http_timeout if timeout is None else timeout,
             )
         except httpx.RequestError as exc:
             raise _transport_error(exc) from exc

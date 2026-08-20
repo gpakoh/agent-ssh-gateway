@@ -40,6 +40,7 @@ class _FakeGateway:
         self.disconnects: list[str] = []
         self.connect_reuse_flags: list[bool] = []
         self.peak_active = 0
+        self._stale_on_execute: set[str] = set()
 
     def post(self, url: str, **kwargs: Any) -> _Response:
         payload = kwargs["json"]
@@ -78,6 +79,10 @@ class _FakeGateway:
         sid = payload["session_id"]
         argv = payload["argv"]
         with self._lock:
+            if sid in self._stale_on_execute:
+                self._stale_on_execute.remove(sid)
+                self.active.pop(sid, None)
+                return _Response({"detail": {"message": "SESSION_NOT_FOUND"}}, 404)
             if sid not in self.active:
                 return _Response({"detail": {"message": "SESSION_NOT_FOUND"}}, 404)
             if argv[:2] == ["marker", "set"]:
@@ -95,6 +100,10 @@ class _FakeGateway:
     def stale(self, sid: str) -> None:
         with self._lock:
             self.active.pop(sid, None)
+
+    def stale_on_next_execute(self, sid: str) -> None:
+        with self._lock:
+            self._stale_on_execute.add(sid)
 
     def active_sids(self) -> set[str]:
         with self._lock:
@@ -311,5 +320,359 @@ async def test_fifty_streamable_http_connect_disconnect_cycles_release_owned_gat
         assert fake.peak_active == 1
         assert fake.connect_reuse_flags == [False] * 50
         assert len(fake.disconnects) == 50
+    finally:
+        stop_ephemeral_server(server, thread)
+
+
+_DUAL_POOL_REGISTERED_MCP_IDS: set[int] = set()
+
+
+def _configure_dual_pool_server(srv: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    normal = srv.GatewayClient(
+        base_url="http://fake-gateway.invalid",
+        api_key="test-key",
+        session_id="",
+        ssh_host="executor.invalid",
+        ssh_user="tester",
+    )
+    agent = srv.GatewayClient(
+        base_url="http://fake-gateway.invalid",
+        api_key="test-key",
+        session_id="",
+        ssh_host="agent-sshd",
+        ssh_user="tester",
+    )
+    monkeypatch.setattr(srv, "client", normal)
+    monkeypatch.setattr(srv, "agent_client", agent)
+    monkeypatch.setattr(srv, "_agent_client_configured", True)
+    monkeypatch.setattr(srv, "_gateway_client_sessions", srv.GatewayClientSessionPool())
+    monkeypatch.setattr(srv, "_agent_client_sessions", srv.GatewayClientSessionPool())
+
+
+def _ensure_dual_pool_probe(srv: Any) -> None:
+    mcp_identity = id(srv.mcp)
+    if mcp_identity in _DUAL_POOL_REGISTERED_MCP_IDS:
+        return
+
+    @srv.mcp.tool(name="_test_dual_pool_lifecycle_probe")
+    def _test_dual_pool_lifecycle_probe(
+        action: str,
+        marker: str | None = None,
+    ) -> dict[str, Any]:
+        normal = srv.get_gateway_client()
+        agent = srv.get_agent_client()
+        normal_stdout: str | None = None
+        agent_stdout: str | None = None
+        error: str | None = None
+
+        if action in {"connect_both", "connect_normal"}:
+            normal.connect()
+            normal.execute_argv(["marker", "set", f"normal-{marker or ''}"])
+        if action in {"connect_both", "connect_agent"}:
+            agent.connect()
+            agent.execute_argv(["marker", "set", f"agent-{marker or ''}"])
+        if action in {"execute_both", "execute_normal"}:
+            normal_stdout = normal.execute_argv(["marker", "get"])["stdout"]
+        if action in {"execute_both", "execute_agent"}:
+            agent_stdout = agent.execute_argv(["marker", "get"])["stdout"]
+        if action == "proactive_normal":
+            try:
+                normal.connect()
+            except srv.GatewayClientError as exc:
+                error = str(exc)
+        if action == "proactive_agent":
+            try:
+                agent.connect()
+            except srv.GatewayClientError as exc:
+                error = str(exc)
+        if action not in {
+            "connect_both",
+            "connect_normal",
+            "connect_agent",
+            "execute_both",
+            "execute_normal",
+            "execute_agent",
+            "proactive_normal",
+            "proactive_agent",
+            "state",
+        }:
+            raise ValueError(action)
+
+        return {
+            "normal_sid": normal.session_id,
+            "agent_sid": agent.session_id,
+            "normal_stdout": normal_stdout,
+            "agent_stdout": agent_stdout,
+            "error": error,
+        }
+
+    _DUAL_POOL_REGISTERED_MCP_IDS.add(mcp_identity)
+
+
+async def _dual_probe(
+    session: ClientSession,
+    action: str,
+    marker: str | None = None,
+) -> dict[str, Any]:
+    args: dict[str, Any] = {"action": action}
+    if marker is not None:
+        args["marker"] = marker
+    return _structured(
+        await session.call_tool("_test_dual_pool_lifecycle_probe", args)
+    )
+
+
+async def _open_five_mcp_clients(
+    owner: AsyncExitStack,
+    url: str,
+) -> tuple[list[ClientSession], list[AsyncExitStack]]:
+    clients: list[ClientSession] = []
+    stacks: list[AsyncExitStack] = []
+    for _ in range(5):
+        stack = await owner.enter_async_context(AsyncExitStack())
+        client, _get_sid = await _open_mcp_client(stack, url)
+        clients.append(client)
+        stacks.append(stack)
+    return clients, stacks
+
+
+@pytest.mark.asyncio
+async def test_five_real_mcp_transports_dual_pool_fill_cap_reconnect_and_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production-like TEST-11: five transports materialize both lazy pools."""
+    fake = _FakeGateway(max_active=10)
+    monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
+    monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
+    monkeypatch.setenv("MCP_ACCESS_PROFILE", "mcp_client_safe")
+    monkeypatch.setattr("gateway_client.httpx.post", fake.post)
+
+    app = build_streamable_http_app()
+    import examples.mcp_server.server as srv
+
+    _configure_dual_pool_server(srv, monkeypatch)
+    _ensure_dual_pool_probe(srv)
+
+    host = "127.0.0.1"
+    port = find_free_port()
+    server, thread = run_ephemeral_server(app, host, port)
+    url = f"http://{host}:{port}/mcp"
+    try:
+        async with AsyncExitStack() as owner:
+            clients, stacks = await _open_five_mcp_clients(owner, url)
+            initial = await asyncio.gather(
+                *(
+                    _dual_probe(client, "connect_both", str(index))
+                    for index, client in enumerate(clients)
+                )
+            )
+
+            normal_sids = [item["normal_sid"] for item in initial]
+            agent_sids = [item["agent_sid"] for item in initial]
+            assert len(set(normal_sids + agent_sids)) == 10
+            assert len(fake.active_sids()) == 10
+            assert fake.peak_active == 10
+            assert fake.connect_reuse_flags == [False] * 10
+
+            before_disconnects = list(fake.disconnects)
+            proactive = await _dual_probe(clients[0], "proactive_normal")
+            assert "429" in (proactive["error"] or "")
+            assert proactive["normal_sid"] == normal_sids[0]
+            assert len(fake.active_sids()) == 10
+            assert fake.disconnects == before_disconnects
+
+            proactive_agent = await _dual_probe(clients[1], "proactive_agent")
+            assert "429" in (proactive_agent["error"] or "")
+            assert proactive_agent["agent_sid"] == agent_sids[1]
+            assert len(fake.active_sids()) == 10
+            assert fake.disconnects == before_disconnects
+
+            fake.stale(normal_sids[0])
+            normal_after = await _dual_probe(clients[0], "execute_normal")
+            assert normal_after["normal_sid"] != normal_sids[0]
+            assert len(fake.active_sids()) == 10
+            unaffected = await asyncio.gather(
+                *(_dual_probe(client, "execute_both") for client in clients[2:])
+            )
+            for index, item in enumerate(unaffected, start=2):
+                assert item["normal_sid"] == normal_sids[index]
+                assert item["agent_sid"] == agent_sids[index]
+                assert item["normal_stdout"] == f"normal-{index}"
+                assert item["agent_stdout"] == f"agent-{index}"
+
+            fake.stale(agent_sids[1])
+            agent_after = await _dual_probe(clients[1], "execute_agent")
+            assert agent_after["agent_sid"] != agent_sids[1]
+            assert len(fake.active_sids()) == 10
+
+            fifth_state = await _dual_probe(clients[4], "state")
+            before_release = set(fake.active_sids())
+            successful_disconnects = len(fake.disconnects)
+            await stacks[4].aclose()
+            expected = before_release - {
+                fifth_state["normal_sid"],
+                fifth_state["agent_sid"],
+            }
+            await _wait_for_active_sids(fake, expected)
+            assert len(expected) == 8
+            assert len(fake.disconnects) == successful_disconnects + 2
+
+            remaining = await asyncio.gather(
+                *(_dual_probe(client, "execute_both") for client in clients[:4])
+            )
+            assert len({item["normal_sid"] for item in remaining}) == 4
+            assert len({item["agent_sid"] for item in remaining}) == 4
+            assert all(item["normal_sid"] in expected for item in remaining)
+            assert all(item["agent_sid"] in expected for item in remaining)
+
+        await _wait_for_active_sids(fake, set())
+    finally:
+        stop_ephemeral_server(server, thread)
+
+
+@pytest.mark.asyncio
+async def test_partial_dual_pool_materialization_races_with_stale_normal_without_11th_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """5 normal + 4 agent at 9; lazy agent materialization races stale normal."""
+    fake = _FakeGateway(max_active=10)
+    monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
+    monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
+    monkeypatch.setenv("MCP_ACCESS_PROFILE", "mcp_client_safe")
+    monkeypatch.setattr("gateway_client.httpx.post", fake.post)
+
+    app = build_streamable_http_app()
+    import examples.mcp_server.server as srv
+
+    _configure_dual_pool_server(srv, monkeypatch)
+    _ensure_dual_pool_probe(srv)
+
+    host = "127.0.0.1"
+    port = find_free_port()
+    server, thread = run_ephemeral_server(app, host, port)
+    url = f"http://{host}:{port}/mcp"
+    try:
+        async with AsyncExitStack() as owner:
+            clients, _stacks = await _open_five_mcp_clients(owner, url)
+            normal = await asyncio.gather(
+                *(
+                    _dual_probe(client, "connect_normal", str(index))
+                    for index, client in enumerate(clients)
+                )
+            )
+            agents = await asyncio.gather(
+                *(
+                    _dual_probe(clients[index], "connect_agent", str(index))
+                    for index in range(4)
+                )
+            )
+            assert len(fake.active_sids()) == 9
+
+            normal0 = normal[0]["normal_sid"]
+            fake.stale_on_next_execute(normal0)
+            lazy_agent, stale_normal = await asyncio.gather(
+                _dual_probe(clients[4], "connect_agent", "4"),
+                _dual_probe(clients[0], "execute_normal"),
+            )
+
+            assert lazy_agent["agent_sid"]
+            assert stale_normal["normal_sid"] != normal0
+            assert len(fake.active_sids()) == 10
+            assert fake.peak_active <= 10
+
+            states = await asyncio.gather(
+                *(_dual_probe(client, "state") for client in clients)
+            )
+            assert len({item["normal_sid"] for item in states}) == 5
+            assert len({item["agent_sid"] for item in states}) == 5
+            for index in range(1, 4):
+                assert states[index]["normal_sid"] == normal[index]["normal_sid"]
+                assert states[index]["agent_sid"] == agents[index]["agent_sid"]
+
+        await _wait_for_active_sids(fake, set())
+    finally:
+        stop_ephemeral_server(server, thread)
+
+
+@pytest.mark.asyncio
+async def test_fifty_streamable_http_dual_pool_cycles_release_two_sids_each(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeGateway(max_active=10)
+    monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
+    monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
+    monkeypatch.setenv("MCP_ACCESS_PROFILE", "mcp_client_safe")
+    monkeypatch.setattr("gateway_client.httpx.post", fake.post)
+
+    app = build_streamable_http_app()
+    import examples.mcp_server.server as srv
+
+    _configure_dual_pool_server(srv, monkeypatch)
+    _ensure_dual_pool_probe(srv)
+
+    host = "127.0.0.1"
+    port = find_free_port()
+    server, thread = run_ephemeral_server(app, host, port)
+    url = f"http://{host}:{port}/mcp"
+    try:
+        for cycle in range(50):
+            async with AsyncExitStack() as stack:
+                session, _get_sid = await _open_mcp_client(stack, url)
+                result = await _dual_probe(session, "connect_both", str(cycle))
+                assert result["normal_sid"] in fake.active_sids()
+                assert result["agent_sid"] in fake.active_sids()
+                assert len(fake.active_sids()) == 2
+            await _wait_for_active_sids(fake, set())
+
+        assert fake.peak_active == 2
+        assert fake.connect_reuse_flags == [False] * 100
+        assert len(fake.disconnects) == 100
+    finally:
+        stop_ephemeral_server(server, thread)
+
+
+@pytest.mark.asyncio
+async def test_abrupt_client_task_cancellation_still_releases_both_owned_sids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeGateway(max_active=10)
+    monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
+    monkeypatch.setenv("MCP_CLIENT_SAFE_MODE", "true")
+    monkeypatch.setenv("MCP_ACCESS_PROFILE", "mcp_client_safe")
+    monkeypatch.setattr("gateway_client.httpx.post", fake.post)
+
+    app = build_streamable_http_app()
+    import examples.mcp_server.server as srv
+
+    _configure_dual_pool_server(srv, monkeypatch)
+    _ensure_dual_pool_probe(srv)
+
+    host = "127.0.0.1"
+    port = find_free_port()
+    server, thread = run_ephemeral_server(app, host, port)
+    url = f"http://{host}:{port}/mcp"
+    materialized = asyncio.Event()
+
+    async def _own_transport() -> None:
+        async with AsyncExitStack() as stack:
+            session, _get_sid = await _open_mcp_client(stack, url)
+            await _dual_probe(session, "connect_both", "cancel")
+            materialized.set()
+            await asyncio.Event().wait()
+
+    try:
+        task = asyncio.create_task(_own_transport())
+        await asyncio.wait_for(materialized.wait(), timeout=3.0)
+        assert len(fake.active_sids()) == 2
+
+        started = asyncio.get_running_loop().time()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        elapsed = asyncio.get_running_loop().time() - started
+
+        await _wait_for_active_sids(fake, set(), timeout=3.0)
+        assert elapsed < 3.0
+        assert len(fake.disconnects) == 2
     finally:
         stop_ephemeral_server(server, thread)

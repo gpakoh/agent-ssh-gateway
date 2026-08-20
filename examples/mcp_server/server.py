@@ -6,7 +6,6 @@ This server is intentionally kept outside the gateway core.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import shutil
 import sys
@@ -16,6 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import anyio
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -62,6 +62,8 @@ from examples.mcp_server.mcp_infra import auth_setup, gateway_errors, runtime, t
 
 _auth_settings, _auth_provider, _agent_router = auth_setup.setup()
 
+_MCP_SESSION_RELEASE_DEADLINE_SECONDS = 4.0
+
 
 @asynccontextmanager
 async def _mcp_lifespan(_server: FastMCP) -> AsyncIterator[Any]:
@@ -77,10 +79,22 @@ async def _mcp_lifespan(_server: FastMCP) -> AsyncIterator[Any]:
     finally:
         gateway_pool = globals().get("_gateway_client_sessions")
         agent_pool = globals().get("_agent_client_sessions")
-        if isinstance(gateway_pool, GatewayClientSessionPool):
-            await asyncio.to_thread(gateway_pool.release_owner, lifecycle_owner)
-        if isinstance(agent_pool, GatewayClientSessionPool):
-            await asyncio.to_thread(agent_pool.release_owner, lifecycle_owner)
+
+        async def _release_pool(pool: GatewayClientSessionPool) -> None:
+            await anyio.to_thread.run_sync(
+                pool.release_owner,
+                lifecycle_owner,
+                abandon_on_cancel=True,
+            )
+
+        # Transport teardown itself may be cancelled. Shield only this bounded
+        # release window; every disconnect also has its own short network timeout.
+        with anyio.move_on_after(_MCP_SESSION_RELEASE_DEADLINE_SECONDS, shield=True):
+            async with anyio.create_task_group() as task_group:
+                if isinstance(gateway_pool, GatewayClientSessionPool):
+                    task_group.start_soon(_release_pool, gateway_pool)
+                if isinstance(agent_pool, GatewayClientSessionPool):
+                    task_group.start_soon(_release_pool, agent_pool)
         await close_fleet_runtime()
 
 

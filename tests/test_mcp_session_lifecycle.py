@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 import pytest
 
 from examples.mcp_server.mcp_infra._server_ref import server_module
@@ -160,3 +163,85 @@ def test_repeated_scoped_connect_releases_superseded_owned_sid(
 
     scoped.release()
     assert disconnects == ["sid-one", "sid-two"]
+
+
+def test_lifecycle_release_uses_dedicated_short_network_timeout(
+    monkeypatch: pytest.MonkeyPatch, live_server: Any
+) -> None:
+    monkeypatch.setenv("MCP_GATEWAY_RELEASE_HTTP_TIMEOUT", "0.25")
+    base = _base_client(live_server)
+    scoped = base.fork_session()
+    disconnect_timeouts: list[float] = []
+
+    def fake_post(url: str, **kwargs: Any) -> _Response:
+        if url.endswith("/api/ssh/connect"):
+            return _Response({"session_id": "owned-session"})
+        if url.endswith("/api/ssh/disconnect"):
+            disconnect_timeouts.append(float(kwargs["timeout"]))
+            raise httpx.ReadTimeout("gateway unavailable")
+        raise AssertionError(url)
+
+    monkeypatch.setattr("gateway_client.httpx.post", fake_post)
+
+    assert scoped.connect() == "owned-session"
+    scoped.release()
+
+    assert disconnect_timeouts == [0.25]
+    assert scoped.session_id == ""
+    assert base.session_id == "seed-session"
+
+
+def test_proactive_connect_capacity_error_preserves_working_owned_sid(
+    monkeypatch: pytest.MonkeyPatch, live_server: Any
+) -> None:
+    base = _base_client(live_server)
+    scoped = base.fork_session()
+    connect_attempts = 0
+    disconnects: list[str] = []
+
+    def fake_post(url: str, **kwargs: Any) -> _Response:
+        nonlocal connect_attempts
+        if url.endswith("/api/ssh/connect"):
+            connect_attempts += 1
+            if connect_attempts == 1:
+                return _Response({"session_id": "working-sid"})
+            return _Response({"detail": {"message": "session limit"}}, 429)
+        if url.endswith("/api/ssh/disconnect"):
+            disconnects.append(kwargs["json"]["session_id"])
+            return _Response({"status": "disconnected"})
+        raise AssertionError(url)
+
+    monkeypatch.setattr("gateway_client.httpx.post", fake_post)
+
+    assert scoped.connect() == "working-sid"
+    with pytest.raises(live_server.GatewayClientError, match="429"):
+        scoped.connect()
+
+    assert scoped.session_id == "working-sid"
+    assert scoped._owns_session is True
+    assert disconnects == []
+
+
+@pytest.mark.asyncio
+async def test_lifespan_release_has_hard_deadline_even_if_cleanup_worker_blocks(
+    monkeypatch: pytest.MonkeyPatch, live_server: Any
+) -> None:
+    class _BlockingPool(live_server.GatewayClientSessionPool):
+        def release_owner(self, _owner: Any) -> int:
+            time.sleep(1.0)
+            return 0
+
+    async def _noop_close() -> None:
+        return None
+
+    monkeypatch.setattr(live_server, "_gateway_client_sessions", _BlockingPool())
+    monkeypatch.setattr(live_server, "_agent_client_sessions", _BlockingPool())
+    monkeypatch.setattr(live_server, "_MCP_SESSION_RELEASE_DEADLINE_SECONDS", 0.1)
+    monkeypatch.setattr(live_server, "close_fleet_runtime", _noop_close)
+
+    started = asyncio.get_running_loop().time()
+    async with live_server._mcp_lifespan(live_server.mcp):
+        pass
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert elapsed < 0.5
