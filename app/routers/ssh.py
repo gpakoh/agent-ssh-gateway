@@ -351,6 +351,7 @@ async def ssh_connect(
             owner_type=_identity.token_type,
             owner_token_fingerprint=_identity.fingerprint,
             source_ip=source_ip,
+            validated_ips=validated_ips,
         )
 
     if reusable is not None:

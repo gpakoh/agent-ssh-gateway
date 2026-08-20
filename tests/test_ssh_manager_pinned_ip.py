@@ -33,6 +33,7 @@ async def test_pinned_ip_dials_the_exact_ip_not_the_hostname():
     try:
         client = _mock_client()
         fake_socket = MagicMock(name="fake_connected_socket")
+        fake_socket.getpeername.return_value = ("203.0.113.5", 22)
         with (
             patch("app.ssh_manager.paramiko.SSHClient", return_value=client),
             patch(
