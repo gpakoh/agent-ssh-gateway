@@ -116,6 +116,29 @@ class GatewayClientError(RuntimeError):
         self.body = body
 
 
+def _transport_error(exc: httpx.RequestError) -> GatewayClientError:
+    """Translate httpx transport failures into the local client error contract.
+
+    Request details are deliberately not copied: httpx exception strings may
+    contain internal hostnames, URLs, query parameters, or other deployment
+    details that must not cross the MCP boundary.
+    """
+    if isinstance(exc, httpx.TimeoutException):
+        message = "Gateway request timed out"
+        code = "TIMEOUT"
+    else:
+        message = "Gateway transport unavailable"
+        code = "REMOTE_UNAVAILABLE"
+    return GatewayClientError(
+        message,
+        body={
+            "message": message,
+            "code": code,
+            "retryable": True,
+        },
+    )
+
+
 class GatewayClient:
     """Small HTTP wrapper around agent-ssh-gateway."""
 
@@ -190,12 +213,15 @@ class GatewayClient:
         if self._ssh_private_key:
             payload["private_key"] = self._ssh_private_key
 
-        response = httpx.post(
-            f"{self.base_url}/api/ssh/connect",
-            json=payload,
-            headers=self._headers(),
-            timeout=30,
-        )
+        try:
+            response = httpx.post(
+                f"{self.base_url}/api/ssh/connect",
+                json=payload,
+                headers=self._headers(),
+                timeout=30,
+            )
+        except httpx.RequestError as exc:
+            raise _transport_error(exc) from exc
         if response.status_code >= 400:
             raise GatewayClientError(f"auto-reconnect failed: {response.status_code}")
         data = response.json()
@@ -246,12 +272,15 @@ class GatewayClient:
         params: dict[str, Any] | None = None,
         timeout: int = 30,
     ) -> dict[str, Any]:
-        response = httpx.get(
-            f"{self.base_url}{path}",
-            params=params,
-            headers=self._headers(),
-            timeout=timeout,
-        )
+        try:
+            response = httpx.get(
+                f"{self.base_url}{path}",
+                params=params,
+                headers=self._headers(),
+                timeout=timeout,
+            )
+        except httpx.RequestError as exc:
+            raise _transport_error(exc) from exc
         if response.status_code >= 400:
             body: dict[str, Any] | None = None
             try:
@@ -273,12 +302,15 @@ class GatewayClient:
         return data
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        response = httpx.post(
-            f"{self.base_url}{path}",
-            json=payload,
-            headers=self._headers(),
-            timeout=self._http_timeout,
-        )
+        try:
+            response = httpx.post(
+                f"{self.base_url}{path}",
+                json=payload,
+                headers=self._headers(),
+                timeout=self._http_timeout,
+            )
+        except httpx.RequestError as exc:
+            raise _transport_error(exc) from exc
         if response.status_code >= 400:
             body: dict[str, Any] | None = None
             try:

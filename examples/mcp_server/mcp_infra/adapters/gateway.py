@@ -190,11 +190,31 @@ def _split_csv_or_lines(value: str | None) -> list[str] | None:
     return items or None
 
 
+def _bounded_gateway_health_error(exc: GatewayClientError) -> dict[str, Any]:
+    """Represent one failed Gateway health subcheck without collapsing MCP health."""
+    code, retryable = _classify_gateway_error(exc)
+    status = "unreachable" if code in {"REMOTE_UNAVAILABLE", "TIMEOUT"} else "degraded"
+    message = {
+        "REMOTE_UNAVAILABLE": "Gateway health endpoint is unreachable",
+        "TIMEOUT": "Gateway health check timed out",
+        "AUTH_ERROR": "Gateway health check authentication failed",
+        "PERMISSION_DENIED": "Gateway health check permission denied",
+        "INVALID_INPUT": "Gateway health check is misconfigured",
+    }.get(code, "Gateway health check failed")
+    return {
+        "status": status,
+        "ready": False,
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+        },
+    }
+
+
 def gateway_health() -> dict[str, Any]:
     """Check gateway + MCP health with build metadata and toolset hash."""
     from datetime import UTC, datetime
-
-    gateway_data = _server_client().health()
 
     mcp_build_sha = os.environ.get("BUILD_SHA", "").strip() or "unknown"
     mcp_build_time = os.environ.get("BUILD_TIME", "").strip()
@@ -238,6 +258,11 @@ def gateway_health() -> dict[str, Any]:
         tm = _server_mcp()._tool_manager
         if hasattr(tm, "_tools"):
             tools_count = len(tm._tools)
+
+    try:
+        gateway_data = _server_client().health()
+    except GatewayClientError as exc:
+        gateway_data = _bounded_gateway_health_error(exc)
 
     return {
         "mcp": {
