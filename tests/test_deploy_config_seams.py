@@ -669,6 +669,29 @@ class TestMcpOauthWorkspaceMount:
         assert mount == f"{var_expr}:{var_expr}:rw", mount
 
 
+class TestDocsOnlyPushDoesNotDeployRuntime:
+    """A docs-only master push must not rebuild/redeploy the live MCP stack.
+
+    Production deploy recreates the ChatGPT-facing MCP containers, so an
+    innocuous TODO/docs commit must not disconnect every active client.  The
+    push-only paths-ignore filter preserves full pull-request checks while
+    suppressing the workflow only when *all* changed files are non-runtime
+    documentation.  Mixed docs + runtime changes still run normally.
+    """
+
+    def test_push_ignores_docs_only_changes_but_pull_requests_remain_unfiltered(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        triggers = wf[True]
+        push = triggers["push"]
+        ignored = set(push.get("paths-ignore", []))
+
+        assert "TODO.md" in ignored
+        assert "docs/**" in ignored
+        assert "paths-ignore" not in triggers["pull_request"], (
+            "PR checks must remain unfiltered even when docs-only master pushes are suppressed"
+        )
+
+
 class TestDeploymentConcurrencySerialization:
     """MAJOR audit finding: ci.yml's deploy job ran scripts/
     deploy-from-registry.sh with no lock of its own -- two close-together
