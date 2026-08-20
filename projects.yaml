@@ -289,3 +289,45 @@ projects:
     type: supervisor-workspace
     description: "Pinned supervisor workspace for web-ssh-gateway trusted delivery"
     tags: [gateway, supervisor, delivery]
+
+  web-ssh-gateway-session-affinity:
+    root: ".supervisor-workspaces/web-ssh-gateway-session-affinity-20260820"
+    type: "supervisor-workspace"
+    description: "Isolated P1 MCP client session-affinity fix"
+    tags: []
+
+  web-ssh-gateway-no-docs-deploy:
+    root: ".supervisor-workspaces/web-ssh-gateway-no-docs-deploy-20260820"
+    type: "supervisor-workspace"
+    description: "P0 docs-only deploy suppression candidate"
+    tags: []
+
+  web-ssh-gateway-bash-n-current:
+    root: ".supervisor-workspaces/web-ssh-gateway-bash-n-current-20260820"
+    type: "supervisor-workspace"
+    description: "Current-master port of PR #70 bash -n policy fix"
+    tags: ["agent-ssh-gateway", "pr70", "integration"]
+
+  web-ssh-gateway-archive-current:
+    root: ".supervisor-workspaces/web-ssh-gateway-archive-current-20260820"
+    type: "supervisor-workspace"
+    description: "Current-master port of PR #42 archive agent task fix"
+    tags: ["agent-ssh-gateway", "pr42", "integration"]
+
+  web-ssh-gateway-compose-current:
+    root: ".supervisor-workspaces/web-ssh-gateway-compose-current-20260820"
+    type: "supervisor-workspace"
+    description: "Current-master port of PR #43 Docker Compose capability fix"
+    tags: ["agent-ssh-gateway", "pr43", "integration"]
+
+  web-ssh-gateway-proxy-current:
+    root: ".supervisor-workspaces/web-ssh-gateway-proxy-current-20260820"
+    type: "supervisor-workspace"
+    description: "Current-master port of PR #44 OpenCode proxy rotation fix"
+    tags: ["agent-ssh-gateway", "pr44", "integration"]
+
+  web-ssh-gateway-archive-linear:
+    root: ".supervisor-workspaces/web-ssh-gateway-archive-linear-20260820"
+    type: "supervisor-workspace"
+    description: "Linear current-master port of archive-agent-task fix"
+    tags: ["agent-ssh-gateway", "pr42", "pr82", "integration"]
