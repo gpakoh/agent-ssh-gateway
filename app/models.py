@@ -301,6 +301,14 @@ class EventHookDeliveryResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class HealthComponentStatus(BaseModel):
+    """Sanitized per-component health status."""
+
+    status: str = "ok"
+    required: bool = True
+    failure_class: str | None = None
+
+
 class HealthResponse(BaseModel):
     """Health check response."""
 
@@ -315,6 +323,7 @@ class HealthResponse(BaseModel):
     build_time: str = ""
     started_at: str = ""
     version: str = ""
+    components: dict[str, HealthComponentStatus] = Field(default_factory=dict)
 
 
 class AuthCheckResponse(BaseModel):

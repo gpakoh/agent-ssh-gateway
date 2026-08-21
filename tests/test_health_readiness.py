@@ -1,6 +1,6 @@
 """Tests for /health readiness semantics and circuit breaker metric cardinality."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from starlette.testclient import TestClient
@@ -46,6 +46,7 @@ class TestHealthReadiness:
         """ready=true when Redis is connected, API key set, SSH reachable."""
         mock_redis = MagicMock()
         mock_redis._redis = MagicMock()  # simulate connected redis
+        mock_redis._redis.ping = AsyncMock(return_value=True)
 
         with (
             patch("app.routers.system._state") as mock_state,
@@ -100,6 +101,7 @@ class TestHealthReadiness:
         """ready=false when persistent_sessions_enabled but session_store is None."""
         mock_redis = MagicMock()
         mock_redis._redis = MagicMock()  # redis is fine
+        mock_redis._redis.ping = AsyncMock(return_value=True)
 
         with (
             patch("app.routers.system._state") as mock_state,
@@ -127,6 +129,7 @@ class TestHealthReadiness:
         """ready=false when auth is enabled but no API key is configured."""
         mock_redis = MagicMock()
         mock_redis._redis = MagicMock()
+        mock_redis._redis.ping = AsyncMock(return_value=True)
 
         with (
             patch("app.routers.system._state") as mock_state,
@@ -155,6 +158,7 @@ class TestHealthReadiness:
         """ready=false when SSH server cannot be reached."""
         mock_redis = MagicMock()
         mock_redis._redis = MagicMock()
+        mock_redis._redis.ping = AsyncMock(return_value=True)
 
         with (
             patch("app.routers.system._state") as mock_state,
@@ -182,6 +186,7 @@ class TestHealthReadiness:
         """ready=true when auth disabled (api_key not required)."""
         mock_redis = MagicMock()
         mock_redis._redis = MagicMock()
+        mock_redis._redis.ping = AsyncMock(return_value=True)
 
         with (
             patch("app.routers.system._state") as mock_state,
