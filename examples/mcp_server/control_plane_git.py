@@ -196,7 +196,7 @@ def _parse_gitea_remote(remote_url: str) -> tuple[str, str, str]:
         if api_host:
             allowed_hosts.add(api_host)
     allowed_hosts.add("gitea")
-    allowed_hosts.add("198.51.100.103")
+    allowed_hosts.add("192.0.2.103")
     allowed_hosts.add("git.example.com")
 
     if host not in allowed_hosts:
