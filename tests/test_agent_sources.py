@@ -240,8 +240,13 @@ def test_source_repo_access_is_scoped_to_registered_root(tmp_path, monkeypatch):
     assert len(source_calls) == 2
     assert all(safe_directory == repo for _, _, safe_directory in source_calls)
     assert all(cwd == repo for _, cwd, _ in source_calls)
-    assert not any("clone" in args for args, _, _ in calls)
-    assert not any("fetch" in args for args, _, _ in calls)
+    # Publication must never clone or fetch FROM the registered checkout;
+    # scratch-dir bundle-verification clones are unrelated to it and allowed.
+    for banned in ("clone", "fetch"):
+        assert not any(
+            banned in args and any(str(repo) in str(arg) for arg in args)
+            for args, _, _ in calls
+        )
 
     update_ref_calls = [args for args, _, _ in calls if "update-ref" in args]
     assert len(update_ref_calls) == 1
