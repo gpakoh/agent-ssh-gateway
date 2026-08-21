@@ -199,6 +199,47 @@ async def _drain_jobs_for_shutdown(job_manager: JobManager, timeout: float = 30.
         return await job_manager.force_cleanup()
 
 
+async def _recover_durable_jobs(
+    job_manager: JobManager, redis_queue: RedisJobQueue
+) -> int:
+    """Discover and schedule durable keyed jobs that survived a gateway restart.
+
+    Safe when called concurrently by two workers: only one token-holder may
+    cross into ``execute_stream`` — the atomic ``claim_durable_execution``
+    Lua script serializes competing claims.
+
+    Redis unavailable before keyed acceptance: ``SubmissionUnavailableError``
+    / fail-closed — recovery is silently skipped and the server still boots
+    for unkeyed jobs.
+    """
+    if redis_queue is None or redis_queue._redis is None:
+        return 0
+
+    reconciled = await redis_queue.reconcile_expired_cancelled_processing()
+    if reconciled:
+        logger.warning(
+            "Reconciled %d expired cancelled durable jobs to ambiguous",
+            len(reconciled),
+        )
+
+    recoverable_ids = await redis_queue.list_recoverable_durable_jobs()
+    if not recoverable_ids:
+        return 0
+
+    recovered = 0
+    for job_id in recoverable_ids:
+        envelope = await redis_queue.recover_durable_job(job_id)
+        if envelope is None:
+            continue
+        rid = await job_manager.recover_job(envelope)
+        if rid:
+            recovered += 1
+
+    if recovered:
+        logger.info("Startup recovery: scheduled %d durable job(s)", recovered)
+    return recovered
+
+
 # ---------------------------------------------------------------------------
 # Lifespan — Initializes Globals In App.state
 # ---------------------------------------------------------------------------
@@ -376,6 +417,16 @@ async def lifespan(app: FastAPI):
                 except Exception:
                     logger.warning("Failed to close unusable persistent session store", exc_info=True)
             state.session_store = None
+
+    # Durable job recovery must run only after the persistent-session
+    # restoration phase has completed. recover_job() also verifies that the
+    # referenced SID is live; unavailable targets remain nonterminal in Redis
+    # rather than being misclassified as command failures.
+    if state.redis_queue and state.redis_queue._redis:
+        try:
+            await _recover_durable_jobs(state.job_manager, state.redis_queue)
+        except Exception as exc:
+            logger.warning("Durable job recovery skipped: %s", exc)
 
     # Initialize Event Hook Components
     if settings.event_hooks_enabled:
@@ -716,7 +767,7 @@ def custom_openapi():
         "oneOf": [
             {
                 "$ref": "#/components/schemas/SSEStatusEvent",
-                "description": "Job status update (started/running/completed/cancelled)",
+                "description": "Job status update (started/running/completed/cancelled/ambiguous)",
             },
             {
                 "$ref": "#/components/schemas/SSEStdoutEvent",
