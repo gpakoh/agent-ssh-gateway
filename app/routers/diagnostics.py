@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, ensure_session_owner, require_scope
+from app.job_manager import TERMINAL_STATES
 from app.models import SessionCheckRequest
 from app.rbac import job_visible_to
 
@@ -29,7 +30,7 @@ def _compute_job_latency_breakdown(identity: AuthIdentity) -> dict:
         if not job_visible_to(job, identity):
             continue
         total_jobs += 1
-        if job.status not in ("completed", "failed", "cancelled"):
+        if job.status not in TERMINAL_STATES:
             continue
         if job.queued_at_mono is None or job.completed_at_mono is None:
             continue
