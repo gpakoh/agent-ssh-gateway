@@ -658,7 +658,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                     "stream_notes": [
                         "Events are SSE-formatted: data: <json>\\n\\n",
                         "Keepalive pings (:keepalive\\n\\n) every 1s when idle.",
-                        "Stream ends when the job reaches a terminal state (completed/failed/cancelled).",
+                        "Stream ends when the job reaches a terminal coordinator state (completed/failed/cancelled/ambiguous).",
                         "Maximum stream duration: 3600s (1 hour).",
                         "Rate limited: 20 requests per minute.",
                     ],
@@ -681,7 +681,7 @@ def build_api_help(request: Request) -> dict[str, Any]:
                 "events": [
                     {
                         "type": "status",
-                        "fields": {"status": "pending | running | completed | failed | cancelled"},
+                        "fields": {"status": "pending | running | cancelling | completed | failed | cancelled | ambiguous"},
                         "description": "Job status change. Emitted on state transitions.",
                     },
                     {

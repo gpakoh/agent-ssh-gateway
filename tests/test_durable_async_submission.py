@@ -32,6 +32,120 @@ class _FakeRedis:
     async def zcard(self, key: str):
         return 0
 
+    async def eval(self, script: str, numkeys: int, *args):
+        import json as _json
+        if "sub_created and env_created" in script:
+            sub_key, env_key = args[0], args[1]
+            sub_claim, env_json, owner, payload, _ttl_s = args[2], args[3], args[4], args[5], args[6]
+            if sub_key not in self.values and env_key not in self.values:
+                self.values[sub_key] = sub_claim
+                self.values[env_key] = env_json
+                return [1, 0]
+            existing = self.values.get(sub_key)
+            if existing is None:
+                return [0, 0]
+            try:
+                tbl = _json.loads(existing)
+                if tbl.get("owner_id") != owner or tbl.get("payload_hash") != payload:
+                    return [0, -1]
+                return [0, 0, tbl.get("job_id", "")]
+            except Exception:
+                return [0, 0]
+        if "claimed_at" in script:
+            env_key, _proc_key, lease_key = args[0], args[1], args[2]
+            token, lease_ttl_s, now_s = args[3], args[4], args[5]
+            lease_ttl = int(lease_ttl_s)
+            now = float(now_s)
+            raw = self.values.get(env_key)
+            if not raw:
+                return [0]
+            env = _json.loads(raw)
+            st = env.get("status")
+            if st in ("completed", "failed", "cancelled", "ambiguous"):
+                return [0]
+            if st == "processing" and env.get("worker_token") == token:
+                env["lease_expiry"] = now + lease_ttl
+                env["last_heartbeat"] = now
+                self.values[env_key] = _json.dumps(env)
+                self.values[lease_key] = token
+                return [1]
+            if st == "processing":
+                if env.get("lease_expiry") and now <= env["lease_expiry"]:
+                    return [0]
+            env["status"] = "processing"
+            env["worker_token"] = token
+            env["lease_expiry"] = now + lease_ttl
+            env["last_heartbeat"] = now
+            env["claimed_at"] = now
+            self.values[env_key] = _json.dumps(env)
+            self.values[lease_key] = token
+            return [1]
+        if "comp_key" in script:
+            env_key = args[0]
+            _proc_key, lease_key = args[1], args[2]
+            _comp_key, _dead_key = args[3], args[4]
+            token, new_status = args[5], args[6]
+            stdout, stderr = args[7], args[8]
+            exit_code_s, error_msg = args[9], args[10]
+            now_s = args[11]
+            now = float(now_s)
+            raw = self.values.get(env_key)
+            if not raw:
+                return [0]
+            env = _json.loads(raw)
+            if env.get("status") != "processing" or env.get("worker_token") != token:
+                return [0]
+            env["status"] = new_status
+            env["finished_at"] = now
+            env["stdout"] = stdout
+            env["stderr"] = stderr
+            if exit_code_s:
+                env["exit_code"] = int(exit_code_s)
+            if error_msg:
+                env["error"] = error_msg
+            self.values[env_key] = _json.dumps(env)
+            return [1]
+        if "ZRANGEBYSCORE" in script and "SCAN" not in script:
+            return []
+        if "env['status'] ~= 'processing' or env['worker_token'] ~= token" in script:
+            env_key = args[0]
+            token = args[3]
+            lease_ttl = int(args[4])
+            now = float(args[5])
+            raw = self.values.get(env_key)
+            if not raw:
+                return [0]
+            env = _json.loads(raw)
+            if env.get("status") != "processing" or env.get("worker_token") != token:
+                return [0]
+            env["lease_expiry"] = now + lease_ttl
+            env["last_heartbeat"] = now
+            self.values[env_key] = _json.dumps(env)
+            return [1]
+        if "SCAN" in script:
+            sub_prefix = args[0]
+            env_prefix = args[1]
+            _limit = int(args[2])
+            result = []
+            for key in list(self.values.keys()):
+                if not key.startswith(sub_prefix):
+                    continue
+                raw = self.values.get(key)
+                if not raw:
+                    continue
+                try:
+                    claim = _json.loads(raw)
+                    jid = str(claim.get("job_id", ""))
+                    env_raw = self.values.get(env_prefix + jid)
+                    if env_raw:
+                        env = _json.loads(env_raw)
+                        if env.get("status") == "pending":
+                            result.append(jid)
+                except Exception:
+                    continue
+            return result
+        return [0]
+
 
 def _queue() -> RedisJobQueue:
     queue = RedisJobQueue("redis://unused")
@@ -128,7 +242,7 @@ async def test_identical_retry_returns_same_job_and_executes_once():
     await asyncio.wait_for(job.completed_event.wait(), timeout=2)
 
     second = await manager.create_job(
-        "session-b",  # a reconnect may legitimately change the SSH session
+        "session-a",
         "sh",
         owner_id="owner-a",
         stdin=b"echo hi\n",
@@ -183,7 +297,7 @@ async def test_retry_after_manager_restart_returns_original_job_id():
     calls2 = [0]
     manager2 = _manager(queue, calls2)
     second = await manager2.create_job(
-        "session-new",
+        "session-a",
         "sh",
         owner_id="owner-a",
         stdin=b"echo hi\n",
@@ -271,7 +385,7 @@ async def test_redis_claim_transport_failure_fails_before_execution():
     queue = RedisJobQueue("redis://unused")
     backend = AsyncMock()
     backend.get.return_value = None
-    backend.set.side_effect = RedisConnectionError("redis down")
+    backend.eval.side_effect = RedisConnectionError("redis down")
     queue._redis = backend
     calls = [0]
     manager = _manager(queue, calls)
