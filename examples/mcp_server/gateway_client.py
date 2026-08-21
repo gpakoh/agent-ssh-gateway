@@ -9,6 +9,7 @@ import time
 import weakref
 from typing import Any
 
+import anyio
 import httpx
 from command_policy import validate_readonly_command
 
@@ -168,8 +169,15 @@ class GatewayClient:
         self.async_job_timeout = int(os.environ.get("MCP_GATEWAY_ASYNC_JOB_TIMEOUT", "3600"))
         self.job_timeout = int(os.environ.get("MCP_GATEWAY_JOB_TIMEOUT", "180"))
         self._http_timeout = int(os.environ.get("MCP_GATEWAY_HTTP_TIMEOUT", "120"))
+        self._release_http_timeout = float(
+            os.environ.get("MCP_GATEWAY_RELEASE_HTTP_TIMEOUT", "2")
+        )
 
         self._reconnect_lock = threading.Lock()
+        self._reuse_existing = True
+        self._release_managed = False
+        self._owns_session = False
+        self._released = False
         self._ssh_host = ssh_host if ssh_host is not None else os.environ.get("GATEWAY_SSH_HOST", "")
         self._ssh_port = ssh_port if ssh_port is not None else int(os.environ.get("GATEWAY_SSH_PORT", "22"))
         self._ssh_user = ssh_user if ssh_user is not None else (
@@ -205,10 +213,14 @@ class GatewayClient:
         ``self.session_id`` between those logical clients makes an auto-reconnect in
         one transport mutate the default session selected by every other transport.
         The current session id is copied as an initial immutable value so deployments
-        that intentionally provide only ``GATEWAY_SESSION_ID`` keep working. Later
-        reconnects mutate only the fork's field. If that copied session is stale, the
-        existing retry/reconnect path can replace it independently; gateway-side
-        ``reuse_existing`` still permits SSH transport multiplexing.
+        that intentionally provide only ``GATEWAY_SESSION_ID`` keep working. It is a
+        borrowed seed: releasing the MCP transport must not disconnect it. Any later
+        connect/reconnect creates a distinct gateway logical SID for this MCP transport.
+
+        Gateway ``reuse_existing=True`` returns the same logical SID, and disconnecting
+        that SID removes it for every holder. Scoped clients therefore deliberately
+        disable SID reuse rather than trying to implement a process-local refcount that
+        could not protect holders in another MCP server process.
         """
         fork = GatewayClient(
             base_url=self.base_url,
@@ -224,9 +236,18 @@ class GatewayClient:
         fork.async_job_timeout = self.async_job_timeout
         fork.job_timeout = self.job_timeout
         fork._http_timeout = self._http_timeout
+        fork._release_http_timeout = self._release_http_timeout
+        fork._reuse_existing = False
+        fork._release_managed = True
+        fork._owns_session = False
         return fork
 
     def _reconnect_session(self) -> None:
+        if self._released:
+            raise GatewayClientError("MCP session is closed")
+        old_owned_sid = (
+            self.session_id if self._release_managed and self._owns_session else ""
+        )
         if not self._ssh_host or not self._ssh_user:
             raise GatewayClientError(
                 "GATEWAY_SSH_HOST and GATEWAY_SSH_USER are required for auto-reconnect"
@@ -235,7 +256,7 @@ class GatewayClient:
             "host": self._ssh_host,
             "port": self._ssh_port,
             "username": self._ssh_user,
-            "reuse_existing": True,
+            "reuse_existing": self._reuse_existing,
         }
         if self._ssh_password:
             payload["password"] = self._ssh_password
@@ -255,12 +276,24 @@ class GatewayClient:
             raise GatewayClientError(f"auto-reconnect failed: {response.status_code}")
         data = response.json()
         self.session_id = data["session_id"]
+        if self._release_managed:
+            self._owns_session = True
+        if old_owned_sid and old_owned_sid != self.session_id:
+            try:
+                self._post(
+                    "/api/ssh/disconnect",
+                    {"session_id": old_owned_sid},
+                    timeout=self._release_http_timeout,
+                )
+            except Exception:
+                pass
 
     def connect(self) -> str:
         """Establish SSH session and return session_id."""
-        self._reconnect_session()
-        assert self.session_id is not None
-        return self.session_id
+        with self._reconnect_lock:
+            self._reconnect_session()
+            assert self.session_id is not None
+            return self.session_id
 
     def disconnect(self, session_id: str | None = None) -> None:
         """Close SSH session. Best-effort — never raises."""
@@ -273,6 +306,84 @@ class GatewayClient:
             pass
         if sid == self.session_id:
             self.session_id = ""
+
+    def prepare_release(self) -> str:
+        """Atomically end local ownership and return the owned SID to clean up.
+
+        This is the lifecycle state transition. It performs no network I/O, so once
+        it returns no later cleanup operation is allowed to mutate this client's
+        ownership/session state. Borrowed seed SIDs are never returned for cleanup.
+        """
+        with self._reconnect_lock:
+            if not self._release_managed or self._released:
+                return ""
+            self._released = True
+            sid = self.session_id if self._owns_session else ""
+            self.session_id = ""
+            self._owns_session = False
+            return sid
+
+    def release(self) -> None:
+        """Release resources owned by an MCP-scoped fork exactly once.
+
+        Synchronous callers keep the historical best-effort behavior. MCP lifespan
+        teardown uses ``prepare_release()`` plus ``release_sid_async()`` so network
+        cleanup remains cancellable and cannot escape the owning lifecycle.
+        """
+        sid = self.prepare_release()
+        if not sid:
+            return
+        try:
+            self._post(
+                "/api/ssh/disconnect",
+                {"session_id": sid},
+                timeout=self._release_http_timeout,
+            )
+        except Exception:
+            # Lifecycle cleanup is best-effort. Gateway idle cleanup remains the
+            # final safety net if teardown happens during a gateway outage.
+            pass
+
+    async def _post_async(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float | int,
+    ) -> dict[str, Any]:
+        try:
+            async with httpx.AsyncClient() as async_client:
+                response = await async_client.post(
+                    f"{self.base_url}{path}",
+                    json=payload,
+                    headers=self._headers(),
+                    timeout=timeout,
+                )
+        except httpx.RequestError as exc:
+            raise _transport_error(exc) from exc
+        if response.status_code >= 400:
+            raise GatewayClientError(
+                f"POST {path} failed: {response.status_code} {response.text}",
+                status_code=response.status_code,
+            )
+        data = response.json()
+        return data if isinstance(data, dict) else {}
+
+    async def release_sid_async(self, sid: str) -> None:
+        """Best-effort cancellable disconnect for a SID already detached locally."""
+        if not sid:
+            return
+        try:
+            with anyio.move_on_after(self._release_http_timeout):
+                await self._post_async(
+                    "/api/ssh/disconnect",
+                    {"session_id": sid},
+                    timeout=self._release_http_timeout,
+                )
+        except Exception:
+            # Request failures are best-effort. Cancellation classes inherit
+            # BaseException and therefore still propagate to the owning task group.
+            pass
 
     @staticmethod
     def _retry_on_session_not_found(
@@ -330,13 +441,19 @@ class GatewayClient:
             )
         return data
 
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float | int | None = None,
+    ) -> dict[str, Any]:
         try:
             response = httpx.post(
                 f"{self.base_url}{path}",
                 json=payload,
                 headers=self._headers(),
-                timeout=self._http_timeout,
+                timeout=self._http_timeout if timeout is None else timeout,
             )
         except httpx.RequestError as exc:
             raise _transport_error(exc) from exc
@@ -742,22 +859,28 @@ class GatewayClient:
 
 
 class GatewayClientSessionPool:
-    """Weakly bind mutable GatewayClient state to a server-side MCP session.
+    """Bind mutable GatewayClient state to a server-side MCP session lifecycle.
 
     The key is the SDK-created ``ServerSession`` object, never a client-supplied
-    header or bearer token. Weak keys ensure a closed MCP transport does not
-    become an unbounded process-lifetime cache. If a future SDK changes the
-    session object so it can no longer be used as a weak key, resolution fails
-    closed instead of silently falling back to shared mutable session state.
+    header or bearer token. Explicit lifecycle-owner release is the resource
+    contract; weak keys are only a cache-safety fallback and do not substitute for
+    disconnecting an owned gateway SID. If a future SDK changes the session object
+    so it can no longer be used as a weak key, resolution fails closed instead of
+    silently falling back to shared mutable session state.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._clients: weakref.WeakKeyDictionary[Any, tuple[GatewayClient, GatewayClient]] = (
-            weakref.WeakKeyDictionary()
-        )
+        self._clients: weakref.WeakKeyDictionary[
+            Any, tuple[GatewayClient, GatewayClient, Any | None]
+        ] = weakref.WeakKeyDictionary()
 
-    def get(self, base: Any, mcp_session: Any) -> Any:
+    def get(
+        self,
+        base: Any,
+        mcp_session: Any,
+        lifecycle_owner: Any | None = None,
+    ) -> Any:
         if not isinstance(base, GatewayClient):
             # Tests and embedding applications deliberately replace the server
             # facade client with a stub/mock. Preserve that exact object rather
@@ -770,5 +893,32 @@ class GatewayClientSessionPool:
                 return existing[1]
 
             scoped = base.fork_session()
-            self._clients[mcp_session] = (base, scoped)
+            self._clients[mcp_session] = (base, scoped, lifecycle_owner)
             return scoped
+
+    def detach_owner(self, lifecycle_owner: Any) -> list[tuple[GatewayClient, str]]:
+        """Detach one lifecycle's clients and atomically end their local ownership."""
+        detached: list[tuple[GatewayClient, str]] = []
+        with self._lock:
+            for mcp_session, entry in list(self._clients.items()):
+                if entry[2] is lifecycle_owner:
+                    self._clients.pop(mcp_session, None)
+                    scoped = entry[1]
+                    detached.append((scoped, scoped.prepare_release()))
+        return detached
+
+    def release_owner(self, lifecycle_owner: Any) -> int:
+        """Synchronously release all scoped clients belonging to one MCP lifespan."""
+        detached = self.detach_owner(lifecycle_owner)
+        for scoped, sid in detached:
+            if not sid:
+                continue
+            try:
+                scoped._post(
+                    "/api/ssh/disconnect",
+                    {"session_id": sid},
+                    timeout=scoped._release_http_timeout,
+                )
+            except Exception:
+                pass
+        return len(detached)
