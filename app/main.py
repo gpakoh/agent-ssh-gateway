@@ -134,7 +134,9 @@ async def _restore_persisted_sessions(
             except ValueError as exc:
                 logger.warning(
                     "Refusing to restore session %s: target host %s failed policy: %s",
-                    sess["session_id"], host, exc,
+                    sess["session_id"],
+                    host,
+                    exc,
                 )
                 failed += 1
                 continue
@@ -153,9 +155,7 @@ async def _restore_persisted_sessions(
                 session_id=sess["session_id"],
                 pinned_ip=validated_ips[0],
             )
-            await session_store.refresh_session_expiry(
-                sess["session_id"], settings.session_timeout
-            )
+            await session_store.refresh_session_expiry(sess["session_id"], settings.session_timeout)
             restored += 1
         except Exception as exc:
             logger.warning("Failed to restore session %s: %s", sess["session_id"], exc)
@@ -163,9 +163,7 @@ async def _restore_persisted_sessions(
     return restored, failed
 
 
-async def _audit_retention_loop(
-    store, *, retention_days: int, interval_seconds: int
-) -> None:
+async def _audit_retention_loop(store, *, retention_days: int, interval_seconds: int) -> None:
     """Periodically prune audit_log entries older than retention_days."""
     while True:
         try:
@@ -199,9 +197,7 @@ async def _drain_jobs_for_shutdown(job_manager: JobManager, timeout: float = 30.
         return await job_manager.force_cleanup()
 
 
-async def _recover_durable_jobs(
-    job_manager: JobManager, redis_queue: RedisJobQueue
-) -> int:
+async def _recover_durable_jobs(job_manager: JobManager, redis_queue: RedisJobQueue) -> int:
     """Discover and schedule durable keyed jobs that survived a gateway restart.
 
     Safe when called concurrently by two workers: only one token-holder may
@@ -243,7 +239,6 @@ async def _recover_durable_jobs(
 # ---------------------------------------------------------------------------
 # Lifespan — Initializes Globals In App.state
 # ---------------------------------------------------------------------------
-
 
 
 def _pin_workspace_registry_root() -> None:
@@ -336,6 +331,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize structured audit event logger (JSONL + ring buffer)
     from app.audit import AuditEventLogger as _AuditEventLogger
+
     state.event_audit_logger = _AuditEventLogger(
         log_path=settings.audit_log_path,
         recent_limit=settings.audit_recent_limit,
@@ -402,9 +398,7 @@ async def lifespan(app: FastAPI):
             logger.info("Persistent Session Store Connected")
 
             # Restore Active Sessions From Previous Run
-            restored, failed = await _restore_persisted_sessions(
-                state.session_store, state.manager
-            )
+            restored, failed = await _restore_persisted_sessions(state.session_store, state.manager)
             if restored:
                 logger.info(
                     "Restored %d sessions from persistent storage (%d failed)", restored, failed
@@ -415,7 +409,9 @@ async def lifespan(app: FastAPI):
                 try:
                     await state.session_store.disconnect()
                 except Exception:
-                    logger.warning("Failed to close unusable persistent session store", exc_info=True)
+                    logger.warning(
+                        "Failed to close unusable persistent session store", exc_info=True
+                    )
             state.session_store = None
 
     # Durable job recovery must run only after the persistent-session
@@ -1270,6 +1266,7 @@ async def validation_exception_handler(request, exc: RequestValidationError):
 
 from app.routers.admin_access import router as admin_access_router  # noqa: E402
 from app.routers.admin_approval import router as admin_approval_router  # noqa: E402
+from app.routers.agents import router as agents_router  # noqa: E402
 from app.routers.allowlist import router as allowlist_router  # noqa: E402
 from app.routers.audit import router as audit_router  # noqa: E402
 from app.routers.batch import router as batch_router  # noqa: E402
@@ -1299,6 +1296,7 @@ app.include_router(project_inspection_router)
 app.include_router(ssh_router)
 app.include_router(files_router)
 app.include_router(jobs_router)
+app.include_router(agents_router)
 app.include_router(git_router)
 app.include_router(context_router)
 app.include_router(search_replace_router)

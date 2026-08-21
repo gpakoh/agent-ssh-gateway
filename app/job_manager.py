@@ -8,6 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
+from app.agent_events import AgentEventEmitter, agent_events
 from app.command_policy import evaluate_command_policy
 from app.config import settings
 from app.exceptions import (
@@ -203,6 +204,7 @@ class JobManager:
         max_jobs: int = 100,
         job_timeout: int = 3600,
         redis_queue: RedisJobQueue | None = None,
+        event_emitter: AgentEventEmitter | None = None,
     ) -> None:
         self._ssh_manager = ssh_manager
         self._jobs: dict[str, JobRecord] = {}
@@ -215,6 +217,9 @@ class JobManager:
         # history/results survive a gateway restart; see save_terminal_job().
         self.redis_queue = redis_queue
         self._job_tasks: dict[str, asyncio.Task] = {}
+        # Agent lifecycle event emission (observability only — never affects
+        # execution outcomes). Defaults to the process-wide store.
+        self._events = event_emitter if event_emitter is not None else agent_events
 
     async def start_cleanup_task(self) -> None:
         """Start background cleanup of old jobs."""
@@ -617,6 +622,12 @@ class JobManager:
                         # prevents stale persistence if another worker took over.
                         job.cancel_event.set()
                         break
+                    self._events.emit(
+                        job_id,
+                        job.owner_id,
+                        "heartbeat",
+                        {"state": "running", "lease_ttl": lease_ttl},
+                    )
                     if await self.redis_queue.is_durable_cancellation_requested(
                         job_id, worker_token=worker_token
                     ):
@@ -640,6 +651,12 @@ class JobManager:
                     "status": "running",
                     "message": f"Started: {_started_command}",
                 }
+            )
+            self._events.emit(
+                job_id,
+                job.owner_id,
+                "started",
+                {"command": _started_command, "session_id": job.session_id},
             )
 
             decision = evaluate_command_policy(
@@ -785,6 +802,25 @@ class JobManager:
                         "exit_code": job.exit_code,
                     }
                 )
+                if job.status == "completed":
+                    self._events.emit(
+                        job_id,
+                        job.owner_id,
+                        "completed",
+                        {"exit_code": job.exit_code, "duration": job.duration},
+                    )
+                else:
+                    self._events.emit(
+                        job_id,
+                        job.owner_id,
+                        "failed",
+                        {
+                            "status": job.status,
+                            "exit_code": job.exit_code,
+                            "error": job.error_message,
+                            "duration": job.duration,
+                        },
+                    )
 
     # ------------------------------------------------------------------
     # Get Job

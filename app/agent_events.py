@@ -90,3 +90,27 @@ class AgentEventEmitter:
 
 
 agent_events = AgentEventEmitter()
+
+
+def record_agent_event(
+    job_id: str,
+    agent_id: str,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+) -> AgentEvent:
+    """Emit one lifecycle event through the process-wide store."""
+    return agent_events.emit(job_id, agent_id, event_type, payload)
+
+
+def list_agent_events(job_id: str) -> list[AgentEvent]:
+    """Read the event timeline of one job from the process-wide store."""
+    return agent_events.store.get_events(job_id)
+
+
+__all__ = [
+    "AgentEvent",
+    "AgentEventEmitter",
+    "AgentEventStore",
+    "list_agent_events",
+    "record_agent_event",
+]
