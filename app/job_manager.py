@@ -1,6 +1,7 @@
 """Background job management for long-running SSH commands."""
 
 import asyncio
+import base64
 import hashlib
 import logging
 import time
@@ -26,14 +27,21 @@ from app.ssh_manager import (
 logger = logging.getLogger(__name__)
 
 MAX_STDOUT_SIZE = 10 * 1024 * 1024  # 10 MB per job
-TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
+TERMINAL_STATES = frozenset({"completed", "failed", "cancelled", "ambiguous"})
 ACTIVE_STATES = frozenset({"pending", "running", "cancelling"})
 SSE_LISTENER_QUEUE_SIZE = 256
+DURABLE_LEASE_TTL_SECONDS = 60
 
 
-def _submission_payload_hash(command: str, stdin: bytes, timeout: int) -> str:
-    """Hash execution semantics without persisting command/stdin in the claim."""
+def _submission_payload_hash(session_id: str, command: str, stdin: bytes, timeout: int) -> str:
+    """Hash immutable execution semantics for a keyed submission.
+
+    ``redact_path_prefix`` is intentionally excluded: it affects presentation
+    only, not the SSH target or remote execution semantics.
+    """
     digest = hashlib.sha256()
+    digest.update(session_id.encode("utf-8"))
+    digest.update(b"\0")
     digest.update(command.encode("utf-8"))
     digest.update(b"\0")
     digest.update(stdin)
@@ -67,7 +75,7 @@ class JobRecord:
     job_id: str
     session_id: str
     command: str
-    status: str = "pending"  # pending, running, cancelling, completed, failed, cancelled
+    status: str = "pending"  # pending, running, cancelling, completed, failed, cancelled, ambiguous
     stdout: str = ""
     stderr: str = ""
     exit_code: int | None = None
@@ -88,6 +96,11 @@ class JobRecord:
     # to the manager's job_timeout (3600) when create_job omits it. Never
     # returned to API callers via to_dict().
     timeout: int = 3600
+    # Set to True when the job was created under a submission_key and a
+    # durable envelope was atomically committed to Redis.  Used by
+    # ``_run_job`` to decide whether to claim/heartbeat/finish via Redis
+    # instead of the legacy in-process path.
+    is_durable: bool = False
 
     # Monotonic timestamps (relative to process start; do NOT survive restart)
     queued_at_mono: float | None = None
@@ -309,9 +322,14 @@ class JobManager:
         atomically reserved before any SSH command is scheduled. Repeating an
         identical request returns the original job_id, including after a
         coordinator/Gateway retry or process restart.
+
+        For keyed submissions the ACK is issued only after the immutable
+        submission identity and the full executable envelope are durably
+        committed together in Redis (``reserve_submission_with_job``).
+        Unkeyed ``create_job`` remains explicitly in-process / best-effort.
         """
         resolved_timeout = self._job_timeout if timeout is None else timeout
-        payload_hash = _submission_payload_hash(command, stdin, resolved_timeout)
+        payload_hash = _submission_payload_hash(session_id, command, stdin, resolved_timeout)
 
         if submission_key:
             if self.redis_queue is None:
@@ -337,13 +355,48 @@ class JobManager:
             if submission_key:
                 if self.redis_queue is None:
                     raise SubmissionUnavailableError("Durable submission requires Redis")
-                reserved_job_id, created = await self.redis_queue.claim_submission(
+
+                # Build the full executable envelope that will be atomically
+                # committed together with the submission claim.  On restart a
+                # gateway worker can reconstruct the job from this envelope alone.
+                now = time.time()
+                envelope: dict = {
+                    "version": 1,
+                    "job_id": job_id,
+                    "submission_key": submission_key,
+                    "session_id": session_id,
+                    "command": command,
+                    "stdin_b64": base64.b64encode(stdin).decode("ascii"),
+                    "timeout": resolved_timeout,
+                    "owner_id": owner_id,
+                    "redact_path_prefix": redact_path_prefix,
+                    "payload_hash": payload_hash,
+                    "status": "pending",
+                    "created_at": now,
+                    "queued_at": now,
+                    "started_at": None,
+                    "claimed_at": None,
+                    "finished_at": None,
+                    "worker_token": None,
+                    "lease_expiry": None,
+                    "last_heartbeat": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "exit_code": None,
+                    "error": None,
+                    "cancel_requested": False,
+                }
+                reserved_job_id, created = await self.redis_queue.reserve_submission_with_job(
                     submission_key,
                     job_id=job_id,
                     owner_id=owner_id,
                     payload_hash=payload_hash,
+                    envelope=envelope,
                 )
                 if not created:
+                    # A previous submission with the same key+payload exists —
+                    # the durable envelope was already committed, so the ACK
+                    # contract is satisfied.
                     return reserved_job_id
                 job_id = reserved_job_id
 
@@ -355,8 +408,11 @@ class JobManager:
                 redact_path_prefix=redact_path_prefix,
                 stdin=stdin,
                 timeout=resolved_timeout,
+                is_durable=bool(submission_key),
             )
             job.queued_at_mono = time.monotonic()
+            if job.is_durable:
+                job.progress["durable_persisted"] = False
             self._jobs[job_id] = job
 
         # Schedule only after a keyed submission is durably reserved.
@@ -390,149 +446,333 @@ class JobManager:
         except Exception:
             logger.warning("Failed to persist job %s to Redis", job.job_id, exc_info=True)
 
+    # ------------------------------------------------------------------
+    # Recovery — Reconstruct from Durable Envelope
+    # ------------------------------------------------------------------
+
+    async def recover_job(self, envelope: dict) -> str | None:
+        """Reconstruct a ``JobRecord`` from a durable envelope and schedule
+        it for execution.  Returns the *job_id* on success, or ``None``
+        if the envelope is invalid or the job is already in memory (e.g.
+        started by a concurrent worker).
+
+        The caller is responsible for ensuring that only recoverable
+        envelopes (those in ``pending`` or expired-``processing`` state)
+        are passed here.  The actual execution claim inside ``_run_job``
+        will serialize concurrent recovery attempts via the atomic
+        ``claim_durable_execution`` Lua script — only one token-holder
+        may cross into ``execute_stream``.
+        """
+        try:
+            job_id = str(envelope["job_id"])
+            session_id = str(envelope["session_id"])
+            command = str(envelope["command"])
+            owner_id = str(envelope.get("owner_id", ""))
+            redact_path_prefix = envelope.get("redact_path_prefix")
+            timeout = int(envelope.get("timeout", 3600))
+            try:
+                stdin = base64.b64decode(envelope.get("stdin_b64", ""))
+            except Exception:
+                stdin = b""
+        except (KeyError, TypeError, ValueError):
+            logger.warning("Invalid durable envelope — skipping recovery")
+            return None
+
+        durable_status = str(envelope.get("status", ""))
+        if durable_status not in {"pending", "processing"}:
+            # Terminal and explicitly ambiguous outcomes are never executable
+            # recovery candidates, even if a caller accidentally supplies them.
+            return None
+        if durable_status == "processing":
+            if bool(envelope.get("cancel_requested")):
+                # A prior worker crossed the remote execution boundary and a
+                # cancellation was acknowledged. Its outcome is ambiguous and
+                # must never be automatically replayed after restart.
+                return None
+            lease_expiry = envelope.get("lease_expiry")
+            if lease_expiry is not None and float(lease_expiry) >= time.time():
+                # Still owned by a live lease; recovery callers must not race it.
+                return None
+
+        # Recovery is dependency-aware: do not run before the target SID
+        # has actually been restored. Missing sessions stay nonterminal in Redis.
+        if await self._ssh_manager.get_session(session_id) is None:
+            logger.warning(
+                "Durable job %s waiting for restored session %s", job_id, session_id
+            )
+            return None
+
+        async with self._lock:
+            if job_id in self._jobs:
+                return None  # already scheduled (concurrent recovery)
+
+            job = JobRecord(
+                job_id=job_id,
+                session_id=session_id,
+                command=command,
+                owner_id=owner_id,
+                redact_path_prefix=redact_path_prefix,
+                stdin=stdin,
+                timeout=timeout,
+                is_durable=True,
+            )
+            job.queued_at_mono = time.monotonic()
+            job.progress["durable_persisted"] = False
+            self._jobs[job_id] = job
+
+        task = asyncio.create_task(self._run_job(job_id))
+        task.add_done_callback(_make_job_error_logger(job_id))
+        self._job_tasks[job_id] = task
+        task.add_done_callback(lambda _: self._job_tasks.pop(job_id, None))
+        logger.info("Recovered durable job %s from envelope", job_id)
+        return job_id
+
     async def _run_job(self, job_id: str) -> None:
-        """Execute a command in the background."""
+        """Execute a command in the background.
+
+        For keyed durable jobs the execution flow is:
+          1. ``claim_durable_execution`` — atomic Redis claim (pending→processing)
+          2. ``execute_stream`` — the actual SSH command
+          3. ``finish_durable_execution`` — fenced terminal transition
+
+        A heartbeat loop runs concurrently with the SSH command and renews
+        the processing lease.  If the lease cannot be renewed (stale owner
+        detected), the heartbeat fails and the fenced-finish transition is
+        rejected — the new token-holder wins.
+
+        Unkeyed jobs (``redis_queue.durable_job_ids`` does not contain the
+        job_id) skip the claim/heartbeat/finish cycle entirely and behave
+        exactly as before (in-process, best-effort).
+        """
         async with self._lock:
             job = self._jobs.get(job_id)
         if not job:
             return
 
         if job.cancel_event.is_set():
-            # Cancelled while still pending -- the Task was already
-            # scheduled by create_job() before cancel_job() ran, but the
-            # command must never actually reach the remote host.
             job.status = "cancelled"
             job.completed_at = job.completed_at or time.time()
             job.completed_at_mono = job.completed_at_mono or time.monotonic()
             job.completed_event.set()
-            await self._persist_terminal_job(job)
+            if not job.is_durable:
+                await self._persist_terminal_job(job)
             return
 
-        job.status = "running"
-        job.started_at = time.time()
-        job.acquired_at_mono = time.monotonic()
-        _started_command = (
-            redact_secrets(job.command)
-            if should_redact_command_output(None)
-            else job.command
-        )
-        await job.notify_listeners(
-            {
-                "type": "status",
-                "status": "running",
-                "message": f"Started: {_started_command}",
-            }
+        # Check whether this is a durable keyed job that requires a Redis
+        # execution claim before crossing into execute_stream.
+        is_durable = (
+            job.is_durable
+            and self.redis_queue is not None
+            and self.redis_queue._redis is not None
         )
 
-        # Defensive command policy check (primary check is at router level)
-        decision = evaluate_command_policy(
-            job.command,
-            mode=settings.command_policy_mode,
-            profile=settings.command_policy_profile,
-        )
-        if not decision.allowed:
-            job.status = "failed"
-            job.error_message = f"Command denied by policy: {decision.reason}"
-            job.completed_at = time.time()
-            job.completed_at_mono = time.monotonic()
-            job.completed_event.set()
-            logger.warning(
-                "Job %s denied by policy: %s", job.job_id, decision.reason
+        worker_token: str | None = None
+        lease_ttl = DURABLE_LEASE_TTL_SECONDS
+        heartbeat_task: asyncio.Task | None = None
+
+        if is_durable:
+            worker_token = uuid.uuid4().hex
+            claimed = await self.redis_queue.claim_durable_execution(
+                job_id, worker_token=worker_token, lease_ttl=lease_ttl,
             )
-            await job.notify_listeners(
-                {
-                    "type": "error",
-                    "error": job.error_message,
-                }
+            if not claimed:
+                # Another worker may own this job. The losing coordinator
+                # must not write an unfenced terminal snapshot over the winner.
+                job.completed_event.set()
+                async with self._lock:
+                    self._jobs.pop(job_id, None)
+                return
+
+            if await self.redis_queue.is_durable_cancellation_requested(
+                job_id, worker_token=worker_token
+            ):
+                job.cancel_event.set()
+                job.status = "cancelled"
+                job.exit_code = -1
+                job.completed_at = time.time()
+                job.completed_at_mono = time.monotonic()
+                job.completed_event.set()
+                persisted = await self.redis_queue.finish_durable_execution(
+                    job_id, worker_token=worker_token, status="cancelled", exit_code=-1
+                )
+                job.progress["durable_persisted"] = persisted
+                if not persisted:
+                    logger.warning(
+                        "Durable terminal state for job %s was not persisted", job_id
+                    )
+                return
+
+            async def _heartbeat_loop() -> None:
+                # Renew well before expiry; fractional intervals are important
+                # for short test/configured leases and avoid TTL-boundary races.
+                interval = max(0.1, lease_ttl / 3)
+                while True:
+                    await asyncio.sleep(interval)
+                    ok = await self.redis_queue.heartbeat_durable_execution(
+                        job_id, worker_token=worker_token, lease_ttl=lease_ttl,
+                    )
+                    if not ok:
+                        # Partition or ownership loss makes the remote outcome
+                        # ambiguous. Ask the transport to stop; fenced finish
+                        # prevents stale persistence if another worker took over.
+                        job.cancel_event.set()
+                        break
+                    if await self.redis_queue.is_durable_cancellation_requested(
+                        job_id, worker_token=worker_token
+                    ):
+                        job.cancel_event.set()
+
+            heartbeat_task = asyncio.create_task(_heartbeat_loop())
+
+        try:
+            job.status = "running"
+            job.started_at = time.time()
+            job.acquired_at_mono = time.monotonic()
+
+            _started_command = (
+                redact_secrets(job.command)
+                if should_redact_command_output(None)
+                else job.command
             )
             await job.notify_listeners(
                 {
                     "type": "status",
-                    "status": "failed",
-                    "duration": job.duration,
-                    "exit_code": -1,
+                    "status": "running",
+                    "message": f"Started: {_started_command}",
                 }
             )
-            await self._persist_terminal_job(job)
-            return
 
-        try:
-            job.command_started_at_mono = time.monotonic()
-            async for msg_type, msg_data in self._ssh_manager.execute_stream(
-                job.session_id,
+            decision = evaluate_command_policy(
                 job.command,
-                timeout=job.timeout,
-                cancel_event=job.cancel_event,
-                stdin_data=job.stdin,
-            ):
-                job.touch()
-
-                if msg_type == "stdout":
-                    remaining = MAX_STDOUT_SIZE - len(job.stdout)
-                    if remaining > 0:
-                        job.stdout += msg_data[:remaining]
-                        if remaining < len(msg_data) and "[truncated]" not in job.stdout:
-                            job.stdout += "\n... [output truncated, exceeded 10MB]"
-                    await job.notify_listeners(
-                        {
-                            "type": "stdout",
-                            "data": msg_data,
-                        }
-                    )
-                elif msg_type == "stderr":
-                    remaining = MAX_STDOUT_SIZE - len(job.stderr)
-                    if remaining > 0:
-                        job.stderr += msg_data[:remaining]
-                        if remaining < len(msg_data) and "[truncated]" not in job.stderr:
-                            job.stderr += "\n... [output truncated, exceeded 10MB]"
-                    await job.notify_listeners(
-                        {
-                            "type": "stderr",
-                            "data": msg_data,
-                        }
-                    )
-                elif msg_type == "exit":
-                    job.exit_code = int(msg_data)
-                    job.command_finished_at_mono = time.monotonic()
-                    await job.notify_listeners(
-                        {
-                            "type": "exit",
-                            "exit_code": job.exit_code,
-                        }
-                    )
-
-            if job.cancel_event.is_set():
-                job.status = "cancelled"
-                if job.exit_code is None:
-                    job.exit_code = -1
-                job.error_message = None
-            else:
-                job.status = "completed" if (job.exit_code == 0) else "failed"
-            if job.status == "failed" and job.exit_code != 0:
-                job.error_message = f"Exit code: {job.exit_code}"
-
-        except SessionNotFoundError as exc:
-            job.status = "failed"
-            job.error_message = str(exc)
-            await job.notify_listeners(
-                {
-                    "type": "error",
-                    "error": str(exc),
-                }
+                mode=settings.command_policy_mode,
+                profile=settings.command_policy_profile,
             )
-        except Exception as exc:
-            job.status = "failed"
-            job.error_message = str(exc)
-            await job.notify_listeners(
-                {
-                    "type": "error",
-                    "error": str(exc),
-                }
-            )
+            if not decision.allowed:
+                job.status = "failed"
+                job.error_message = f"Command denied by policy: {decision.reason}"
+                job.completed_at = time.time()
+                job.completed_at_mono = time.monotonic()
+                job.completed_event.set()
+                logger.warning(
+                    "Job %s denied by policy: %s", job.job_id, decision.reason
+                )
+                await job.notify_listeners(
+                    {"type": "error", "error": job.error_message}
+                )
+                await job.notify_listeners(
+                    {
+                        "type": "status",
+                        "status": "failed",
+                        "duration": job.duration,
+                        "exit_code": -1,
+                    }
+                )
+                return  # finally block handles fenced-finish
+
+            try:
+                job.command_started_at_mono = time.monotonic()
+                async for msg_type, msg_data in self._ssh_manager.execute_stream(
+                    job.session_id,
+                    job.command,
+                    timeout=job.timeout,
+                    cancel_event=job.cancel_event,
+                    stdin_data=job.stdin,
+                ):
+                    job.touch()
+
+                    if msg_type == "stdout":
+                        remaining = MAX_STDOUT_SIZE - len(job.stdout)
+                        if remaining > 0:
+                            job.stdout += msg_data[:remaining]
+                            if remaining < len(msg_data) and "[truncated]" not in job.stdout:
+                                job.stdout += "\n... [output truncated, exceeded 10MB]"
+                        await job.notify_listeners(
+                            {"type": "stdout", "data": msg_data}
+                        )
+                    elif msg_type == "stderr":
+                        remaining = MAX_STDOUT_SIZE - len(job.stderr)
+                        if remaining > 0:
+                            job.stderr += msg_data[:remaining]
+                            if remaining < len(msg_data) and "[truncated]" not in job.stderr:
+                                job.stderr += "\n... [output truncated, exceeded 10MB]"
+                        await job.notify_listeners(
+                            {"type": "stderr", "data": msg_data}
+                        )
+                    elif msg_type == "exit":
+                        job.exit_code = int(msg_data)
+                        job.command_finished_at_mono = time.monotonic()
+                        await job.notify_listeners(
+                            {"type": "exit", "exit_code": job.exit_code}
+                        )
+
+                if is_durable and job.cancel_event.is_set():
+                    # A non-negative recv_exit_status() is factual remote
+                    # completion and wins a concurrent/late cancel request.
+                    # The -1 sentinel from SSHSessionManager.execute_stream()
+                    # is synthetic after local channel.close(), so it cannot
+                    # prove that remote side effects stopped.
+                    if job.exit_code is not None and job.exit_code >= 0:
+                        job.status = "completed" if job.exit_code == 0 else "failed"
+                        if job.status == "failed":
+                            job.error_message = f"Exit code: {job.exit_code}"
+                    else:
+                        job.status = "ambiguous"
+                        if job.exit_code is None:
+                            job.exit_code = -1
+                        job.error_message = (
+                            "Local SSH channel interrupted after cancellation; "
+                            "remote command outcome is unproven"
+                        )
+                        job.progress["cancellation_outcome"] = "ambiguous"
+                        job.progress["locally_interrupted"] = True
+                elif job.cancel_event.is_set():
+                    # Preserve legacy best-effort semantics for unkeyed jobs.
+                    job.status = "cancelled"
+                    if job.exit_code is None:
+                        job.exit_code = -1
+                    job.error_message = None
+                else:
+                    job.status = "completed" if (job.exit_code == 0) else "failed"
+                    if job.status == "failed" and job.exit_code != 0:
+                        job.error_message = f"Exit code: {job.exit_code}"
+
+            except SessionNotFoundError as exc:
+                job.status = "failed"
+                job.error_message = str(exc)
+                await job.notify_listeners({"type": "error", "error": str(exc)})
+            except Exception as exc:
+                job.status = "failed"
+                job.error_message = str(exc)
+                await job.notify_listeners({"type": "error", "error": str(exc)})
         finally:
-            # Cancellation of the local asyncio Task is not itself a terminal
-            # remote outcome.  Only publish completion when the execution path
-            # has actually resolved the job into a terminal state.
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+
+            if is_durable and self.redis_queue and job.status in TERMINAL_STATES:
+                assert worker_token is not None
+                persisted = await self.redis_queue.finish_durable_execution(
+                    job_id,
+                    worker_token=worker_token,
+                    status=job.status,
+                    stdout=job.stdout,
+                    stderr=job.stderr,
+                    exit_code=job.exit_code,
+                    error=job.error_message,
+                )
+                job.progress["durable_persisted"] = persisted
+                if not persisted:
+                    logger.warning(
+                        "Durable terminal state for job %s was not persisted; "
+                        "remote outcome is known locally but restart recovery remains pending",
+                        job_id,
+                    )
+            elif job.status in TERMINAL_STATES:
+                await self._persist_terminal_job(job)
+
             if job.status in TERMINAL_STATES:
                 job.completed_at = time.time()
                 job.completed_at_mono = time.monotonic()
@@ -545,7 +785,6 @@ class JobManager:
                         "exit_code": job.exit_code,
                     }
                 )
-                await self._persist_terminal_job(job)
 
     # ------------------------------------------------------------------
     # Get Job
@@ -600,13 +839,34 @@ class JobManager:
     # ------------------------------------------------------------------
 
     async def cancel_job(self, job_id: str) -> str:
-        """Cancel a running job."""
+        """Request cancellation, durably for keyed jobs.
+
+        Pending durable jobs become terminal ``cancelled`` before ACK.
+        Processing jobs persist cancellation intent. A factual non-negative
+        remote exit remains completed/failed; local channel interruption is
+        durably classified ``ambiguous`` and is never auto-replayed.
+        """
         job = await self.get_job(job_id)
         if not job:
             raise SessionNotFoundError(f"Job {job_id} not found")
 
         if job.status not in ACTIVE_STATES:
             raise ExecutionError(f"Cannot cancel job with status: {job.status}")
+
+        if job.is_durable:
+            if self.redis_queue is None:
+                raise SubmissionUnavailableError("Durable cancellation requires Redis")
+            durable_status = await self.redis_queue.request_durable_cancellation(job_id)
+            if durable_status == "cancelled":
+                job.cancel_event.set()
+                job.status = "cancelled"
+                job.completed_at = time.time()
+                job.completed_at_mono = time.monotonic()
+                job.completed_event.set()
+                await job.notify_listeners({"type": "status", "status": "cancelled"})
+                return "cancelled"
+            if durable_status != "cancelling":
+                raise ExecutionError("Durable job is no longer cancellable")
 
         job.cancel_event.set()
         if job.status == "pending":

@@ -1197,14 +1197,14 @@ function handleSSEEvent(jobId, event) {
 
     if (type === 'status') {
         const s = event.status;
-        const label = s === 'pending' ? 'Pending' : s === 'running' ? 'Running' : s === 'completed' ? '✓ Completed' : s === 'failed' ? '✗ Failed' : s === 'cancelled' ? '⊙ Cancelled' : s;
+        const label = s === 'pending' ? 'Pending' : s === 'running' ? 'Running' : s === 'completed' ? '✓ Completed' : s === 'failed' ? '✗ Failed' : s === 'cancelled' ? '⊙ Cancelled' : s === 'ambiguous' ? '⚠ Ambiguous remote outcome' : s;
         const color = s === 'completed' ? 'var(--accent-success)' : s === 'failed' ? 'var(--accent-danger)' : s === 'running' ? 'var(--accent-warning)' : 'var(--accent-info)';
-        appendLine(`[${label}]`, s === 'completed' || s === 'failed' || s === 'cancelled' ? 'stdout' : 'system');
+        appendLine(`[${label}]`, s === 'completed' || s === 'failed' || s === 'cancelled' || s === 'ambiguous' ? 'stdout' : 'system');
 
         if (s === 'completed' && event.exit_code !== undefined) {
             appendLine(`  Exit code: ${event.exit_code}`, 'stdout');
         }
-        if (s === 'failed' || s === 'cancelled') {
+        if (s === 'failed' || s === 'cancelled' || s === 'ambiguous') {
             stopJobStream(jobId);
         }
     } else if (type === 'stdout') {
@@ -1243,7 +1243,7 @@ async function pollJobStatus(jobId) {
             const s = status.status;
             appendLine(`[Poll] ${s} (${formatElapsed(status.duration || 0)})`, 'system');
 
-            if (s === 'completed' || s === 'failed' || s === 'cancelled') {
+            if (s === 'completed' || s === 'failed' || s === 'cancelled' || s === 'ambiguous') {
                 clearInterval(pollId);
                 const result = await apiJobResult(jobId);
                 appendLine(`--- stdout ---`, 'system');

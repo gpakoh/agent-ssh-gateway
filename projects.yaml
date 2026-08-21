@@ -331,3 +331,17 @@ projects:
     type: "supervisor-workspace"
     description: "Linear current-master port of archive-agent-task fix"
     tags: ["agent-ssh-gateway", "pr42", "pr82", "integration"]
+
+  astro-builder:
+    root: quart-platform/astro-builder
+    parent: quart-platform
+    type: unknown
+    description: "MiniApp builder template — source of truth"
+    tags: []
+
+  gpt-browser-bridge:
+    root: quart-platform/gpt-browser-bridge
+    parent: quart-platform
+    type: python-service
+    description: "ChatGPT web automation bridge — Quart/FastAPI, undetected-chromedriver, tools API"
+    tags: []
