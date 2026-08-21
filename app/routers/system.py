@@ -1,5 +1,6 @@
 """System and meta routes: health, capabilities, config, help, metrics, SDK, circuit-breaker, UI."""
 
+import asyncio
 import os
 import socket
 from pathlib import Path
@@ -19,6 +20,7 @@ from app.config import settings
 from app.metrics import metrics
 from app.models import (
     CapabilitiesResponse,
+    HealthComponentStatus,
     HealthResponse,
 )
 from app.state import _err
@@ -35,68 +37,259 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 
-async def _deep_ssh_check(host: str, port: int) -> bool | None:
-    """SSH deep check: try to authenticate and run `true`.
+HEALTH_REDIS_TIMEOUT_SECONDS = 1.0
+HEALTH_POSTGRES_TIMEOUT_SECONDS = 1.0
+HEALTH_SSH_OPERATION_TIMEOUT_SECONDS = 1.0
+HEALTH_SSH_PROBE_TIMEOUT_SECONDS = 2.25
+# Docker's HTTP caller times out at 4s. Keep a full second of scheduling/serialization margin.
+HEALTH_AGGREGATE_TIMEOUT_SECONDS = 3.0
 
-    Returns:
-        True  — SSH is fully functional.
-        False — SSH connection or command failed.
-        None  — not configured (no test credentials).
-    """
+
+def _component_status(
+    *,
+    ok: bool,
+    required: bool,
+    failure_class: str | None = None,
+) -> HealthComponentStatus:
+    return HealthComponentStatus(
+        status="ok" if (ok or not required) else "degraded",
+        required=required,
+        failure_class=None if ok else failure_class,
+    )
+
+
+def _classify_health_failure(exc: BaseException) -> str:
+    """Map dependency failures to a bounded, non-sensitive public class."""
+    from redis.exceptions import ConnectionError as RedisConnectionError
+    from redis.exceptions import TimeoutError as RedisTimeoutError
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (TimeoutError, RedisTimeoutError, SqlAlchemyTimeoutError)):
+            return "timeout"
+        if isinstance(current, (OSError, RedisConnectionError, OperationalError)):
+            return "connect_error"
+        cause = current.__cause__ or current.__context__
+        current = cause if isinstance(cause, BaseException) else None
+    return "unavailable"
+
+
+def _deep_ssh_check_blocking(
+    host: str,
+    port: int,
+    user: str,
+    password: str | None,
+) -> bool:
+    """Blocking Paramiko probe. Caller must run this outside the event loop."""
+    import paramiko
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            host,
+            port=port,
+            username=user,
+            password=password,
+            timeout=HEALTH_SSH_OPERATION_TIMEOUT_SECONDS,
+            allow_agent=False,
+            look_for_keys=False,
+        )
+        _, stdout, _ = client.exec_command(
+            "true", timeout=HEALTH_SSH_OPERATION_TIMEOUT_SECONDS
+        )
+        return stdout.channel.recv_exit_status() == 0
+    finally:
+        client.close()
+
+
+async def _probe_deep_ssh(
+    host: str,
+    port: int,
+    user: str,
+    password: str | None,
+) -> tuple[bool, str | None]:
+    try:
+        ok = await asyncio.wait_for(
+            asyncio.to_thread(_deep_ssh_check_blocking, host, port, user, password),
+            timeout=HEALTH_SSH_PROBE_TIMEOUT_SECONDS,
+        )
+        return ok, None if ok else "unavailable"
+    except Exception as exc:
+        return False, _classify_health_failure(exc)
+
+
+async def _deep_ssh_check(host: str, port: int) -> bool | None:
+    """Compatibility helper for the optional deep SSH health probe."""
     user = settings.ssh_health_user
-    password = settings.ssh_health_password
     if not user:
         return None
-    try:
-        import paramiko
+    ok, _failure = await _probe_deep_ssh(
+        host, port, user, settings.ssh_health_password
+    )
+    return ok
 
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(host, port=port, username=user, password=password, timeout=5, allow_agent=False, look_for_keys=False)
-        _, stdout, _ = client.exec_command("true", timeout=5)
-        exit_code = stdout.channel.recv_exit_status()
-        client.close()
-        return exit_code == 0
-    except Exception:
-        return False
+
+def _tcp_ssh_check_blocking(host: str, port: int) -> None:
+    """Blocking TCP connect used by the shallow SSH health probe."""
+    with socket.create_connection(
+        (host, port), timeout=HEALTH_SSH_OPERATION_TIMEOUT_SECONDS
+    ):
+        return None
+
+
+async def _probe_ssh(host: str, port: int) -> tuple[bool, str | None]:
+    """Probe SSH without blocking the FastAPI event loop."""
+    user = settings.ssh_health_user
+    if user:
+        return await _probe_deep_ssh(
+            host, port, user, settings.ssh_health_password
+        )
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(_tcp_ssh_check_blocking, host, port),
+            timeout=HEALTH_SSH_PROBE_TIMEOUT_SECONDS,
+        )
+        return True, None
+    except Exception as exc:
+        return False, _classify_health_failure(exc)
+
+
+async def _probe_redis() -> tuple[bool, str | None]:
+    """Actively verify Redis when configured; never leak backend exception text."""
+    queue = _state.redis_queue
+    client = queue._redis if queue is not None else None
+    if client is None:
+        return False, "unavailable"
+    try:
+        await asyncio.wait_for(client.ping(), timeout=HEALTH_REDIS_TIMEOUT_SECONDS)
+        return True, None
+    except Exception as exc:
+        return False, _classify_health_failure(exc)
+
+
+async def _probe_postgres() -> tuple[bool, str | None]:
+    """Actively verify the persistent-session PostgreSQL engine."""
+    from sqlalchemy import text
+
+    store = _state.session_store
+    engine = store._engine if store is not None else None
+    if engine is None:
+        return False, "unavailable"
+
+    async def _select_one() -> None:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+
+    try:
+        await asyncio.wait_for(_select_one(), timeout=HEALTH_POSTGRES_TIMEOUT_SECONDS)
+        return True, None
+    except Exception as exc:
+        return False, _classify_health_failure(exc)
+
+
+async def _run_health_probes(
+    *,
+    redis_required: bool,
+    postgres_required: bool,
+    ssh_host: str,
+    ssh_port: int,
+) -> dict[str, tuple[bool, str | None]]:
+    """Run independent dependency probes concurrently under one aggregate budget."""
+    tasks: dict[str, asyncio.Task[tuple[bool, str | None]]] = {
+        "ssh": asyncio.create_task(_probe_ssh(ssh_host, ssh_port)),
+    }
+    if redis_required:
+        tasks["redis"] = asyncio.create_task(_probe_redis())
+    if postgres_required:
+        tasks["postgres"] = asyncio.create_task(_probe_postgres())
+
+    done, pending = await asyncio.wait(
+        set(tasks.values()), timeout=HEALTH_AGGREGATE_TIMEOUT_SECONDS
+    )
+    results: dict[str, tuple[bool, str | None]] = {}
+    for name, task in tasks.items():
+        if task in pending:
+            task.cancel()
+            results[name] = (False, "timeout")
+            continue
+        try:
+            results[name] = task.result()
+        except Exception as exc:
+            results[name] = (False, _classify_health_failure(exc))
+
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    return results
 
 
 @router.get("/health", tags=["system"], response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint.
-
-    Reports readiness based on all critical subsystems: Redis,
-    PostgreSQL, API key configuration, and SSH server reachability.
-    """
+    """Return bounded aggregate health while preserving per-component truth."""
     from app import build_info
-    from app.version import APP_VERSION
 
-    redis_ok = _state.redis_queue is not None and _state.redis_queue._redis is not None
-    persistent_sessions_ok = _state.session_store is not None
     meta = build_info.get_build_metadata()
 
-    api_key_ok = bool(settings.api_key)
+    redis_required = bool(settings.redis_url)
+    postgres_required = bool(settings.persistent_sessions_enabled)
 
     ssh_host = os.environ.get("GATEWAY_SSH_HOST", "sshd")
     ssh_port = int(os.environ.get("GATEWAY_SSH_PORT", "22"))
 
-    # TCP-level check (always)
-    ssh_tcp_ok = False
-    try:
-        with socket.create_connection((ssh_host, ssh_port), timeout=2):
-            ssh_tcp_ok = True
-    except (OSError, TimeoutError):
-        pass
+    probe_results = await _run_health_probes(
+        redis_required=redis_required,
+        postgres_required=postgres_required,
+        ssh_host=ssh_host,
+        ssh_port=ssh_port,
+    )
 
-    # Deep SSH check (only when test credentials configured)
-    ssh_deep_ok = await _deep_ssh_check(ssh_host, ssh_port)
-    ssh_ok = ssh_tcp_ok if ssh_deep_ok is None else ssh_deep_ok
+    if redis_required:
+        redis_ok, redis_failure = probe_results["redis"]
+    else:
+        redis_ok = _state.redis_queue is not None and _state.redis_queue._redis is not None
+        redis_failure = None if redis_ok else "not_configured"
 
-    redis_degraded = not redis_ok and settings.redis_url
-    sessions_degraded = settings.persistent_sessions_enabled and not persistent_sessions_ok
-    auth_degraded = settings.api_auth_enabled and not api_key_ok
-    ssh_degraded = not ssh_ok
-    status = "degraded" if (redis_degraded or sessions_degraded or auth_degraded or ssh_degraded) else "ok"
+    if postgres_required:
+        persistent_sessions_ok, postgres_failure = probe_results["postgres"]
+    else:
+        persistent_sessions_ok = _state.session_store is not None
+        postgres_failure = None if persistent_sessions_ok else "not_configured"
+
+    ssh_ok, ssh_failure = probe_results["ssh"]
+
+    api_key_ok = bool(settings.api_key)
+    auth_required = bool(settings.api_auth_enabled)
+    auth_ok = api_key_ok or not auth_required
+    auth_failure = None if auth_ok else "unavailable"
+
+    components: dict[str, HealthComponentStatus] = {
+        "redis": _component_status(
+            ok=redis_ok, required=redis_required, failure_class=redis_failure
+        ),
+        "postgres": _component_status(
+            ok=persistent_sessions_ok,
+            required=postgres_required,
+            failure_class=postgres_failure,
+        ),
+        # Backward-compatible structured alias for the existing flat field.
+        "persistent_sessions": _component_status(
+            ok=persistent_sessions_ok,
+            required=postgres_required,
+            failure_class=postgres_failure,
+        ),
+        "auth": _component_status(
+            ok=auth_ok, required=auth_required, failure_class=auth_failure
+        ),
+        "ssh": _component_status(ok=ssh_ok, required=True, failure_class=ssh_failure),
+    }
+
+    degraded = any(component.status == "degraded" for component in components.values())
+    status = "degraded" if degraded else "ok"
+
     return HealthResponse(
         status=status,
         redis=redis_ok,
@@ -109,6 +302,7 @@ async def health_check():
         build_time=meta["build_time"],
         started_at=meta["started_at"],
         version=APP_VERSION,
+        components=components,
     )
 
 
