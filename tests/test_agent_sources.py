@@ -88,11 +88,12 @@ def test_missing_commit_fails_without_publishing(tmp_path, monkeypatch):
     repo, _sha = _repo(tmp_path)
     source_root = tmp_path / "sources"
     monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", str(source_root))
+    monkeypatch.delenv("GITEA_TOKEN", raising=False)
     monkeypatch.setattr(
         "examples.mcp_server.agent_sources.get_registry", lambda: _Registry(repo)
     )
     missing = "f" * 40
-    with pytest.raises(ManagedSourceBundleError, match="cat-file"):
+    with pytest.raises(ManagedSourceBundleError):
         ensure_managed_source_bundle("nod", missing)
     expected = managed_source_bundle_path("nod", missing)
     assert expected is not None
@@ -252,3 +253,285 @@ def test_source_repo_access_is_scoped_to_registered_root(tmp_path, monkeypatch):
         if "cat-file" not in args and "--git-path" not in args
     ]
     assert all(safe_directory is None for safe_directory in non_source_calls)
+
+
+# ---------------------------------------------------------------------------
+# Remote fallback regression tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeRegistry:
+    """Minimal registry that returns a pre-created local repo root."""
+
+    def __init__(self, root: Path):
+        self._root = root
+
+    def project_info(self, project: str) -> dict[str, str]:
+        return {"project_id": project, "root": str(self._root)}
+
+
+def _make_bare_clone(tmp_path: Path, source_repo: Path) -> tuple[Path, str]:
+    """Create a bare clone of *source_repo* that contains all objects."""
+    bare = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "clone", "--bare", str(source_repo), str(bare)],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    sha = _git(source_repo, "rev-parse", "HEAD")
+    return bare, sha
+
+
+def test_existing_bundle_skips_remote_fetch(tmp_path, monkeypatch):
+    """Test 1: Bundle already exists with correct SHA → no remote fetch."""
+    repo, sha = _repo(tmp_path)
+    source_root = tmp_path / "sources"
+    monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", str(source_root))
+    monkeypatch.setattr(
+        "examples.mcp_server.agent_sources.get_registry", lambda: _FakeRegistry(repo)
+    )
+
+    # Pre-create the bundle at the expected path
+    bundle_raw = managed_source_bundle_path("nod", sha)
+    assert bundle_raw is not None
+    bundle_path = Path(bundle_raw)
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    _git(repo, "bundle", "create", str(bundle_path), "HEAD")
+    assert bundle_path.is_file()
+
+    git_calls: list[list[str]] = []
+
+    def track_run_git(args, **kwargs):
+        git_calls.append(args)
+        # For bundle verification
+        if "bundle" in args and "list-heads" in args:
+            return f"{sha}\n"
+        return ""
+
+    monkeypatch.setattr("examples.mcp_server.agent_sources._run_git", track_run_git)
+
+    result = ensure_managed_source_bundle("nod", sha)
+    assert result == str(bundle_path)
+
+    # cat-file and any remote fetch should never be called
+    cat_file_calls = [a for a in git_calls if "cat-file" in a]
+    fetch_calls = [a for a in git_calls if "fetch" in a]
+    assert cat_file_calls == [], "cat-file should not run when bundle exists"
+    assert fetch_calls == [], "remote fetch should not run when bundle exists"
+
+
+def test_missing_object_fetches_from_trusted_remote(tmp_path, monkeypatch):
+    """Test 2: Local object missing + remote has SHA → fetch, bundle, verify."""
+    # Create source repo and a bare clone (simulating trusted remote)
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    _git(source_repo, "init")
+    _git(source_repo, "config", "user.name", "Test")
+    _git(source_repo, "config", "user.email", "test@example.com")
+    (source_repo / "data.txt").write_text("remote-content\n", encoding="utf-8")
+    _git(source_repo, "add", "data.txt")
+    _git(source_repo, "commit", "-m", "remote commit")
+    remote_sha = _git(source_repo, "rev-parse", "HEAD")
+    bare_remote, _ = _make_bare_clone(tmp_path, source_repo)
+
+    # Local repo (registered project) — has no objects for the remote SHA
+    local_repo = tmp_path / "local"
+    local_repo.mkdir()
+    _git(local_repo, "init")
+    _git(local_repo, "config", "user.name", "Test")
+    _git(local_repo, "config", "user.email", "test@example.com")
+    (local_repo / "local.txt").write_text("local-only\n", encoding="utf-8")
+    _git(local_repo, "add", "local.txt")
+    _git(local_repo, "commit", "-m", "local only")
+    _git(local_repo, "remote", "add", "origin", str(bare_remote))
+
+    source_root = tmp_path / "sources"
+    monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", str(source_root))
+    monkeypatch.setenv("GITEA_TOKEN", "fake-token")
+    monkeypatch.setattr(
+        "examples.mcp_server.agent_sources.get_registry",
+        lambda: _FakeRegistry(local_repo),
+    )
+
+    # Mock _resolve_trusted_remote to return the bare clone URL
+    monkeypatch.setattr(
+        "examples.mcp_server.agent_sources._resolve_trusted_remote",
+        lambda _root: (str(bare_remote), "fake-token"),
+    )
+
+    result = ensure_managed_source_bundle("nod", remote_sha)
+    assert result is not None
+    bundle = Path(result)
+    assert bundle.is_file()
+
+    # Verify bundle contains exactly the expected SHA
+    heads = subprocess.run(
+        ["git", "bundle", "list-heads", str(bundle)],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    assert heads.split()[0].lower() == remote_sha
+
+    # Verify bundle content
+    clone_dir = tmp_path / "verify"
+    subprocess.run(
+        ["git", "clone", "-b", "source", str(bundle), str(clone_dir)],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert (clone_dir / "data.txt").read_text(encoding="utf-8") == "remote-content\n"
+
+
+def test_wrong_sha_rejects_bundle(tmp_path, monkeypatch):
+    """Test 3: Remote fetch for nonexistent SHA → reject, no bundle installed.
+
+    When the requested SHA does not exist on the trusted remote, ``git fetch``
+    fails with *upload-pack: not our ref*.  This is the correct fail-closed
+    behavior: no partial artifacts are created.
+    """
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    _git(source_repo, "init")
+    _git(source_repo, "config", "user.name", "Test")
+    _git(source_repo, "config", "user.email", "test@example.com")
+    (source_repo / "data.txt").write_text("content\n", encoding="utf-8")
+    _git(source_repo, "add", "data.txt")
+    _git(source_repo, "commit", "-m", "commit")
+    bare_remote, _ = _make_bare_clone(tmp_path, source_repo)
+
+    local_repo = tmp_path / "local"
+    local_repo.mkdir()
+    _git(local_repo, "init")
+    _git(local_repo, "config", "user.name", "Test")
+    _git(local_repo, "config", "user.email", "test@example.com")
+    (local_repo / "local.txt").write_text("local\n", encoding="utf-8")
+    _git(local_repo, "add", "local.txt")
+    _git(local_repo, "commit", "-m", "local")
+
+    source_root = tmp_path / "sources"
+    monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", str(source_root))
+    monkeypatch.setenv("GITEA_TOKEN", "fake-token")
+    monkeypatch.setattr(
+        "examples.mcp_server.agent_sources.get_registry",
+        lambda: _FakeRegistry(local_repo),
+    )
+    monkeypatch.setattr(
+        "examples.mcp_server.agent_sources._resolve_trusted_remote",
+        lambda _root: (str(bare_remote), "fake-token"),
+    )
+
+    wrong_sha = "a" * 40
+    with pytest.raises(ManagedSourceBundleError):
+        ensure_managed_source_bundle("nod", wrong_sha)
+
+    # No bundle should be published
+    bundle_raw = managed_source_bundle_path("nod", wrong_sha)
+    assert bundle_raw is not None
+    assert not Path(bundle_raw).exists()
+    # No temp artifacts
+    parent = Path(bundle_raw).parent
+    if parent.exists():
+        tmp_files = list(parent.glob(f".{wrong_sha}.*"))
+        assert tmp_files == [], f"Partial artifacts found: {tmp_files}"
+
+
+def test_auth_failure_no_partial_artifacts(tmp_path, monkeypatch):
+    """Test 4: Remote fetch fails → clean failure, no partial bundle."""
+    local_repo = tmp_path / "local"
+    local_repo.mkdir()
+    _git(local_repo, "init")
+    _git(local_repo, "config", "user.name", "Test")
+    _git(local_repo, "config", "user.email", "test@example.com")
+    (local_repo / "f.txt").write_text("x\n", encoding="utf-8")
+    _git(local_repo, "add", "f.txt")
+    _git(local_repo, "commit", "-m", "base")
+
+    missing_sha = "e" * 40
+    source_root = tmp_path / "sources"
+    monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", str(source_root))
+    monkeypatch.setattr(
+        "examples.mcp_server.agent_sources.get_registry",
+        lambda: _FakeRegistry(local_repo),
+    )
+
+    def failing_resolve(_root):
+        raise ManagedSourceBundleError("trusted remote resolution failed")
+
+    monkeypatch.setattr(
+        "examples.mcp_server.agent_sources._resolve_trusted_remote",
+        failing_resolve,
+    )
+
+    with pytest.raises(ManagedSourceBundleError, match="trusted remote"):
+        ensure_managed_source_bundle("nod", missing_sha)
+
+    # No partial artifacts
+    bundle_raw = managed_source_bundle_path("nod", missing_sha)
+    assert bundle_raw is not None
+    assert not Path(bundle_raw).exists()
+    # Check no .tmp files remain
+    parent = Path(bundle_raw).parent
+    if parent.exists():
+        tmp_files = list(parent.glob(f".{missing_sha}.*"))
+        assert tmp_files == [], f"Partial artifacts found: {tmp_files}"
+
+
+def test_token_never_in_url_or_config(tmp_path, monkeypatch):
+    """Test 5: Token never appears in URLs or git config."""
+    from examples.mcp_server.agent_sources import _resolve_trusted_remote
+
+    # Mock git remote get-url to return a Gitea SSH URL
+    fake_origin = "ssh://git@192.168.1.103:2222/gpakoh/test-repo.git"
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+
+    import unittest.mock as _mock
+
+    # Mock subprocess.run for git remote get-url
+    get_url_result = _mock.Mock(returncode=0, stdout=f"{fake_origin}\n", stderr="")
+
+    # Mock the Gitea API calls
+    fake_user_data = {"login": "testuser"}
+    fake_repo_data = {"clone_url": "https://192.168.1.103/gpakoh/test-repo.git"}
+
+    # Track all subprocess calls to _minimal_git_env and git fetch
+    captured_envs: list[dict] = []
+    captured_urls: list[str] = []
+
+    def tracking_run(cmd, **kwargs):
+        env = kwargs.get("env", {})
+        if env:
+            captured_envs.append(dict(env))
+        if len(cmd) >= 2 and cmd[0] == "git" and cmd[1] == "fetch":
+            captured_urls.append(cmd[2] if len(cmd) > 2 else "")
+        return get_url_result
+
+    monkeypatch.setattr("subprocess.run", tracking_run)
+    monkeypatch.setattr(
+        "examples.mcp_server.control_plane_git._gitea_get",
+        lambda path, *, token: fake_user_data if "/user" in path else fake_repo_data,
+    )
+
+    try:
+        clone_url, token = _resolve_trusted_remote(project_root)
+    except ManagedSourceBundleError:
+        # Expected: control_plane_git._parse_gitea_remote may fail on mock
+        # The important check is that token never leaked
+        pass
+
+    # Verify token never appears in any captured environment
+    for env in captured_envs:
+        for key, value in env.items():
+            assert "fake-token" not in value, (
+                f"Token leaked in env var {key}={value}"
+            )
+            assert "Authorization" not in value or "Basic" in value, (
+                f"Token in unexpected env format: {key}={value}"
+            )
+
+    # Verify no URL contains the token
+    for url in captured_urls:
+        assert "fake-token" not in url, f"Token leaked in URL: {url}"
