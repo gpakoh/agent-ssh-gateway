@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import anyio
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -61,13 +62,44 @@ from examples.mcp_server.mcp_infra import auth_setup, gateway_errors, runtime, t
 
 _auth_settings, _auth_provider, _agent_router = auth_setup.setup()
 
+_MCP_SESSION_RELEASE_DEADLINE_SECONDS = 4.0
+
 
 @asynccontextmanager
-async def _mcp_lifespan(_server: FastMCP) -> AsyncIterator[None]:
-    """Close event-loop-owned fleet resources with the MCP server."""
+async def _mcp_lifespan(_server: FastMCP) -> AsyncIterator[Any]:
+    """Own resources for one SDK ServerSession and release them on transport close.
+
+    MCP SDK 1.29 enters this lifespan once per ``Server.run()`` / ``ServerSession``.
+    Its handler task group is cancelled before this context exits, so releasing the
+    scoped gateway client here cannot race an in-flight tool from the same transport.
+    """
+    lifecycle_owner = object()
     try:
-        yield None
+        yield lifecycle_owner
     finally:
+        gateway_pool = globals().get("_gateway_client_sessions")
+        agent_pool = globals().get("_agent_client_sessions")
+
+        # End local ownership synchronously before any cancellable network I/O.
+        # Once detached, this lifecycle can no longer mutate pool membership or
+        # client ownership/session state, even if its network cleanup is cancelled.
+        detached: list[tuple[GatewayClient, str]] = []
+        if isinstance(gateway_pool, GatewayClientSessionPool):
+            detached.extend(gateway_pool.detach_owner(lifecycle_owner))
+        if isinstance(agent_pool, GatewayClientSessionPool):
+            detached.extend(agent_pool.detach_owner(lifecycle_owner))
+
+        async def _release_sid(scoped: GatewayClient, sid: str) -> None:
+            await scoped.release_sid_async(sid)
+
+        # Transport teardown itself may be cancelled. Shield only this bounded
+        # task group. Unlike an abandoned worker thread, every cleanup coroutine
+        # remains owned by this task group and is cancelled/joined before exit.
+        with anyio.move_on_after(_MCP_SESSION_RELEASE_DEADLINE_SECONDS, shield=True):
+            async with anyio.create_task_group() as task_group:
+                for scoped, sid in detached:
+                    if sid:
+                        task_group.start_soon(_release_sid, scoped, sid)
         await close_fleet_runtime()
 
 
@@ -116,12 +148,22 @@ def _current_mcp_session() -> Any | None:
         return None
 
 
+def _current_mcp_lifecycle_owner() -> Any | None:
+    """Return the per-ServerSession lifespan owner for deterministic cleanup."""
+    try:
+        return mcp.get_context().request_context.lifespan_context
+    except (AttributeError, LookupError, ValueError):
+        return None
+
+
 def get_gateway_client() -> Any:
     """Resolve gateway client state for the current logical MCP transport."""
     session = _current_mcp_session()
     if session is None:
         return client
-    return _gateway_client_sessions.get(client, session)
+    return _gateway_client_sessions.get(
+        client, session, _current_mcp_lifecycle_owner()
+    )
 
 
 def get_agent_client() -> Any:
@@ -131,7 +173,9 @@ def get_agent_client() -> Any:
     session = _current_mcp_session()
     if session is None:
         return agent_client
-    return _agent_client_sessions.get(agent_client, session)
+    return _agent_client_sessions.get(
+        agent_client, session, _current_mcp_lifecycle_owner()
+    )
 
 
 register_tool = tool_registry.register_tool
