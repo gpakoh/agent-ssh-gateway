@@ -929,8 +929,9 @@ def _supervisor_postrun_script_lines(
             "FINAL_RC=$RC",
             'if [ "$EVIDENCE_RC" -ne 0 ]; then FINAL_RC=70; fi',
             'if [ "$SCOPE_RC" -ne 0 ]; then FINAL_RC=71; fi',
-            'if [ "$CHECKS_RC" -ne 0 ]; then FINAL_RC=72; fi',
+            'if [ "$CHECKS_RC" -gt 0 ] && [ "$CHECKS_RC" -ne 127 ]; then FINAL_RC=72; fi',
             'if [ "$PARENT_RC" -ne 0 ]; then FINAL_RC=74; fi',
+            'if [ "$CHECKS_RC" -eq 127 ]; then CHECKS_WARNING=1; else CHECKS_WARNING=0; fi',
         ]
     )
     return lines
@@ -1244,7 +1245,9 @@ def _build_opencode_script(
     )
     parts.extend(
         [
-            "if [ $FINAL_RC -eq 0 ]; then",
+            'if [ $FINAL_RC -eq 0 ] && [ "${CHECKS_WARNING:-0}" -eq 1 ]; then',
+            '  echo "Status: needs-review-warning" > "$td/agent-status.md"',
+            'elif [ $FINAL_RC -eq 0 ]; then',
             '  echo "Status: needs-review" > "$td/agent-status.md"',
             'elif [ "$PROXY_BLOCKED" -eq 1 ] && [ "$PARENT_RC" -eq 0 ] && [ "$EVIDENCE_RC" -eq 0 ] && [ "$SCOPE_RC" -eq 0 ] && [ "$CHECKS_RC" -eq 0 ]; then',
             '  echo "Status: blocked" > "$td/agent-status.md"',

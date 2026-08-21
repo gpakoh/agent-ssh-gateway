@@ -402,6 +402,51 @@ def test_explicit_base_ref_checks_out_pinned_commit(tmp_path, monkeypatch):
     assert _git(source, "rev-parse", "HEAD") == current_head
 
 
+def test_full_script_reports_needs_review_warning_when_check_tool_missing(tmp_path, monkeypatch):
+    """End-to-end: worker succeeds, check tool is missing (exit 127) ->
+    run must NOT fail; canonical status is needs-review-warning."""
+    monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+    monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+    source = tmp_path / "source-warning"
+    source.mkdir()
+    _init_git_repo(source)
+
+    artifacts = tmp_path / "warning-artifacts" / TASK_ID
+    artifacts.mkdir(parents=True)
+    (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+    workspace = tmp_path / "warning-workspaces" / TASK_ID
+    fake_bin = tmp_path / "warning-bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "opencode"
+    fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    script = _build_opencode_script(
+        str(artifacts),
+        TASK_ID,
+        None,
+        project_root=str(source),
+        worktree_path=str(workspace),
+        required_checks=["mcp-definitely-missing-tool --version"],
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert (
+        artifacts / "agent-status.md"
+    ).read_text(encoding="utf-8").strip() == "Status: needs-review-warning"
+    report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
+    assert "- Required-checks exit code: 127 (ran=1)" in report
+
+
 def test_existing_clean_workspace_rejects_base_ref_drift(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
     monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
@@ -1192,6 +1237,7 @@ def _run_supervisor_postrun(
     allowed_files: list[str],
     forbidden_files: list[str] | None = None,
     required_checks: list[str] | None = None,
+    worker_rc: int = 0,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     td = root / "task-artifacts"
     td.mkdir(exist_ok=True)
@@ -1199,7 +1245,7 @@ def _run_supervisor_postrun(
         [
             f"td={shlex.quote(str(td))}",
             f"BASE_HEAD={shlex.quote(base_head)}",
-            "RC=0",
+            f"RC={worker_rc}",
             *_supervisor_postrun_script_lines(
                 allowed_files,
                 forbidden_files or [],
@@ -1303,6 +1349,61 @@ class TestSupervisorPostrunEvidence:
         assert result.returncode == 72
         checks = (td / "required-checks.log").read_text(encoding="utf-8")
         assert "FAIL exit=9" in checks
+
+    def test_required_check_command_not_found_is_warning(self, tmp_path):
+        """CHECKS_RC=127 means the check tool is missing from the check
+        environment (command not found / infrastructure gap). It must NOT
+        fail the run: the worker did its job, the environment did not."""
+        base_head = _init_git_repo(tmp_path)
+        (tmp_path / "base.txt").write_text("changed\n", encoding="utf-8")
+
+        result, td = _run_supervisor_postrun(
+            tmp_path,
+            base_head=base_head,
+            allowed_files=["base.txt"],
+            required_checks=["mcp-definitely-missing-tool --version"],
+        )
+
+        assert result.returncode == 0, result.stderr
+        checks = (td / "required-checks.log").read_text(encoding="utf-8")
+        assert "FAIL exit=127" in checks
+
+    def test_required_check_exit_one_is_failure(self, tmp_path):
+        """A check that runs and reports a real failure (exit 1) must fail
+        the run with the required-checks contract code 72."""
+        base_head = _init_git_repo(tmp_path)
+        (tmp_path / "base.txt").write_text("changed\n", encoding="utf-8")
+
+        result, td = _run_supervisor_postrun(
+            tmp_path,
+            base_head=base_head,
+            allowed_files=["base.txt"],
+            required_checks=["python3 -c 'import sys; sys.exit(1)'"],
+        )
+
+        assert result.returncode == 72
+        checks = (td / "required-checks.log").read_text(encoding="utf-8")
+        assert "FAIL exit=1" in checks
+
+    def test_worker_failure_overrides_unavailable_checks(self, tmp_path):
+        """Worker failure keeps the run FAILED regardless of the check
+        environment: required checks are skipped entirely after a failed
+        worker run, so no check outcome (not even 127/warning) can mask it."""
+        base_head = _init_git_repo(tmp_path)
+        (tmp_path / "base.txt").write_text("changed\n", encoding="utf-8")
+
+        result, td = _run_supervisor_postrun(
+            tmp_path,
+            base_head=base_head,
+            allowed_files=["base.txt"],
+            worker_rc=1,
+            required_checks=["mcp-definitely-missing-tool --version"],
+        )
+
+        assert result.returncode == 1
+        status = (td / "agent-status.md").read_text(encoding="utf-8")
+        assert "Supervisor required checks skipped" in status
+        assert not (td / "required-checks.log").exists()
 
     def test_required_check_ignored_worker_venv_cannot_change_result(self, tmp_path, monkeypatch):
         root = tmp_path / "repo"
