@@ -8,7 +8,7 @@ while the job record is still known to the gateway.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import state as _state
 from app.agent_events import list_agent_events
@@ -23,6 +23,7 @@ router = APIRouter(tags=["agents"])
 async def agent_events_history(
     job_id: str,
     _identity: AuthIdentity = Depends(require_scope("jobs:read")),
+    limit: int = Query(default=100, ge=1, le=500),
 ):
     """Lifecycle event timeline (started/heartbeat/progress/completed/failed)
     for a background job. Same ownership rules as the jobs endpoints."""
@@ -31,7 +32,7 @@ async def agent_events_history(
         raise HTTPException(status_code=404, detail=_err(404, f"Job {job_id} not found"))
     if not job_visible_to(job, _identity):
         raise HTTPException(status_code=403, detail=_err(403, "Job belongs to a different owner"))
-    events = list_agent_events(job_id)
+    events = list_agent_events(job_id)[-limit:]
     return {
         "job_id": job_id,
         "count": len(events),

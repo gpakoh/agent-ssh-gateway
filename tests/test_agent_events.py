@@ -251,6 +251,27 @@ class TestAgentEventsEndpoint:
         assert data["count"] == 2
         assert [e["type"] for e in data["events"]] == ["started", "completed"]
 
+    def test_limit_returns_last_n_events(self, monkeypatch):
+        from app import agent_events as agent_events_module
+        from app import state as _app_state
+
+        client = self._client(monkeypatch)
+        job = MagicMock(owner_id="user:admin")
+        job.status = "running"
+        _app_state.job_manager.get_job = AsyncMock(return_value=job)
+        for i in range(5):
+            agent_events_module.agent_events.emit("job-lim", "fp-a", "heartbeat", {"i": i})
+
+        resp = client.get(
+            "/api/agents/job-lim/events?limit=2",
+            headers={"X-API-Key": "secret-42"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 2
+        assert [e["payload"]["i"] for e in data["events"]] == [3, 4]
+
     def test_unknown_job_returns_404(self, monkeypatch):
         from app import state as _app_state
 
