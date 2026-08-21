@@ -49,8 +49,8 @@ def _create_agent_events() -> None:
         sa.Column(
             "sequence",
             sa.BigInteger(),
-            sa.Sequence("agent_events_sequence_seq"),
             nullable=False,
+            server_default=sa.text("nextval('agent_events_sequence_seq')"),
         ),
         sa.Column("job_id", sa.String(length=36), nullable=False),
         sa.Column("attempt_id", sa.String(length=36), nullable=False),
@@ -77,6 +77,11 @@ def _create_agent_events() -> None:
 
 
 def upgrade() -> None:
+    # Alembic's create_table silently ignores column-attached sa.Sequence
+    # objects, so the sequence must be created explicitly. Run it outside
+    # the table guard: a table auto-created by Base.metadata.create_all may
+    # exist without the sequence.
+    op.execute(text("CREATE SEQUENCE IF NOT EXISTS agent_events_sequence_seq"))
     if not _table_exists("agent_events"):
         _create_agent_events()
 
@@ -84,5 +89,5 @@ def upgrade() -> None:
 def downgrade() -> None:
     if _table_exists("agent_events"):
         op.drop_table("agent_events")
-    # CREATE SEQUENCE is not OWNED BY the column, so drop_table leaves it behind.
+    # The sequence is not OWNED BY the column, so drop_table leaves it behind.
     op.execute(text("DROP SEQUENCE IF EXISTS agent_events_sequence_seq"))
