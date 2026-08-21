@@ -955,13 +955,13 @@ def test_sanitize_labels_string_redacts_url_email_sha_values():
     """CI/registry URLs, emails and commit SHAs in label values must not
     leak infrastructure topology (audit T31 #11)."""
     labels = (
-        "org.opencontainers.image.source=https://git.xloud.ru/gpakoh/web.git,"
+        "org.opencontainers.image.source=https://git.example.com/gpakoh/web.git,"
         "org.opencontainers.image.authors=dev@example.com,"
         "org.opencontainers.image.revision=0123456789abcdef0123456789abcdef01234567,"
         "org.opencontainers.image.version=1.2.3"
     )
     out = DockerClient._sanitize_labels_string(labels)
-    assert "git.xloud.ru" not in out
+    assert "git.example.com" not in out
     assert "dev@example.com" not in out
     assert "0123456789abcdef" not in out
     assert "1.2.3" in out

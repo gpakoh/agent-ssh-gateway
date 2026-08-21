@@ -196,8 +196,8 @@ def _parse_gitea_remote(remote_url: str) -> tuple[str, str, str]:
         if api_host:
             allowed_hosts.add(api_host)
     allowed_hosts.add("gitea")
-    allowed_hosts.add("192.168.1.103")
-    allowed_hosts.add("git.xloud.ru")
+    allowed_hosts.add("192.0.2.103")
+    allowed_hosts.add("git.example.com")
 
     if host not in allowed_hosts:
         raise RuntimeError("GIT_REMOTE_NOT_ALLOWED")

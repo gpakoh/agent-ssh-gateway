@@ -484,7 +484,7 @@ def test_token_never_in_url_or_config(tmp_path, monkeypatch):
     from examples.mcp_server.agent_sources import _resolve_trusted_remote
 
     # Mock git remote get-url to return a Gitea SSH URL
-    fake_origin = "ssh://git@192.168.1.103:2222/gpakoh/test-repo.git"
+    fake_origin = "ssh://git@192.0.2.103:2222/gpakoh/test-repo.git"
     project_root = tmp_path / "project"
     project_root.mkdir()
 
@@ -495,7 +495,7 @@ def test_token_never_in_url_or_config(tmp_path, monkeypatch):
 
     # Mock the Gitea API calls
     fake_user_data = {"login": "testuser"}
-    fake_repo_data = {"clone_url": "https://192.168.1.103/gpakoh/test-repo.git"}
+    fake_repo_data = {"clone_url": "https://192.0.2.103/gpakoh/test-repo.git"}
 
     # Track all subprocess calls to _minimal_git_env and git fetch
     captured_envs: list[dict] = []

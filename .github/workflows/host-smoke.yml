@@ -42,7 +42,7 @@ jobs:
   host-smoke:
     name: Host smoke
     # Self-hosted Gitea runner only (label host-smoke-ci, Gitea at
-    # git.xloud.ru) — needs real /media, nginx certs and Redis, which
+    # git.example.com) — needs real /media, nginx certs and Redis, which
     # GitHub's hosted runners don't have. GitHub would queue this job
     # forever without a matching runner, so skip it there entirely via
     # github.server_url — same guard as ci.yml's build-and-push/deploy.

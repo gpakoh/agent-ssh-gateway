@@ -41,8 +41,8 @@ class TestRemotesHelperSignalsRedaction:
                 "execute_project_command": lambda self, project, command: {
                     "exit_code": 0,
                     "stdout": (
-                        "origin\thttps://gpakoh:secrettoken@git.xloud.ru/gpakoh/repo.git (fetch)\n"
-                        "origin\thttps://gpakoh:secrettoken@git.xloud.ru/gpakoh/repo.git (push)\n"
+                        "origin\thttps://gpakoh:secrettoken@git.example.com/gpakoh/repo.git (fetch)\n"
+                        "origin\thttps://gpakoh:secrettoken@git.example.com/gpakoh/repo.git (push)\n"
                     ),
                     "stderr": "",
                 }
@@ -89,7 +89,7 @@ class TestGatewayRemotesEndToEnd:
             "execute_project_command",
             lambda project, command: {
                 "exit_code": 0,
-                "stdout": "origin\thttps://gpakoh:secrettoken@git.xloud.ru/gpakoh/repo.git (fetch)\n",
+                "stdout": "origin\thttps://gpakoh:secrettoken@git.example.com/gpakoh/repo.git (fetch)\n",
                 "stderr": "",
             },
         )

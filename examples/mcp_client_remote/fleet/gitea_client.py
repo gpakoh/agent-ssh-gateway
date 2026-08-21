@@ -118,7 +118,7 @@ class GiteaClient:
         except httpx.HTTPStatusError as exc:
             # httpx.HTTPStatusError's own message embeds the fully-resolved
             # absolute URL (scheme + internal host + port from API_BASE,
-            # e.g. http://192.168.1.103:3005/...) — FastMCP's tool-call
+            # e.g. http://192.0.2.103:3005/...) — FastMCP's tool-call
             # error handler sends str(exception) straight to the external
             # MCP client verbatim (mcp/server/lowlevel/server.py's
             # `except Exception as e: return self._make_error_result(str(e))`),

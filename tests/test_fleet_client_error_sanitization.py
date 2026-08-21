@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "mcp_c
 from fleet.gitea_client import GiteaClient  # noqa: E402
 from fleet.github_client import GitHubClient  # noqa: E402
 
-INTERNAL_HOST = "http://192.168.1.103:3005"
+INTERNAL_HOST = "http://192.0.2.103:3005"
 
 
 def _not_found_transport() -> httpx.MockTransport:

@@ -228,7 +228,7 @@ jobs:
     #
     # These two jobs (build-and-push, deploy) only ever run on the
     # self-hosted Gitea runner pool (label docker-e2e-ci, Gitea at
-    # git.xloud.ru). GitHub's hosted runners have no such label AND their
+    # git.example.com). GitHub's hosted runners have no such label AND their
     # Actions parser rejects `container:` without an `image:` (which the
     # Gitea runner accepts) — an invalid file fails every job in the
     # workflow there. So: skip them on GitHub entirely via
