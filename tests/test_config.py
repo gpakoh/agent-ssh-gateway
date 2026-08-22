@@ -54,3 +54,28 @@ def test_settings_allows_real_secrets(monkeypatch):
 
     cfg = Settings()
     assert cfg.api_key == "live-api-key-abc123"
+
+
+class TestObservabilitySettings:
+    """Agent events observability v2 settings (Task 1.3)."""
+
+    def test_observability_defaults(self):
+        s = Settings(
+            api_key="test-key-not-placeholder",
+            _env_file=None,
+        )
+        assert s.heartbeat_interval == 30
+        assert s.stale_threshold == 120
+        assert s.agent_id == "gateway"
+
+    def test_observability_env_aliases(self, monkeypatch):
+        monkeypatch.setenv("HEARTBEAT_INTERVAL", "15")
+        monkeypatch.setenv("STALE_THRESHOLD", "60")
+        monkeypatch.setenv("AGENT_ID", "gw-alpha")
+        s = Settings(
+            api_key="test-key-not-placeholder",
+            _env_file=None,
+        )
+        assert s.heartbeat_interval == 15
+        assert s.stale_threshold == 60
+        assert s.agent_id == "gw-alpha"

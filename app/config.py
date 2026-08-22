@@ -158,6 +158,11 @@ class Settings(BaseSettings):
     database_url: str = Field(default="", alias="DATABASE_URL")
     persistent_sessions_enabled: bool = Field(default=False, alias="PERSISTENT_SESSIONS_ENABLED")
 
+    # Agent events observability v2
+    heartbeat_interval: int = Field(default=30, alias="HEARTBEAT_INTERVAL")  # seconds (non-durable jobs; durable renewal stays at lease_ttl/3)
+    stale_threshold: int = Field(default=120, alias="STALE_THRESHOLD")  # seconds without heartbeat before supervisor marks stale
+    agent_id: str = Field(default="gateway", alias="AGENT_ID")
+
     # Audit trail
     audit_log_path: str = Field(default="./data/audit/events.jsonl", alias="AUDIT_LOG_PATH")
     audit_recent_limit: int = Field(default=500, alias="AUDIT_RECENT_LIMIT")
