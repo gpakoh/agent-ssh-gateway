@@ -163,7 +163,7 @@ class DualWriteAgentEventEmitter:
     ) -> None:
         self._memory = memory_emitter
         self._pg = pg_store
-        self._subscribers: dict[str, list[asyncio.Queue]] = defaultdict(list)
+        self._subscribers: dict[str, list[EventSubscription]] = defaultdict(list)
         self._watermarks: dict[str, int] = {}  # last committed PG sequence per job
         self._observability_state = ObservabilityState()
 
@@ -223,7 +223,8 @@ class DualWriteAgentEventEmitter:
             raise ObservabilityDegradedError(reason) from exc
         # Committed from here on: recovery + fan-out must not re-raise.
         self._observability_state.mark_healthy()
-        self._watermarks[job_id] = record.sequence
+        if record.sequence is not None:
+            self._watermarks[job_id] = record.sequence
         event_data = {
             "sequence": record.sequence,
             "job_id": job_id,
@@ -248,9 +249,7 @@ class DualWriteAgentEventEmitter:
         watermark = self._watermarks.get(job_id)
         if watermark is None and self._pg:
             watermark = await self._pg.get_latest_sequence(job_id)
-        sub = EventSubscription(
-            queue=asyncio.Queue(maxsize=500), watermark=watermark or 0
-        )
+        sub = EventSubscription(queue=asyncio.Queue(maxsize=500), watermark=watermark or 0)
         self._subscribers[job_id].append(sub)
         return sub
 

@@ -15,7 +15,8 @@ from slowapi.errors import RateLimitExceeded
 
 import app.build_info as build_info
 import app.state as state
-from app.agent_events import AgentEventStore, DualWriteAgentEventEmitter, agent_events
+from app.agent_event_store import AgentEventStore
+from app.agent_events import DualWriteAgentEventEmitter, agent_events
 from app.agent_token_store import AgentTokenStore
 from app.auth_middleware import (
     PUBLIC_AUTH_PATHS,

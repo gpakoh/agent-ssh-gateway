@@ -31,6 +31,7 @@ from app.webhook_manager import WebhookManager
 
 if TYPE_CHECKING:
     from app.access_control import AccessControlStore
+    from app.agent_event_store import AgentEventStore
     from app.audit_store import AuditLogStore
 
 manager: SSHSessionManager | None = None
@@ -55,7 +56,7 @@ circuit_breakers: CircuitBreakerRegistry | None = None
 dist_lock: DistributedLock | None = None
 session_store: SessionStore | None = None
 agent_event_emitter: DualWriteAgentEventEmitter | None = None
-agent_event_store = None  # AgentEventStore | None (set in lifespan; avoids import cycle)
+agent_event_store: AgentEventStore | None = None  # set in lifespan; avoids import cycle
 host_key_store: HostKeyStore | None = None
 bulk_ops: BulkOperationsManager | None = None
 event_hook_store: EventHookStore | None = None
