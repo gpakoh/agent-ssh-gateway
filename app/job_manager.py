@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from app.agent_events import AgentEventEmitter, agent_events
+from app.agent_events import AgentEventEmitter, ObservabilityDegradedError, agent_events
 from app.command_policy import evaluate_command_policy
 from app.config import settings
 from app.exceptions import (
@@ -540,6 +540,39 @@ class JobManager:
         logger.info("Recovered durable job %s from envelope", job_id)
         return job_id
 
+    async def _emit_observability_event(
+        self,
+        job: JobRecord,
+        event_type: str,
+        payload: dict | None = None,
+    ) -> None:
+        """Dual-write an attempt-scoped agent event (observability only).
+
+        The in-memory pipeline is authoritative for live consumers and is
+        preserved in every path: PG success fans out internally, PG outage
+        or an unstarted attempt falls back to the legacy emitter. Never
+        raises — observability must not affect execution outcomes.
+        """
+        import app.state as app_state  # late import: avoids main<->job_manager cycle
+
+        payload = payload or {}
+        emitter = getattr(app_state, "agent_event_emitter", None)
+        if emitter is None or job.attempt_id is None:
+            self._events.emit(job.job_id, job.owner_id, event_type, payload)
+            return
+        try:
+            await emitter.pg_emit(
+                job.job_id,
+                job.attempt_id,
+                job.owner_id,
+                settings.agent_id,
+                event_type,
+                payload,
+            )
+        except ObservabilityDegradedError:
+            # PG down: memory pipeline stays fed; state already marked degraded.
+            self._events.emit(job.job_id, job.owner_id, event_type, payload)
+
     async def _run_job(self, job_id: str) -> None:
         """Execute a command in the background.
 
@@ -630,9 +663,14 @@ class JobManager:
                         # prevents stale persistence if another worker took over.
                         job.cancel_event.set()
                         break
-                    self._events.emit(
-                        job_id,
-                        job.owner_id,
+                    # Observability piggyback on the SAME tick — renewal
+                    # cadence stays lease_ttl/3, never deferred by PG health.
+                    # The dual-write wrapper keeps the memory pipeline fed
+                    # even while PG is degraded.
+                    job.last_heartbeat_at = time.time()
+                    job.heartbeat_seq += 1
+                    await self._emit_observability_event(
+                        job,
                         "heartbeat",
                         {"state": "running", "lease_ttl": lease_ttl},
                     )
@@ -642,6 +680,19 @@ class JobManager:
                         job.cancel_event.set()
 
             heartbeat_task = asyncio.create_task(_heartbeat_loop())
+        else:
+            interval = max(0.1, float(settings.heartbeat_interval))
+
+            async def _nondurable_heartbeat_loop() -> None:
+                while True:
+                    await asyncio.sleep(interval)
+                    if job.status != "running":
+                        continue
+                    job.last_heartbeat_at = time.time()
+                    job.heartbeat_seq += 1
+                    await self._emit_observability_event(job, "heartbeat", {"state": "running"})
+
+            heartbeat_task = asyncio.create_task(_nondurable_heartbeat_loop())
 
         try:
             job.status = "running"
@@ -662,9 +713,8 @@ class JobManager:
                     "message": f"Started: {_started_command}",
                 }
             )
-            self._events.emit(
-                job_id,
-                job.owner_id,
+            await self._emit_observability_event(
+                job,
                 "started",
                 {"command": _started_command, "session_id": job.session_id},
             )
@@ -762,7 +812,13 @@ class JobManager:
                 job.error_message = str(exc)
                 await job.notify_listeners({"type": "error", "error": str(exc)})
         finally:
-            if heartbeat_task is not None:
+            # Durable reap keeps its legacy position: cancel-then-await before
+            # fenced finish. Non-durable reap is deferred to the END of the
+            # finally block — awaiting the cancelled timer yields to the event
+            # loop, and no yield may sit between completed_event.set() and
+            # _persist_terminal_job (callers treat terminal state visibility
+            # as "Redis mirror done").
+            if is_durable and heartbeat_task is not None:
                 heartbeat_task.cancel()
                 try:
                     await heartbeat_task
@@ -803,16 +859,14 @@ class JobManager:
                     }
                 )
                 if job.status == "completed":
-                    self._events.emit(
-                        job_id,
-                        job.owner_id,
+                    await self._emit_observability_event(
+                        job,
                         "completed",
                         {"exit_code": job.exit_code, "duration": job.duration},
                     )
                 else:
-                    self._events.emit(
-                        job_id,
-                        job.owner_id,
+                    await self._emit_observability_event(
+                        job,
                         "failed",
                         {
                             "status": job.status,
@@ -821,6 +875,15 @@ class JobManager:
                             "duration": job.duration,
                         },
                     )
+
+            # Non-durable reap: after persistence and terminal emissions so
+            # the cancellation yield cannot reorder them (see comment above).
+            if not is_durable and heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
 
     # ------------------------------------------------------------------
     # Get Job
