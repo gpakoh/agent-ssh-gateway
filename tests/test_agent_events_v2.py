@@ -8,6 +8,7 @@ local dev URL) so create_all/drop never touch shared tables.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from types import SimpleNamespace
 
@@ -590,9 +591,7 @@ def _running_job(jm, *, hb_age=None, claimed=True):
     job.status = "running"
     job.attempt_id = "att-1"
     if claimed:
-        job.last_heartbeat_at = (
-            time.time() - hb_age if hb_age is not None else time.time()
-        )
+        job.last_heartbeat_at = time.time() - hb_age if hb_age is not None else time.time()
     jm._jobs[job.job_id] = job
     return job
 
@@ -763,13 +762,14 @@ def _pg_events():
 @pytest.mark.asyncio
 async def test_query_returns_pg_events_for_known_job(monkeypatch):
     monkeypatch.setattr(app_state, "agent_event_store", _FakeQueryStore(_pg_events()))
-    master = AuthIdentity(
-        token_type="master", token="k", name="m", scopes=("jobs:read",)
-    )
+    master = AuthIdentity(token_type="master", token="k", name="m", scopes=("jobs:read",))
     resp = await agent_events_history("job-q", master, limit=500)
     assert resp["count"] == 4
     assert [e["type"] for e in resp["events"]] == [
-        "started", "heartbeat", "heartbeat", "completed",
+        "started",
+        "heartbeat",
+        "heartbeat",
+        "completed",
     ]
     assert all("sequence" in e and "attempt_id" in e for e in resp["events"])
 
@@ -777,9 +777,7 @@ async def test_query_returns_pg_events_for_known_job(monkeypatch):
 @pytest.mark.asyncio
 async def test_query_unknown_job_returns_404(monkeypatch):
     monkeypatch.setattr(app_state, "agent_event_store", _FakeQueryStore(_pg_events()))
-    master = AuthIdentity(
-        token_type="master", token="k", name="m", scopes=("jobs:read",)
-    )
+    master = AuthIdentity(token_type="master", token="k", name="m", scopes=("jobs:read",))
     with pytest.raises(_HTTPException) as exc_info:
         await agent_events_history("job-nope", master)
     assert exc_info.value.status_code == 404
@@ -805,9 +803,185 @@ async def test_query_orders_by_sequence_not_created_at(monkeypatch):
     events = _pg_events()
     # sequence ascending, but give descending pseudo-created_at markers via payload
     monkeypatch.setattr(app_state, "agent_event_store", _FakeQueryStore(events))
-    master = AuthIdentity(
-        token_type="master", token="k", name="m", scopes=("jobs:read",)
-    )
+    master = AuthIdentity(token_type="master", token="k", name="m", scopes=("jobs:read",))
     resp = await agent_events_history("job-q", master, limit=500)
     seqs = [e["sequence"] for e in resp["events"]]
     assert seqs == sorted(seqs) == [1, 2, 3, 4]
+
+
+# ---------------------------------------------------------------------------
+# Task 7.1: SSE stream with high-water-mark replay
+# ---------------------------------------------------------------------------
+
+from app.routers.agents import agent_events_stream  # noqa: E402
+
+
+class _FakeSSEStore(_FakeQueryStore):
+    """Adds insert/watermark/min-sequence so DualWrite can drive live flow."""
+
+    def __init__(self, events=None):
+        super().__init__(events)
+        self.force_min = None
+
+    async def insert(self, **kwargs):
+        seq = max((e["sequence"] for e in self._events), default=0) + 1
+        row = {**kwargs, "type": kwargs["event_type"], "sequence": seq}
+        row.pop("event_type", None)
+        self._events.append(row)
+        return SimpleNamespace(sequence=seq, created_at=None)
+
+    async def get_events(self, job_id, *, after_sequence=None, up_to_sequence=None, limit=500):
+        rows = [e for e in self._events if e["job_id"] == job_id]
+        if after_sequence is not None:
+            rows = [e for e in rows if e["sequence"] > after_sequence]
+        if up_to_sequence is not None:
+            rows = [e for e in rows if e["sequence"] <= up_to_sequence]
+        return [SimpleNamespace(**{**e, "event_type": e["type"]}) for e in rows[:limit]]
+
+    async def get_latest_sequence(self, job_id):
+        rows = [e["sequence"] for e in self._events if e["job_id"] == job_id]
+        return max(rows) if rows else None
+
+    async def get_min_sequence(self, job_id):
+        if self.force_min is not None:
+            return self.force_min
+        rows = [e["sequence"] for e in self._events if e["job_id"] == job_id]
+        return min(rows) if rows else None
+
+
+def _sse_wire(monkeypatch, seed=None):
+    store = _FakeSSEStore(seed or [])
+    memory = AgentEventEmitter()
+    emitter = DualWriteAgentEventEmitter(memory_emitter=memory, pg_store=store)
+    monkeypatch.setattr(app_state, "agent_event_store", store)
+    monkeypatch.setattr(app_state, "agent_event_emitter", emitter)
+    master = AuthIdentity(token_type="master", token="k", name="m", scopes=("jobs:read",))
+    return store, emitter, master
+
+
+async def _drain(resp):
+    chunks = []
+    async for chunk in resp.body_iterator:
+        chunks.append(chunk)
+    parsed = []
+    for chunk in chunks:
+        text = chunk.decode() if isinstance(chunk, bytes) else chunk
+        if text.startswith(":"):
+            continue
+        fields = dict(line.split(": ", 1) for line in text.strip().split("\n") if ": " in line)
+        parsed.append(
+            {
+                "event": fields.get("event"),
+                "data": json.loads(fields.get("data", "{}")),
+                "id": int(fields["id"]) if "id" in fields else None,
+            }
+        )
+    return parsed
+
+
+def _seed(seed_events, count):
+    return [
+        {
+            "sequence": i,
+            "job_id": "job-q",
+            "attempt_id": "att-1",
+            "owner_id": "fp-owner",
+            "agent_id": "gateway",
+            "type": t,
+            "payload": {"n": i},
+            "created_at": None,
+        }
+        for i, t in zip(range(1, count + 1), seed_events, strict=True)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sse_full_replay_closes_on_terminal(monkeypatch):
+    store, _emitter, master = _sse_wire(
+        monkeypatch, _seed(["started", "heartbeat", "completed"], 3)
+    )
+    resp = await agent_events_stream("job-q", master, last_event_id=None)
+    chunks = await asyncio.wait_for(_drain(resp), timeout=5)
+    assert [c["id"] for c in chunks] == [1, 2, 3]
+    assert [c["event"] for c in chunks] == ["started", "heartbeat", "completed"]
+    assert chunks[-1]["data"]["payload"]["n"] == 3
+
+
+@pytest.mark.asyncio
+async def test_sse_reconnect_replays_from_last_event_id(monkeypatch):
+    store, _emitter, master = _sse_wire(
+        monkeypatch, _seed(["started", "heartbeat", "completed"], 3)
+    )
+    resp = await agent_events_stream("job-q", master, last_event_id="2")
+    chunks = await asyncio.wait_for(_drain(resp), timeout=5)
+    assert [c["id"] for c in chunks] == [3]
+    assert chunks[0]["event"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_sse_no_gap_between_replay_and_live(monkeypatch):
+    store, emitter, master = _sse_wire(monkeypatch, _seed(["started", "heartbeat"], 2))
+
+    async def live_after_subscribe():
+        await asyncio.sleep(0.05)  # let subscription register
+        for etype in ("progress", "failed"):
+            await emitter.pg_emit(
+                job_id="job-q",
+                attempt_id="att-1",
+                owner_id="fp-owner",
+                agent_id="gateway",
+                event_type=etype,
+                payload={"live": etype},
+            )
+
+    resp = await agent_events_stream("job-q", master, last_event_id=None)
+    task = asyncio.create_task(_drain(resp))
+    asyncio.create_task(live_after_subscribe())
+    chunks = await asyncio.wait_for(task, timeout=5)
+    # replay 1..watermark(2) then live 3,4 — no gap, no duplicates
+    assert [c["id"] for c in chunks] == [1, 2, 3, 4]
+    types = [c["event"] for c in chunks]
+    assert types == ["started", "heartbeat", "progress", "failed"]
+
+
+@pytest.mark.asyncio
+async def test_sse_invalid_or_negative_last_event_id_is_400(monkeypatch):
+    _store, _emitter, master = _sse_wire(monkeypatch, _seed(["started"], 1))
+    for bad in ("abc", "-1"):
+        with pytest.raises(_HTTPException) as exc_info:
+            await agent_events_stream("job-q", master, last_event_id=bad)
+        assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_sse_future_cursor_400_expired_cursor_409(monkeypatch):
+    store, _emitter, master = _sse_wire(monkeypatch, _seed(["started"], 1))
+    with pytest.raises(_HTTPException) as exc_info:
+        await agent_events_stream("job-q", master, last_event_id="99")
+    assert exc_info.value.status_code == 400
+    store.force_min = 5  # retention evicted everything below 5
+    with pytest.raises(_HTTPException) as exc_info:
+        await agent_events_stream("job-q", master, last_event_id="2")
+    assert exc_info.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_sse_overflow_signaled_out_of_band(monkeypatch):
+    store, emitter, master = _sse_wire(monkeypatch, _seed(["started"], 1))
+    resp = await agent_events_stream("job-q", master, last_event_id="1")
+    sub = emitter._subscribers["job-q"][0]
+    sub.queue = asyncio.Queue(maxsize=1)  # saturate deterministically
+    for i in range(2):  # first fills the slot, second trips overflow flag
+        await emitter.pg_emit(
+            job_id="job-q",
+            attempt_id="att-1",
+            owner_id="fp-owner",
+            agent_id="gateway",
+            event_type="heartbeat",
+            payload={"i": i},
+        )
+    assert sub.overflow is True  # producer-side control state, not a queued msg
+    chunks = await asyncio.wait_for(_drain(resp), timeout=5)
+    errors = [c for c in chunks if c["event"] == "error"]
+    assert len(errors) == 1
+    assert "last_sequence" in errors[0]["data"]

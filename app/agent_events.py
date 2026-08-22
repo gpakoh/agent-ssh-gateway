@@ -107,10 +107,16 @@ dual_write_emitter: DualWriteAgentEventEmitter | None = None
 
 @dataclass
 class EventSubscription:
-    """Live subscription to committed events for one job."""
+    """Live subscription to committed events for one job.
+
+    ``overflow`` is producer-set control state: when the data queue is
+    saturated, the producer flips the flag instead of pushing an error
+    through the full queue itself. The reader polls it each iteration.
+    """
 
     queue: asyncio.Queue
     watermark: int  # last PG-committed sequence at subscription time
+    overflow: bool = False
 
 
 @dataclass(slots=True)
@@ -227,11 +233,13 @@ class DualWriteAgentEventEmitter:
             "payload": payload or {},
             "created_at": record.created_at.isoformat() if record.created_at else None,
         }
-        for queue in self._subscribers.get(job_id, []):
+        for sub in self._subscribers.get(job_id, []):
             try:
-                queue.put_nowait(event_data)
+                sub.queue.put_nowait(event_data)
             except asyncio.QueueFull:
-                pass  # overflow handled by subscriber control state (Task 7)
+                # Out-of-band overflow signal: the saturated data queue must
+                # never carry its own failure notice. Reader emits the error.
+                sub.overflow = True
         self._memory.emit(job_id, agent_id, event_type, payload)
         return record
 
@@ -240,14 +248,16 @@ class DualWriteAgentEventEmitter:
         watermark = self._watermarks.get(job_id)
         if watermark is None and self._pg:
             watermark = await self._pg.get_latest_sequence(job_id)
-        queue: asyncio.Queue = asyncio.Queue(maxsize=500)
-        self._subscribers[job_id].append(queue)
-        return EventSubscription(queue=queue, watermark=watermark or 0)
+        sub = EventSubscription(
+            queue=asyncio.Queue(maxsize=500), watermark=watermark or 0
+        )
+        self._subscribers[job_id].append(sub)
+        return sub
 
     def remove_subscriber(self, job_id: str, queue: asyncio.Queue) -> None:
         """Remove a subscriber queue."""
         subs = self._subscribers.get(job_id, [])
-        self._subscribers[job_id] = [q for q in subs if q is not queue]
+        self._subscribers[job_id] = [s for s in subs if s.queue is not queue]
 
     def get_committed_sequence(self, job_id: str) -> int | None:
         """Last sequence known committed to PG for this job."""
