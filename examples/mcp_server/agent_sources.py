@@ -125,11 +125,12 @@ def _assert_bundle_usable(
 
 
 def _assert_source_not_partial(project_root: Path) -> None:
-    """Refuse publication from shallow/partial sources (incomplete history).
+    """Refuse publication from shallow sources (incomplete history).
 
     Traversal from such sources either fails deep inside bundle creation
-    with an opaque diagnostic or, for partial clones, could silently depend
-    on promisor fetch availability.  Fail closed here with actionable
+    with an opaque diagnostic.  Partial/promisor clones are not detected
+    here; the post-create scratch-clone proof is the completeness gate for
+    any artifact that passes this check.  Fail closed here with actionable
     guidance instead.
     """
     is_shallow = (
