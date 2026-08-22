@@ -52,12 +52,12 @@ class Settings(BaseSettings):
     command_policy_key_profiles: str = Field(
         default="{}",
         alias="COMMAND_POLICY_KEY_PROFILES",
-        description="JSON mapping API key fingerprint → profile name (e.g. {\"abc123\": \"testlint\"})",
+        description='JSON mapping API key fingerprint → profile name (e.g. {"abc123": "testlint"})',
     )
     command_policy_agent_modes: str = Field(
         default="{}",
         alias="COMMAND_POLICY_AGENT_MODES",
-        description="JSON mapping agent name → policy mode (e.g. {\"chatgpt\":\"enforce\",\"claude-code\":\"audit\"})",
+        description='JSON mapping agent name → policy mode (e.g. {"chatgpt":"enforce","claude-code":"audit"})',
     )
     command_output_redaction_enabled: bool = Field(
         default=True, alias="COMMAND_OUTPUT_REDACTION_ENABLED"
@@ -158,15 +158,23 @@ class Settings(BaseSettings):
     database_url: str = Field(default="", alias="DATABASE_URL")
     persistent_sessions_enabled: bool = Field(default=False, alias="PERSISTENT_SESSIONS_ENABLED")
 
+    # Agent events observability v2
+    heartbeat_interval: int = Field(
+        default=30, alias="HEARTBEAT_INTERVAL"
+    )  # seconds (non-durable jobs; durable renewal stays at lease_ttl/3)
+    stale_threshold: int = Field(
+        default=120, alias="STALE_THRESHOLD"
+    )  # seconds without heartbeat before supervisor marks stale
+    stale_scan_interval: int = Field(
+        default=30, alias="STALE_SCAN_INTERVAL"
+    )  # seconds between supervisor sweeps over running jobs
+    agent_id: str = Field(default="gateway", alias="AGENT_ID")
+
     # Audit trail
     audit_log_path: str = Field(default="./data/audit/events.jsonl", alias="AUDIT_LOG_PATH")
     audit_recent_limit: int = Field(default=500, alias="AUDIT_RECENT_LIMIT")
-    audit_log_persist_enabled: bool = Field(
-        default=False, alias="AUDIT_LOG_PERSIST_ENABLED"
-    )
-    audit_log_retention_days: int = Field(
-        default=90, alias="AUDIT_LOG_RETENTION_DAYS"
-    )
+    audit_log_persist_enabled: bool = Field(default=False, alias="AUDIT_LOG_PERSIST_ENABLED")
+    audit_log_retention_days: int = Field(default=90, alias="AUDIT_LOG_RETENTION_DAYS")
     audit_log_cleanup_interval_seconds: int = Field(
         default=3600, alias="AUDIT_LOG_CLEANUP_INTERVAL_SECONDS"
     )
@@ -195,9 +203,7 @@ class Settings(BaseSettings):
     access_control_pending_ttl: int = Field(default=900, alias="ACCESS_CONTROL_PENDING_TTL")
     access_control_allow_ttl: int = Field(default=86400, alias="ACCESS_CONTROL_ALLOW_TTL")
     access_control_deny_ttl: int = Field(default=86400, alias="ACCESS_CONTROL_DENY_TTL")
-    access_control_redis_url: str | None = Field(
-        default=None, alias="ACCESS_CONTROL_REDIS_URL"
-    )
+    access_control_redis_url: str | None = Field(default=None, alias="ACCESS_CONTROL_REDIS_URL")
 
     model_config = SettingsConfigDict(
         env_file=".env",

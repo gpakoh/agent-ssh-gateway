@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from app.agent_events import AgentEventEmitter, agent_events
+from app.agent_events import AgentEventEmitter, ObservabilityDegradedError, agent_events
 from app.command_policy import evaluate_command_policy
 from app.config import settings
 from app.exceptions import (
@@ -102,6 +102,16 @@ class JobRecord:
     # ``_run_job`` to decide whether to claim/heartbeat/finish via Redis
     # instead of the legacy in-process path.
     is_durable: bool = False
+
+    # Supervisor/observability identity (agent events v2). attempt_id is
+    # assigned per execution attempt at the running transition, never at
+    # construction, so recovered jobs get a fresh id and worker events stay
+    # distinguishable.
+    supervisor_state: str = "healthy"  # healthy|stale|recovered|needs_attention
+    stale_since: float | None = None
+    attempt_id: str | None = None
+    last_heartbeat_at: float | None = None
+    heartbeat_seq: int = 0
 
     # Monotonic timestamps (relative to process start; do NOT survive restart)
     queued_at_mono: float | None = None
@@ -212,6 +222,7 @@ class JobManager:
         self._max_jobs = max_jobs
         self._job_timeout = job_timeout
         self._cleanup_task: asyncio.Task | None = None
+        self._supervisor_task: asyncio.Task | None = None
         # Set post-construction in main.py's lifespan — RedisJobQueue is
         # created after JobManager. Mirrors terminal job state so job
         # history/results survive a gateway restart; see save_terminal_job().
@@ -226,6 +237,62 @@ class JobManager:
         if self._cleanup_task is None or self._cleanup_task.done():
             self._cleanup_task = asyncio.create_task(self._cleanup_loop())
             logger.info("Job Cleanup Task Started")
+
+    async def start_supervisor_task(self) -> None:
+        """Start the single stale/recovered supervisor sweep (agent events v2).
+
+        Exactly ONE instance exists per manager regardless of job count.
+        """
+        if self._supervisor_task is None or self._supervisor_task.done():
+            self._supervisor_task = asyncio.create_task(self._stale_detection_loop())
+            logger.info("Job Supervisor Task Started")
+
+    async def stop_supervisor_task(self) -> None:
+        if self._supervisor_task is not None and not self._supervisor_task.done():
+            self._supervisor_task.cancel()
+            try:
+                await self._supervisor_task
+            except asyncio.CancelledError:
+                pass
+        self._supervisor_task = None
+
+    async def _stale_detection_loop(self) -> None:
+        """Sweep running jobs for heartbeat silence; supervisor state only.
+
+        Never modifies ``job.status`` — staleness is observability, not
+        lifecycle. Jobs without a heartbeat yet (not claimed) are skipped.
+        """
+        interval = max(0.1, float(settings.stale_scan_interval))
+        while True:
+            await asyncio.sleep(interval)
+            now = time.time()
+            async with self._lock:
+                candidates = [job for job in self._jobs.values() if job.status == "running"]
+            for job in candidates:
+                if job.last_heartbeat_at is None:
+                    continue  # not claimed yet — never flag unclaimed jobs
+                fresh = now - job.last_heartbeat_at <= settings.stale_threshold
+                if fresh and job.supervisor_state == "stale":
+                    stale_duration = round(now - (job.stale_since or now), 3)
+                    job.supervisor_state = "healthy"
+                    job.stale_since = None
+                    await self._emit_observability_event(
+                        job,
+                        "recovered",
+                        {"stale_duration": stale_duration},
+                    )
+                    await job.notify_listeners(
+                        {
+                            "type": "supervisor",
+                            "state": "healthy",
+                            "stale_duration": stale_duration,
+                        }
+                    )
+                elif not fresh and job.supervisor_state != "stale":
+                    job.supervisor_state = "stale"
+                    job.stale_since = now
+                    await self._emit_observability_event(job, "stale", {})
+                    await job.notify_listeners({"type": "supervisor", "state": "stale"})
 
     async def stop_cleanup_task(self) -> None:
         """Stop background cleanup."""
@@ -502,9 +569,7 @@ class JobManager:
         # Recovery is dependency-aware: do not run before the target SID
         # has actually been restored. Missing sessions stay nonterminal in Redis.
         if await self._ssh_manager.get_session(session_id) is None:
-            logger.warning(
-                "Durable job %s waiting for restored session %s", job_id, session_id
-            )
+            logger.warning("Durable job %s waiting for restored session %s", job_id, session_id)
             return None
 
         async with self._lock:
@@ -531,6 +596,39 @@ class JobManager:
         task.add_done_callback(lambda _: self._job_tasks.pop(job_id, None))
         logger.info("Recovered durable job %s from envelope", job_id)
         return job_id
+
+    async def _emit_observability_event(
+        self,
+        job: JobRecord,
+        event_type: str,
+        payload: dict | None = None,
+    ) -> None:
+        """Dual-write an attempt-scoped agent event (observability only).
+
+        The in-memory pipeline is authoritative for live consumers and is
+        preserved in every path: PG success fans out internally, PG outage
+        or an unstarted attempt falls back to the legacy emitter. Never
+        raises — observability must not affect execution outcomes.
+        """
+        import app.state as app_state  # late import: avoids main<->job_manager cycle
+
+        payload = payload or {}
+        emitter = getattr(app_state, "agent_event_emitter", None)
+        if emitter is None or job.attempt_id is None:
+            self._events.emit(job.job_id, job.owner_id, event_type, payload)
+            return
+        try:
+            await emitter.pg_emit(
+                job.job_id,
+                job.attempt_id,
+                job.owner_id,
+                settings.agent_id,
+                event_type,
+                payload,
+            )
+        except ObservabilityDegradedError:
+            # PG down: memory pipeline stays fed; state already marked degraded.
+            self._events.emit(job.job_id, job.owner_id, event_type, payload)
 
     async def _run_job(self, job_id: str) -> None:
         """Execute a command in the background.
@@ -566,9 +664,7 @@ class JobManager:
         # Check whether this is a durable keyed job that requires a Redis
         # execution claim before crossing into execute_stream.
         is_durable = (
-            job.is_durable
-            and self.redis_queue is not None
-            and self.redis_queue._redis is not None
+            job.is_durable and self.redis_queue is not None and self.redis_queue._redis is not None
         )
 
         worker_token: str | None = None
@@ -578,7 +674,9 @@ class JobManager:
         if is_durable:
             worker_token = uuid.uuid4().hex
             claimed = await self.redis_queue.claim_durable_execution(
-                job_id, worker_token=worker_token, lease_ttl=lease_ttl,
+                job_id,
+                worker_token=worker_token,
+                lease_ttl=lease_ttl,
             )
             if not claimed:
                 # Another worker may own this job. The losing coordinator
@@ -602,9 +700,7 @@ class JobManager:
                 )
                 job.progress["durable_persisted"] = persisted
                 if not persisted:
-                    logger.warning(
-                        "Durable terminal state for job %s was not persisted", job_id
-                    )
+                    logger.warning("Durable terminal state for job %s was not persisted", job_id)
                 return
 
             async def _heartbeat_loop() -> None:
@@ -614,7 +710,9 @@ class JobManager:
                 while True:
                     await asyncio.sleep(interval)
                     ok = await self.redis_queue.heartbeat_durable_execution(
-                        job_id, worker_token=worker_token, lease_ttl=lease_ttl,
+                        job_id,
+                        worker_token=worker_token,
+                        lease_ttl=lease_ttl,
                     )
                     if not ok:
                         # Partition or ownership loss makes the remote outcome
@@ -622,9 +720,14 @@ class JobManager:
                         # prevents stale persistence if another worker took over.
                         job.cancel_event.set()
                         break
-                    self._events.emit(
-                        job_id,
-                        job.owner_id,
+                    # Observability piggyback on the SAME tick — renewal
+                    # cadence stays lease_ttl/3, never deferred by PG health.
+                    # The dual-write wrapper keeps the memory pipeline fed
+                    # even while PG is degraded.
+                    job.last_heartbeat_at = time.time()
+                    job.heartbeat_seq += 1
+                    await self._emit_observability_event(
+                        job,
                         "heartbeat",
                         {"state": "running", "lease_ttl": lease_ttl},
                     )
@@ -634,16 +737,31 @@ class JobManager:
                         job.cancel_event.set()
 
             heartbeat_task = asyncio.create_task(_heartbeat_loop())
+        else:
+            interval = max(0.1, float(settings.heartbeat_interval))
+
+            async def _nondurable_heartbeat_loop() -> None:
+                while True:
+                    await asyncio.sleep(interval)
+                    if job.status != "running":
+                        continue
+                    job.last_heartbeat_at = time.time()
+                    job.heartbeat_seq += 1
+                    await self._emit_observability_event(job, "heartbeat", {"state": "running"})
+
+            heartbeat_task = asyncio.create_task(_nondurable_heartbeat_loop())
 
         try:
             job.status = "running"
             job.started_at = time.time()
             job.acquired_at_mono = time.monotonic()
+            job.attempt_id = uuid.uuid4().hex
+            job.last_heartbeat_at = time.time()
+            job.supervisor_state = "healthy"
+            job.heartbeat_seq = 0
 
             _started_command = (
-                redact_secrets(job.command)
-                if should_redact_command_output(None)
-                else job.command
+                redact_secrets(job.command) if should_redact_command_output(None) else job.command
             )
             await job.notify_listeners(
                 {
@@ -652,9 +770,8 @@ class JobManager:
                     "message": f"Started: {_started_command}",
                 }
             )
-            self._events.emit(
-                job_id,
-                job.owner_id,
+            await self._emit_observability_event(
+                job,
                 "started",
                 {"command": _started_command, "session_id": job.session_id},
             )
@@ -670,12 +787,8 @@ class JobManager:
                 job.completed_at = time.time()
                 job.completed_at_mono = time.monotonic()
                 job.completed_event.set()
-                logger.warning(
-                    "Job %s denied by policy: %s", job.job_id, decision.reason
-                )
-                await job.notify_listeners(
-                    {"type": "error", "error": job.error_message}
-                )
+                logger.warning("Job %s denied by policy: %s", job.job_id, decision.reason)
+                await job.notify_listeners({"type": "error", "error": job.error_message})
                 await job.notify_listeners(
                     {
                         "type": "status",
@@ -703,24 +816,18 @@ class JobManager:
                             job.stdout += msg_data[:remaining]
                             if remaining < len(msg_data) and "[truncated]" not in job.stdout:
                                 job.stdout += "\n... [output truncated, exceeded 10MB]"
-                        await job.notify_listeners(
-                            {"type": "stdout", "data": msg_data}
-                        )
+                        await job.notify_listeners({"type": "stdout", "data": msg_data})
                     elif msg_type == "stderr":
                         remaining = MAX_STDOUT_SIZE - len(job.stderr)
                         if remaining > 0:
                             job.stderr += msg_data[:remaining]
                             if remaining < len(msg_data) and "[truncated]" not in job.stderr:
                                 job.stderr += "\n... [output truncated, exceeded 10MB]"
-                        await job.notify_listeners(
-                            {"type": "stderr", "data": msg_data}
-                        )
+                        await job.notify_listeners({"type": "stderr", "data": msg_data})
                     elif msg_type == "exit":
                         job.exit_code = int(msg_data)
                         job.command_finished_at_mono = time.monotonic()
-                        await job.notify_listeners(
-                            {"type": "exit", "exit_code": job.exit_code}
-                        )
+                        await job.notify_listeners({"type": "exit", "exit_code": job.exit_code})
 
                 if is_durable and job.cancel_event.is_set():
                     # A non-negative recv_exit_status() is factual remote
@@ -762,7 +869,13 @@ class JobManager:
                 job.error_message = str(exc)
                 await job.notify_listeners({"type": "error", "error": str(exc)})
         finally:
-            if heartbeat_task is not None:
+            # Durable reap keeps its legacy position: cancel-then-await before
+            # fenced finish. Non-durable reap is deferred to the END of the
+            # finally block — awaiting the cancelled timer yields to the event
+            # loop, and no yield may sit between completed_event.set() and
+            # _persist_terminal_job (callers treat terminal state visibility
+            # as "Redis mirror done").
+            if is_durable and heartbeat_task is not None:
                 heartbeat_task.cancel()
                 try:
                     await heartbeat_task
@@ -803,16 +916,14 @@ class JobManager:
                     }
                 )
                 if job.status == "completed":
-                    self._events.emit(
-                        job_id,
-                        job.owner_id,
+                    await self._emit_observability_event(
+                        job,
                         "completed",
                         {"exit_code": job.exit_code, "duration": job.duration},
                     )
                 else:
-                    self._events.emit(
-                        job_id,
-                        job.owner_id,
+                    await self._emit_observability_event(
+                        job,
                         "failed",
                         {
                             "status": job.status,
@@ -821,6 +932,15 @@ class JobManager:
                             "duration": job.duration,
                         },
                     )
+
+            # Non-durable reap: after persistence and terminal emissions so
+            # the cancellation yield cannot reorder them (see comment above).
+            if not is_durable and heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
 
     # ------------------------------------------------------------------
     # Get Job
@@ -920,9 +1040,7 @@ class JobManager:
         )
         return job.status
 
-    async def wait_for_completion(
-        self, job_id: str, identity_sub: str, timeout_s: float
-    ) -> dict:
+    async def wait_for_completion(self, job_id: str, identity_sub: str, timeout_s: float) -> dict:
         """Long-poll: wait for job completion or timeout.
 
         Returns job.to_dict() on completion, or

@@ -19,3 +19,12 @@ class SubmissionConflictError(Exception):
 
 class SubmissionUnavailableError(Exception):
     """Raised when a durable idempotent submission cannot be recorded."""
+
+
+class ObservabilityDegradedError(Exception):
+    """Raised when agent-event persistence fails.
+
+    Observability-only: callers must log and continue job execution —
+    never propagate to the job outcome. The emitter tracks degraded state
+    for /health exposure and clears it on the next successful persist.
+    """

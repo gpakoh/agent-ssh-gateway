@@ -4,7 +4,23 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    Column,
+    DateTime,
+    Integer,
+    String,
+    Text,
+    func,
+    text,
+)
+from sqlalchemy import (
+    Sequence as SASequence,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -91,7 +107,9 @@ class EventHook(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
     )
 
     def to_dict(self) -> dict:
@@ -128,7 +146,9 @@ class WebhookDelivery(Base):
     leased_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
     )
 
 
@@ -165,9 +185,7 @@ class AuditLogEntry(Base):
     command = Column(Text, nullable=True)
     exit_code = Column(Integer, nullable=True)
     duration_ms = Column(Integer, nullable=True)
-    created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
 
     def to_dict(self) -> dict:
         return {
@@ -198,6 +216,35 @@ class AuditLogEntry(Base):
         }
 
 
+_agent_events_seq = SASequence("agent_events_sequence_seq")
+
+
+class AgentEventRecord(Base):
+    """Append-only agent event log row (observability v2).
+
+    Each event carries a monotonically increasing ``sequence`` drawn from the
+    dedicated ``agent_events_sequence_seq`` PostgreSQL sequence, enabling
+    replay/resume cursors scoped per job.
+    """
+
+    __tablename__ = "agent_events"
+    __mapper_args__ = {"eager_defaults": True}
+
+    id = Column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    sequence = Column(BigInteger, _agent_events_seq, nullable=False, unique=True)
+    job_id = Column(String(36), nullable=False, index=True)
+    attempt_id = Column(String(36), nullable=False, index=True)
+    owner_id = Column(String(128), nullable=False)
+    agent_id = Column(String(128), nullable=False)
+    event_type = Column(String(32), nullable=False)
+    payload = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class SessionStore:
     """Async session store using PostgreSQL."""
 
@@ -205,6 +252,11 @@ class SessionStore:
         self._database_url = database_url
         self._engine: AsyncEngine | None = None
         self._session_maker: async_sessionmaker[AsyncSession] | None = None
+
+    @property
+    def session_maker(self) -> async_sessionmaker[AsyncSession] | None:
+        """Expose the async session maker for sibling stores (agent events)."""
+        return self._session_maker
 
     async def connect(self):
         """Initialize database connection."""

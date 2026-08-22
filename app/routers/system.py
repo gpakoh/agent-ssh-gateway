@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 
 from app import state as _state
+from app.agent_events import ObservabilityState
 from app.api_help import build_api_help
 from app.auth_middleware import (
     AuthIdentity,
@@ -99,9 +100,7 @@ def _deep_ssh_check_blocking(
             allow_agent=False,
             look_for_keys=False,
         )
-        _, stdout, _ = client.exec_command(
-            "true", timeout=HEALTH_SSH_OPERATION_TIMEOUT_SECONDS
-        )
+        _, stdout, _ = client.exec_command("true", timeout=HEALTH_SSH_OPERATION_TIMEOUT_SECONDS)
         return stdout.channel.recv_exit_status() == 0
     finally:
         client.close()
@@ -128,17 +127,13 @@ async def _deep_ssh_check(host: str, port: int) -> bool | None:
     user = settings.ssh_health_user
     if not user:
         return None
-    ok, _failure = await _probe_deep_ssh(
-        host, port, user, settings.ssh_health_password
-    )
+    ok, _failure = await _probe_deep_ssh(host, port, user, settings.ssh_health_password)
     return ok
 
 
 def _tcp_ssh_check_blocking(host: str, port: int) -> None:
     """Blocking TCP connect used by the shallow SSH health probe."""
-    with socket.create_connection(
-        (host, port), timeout=HEALTH_SSH_OPERATION_TIMEOUT_SECONDS
-    ):
+    with socket.create_connection((host, port), timeout=HEALTH_SSH_OPERATION_TIMEOUT_SECONDS):
         return None
 
 
@@ -146,9 +141,7 @@ async def _probe_ssh(host: str, port: int) -> tuple[bool, str | None]:
     """Probe SSH without blocking the FastAPI event loop."""
     user = settings.ssh_health_user
     if user:
-        return await _probe_deep_ssh(
-            host, port, user, settings.ssh_health_password
-        )
+        return await _probe_deep_ssh(host, port, user, settings.ssh_health_password)
     try:
         await asyncio.wait_for(
             asyncio.to_thread(_tcp_ssh_check_blocking, host, port),
@@ -281,11 +274,30 @@ async def health_check():
             required=postgres_required,
             failure_class=postgres_failure,
         ),
-        "auth": _component_status(
-            ok=auth_ok, required=auth_required, failure_class=auth_failure
-        ),
+        "auth": _component_status(ok=auth_ok, required=auth_required, failure_class=auth_failure),
         "ssh": _component_status(ok=ssh_ok, required=True, failure_class=ssh_failure),
     }
+
+    # Agent events observability v2: degraded pipeline is visible as a
+    # component and participates in the pinned aggregate rule (ANY degraded
+    # -> status "degraded"), matching the architect's health sketch; job
+    # execution is unaffected either way. Guard against MagicMock state
+    # surfaces used by existing health tests: only a real ObservabilityState
+    # is interpreted.
+    emitter = getattr(_state, "agent_event_emitter", None)
+    obs_state = getattr(emitter, "observability_state", None)
+    if isinstance(obs_state, ObservabilityState) and obs_state.is_degraded:
+        components["observability"] = HealthComponentStatus(
+            status="degraded",
+            required=False,
+            failure_class="postgres_unavailable",
+            reason=(obs_state.degraded_reason or "unknown")[:200],
+        )
+    else:
+        components["observability"] = HealthComponentStatus(
+            status="ok",
+            required=False,
+        )
 
     degraded = any(component.status == "degraded" for component in components.values())
     status = "degraded" if degraded else "ok"

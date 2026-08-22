@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from app.agent_events import DualWriteAgentEventEmitter
 from app.audit import AuditEventLogger
 from app.batch_operations import BatchOperationsManager
 from app.bulk_operations_v2 import BulkOperationsManager
@@ -30,6 +31,7 @@ from app.webhook_manager import WebhookManager
 
 if TYPE_CHECKING:
     from app.access_control import AccessControlStore
+    from app.agent_event_store import AgentEventStore
     from app.audit_store import AuditLogStore
 
 manager: SSHSessionManager | None = None
@@ -53,6 +55,8 @@ redis_queue: RedisJobQueue | None = None
 circuit_breakers: CircuitBreakerRegistry | None = None
 dist_lock: DistributedLock | None = None
 session_store: SessionStore | None = None
+agent_event_emitter: DualWriteAgentEventEmitter | None = None
+agent_event_store: AgentEventStore | None = None  # set in lifespan; avoids import cycle
 host_key_store: HostKeyStore | None = None
 bulk_ops: BulkOperationsManager | None = None
 event_hook_store: EventHookStore | None = None

@@ -307,6 +307,7 @@ class HealthComponentStatus(BaseModel):
     status: str = "ok"
     required: bool = True
     failure_class: str | None = None
+    reason: str | None = None  # bounded human-readable detail (optional)
 
 
 class HealthResponse(BaseModel):
@@ -385,8 +386,7 @@ class AgentTokenRequest(BaseModel):
     )
     labels: list[str] = Field(
         default_factory=list,
-        description="Tenant labels (resource group) inherited by sessions "
-        "created with this token",
+        description="Tenant labels (resource group) inherited by sessions created with this token",
     )
 
 
@@ -760,7 +760,9 @@ class GitPushRequest(BaseModel):
 
     context_id: str = Field(..., min_length=1)
     remote: str = Field(default="origin", min_length=1)
-    branch: str | None = Field(default=None, description="Branch to push; defaults to current branch")
+    branch: str | None = Field(
+        default=None, description="Branch to push; defaults to current branch"
+    )
 
 
 class GitActionResponse(BaseModel):
