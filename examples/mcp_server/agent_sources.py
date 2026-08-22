@@ -93,6 +93,62 @@ def _bundle_head(path: Path) -> str | None:
     return heads[0] if len(heads) == 1 else None
 
 
+def _assert_bundle_usable(
+    path: Path,
+    expected: str,
+    *,
+    full_proof: bool,
+) -> None:
+    """Fail closed unless *path* is a usable bundle for *expected*.
+
+    ``git bundle list-heads`` alone cannot detect bundles that clone fails
+    on (prerequisite-restricted artifacts, truncated histories).  Every
+    accepted artifact therefore passes ``git bundle verify`` inside a fresh
+    scratch repository; ``full_proof`` additionally performs a real scratch
+    clone and pins its HEAD to *expected* — the acceptance evidence for
+    publication.
+    """
+    with tempfile.TemporaryDirectory(prefix="mcp-agent-bundle-verify-") as scratch:
+        bare = Path(scratch) / "verify.git"
+        _run_git(["init", "--quiet", "--bare", str(bare)])
+        _run_git(["-C", str(bare), "bundle", "verify", str(path)])
+        if not full_proof:
+            return
+        clone_dir = Path(scratch) / "clone"
+        _run_git(["clone", "--quiet", "--no-hardlinks", str(path), str(clone_dir)])
+        _run_git(["-C", str(clone_dir), "checkout", "--quiet", "--detach", expected])
+        resolved = _run_git(["-C", str(clone_dir), "rev-parse", "HEAD"]).strip().lower()
+    if resolved != expected:
+        raise ManagedSourceBundleError(
+            f"managed bundle clone resolved to {resolved}, expected {expected}"
+        )
+
+
+def _assert_source_not_partial(project_root: Path) -> None:
+    """Refuse publication from shallow sources (incomplete history).
+
+    Traversal from such sources either fails deep inside bundle creation
+    with an opaque diagnostic.  Partial/promisor clones are not detected
+    here; the post-create scratch-clone proof is the completeness gate for
+    any artifact that passes this check.  Fail closed here with actionable
+    guidance instead.
+    """
+    is_shallow = (
+        _run_git(
+            ["rev-parse", "--is-shallow-repository"],
+            cwd=project_root,
+            safe_directory=project_root,
+        )
+        .strip()
+        .lower()
+    )
+    if is_shallow == "true":
+        raise ManagedSourceBundleError(
+            f"source repository {project_root} is shallow; run "
+            "'git fetch --unshallow' before publishing managed source bundles"
+        )
+
+
 def _is_missing_object_error(exc: ManagedSourceBundleError) -> bool:
     """Return True if *exc* was caused by a missing Git object (``fatal: bad object``).
 
@@ -285,6 +341,8 @@ def _materialize_from_remote(
         if _bundle_head(temp_bundle) != expected:
             raise ManagedSourceBundleError("remote bundle verification failed")
 
+        _assert_bundle_usable(temp_bundle, expected, full_proof=True)
+
         os.replace(temp_bundle, bundle_path)
         if _bundle_head(bundle_path) != expected:
             bundle_path.unlink(missing_ok=True)
@@ -323,10 +381,20 @@ def ensure_managed_source_bundle(project: str, base_ref: str | None) -> str | No
     bundle_path = Path(bundle_raw)
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if bundle_path.is_file() and _bundle_head(bundle_path) == expected:
-        return str(bundle_path)
+    if bundle_path.is_file():
+        try:
+            head = _bundle_head(bundle_path)
+            if head == expected:
+                _assert_bundle_usable(bundle_path, expected, full_proof=False)
+                return str(bundle_path)
+        except ManagedSourceBundleError:
+            # A pre-existing artifact that fails verification is not
+            # consumable: fall through and attempt a clean rebuild instead
+            # of handing it to workers.
+            pass
 
     project_root = Path(get_registry().project_info(project)["root"])
+    _assert_source_not_partial(project_root)
 
     object_missing = False
     try:
@@ -391,6 +459,8 @@ def ensure_managed_source_bundle(project: str, base_ref: str | None) -> str | No
 
         if _bundle_head(temp_bundle) != expected:
             raise ManagedSourceBundleError("managed source bundle verification failed")
+
+        _assert_bundle_usable(temp_bundle, expected, full_proof=True)
 
         os.replace(temp_bundle, bundle_path)
         if _bundle_head(bundle_path) != expected:

@@ -235,13 +235,20 @@ def test_source_repo_access_is_scoped_to_registered_root(tmp_path, monkeypatch):
     source_calls = [
         (args, cwd, safe_directory)
         for args, cwd, safe_directory in calls
-        if "cat-file" in args or "--git-path" in args
+        if "cat-file" in args
+        or "--git-path" in args
+        or "--is-shallow-repository" in args
     ]
-    assert len(source_calls) == 2
+    assert len(source_calls) == 3
     assert all(safe_directory == repo for _, _, safe_directory in source_calls)
     assert all(cwd == repo for _, cwd, _ in source_calls)
-    assert not any("clone" in args for args, _, _ in calls)
-    assert not any("fetch" in args for args, _, _ in calls)
+    # Publication must never clone or fetch FROM the registered checkout;
+    # scratch-dir bundle-verification clones are unrelated to it and allowed.
+    for banned in ("clone", "fetch"):
+        assert not any(
+            banned in args and any(str(repo) in str(arg) for arg in args)
+            for args, _, _ in calls
+        )
 
     update_ref_calls = [args for args, _, _ in calls if "update-ref" in args]
     assert len(update_ref_calls) == 1
@@ -250,7 +257,9 @@ def test_source_repo_access_is_scoped_to_registered_root(tmp_path, monkeypatch):
     non_source_calls = [
         safe_directory
         for args, _cwd, safe_directory in calls
-        if "cat-file" not in args and "--git-path" not in args
+        if "cat-file" not in args
+        and "--git-path" not in args
+        and "--is-shallow-repository" not in args
     ]
     assert all(safe_directory is None for safe_directory in non_source_calls)
 

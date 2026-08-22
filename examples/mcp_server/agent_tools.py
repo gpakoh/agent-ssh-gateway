@@ -1050,6 +1050,10 @@ def _build_opencode_script(
                 'MANAGED_SOURCE_HEAD=$(printf "%s\\n" "$MANAGED_SOURCE_HEADS" | awk \'NF { print $1; exit }\')',
                 'MANAGED_SOURCE_EXTRA_HEAD=$(printf "%s\\n" "$MANAGED_SOURCE_HEADS" | awk \'NF { count++; if (count == 2) { print $1; exit } }\')',
                 'if [ -z "$MANAGED_SOURCE_HEAD" ] || [ -n "$MANAGED_SOURCE_EXTRA_HEAD" ] || [ "$MANAGED_SOURCE_HEAD" != "$TASK_BASE_COMMIT" ]; then echo "Immutable managed source bundle does not match base_ref" >> "$td/agent-status.md"; exit 73; fi',
+                'MANAGED_VERIFY_DIR=$(mktemp -d)',
+                'git init -q --bare "$MANAGED_VERIFY_DIR/v.git" || { echo "managed bundle verification scratch failed" >> "$td/agent-status.md"; rm -rf "$MANAGED_VERIFY_DIR"; exit 73; }',
+                'if ! git -C "$MANAGED_VERIFY_DIR/v.git" bundle verify "$MANAGED_SOURCE_BUNDLE" >/dev/null 2>>"$td/agent-status.md"; then echo "Immutable managed source bundle failed integrity verification" >> "$td/agent-status.md"; rm -rf "$MANAGED_VERIFY_DIR"; exit 73; fi',
+                'rm -rf "$MANAGED_VERIFY_DIR"',
             ]
             create_workspace_lines = [
                 '  git clone --no-hardlinks --no-checkout "$MANAGED_SOURCE_BUNDLE" "$wt" 2>>"$td/agent-status.md" || { echo "managed clone failed: $wt" >> "$td/agent-status.md"; exit 1; }',
