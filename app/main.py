@@ -284,6 +284,7 @@ async def lifespan(app: FastAPI):
 
     state.job_manager = JobManager(ssh_manager=state.manager)
     await state.job_manager.start_cleanup_task()
+    await state.job_manager.start_supervisor_task()
 
     state.file_editor = FileEditor(ssh_manager=state.manager)
 
@@ -509,6 +510,7 @@ async def lifespan(app: FastAPI):
     # Cleanup
     await state.context_manager.stop_cleanup_task()
     await state.job_manager.stop_cleanup_task()
+    await state.job_manager.stop_supervisor_task()
     await state.manager.stop_cleanup_task()
     if state.access_control_store:
         await state.access_control_store.stop_cleanup_task()

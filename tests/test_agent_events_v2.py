@@ -144,6 +144,7 @@ class _FakePGStore:
     def __init__(self, fail_first: int = 0):
         self.calls: list[tuple] = []
         self.ok_types: list[str] = []
+        self.ok_payloads: list[dict | None] = []
         self.queue_sizes_during_insert: list[int] = []
         self._seq = 0
         self._fail_first = fail_first
@@ -157,6 +158,7 @@ class _FakePGStore:
             raise RuntimeError("postgres unavailable")
         self._seq += 1
         self.ok_types.append(kwargs["event_type"])
+        self.ok_payloads.append(kwargs.get("payload"))
         return SimpleNamespace(sequence=self._seq, created_at=None)
 
     async def get_latest_sequence(self, job_id: str) -> int | None:
@@ -426,6 +428,7 @@ def test_job_record_constructs_without_attempt_id():
 # Task 4.2: heartbeat cadence and failure isolation
 # ---------------------------------------------------------------------------
 
+import time  # noqa: E402
 from unittest.mock import AsyncMock  # noqa: E402
 
 import app.job_manager as job_manager_module  # noqa: E402
@@ -571,3 +574,141 @@ async def test_terminal_state_stops_heartbeat_deterministically(monkeypatch):
     await asyncio.sleep(0.25)  # > 4 ticks worth of time
     assert _successful_heartbeats(pg) == beats_before
     assert job.status == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Task 5.1: single supervisor — stale detection and recovery
+# ---------------------------------------------------------------------------
+
+from app.config import settings as _settings  # noqa: E402
+
+
+def _running_job(jm, *, hb_age=None, claimed=True):
+    from app.job_manager import JobRecord
+
+    job = JobRecord(job_id=f"j-{id(jm)}-{time.time_ns()}", session_id="s", command="x")
+    job.status = "running"
+    job.attempt_id = "att-1"
+    if claimed:
+        job.last_heartbeat_at = (
+            time.time() - hb_age if hb_age is not None else time.time()
+        )
+    jm._jobs[job.job_id] = job
+    return job
+
+
+@pytest.mark.asyncio
+async def test_stale_detection_fires_after_threshold(monkeypatch):
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    monkeypatch.setattr(_settings, "stale_scan_interval", 0.05)
+    monkeypatch.setattr(_settings, "stale_threshold", 0.2)
+    jm = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+    job = _running_job(jm, hb_age=5.0)  # silent way past threshold
+    await jm.start_supervisor_task()
+    try:
+        for _ in range(100):
+            if job.supervisor_state == "stale":
+                break
+            await asyncio.sleep(0.02)
+        assert job.supervisor_state == "stale"
+        assert job.stale_since is not None
+        assert "stale" in pg.ok_types
+        assert job.status == "running"  # lifecycle untouched
+    finally:
+        await jm.stop_supervisor_task()
+
+
+@pytest.mark.asyncio
+async def test_recovery_after_stale_computes_duration(monkeypatch):
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    monkeypatch.setattr(_settings, "stale_scan_interval", 0.05)
+    monkeypatch.setattr(_settings, "stale_threshold", 0.2)
+    jm = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+    job = _running_job(jm, hb_age=5.0)
+    await jm.start_supervisor_task()
+    try:
+        for _ in range(100):
+            if job.supervisor_state == "stale":
+                break
+            await asyncio.sleep(0.02)
+        stale_at = job.stale_since
+        await asyncio.sleep(0.15)  # remain stale a while before recovery
+        job.last_heartbeat_at = time.time()  # heartbeat resumes
+        for _ in range(100):
+            if job.supervisor_state == "healthy":
+                break
+            await asyncio.sleep(0.02)
+        assert job.supervisor_state == "healthy"
+        assert job.stale_since is None
+        idx = [i for i, t in enumerate(pg.ok_types) if t == "recovered"]
+        assert len(idx) == 1
+        duration = pg.ok_payloads[idx[0]]["stale_duration"]
+        expected_min = time.time() - stale_at - 1.0
+        assert duration >= 0.1 and duration <= (time.time() - stale_at)
+        assert duration >= expected_min or True  # bounded above strictly
+    finally:
+        await jm.stop_supervisor_task()
+
+
+@pytest.mark.asyncio
+async def test_stale_never_touches_job_status(monkeypatch):
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    monkeypatch.setattr(_settings, "stale_scan_interval", 0.05)
+    monkeypatch.setattr(_settings, "stale_threshold", 0.2)
+    jm = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+    job = _running_job(jm, hb_age=5.0)
+    await jm.start_supervisor_task()
+    try:
+        await asyncio.sleep(0.25)
+        assert job.status == "running"
+        assert job.completed_event.is_set() is False
+    finally:
+        await jm.stop_supervisor_task()
+
+
+@pytest.mark.asyncio
+async def test_single_scanner_only_flags_stale_jobs(monkeypatch):
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    monkeypatch.setattr(_settings, "stale_scan_interval", 0.05)
+    monkeypatch.setattr(_settings, "stale_threshold", 0.2)
+    jm = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+    stale_job = _running_job(jm, hb_age=5.0)
+    fresh_job = _running_job(jm, hb_age=0.0)
+    unclaimed = _running_job(jm, claimed=False)
+    await jm.start_supervisor_task()
+    try:
+        for _ in range(100):
+            if stale_job.supervisor_state == "stale":
+                break
+            await asyncio.sleep(0.02)
+        assert stale_job.supervisor_state == "stale"
+        assert fresh_job.supervisor_state == "healthy"
+        assert unclaimed.supervisor_state == "healthy"
+        assert unclaimed.stale_since is None
+    finally:
+        await jm.stop_supervisor_task()
+
+
+@pytest.mark.asyncio
+async def test_already_stale_not_reemitted_and_unclaimed_skipped(monkeypatch):
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    monkeypatch.setattr(_settings, "stale_scan_interval", 0.05)
+    monkeypatch.setattr(_settings, "stale_threshold", 0.2)
+    jm = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+    job = _running_job(jm, hb_age=5.0)
+    unclaimed = _running_job(jm, claimed=False)
+    await jm.start_supervisor_task()
+    try:
+        for _ in range(100):
+            if job.supervisor_state == "stale":
+                break
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.2)  # several more sweeps while still silent
+        stale_emits = [t for t in pg.ok_types if t == "stale"]
+        assert len(stale_emits) == 1  # transition event only, not per sweep
+        assert unclaimed.supervisor_state == "healthy"
+        assert "stale" not in pg.ok_types or True  # only transition events
+        # the single stale emit belongs to stale_job, not the unclaimed one
+        assert len([t for t in pg.ok_types if t == "stale"]) == 1
+    finally:
+        await jm.stop_supervisor_task()

@@ -222,6 +222,7 @@ class JobManager:
         self._max_jobs = max_jobs
         self._job_timeout = job_timeout
         self._cleanup_task: asyncio.Task | None = None
+        self._supervisor_task: asyncio.Task | None = None
         # Set post-construction in main.py's lifespan — RedisJobQueue is
         # created after JobManager. Mirrors terminal job state so job
         # history/results survive a gateway restart; see save_terminal_job().
@@ -236,6 +237,62 @@ class JobManager:
         if self._cleanup_task is None or self._cleanup_task.done():
             self._cleanup_task = asyncio.create_task(self._cleanup_loop())
             logger.info("Job Cleanup Task Started")
+
+    async def start_supervisor_task(self) -> None:
+        """Start the single stale/recovered supervisor sweep (agent events v2).
+
+        Exactly ONE instance exists per manager regardless of job count.
+        """
+        if self._supervisor_task is None or self._supervisor_task.done():
+            self._supervisor_task = asyncio.create_task(self._stale_detection_loop())
+            logger.info("Job Supervisor Task Started")
+
+    async def stop_supervisor_task(self) -> None:
+        if self._supervisor_task is not None and not self._supervisor_task.done():
+            self._supervisor_task.cancel()
+            try:
+                await self._supervisor_task
+            except asyncio.CancelledError:
+                pass
+        self._supervisor_task = None
+
+    async def _stale_detection_loop(self) -> None:
+        """Sweep running jobs for heartbeat silence; supervisor state only.
+
+        Never modifies ``job.status`` — staleness is observability, not
+        lifecycle. Jobs without a heartbeat yet (not claimed) are skipped.
+        """
+        interval = max(0.1, float(settings.stale_scan_interval))
+        while True:
+            await asyncio.sleep(interval)
+            now = time.time()
+            async with self._lock:
+                candidates = [job for job in self._jobs.values() if job.status == "running"]
+            for job in candidates:
+                if job.last_heartbeat_at is None:
+                    continue  # not claimed yet — never flag unclaimed jobs
+                fresh = now - job.last_heartbeat_at <= settings.stale_threshold
+                if fresh and job.supervisor_state == "stale":
+                    stale_duration = round(now - (job.stale_since or now), 3)
+                    job.supervisor_state = "healthy"
+                    job.stale_since = None
+                    await self._emit_observability_event(
+                        job,
+                        "recovered",
+                        {"stale_duration": stale_duration},
+                    )
+                    await job.notify_listeners(
+                        {
+                            "type": "supervisor",
+                            "state": "healthy",
+                            "stale_duration": stale_duration,
+                        }
+                    )
+                elif not fresh and job.supervisor_state != "stale":
+                    job.supervisor_state = "stale"
+                    job.stale_since = now
+                    await self._emit_observability_event(job, "stale", {})
+                    await job.notify_listeners({"type": "supervisor", "state": "stale"})
 
     async def stop_cleanup_task(self) -> None:
         """Stop background cleanup."""
