@@ -143,16 +143,20 @@ class _FakePGStore:
 
     def __init__(self, fail_first: int = 0):
         self.calls: list[tuple] = []
+        self.ok_types: list[str] = []
         self.queue_sizes_during_insert: list[int] = []
         self._seq = 0
         self._fail_first = fail_first
 
     async def insert(self, **kwargs):
         self.calls.append(("insert", kwargs["event_type"]))
+        if getattr(self, "fail_forever", False):
+            raise RuntimeError("postgres unavailable")
         if self._fail_first > 0:
             self._fail_first -= 1
             raise RuntimeError("postgres unavailable")
         self._seq += 1
+        self.ok_types.append(kwargs["event_type"])
         return SimpleNamespace(sequence=self._seq, created_at=None)
 
     async def get_latest_sequence(self, job_id: str) -> int | None:
@@ -416,3 +420,154 @@ def test_job_record_constructs_without_attempt_id():
     assert job.stale_since is None
     assert job.last_heartbeat_at is None
     assert job.heartbeat_seq == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 4.2: heartbeat cadence and failure isolation
+# ---------------------------------------------------------------------------
+
+from unittest.mock import AsyncMock  # noqa: E402
+
+import app.job_manager as job_manager_module  # noqa: E402
+from app.job_manager import JobManager  # noqa: E402
+from tests.test_durable_job_recovery import _make_queue  # noqa: E402
+
+
+def _v2_manager(queue, execute_stream):
+    ssh = AsyncMock()
+    ssh.execute_stream = execute_stream
+    return JobManager(ssh_manager=ssh, max_jobs=100, redis_queue=queue)
+
+
+def _wire_state_emitter(monkeypatch, fail_forever=False):
+    emitter, pg = _make_emitter()
+    if fail_forever:
+        pg.fail_forever = True
+    monkeypatch.setattr(app_state, "agent_event_emitter", emitter)
+    return emitter, pg
+
+
+def _successful_heartbeats(pg):
+    return sum(1 for t in pg.ok_types if t == "heartbeat")  # committed only
+
+
+@pytest.mark.asyncio
+async def test_nondurable_job_emits_heartbeat_at_configured_interval(monkeypatch):
+    monkeypatch.setattr(settings, "heartbeat_interval", 0.1)
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    started = asyncio.Event()
+
+    async def slow_stream(*_args, **_kwargs):
+        started.set()
+        await asyncio.sleep(0.5)
+        yield "exit", "0"
+
+    ssh = AsyncMock()
+    ssh.execute_stream = slow_stream
+    jm = JobManager(ssh_manager=ssh, max_jobs=10)
+    job_id = await jm.create_job("s1", "slow", owner_id="o1")
+    job = await jm.get_job(job_id)
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(job.completed_event.wait(), timeout=5)
+
+    assert _successful_heartbeats(pg) >= 3  # ~5 ticks in 0.5s @ 0.1
+    assert job.heartbeat_seq == _successful_heartbeats(pg)
+    assert job.last_heartbeat_at is not None
+
+
+@pytest.mark.asyncio
+async def test_durable_renewal_keeps_lease_ttl_third_and_piggybacks(monkeypatch):
+    monkeypatch.setattr(job_manager_module, "DURABLE_LEASE_TTL_SECONDS", 1)
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    q = _make_queue()
+    renewals: list[bool] = []
+    original = type(q).heartbeat_durable_execution
+
+    async def spying_renewal(self, *args, **kwargs):
+        ok = await original(self, *args, **kwargs)
+        renewals.append(ok)
+        return ok
+
+    monkeypatch.setattr(type(q), "heartbeat_durable_execution", spying_renewal)
+    started = asyncio.Event()
+
+    async def slow_stream(*_args, **_kwargs):
+        started.set()
+        await asyncio.sleep(0.9)
+        yield "exit", "0"
+
+    jm = _v2_manager(q, slow_stream)
+    job_id = await jm.create_job(
+        "sid", "durable-slow", owner_id="owner", submission_key="key:v2-hb-piggy"
+    )
+    job = await jm.get_job(job_id)
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(job.completed_event.wait(), timeout=5)
+
+    assert len(renewals) >= 2  # ~0.33s cadence over a 0.9s window
+    assert all(renewals)
+    # every successful renewal carried exactly one observability heartbeat
+    assert _successful_heartbeats(pg) == len(renewals)
+    assert job.supervisor_state == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_pg_failure_does_not_skip_renewal_or_stop_timestamps(monkeypatch):
+    monkeypatch.setattr(job_manager_module, "DURABLE_LEASE_TTL_SECONDS", 1)
+    emitter, pg = _wire_state_emitter(monkeypatch, fail_forever=True)
+    q = _make_queue()
+    renewals: list[bool] = []
+    original = type(q).heartbeat_durable_execution
+
+    async def spying_renewal(self, *args, **kwargs):
+        ok = await original(self, *args, **kwargs)
+        renewals.append(ok)
+        return ok
+
+    monkeypatch.setattr(type(q), "heartbeat_durable_execution", spying_renewal)
+    started = asyncio.Event()
+
+    async def slow_stream(*_args, **_kwargs):
+        started.set()
+        await asyncio.sleep(0.9)
+        yield "exit", "0"
+
+    jm = _v2_manager(q, slow_stream)
+    job_id = await jm.create_job(
+        "sid", "durable-pgdown", owner_id="owner", submission_key="key:v2-hb-pgfail"
+    )
+    job = await jm.get_job(job_id)
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(job.completed_event.wait(), timeout=5)
+
+    assert len(renewals) >= 2 and all(renewals)  # renewal NEVER skipped
+    assert _successful_heartbeats(pg) == 0  # every PG write failed
+    assert emitter.observability_state.is_degraded
+    assert job.last_heartbeat_at is not None  # timestamps still advanced
+    assert job.status == "completed"  # execution outcome unaffected
+
+
+@pytest.mark.asyncio
+async def test_terminal_state_stops_heartbeat_deterministically(monkeypatch):
+    monkeypatch.setattr(settings, "heartbeat_interval", 0.05)
+    emitter, pg = _wire_state_emitter(monkeypatch)
+
+    async def instant_stream(*_args, **_kwargs):
+        yield "exit", "0"
+
+    ssh = AsyncMock()
+    ssh.execute_stream = instant_stream
+    jm = JobManager(ssh_manager=ssh, max_jobs=10)
+    job_id = await jm.create_job("s1", "fast", owner_id="o1")
+    job = await jm.get_job(job_id)
+    await asyncio.wait_for(job.completed_event.wait(), timeout=5)
+    for _ in range(200):  # reap: manager task registry drains via callbacks
+        if not jm._job_tasks:
+            break
+        await asyncio.sleep(0.005)
+    assert jm._job_tasks == {}
+
+    beats_before = _successful_heartbeats(pg)
+    await asyncio.sleep(0.25)  # > 4 ticks worth of time
+    assert _successful_heartbeats(pg) == beats_before
+    assert job.status == "completed"
