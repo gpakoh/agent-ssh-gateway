@@ -107,7 +107,9 @@ class EventHook(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
     )
 
     def to_dict(self) -> dict:
@@ -144,7 +146,9 @@ class WebhookDelivery(Base):
     leased_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
     )
 
 
@@ -181,9 +185,7 @@ class AuditLogEntry(Base):
     command = Column(Text, nullable=True)
     exit_code = Column(Integer, nullable=True)
     duration_ms = Column(Integer, nullable=True)
-    created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
 
     def to_dict(self) -> dict:
         return {
@@ -250,6 +252,11 @@ class SessionStore:
         self._database_url = database_url
         self._engine: AsyncEngine | None = None
         self._session_maker: async_sessionmaker[AsyncSession] | None = None
+
+    @property
+    def session_maker(self) -> async_sessionmaker[AsyncSession] | None:
+        """Expose the async session maker for sibling stores (agent events)."""
+        return self._session_maker
 
     async def connect(self):
         """Initialize database connection."""

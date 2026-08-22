@@ -99,9 +99,7 @@ def _deep_ssh_check_blocking(
             allow_agent=False,
             look_for_keys=False,
         )
-        _, stdout, _ = client.exec_command(
-            "true", timeout=HEALTH_SSH_OPERATION_TIMEOUT_SECONDS
-        )
+        _, stdout, _ = client.exec_command("true", timeout=HEALTH_SSH_OPERATION_TIMEOUT_SECONDS)
         return stdout.channel.recv_exit_status() == 0
     finally:
         client.close()
@@ -128,17 +126,13 @@ async def _deep_ssh_check(host: str, port: int) -> bool | None:
     user = settings.ssh_health_user
     if not user:
         return None
-    ok, _failure = await _probe_deep_ssh(
-        host, port, user, settings.ssh_health_password
-    )
+    ok, _failure = await _probe_deep_ssh(host, port, user, settings.ssh_health_password)
     return ok
 
 
 def _tcp_ssh_check_blocking(host: str, port: int) -> None:
     """Blocking TCP connect used by the shallow SSH health probe."""
-    with socket.create_connection(
-        (host, port), timeout=HEALTH_SSH_OPERATION_TIMEOUT_SECONDS
-    ):
+    with socket.create_connection((host, port), timeout=HEALTH_SSH_OPERATION_TIMEOUT_SECONDS):
         return None
 
 
@@ -146,9 +140,7 @@ async def _probe_ssh(host: str, port: int) -> tuple[bool, str | None]:
     """Probe SSH without blocking the FastAPI event loop."""
     user = settings.ssh_health_user
     if user:
-        return await _probe_deep_ssh(
-            host, port, user, settings.ssh_health_password
-        )
+        return await _probe_deep_ssh(host, port, user, settings.ssh_health_password)
     try:
         await asyncio.wait_for(
             asyncio.to_thread(_tcp_ssh_check_blocking, host, port),
@@ -281,13 +273,26 @@ async def health_check():
             required=postgres_required,
             failure_class=postgres_failure,
         ),
-        "auth": _component_status(
-            ok=auth_ok, required=auth_required, failure_class=auth_failure
-        ),
+        "auth": _component_status(ok=auth_ok, required=auth_required, failure_class=auth_failure),
         "ssh": _component_status(ok=ssh_ok, required=True, failure_class=ssh_failure),
     }
 
-    degraded = any(component.status == "degraded" for component in components.values())
+    # Agent events observability v2: degraded pipeline is visible but never
+    # flips gateway availability (gateway availability != observability
+    # availability), hence required=False.
+    emitter = getattr(_state, "agent_event_emitter", None)
+    obs_state = emitter.observability_state if emitter is not None else None
+    observability_ok = obs_state is None or not obs_state.is_degraded
+    components["observability"] = HealthComponentStatus(
+        status="ok" if observability_ok else "degraded",
+        required=False,
+        failure_class=None if observability_ok else "postgres_unavailable",
+        reason=(None if observability_ok else (obs_state.degraded_reason or "unknown")[:200]),
+    )
+
+    degraded = any(
+        component.status == "degraded" and component.required for component in components.values()
+    )
     status = "degraded" if degraded else "ok"
 
     return HealthResponse(

@@ -324,3 +324,85 @@ async def test_concurrent_emits_keep_unique_sequences():
     assert seqs == [1, 2, 3, 4, 5]
     assert emitter.get_committed_sequence(job_id) == 5
     assert not emitter.observability_state.is_degraded
+
+
+# ---------------------------------------------------------------------------
+# Task 2.2: lifespan wiring surface + /health degraded exposure
+# ---------------------------------------------------------------------------
+
+
+import app.routers.system as system_router  # noqa: E402
+import app.state as app_state  # noqa: E402
+from app.models import HealthComponentStatus  # noqa: E402
+from app.session_store import SessionStore  # noqa: E402
+
+
+def _wire_health(monkeypatch):
+    """Bypass real infra probes; keep component aggregation logic intact."""
+
+    async def fake_probes(*, redis_required, postgres_required, ssh_host, ssh_port):
+        return {
+            "redis": (True, None),
+            "postgres": (True, None),
+            "ssh": (True, None),
+        }
+
+    monkeypatch.setattr(system_router, "_run_health_probes", fake_probes)
+    monkeypatch.setattr(settings, "persistent_sessions_enabled", True)
+
+
+@pytest.mark.asyncio
+async def test_health_reports_observability_degraded_without_flipping_gateway(
+    monkeypatch,
+):
+    _wire_health(monkeypatch)
+    emitter, _pg = _make_emitter(fail_first=1)
+    with pytest.raises(ObservabilityDegradedError):
+        await emitter.pg_emit(**_event_kwargs())
+    monkeypatch.setattr(app_state, "agent_event_emitter", emitter)
+
+    resp = await system_router.health_check()
+
+    obs = resp.components["observability"]
+    assert isinstance(obs, HealthComponentStatus)
+    assert obs.status == "degraded"
+    assert obs.required is False
+    assert obs.failure_class == "postgres_unavailable"
+    assert "postgres unavailable" in (obs.reason or "")
+    # gateway availability != observability availability
+    assert resp.status == "ok"
+    assert resp.ready is True
+
+
+@pytest.mark.asyncio
+async def test_health_clears_after_recovery_emit(monkeypatch):
+    _wire_health(monkeypatch)
+    emitter, _pg = _make_emitter(fail_first=1)
+    with pytest.raises(ObservabilityDegradedError):
+        await emitter.pg_emit(**_event_kwargs())
+    await emitter.pg_emit(**_event_kwargs(event_type="JOB_COMPLETED"))
+    monkeypatch.setattr(app_state, "agent_event_emitter", emitter)
+
+    resp = await system_router.health_check()
+
+    obs = resp.components["observability"]
+    assert obs.status == "ok"
+    assert obs.failure_class is None and obs.reason is None
+
+
+@pytest.mark.asyncio
+async def test_health_ok_when_observability_not_wired(monkeypatch):
+    _wire_health(monkeypatch)
+    monkeypatch.setattr(app_state, "agent_event_emitter", None)
+
+    resp = await system_router.health_check()
+
+    obs = resp.components["observability"]
+    assert obs.status == "ok"
+    assert obs.required is False
+
+
+def test_lifespan_wiring_uses_session_store_engine():
+    """SessionStore exposes its session maker for the events store."""
+    store = SessionStore("postgresql+asyncpg://u:p@localhost:5432/db")
+    assert store.session_maker is None  # not connected yet — wiring must guard

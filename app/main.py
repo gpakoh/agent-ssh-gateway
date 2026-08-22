@@ -15,6 +15,7 @@ from slowapi.errors import RateLimitExceeded
 
 import app.build_info as build_info
 import app.state as state
+from app.agent_events import AgentEventStore, DualWriteAgentEventEmitter, agent_events
 from app.agent_token_store import AgentTokenStore
 from app.auth_middleware import (
     PUBLIC_AUTH_PATHS,
@@ -424,6 +425,22 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Durable job recovery skipped: %s", exc)
 
+    # Agent events observability v2: dual-write emitter (PG-first + live fan-out).
+    # Reuses the persistent-session engine; observability-only, so a failure to
+    # wire it must never block startup. Degraded state is exposed via /health.
+    state.agent_event_emitter = None
+    if settings.persistent_sessions_enabled and state.session_store is not None:
+        session_maker = state.session_store.session_maker
+        if session_maker is not None:
+            try:
+                pg_event_store = AgentEventStore(session_maker)
+                state.agent_event_emitter = DualWriteAgentEventEmitter(
+                    memory_emitter=agent_events, pg_store=pg_event_store
+                )
+                logger.info("Agent events dual-write emitter wired")
+            except Exception as exc:
+                logger.warning("Agent events emitter not available: %s", exc)
+
     # Initialize Event Hook Components
     if settings.event_hooks_enabled:
         try:
@@ -541,6 +558,7 @@ async def lifespan(app: FastAPI):
     if ds:
         await ds.close()
         logger.info("Event Hook Delivery Service Shut Down")
+    state.agent_event_emitter = None
     if state.session_store:
         await state.session_store.disconnect()
     if state.host_key_store:

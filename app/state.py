@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from app.agent_events import DualWriteAgentEventEmitter
 from app.audit import AuditEventLogger
 from app.batch_operations import BatchOperationsManager
 from app.bulk_operations_v2 import BulkOperationsManager
@@ -53,6 +54,7 @@ redis_queue: RedisJobQueue | None = None
 circuit_breakers: CircuitBreakerRegistry | None = None
 dist_lock: DistributedLock | None = None
 session_store: SessionStore | None = None
+agent_event_emitter: DualWriteAgentEventEmitter | None = None
 host_key_store: HostKeyStore | None = None
 bulk_ops: BulkOperationsManager | None = None
 event_hook_store: EventHookStore | None = None
