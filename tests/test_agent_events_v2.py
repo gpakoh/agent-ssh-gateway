@@ -405,3 +405,14 @@ def test_lifespan_wiring_uses_session_store_engine():
     """SessionStore exposes its session maker for the events store."""
     store = SessionStore("postgresql+asyncpg://u:p@localhost:5432/db")
     assert store.session_maker is None  # not connected yet — wiring must guard
+
+
+def test_job_record_constructs_without_attempt_id():
+    from app.job_manager import JobRecord
+
+    job = JobRecord(job_id="j1", session_id="s1", command="true")
+    assert job.attempt_id is None
+    assert job.supervisor_state == "healthy"
+    assert job.stale_since is None
+    assert job.last_heartbeat_at is None
+    assert job.heartbeat_seq == 0

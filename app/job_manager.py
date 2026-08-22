@@ -103,6 +103,16 @@ class JobRecord:
     # instead of the legacy in-process path.
     is_durable: bool = False
 
+    # Supervisor/observability identity (agent events v2). attempt_id is
+    # assigned per execution attempt at the running transition, never at
+    # construction, so recovered jobs get a fresh id and worker events stay
+    # distinguishable.
+    supervisor_state: str = "healthy"  # healthy|stale|recovered|needs_attention
+    stale_since: float | None = None
+    attempt_id: str | None = None
+    last_heartbeat_at: float | None = None
+    heartbeat_seq: int = 0
+
     # Monotonic timestamps (relative to process start; do NOT survive restart)
     queued_at_mono: float | None = None
     acquired_at_mono: float | None = None
@@ -502,9 +512,7 @@ class JobManager:
         # Recovery is dependency-aware: do not run before the target SID
         # has actually been restored. Missing sessions stay nonterminal in Redis.
         if await self._ssh_manager.get_session(session_id) is None:
-            logger.warning(
-                "Durable job %s waiting for restored session %s", job_id, session_id
-            )
+            logger.warning("Durable job %s waiting for restored session %s", job_id, session_id)
             return None
 
         async with self._lock:
@@ -566,9 +574,7 @@ class JobManager:
         # Check whether this is a durable keyed job that requires a Redis
         # execution claim before crossing into execute_stream.
         is_durable = (
-            job.is_durable
-            and self.redis_queue is not None
-            and self.redis_queue._redis is not None
+            job.is_durable and self.redis_queue is not None and self.redis_queue._redis is not None
         )
 
         worker_token: str | None = None
@@ -578,7 +584,9 @@ class JobManager:
         if is_durable:
             worker_token = uuid.uuid4().hex
             claimed = await self.redis_queue.claim_durable_execution(
-                job_id, worker_token=worker_token, lease_ttl=lease_ttl,
+                job_id,
+                worker_token=worker_token,
+                lease_ttl=lease_ttl,
             )
             if not claimed:
                 # Another worker may own this job. The losing coordinator
@@ -602,9 +610,7 @@ class JobManager:
                 )
                 job.progress["durable_persisted"] = persisted
                 if not persisted:
-                    logger.warning(
-                        "Durable terminal state for job %s was not persisted", job_id
-                    )
+                    logger.warning("Durable terminal state for job %s was not persisted", job_id)
                 return
 
             async def _heartbeat_loop() -> None:
@@ -614,7 +620,9 @@ class JobManager:
                 while True:
                     await asyncio.sleep(interval)
                     ok = await self.redis_queue.heartbeat_durable_execution(
-                        job_id, worker_token=worker_token, lease_ttl=lease_ttl,
+                        job_id,
+                        worker_token=worker_token,
+                        lease_ttl=lease_ttl,
                     )
                     if not ok:
                         # Partition or ownership loss makes the remote outcome
@@ -639,11 +647,13 @@ class JobManager:
             job.status = "running"
             job.started_at = time.time()
             job.acquired_at_mono = time.monotonic()
+            job.attempt_id = uuid.uuid4().hex
+            job.last_heartbeat_at = time.time()
+            job.supervisor_state = "healthy"
+            job.heartbeat_seq = 0
 
             _started_command = (
-                redact_secrets(job.command)
-                if should_redact_command_output(None)
-                else job.command
+                redact_secrets(job.command) if should_redact_command_output(None) else job.command
             )
             await job.notify_listeners(
                 {
@@ -670,12 +680,8 @@ class JobManager:
                 job.completed_at = time.time()
                 job.completed_at_mono = time.monotonic()
                 job.completed_event.set()
-                logger.warning(
-                    "Job %s denied by policy: %s", job.job_id, decision.reason
-                )
-                await job.notify_listeners(
-                    {"type": "error", "error": job.error_message}
-                )
+                logger.warning("Job %s denied by policy: %s", job.job_id, decision.reason)
+                await job.notify_listeners({"type": "error", "error": job.error_message})
                 await job.notify_listeners(
                     {
                         "type": "status",
@@ -703,24 +709,18 @@ class JobManager:
                             job.stdout += msg_data[:remaining]
                             if remaining < len(msg_data) and "[truncated]" not in job.stdout:
                                 job.stdout += "\n... [output truncated, exceeded 10MB]"
-                        await job.notify_listeners(
-                            {"type": "stdout", "data": msg_data}
-                        )
+                        await job.notify_listeners({"type": "stdout", "data": msg_data})
                     elif msg_type == "stderr":
                         remaining = MAX_STDOUT_SIZE - len(job.stderr)
                         if remaining > 0:
                             job.stderr += msg_data[:remaining]
                             if remaining < len(msg_data) and "[truncated]" not in job.stderr:
                                 job.stderr += "\n... [output truncated, exceeded 10MB]"
-                        await job.notify_listeners(
-                            {"type": "stderr", "data": msg_data}
-                        )
+                        await job.notify_listeners({"type": "stderr", "data": msg_data})
                     elif msg_type == "exit":
                         job.exit_code = int(msg_data)
                         job.command_finished_at_mono = time.monotonic()
-                        await job.notify_listeners(
-                            {"type": "exit", "exit_code": job.exit_code}
-                        )
+                        await job.notify_listeners({"type": "exit", "exit_code": job.exit_code})
 
                 if is_durable and job.cancel_event.is_set():
                     # A non-negative recv_exit_status() is factual remote
@@ -920,9 +920,7 @@ class JobManager:
         )
         return job.status
 
-    async def wait_for_completion(
-        self, job_id: str, identity_sub: str, timeout_s: float
-    ) -> dict:
+    async def wait_for_completion(self, job_id: str, identity_sub: str, timeout_s: float) -> dict:
         """Long-poll: wait for job completion or timeout.
 
         Returns job.to_dict() on completion, or
