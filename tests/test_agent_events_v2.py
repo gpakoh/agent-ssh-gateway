@@ -352,9 +352,8 @@ def _wire_health(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_health_reports_observability_degraded_without_flipping_gateway(
-    monkeypatch,
-):
+async def test_health_reports_observability_degraded(monkeypatch):
+    """Pinned aggregate rule: ANY degraded component flips gateway status."""
     _wire_health(monkeypatch)
     emitter, _pg = _make_emitter(fail_first=1)
     with pytest.raises(ObservabilityDegradedError):
@@ -369,9 +368,8 @@ async def test_health_reports_observability_degraded_without_flipping_gateway(
     assert obs.required is False
     assert obs.failure_class == "postgres_unavailable"
     assert "postgres unavailable" in (obs.reason or "")
-    # gateway availability != observability availability
-    assert resp.status == "ok"
-    assert resp.ready is True
+    assert resp.status == "degraded"
+    assert resp.ready is False
 
 
 @pytest.mark.asyncio
@@ -388,6 +386,7 @@ async def test_health_clears_after_recovery_emit(monkeypatch):
     obs = resp.components["observability"]
     assert obs.status == "ok"
     assert obs.failure_class is None and obs.reason is None
+    assert resp.status == "ok"
 
 
 @pytest.mark.asyncio

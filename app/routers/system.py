@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 
 from app import state as _state
+from app.agent_events import ObservabilityState
 from app.api_help import build_api_help
 from app.auth_middleware import (
     AuthIdentity,
@@ -277,22 +278,28 @@ async def health_check():
         "ssh": _component_status(ok=ssh_ok, required=True, failure_class=ssh_failure),
     }
 
-    # Agent events observability v2: degraded pipeline is visible but never
-    # flips gateway availability (gateway availability != observability
-    # availability), hence required=False.
+    # Agent events observability v2: degraded pipeline is visible as a
+    # component and participates in the pinned aggregate rule (ANY degraded
+    # -> status "degraded"), matching the architect's health sketch; job
+    # execution is unaffected either way. Guard against MagicMock state
+    # surfaces used by existing health tests: only a real ObservabilityState
+    # is interpreted.
     emitter = getattr(_state, "agent_event_emitter", None)
-    obs_state = emitter.observability_state if emitter is not None else None
-    observability_ok = obs_state is None or not obs_state.is_degraded
-    components["observability"] = HealthComponentStatus(
-        status="ok" if observability_ok else "degraded",
-        required=False,
-        failure_class=None if observability_ok else "postgres_unavailable",
-        reason=(None if observability_ok else (obs_state.degraded_reason or "unknown")[:200]),
-    )
+    obs_state = getattr(emitter, "observability_state", None)
+    if isinstance(obs_state, ObservabilityState) and obs_state.is_degraded:
+        components["observability"] = HealthComponentStatus(
+            status="degraded",
+            required=False,
+            failure_class="postgres_unavailable",
+            reason=(obs_state.degraded_reason or "unknown")[:200],
+        )
+    else:
+        components["observability"] = HealthComponentStatus(
+            status="ok",
+            required=False,
+        )
 
-    degraded = any(
-        component.status == "degraded" and component.required for component in components.values()
-    )
+    degraded = any(component.status == "degraded" for component in components.values())
     status = "degraded" if degraded else "ok"
 
     return HealthResponse(
