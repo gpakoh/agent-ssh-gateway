@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+
+from app.exceptions import ObservabilityDegradedError
+
+if TYPE_CHECKING:
+    from app.agent_event_store import AgentEventStore as PGAgentEventStore
+    from app.session_store import AgentEventRecord
+
+logger = logging.getLogger(__name__)
 
 MAX_EVENTS_PER_JOB = 100
 
@@ -91,6 +102,157 @@ class AgentEventEmitter:
 
 agent_events = AgentEventEmitter()
 
+dual_write_emitter: DualWriteAgentEventEmitter | None = None
+
+
+@dataclass
+class EventSubscription:
+    """Live subscription to committed events for one job."""
+
+    queue: asyncio.Queue
+    watermark: int  # last PG-committed sequence at subscription time
+
+
+@dataclass(slots=True)
+class ObservabilityState:
+    """Degraded-state machine for the observability pipeline.
+
+    HEALTHY --(persistence failure)--> DEGRADED
+    DEGRADED --(successful persistence)--> HEALTHY
+
+    Observability degradation NEVER affects job execution outcomes.
+    """
+
+    is_degraded: bool = False
+    degraded_since: datetime | None = None
+    degraded_reason: str | None = None
+
+    def mark_degraded(self, reason: str) -> None:
+        if not self.is_degraded:
+            self.is_degraded = True
+            self.degraded_since = datetime.now(UTC)
+        self.degraded_reason = reason
+
+    def mark_healthy(self) -> None:
+        self.is_degraded = False
+        self.degraded_since = None
+        self.degraded_reason = None
+
+
+class DualWriteAgentEventEmitter:
+    """PG-first emitter with live fan-out. Backward-compatible wrapper.
+
+    Persistence order is strict: PG insert commits first, only then are
+    live subscribers fanned out and the in-memory cache updated. A PG
+    failure flips the emitter's :class:`ObservabilityState` to degraded
+    and raises :class:`ObservabilityDegradedError`; callers must catch it
+    and continue job execution. The next successful persist clears the
+    degraded state automatically.
+    """
+
+    def __init__(
+        self,
+        memory_emitter: AgentEventEmitter,
+        pg_store: PGAgentEventStore | None = None,
+    ) -> None:
+        self._memory = memory_emitter
+        self._pg = pg_store
+        self._subscribers: dict[str, list[asyncio.Queue]] = defaultdict(list)
+        self._watermarks: dict[str, int] = {}  # last committed PG sequence per job
+        self._observability_state = ObservabilityState()
+
+    @property
+    def observability_state(self) -> ObservabilityState:
+        """Current degraded-state machine (for /health exposure)."""
+        return self._observability_state
+
+    @property
+    def store(self) -> AgentEventStore:
+        """Backward compat: expose in-memory store."""
+        return self._memory.store
+
+    def emit(
+        self,
+        job_id: str,
+        agent_id: str,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+    ) -> AgentEvent:
+        """Sync emit — writes to memory only. Backward compatible."""
+        return self._memory.emit(job_id, agent_id, event_type, payload)
+
+    async def pg_emit(
+        self,
+        job_id: str,
+        attempt_id: str,
+        owner_id: str,
+        agent_id: str,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+    ) -> AgentEventRecord | None:
+        """Persist-first: write to PG, then fan out to subscribers.
+
+        Returns committed record or None if PG is not configured.
+        Raises ObservabilityDegradedError if the PG write fails — after
+        marking the emitter degraded. Post-commit fan-out failures never
+        flip state or propagate: the event IS committed once PG returned.
+        """
+        if not self._pg:
+            return None
+        try:
+            record = await self._pg.insert(
+                job_id=job_id,
+                attempt_id=attempt_id,
+                owner_id=owner_id,
+                agent_id=agent_id,
+                event_type=event_type,
+                payload=payload,
+            )
+        except Exception as exc:
+            reason = f"postgres unavailable: {exc}"
+            self._observability_state.mark_degraded(reason)
+            logger.warning(
+                "PG emit failed for job %s — observability degraded", job_id, exc_info=exc
+            )
+            raise ObservabilityDegradedError(reason) from exc
+        # Committed from here on: recovery + fan-out must not re-raise.
+        self._observability_state.mark_healthy()
+        self._watermarks[job_id] = record.sequence
+        event_data = {
+            "sequence": record.sequence,
+            "job_id": job_id,
+            "attempt_id": attempt_id,
+            "agent_id": agent_id,
+            "type": event_type,
+            "payload": payload or {},
+            "created_at": record.created_at.isoformat() if record.created_at else None,
+        }
+        for queue in self._subscribers.get(job_id, []):
+            try:
+                queue.put_nowait(event_data)
+            except asyncio.QueueFull:
+                pass  # overflow handled by subscriber control state (Task 7)
+        self._memory.emit(job_id, agent_id, event_type, payload)
+        return record
+
+    async def subscribe(self, job_id: str) -> EventSubscription:
+        """Create a live subscription with committed watermark."""
+        watermark = self._watermarks.get(job_id)
+        if watermark is None and self._pg:
+            watermark = await self._pg.get_latest_sequence(job_id)
+        queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+        self._subscribers[job_id].append(queue)
+        return EventSubscription(queue=queue, watermark=watermark or 0)
+
+    def remove_subscriber(self, job_id: str, queue: asyncio.Queue) -> None:
+        """Remove a subscriber queue."""
+        subs = self._subscribers.get(job_id, [])
+        self._subscribers[job_id] = [q for q in subs if q is not queue]
+
+    def get_committed_sequence(self, job_id: str) -> int | None:
+        """Last sequence known committed to PG for this job."""
+        return self._watermarks.get(job_id)
+
 
 def record_agent_event(
     job_id: str,
@@ -111,6 +273,9 @@ __all__ = [
     "AgentEvent",
     "AgentEventEmitter",
     "AgentEventStore",
+    "DualWriteAgentEventEmitter",
+    "EventSubscription",
+    "ObservabilityState",
     "list_agent_events",
     "record_agent_event",
 ]
