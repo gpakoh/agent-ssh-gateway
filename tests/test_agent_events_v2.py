@@ -712,3 +712,102 @@ async def test_already_stale_not_reemitted_and_unclaimed_skipped(monkeypatch):
         assert len([t for t in pg.ok_types if t == "stale"]) == 1
     finally:
         await jm.stop_supervisor_task()
+
+
+# ---------------------------------------------------------------------------
+# Task 6.1: PG-based query API
+# ---------------------------------------------------------------------------
+
+from fastapi import HTTPException as _HTTPException  # noqa: E402
+
+from app.auth_middleware import AuthIdentity  # noqa: E402
+from app.routers.agents import agent_events_history  # noqa: E402
+
+
+class _FakeQueryStore:
+    """Minimal AgentEventStore stand-in for the query endpoint."""
+
+    def __init__(self, events=None):
+        self._events = list(events or [])
+
+    async def get_owner_id(self, job_id):
+        for e in self._events:
+            if e["job_id"] == job_id:
+                return e["owner_id"]
+        return None
+
+    async def get_events(self, job_id, **_kwargs):
+        rows = [e for e in self._events if e["job_id"] == job_id]
+        return [SimpleNamespace(**{**e, "event_type": e["type"]}) for e in rows]
+
+
+def _pg_events():
+    owner = "fp-owner"
+    # created_at deliberately DESCENDS while sequence ASCENDS — ordering must
+    # follow sequence, not creation time.
+    return [
+        {
+            "sequence": i,
+            "job_id": "job-q",
+            "attempt_id": "att-1",
+            "owner_id": owner,
+            "agent_id": "gateway",
+            "type": ["started", "heartbeat", "heartbeat", "completed"][i - 1],
+            "payload": {"n": i},
+            "created_at": None,
+        }
+        for i in range(1, 5)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_query_returns_pg_events_for_known_job(monkeypatch):
+    monkeypatch.setattr(app_state, "agent_event_store", _FakeQueryStore(_pg_events()))
+    master = AuthIdentity(
+        token_type="master", token="k", name="m", scopes=("jobs:read",)
+    )
+    resp = await agent_events_history("job-q", master, limit=500)
+    assert resp["count"] == 4
+    assert [e["type"] for e in resp["events"]] == [
+        "started", "heartbeat", "heartbeat", "completed",
+    ]
+    assert all("sequence" in e and "attempt_id" in e for e in resp["events"])
+
+
+@pytest.mark.asyncio
+async def test_query_unknown_job_returns_404(monkeypatch):
+    monkeypatch.setattr(app_state, "agent_event_store", _FakeQueryStore(_pg_events()))
+    master = AuthIdentity(
+        token_type="master", token="k", name="m", scopes=("jobs:read",)
+    )
+    with pytest.raises(_HTTPException) as exc_info:
+        await agent_events_history("job-nope", master)
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_query_non_owner_gets_403_from_persisted_owner(monkeypatch):
+    monkeypatch.setattr(app_state, "agent_event_store", _FakeQueryStore(_pg_events()))
+    other = AuthIdentity(
+        token_type="agent",
+        token="other-token",
+        name="other",
+        scopes=("jobs:read",),
+    )
+    assert other.fingerprint != "fp-owner"
+    with pytest.raises(_HTTPException) as exc_info:
+        await agent_events_history("job-q", other)
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_query_orders_by_sequence_not_created_at(monkeypatch):
+    events = _pg_events()
+    # sequence ascending, but give descending pseudo-created_at markers via payload
+    monkeypatch.setattr(app_state, "agent_event_store", _FakeQueryStore(events))
+    master = AuthIdentity(
+        token_type="master", token="k", name="m", scopes=("jobs:read",)
+    )
+    resp = await agent_events_history("job-q", master, limit=500)
+    seqs = [e["sequence"] for e in resp["events"]]
+    assert seqs == sorted(seqs) == [1, 2, 3, 4]

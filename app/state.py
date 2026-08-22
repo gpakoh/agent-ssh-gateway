@@ -55,6 +55,7 @@ circuit_breakers: CircuitBreakerRegistry | None = None
 dist_lock: DistributedLock | None = None
 session_store: SessionStore | None = None
 agent_event_emitter: DualWriteAgentEventEmitter | None = None
+agent_event_store = None  # AgentEventStore | None (set in lifespan; avoids import cycle)
 host_key_store: HostKeyStore | None = None
 bulk_ops: BulkOperationsManager | None = None
 event_hook_store: EventHookStore | None = None

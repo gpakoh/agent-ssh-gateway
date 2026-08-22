@@ -430,11 +430,13 @@ async def lifespan(app: FastAPI):
     # Reuses the persistent-session engine; observability-only, so a failure to
     # wire it must never block startup. Degraded state is exposed via /health.
     state.agent_event_emitter = None
+    state.agent_event_store = None
     if settings.persistent_sessions_enabled and state.session_store is not None:
         session_maker = state.session_store.session_maker
         if session_maker is not None:
             try:
                 pg_event_store = AgentEventStore(session_maker)
+                state.agent_event_store = pg_event_store
                 state.agent_event_emitter = DualWriteAgentEventEmitter(
                     memory_emitter=agent_events, pg_store=pg_event_store
                 )
