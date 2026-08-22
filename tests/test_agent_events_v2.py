@@ -1136,3 +1136,103 @@ async def test_integration_sse_reconnect_without_gaps_or_duplicates(monkeypatch)
     text = first.decode() if isinstance(first, bytes) else first
     assert "id: 1" in text
     assert [c["id"] for c in chunks] == [2, 3]
+
+
+# ---------------------------------------------------------------------------
+# Task 8.2: adversarial
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_adversarial_no_heartbeats_after_terminal(monkeypatch):
+    monkeypatch.setattr(settings, "heartbeat_interval", 0.05)
+    _store, pg = _wire_state_emitter(monkeypatch)
+
+    async def brief_stream(*_a, **_k):
+        await asyncio.sleep(0.15)
+        yield "exit", "0"
+
+    ssh = AsyncMock()
+    ssh.execute_stream = brief_stream
+    jm = JobManager(ssh_manager=ssh, max_jobs=10)
+    job_id = await jm.create_job("s1", "post-terminal", owner_id="o1")
+    job = await jm.get_job(job_id)
+    await asyncio.wait_for(job.completed_event.wait(), timeout=5)
+    await asyncio.sleep(0.15)  # several more cadence ticks elapse
+
+    assert job.status == "completed"
+    beats = pg.ok_types.count("heartbeat")
+    await asyncio.sleep(0.15)
+    assert pg.ok_types.count("heartbeat") == beats  # loop stopped, not 30s-cadenced
+
+
+@pytest.mark.asyncio
+async def test_adversarial_stale_not_fired_below_threshold(monkeypatch):
+    _store, pg = _wire_state_emitter(monkeypatch)
+    monkeypatch.setattr(_settings, "stale_scan_interval", 0.05)
+    monkeypatch.setattr(_settings, "stale_threshold", 0.25)
+    jm = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+    job = _running_job(jm, hb_age=0.0)  # brand-fresh heartbeat
+    await jm.start_supervisor_task()
+    try:
+        await asyncio.sleep(0.12)  # ~2 sweeps while still under threshold
+        early = (job.supervisor_state == "healthy") and ("stale" not in pg.ok_types)
+        job.last_heartbeat_at = time.time() - 5.0  # cross the threshold
+        for _ in range(100):
+            if job.supervisor_state == "stale":
+                break
+            await asyncio.sleep(0.02)
+    finally:
+        await jm.stop_supervisor_task()
+    assert early is True
+    assert job.supervisor_state == "stale"
+
+
+@pytest.mark.asyncio
+async def test_adversarial_concurrent_emit_during_replay(monkeypatch):
+    store, emitter, master = _sse_wire(monkeypatch, _seed(["started", "heartbeat", "completed"], 3))
+    orig_get = store.get_events
+
+    async def slow_get(*a, **kw):
+        await asyncio.sleep(0.1)  # hold replay open while producer fires
+        return await orig_get(*a, **kw)
+
+    store.get_events = slow_get  # type: ignore[method-assign]
+    resp = await agent_events_stream("job-q", master, last_event_id=None)
+    drain_task = asyncio.create_task(asyncio.wait_for(_drain(resp), timeout=5))
+    await asyncio.sleep(0.03)  # drain now parked inside replay sleep
+    for i in range(2):
+        await emitter.pg_emit(
+            job_id="job-q",
+            attempt_id="att-1",
+            owner_id="fp-owner",
+            agent_id="gateway",
+            event_type="heartbeat",
+            payload={"live": i},
+        )
+    chunks = await drain_task
+    ids = [c["id"] for c in chunks if c["event"] != "error"]
+    assert ids == sorted(set(ids))  # strictly increasing, zero duplicates
+    assert all(i <= 5 for i in ids)
+
+
+@pytest.mark.asyncio
+async def test_adversarial_overflow_keeps_store_intact(monkeypatch):
+    store, emitter, master = _sse_wire(monkeypatch, _seed(["started"], 1))
+    resp = await agent_events_stream("job-q", master, last_event_id="1")
+    sub = emitter._subscribers["job-q"][0]
+    sub.queue = asyncio.Queue(maxsize=1)
+    for i in range(5):  # flood live fan-out; every emit still commits first
+        await emitter.pg_emit(
+            job_id="job-q",
+            attempt_id="att-1",
+            owner_id="fp-owner",
+            agent_id="gateway",
+            event_type="heartbeat",
+            payload={"i": i},
+        )
+    chunks = await asyncio.wait_for(_drain(resp), timeout=10)
+    errors = [c for c in chunks if c["event"] == "error"]
+    assert len(errors) == 1 and "last_sequence" in errors[0]["data"]
+    committed = await store.get_events("job-q")
+    assert len(committed) == 6  # overflow signaled, nothing dropped server-side
