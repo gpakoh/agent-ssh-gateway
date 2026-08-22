@@ -985,3 +985,154 @@ async def test_sse_overflow_signaled_out_of_band(monkeypatch):
     errors = [c for c in chunks if c["event"] == "error"]
     assert len(errors) == 1
     assert "last_sequence" in errors[0]["data"]
+
+
+# ---------------------------------------------------------------------------
+# Task 8.1: full lifecycle integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_integration_durable_lifecycle_records_in_pg(monkeypatch):
+    monkeypatch.setattr(job_manager_module, "DURABLE_LEASE_TTL_SECONDS", 1)
+    monkeypatch.setattr(settings, "heartbeat_interval", 30)
+    _store, pg = _wire_state_emitter(monkeypatch)
+    q = _make_queue()
+    started = asyncio.Event()
+
+    async def slow_stream(*_a, **_k):
+        started.set()
+        await asyncio.sleep(0.75)
+        yield "exit", "0"
+
+    jm = _v2_manager(q, slow_stream)
+    job_id = await jm.create_job(
+        "sid", "durable-life", owner_id="owner", submission_key="key:int-durable"
+    )
+    job = await jm.get_job(job_id)
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(job.completed_event.wait(), timeout=5)
+
+    types = [c[1] for c in pg.calls if c[0] == "insert"]
+    assert types == ["started"] + ["heartbeat"] * (len(types) - 2) + ["completed"]
+    assert job.attempt_id is not None
+
+
+@pytest.mark.asyncio
+async def test_integration_nondurable_lifecycle_records_in_pg(monkeypatch):
+    monkeypatch.setattr(settings, "heartbeat_interval", 0.05)
+    _store, pg = _wire_state_emitter(monkeypatch)
+    started = asyncio.Event()
+
+    async def slow_stream(*_a, **_k):
+        started.set()
+        await asyncio.sleep(0.35)
+        yield "exit", "0"
+
+    ssh = AsyncMock()
+    ssh.execute_stream = slow_stream
+    jm = JobManager(ssh_manager=ssh, max_jobs=10)
+    job_id = await jm.create_job("s1", "nd-life", owner_id="o1")
+    job = await jm.get_job(job_id)
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(job.completed_event.wait(), timeout=5)
+
+    types = [c[1] for c in pg.calls if c[0] == "insert"]
+    assert types[0] == "started" and types[-1] == "completed"
+    assert "heartbeat" in types
+    assert job.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_integration_stale_then_recovery_with_duration(monkeypatch):
+    _store, pg = _wire_state_emitter(monkeypatch)
+    monkeypatch.setattr(_settings, "stale_scan_interval", 0.05)
+    monkeypatch.setattr(_settings, "stale_threshold", 0.2)
+    jm = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+    job = _running_job(jm, hb_age=5.0)
+    await jm.start_supervisor_task()
+    try:
+        for _ in range(100):
+            if job.supervisor_state == "stale":
+                break
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.12)
+        job.last_heartbeat_at = time.time()
+        for _ in range(100):
+            if job.supervisor_state == "healthy":
+                break
+            await asyncio.sleep(0.02)
+    finally:
+        await jm.stop_supervisor_task()
+    assert pg.ok_types.count("stale") == 1
+    assert pg.ok_types.count("recovered") == 1
+    rec_idx = pg.ok_types.index("recovered")
+    assert pg.ok_payloads[rec_idx]["stale_duration"] > 0
+
+
+@pytest.mark.asyncio
+async def test_integration_pg_outage_memory_pipeline_still_delivers(monkeypatch):
+
+    monkeypatch.setattr(settings, "heartbeat_interval", 30)
+    emitter, pg = _wire_state_emitter(monkeypatch, fail_forever=True)
+    import app.job_manager as _jm_mod
+
+    legacy = AgentEventEmitter()
+    monkeypatch.setattr(_jm_mod, "agent_events", legacy)
+
+    async def instant(*_a, **_k):
+        yield "exit", "0"
+
+    ssh = AsyncMock()
+    ssh.execute_stream = instant
+    jm = JobManager(ssh_manager=ssh, max_jobs=10)
+    job_id = await jm.create_job("s1", "outage", owner_id="o1")
+    job = await jm.get_job(job_id)
+    await asyncio.wait_for(job.completed_event.wait(), timeout=5)
+
+    assert pg._seq == 0  # nothing persisted
+    assert emitter.observability_state.is_degraded
+    memory_types = [e.event_type for e in legacy.store.get_events(job_id)]
+    assert memory_types == ["started", "completed"]  # consumers unaffected
+    assert job.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_integration_two_attempts_distinguishable(monkeypatch):
+    store, emitter = None, None
+    store = _FakeSSEStore([])
+    memory = AgentEventEmitter()
+    emitter = DualWriteAgentEventEmitter(memory_emitter=memory, pg_store=store)
+    monkeypatch.setattr(app_state, "agent_event_store", store)
+    monkeypatch.setattr(app_state, "agent_event_emitter", emitter)
+
+    for attempt in ("att-worker-1", "att-worker-2"):
+        await emitter.pg_emit(
+            job_id="job-two",
+            attempt_id=attempt,
+            owner_id="owner",
+            agent_id="gateway",
+            event_type="started",
+            payload={"worker": attempt},
+        )
+    records = await store.get_events("job-two")
+    attempts = [r.attempt_id for r in records]
+    assert attempts == ["att-worker-1", "att-worker-2"]
+    assert len(set(attempts)) == 2
+
+
+@pytest.mark.asyncio
+async def test_integration_sse_reconnect_without_gaps_or_duplicates(monkeypatch):
+    store, _emitter, master = _sse_wire(
+        monkeypatch, _seed(["started", "heartbeat", "completed"], 3)
+    )
+    resp = await agent_events_stream("job-q", master, last_event_id=None)
+    it = resp.body_iterator
+    first = await anext(it)
+    await it.aclose()  # client drops mid-stream
+
+    resp2 = await agent_events_stream("job-q", master, last_event_id="1")
+    chunks = await asyncio.wait_for(_drain(resp2), timeout=5)
+    text = first.decode() if isinstance(first, bytes) else first
+    assert "id: 1" in text
+    assert [c["id"] for c in chunks] == [2, 3]
