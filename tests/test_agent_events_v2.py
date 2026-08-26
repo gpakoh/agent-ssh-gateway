@@ -1665,7 +1665,14 @@ async def test_slow_pg_emit_does_not_block_manager_operations(monkeypatch):
     monkeypatch.setattr(job_manager_module, "OBSERVABILITY_EMIT_BUDGET_SECONDS", 0.3)
     monkeypatch.setattr(_settings, "stale_scan_interval", 0.05)
     monkeypatch.setattr(_settings, "stale_threshold", 0.2)
-    jm = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+
+    async def _noop_stream(*_a, **_kw):
+        return
+        yield  # pragma: no cover — async generator marker
+
+    ssh_mock = AsyncMock()
+    ssh_mock.execute_stream = _noop_stream
+    jm = JobManager(ssh_manager=ssh_mock, max_jobs=10)
     job = _running_job(jm, hb_age=5.0)  # sweep will flag stale -> hung emit
     await jm.start_supervisor_task()
     try:
