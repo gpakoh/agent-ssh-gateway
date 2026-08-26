@@ -34,20 +34,36 @@ async def test_cleanup_stale_sessions_with_sessions():
 
     now = time.time()
     manager._sessions["stale-1"] = MagicMock(
-        spec=["client", "last_activity", "idle_time", "session_id", "is_connected"],
+        spec=[
+            "client",
+            "last_activity",
+            "idle_time",
+            "session_id",
+            "is_connected",
+            "effective_idle_timeout",
+        ],
         client=mock_client,
         last_activity=now - 9999,
         idle_time=9999,
         session_id="stale-1",
         is_connected=lambda: True,
+        effective_idle_timeout=0,
     )
     manager._sessions["stale-2"] = MagicMock(
-        spec=["client", "last_activity", "idle_time", "session_id", "is_connected"],
+        spec=[
+            "client",
+            "last_activity",
+            "idle_time",
+            "session_id",
+            "is_connected",
+            "effective_idle_timeout",
+        ],
         client=mock_client,
         last_activity=now - 9999,
         idle_time=9999,
         session_id="stale-2",
         is_connected=lambda: True,
+        effective_idle_timeout=0,
     )
     try:
         n = await manager.cleanup_stale_sessions()
@@ -285,6 +301,7 @@ async def test_shutdown_job_drain_timeout_forces_cleanup_and_returns():
     forced = await _drain_jobs_for_shutdown(job_manager, timeout=0.01)
     assert forced == 1
     job_manager.force_cleanup.assert_awaited_once()
+
 
 @pytest.mark.asyncio
 async def test_execute_stream_task_cancel_closes_remote_channel():

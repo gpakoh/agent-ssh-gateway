@@ -18,10 +18,13 @@ repository is confirmed via the Gitea API.  Authentication uses one-shot
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+import stat
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.workspace.registry import get_registry
@@ -36,6 +39,169 @@ _BAD_OBJECT_RE = re.compile(
 
 class ManagedSourceBundleError(RuntimeError):
     """Raised when trusted source publication cannot prove the requested SHA."""
+
+
+class ManagedSourceDigestError(ManagedSourceBundleError, ValueError):
+    """Digest binding failed: metadata invalid or artifact bytes diverged.
+
+    Inherits ``ValueError`` so launch wrappers that already fail closed on
+    ``ValueError`` reject bad digest metadata before any worker starts.
+    """
+
+
+_MANAGED_DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
+_MANAGED_COPY_CHUNK_BYTES = 1024 * 1024
+
+
+def validate_bundle_digest(value: object) -> str:
+    """Strictly validate a SHA-256 digest crossing the trust boundary."""
+    if not isinstance(value, str) or not _MANAGED_DIGEST_RE.fullmatch(value):
+        raise ManagedSourceDigestError(
+            "managed source digest must be a 64-character lowercase hex string"
+        )
+    return value
+
+
+@dataclass(frozen=True)
+class ManagedSourcePublication:
+    """Published artifact bound to the exact bytes proven by control plane."""
+
+    path: str
+    sha256: str
+
+
+def _open_artifact_fd(bundle_path: Path) -> int:
+    """Open *bundle_path* read-only without following symlinks.
+
+    Rejects symlinks via ``lstat`` before and ``fstat`` after opening, so a
+    swap between the two checks to a symlink or a non-regular file fails
+    closed instead of reading foreign bytes.
+    """
+    try:
+        st = os.lstat(bundle_path)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise ManagedSourceDigestError(
+                "managed source bundle is not a regular file"
+            )
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        fd = os.open(bundle_path, flags)
+    except OSError as exc:
+        raise ManagedSourceDigestError(
+            f"managed source bundle unavailable: {exc}"
+        ) from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ManagedSourceDigestError(
+                "managed source bundle is not a regular file"
+            )
+    except OSError as exc:
+        raise ManagedSourceDigestError(
+            f"managed source bundle unavailable: {exc}"
+        ) from exc
+    return fd
+
+
+def capture_bundle_digest(bundle_path: str | Path) -> str:
+    """SHA-256 over exactly the bytes at ``bundle_path`` (symlink-safe)."""
+    fd = _open_artifact_fd(Path(bundle_path))
+    digest = hashlib.sha256()
+    try:
+        with os.fdopen(fd, "rb", closefd=True) as handle:
+            while chunk := handle.read(_MANAGED_COPY_CHUNK_BYTES):
+                digest.update(chunk)
+    except OSError as exc:
+        raise ManagedSourceDigestError(
+            f"managed source bundle unreadable during digest capture: {exc}"
+        ) from exc
+    return digest.hexdigest()
+
+
+def capture_private_snapshot(
+    bundle_path: str | Path,
+    dest_dir: str | Path | None = None,
+) -> tuple[Path, str]:
+    """One private read pass of the published artifact.
+
+    Opens the bundle without following symlinks and streams it once into a
+    private ``0700`` directory while hashing exactly the bytes written.
+    Returns ``(snapshot_path, sha256)`` -- callers must run every semantic
+    proof against ``snapshot_path`` so that proof and digest bind the same
+    bytes, closing the verify->use TOCTOU window on the control plane side.
+    """
+    fd = _open_artifact_fd(Path(bundle_path))
+    if dest_dir is not None:
+        os.makedirs(dest_dir, exist_ok=True)
+    private_dir = Path(tempfile.mkdtemp(prefix="managed-source-", dir=dest_dir))
+    dst = private_dir / "source.bundle"
+    digest = hashlib.sha256()
+    try:
+        with (
+            os.fdopen(fd, "rb", closefd=True) as fin,
+            open(dst, "wb") as fout,
+        ):
+            while chunk := fin.read(_MANAGED_COPY_CHUNK_BYTES):
+                digest.update(chunk)
+                fout.write(chunk)
+            fout.flush()
+            os.fsync(fout.fileno())
+    except OSError as exc:
+        dst.unlink(missing_ok=True)
+        private_dir.rmdir()
+        raise ManagedSourceDigestError(
+            f"managed source private snapshot failed: {exc}"
+        ) from exc
+    os.chmod(dst, 0o400)
+    return dst, digest.hexdigest()
+
+
+def secure_copy_and_verify(
+    bundle_path: str | Path,
+    expected_digest: str,
+    dest_dir: str | Path | None = None,
+) -> Path:
+    """Private verified copy of the managed artifact (worker-side primitive).
+
+    Takes one private snapshot of the mutable published path and fails
+    closed unless its bytes hash to ``expected_digest``. Downstream
+    consumers must treat the returned path as the only trusted artifact and
+    never re-open ``bundle_path``.
+    """
+    expected = validate_bundle_digest(expected_digest)
+    snapshot, actual = capture_private_snapshot(bundle_path, dest_dir)
+    if actual != expected:
+        snapshot.unlink(missing_ok=True)
+        snapshot.parent.rmdir()
+        raise ManagedSourceDigestError(
+            f"managed source digest mismatch: expected {expected}, got {actual}"
+        )
+    return snapshot
+
+
+def bind_publication_bytes(bundle_path: Path, expected: str) -> ManagedSourcePublication:
+    """Prove semantics and capture the digest over the SAME snapshot bytes.
+
+    The control plane makes one private snapshot of the published artifact
+    and runs the complete evidence chain (single advertised head equal to
+    *expected*, ``git bundle verify``, scratch clone pinned to *expected*)
+    plus the SHA-256 computation on those identical bytes. The returned
+    digest therefore describes bytes the trusted plane fully proved --
+    workers later demand exactly this digest from their own private copy.
+    """
+    snapshot, sha256 = capture_private_snapshot(bundle_path)
+    try:
+        if _bundle_head(snapshot) != expected:
+            raise ManagedSourceBundleError(
+                "published managed source bundle verification failed"
+            )
+        _assert_bundle_usable(snapshot, expected, full_proof=True)
+    finally:
+        snapshot.unlink(missing_ok=True)
+        snapshot.parent.rmdir()
+    return ManagedSourcePublication(path=str(bundle_path), sha256=sha256)
 
 
 def _git_subcommand(args: list[str]) -> str:
@@ -255,10 +421,10 @@ def _materialize_from_remote(
     project: str,
     expected: str,
     bundle_path: Path,
-) -> str | None:
+) -> ManagedSourcePublication:
     """Fetch *expected* from the trusted remote and publish a verified bundle.
 
-    Returns the bundle path on success.  Raises on any failure.
+    Returns the bound publication on success.  Raises on any failure.
     """
     project_root = Path(get_registry().project_info(project)["root"])
     clone_url, token = _resolve_trusted_remote(project_root)
@@ -344,22 +510,26 @@ def _materialize_from_remote(
         _assert_bundle_usable(temp_bundle, expected, full_proof=True)
 
         os.replace(temp_bundle, bundle_path)
-        if _bundle_head(bundle_path) != expected:
-            bundle_path.unlink(missing_ok=True)
-            raise ManagedSourceBundleError(
-                "published remote bundle verification failed"
-            )
-        return str(bundle_path)
+        return bind_publication_bytes(bundle_path, expected)
     finally:
         temp_bundle.unlink(missing_ok=True)
 
 
-def ensure_managed_source_bundle(project: str, base_ref: str | None) -> str | None:
+def ensure_managed_source_bundle(
+    project: str, base_ref: str | None
+) -> ManagedSourcePublication | None:
     """Publish/reuse a self-contained bundle for ``project`` at ``base_ref``.
 
     Returns ``None`` when managed source storage is not configured (legacy
     local/dev mode).  Once ``MCP_AGENT_SOURCE_ROOT`` is configured, an exact
     full commit id is mandatory and publication fails closed.
+
+    Every accepted artifact is bound cryptographically: the control plane
+    takes one private snapshot of the published bytes and runs the full
+    semantic proof AND the SHA-256 capture over those identical snapshot
+    bytes (:func:`bind_publication_bytes`).  The returned digest therefore
+    describes exactly the bytes that were proven -- workers later demand
+    this digest from their own private copy.
 
     When the local object database does not contain the requested commit
     (``git cat-file -e`` → *fatal: bad object*), a safe fallback fetches the
@@ -383,10 +553,7 @@ def ensure_managed_source_bundle(project: str, base_ref: str | None) -> str | No
 
     if bundle_path.is_file():
         try:
-            head = _bundle_head(bundle_path)
-            if head == expected:
-                _assert_bundle_usable(bundle_path, expected, full_proof=False)
-                return str(bundle_path)
+            return bind_publication_bytes(bundle_path, expected)
         except ManagedSourceBundleError:
             # A pre-existing artifact that fails verification is not
             # consumable: fall through and attempt a clean rebuild instead
@@ -463,11 +630,6 @@ def ensure_managed_source_bundle(project: str, base_ref: str | None) -> str | No
         _assert_bundle_usable(temp_bundle, expected, full_proof=True)
 
         os.replace(temp_bundle, bundle_path)
-        if _bundle_head(bundle_path) != expected:
-            bundle_path.unlink(missing_ok=True)
-            raise ManagedSourceBundleError(
-                "published managed source bundle verification failed"
-            )
-        return str(bundle_path)
+        return bind_publication_bytes(bundle_path, expected)
     finally:
         temp_bundle.unlink(missing_ok=True)

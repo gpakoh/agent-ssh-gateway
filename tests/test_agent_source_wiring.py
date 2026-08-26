@@ -8,6 +8,7 @@ import pytest
 def test_write_agent_task_publishes_source_before_remote_write(monkeypatch):
     import examples.mcp_server.mcp_infra.adapters.agent as adapter
     import examples.mcp_server.server as server_mod
+    from examples.mcp_server.agent_sources import ManagedSourcePublication
 
     events: list[str] = []
     client = MagicMock()
@@ -18,7 +19,12 @@ def test_write_agent_task_publishes_source_before_remote_write(monkeypatch):
 
     def publish(project, base_ref):
         events.append("publish-source")
-        return "/var/lib/mcp-agent/sources/test.bundle"
+        # Publication now carries the control-plane-proven digest that the
+        # task metadata channel forwards to the worker script.
+        return ManagedSourcePublication(
+            path="/var/lib/mcp-agent/sources/test.bundle",
+            sha256="a" * 64,
+        )
 
     client.execute_project_script.side_effect = execute_script
     monkeypatch.setattr(server_mod, "client", client)

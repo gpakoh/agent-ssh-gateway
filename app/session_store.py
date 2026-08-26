@@ -237,7 +237,7 @@ class AgentEventRecord(Base):
     )
     sequence = Column(BigInteger, _agent_events_seq, nullable=False, unique=True)
     job_id = Column(String(36), nullable=False, index=True)
-    attempt_id = Column(String(36), nullable=False, index=True)
+    attempt_id = Column(String(36), nullable=True, index=True)
     owner_id = Column(String(128), nullable=False)
     agent_id = Column(String(128), nullable=False)
     event_type = Column(String(32), nullable=False)

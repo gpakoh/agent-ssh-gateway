@@ -190,7 +190,7 @@ class DualWriteAgentEventEmitter:
     async def pg_emit(
         self,
         job_id: str,
-        attempt_id: str,
+        attempt_id: str | None,
         owner_id: str,
         agent_id: str,
         event_type: str,
@@ -245,12 +245,20 @@ class DualWriteAgentEventEmitter:
         return record
 
     async def subscribe(self, job_id: str) -> EventSubscription:
-        """Create a live subscription with committed watermark."""
-        watermark = self._watermarks.get(job_id)
-        if watermark is None and self._pg:
-            watermark = await self._pg.get_latest_sequence(job_id)
-        sub = EventSubscription(queue=asyncio.Queue(maxsize=500), watermark=watermark or 0)
+        """Create a live subscription; register BEFORE reading the watermark.
+
+        Registering first guarantees that every event committed from this
+        point on is fanned out into the queue. The watermark read afterwards
+        may already cover some of those queued events — the SSE layer replays
+        up to ``watermark`` and de-duplicates queue items whose sequence is
+        <= the last replayed one. Together: no gap, no duplication.
+        """
+        sub = EventSubscription(queue=asyncio.Queue(maxsize=500), watermark=0)
         self._subscribers[job_id].append(sub)
+        if self._pg:
+            sub.watermark = await self._pg.get_latest_sequence(job_id) or 0
+        else:
+            sub.watermark = self._watermarks.get(job_id, 0)
         return sub
 
     def remove_subscriber(self, job_id: str, queue: asyncio.Queue) -> None:

@@ -276,12 +276,20 @@ def build_task_json(
     push_allowed: bool = False,
     base_ref: str | None = None,
     allowed_backends: list[str] | None = None,
+    managed_source_sha256: str | None = None,
 ) -> str:
     """Build machine-readable task.json content."""
     validate_task_id(task_id)
     validate_required_checks(required_checks)
     validate_scope_contract(allowed_files, forbidden_files)
     validate_base_ref(base_ref)
+    if managed_source_sha256 is not None and (
+        not isinstance(managed_source_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", managed_source_sha256)
+    ):
+        raise ValueError(
+            "managed_source_sha256 must be a 64-character lowercase hex digest"
+        )
     normalized_backends = _validate_allowed_backends(agent, allowed_backends)
     data: dict[str, Any] = {
         "task_id": task_id,
@@ -292,6 +300,7 @@ def build_task_json(
         "required_checks": required_checks or [],
         "worktree_path": worktree_path or "",
         "base_ref": base_ref or "",
+        "managed_source_sha256": managed_source_sha256 or "",
         "commit_allowed": commit_allowed,
         "push_allowed": push_allowed,
         "created": datetime.now(UTC).isoformat(),
@@ -527,6 +536,7 @@ def write_agent_task(
     worktree_path: str | None = None,
     base_ref: str | None = None,
     allowed_backends: list[str] | None = None,
+    managed_source_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Write task.json + current-plan.md + agent-status.md to .ai-bridge/tasks/<task_id>/."""
     validate_task_id(task_id)
@@ -540,6 +550,7 @@ def write_agent_task(
         worktree_path=worktree_path,
         base_ref=base_ref,
         allowed_backends=allowed_backends,
+        managed_source_sha256=managed_source_sha256,
     )
     td = task_dir(project, task_id)
     current_plan = build_current_plan(

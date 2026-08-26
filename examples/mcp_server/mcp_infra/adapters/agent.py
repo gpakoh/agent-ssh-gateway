@@ -93,7 +93,14 @@ def gateway_write_agent_task(
     def _fn() -> dict[str, Any]:
         # Publish exact committed source in the trusted control plane before
         # the task becomes runnable. The executor only consumes this root RO.
-        ensure_managed_source_bundle(project, base_ref)
+        #
+        # The returned publication binds a SHA-256 that the control plane
+        # computed over the SAME private snapshot bytes it just fully
+        # proved (single head == base_ref, bundle verify, scratch clone).
+        # Any failure here propagates: no runnable task without a bound
+        # digest, and no supervisor-time recapture fallback exists.
+        publication = ensure_managed_source_bundle(project, base_ref)
+        managed_source_sha256 = publication.sha256 if publication else None
 
         return _write_agent_task(
             # Script transport (sh + stdin), NOT run_project_command: the
@@ -115,6 +122,7 @@ def gateway_write_agent_task(
             constraints=constraints,
             worktree_path=worktree_path,
             base_ref=base_ref,
+            managed_source_sha256=managed_source_sha256,
         )
 
     return run_tool(
@@ -251,9 +259,7 @@ async def gateway_run_opencode(
             task_id=task_id,
             model=model,
             run_script=lambda _p, s: _server_agent_client().execute_script(s),
-            run_script_async=lambda _p, s, k: _server_agent_client().execute_script_async(
-                s, k
-            ),
+            run_script_async=lambda _p, s, k: _server_agent_client().execute_script_async(s, k),
             async_submit=async_submit,
         )
 
@@ -294,9 +300,7 @@ def _build_agent_submit(
             model=model,
             router=_server_agent_router(),
             run_script=lambda _p, s: _server_agent_client().execute_script(s),
-            run_script_async=lambda _p, s, k: _server_agent_client().execute_script_async(
-                s, k
-            ),
+            run_script_async=lambda _p, s, k: _server_agent_client().execute_script_async(s, k),
             async_submit=async_submit,
         )
 

@@ -72,10 +72,10 @@ def register_tool(name: str):
         if not should_register_tool(name):
             return func
 
-        import asyncio
         import functools
+        import inspect
 
-        if asyncio.iscoroutinefunction(func):
+        if inspect.iscoroutinefunction(func):
 
             @functools.wraps(func)
             async def async_result_wrapper(*args, **kwargs):
@@ -104,9 +104,9 @@ def instrumented(tool_name: str):
     """Decorator that wraps a tool function with latency tracking."""
 
     def decorator(func):
-        import asyncio
+        import inspect
 
-        if asyncio.iscoroutinefunction(func):
+        if inspect.iscoroutinefunction(func):
 
             async def async_wrapper(*args, **kwargs):
                 tracker = get_tracker()
@@ -119,6 +119,7 @@ def instrumented(tool_name: str):
                 return result
 
             from functools import wraps
+
             wraps(func)(async_wrapper)
             return async_wrapper
         else:
@@ -134,6 +135,7 @@ def instrumented(tool_name: str):
                 return result
 
             from functools import wraps
+
             wraps(func)(sync_wrapper)
             return sync_wrapper
 
@@ -211,14 +213,16 @@ def run_tool(
             # Emit structured audit event
             try:
                 audit_logger = _server.get_audit_logger()
-                audit_logger.append(McpAuditEvent(
-                    event_type="mcp.tool_blocked",
-                    tool=tool,
-                    action=title,
-                    decision="block",
-                    reason=str(exc),
-                    error_code=error_code,
-                ))
+                audit_logger.append(
+                    McpAuditEvent(
+                        event_type="mcp.tool_blocked",
+                        tool=tool,
+                        action=title,
+                        decision="block",
+                        reason=str(exc),
+                        error_code=error_code,
+                    )
+                )
             except Exception:
                 pass  # audit failure must not change tool behavior
 

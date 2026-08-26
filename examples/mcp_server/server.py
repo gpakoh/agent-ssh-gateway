@@ -24,6 +24,7 @@ _mcp_started_at = _time.time()
 
 from docker_confirm import ConfirmStore
 from gateway_client import (
+    CleanupTargets,  # noqa: F401 (facade: lifecycle cleanup uses this type)
     GatewayClient,
     GatewayClientError,  # noqa: F401 (facade: tests raise this class by server-module identity)
     GatewayClientSessionPool,
@@ -31,7 +32,7 @@ from gateway_client import (
 from mcp.server.fastmcp import FastMCP
 from mcp_client_tools import (
     read_file,  # noqa: F401 (facade: tests patch this name)
-    )
+)
 
 from examples.mcp_client_remote.fleet.context7_server import (
     _call_upstream as _call_context7_upstream,  # noqa: F401  (facade: tests monkeypatch this name)
@@ -83,7 +84,7 @@ async def _mcp_lifespan(_server: FastMCP) -> AsyncIterator[Any]:
         # End local ownership synchronously before any cancellable network I/O.
         # Once detached, this lifecycle can no longer mutate pool membership or
         # client ownership/session state, even if its network cleanup is cancelled.
-        detached: list[tuple[GatewayClient, str]] = []
+        detached: list[tuple[GatewayClient, CleanupTargets]] = []
         if isinstance(gateway_pool, GatewayClientSessionPool):
             detached.extend(gateway_pool.detach_owner(lifecycle_owner))
         if isinstance(agent_pool, GatewayClientSessionPool):
@@ -97,8 +98,8 @@ async def _mcp_lifespan(_server: FastMCP) -> AsyncIterator[Any]:
         # remains owned by this task group and is cancelled/joined before exit.
         with anyio.move_on_after(_MCP_SESSION_RELEASE_DEADLINE_SECONDS, shield=True):
             async with anyio.create_task_group() as task_group:
-                for scoped, sid in detached:
-                    if sid:
+                for scoped, targets in detached:
+                    for sid in targets.all_sids:
                         task_group.start_soon(_release_sid, scoped, sid)
         await close_fleet_runtime()
 
@@ -161,9 +162,7 @@ def get_gateway_client() -> Any:
     session = _current_mcp_session()
     if session is None:
         return client
-    return _gateway_client_sessions.get(
-        client, session, _current_mcp_lifecycle_owner()
-    )
+    return _gateway_client_sessions.get(client, session, _current_mcp_lifecycle_owner())
 
 
 def get_agent_client() -> Any:
@@ -173,9 +172,7 @@ def get_agent_client() -> Any:
     session = _current_mcp_session()
     if session is None:
         return agent_client
-    return _agent_client_sessions.get(
-        agent_client, session, _current_mcp_lifecycle_owner()
-    )
+    return _agent_client_sessions.get(agent_client, session, _current_mcp_lifecycle_owner())
 
 
 register_tool = tool_registry.register_tool
@@ -279,11 +276,6 @@ def _get_pg_client() -> PostgresClient | None:
 _confirm_store: ConfirmStore = ConfirmStore()
 
 
-
-
-
-
-
 # ── Tools Manifest ──────────────────────────────────────────────
 
 from tools_manifest import build_manifest as _build_manifest  # noqa: E402
@@ -320,9 +312,8 @@ def _unavailable_tool_reasons() -> dict[str, str]:
 
     reasons: dict[str, str] = {}
     docker_cli = shutil.which("docker")
-    docker_connectable = (
-        bool(os.environ.get("DOCKER_HOST"))
-        or os.path.exists("/var/run/docker.sock")
+    docker_connectable = bool(os.environ.get("DOCKER_HOST")) or os.path.exists(
+        "/var/run/docker.sock"
     )
     if docker_cli is None:
         msg = "docker CLI not present in this image"

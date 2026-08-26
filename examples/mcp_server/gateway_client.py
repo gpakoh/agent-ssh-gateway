@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import os
 import threading
@@ -55,14 +56,14 @@ def _script_stdin_wrapper(script: str) -> str:
     guarantee for the MCP container.
     """
     return (
-        'tmpf=$(mktemp /tmp/agent-script-XXXXXX)\n'
-        f'cat > "$tmpf" <<\'{_SCRIPT_BODY_DELIM}\'\n'
+        "tmpf=$(mktemp /tmp/agent-script-XXXXXX)\n"
+        f"cat > \"$tmpf\" <<'{_SCRIPT_BODY_DELIM}'\n"
         + script.rstrip("\n")
         + f"\n{_SCRIPT_BODY_DELIM}\n"
         'sh "$tmpf"\n'
-        'rc=$?\n'
+        "rc=$?\n"
         'rm -f "$tmpf"\n'
-        'exit $rc\n'
+        "exit $rc\n"
     )
 
 
@@ -141,6 +142,28 @@ def _transport_error(exc: httpx.RequestError) -> GatewayClientError:
     )
 
 
+@dataclasses.dataclass(frozen=True)
+class CleanupTargets:
+    """Frozen set of SIDs that need network disconnect after pool lock release.
+
+    ``prepare_release()`` is LOCAL ONLY (no network I/O). It freezes ownership
+    state into this structure so callers can perform cleanup *after* releasing
+    pool-level locks.  Borrowed seed SIDs are never included.
+    """
+
+    current_sid: str = ""
+    retired_sids: frozenset[str] = dataclasses.field(default_factory=frozenset)
+
+    @property
+    def all_sids(self) -> set[str]:
+        """Every SID that must be attempted for disconnect."""
+        result: set[str] = set()
+        if self.current_sid:
+            result.add(self.current_sid)
+        result.update(self.retired_sids)
+        return result
+
+
 class GatewayClient:
     """Small HTTP wrapper around agent-ssh-gateway."""
 
@@ -169,20 +192,28 @@ class GatewayClient:
         self.async_job_timeout = int(os.environ.get("MCP_GATEWAY_ASYNC_JOB_TIMEOUT", "3600"))
         self.job_timeout = int(os.environ.get("MCP_GATEWAY_JOB_TIMEOUT", "180"))
         self._http_timeout = int(os.environ.get("MCP_GATEWAY_HTTP_TIMEOUT", "120"))
-        self._release_http_timeout = float(
-            os.environ.get("MCP_GATEWAY_RELEASE_HTTP_TIMEOUT", "2")
-        )
+        self._release_http_timeout = float(os.environ.get("MCP_GATEWAY_RELEASE_HTTP_TIMEOUT", "2"))
 
         self._reconnect_lock = threading.Lock()
+        self._retired: set[str] = set()
         self._reuse_existing = True
         self._release_managed = False
         self._owns_session = False
         self._released = False
-        self._ssh_host = ssh_host if ssh_host is not None else os.environ.get("GATEWAY_SSH_HOST", "")
-        self._ssh_port = ssh_port if ssh_port is not None else int(os.environ.get("GATEWAY_SSH_PORT", "22"))
-        self._ssh_user = ssh_user if ssh_user is not None else (
-            os.environ.get("GATEWAY_SSH_USER", "")
-            or os.environ.get("GATEWAY_SSH_USERNAME", "")
+        self._ephemeral = False
+        self._idle_timeout_seconds: int | None = None
+        self._ssh_host = (
+            ssh_host if ssh_host is not None else os.environ.get("GATEWAY_SSH_HOST", "")
+        )
+        self._ssh_port = (
+            ssh_port if ssh_port is not None else int(os.environ.get("GATEWAY_SSH_PORT", "22"))
+        )
+        self._ssh_user = (
+            ssh_user
+            if ssh_user is not None
+            else (
+                os.environ.get("GATEWAY_SSH_USER", "") or os.environ.get("GATEWAY_SSH_USERNAME", "")
+            )
         )
         self._ssh_password = (
             ssh_password if ssh_password is not None else os.environ.get("GATEWAY_SSH_PASSWORD", "")
@@ -193,7 +224,11 @@ class GatewayClient:
             else os.environ.get("GATEWAY_SSH_PRIVATE_KEY", "")
         )
         if not self._ssh_private_key:
-            key_path = ssh_key_path if ssh_key_path is not None else os.environ.get("GATEWAY_SSH_KEY_PATH", "")
+            key_path = (
+                ssh_key_path
+                if ssh_key_path is not None
+                else os.environ.get("GATEWAY_SSH_KEY_PATH", "")
+            )
             if key_path:
                 try:
                     with open(key_path) as f:
@@ -240,14 +275,30 @@ class GatewayClient:
         fork._reuse_existing = False
         fork._release_managed = True
         fork._owns_session = False
+        fork._ephemeral = True
+        fork._idle_timeout_seconds = 600
         return fork
 
     def _reconnect_session(self) -> None:
         if self._released:
             raise GatewayClientError("MCP session is closed")
-        old_owned_sid = (
-            self.session_id if self._release_managed and self._owns_session else ""
-        )
+        for retired_sid in list(self._retired):
+            if retired_sid == self.session_id:
+                continue
+            try:
+                self._post(
+                    "/api/ssh/disconnect",
+                    {"session_id": retired_sid},
+                    timeout=self._release_http_timeout,
+                )
+                self._retired.discard(retired_sid)
+            except Exception:
+                pass
+        if self._retired:
+            raise GatewayClientError(
+                f"reconnect blocked: {len(self._retired)} retired SID(s) still awaiting cleanup"
+            )
+        old_owned_sid = self.session_id if self._release_managed and self._owns_session else ""
         if not self._ssh_host or not self._ssh_user:
             raise GatewayClientError(
                 "GATEWAY_SSH_HOST and GATEWAY_SSH_USER are required for auto-reconnect"
@@ -262,6 +313,10 @@ class GatewayClient:
             payload["password"] = self._ssh_password
         if self._ssh_private_key:
             payload["private_key"] = self._ssh_private_key
+        if self._ephemeral:
+            payload["ephemeral"] = True
+        if self._idle_timeout_seconds is not None:
+            payload["idle_timeout_seconds"] = self._idle_timeout_seconds
 
         try:
             response = httpx.post(
@@ -286,7 +341,8 @@ class GatewayClient:
                     timeout=self._release_http_timeout,
                 )
             except Exception:
-                pass
+                if self._release_managed:
+                    self._retired.add(old_owned_sid)
 
     def connect(self) -> str:
         """Establish SSH session and return session_id."""
@@ -307,42 +363,45 @@ class GatewayClient:
         if sid == self.session_id:
             self.session_id = ""
 
-    def prepare_release(self) -> str:
-        """Atomically end local ownership and return the owned SID to clean up.
+    def prepare_release(self) -> CleanupTargets:
+        """Atomically end local ownership and return cleanup targets.
 
-        This is the lifecycle state transition. It performs no network I/O, so once
-        it returns no later cleanup operation is allowed to mutate this client's
-        ownership/session state. Borrowed seed SIDs are never returned for cleanup.
+        LOCAL ONLY — no network I/O.  Returns a frozen snapshot of every SID
+        that needs a remote disconnect attempt.  After this call the client is
+        released and can no longer reconnect.
+
+        Borrowed seed SIDs are never included in the targets.
         """
         with self._reconnect_lock:
             if not self._release_managed or self._released:
-                return ""
+                return CleanupTargets()
+            current_sid = self.session_id if self._owns_session else ""
+            retired_sids = frozenset(self._retired)
             self._released = True
-            sid = self.session_id if self._owns_session else ""
             self.session_id = ""
             self._owns_session = False
-            return sid
+            self._retired.clear()
+            return CleanupTargets(current_sid=current_sid, retired_sids=retired_sids)
 
     def release(self) -> None:
         """Release resources owned by an MCP-scoped fork exactly once.
 
-        Synchronous callers keep the historical best-effort behavior. MCP lifespan
+        Synchronous callers keep the historical best-effort behavior.  MCP lifespan
         teardown uses ``prepare_release()`` plus ``release_sid_async()`` so network
         cleanup remains cancellable and cannot escape the owning lifecycle.
         """
-        sid = self.prepare_release()
-        if not sid:
-            return
-        try:
-            self._post(
-                "/api/ssh/disconnect",
-                {"session_id": sid},
-                timeout=self._release_http_timeout,
-            )
-        except Exception:
-            # Lifecycle cleanup is best-effort. Gateway idle cleanup remains the
-            # final safety net if teardown happens during a gateway outage.
-            pass
+        targets = self.prepare_release()
+        for sid in targets.all_sids:
+            try:
+                self._post(
+                    "/api/ssh/disconnect",
+                    {"session_id": sid},
+                    timeout=self._release_http_timeout,
+                )
+            except Exception:
+                # Lifecycle cleanup is best-effort. Gateway idle cleanup remains the
+                # final safety net if teardown happens during a gateway outage.
+                pass
 
     async def _post_async(
         self,
@@ -392,13 +451,13 @@ class GatewayClient:
         @functools.wraps(func)
         def wrapper(self: GatewayClient, *args: Any, **kwargs: Any) -> Any:
             for attempt in range(2):
+                stale_sid = self.session_id
                 try:
                     return func(self, *args, **kwargs)
                 except GatewayClientError as e:
                     if attempt == 0 and GatewayClient._SESSION_NOT_FOUND in str(e):
-                        old_sid = self.session_id
                         with self._reconnect_lock:
-                            if self.session_id == old_sid:
+                            if self.session_id == stale_sid:
                                 self._reconnect_session()
                         continue
                     raise
@@ -529,6 +588,7 @@ class GatewayClient:
         info = get_registry().project_info(project)
         cwd = str(info["root"])
         import shlex as _shlex
+
         argv = _shlex.split(command)
         return self._post(
             "/api/ssh/execute-argv",
@@ -850,8 +910,7 @@ class GatewayClient:
                 result["stdout"] = "\n".join(lines)
             output[name] = result
         all_failed = all(
-            isinstance(r, dict) and r.get("exit_code", -1) != 0
-            for r in output.values()
+            isinstance(r, dict) and r.get("exit_code", -1) != 0 for r in output.values()
         )
         if all_failed:
             output["ok"] = False
@@ -889,16 +948,34 @@ class GatewayClientSessionPool:
 
         with self._lock:
             existing = self._clients.get(mcp_session)
-            if existing is not None and existing[0] is base:
-                return existing[1]
+            if existing is not None:
+                if existing[0] is base:
+                    return existing[1]
+                # Different base for the same mcp_session key.  The old scoped
+                # client may own a live gateway session.  Silently overwriting
+                # it would orphan that session — no pool entry and no lifecycle
+                # owner reference remain to release it.  Fail closed: all
+                # production call sites pass a process-singleton base, so a
+                # changed identity is a programming error.
+                raise RuntimeError(
+                    "GatewayClientSessionPool: base identity changed for"
+                    f" existing mcp_session {mcp_session!r}; the previous"
+                    " scoped client may own a live gateway session and"
+                    " cannot be safely replaced without explicit lifecycle"
+                    " teardown"
+                )
 
             scoped = base.fork_session()
             self._clients[mcp_session] = (base, scoped, lifecycle_owner)
             return scoped
 
-    def detach_owner(self, lifecycle_owner: Any) -> list[tuple[GatewayClient, str]]:
-        """Detach one lifecycle's clients and atomically end their local ownership."""
-        detached: list[tuple[GatewayClient, str]] = []
+    def detach_owner(self, lifecycle_owner: Any) -> list[tuple[GatewayClient, CleanupTargets]]:
+        """Detach one lifecycle's clients and atomically end their local ownership.
+
+        Returns cleanup targets.  Network I/O happens only in the callers
+        (``release_owner()`` / lifespan teardown), *after* pool lock is released.
+        """
+        detached: list[tuple[GatewayClient, CleanupTargets]] = []
         with self._lock:
             for mcp_session, entry in list(self._clients.items()):
                 if entry[2] is lifecycle_owner:
@@ -910,15 +987,14 @@ class GatewayClientSessionPool:
     def release_owner(self, lifecycle_owner: Any) -> int:
         """Synchronously release all scoped clients belonging to one MCP lifespan."""
         detached = self.detach_owner(lifecycle_owner)
-        for scoped, sid in detached:
-            if not sid:
-                continue
-            try:
-                scoped._post(
-                    "/api/ssh/disconnect",
-                    {"session_id": sid},
-                    timeout=scoped._release_http_timeout,
-                )
-            except Exception:
-                pass
+        for scoped, targets in detached:
+            for sid in targets.all_sids:
+                try:
+                    scoped._post(
+                        "/api/ssh/disconnect",
+                        {"session_id": sid},
+                        timeout=scoped._release_http_timeout,
+                    )
+                except Exception:
+                    pass
         return len(detached)
