@@ -169,6 +169,9 @@ class Settings(BaseSettings):
         default=30, alias="STALE_SCAN_INTERVAL"
     )  # seconds between supervisor sweeps over running jobs
     agent_id: str = Field(default="gateway", alias="AGENT_ID")
+    sse_max_duration: float = Field(
+        default=3600.0, alias="SSE_MAX_DURATION"
+    )  # seconds; bounded lifetime for agent-events SSE streams (reconnect with Last-Event-ID)
 
     # Audit trail
     audit_log_path: str = Field(default="./data/audit/events.jsonl", alias="AUDIT_LOG_PATH")

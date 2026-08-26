@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import paramiko
@@ -169,14 +170,14 @@ async def test_manager_acquire_pooled_client_on_create():
     manager = SSHSessionManager(connection_pool_size=4)
     assert manager.pool_stats is not None
     pooled = _mock_client(alive=True)
-    await manager._pool.release(
-        ("h", 22, "u", "password", _PW_FINGERPRINT, "192.0.2.10"), pooled
-    )
+    await manager._pool.release(("h", 22, "u", "password", _PW_FINGERPRINT, "192.0.2.10"), pooled)
 
     # Patch create so the fresh-connect path never runs (pooled path used).
     manager._load_private_key = MagicMock()
+
     async def fake_connect(client, *a, **k):
         pass
+
     import paramiko
 
     # create_session must use the pooled client, no real connect happens.
@@ -214,9 +215,7 @@ async def test_manager_disconnect_releases_to_pool():
 
     manager = SSHSessionManager(connection_pool_size=4)
     pooled = _mock_client(alive=True)
-    await manager._pool.release(
-        ("h", 22, "u", "password", _PW_FINGERPRINT, "192.0.2.10"), pooled
-    )
+    await manager._pool.release(("h", 22, "u", "password", _PW_FINGERPRINT, "192.0.2.10"), pooled)
 
     sid = await manager.create_session(
         host="h", port=22, username="u", password="pw", pinned_ip="192.0.2.10"
@@ -257,9 +256,7 @@ async def test_manager_create_session_does_not_reuse_pool_on_different_password(
     """
     manager = SSHSessionManager(connection_pool_size=4)
     pooled = _mock_client(alive=True)
-    await manager._pool.release(
-        ("h", 22, "u", "password", _PW_FINGERPRINT, "192.0.2.10"), pooled
-    )
+    await manager._pool.release(("h", 22, "u", "password", _PW_FINGERPRINT, "192.0.2.10"), pooled)
 
     import paramiko
 
@@ -276,7 +273,10 @@ async def test_manager_create_session_does_not_reuse_pool_on_different_password(
 
     paramiko.SSHClient = FakeClient
     try:
-        with patch("app.ssh_manager.socket.create_connection", return_value=MagicMock(getpeername=MagicMock(return_value=("192.0.2.10", 22)))):
+        with patch(
+            "app.ssh_manager.socket.create_connection",
+            return_value=MagicMock(getpeername=MagicMock(return_value=("192.0.2.10", 22))),
+        ):
             sid = await manager.create_session(
                 host="h",
                 port=22,
@@ -303,6 +303,8 @@ async def test_create_session_enforces_max_sessions_per_ip(monkeypatch):
     existing = MagicMock()
     existing.session_id = "s-existing"
     existing.source_ip = "10.0.0.5"
+    existing.effective_idle_timeout = 0
+    existing.last_activity = time.time()
     manager._sessions["s-existing"] = existing
 
     # Same source IP → rejected before any connection attempt.

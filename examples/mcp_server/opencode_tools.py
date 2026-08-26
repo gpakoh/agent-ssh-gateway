@@ -121,12 +121,16 @@ def project_run_opencode(
         validate_base_ref(raw_base_ref)
         base_ref = raw_base_ref if isinstance(raw_base_ref, str) and raw_base_ref else None
         managed_source_path = None
+        managed_source_sha256 = None
         if managed_clone:
             if not base_ref:
                 raise ValueError("managed OpenCode execution requires an exact base_ref")
             managed_source_path = managed_source_bundle_path(project, base_ref)
             if not managed_source_path:
                 raise ValueError("MCP_AGENT_SOURCE_ROOT is required for managed OpenCode execution")
+            raw_sha256 = (task_json or {}).get("managed_source_sha256")
+            if isinstance(raw_sha256, str):
+                managed_source_sha256 = raw_sha256.strip() or None
         allowed_files = _task_string_list(task_json or {}, "allowed_files")
         forbidden_files = _task_string_list(task_json or {}, "forbidden_files")
         required_checks = _task_string_list(task_json or {}, "required_checks")
@@ -153,6 +157,7 @@ def project_run_opencode(
         managed_clone=managed_clone,
         base_ref=base_ref,
         managed_source_path=managed_source_path,
+        managed_source_sha256=managed_source_sha256,
     )
 
     if async_submit:

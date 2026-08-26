@@ -29,9 +29,36 @@ logger = logging.getLogger(__name__)
 
 MAX_STDOUT_SIZE = 10 * 1024 * 1024  # 10 MB per job
 TERMINAL_STATES = frozenset({"completed", "failed", "cancelled", "ambiguous"})
+
+# Observability event type per terminal lifecycle status. ``ambiguous`` is its
+# own explicitly-defined outcome (remote result unproven) — never masked as
+# completed or cancelled.
+_TERMINAL_EVENT_BY_STATUS = {
+    "completed": "completed",
+    "failed": "failed",
+    "cancelled": "cancelled",
+    "ambiguous": "ambiguous",
+}
 ACTIVE_STATES = frozenset({"pending", "running", "cancelling"})
 SSE_LISTENER_QUEUE_SIZE = 256
 DURABLE_LEASE_TTL_SECONDS = 60
+
+
+def _durable_heartbeat_interval(lease_ttl: float) -> float:
+    """Lease-renewal cadence: exactly ``lease_ttl / 3`` (TTL=60s -> ~20s).
+
+    Deliberately independent of ``settings.heartbeat_interval`` — that value
+    drives the non-durable lifecycle heartbeat only. Renewal must always sit
+    well inside the lease window regardless of configuration.
+    """
+    return max(0.1, float(lease_ttl) / 3.0)
+
+
+# Hard wall-clock cap for observability writes on the job execution path
+# (started/terminal/supervisor events). A hung PostgreSQL write must never
+# stall execution, completion bookkeeping or supervisor sweeps; heartbeats use
+# the tighter min(budget, interval/2) bound derived from their own cadence.
+OBSERVABILITY_EMIT_BUDGET_SECONDS = 5.0
 
 
 def _submission_payload_hash(session_id: str, command: str, stdin: bytes, timeout: int) -> str:
@@ -276,10 +303,11 @@ class JobManager:
                     stale_duration = round(now - (job.stale_since or now), 3)
                     job.supervisor_state = "healthy"
                     job.stale_since = None
-                    await self._emit_observability_event(
+                    await self._emit_bounded(
                         job,
                         "recovered",
                         {"stale_duration": stale_duration},
+                        budget=OBSERVABILITY_EMIT_BUDGET_SECONDS,
                     )
                     await job.notify_listeners(
                         {
@@ -291,7 +319,16 @@ class JobManager:
                 elif not fresh and job.supervisor_state != "stale":
                     job.supervisor_state = "stale"
                     job.stale_since = now
-                    await self._emit_observability_event(job, "stale", {})
+                    await self._emit_bounded(
+                        job,
+                        "stale",
+                        {
+                            "last_heartbeat_at": job.last_heartbeat_at,
+                            "missed_seconds": round(now - (job.last_heartbeat_at or now), 3),
+                            "stale_since": job.stale_since,
+                        },
+                        budget=OBSERVABILITY_EMIT_BUDGET_SECONDS,
+                    )
                     await job.notify_listeners({"type": "supervisor", "state": "stale"})
 
     async def stop_cleanup_task(self) -> None:
@@ -597,6 +634,73 @@ class JobManager:
         logger.info("Recovered durable job %s from envelope", job_id)
         return job_id
 
+    async def _emit_bounded(
+        self,
+        job: JobRecord,
+        event_type: str,
+        payload: dict | None = None,
+        *,
+        budget: float,
+    ) -> None:
+        """Emit an observability event with a hard wall-clock bound.
+
+        Guarantees that observability I/O can never stall the calling loop
+        beyond ``budget`` seconds — a hung PostgreSQL write is abandoned
+        (the in-flight insert is cancelled before commit, so nothing partial
+        is persisted) and the caller keeps its deadline. Never raises and
+        never fails the job.
+        """
+        try:
+            await asyncio.wait_for(
+                self._emit_observability_event(job, event_type, payload), timeout=budget
+            )
+        except TimeoutError:
+            logger.warning(
+                "Observability emit for job %s (%s) exceeded %.2fs budget; "
+                "continuing without blocking the caller",
+                job.job_id,
+                event_type,
+                budget,
+            )
+
+    async def _emit_cancelled_once(self, job: JobRecord) -> None:
+        """Persist a ``cancelled`` event for a job that never began executing.
+
+        Pre-execution cancellation leaves no attempt_id, so the event is
+        written with an empty-attempt sentinel to keep restart-survivable
+        history queryable. Idempotent via a progress flag: the synchronous
+        cancel path and the _run_job early-return may both observe the same
+        cancellation, but only one event is ever recorded.
+        """
+        if job.progress.get("cancellation_obs_emitted"):
+            return
+        job.progress["cancellation_obs_emitted"] = True
+        payload = {
+            "status": "cancelled",
+            "exit_code": job.exit_code,
+            "error": job.error_message,
+            "duration": job.duration,
+        }
+        import app.state as app_state  # late import: avoids main<->job_manager cycle
+
+        emitter = getattr(app_state, "agent_event_emitter", None)
+        try:
+            if emitter is None:
+                raise ObservabilityDegradedError("observability not wired")
+            await asyncio.wait_for(
+                emitter.pg_emit(
+                    job.job_id,
+                    job.attempt_id,
+                    job.owner_id,
+                    settings.agent_id,
+                    "cancelled",
+                    payload,
+                ),
+                timeout=OBSERVABILITY_EMIT_BUDGET_SECONDS,
+            )
+        except (ObservabilityDegradedError, TimeoutError):
+            self._events.emit(job.job_id, job.owner_id, "cancelled", payload)
+
     async def _emit_observability_event(
         self,
         job: JobRecord,
@@ -614,7 +718,7 @@ class JobManager:
 
         payload = payload or {}
         emitter = getattr(app_state, "agent_event_emitter", None)
-        if emitter is None or job.attempt_id is None:
+        if emitter is None:
             self._events.emit(job.job_id, job.owner_id, event_type, payload)
             return
         try:
@@ -657,6 +761,7 @@ class JobManager:
             job.completed_at = job.completed_at or time.time()
             job.completed_at_mono = job.completed_at_mono or time.monotonic()
             job.completed_event.set()
+            await self._emit_cancelled_once(job)
             if not job.is_durable:
                 await self._persist_terminal_job(job)
             return
@@ -706,9 +811,11 @@ class JobManager:
             async def _heartbeat_loop() -> None:
                 # Renew well before expiry; fractional intervals are important
                 # for short test/configured leases and avoid TTL-boundary races.
-                interval = max(0.1, lease_ttl / 3)
+                interval = _durable_heartbeat_interval(lease_ttl)
+                loop = asyncio.get_running_loop()
+                next_renewal = loop.time() + interval
                 while True:
-                    await asyncio.sleep(interval)
+                    await asyncio.sleep(max(0, next_renewal - loop.time()))
                     ok = await self.redis_queue.heartbeat_durable_execution(
                         job_id,
                         worker_token=worker_token,
@@ -720,16 +827,22 @@ class JobManager:
                         # prevents stale persistence if another worker took over.
                         job.cancel_event.set()
                         break
-                    # Observability piggyback on the SAME tick — renewal
-                    # cadence stays lease_ttl/3, never deferred by PG health.
-                    # The dual-write wrapper keeps the memory pipeline fed
-                    # even while PG is degraded.
+                    next_renewal += interval
+                    # Observability piggyback on the SAME tick — bounded by the
+                    # remaining time before the next scheduled renewal so that
+                    # a hung PG write can never push the next Redis renewal
+                    # past the lease deadline. The dual-write wrapper keeps the
+                    # memory pipeline fed even while PG is degraded.
                     job.last_heartbeat_at = time.time()
                     job.heartbeat_seq += 1
-                    await self._emit_observability_event(
+                    await self._emit_bounded(
                         job,
                         "heartbeat",
                         {"state": "running", "lease_ttl": lease_ttl},
+                        budget=min(
+                            OBSERVABILITY_EMIT_BUDGET_SECONDS,
+                            max(0.01, next_renewal - loop.time()),
+                        ),
                     )
                     if await self.redis_queue.is_durable_cancellation_requested(
                         job_id, worker_token=worker_token
@@ -747,7 +860,12 @@ class JobManager:
                         continue
                     job.last_heartbeat_at = time.time()
                     job.heartbeat_seq += 1
-                    await self._emit_observability_event(job, "heartbeat", {"state": "running"})
+                    await self._emit_bounded(
+                        job,
+                        "heartbeat",
+                        {"state": "running"},
+                        budget=min(5.0, interval / 2),
+                    )
 
             heartbeat_task = asyncio.create_task(_nondurable_heartbeat_loop())
 
@@ -770,10 +888,11 @@ class JobManager:
                     "message": f"Started: {_started_command}",
                 }
             )
-            await self._emit_observability_event(
+            await self._emit_bounded(
                 job,
                 "started",
                 {"command": _started_command, "session_id": job.session_id},
+                budget=OBSERVABILITY_EMIT_BUDGET_SECONDS,
             )
 
             decision = evaluate_command_policy(
@@ -916,21 +1035,26 @@ class JobManager:
                     }
                 )
                 if job.status == "completed":
-                    await self._emit_observability_event(
+                    await self._emit_bounded(
                         job,
                         "completed",
                         {"exit_code": job.exit_code, "duration": job.duration},
+                        budget=OBSERVABILITY_EMIT_BUDGET_SECONDS,
                     )
                 else:
-                    await self._emit_observability_event(
+                    # cancelled/ambiguous keep their own event types: history
+                    # must never mask a user cancellation as a failure, nor an
+                    # unproven remote outcome as either completed or cancelled.
+                    await self._emit_bounded(
                         job,
-                        "failed",
+                        _TERMINAL_EVENT_BY_STATUS.get(job.status, "failed"),
                         {
                             "status": job.status,
                             "exit_code": job.exit_code,
                             "error": job.error_message,
                             "duration": job.duration,
                         },
+                        budget=OBSERVABILITY_EMIT_BUDGET_SECONDS,
                     )
 
             # Non-durable reap: after persistence and terminal emissions so
@@ -1019,6 +1143,7 @@ class JobManager:
                 job.completed_at = time.time()
                 job.completed_at_mono = time.monotonic()
                 job.completed_event.set()
+                await self._emit_cancelled_once(job)
                 await job.notify_listeners({"type": "status", "status": "cancelled"})
                 return "cancelled"
             if durable_status != "cancelling":
@@ -1030,6 +1155,7 @@ class JobManager:
             job.completed_at = time.time()
             job.completed_at_mono = time.monotonic()
             job.completed_event.set()
+            await self._emit_cancelled_once(job)
         else:
             job.status = "cancelling"
         await job.notify_listeners(

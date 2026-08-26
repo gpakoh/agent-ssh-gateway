@@ -371,6 +371,8 @@ async def ssh_connect(
             source_ip=source_ip,
             tenant_labels=_identity.tenant_labels,
             pinned_ip=validated_ips[0],
+            ephemeral=req.ephemeral,
+            idle_timeout_seconds=req.idle_timeout_seconds,
         )
 
     from app.audit import emit_session_lifecycle_event as _emit_session
@@ -388,7 +390,7 @@ async def ssh_connect(
             request_id=getattr(request.state, "request_id", ""),
         )
 
-    if _state.session_store:
+    if _state.session_store and not req.ephemeral:
         try:
             if reusable is not None:
                 await _state.session_store.refresh_session_expiry(
@@ -503,8 +505,10 @@ async def ssh_prewarm(
                 tenant_labels=_identity.tenant_labels,
                 session_id=session_id,
                 pinned_ip=validated_ips[0],
+                ephemeral=req.ephemeral,
+                idle_timeout_seconds=req.idle_timeout_seconds,
             )
-            if _state.session_store:
+            if _state.session_store and not req.ephemeral:
                 try:
                     await _state.session_store.save_session(
                         session_id=session_id,

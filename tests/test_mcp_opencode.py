@@ -29,7 +29,9 @@ from examples.mcp_server.opencode_tools import project_run_opencode  # noqa: E40
 TASK_ID = "2026-06-25-fix-auth-opencode"
 
 
-def _fake_run_cmd(current_plan: str = "# Plan\n\n1. Do the thing", task_json: dict | None = None) -> MagicMock:
+def _fake_run_cmd(
+    current_plan: str = "# Plan\n\n1. Do the thing", task_json: dict | None = None
+) -> MagicMock:
     if task_json is None:
         task_json = {"worktree_path": "../agent-worktrees/test-opencode"}
 
@@ -110,7 +112,9 @@ class TestProjectRunOpencodeExecutes:
         must cd into the absolute project root itself."""
         monkeypatch.setattr(
             "app.workspace.registry.get_registry",
-            lambda: type("R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}})(),
+            lambda: type(
+                "R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}}
+            )(),
         )
         rc = _fake_run_cmd()
         captured: dict[str, str] = {}
@@ -130,7 +134,9 @@ class TestProjectRunOpencodeExecutes:
             captured["script"] = script
             return {"exit_code": 0, "stdout": "", "stderr": ""}
 
-        project_run_opencode(rc, project="test", task_id=TASK_ID, model="gpt-4o", run_script=run_script)
+        project_run_opencode(
+            rc, project="test", task_id=TASK_ID, model="gpt-4o", run_script=run_script
+        )
         assert "--model 'gpt-4o'" in captured["script"]
 
     def test_task_base_ref_reaches_generated_script(self):
@@ -157,6 +163,7 @@ class TestProjectRunOpencodeExecutes:
         assert result["status"] == "error"
         assert "Invalid base_ref" in result["error"]
         run_script.assert_not_called()
+
     def test_non_string_task_base_ref_errors_before_execution(self):
         rc = _fake_run_cmd(
             task_json={"worktree_path": "../agent-worktrees/test-opencode", "base_ref": 123}
@@ -167,7 +174,6 @@ class TestProjectRunOpencodeExecutes:
         assert "base_ref must be a string or None" in result["error"]
         run_script.assert_not_called()
 
-
     def test_managed_mode_uses_immutable_source_bundle(self, monkeypatch):
         base_ref = "c" * 40
         monkeypatch.setenv("MCP_AGENT_WORKSPACE_ROOT", "/var/lib/mcp-agent/workspaces")
@@ -175,11 +181,11 @@ class TestProjectRunOpencodeExecutes:
         monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", "/var/lib/mcp-agent/sources")
         monkeypatch.setattr(
             "app.workspace.registry.get_registry",
-            lambda: type("R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}})(),
+            lambda: type(
+                "R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}}
+            )(),
         )
-        rc = _fake_run_cmd(
-            task_json={"base_ref": base_ref}
-        )
+        rc = _fake_run_cmd(task_json={"base_ref": base_ref, "managed_source_sha256": "a" * 64})
         captured: dict[str, str] = {}
 
         def run_script(project, script):
@@ -190,7 +196,7 @@ class TestProjectRunOpencodeExecutes:
         assert result["status"] == "needs-review"
         script = captured["script"]
         assert f"/{base_ref}.bundle" in script
-        assert 'git clone --no-hardlinks --no-checkout "$MANAGED_SOURCE_BUNDLE" "$wt"' in script
+        assert 'git clone --no-hardlinks --no-checkout "$MANAGED_SOURCE_COPY" "$wt"' in script
         assert 'git clone --no-hardlinks --no-checkout "$PARENT_ROOT" "$wt"' not in script
 
     def test_managed_mode_with_user_worktree_path_errors(self, monkeypatch):
@@ -204,7 +210,9 @@ class TestProjectRunOpencodeExecutes:
         monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", "/var/lib/mcp-agent/sources")
         monkeypatch.setattr(
             "app.workspace.registry.get_registry",
-            lambda: type("R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}})(),
+            lambda: type(
+                "R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}}
+            )(),
         )
         rc = _fake_run_cmd(
             task_json={"worktree_path": "/tmp/valid-user-worktree", "base_ref": base_ref}
@@ -236,7 +244,9 @@ class TestProjectRunOpencodeExecutes:
         monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", "/var/lib/mcp-agent/sources")
         monkeypatch.setattr(
             "app.workspace.registry.get_registry",
-            lambda: type("R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}})(),
+            lambda: type(
+                "R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}}
+            )(),
         )
         rc = _fake_run_cmd(task_json={})
         run_script = MagicMock(return_value={"exit_code": 0, "stdout": "", "stderr": ""})
@@ -264,7 +274,11 @@ class TestProjectRunOpencodeAsyncSubmit:
         rc = _fake_run_cmd()
         run_script_async = MagicMock(return_value={"job_id": "job-77"})
         result = project_run_opencode(
-            rc, project="test", task_id=TASK_ID, async_submit=True, run_script_async=run_script_async
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            async_submit=True,
+            run_script_async=run_script_async,
         )
         assert result["status"] == "running"
         assert result["job_id"] == "job-77"
@@ -281,7 +295,11 @@ class TestProjectRunOpencodeAsyncSubmit:
         rc = _fake_run_cmd(current_plan="")
         run_script_async = MagicMock(return_value={"job_id": "job-1"})
         result = project_run_opencode(
-            rc, project="test", task_id=TASK_ID, async_submit=True, run_script_async=run_script_async
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            async_submit=True,
+            run_script_async=run_script_async,
         )
         assert result["status"] == "error"
         run_script_async.assert_not_called()
@@ -310,10 +328,22 @@ class TestServerWrapperWired:
         example_dir = Path(__file__).resolve().parents[1] / "examples" / "mcp_server"
         monkeypatch.syspath_prepend(str(example_dir))
         # Clear ALL modules that server.py imports so a clean reimport occurs
-        clear_prefixes = ("server", "mcp_server", "tool_modes", "opencode_tools", "command_policy",
-                          "gateway_client", "handoff", "self_test", "write_modes",
-                          "docker_confirm", "agent_tools", "agent_tasks",
-                          "agent_backend_router", "mcp_client_tools")
+        clear_prefixes = (
+            "server",
+            "mcp_server",
+            "tool_modes",
+            "opencode_tools",
+            "command_policy",
+            "gateway_client",
+            "handoff",
+            "self_test",
+            "write_modes",
+            "docker_confirm",
+            "agent_tools",
+            "agent_tasks",
+            "agent_backend_router",
+            "mcp_client_tools",
+        )
         saved_modules = {}
         for name in list(sys.modules):
             if any(p in name for p in clear_prefixes):

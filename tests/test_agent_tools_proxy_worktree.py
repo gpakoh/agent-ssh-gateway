@@ -10,6 +10,7 @@ test_opencode_runner_argv.py.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -160,21 +161,29 @@ class TestBuildOpencodeScriptProxy:
         canonical = 'echo "Status: needs-review" > "$td/agent-status.md"'
         assert snapshot in script
         assert script.index(snapshot) < script.index(canonical)
-        assert '## Worker status snapshot' in script
+        assert "## Worker status snapshot" in script
         assert 'cat "$td/worker-status.md" >> "$td/agent-report.md"' in script
 
 
 class TestBuildOpencodeScriptWorktree:
     def test_worktree_added_when_path_provided(self):
         script = _build_opencode_script(
-            TD, TASK_ID, None, project_root="/srv/proj", worktree_path="/srv/proj/.ai-bridge/worktrees/a12345678901"
+            TD,
+            TASK_ID,
+            None,
+            project_root="/srv/proj",
+            worktree_path="/srv/proj/.ai-bridge/worktrees/a12345678901",
         )
         assert "git worktree add --detach" in script
         assert 'cd "$wt" || exit 1' in script
 
     def test_relative_worktree_resolved_against_project_root(self):
         script = _build_opencode_script(
-            TD, TASK_ID, None, project_root="/srv/proj", worktree_path="../agent-worktrees/a12345678901"
+            TD,
+            TASK_ID,
+            None,
+            project_root="/srv/proj",
+            worktree_path="../agent-worktrees/a12345678901",
         )
         assert "wt='/srv/agent-worktrees/a12345678901'" in script
 
@@ -204,11 +213,17 @@ class TestBuildOpencodeScriptWorktree:
             managed_clone=True,
             base_ref=base_ref,
             managed_source_path=bundle,
+            managed_source_sha256="b" * 64,
         )
-        assert 'git clone --no-hardlinks --no-checkout "$MANAGED_SOURCE_BUNDLE" "$wt"' in script
+        assert 'git clone --no-hardlinks --no-checkout "$MANAGED_SOURCE_COPY" "$wt"' in script
+        assert (
+            "MANAGED_SOURCE_EXPECTED_SHA256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'"
+            in script
+        )
+        assert "MANAGED_COPY_PY" in script
+        assert f"MANAGED_SOURCE_BUNDLE='{bundle}'" in script
         assert f"TASK_BASE_REF='{base_ref}'" in script
         assert 'TASK_BASE_COMMIT="$TASK_BASE_REF"' in script
-        assert bundle in script
         assert 'git -C "$wt" checkout --detach "$TASK_BASE_COMMIT"' in script
         assert "git worktree add" not in script
         assert "workspace with baseline drift" in script
@@ -221,9 +236,7 @@ class TestIsolatedWorktreeGuard:
         assert "outside the authoritative source checkout" in error
 
     def test_nested_workspace_inside_source_is_forbidden(self):
-        error = _isolated_worktree_error(
-            "/srv/proj", "/srv/proj/.ai-bridge/worktrees/task-1"
-        )
+        error = _isolated_worktree_error("/srv/proj", "/srv/proj/.ai-bridge/worktrees/task-1")
         assert error is not None
         assert "outside the authoritative source checkout" in error
 
@@ -298,6 +311,7 @@ def _run_managed_bundle_case(
         managed_clone=True,
         base_ref=base_ref,
         managed_source_path=str(source_bundle),
+        managed_source_sha256=hashlib.sha256(source_bundle.read_bytes()).hexdigest(),
     )
     result = subprocess.run(
         ["sh", "-c", script],
@@ -440,9 +454,9 @@ def test_full_script_reports_needs_review_warning_when_check_tool_missing(tmp_pa
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
-    assert (
-        artifacts / "agent-status.md"
-    ).read_text(encoding="utf-8").strip() == "Status: needs-review-warning"
+    assert (artifacts / "agent-status.md").read_text(
+        encoding="utf-8"
+    ).strip() == "Status: needs-review-warning"
     report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
     assert "- Required-checks exit code: 127 (ran=1)" in report
 
@@ -534,6 +548,7 @@ def test_managed_clone_executes_without_creating_source_worktree_metadata(tmp_pa
         managed_clone=True,
         base_ref=source_head,
         managed_source_path=str(source_bundle),
+        managed_source_sha256=hashlib.sha256(source_bundle.read_bytes()).hexdigest(),
     )
     result = subprocess.run(
         ["sh", "-c", script],
@@ -559,7 +574,9 @@ def test_managed_clone_executes_without_creating_source_worktree_metadata(tmp_pa
     }
     assert source_objects_after == source_objects_before
     assert not (source / ".git" / "worktrees").exists()
-    assert (artifacts / "agent-status.md").read_text(encoding="utf-8").strip() == "Status: needs-review"
+    assert (artifacts / "agent-status.md").read_text(
+        encoding="utf-8"
+    ).strip() == "Status: needs-review"
 
 
 def test_managed_clone_rejects_existing_workspace_with_remote(tmp_path, monkeypatch):
@@ -598,6 +615,7 @@ def test_managed_clone_rejects_existing_workspace_with_remote(tmp_path, monkeypa
         managed_clone=True,
         base_ref=source_head,
         managed_source_path=str(source_bundle),
+        managed_source_sha256=hashlib.sha256(source_bundle.read_bytes()).hexdigest(),
     )
     result = subprocess.run(
         ["sh", "-c", script],
@@ -648,6 +666,7 @@ def test_managed_clone_rejects_symlink_workspace(tmp_path, monkeypatch):
         managed_clone=True,
         base_ref=source_head,
         managed_source_path=str(source_bundle),
+        managed_source_sha256=hashlib.sha256(source_bundle.read_bytes()).hexdigest(),
     )
     result = subprocess.run(
         ["sh", "-c", script],
@@ -697,6 +716,7 @@ def test_managed_clone_requires_registry_root_at_git_toplevel(tmp_path, monkeypa
         managed_clone=True,
         base_ref=repo_head,
         managed_source_path=str(source_bundle),
+        managed_source_sha256=hashlib.sha256(source_bundle.read_bytes()).hexdigest(),
     )
     result = subprocess.run(
         ["sh", "-c", script],
@@ -740,9 +760,7 @@ def _run_proxy_preflight_script(tmp_path: Path, monkeypatch, *, provider_body: s
         provider = tmp_path / "provider.txt"
         provider.write_text(provider_body, encoding="utf-8")
         monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", provider.as_uri())
-    script = _build_opencode_script(
-        str(artifacts), TASK_ID, None, project_root=str(source)
-    )
+    script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
     result = subprocess.run(
         ["sh", "-c", script], cwd=source, text=True, capture_output=True, check=False, timeout=15
     )
@@ -831,10 +849,7 @@ def test_parallel_runners_receive_distinct_proxy_leases(tmp_path, monkeypatch):
         capture = tmp_path / "proxy-capture.txt"
         fake = fake_bin / "opencode"
         fake.write_text(
-            "#!/bin/sh\n"
-            'printf "%s\\n" "$HTTP_PROXY" >> "$PROXY_CAPTURE"\n'
-            "sleep 1\n"
-            "exit 0\n",
+            '#!/bin/sh\nprintf "%s\\n" "$HTTP_PROXY" >> "$PROXY_CAPTURE"\nsleep 1\nexit 0\n',
             encoding="utf-8",
         )
         fake.chmod(0o755)
@@ -878,7 +893,6 @@ def test_parallel_runners_receive_distinct_proxy_leases(tmp_path, monkeypatch):
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
-
 
 
 def test_proxy_transport_expired_certificate_retries_next_proxy(tmp_path, monkeypatch):
@@ -926,12 +940,20 @@ def test_proxy_transport_expired_certificate_retries_next_proxy(tmp_path, monkey
 
         script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
         result = subprocess.run(
-            ["sh", "-c", script], cwd=source, text=True, capture_output=True, check=False, timeout=15
+            ["sh", "-c", script],
+            cwd=source,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
         )
 
         assert result.returncode == 0, result.stderr or result.stdout
         assert capture.read_text(encoding="utf-8").splitlines() == _ProxyPoolHandler.proxies
-        assert any(report.get("proxy") == _ProxyPoolHandler.proxies[0] for report in _ProxyPoolHandler.reports)
+        assert any(
+            report.get("proxy") == _ProxyPoolHandler.proxies[0]
+            for report in _ProxyPoolHandler.reports
+        )
         assert "startup-ok" in (artifacts / "opencode-output.log").read_text(encoding="utf-8")
         worker_status = (artifacts / "worker-status.md").read_text(encoding="utf-8")
         assert "rotating proxy (attempt 1/4)" in worker_status
@@ -986,7 +1008,12 @@ def test_proxy_transport_marker_after_real_progress_does_not_retry(tmp_path, mon
 
         script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
         result = subprocess.run(
-            ["sh", "-c", script], cwd=source, text=True, capture_output=True, check=False, timeout=15
+            ["sh", "-c", script],
+            cwd=source,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
         )
 
         assert result.returncode == 1
@@ -1041,9 +1068,7 @@ def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
         monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "1")
         monkeypatch.setenv("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "1")
 
-        script = _build_opencode_script(
-            str(artifacts), TASK_ID, None, project_root=str(source)
-        )
+        script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
         result = subprocess.run(
             ["sh", "-c", script],
             cwd=source,
@@ -1120,9 +1145,7 @@ def test_startup_stall_can_reach_third_distinct_proxy(tmp_path, monkeypatch):
         monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "1")
         monkeypatch.setenv("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "1")
 
-        script = _build_opencode_script(
-            str(artifacts), TASK_ID, None, project_root=str(source)
-        )
+        script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
         result = subprocess.run(
             ["sh", "-c", script],
             cwd=source,
@@ -1139,9 +1162,7 @@ def test_startup_stall_can_reach_third_distinct_proxy(tmp_path, monkeypatch):
         reported = {report.get("proxy") for report in _ProxyPoolHandler.reports}
         assert _ProxyPoolHandler.proxies[0] in reported
         assert _ProxyPoolHandler.proxies[1] in reported
-        assert "third-proxy-ok" in (artifacts / "opencode-output.log").read_text(
-            encoding="utf-8"
-        )
+        assert "third-proxy-ok" in (artifacts / "opencode-output.log").read_text(encoding="utf-8")
         worker_status = (artifacts / "worker-status.md").read_text(encoding="utf-8")
         assert "attempt 1/4" in worker_status
         assert "attempt 2/4" in worker_status
@@ -1202,9 +1223,7 @@ def test_startup_retry_stops_at_configured_attempt_limit(tmp_path, monkeypatch):
         monkeypatch.setenv("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "1")
         monkeypatch.setenv("OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS", "3")
 
-        script = _build_opencode_script(
-            str(artifacts), TASK_ID, None, project_root=str(source)
-        )
+        script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
         result = subprocess.run(
             ["sh", "-c", script],
             cwd=source,
@@ -1436,7 +1455,7 @@ class TestSupervisorPostrunEvidence:
         monkeypatch.setenv("VIRTUAL_ENV", str(venv))
 
         check = (
-            "python3 -c \"import os; "
+            'python3 -c "import os; '
             "assert open('base.txt').read() == 'changed by worker\\n'; "
             "assert not os.path.isdir('.venv'); "
             "assert 'PYTHONPATH' not in os.environ; "
@@ -1521,7 +1540,7 @@ class TestSupervisorPostrunEvidence:
         script = "\n".join(
             [
                 f"td={shlex.quote(str(td))}",
-                "mkdir -p \"$td\"",
+                'mkdir -p "$td"',
                 *_parent_prerun_snapshot_script_lines(str(parent)),
                 f"cd {shlex.quote(str(worker))}",
                 f"BASE_HEAD={shlex.quote(base_head)}",
@@ -1598,7 +1617,7 @@ class TestSupervisorPostrunEvidence:
             project_root="/srv/proj",
             worktree_path="/srv/agent-workspaces/t1",
         )
-        assert "git -C \"$wt\" rev-parse --show-toplevel" in script
+        assert 'git -C "$wt" rev-parse --show-toplevel' in script
         assert "Refusing non-worktree-root path" in script
         assert "Refusing dirty existing workspace" in script
 
@@ -1630,6 +1649,7 @@ class TestSupervisorPostrunEvidence:
             managed_clone=True,
             base_ref=source_head,
             managed_source_path=str(source_bundle),
+            managed_source_sha256=hashlib.sha256(source_bundle.read_bytes()).hexdigest(),
         )
 
         assert str(source) not in script
@@ -1645,18 +1665,20 @@ class TestSupervisorPostrunEvidence:
         assert result.returncode == 0, result.stderr or result.stdout
         assert _git(workspace, "rev-parse", "HEAD") == source_head
         assert _git(workspace, "remote") == ""
-        assert (artifacts / "agent-status.md").read_text(encoding="utf-8").strip() == "Status: needs-review"
+        assert (artifacts / "agent-status.md").read_text(
+            encoding="utf-8"
+        ).strip() == "Status: needs-review"
 
 
 class TestSupervisorRequiredCheckDevExtraBootstrap:
     @staticmethod
     def _commit_uv_project(root: Path, *, dev_extra: bool) -> str:
-        pyproject = "[project]\nname = \"verification-fixture\"\nversion = \"0.0.0\"\n"
+        pyproject = '[project]\nname = "verification-fixture"\nversion = "0.0.0"\n'
         if dev_extra:
             pyproject += "\n[project.optional-dependencies]\ndev = []\n"
         (root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
         (root / "uv.lock").write_text(
-            "version = 1\nrevision = 1\nrequires-python = \">=3.11\"\n", encoding="utf-8"
+            'version = 1\nrevision = 1\nrequires-python = ">=3.11"\n', encoding="utf-8"
         )
         _git(root, "add", "pyproject.toml", "uv.lock")
         _git(root, "commit", "-m", "add uv fixture")
@@ -1685,7 +1707,9 @@ class TestSupervisorRequiredCheckDevExtraBootstrap:
         assert "bootstrapping declared dev extra" in log
         assert "dev extra bootstrap succeeded" in log
 
-    def test_uv_project_without_dev_extra_preserves_existing_check_behavior(self, tmp_path, monkeypatch):
+    def test_uv_project_without_dev_extra_preserves_existing_check_behavior(
+        self, tmp_path, monkeypatch
+    ):
         _init_git_repo(tmp_path)
         base_head = self._commit_uv_project(tmp_path, dev_extra=False)
         fake_bin = tmp_path.parent / f"{tmp_path.name}-fake-bin"
@@ -1756,9 +1780,7 @@ class TestRuntimeTimeout:
         fake = fake_bin / "opencode"
         # Emit real (non-build) progress then hang forever.
         fake.write_text(
-            "#!/bin/sh\n"
-            'printf "\\033[0m\\n> big-pickle\\n\\033[0m"\n'
-            "sleep 3600\n",
+            '#!/bin/sh\nprintf "\\033[0m\\n> big-pickle\\n\\033[0m"\nsleep 3600\n',
             encoding="utf-8",
         )
         fake.chmod(0o755)
@@ -1767,9 +1789,7 @@ class TestRuntimeTimeout:
         monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
         monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "2")
 
-        script = _build_opencode_script(
-            str(artifacts), TASK_ID, None, project_root=str(source)
-        )
+        script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
         result = subprocess.run(
             ["sh", "-c", script],
             cwd=source,
@@ -1824,9 +1844,7 @@ class TestRuntimeTimeout:
             # Emit progress (non-build line) then hang — same as above but
             # with a proxy configured so startup retry is in play.
             fake.write_text(
-                "#!/bin/sh\n"
-                'printf "\\033[0m\\n> big-pickle\\n\\033[0m"\n'
-                "sleep 3600\n",
+                '#!/bin/sh\nprintf "\\033[0m\\n> big-pickle\\n\\033[0m"\nsleep 3600\n',
                 encoding="utf-8",
             )
             fake.chmod(0o755)
@@ -1843,9 +1861,7 @@ class TestRuntimeTimeout:
             monkeypatch.setenv("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "1")
             monkeypatch.setenv("OPENCODE_RUN_TIMEOUT_SECONDS", "2")
 
-            script = _build_opencode_script(
-                str(artifacts), TASK_ID, None, project_root=str(source)
-            )
+            script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
             result = subprocess.run(
                 ["sh", "-c", script],
                 cwd=source,

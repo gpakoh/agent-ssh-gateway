@@ -146,6 +146,7 @@ class _FakePGStore:
         self.calls: list[tuple] = []
         self.ok_types: list[str] = []
         self.ok_payloads: list[dict | None] = []
+        self.ok_attempt_ids: list[str | None] = []
         self.queue_sizes_during_insert: list[int] = []
         self._seq = 0
         self._fail_first = fail_first
@@ -160,6 +161,7 @@ class _FakePGStore:
         self._seq += 1
         self.ok_types.append(kwargs["event_type"])
         self.ok_payloads.append(kwargs.get("payload"))
+        self.ok_attempt_ids.append(kwargs.get("attempt_id"))
         return SimpleNamespace(sequence=self._seq, created_at=None)
 
     async def get_latest_sequence(self, job_id: str) -> int | None:
@@ -434,7 +436,7 @@ from unittest.mock import AsyncMock  # noqa: E402
 
 import app.job_manager as job_manager_module  # noqa: E402
 from app.job_manager import JobManager  # noqa: E402
-from tests.test_durable_job_recovery import _make_queue  # noqa: E402
+from tests.test_durable_job_recovery import _make_queue, _make_stream  # noqa: E402
 
 
 def _v2_manager(queue, execute_stream):
@@ -713,6 +715,407 @@ async def test_already_stale_not_reemitted_and_unclaimed_skipped(monkeypatch):
         await jm.stop_supervisor_task()
 
 
+@pytest.mark.asyncio
+async def test_stale_event_payload_contains_spec_fields(monkeypatch):
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    monkeypatch.setattr(_settings, "stale_scan_interval", 0.05)
+    monkeypatch.setattr(_settings, "stale_threshold", 0.2)
+    jm = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+    job = _running_job(jm, hb_age=5.0)
+    expected_hb = job.last_heartbeat_at
+    await jm.start_supervisor_task()
+    try:
+        for _ in range(100):
+            if job.supervisor_state == "stale":
+                break
+            await asyncio.sleep(0.02)
+        assert job.supervisor_state == "stale"
+        stale_payloads = [
+            p
+            for t, p in zip(pg.ok_types, pg.ok_payloads, strict=False)
+            if t == "stale" and p is not None
+        ]
+        assert len(stale_payloads) == 1
+        payload = stale_payloads[0]
+        assert payload["last_heartbeat_at"] == expected_hb
+        assert payload["missed_seconds"] >= 0.2
+        assert payload["stale_since"] is not None
+    finally:
+        await jm.stop_supervisor_task()
+
+
+# ---------------------------------------------------------------------------
+# Corrective round BLOCKER 2: cancelled lifecycle events
+# ---------------------------------------------------------------------------
+
+
+def _plain_job(jm, status="pending"):
+    from app.job_manager import JobRecord
+
+    job = JobRecord(job_id=f"j-cancel-{time.time_ns()}", session_id="s", command="x")
+    job.status = status
+    jm._jobs[job.job_id] = job
+    return job
+
+
+@pytest.mark.asyncio
+async def test_pending_cancel_persists_cancelled_event(monkeypatch):
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    jm = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+    job = _plain_job(jm)  # never claimed, no attempt_id
+    result = await jm.cancel_job(job.job_id)
+    assert result == "cancelled"
+    assert job.status == "cancelled"
+    assert "cancelled" in pg.ok_types  # persisted despite missing attempt
+    payload = pg.ok_payloads[pg.ok_types.index("cancelled")]
+    assert payload["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_durable_preack_cancel_persists_cancelled_event(monkeypatch):
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    q = _make_queue()
+    jm = _v2_manager(q, _make_stream())
+    job = _plain_job(jm)
+    job.is_durable = True
+
+    async def fake_request(job_id):
+        return "cancelled"
+
+    monkeypatch.setattr(q, "request_durable_cancellation", fake_request)
+    result = await jm.cancel_job(job.job_id)
+    assert result == "cancelled"
+    assert "cancelled" in pg.ok_types
+
+
+@pytest.mark.asyncio
+async def test_cancelled_event_emitted_exactly_once_across_paths(monkeypatch):
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    jm = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+    job = _plain_job(jm)
+    await jm.cancel_job(job.job_id)  # synchronous cancel path emits
+    await jm._run_job(job.job_id)  # early-return path must not duplicate
+    assert len([t for t in pg.ok_types if t == "cancelled"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_running_cancellation_records_cancelled_type(monkeypatch):
+    monkeypatch.setattr(_settings, "heartbeat_interval", 0.02)
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def stream(*args, **kwargs):
+        started.set()
+        await release.wait()
+        yield "exit", "-1"
+
+    ssh = AsyncMock()
+    ssh.execute_stream = stream
+    jm = JobManager(ssh_manager=ssh, max_jobs=10)
+    job_id = await jm.create_job("s1", "nd-cancel", owner_id="o1")
+    job = await jm.get_job(job_id)
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await jm.cancel_job(job_id)  # running -> cancelling
+    release.set()
+    await asyncio.wait_for(job.completed_event.wait(), timeout=5)
+    assert job.status == "cancelled"
+    types = [c[1] for c in pg.calls if c[0] == "insert"]
+    assert types[-1] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_terminal_recorded_as_ambiguous(monkeypatch):
+    monkeypatch.setattr(job_manager_module, "DURABLE_LEASE_TTL_SECONDS", 1)
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    q = _make_queue()
+
+    async def fake_request(job_id):
+        return "cancelling"
+
+    monkeypatch.setattr(q, "request_durable_cancellation", fake_request)
+
+    started = asyncio.Event()
+
+    async def stream(*args, **kwargs):
+        started.set()
+        await kwargs["cancel_event"].wait()  # local interruption while running
+        yield "exit", "-1"  # synthetic sentinel: remote outcome unproven
+
+    jm = _v2_manager(q, stream)
+    job_id = await jm.create_job(
+        "sid", "durable-cancel", owner_id="owner", submission_key="key:v2-amb"
+    )
+    job = await jm.get_job(job_id)
+    await asyncio.wait_for(started.wait(), timeout=2)
+    await jm.cancel_job(job_id)  # running -> cancelling
+    await asyncio.wait_for(job.completed_event.wait(), timeout=5)
+    assert job.status == "ambiguous"
+    types = [c[1] for c in pg.calls if c[0] == "insert"]
+    assert types[-1] == "ambiguous"
+    assert "cancelled" not in types
+    assert "completed" not in types
+
+
+def test_sse_terminal_types_include_cancelled_and_ambiguous():
+    from app.routers.agents import _TERMINAL_EVENT_TYPES
+
+    assert {"cancelled", "ambiguous"} <= _TERMINAL_EVENT_TYPES
+
+
+# ---------------------------------------------------------------------------
+# BLOCKER A: pre-attempt cancellation carries attempt_id=NULL in PG
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pending_cancel_pg_row_has_null_attempt_id(monkeypatch):
+    """Pending cancellation persists to PG with attempt_id=None — the
+    execution attempt never existed, so the column must stay NULL."""
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    jm = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+    job = _plain_job(jm)  # attempt_id is None
+    assert job.attempt_id is None
+    result = await jm.cancel_job(job.job_id)
+    assert result == "cancelled"
+    assert "cancelled" in pg.ok_types
+    idx = pg.ok_types.index("cancelled")
+    assert pg.ok_attempt_ids[idx] is None, (
+        "pre-execution cancelled event must have attempt_id=None in PG"
+    )
+
+
+@pytest.mark.asyncio
+async def test_running_cancellation_pg_row_has_real_attempt_id(monkeypatch):
+    """Running cancellation carries the real execution attempt_id."""
+    monkeypatch.setattr(_settings, "heartbeat_interval", 0.02)
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def stream(*args, **kwargs):
+        started.set()
+        await release.wait()
+        yield "exit", "-1"
+
+    ssh = AsyncMock()
+    ssh.execute_stream = stream
+    jm = JobManager(ssh_manager=ssh, max_jobs=10)
+    job_id = await jm.create_job("s1", "nd-cancel", owner_id="o1")
+    job = await jm.get_job(job_id)
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert job.attempt_id is not None, "running job must have real attempt_id"
+    await jm.cancel_job(job_id)
+    release.set()
+    await asyncio.wait_for(job.completed_event.wait(), timeout=5)
+    types = [c[1] for c in pg.calls if c[0] == "insert"]
+    assert types[-1] == "cancelled"
+    idx = types.index("cancelled")
+    assert pg.ok_attempt_ids[idx] == job.attempt_id, (
+        "running cancellation must carry real attempt_id"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_cancel_does_not_assign_synthetic_attempt_id(monkeypatch):
+    """A pending job cancelled before execution must NOT receive a synthetic
+    attempt_id — attempt_id identifies execution, not lifecycle."""
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    jm = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+    job = _plain_job(jm)
+    assert job.attempt_id is None
+    await jm.cancel_job(job.job_id)
+    assert job.attempt_id is None, (
+        "cancel must not inject a synthetic attempt_id onto the JobRecord"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Corrective round BLOCKERS 3+4: durable cadence & hung-PG renewal safety
+# ---------------------------------------------------------------------------
+
+
+def test_durable_heartbeat_interval_is_ttl_third():
+    assert job_manager_module._durable_heartbeat_interval(60) == pytest.approx(20.0)
+    assert job_manager_module._durable_heartbeat_interval(1.5) == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_hung_pg_emit_does_not_defer_lease_renewal(monkeypatch):
+    monkeypatch.setattr(job_manager_module, "DURABLE_LEASE_TTL_SECONDS", 1)
+    emitter, pg = _wire_state_emitter(monkeypatch)
+
+    async def hung_insert(**kwargs):  # never returns, never raises
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(pg, "insert", hung_insert)
+    monkeypatch.setattr(job_manager_module, "OBSERVABILITY_EMIT_BUDGET_SECONDS", 0.3)
+
+    q = _make_queue()
+    renewal_gaps: list[float] = []
+    last_t: list[float | None] = [None]
+    original = q.heartbeat_durable_execution
+
+    async def spying_renewal(*args, **kwargs):
+        now = time.monotonic()
+        if last_t[0] is not None:
+            renewal_gaps.append(now - last_t[0])
+        last_t[0] = now
+        return await original(*args, **kwargs)
+
+    q.heartbeat_durable_execution = spying_renewal
+    started = asyncio.Event()
+
+    async def stream(*args, **kwargs):
+        started.set()
+        await asyncio.sleep(1.2)  # room for >= 3 nominal renewals at ~0.33s
+        yield "exit", "0"
+
+    jm = _v2_manager(q, stream)
+    job_id = await jm.create_job(
+        "sid", "durable-hang", owner_id="owner", submission_key="key:v2-hang"
+    )
+    job = await jm.get_job(job_id)
+    await asyncio.wait_for(started.wait(), timeout=2)
+    await asyncio.wait_for(job.completed_event.wait(), timeout=8)
+
+    assert len(renewal_gaps) >= 2  # renewals kept happening
+    assert all(g <= 0.8 for g in renewal_gaps)  # ~0.33s nominal + 0.3s budget cap
+    assert job.status == "completed"  # observability timeout never fails the job
+
+
+@pytest.mark.asyncio
+async def test_slow_pg_does_not_drift_renewal_deadline(monkeypatch):
+    """BLOCKER B: absolute-monotonic scheduling.
+
+    A deliberately slow PG insert (0.15s) must not push Redis renewal gaps
+    above lease_ttl/3 + margin.  Without absolute scheduling the gaps would
+    include the PG delay and drift to interval + 0.15s each iteration.
+    """
+    lease_ttl = 1.5
+    interval = lease_ttl / 3  # 0.5s
+    monkeypatch.setattr(job_manager_module, "DURABLE_LEASE_TTL_SECONDS", int(lease_ttl))
+    emitter, pg = _wire_state_emitter(monkeypatch)
+
+    async def slow_insert(**kwargs):
+        pg.calls.append(("insert", kwargs["event_type"]))
+        pg.ok_types.append(kwargs["event_type"])
+        pg.ok_payloads.append(kwargs.get("payload"))
+        pg._seq += 1
+        await asyncio.sleep(0.15)  # deliberate PG latency
+        return SimpleNamespace(sequence=pg._seq, created_at=None)
+
+    monkeypatch.setattr(pg, "insert", slow_insert)
+
+    q = _make_queue()
+    renewal_times: list[float] = []
+    original = q.heartbeat_durable_execution
+
+    async def recording_renewal(*args, **kwargs):
+        renewal_times.append(time.monotonic())
+        return await original(*args, **kwargs)
+
+    q.heartbeat_durable_execution = recording_renewal
+    started = asyncio.Event()
+
+    async def stream(*args, **kwargs):
+        started.set()
+        await asyncio.sleep(2.0)  # ~4 renewal cycles at 0.5s
+        yield "exit", "0"
+
+    jm = _v2_manager(q, stream)
+    job_id = await jm.create_job(
+        "sid", "durable-slow-pg", owner_id="owner", submission_key="key:v2-slowpg"
+    )
+    job = await jm.get_job(job_id)
+    await asyncio.wait_for(started.wait(), timeout=2)
+    await asyncio.wait_for(job.completed_event.wait(), timeout=8)
+
+    assert len(renewal_times) >= 3, f"expected ≥3 renewals, got {len(renewal_times)}"
+    gaps = [renewal_times[i + 1] - renewal_times[i] for i in range(len(renewal_times) - 1)]
+    # With absolute scheduling each gap should be ~interval (0.5s), not
+    # interval + PG_delay (0.65s).  Allow 20% margin for event-loop jitter.
+    max_allowed = interval * 1.2
+    assert all(g <= max_allowed for g in gaps), (
+        f"renewal gaps drifted beyond {max_allowed:.3f}s: {gaps}"
+    )
+    assert job.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_emit_budget_never_exceeds_global_cap(monkeypatch):
+    """Production-like long interval: lease_ttl=60 → interval=20s.
+    Without the global cap, emit budget would be min(20, remaining) ≈ 20s.
+    With OBSERVABILITY_EMIT_BUDGET_SECONDS=0.3 the hung PG must time out
+    at 0.3s, not 20s, proving both caps apply simultaneously."""
+    monkeypatch.setattr(job_manager_module, "DURABLE_LEASE_TTL_SECONDS", 60)
+    emitter, pg = _wire_state_emitter(monkeypatch)
+    monkeypatch.setattr(job_manager_module, "OBSERVABILITY_EMIT_BUDGET_SECONDS", 0.3)
+
+    async def hung_insert(**kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(pg, "insert", hung_insert)
+
+    q = _make_queue()
+    started = asyncio.Event()
+
+    async def stream(*args, **kwargs):
+        started.set()
+        await asyncio.sleep(1.0)
+        yield "exit", "0"
+
+    jm = _v2_manager(q, stream)
+    job_id = await jm.create_job(
+        "sid", "durable-cap", owner_id="owner", submission_key="key:v2-cap"
+    )
+    job = await jm.get_job(job_id)
+    await asyncio.wait_for(started.wait(), timeout=2)
+    t0 = time.monotonic()
+    await asyncio.wait_for(job.completed_event.wait(), timeout=8)
+    elapsed = time.monotonic() - t0
+    # Job must complete quickly — hung PG timed out at global cap (0.3s),
+    # not at interval-based budget (~10s for 20s interval).
+    assert elapsed < 2.0, f"job took {elapsed:.2f}s — PG emit likely not bounded by global cap"
+    assert job.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_hung_pg_does_not_block_job_execution_path(monkeypatch):
+    """A PG write hanging from the very first event must not stall execution.
+
+    The ``started`` emission sits between the Redis claim and execute_stream;
+    without an emit budget the whole job would freeze before running.
+    """
+    monkeypatch.setattr(job_manager_module, "DURABLE_LEASE_TTL_SECONDS", 1)
+    emitter, pg = _wire_state_emitter(monkeypatch)
+
+    async def hung_insert(**kwargs):
+        pg.calls.append(("insert", kwargs["event_type"]))  # attempt recorded
+        await asyncio.Event().wait()  # hangs from the first call
+
+    monkeypatch.setattr(pg, "insert", hung_insert)
+    monkeypatch.setattr(job_manager_module, "OBSERVABILITY_EMIT_BUDGET_SECONDS", 0.3)
+
+    q = _make_queue()
+    stream_entered = asyncio.Event()
+
+    async def stream(*args, **kwargs):
+        stream_entered.set()
+        await asyncio.sleep(0.2)
+        yield "exit", "0"
+
+    jm = _v2_manager(q, stream)
+    job_id = await jm.create_job(
+        "sid", "durable-execpath", owner_id="owner", submission_key="key:v2-execpath"
+    )
+    job = await jm.get_job(job_id)
+    await asyncio.wait_for(stream_entered.wait(), timeout=3)
+    await asyncio.wait_for(job.completed_event.wait(), timeout=6)
+    assert job.status == "completed"
+    assert ("insert", "started") in pg.calls  # attempted, just bounded
+
+
 # ---------------------------------------------------------------------------
 # Task 6.1: PG-based query API
 # ---------------------------------------------------------------------------
@@ -729,11 +1132,16 @@ class _FakeQueryStore:
     def __init__(self, events=None):
         self._events = list(events or [])
 
-    async def get_owner_id(self, job_id):
+    async def get_owner_ids(self, job_id):
+        seen = []
         for e in self._events:
-            if e["job_id"] == job_id:
-                return e["owner_id"]
-        return None
+            if e["job_id"] == job_id and e["owner_id"] not in seen:
+                seen.append(e["owner_id"])
+        return seen
+
+    async def get_owner_id(self, job_id):
+        owners = await self.get_owner_ids(job_id)
+        return owners[0] if len(owners) == 1 else None
 
     async def get_events(self, job_id, **_kwargs):
         rows = [e for e in self._events if e["job_id"] == job_id]
@@ -1015,6 +1423,7 @@ async def test_integration_durable_lifecycle_records_in_pg(monkeypatch):
 
     types = [c[1] for c in pg.calls if c[0] == "insert"]
     assert types == ["started"] + ["heartbeat"] * (len(types) - 2) + ["completed"]
+    assert "heartbeat" in types, "healthy PG path must persist heartbeat events"
     assert job.attempt_id is not None
 
 
@@ -1236,3 +1645,310 @@ async def test_adversarial_overflow_keeps_store_intact(monkeypatch):
     assert len(errors) == 1 and "last_sequence" in errors[0]["data"]
     committed = await store.get_events("job-q")
     assert len(committed) == 6  # overflow signaled, nothing dropped server-side
+
+
+# ---------------------------------------------------------------------------
+# Corrective round BLOCKERS 6+7: lock scope & persisted authorization
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_slow_pg_emit_does_not_block_manager_operations(monkeypatch):
+    """Adversarial: supervisor stuck in a hung PG emit must not stall the
+    manager's create/get/cancel paths (no DB await may hold the lock)."""
+    emitter, pg = _wire_state_emitter(monkeypatch)
+
+    async def hung_insert(**kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(pg, "insert", hung_insert)
+    monkeypatch.setattr(job_manager_module, "OBSERVABILITY_EMIT_BUDGET_SECONDS", 0.3)
+    monkeypatch.setattr(_settings, "stale_scan_interval", 0.05)
+    monkeypatch.setattr(_settings, "stale_threshold", 0.2)
+
+    async def _noop_stream(*_a, **_kw):
+        return
+        yield  # pragma: no cover — async generator marker
+
+    ssh_mock = AsyncMock()
+    ssh_mock.execute_stream = _noop_stream
+    jm = JobManager(ssh_manager=ssh_mock, max_jobs=10)
+    job = _running_job(jm, hb_age=5.0)  # sweep will flag stale -> hung emit
+    await jm.start_supervisor_task()
+    try:
+        for _ in range(100):
+            if job.supervisor_state == "stale":
+                break
+            await asyncio.sleep(0.02)
+        assert job.supervisor_state == "stale"  # inside hung emit window now
+
+        ops_t0 = time.monotonic()
+        j2 = await asyncio.wait_for(jm.create_job("s2", "nd-ok", owner_id="o2"), timeout=2)
+        got = await asyncio.wait_for(jm.get_job(j2), timeout=2)
+        assert got is not None
+
+        # cancel_job() itself must not be blocked by the supervisor's hung PG emit.
+        cancel_ret = await asyncio.wait_for(jm.cancel_job(j2), timeout=2)
+        ops_elapsed = time.monotonic() - ops_t0
+
+        # Manager operations (create/get/cancel) must complete within budget.
+        assert ops_elapsed < 2.0
+
+        # The _run_job task races with cancel_job: if it promoted the job to
+        # "running" before cancel ran, the cancel path returns "cancelling".
+        assert cancel_ret in {"cancelled", "cancelling"}
+
+        # Terminal convergence has its own explicit bound (separate from the
+        # manager-operation latency budget).
+        if cancel_ret == "cancelling":
+            await asyncio.wait_for(got.completed_event.wait(), timeout=5)
+
+        assert got.status == "cancelled"
+    finally:
+        await jm.stop_supervisor_task()
+
+
+@pytest.mark.asyncio
+async def test_cancel_on_running_job_reaches_terminal(monkeypatch):
+    """Deterministically prove the pending vs running race: block
+    execute_stream until cancel_event, ensuring the job is in 'running'
+    when cancel_job is called.  cancel_job returns 'cancelling' (not
+    'cancelled').  The old synchronous assertion would immediately RED;
+    the corrected path reaches terminal 'cancelled' via completed_event."""
+    emitter, pg = _wire_state_emitter(monkeypatch)
+
+    async def blocking_stream(*_args, cancel_event=None, **_kwargs):
+        """Simulate a long-running command that stops only when cancelled."""
+        if cancel_event is not None:
+            await cancel_event.wait()
+        return
+        yield  # pragma: no cover — async generator marker only
+
+    ssh = AsyncMock()
+    ssh.execute_stream = blocking_stream
+    jm = JobManager(ssh_manager=ssh, max_jobs=10)
+
+    j2 = await asyncio.wait_for(jm.create_job("s2", "long-cmd", owner_id="o2"), timeout=2)
+    got = await asyncio.wait_for(jm.get_job(j2), timeout=2)
+    assert got is not None
+
+    # Wait for _run_job to promote to "running".
+    for _ in range(200):
+        if got.status == "running":
+            break
+        await asyncio.sleep(0.01)
+    assert got.status == "running"
+
+    # cancel_job on a running job returns "cancelling", never "cancelled".
+    cancel_ret = await asyncio.wait_for(jm.cancel_job(j2), timeout=2)
+    assert cancel_ret == "cancelling"
+    # Old broken assertion: assert got.status == "cancelled"  — would RED here.
+
+    # The corrected path: _run_job detects cancel_event and transitions
+    # the job to terminal "cancelled", signaling completed_event.
+    await asyncio.wait_for(got.completed_event.wait(), timeout=5)
+    assert got.status == "cancelled"
+
+
+class _FakeMixedOwnerStore(_FakeQueryStore):
+    """Simulates corrupted history: one job_id owned by two owners."""
+
+    async def get_owner_ids(self, job_id):
+        if job_id == "job-q":
+            return ["fp-owner", "fp-intruder"]
+        return []
+
+    async def get_owner_id(self, job_id):  # legacy singular — must NOT be trusted
+        return "fp-owner"
+
+
+def _admin_identity():
+    return AuthIdentity(
+        token_type="agent",
+        token="admin-token",
+        name="a",
+        scopes=("jobs:read",),
+        role="admin",
+    )
+
+
+@pytest.mark.asyncio
+async def test_query_mixed_owner_rows_fail_closed(monkeypatch):
+    monkeypatch.setattr(app_state, "agent_event_store", _FakeMixedOwnerStore(_pg_events()))
+    master = AuthIdentity(token_type="master", token="k", name="m", scopes=("jobs:read",))
+    with pytest.raises(_HTTPException) as exc_info:
+        await agent_events_history("job-q", master, limit=10)
+    assert exc_info.value.status_code == 403
+    admin = _admin_identity()
+    with pytest.raises(_HTTPException) as exc_info:
+        await agent_events_history("job-q", admin, limit=10)
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_query_works_after_restart_without_memory_job(monkeypatch):
+    """Restart-style: JobRecord gone from memory, history lives only in PG."""
+    from app.job_manager import JobManager
+
+    monkeypatch.setattr(app_state, "agent_event_store", _FakeQueryStore(_pg_events()))
+    monkeypatch.setattr(app_state, "job_manager", JobManager(ssh_manager=AsyncMock()))
+    master = AuthIdentity(token_type="master", token="k", name="m", scopes=("jobs:read",))
+    resp = await agent_events_history("job-q", master, limit=10)
+    assert resp["count"] >= 1
+
+
+class _FakeMixedSSEStore(_FakeSSEStore):
+    async def get_owner_ids(self, job_id):
+        if job_id == "job-q":
+            return ["fp-owner", "fp-intruder"]
+        return []
+
+
+@pytest.mark.asyncio
+async def test_sse_mixed_owner_rows_fail_closed(monkeypatch):
+    memory = AgentEventEmitter()
+    emitter = DualWriteAgentEventEmitter(memory_emitter=memory, pg_store=None)
+    monkeypatch.setattr(app_state, "agent_event_emitter", emitter)
+    monkeypatch.setattr(app_state, "agent_event_store", _FakeMixedSSEStore(_pg_events()))
+    master = AuthIdentity(token_type="master", token="k", name="m", scopes=("jobs:read",))
+    with pytest.raises(_HTTPException) as exc_info:
+        await agent_events_stream("job-q", master, last_event_id=None)
+    assert exc_info.value.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Corrective round BLOCKERS 8/9/10: replay pagination, subscribe race, bounds
+# ---------------------------------------------------------------------------
+
+
+def _seed_many(count, types=None):
+    types = types or ["heartbeat"]
+    out = []
+    for i in range(1, count + 1):
+        t = types[-1] if i == count else types[(i - 1) % len(types)] if False else "heartbeat"
+        out.append(
+            {
+                "sequence": i,
+                "job_id": "job-q",
+                "attempt_id": "att-1",
+                "owner_id": "fp-owner",
+                "agent_id": "gateway",
+                "type": t,
+                "payload": {"n": i},
+                "created_at": None,
+            }
+        )
+    out[-1]["type"] = "completed"
+    return out
+
+
+@pytest.mark.asyncio
+async def test_sse_replay_paginates_beyond_single_batch(monkeypatch):
+    """BLOCKER 8: initial connect with >500 persisted events must stream ALL
+    of them (batched), never silently truncate at the store's page size."""
+    total = 1200
+    store, emitter, master = _sse_wire(monkeypatch, _seed_many(total))
+    monkeypatch.setattr(_settings, "sse_max_duration", 3600)
+    resp = await agent_events_stream("job-q", master, last_event_id=None)
+    chunks = await asyncio.wait_for(_drain(resp), timeout=20)
+    datas = [c for c in chunks if c["event"] != "error"]
+    seqs = [d["data"]["sequence"] for d in datas]
+    assert len(seqs) == total, f"got {len(seqs)} of {total}"
+    assert seqs == sorted(seqs)
+    assert seqs[0] == 1 and seqs[-1] == total
+    assert chunks[-1]["event"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_subscribe_registers_before_watermark_read(monkeypatch):
+    """BLOCKER 9: deterministic race — a commit landing while subscribe() is
+    still reading the PG watermark must already be captured by the queue."""
+    emitter, pg = _make_emitter()
+    gate = asyncio.Event()
+
+    async def gated_latest(job_id):
+        await gate.wait()
+        return 5
+
+    monkeypatch.setattr(pg, "get_latest_sequence", gated_latest)
+
+    sub_task = asyncio.create_task(emitter.subscribe("race-job"))
+    await asyncio.sleep(0)  # let subscribe run up to the gated PG read
+    # Commit lands AFTER registration point but BEFORE watermark resolves.
+    record = await emitter.pg_emit(
+        job_id="race-job",
+        attempt_id="att",
+        owner_id="o",
+        agent_id="gw",
+        event_type="started",
+        payload={},
+    )
+    assert record.sequence is not None
+    gate.set()
+    sub = await asyncio.wait_for(sub_task, timeout=2)
+    assert sub.watermark >= record.sequence
+    assert sub.queue.qsize() >= 1, "committed event lost between register and watermark read"
+
+
+@pytest.mark.asyncio
+async def test_sse_max_duration_terminates_stream_with_reconnect_hint(monkeypatch):
+    """BLOCKER 10: bounded stream duration — server closes with an error
+    frame carrying last_sequence so the client can reconnect."""
+    store, emitter, master = _sse_wire(monkeypatch, _seed(["started"], 1))
+    monkeypatch.setattr(_settings, "sse_max_duration", 0.15)
+    resp = await agent_events_stream("job-q", master, last_event_id="1")
+    chunks = await asyncio.wait_for(_drain(resp), timeout=5)
+    errors = [c for c in chunks if c["event"] == "error"]
+    assert len(errors) == 1
+    assert errors[0]["data"].get("reason") == "max_duration"
+    assert "last_sequence" in errors[0]["data"]
+
+
+@pytest.mark.asyncio
+async def test_slow_replay_respects_max_duration_bound(monkeypatch):
+    """BLOCKER C: replay-phase PG latency must not let the stream exceed
+    MAX_SSE_DURATION.  A deliberately slow get_events must be interrupted
+    by the deadline, producing a max_duration error frame."""
+    total = 1200
+    store, emitter, master = _sse_wire(monkeypatch, _seed_many(total))
+    original_get_events = store.get_events
+
+    async def slow_get_events(*args, **kwargs):
+        await asyncio.sleep(0.05)  # 50ms per page × ~3 pages = 150ms
+        return await original_get_events(*args, **kwargs)
+
+    monkeypatch.setattr(store, "get_events", slow_get_events)
+    monkeypatch.setattr(_settings, "sse_max_duration", 0.08)  # tighter than replay time
+    resp = await agent_events_stream("job-q", master, last_event_id=None)
+    chunks = await asyncio.wait_for(_drain(resp), timeout=10)
+    errors = [c for c in chunks if c["event"] == "error"]
+    assert len(errors) >= 1
+    assert errors[0]["data"].get("reason") == "max_duration"
+    # Stream must NOT have delivered all 1200 events — it was cut short
+    datas = [c for c in chunks if c["event"] != "error"]
+    assert len(datas) < total
+
+
+@pytest.mark.asyncio
+async def test_replay_get_events_timeout_yields_max_duration(monkeypatch):
+    """TEST-09: get_events blocks beyond remaining deadline →
+    asyncio.wait_for raises TimeoutError → stream yields exactly one
+    max_duration frame and returns.  No complete replay occurs."""
+    store, emitter, master = _sse_wire(monkeypatch, _seed_many(1200))
+    hang_event = asyncio.Event()
+
+    async def blocking_get_events(*args, **kwargs):
+        await hang_event.wait()  # blocks forever until cancelled
+        return []
+
+    monkeypatch.setattr(store, "get_events", blocking_get_events)
+    monkeypatch.setattr(_settings, "sse_max_duration", 0.1)
+    resp = await agent_events_stream("job-q", master, last_event_id=None)
+    chunks = await asyncio.wait_for(_drain(resp), timeout=5)
+    # Exactly one max_duration error frame, stream terminates
+    errors = [c for c in chunks if c["event"] == "error"]
+    assert len(errors) == 1, f"expected 1 error frame, got {len(errors)}"
+    assert errors[0]["data"].get("reason") == "max_duration"
+    # No data events delivered — replay was cancelled before yielding
+    datas = [c for c in chunks if c["event"] != "error"]
+    assert len(datas) == 0, f"expected 0 data events during blocked replay, got {len(datas)}"

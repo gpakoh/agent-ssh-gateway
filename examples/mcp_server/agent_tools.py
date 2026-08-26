@@ -30,6 +30,10 @@ from examples.mcp_server.agent_paths import (
     project_state_key,
     task_dir,
 )
+from examples.mcp_server.agent_sources import (
+    ManagedSourceDigestError,
+    validate_bundle_digest,
+)
 
 TASKS_REL_DIR = ".ai-bridge/tasks"
 
@@ -937,6 +941,84 @@ def _supervisor_postrun_script_lines(
     return lines
 
 
+_WORKER_SECURE_COPY_PY = """\
+import hashlib
+import os
+import stat
+import sys
+import tempfile
+
+src, expected = sys.argv[1], sys.argv[2].strip().lower()
+
+
+def die(message):
+    print(message)
+    sys.exit(3)
+
+
+if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+    die("managed source digest metadata invalid")
+
+flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+try:
+    fd = os.open(src, flags)
+except OSError:
+    die("immutable managed source bundle is unavailable")
+
+digest = hashlib.sha256()
+try:
+    out_dir = tempfile.mkdtemp(prefix="managed-source-")
+    os.chmod(out_dir, 0o700)
+    dst = os.path.join(out_dir, "source.bundle")
+    with os.fdopen(fd, "rb", closefd=True) as fin, open(dst, "wb") as fout:
+        if not stat.S_ISREG(os.fstat(fin.fileno()).st_mode):
+            die("managed source bundle is not a regular file")
+        while True:
+            chunk = fin.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            fout.write(chunk)
+        fout.flush()
+        os.fsync(fout.fileno())
+except OSError as exc:
+    die("managed source private copy failed: %s" % exc)
+
+actual = digest.hexdigest()
+if actual != expected:
+    try:
+        os.unlink(dst)
+        os.rmdir(out_dir)
+    except OSError:
+        pass
+    die("managed source digest mismatch")
+
+os.chmod(dst, 0o400)
+print(dst)
+print(out_dir)
+"""
+
+
+def _managed_secure_copy_lines() -> list[str]:
+    """Worker-side digest binding for the managed source bundle.
+
+    The worker never trusts the published path: it makes one private copy
+    (opened without following symlinks) while hashing the exact bytes
+    written, and refuses to continue unless that hash equals the digest the
+    supervisor embedded from trusted task metadata. All subsequent git
+    operations consume only ``$MANAGED_SOURCE_COPY``.
+    """
+    return [
+        "MANAGED_COPY_PLAN=$(python3 - \"$MANAGED_SOURCE_BUNDLE\" \"$MANAGED_SOURCE_EXPECTED_SHA256\" <<'MANAGED_COPY_PY'",
+        _WORKER_SECURE_COPY_PY.rstrip("\n"),
+        "MANAGED_COPY_PY",
+        ") || { echo \"Managed source binding failed: $MANAGED_COPY_PLAN\" >> \"$td/agent-status.md\"; exit 73; }",
+        'MANAGED_SOURCE_COPY=$(printf "%s\\n" "$MANAGED_COPY_PLAN" | sed -n "1p")',
+        'MANAGED_PRIVATE_DIR=$(printf "%s\\n" "$MANAGED_COPY_PLAN" | sed -n "2p")',
+        "trap 'rm -rf \"$MANAGED_PRIVATE_DIR\" 2>/dev/null' EXIT",
+    ]
+
+
 def _build_opencode_script(
     td: str,
     task_id: str,
@@ -949,6 +1031,7 @@ def _build_opencode_script(
     managed_clone: bool = False,
     base_ref: str | None = None,
     managed_source_path: str | None = None,
+    managed_source_sha256: str | None = None,
 ) -> str:
     opencode_flags = "--dangerously-skip-permissions"
     if model:
@@ -991,6 +1074,23 @@ def _build_opencode_script(
         raise ValueError("managed_clone requires an exact base_ref")
     if managed_clone and not managed_source_path:
         raise ValueError("managed_clone requires an immutable managed source")
+
+    # Digest binding is MANDATORY in managed mode: the worker may only
+    # clone bytes whose SHA-256 was computed by the trusted control plane
+    # over the snapshot it fully proved, and embedded here from task
+    # metadata. Missing or malformed metadata fails closed before any
+    # script is emitted or worker launched -- there is no recapture
+    # fallback.
+    expected_digest = ""
+    if managed_clone:
+        if (
+            not isinstance(managed_source_sha256, str)
+            or not managed_source_sha256.strip()
+        ):
+            raise ManagedSourceDigestError(
+                "managed OpenCode execution requires publisher digest metadata"
+            )
+        expected_digest = validate_bundle_digest(managed_source_sha256.strip())
 
     # Managed workers trust the immutable bundle, never the authoritative
     # checkout. Drop the parent path even if a caller supplied it.
@@ -1045,18 +1145,19 @@ def _build_opencode_script(
         if managed_clone:
             managed_source_lines = [
                 f"MANAGED_SOURCE_BUNDLE={_shell_escape(managed_source_path or '')}",
-                'if [ -L "$MANAGED_SOURCE_BUNDLE" ] || [ ! -f "$MANAGED_SOURCE_BUNDLE" ]; then echo "Immutable managed source bundle is unavailable" >> "$td/agent-status.md"; exit 73; fi',
-                'MANAGED_SOURCE_HEADS=$(git bundle list-heads "$MANAGED_SOURCE_BUNDLE" 2>/dev/null) || MANAGED_SOURCE_HEADS=""',
+                f"MANAGED_SOURCE_EXPECTED_SHA256={_shell_escape(expected_digest)}",
+                *_managed_secure_copy_lines(),
+                'MANAGED_SOURCE_HEADS=$(git bundle list-heads "$MANAGED_SOURCE_COPY" 2>/dev/null) || MANAGED_SOURCE_HEADS=""',
                 'MANAGED_SOURCE_HEAD=$(printf "%s\\n" "$MANAGED_SOURCE_HEADS" | awk \'NF { print $1; exit }\')',
                 'MANAGED_SOURCE_EXTRA_HEAD=$(printf "%s\\n" "$MANAGED_SOURCE_HEADS" | awk \'NF { count++; if (count == 2) { print $1; exit } }\')',
                 'if [ -z "$MANAGED_SOURCE_HEAD" ] || [ -n "$MANAGED_SOURCE_EXTRA_HEAD" ] || [ "$MANAGED_SOURCE_HEAD" != "$TASK_BASE_COMMIT" ]; then echo "Immutable managed source bundle does not match base_ref" >> "$td/agent-status.md"; exit 73; fi',
                 'MANAGED_VERIFY_DIR=$(mktemp -d)',
                 'git init -q --bare "$MANAGED_VERIFY_DIR/v.git" || { echo "managed bundle verification scratch failed" >> "$td/agent-status.md"; rm -rf "$MANAGED_VERIFY_DIR"; exit 73; }',
-                'if ! git -C "$MANAGED_VERIFY_DIR/v.git" bundle verify "$MANAGED_SOURCE_BUNDLE" >/dev/null 2>>"$td/agent-status.md"; then echo "Immutable managed source bundle failed integrity verification" >> "$td/agent-status.md"; rm -rf "$MANAGED_VERIFY_DIR"; exit 73; fi',
+                'if ! git -C "$MANAGED_VERIFY_DIR/v.git" bundle verify "$MANAGED_SOURCE_COPY" >/dev/null 2>>"$td/agent-status.md"; then echo "Immutable managed source bundle failed integrity verification" >> "$td/agent-status.md"; rm -rf "$MANAGED_VERIFY_DIR"; exit 73; fi',
                 'rm -rf "$MANAGED_VERIFY_DIR"',
             ]
             create_workspace_lines = [
-                '  git clone --no-hardlinks --no-checkout "$MANAGED_SOURCE_BUNDLE" "$wt" 2>>"$td/agent-status.md" || { echo "managed clone failed: $wt" >> "$td/agent-status.md"; exit 1; }',
+                '  git clone --no-hardlinks --no-checkout "$MANAGED_SOURCE_COPY" "$wt" 2>>"$td/agent-status.md" || { echo "managed clone failed: $wt" >> "$td/agent-status.md"; exit 1; }',
                 '  git -C "$wt" checkout --detach "$TASK_BASE_COMMIT" 2>>"$td/agent-status.md" || { echo "managed clone checkout failed: $wt" >> "$td/agent-status.md"; exit 1; }',
                 '  git -C "$wt" remote remove origin 2>>"$td/agent-status.md" || { echo "managed clone source remote removal failed: $wt" >> "$td/agent-status.md"; exit 1; }',
             ]
@@ -1451,12 +1552,16 @@ def project_run_agent(
             validate_base_ref(raw_base_ref)
             base_ref = raw_base_ref if isinstance(raw_base_ref, str) and raw_base_ref else None
             managed_source_path = None
+            managed_source_sha256 = None
             if managed_clone:
                 if not base_ref:
                     raise ValueError("managed OpenCode execution requires an exact base_ref")
                 managed_source_path = managed_source_bundle_path(project, base_ref)
                 if not managed_source_path:
                     raise ValueError("MCP_AGENT_SOURCE_ROOT is required for managed OpenCode execution")
+                raw_sha256 = task_json.get("managed_source_sha256")
+                if isinstance(raw_sha256, str) and raw_sha256.strip():
+                    managed_source_sha256 = raw_sha256.strip()
             allowed_files = _task_string_list(task_json, "allowed_files")
             forbidden_files = _task_string_list(task_json, "forbidden_files")
             required_checks = _task_string_list(task_json, "required_checks")
@@ -1483,6 +1588,7 @@ def project_run_agent(
             managed_clone=managed_clone,
             base_ref=base_ref,
             managed_source_path=managed_source_path,
+            managed_source_sha256=managed_source_sha256,
         )
     else:
         return {

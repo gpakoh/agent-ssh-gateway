@@ -32,11 +32,35 @@ class ConnectRequest(BaseModel):
             "authentication method, and credential fingerprint all match exactly."
         ),
     )
+    ephemeral: bool = Field(
+        default=False,
+        description=(
+            "Mark session as ephemeral (transport-scoped). Ephemeral sessions "
+            "use a shorter idle timeout and are not persisted across gateway restarts."
+        ),
+    )
+    idle_timeout_seconds: int | None = Field(
+        default=None,
+        ge=60,
+        le=86400,
+        description=(
+            "Requested idle timeout in seconds. May shorten but never extend "
+            "the global session_timeout. Minimum 60s."
+        ),
+    )
 
     @model_validator(mode="after")
     def check_auth_method(self):
         if not self.password and not self.private_key:
             raise ValueError("Either password or private_key must be provided")
+        return self
+
+    @model_validator(mode="after")
+    def check_ephemeral_contract(self):
+        if self.ephemeral and self.reuse_existing:
+            raise ValueError("ephemeral=True and reuse_existing=True are mutually exclusive")
+        if self.idle_timeout_seconds is not None and not self.ephemeral:
+            raise ValueError("idle_timeout_seconds requires ephemeral=True")
         return self
 
     def __repr__(self) -> str:

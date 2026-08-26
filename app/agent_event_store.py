@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,7 +25,7 @@ class AgentEventStore:
         self,
         *,
         job_id: str,
-        attempt_id: str,
+        attempt_id: str | None = None,
         owner_id: str,
         agent_id: str,
         event_type: str,
@@ -83,9 +83,24 @@ class AgentEventStore:
             result = await session.execute(stmt)
             return result.scalar_one_or_none()
 
-    async def get_owner_id(self, job_id: str) -> str | None:
-        """Get owner_id from any event of the job for authorization checks."""
-        stmt = select(AgentEventRecord.owner_id).where(AgentEventRecord.job_id == job_id).limit(1)
+    async def get_owner_ids(self, job_id: str) -> list[str]:
+        """Distinct owner_ids for a job — used for fail-closed authorization.
+
+        A job whose history contains rows from more than one owner is treated
+        as corrupted; callers must deny access regardless of role.
+        """
+        stmt = select(AgentEventRecord.owner_id).where(AgentEventRecord.job_id == job_id).distinct()
         async with self._sm() as session:
             result = await session.execute(stmt)
-            return result.scalar_one_or_none()
+            return list(cast("list[str]", result.scalars().all()))
+
+    async def get_owner_id(self, job_id: str) -> str | None:
+        """Single-owner convenience wrapper over :meth:`get_owner_ids`.
+
+        Returns the owner when exactly one distinct owner exists, else None
+        (unknown job OR ambiguous ownership — ambiguous must not authorize).
+        """
+        owners = await self.get_owner_ids(job_id)
+        if len(owners) == 1:
+            return owners[0]
+        return None

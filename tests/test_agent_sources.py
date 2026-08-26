@@ -1,23 +1,27 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from examples.mcp_server import agent_sources
 from examples.mcp_server.agent_paths import managed_source_bundle_path
 from examples.mcp_server.agent_sources import (
     ManagedSourceBundleError,
+    ManagedSourceDigestError,
     _run_git,
+    capture_bundle_digest,
     ensure_managed_source_bundle,
+    secure_copy_and_verify,
+    validate_bundle_digest,
 )
 
 
 def _git(cwd: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", *args], cwd=cwd, text=True, capture_output=True, check=True
-    )
+    result = subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=True)
     return result.stdout.strip()
 
 
@@ -54,22 +58,18 @@ def test_managed_mode_requires_exact_base_ref(tmp_path, monkeypatch):
         ensure_managed_source_bundle("any-project", "main")
 
 
-def test_publishes_exact_commit_for_arbitrary_project_ignoring_dirty_tree(
-    tmp_path, monkeypatch
-):
+def test_publishes_exact_commit_for_arbitrary_project_ignoring_dirty_tree(tmp_path, monkeypatch):
     repo, sha = _repo(tmp_path)
     (repo / "payload.txt").write_text("DIRTY WORKTREE\n", encoding="utf-8")
     source_root = tmp_path / "sources"
     monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", str(source_root))
-    monkeypatch.setattr(
-        "examples.mcp_server.agent_sources.get_registry", lambda: _Registry(repo)
-    )
+    monkeypatch.setattr("examples.mcp_server.agent_sources.get_registry", lambda: _Registry(repo))
 
     published = ensure_managed_source_bundle("nod", sha)
     expected = managed_source_bundle_path("nod", sha)
-    assert published == expected
     assert published is not None
-    bundle = Path(published)
+    assert published.path == str(expected)
+    bundle = Path(published.path)
     assert bundle.is_file()
     heads = _git(repo, "bundle", "list-heads", str(bundle))
     assert heads.split()[0] == sha
@@ -89,9 +89,7 @@ def test_missing_commit_fails_without_publishing(tmp_path, monkeypatch):
     source_root = tmp_path / "sources"
     monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", str(source_root))
     monkeypatch.delenv("GITEA_TOKEN", raising=False)
-    monkeypatch.setattr(
-        "examples.mcp_server.agent_sources.get_registry", lambda: _Registry(repo)
-    )
+    monkeypatch.setattr("examples.mcp_server.agent_sources.get_registry", lambda: _Registry(repo))
     missing = "f" * 40
     with pytest.raises(ManagedSourceBundleError):
         ensure_managed_source_bundle("nod", missing)
@@ -103,9 +101,7 @@ def test_missing_commit_fails_without_publishing(tmp_path, monkeypatch):
 def test_atomic_replace_failure_propagates(tmp_path, monkeypatch):
     repo, sha = _repo(tmp_path)
     monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", str(tmp_path / "sources"))
-    monkeypatch.setattr(
-        "examples.mcp_server.agent_sources.get_registry", lambda: _Registry(repo)
-    )
+    monkeypatch.setattr("examples.mcp_server.agent_sources.get_registry", lambda: _Registry(repo))
 
     def fail_replace(src, dst):
         raise OSError("simulated atomic publication failure")
@@ -143,15 +139,11 @@ class TestGitErrorMessage:
 
     def test_reports_bundle_not_git_dir_option(self):
         with pytest.raises(ManagedSourceBundleError, match=r"git bundle"):
-            self._run_failing_git(
-                ["--git-dir=/tmp/x", "bundle", "create", "refs/heads/source"]
-            )
+            self._run_failing_git(["--git-dir=/tmp/x", "bundle", "create", "refs/heads/source"])
 
     def test_reports_cat_file_not_git_dir_option(self):
         with pytest.raises(ManagedSourceBundleError, match=r"git cat-file"):
-            self._run_failing_git(
-                ["--git-dir=/tmp/x", "cat-file", "-e", "abc123^{commit}"]
-            )
+            self._run_failing_git(["--git-dir=/tmp/x", "cat-file", "-e", "abc123^{commit}"])
 
     def test_reports_simple_subcommand_without_git_dir(self):
         with pytest.raises(ManagedSourceBundleError, match=r"git status"):
@@ -169,9 +161,7 @@ class TestGitErrorMessage:
             raise subprocess.TimeoutExpired(cmd=["git"], timeout=120)
 
         with unittest.mock.patch("subprocess.run", side_effect=timeout_run):
-            with pytest.raises(
-                ManagedSourceBundleError, match=r"timed out during git bundle"
-            ):
+            with pytest.raises(ManagedSourceBundleError, match=r"timed out during git bundle"):
                 _run_git(["--git-dir=/tmp/x", "bundle", "create", "out.bndl"])
 
 
@@ -195,39 +185,33 @@ def test_registry_project_root_is_the_only_safe_directory_exception(monkeypatch,
         safe_directory=project_root,
     )
 
-    assert captured == [[
-        "git",
-        "-c",
-        f"safe.directory={project_root}",
-        "cat-file",
-        "-e",
-        "a" * 40 + "^{commit}",
-    ]]
+    assert captured == [
+        [
+            "git",
+            "-c",
+            f"safe.directory={project_root}",
+            "cat-file",
+            "-e",
+            "a" * 40 + "^{commit}",
+        ]
+    ]
     assert "safe.directory=*" not in captured[0]
 
 
 def test_source_repo_access_is_scoped_to_registered_root(tmp_path, monkeypatch):
     repo, sha = _repo(tmp_path)
     monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", str(tmp_path / "sources"))
-    monkeypatch.setattr(
-        "examples.mcp_server.agent_sources.get_registry", lambda: _Registry(repo)
-    )
+    monkeypatch.setattr("examples.mcp_server.agent_sources.get_registry", lambda: _Registry(repo))
 
     calls: list[tuple[list[str], Path | None, Path | None]] = []
 
-    def fake_run_git(args, *, cwd=None, safe_directory=None):
-        calls.append((args, cwd, safe_directory))
-        if "--git-path" in args:
-            return str(repo / ".git" / "objects")
-        if "rev-parse" in args:
-            return sha
-        return ""
+    real_run_git = agent_sources._run_git
 
-    monkeypatch.setattr("examples.mcp_server.agent_sources._run_git", fake_run_git)
-    monkeypatch.setattr(
-        "examples.mcp_server.agent_sources._bundle_head", lambda path: sha
-    )
-    monkeypatch.setattr(os, "replace", lambda src, dst: None)
+    def tracking_run_git(args, *, cwd=None, safe_directory=None):
+        calls.append((args, cwd, safe_directory))
+        return real_run_git(args, cwd=cwd, safe_directory=safe_directory)
+
+    monkeypatch.setattr("examples.mcp_server.agent_sources._run_git", tracking_run_git)
 
     published = ensure_managed_source_bundle("nod", sha)
     assert published is not None
@@ -235,9 +219,7 @@ def test_source_repo_access_is_scoped_to_registered_root(tmp_path, monkeypatch):
     source_calls = [
         (args, cwd, safe_directory)
         for args, cwd, safe_directory in calls
-        if "cat-file" in args
-        or "--git-path" in args
-        or "--is-shallow-repository" in args
+        if "cat-file" in args or "--git-path" in args or "--is-shallow-repository" in args
     ]
     assert len(source_calls) == 3
     assert all(safe_directory == repo for _, _, safe_directory in source_calls)
@@ -246,8 +228,7 @@ def test_source_repo_access_is_scoped_to_registered_root(tmp_path, monkeypatch):
     # scratch-dir bundle-verification clones are unrelated to it and allowed.
     for banned in ("clone", "fetch"):
         assert not any(
-            banned in args and any(str(repo) in str(arg) for arg in args)
-            for args, _, _ in calls
+            banned in args and any(str(repo) in str(arg) for arg in args) for args, _, _ in calls
         )
 
     update_ref_calls = [args for args, _, _ in calls if "update-ref" in args]
@@ -311,17 +292,17 @@ def test_existing_bundle_skips_remote_fetch(tmp_path, monkeypatch):
 
     git_calls: list[list[str]] = []
 
+    real_run_git = agent_sources._run_git
+
     def track_run_git(args, **kwargs):
         git_calls.append(args)
-        # For bundle verification
-        if "bundle" in args and "list-heads" in args:
-            return f"{sha}\n"
-        return ""
+        return real_run_git(args, **kwargs)
 
     monkeypatch.setattr("examples.mcp_server.agent_sources._run_git", track_run_git)
 
     result = ensure_managed_source_bundle("nod", sha)
-    assert result == str(bundle_path)
+    assert result is not None
+    assert result.path == str(bundle_path)
 
     # cat-file and any remote fetch should never be called
     cat_file_calls = [a for a in git_calls if "cat-file" in a]
@@ -371,7 +352,7 @@ def test_missing_object_fetches_from_trusted_remote(tmp_path, monkeypatch):
 
     result = ensure_managed_source_bundle("nod", remote_sha)
     assert result is not None
-    bundle = Path(result)
+    bundle = Path(result.path if result else "")
     assert bundle.is_file()
 
     # Verify bundle contains exactly the expected SHA
@@ -534,9 +515,7 @@ def test_token_never_in_url_or_config(tmp_path, monkeypatch):
     # Verify token never appears in any captured environment
     for env in captured_envs:
         for key, value in env.items():
-            assert "fake-token" not in value, (
-                f"Token leaked in env var {key}={value}"
-            )
+            assert "fake-token" not in value, f"Token leaked in env var {key}={value}"
             assert "Authorization" not in value or "Basic" in value, (
                 f"Token in unexpected env format: {key}={value}"
             )
@@ -544,3 +523,74 @@ def test_token_never_in_url_or_config(tmp_path, monkeypatch):
     # Verify no URL contains the token
     for url in captured_urls:
         assert "fake-token" not in url, f"Token leaked in URL: {url}"
+
+
+# ---------------------------------------------------------------------------
+# Digest binding primitives (TOCTOU closure for managed source transport).
+# ---------------------------------------------------------------------------
+
+
+def test_validate_bundle_digest_accepts_only_lowercase_hex64():
+    assert validate_bundle_digest("a" * 64) == "a" * 64
+    for bad in ["", "a" * 63, "a" * 65, "A" * 64, "g" * 64, None, 12345]:
+        with pytest.raises(ManagedSourceDigestError):
+            validate_bundle_digest(bad)
+
+
+def test_capture_bundle_digest_matches_manual_hash(tmp_path):
+    artifact = tmp_path / "artifact.bundle"
+    payload = b"0" * (1024 * 1024 + 17)
+    artifact.write_bytes(payload)
+
+    assert capture_bundle_digest(artifact) == hashlib.sha256(payload).hexdigest()
+
+
+def test_capture_and_secure_copy_reject_symlink(tmp_path):
+    real = tmp_path / "real.bundle"
+    real.write_bytes(b"trusted bytes\n")
+    link = tmp_path / "link.bundle"
+    link.symlink_to(real)
+    digest = hashlib.sha256(b"trusted bytes\n").hexdigest()
+
+    with pytest.raises(ManagedSourceDigestError):
+        capture_bundle_digest(link)
+    with pytest.raises(ManagedSourceDigestError):
+        secure_copy_and_verify(link, digest, dest_dir=tmp_path)
+
+
+def test_secure_copy_happy_path_is_readonly_private_copy(tmp_path):
+    artifact = tmp_path / "good.bundle"
+    payload = b"bundle-payload\n"
+    artifact.write_bytes(payload)
+    copies_dir = tmp_path / "out"
+    copies_dir.mkdir()
+
+    copy = secure_copy_and_verify(
+        artifact, hashlib.sha256(payload).hexdigest(), dest_dir=copies_dir
+    )
+    try:
+        assert copy.parent.parent == copies_dir
+        assert oct(copy.parent.stat().st_mode & 0o777) == "0o700"
+        assert oct(copy.stat().st_mode & 0o777) == "0o400"
+        assert copy.read_bytes() == payload
+    finally:
+        import shutil
+
+        shutil.rmtree(copy.parent)
+
+
+def test_secure_copy_mismatch_leaves_no_trace(tmp_path):
+    artifact = tmp_path / "swap.bundle"
+    artifact.write_bytes(b"actual-bytes\n")
+    copies_dir = tmp_path / "out2"
+    copies_dir.mkdir()
+
+    with pytest.raises(ManagedSourceDigestError, match="digest mismatch"):
+        secure_copy_and_verify(artifact, "b" * 64, dest_dir=copies_dir)
+
+    assert list(copies_dir.iterdir()) == []
+
+
+def test_secure_copy_missing_artifact_fails_closed(tmp_path):
+    with pytest.raises(ManagedSourceDigestError):
+        secure_copy_and_verify(tmp_path / "absent.bundle", "c" * 64, dest_dir=tmp_path)

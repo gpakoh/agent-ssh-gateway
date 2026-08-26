@@ -104,6 +104,11 @@ filterwarnings = [
   # uvicorn.Server.run() for a plain-HTTP app that never opens a
   # websocket connection at all (Phase 18B PR1 CI blocker).
   "ignore::DeprecationWarning:websockets.legacy",
+  # slowapi 0.1.9 uses deprecated asyncio.iscoroutinefunction — upstream
+  # fixed in 0.1.10 (PR #275, merged 2026-06-13). Narrow module filter
+  # allows slowapi's warning through while keeping our own code's
+  # asyncio.iscoroutinefunction usages as errors.
+  "default:.*asyncio.iscoroutinefunction.*:DeprecationWarning:slowapi\\.extension",
 ]
 
 [tool.ruff]

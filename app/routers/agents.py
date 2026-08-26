@@ -17,10 +17,36 @@ from starlette.responses import StreamingResponse
 from app import state as _state
 from app.agent_events import list_agent_events
 from app.auth_middleware import AuthIdentity, require_scope
+from app.config import settings
 from app.rbac import job_visible_to
 from app.state import _err
 
 router = APIRouter(tags=["agents"])
+
+_REPLAY_PAGE_SIZE = 500
+
+
+async def _authorize_pg_job(pg_store, job_id: str, identity) -> None:
+    """Fail-closed authorization resolved from persisted event ownership.
+
+    - unknown job (no persisted events) -> 404
+    - mixed-owner history (corruption)  -> 403 for EVERYONE, roles included
+    - otherwise master/admin bypass, plain agents must own the job
+    """
+    owners = await pg_store.get_owner_ids(job_id)
+    if not owners:
+        raise HTTPException(status_code=404, detail=_err(404, f"Job {job_id} not found"))
+    if len(owners) > 1:
+        raise HTTPException(
+            status_code=403,
+            detail=_err(403, "Job ownership is ambiguous; access denied"),
+        )
+    if (
+        identity.token_type != "master"
+        and identity.role != "admin"
+        and owners[0] != identity.fingerprint
+    ):
+        raise HTTPException(status_code=403, detail=_err(403, "Job belongs to a different owner"))
 
 
 def _record_to_dict(record) -> dict:
@@ -46,17 +72,7 @@ async def agent_events_history(
     for a background job. Same ownership rules as the jobs endpoints."""
     pg_store = getattr(_state, "agent_event_store", None)
     if pg_store is not None:
-        owner_id = await pg_store.get_owner_id(job_id)
-        if owner_id is None:
-            raise HTTPException(status_code=404, detail=_err(404, f"Job {job_id} not found"))
-        if (
-            _identity.token_type != "master"
-            and _identity.role != "admin"
-            and owner_id != _identity.fingerprint
-        ):
-            raise HTTPException(
-                status_code=403, detail=_err(403, "Job belongs to a different owner")
-            )
+        await _authorize_pg_job(pg_store, job_id, _identity)
         records = await pg_store.get_events(job_id)
         records = records[-limit:]
         return {
@@ -79,7 +95,7 @@ async def agent_events_history(
     }
 
 
-_TERMINAL_EVENT_TYPES = {"completed", "failed", "cancelled"}
+_TERMINAL_EVENT_TYPES = {"completed", "failed", "cancelled", "ambiguous"}
 
 
 def _sse(event_type: str, data: dict, sequence: int | None = None) -> str:
@@ -119,15 +135,7 @@ async def agent_events_stream(
         if cursor < 0:
             raise HTTPException(status_code=400, detail=_err(400, "Invalid Last-Event-ID"))
 
-    owner_id = await pg_store.get_owner_id(job_id)
-    if owner_id is None:
-        raise HTTPException(status_code=404, detail=_err(404, f"Job {job_id} not found"))
-    if (
-        _identity.token_type != "master"
-        and _identity.role != "admin"
-        and owner_id != _identity.fingerprint
-    ):
-        raise HTTPException(status_code=403, detail=_err(403, "Job belongs to a different owner"))
+    await _authorize_pg_job(pg_store, job_id, _identity)
 
     watermark_now = await pg_store.get_latest_sequence(job_id) or 0
     min_seq = await pg_store.get_min_sequence(job_id)
@@ -144,31 +152,72 @@ async def agent_events_stream(
 
     async def event_stream():
         last_sent = cursor
-        try:
-            replay = await pg_store.get_events(
-                job_id,
-                after_sequence=cursor or None,
-                up_to_sequence=subscription.watermark or None,
-            )
-            for record in replay:
-                yield _sse(record.event_type, _record_to_dict(record), record.sequence)
-                last_sent = record.sequence
-                if record.event_type in _TERMINAL_EVENT_TYPES:
-                    return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, float(settings.sse_max_duration))
 
+        def _error_frame(reason: str) -> str:
+            return _sse("error", {"reason": reason, "last_sequence": last_sent})
+
+        try:
+            # Replay phase: paginated batches so histories beyond one page
+            # size are streamed completely (no silent truncation), bounded by
+            # the subscription watermark. Overflow during replay terminates
+            # the stream so the client reconnects instead of silently losing.
+            after = cursor
             while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    yield _error_frame("max_duration")
+                    return
                 if subscription.overflow:
-                    yield _sse("error", {"last_sequence": last_sent})
+                    yield _error_frame("queue_overflow")
                     return
                 try:
-                    event = await asyncio.wait_for(subscription.queue.get(), timeout=1.0)
+                    batch = await asyncio.wait_for(
+                        pg_store.get_events(
+                            job_id,
+                            after_sequence=after or None,
+                            up_to_sequence=subscription.watermark or None,
+                            limit=_REPLAY_PAGE_SIZE,
+                        ),
+                        timeout=remaining,
+                    )
+                except TimeoutError:
+                    yield _error_frame("max_duration")
+                    return
+                if not batch:
+                    break
+                for record in batch:
+                    yield _sse(record.event_type, _record_to_dict(record), record.sequence)
+                    last_sent = record.sequence
+                    if record.event_type in _TERMINAL_EVENT_TYPES:
+                        return
+                    if deadline - loop.time() <= 0:
+                        yield _error_frame("max_duration")
+                        return
+                if len(batch) < _REPLAY_PAGE_SIZE:
+                    break
+                after = batch[-1].sequence
+
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    yield _error_frame("max_duration")
+                    return
+                if subscription.overflow:
+                    yield _error_frame("queue_overflow")
+                    return
+                try:
+                    event = await asyncio.wait_for(
+                        subscription.queue.get(), timeout=min(1.0, remaining)
+                    )
                 except TimeoutError:
                     yield ": keepalive\n\n"
                     continue
                 sequence = event.get("sequence")
                 event_type = event.get("type")
                 if sequence is not None and sequence <= last_sent:
-                    continue  # already replayed
+                    continue  # already covered by replay — dedupe
                 yield _sse(event_type, event, sequence)
                 last_sent = sequence or last_sent
                 if event_type in _TERMINAL_EVENT_TYPES:

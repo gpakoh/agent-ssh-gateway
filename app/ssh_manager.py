@@ -159,6 +159,8 @@ class SessionRecord:
     credential_fingerprint: str = ""
     destination_ip: str | None = None
     tenant_labels: tuple[str, ...] = ()
+    effective_idle_timeout: int = 0
+    ephemeral: bool = False
 
     def touch(self) -> None:
         """Update last activity timestamp."""
@@ -255,7 +257,11 @@ class SSHSessionManager:
 
         async with self._lock:
             for sid, record in list(self._sessions.items()):
-                if now - record.last_activity > self._session_timeout:
+                limit = min(
+                    record.effective_idle_timeout or self._session_timeout,
+                    self._session_timeout,
+                )
+                if now - record.last_activity > limit:
                     del self._sessions[sid]
                     stale.append(record)
 
@@ -371,11 +377,33 @@ class SSHSessionManager:
         tenant_labels: tuple[str, ...] = (),
         session_id: str | None = None,
         pinned_ip: str | None = None,
+        ephemeral: bool = False,
+        idle_timeout_seconds: int | None = None,
     ) -> str:
         """Create a new SSH session with race-free per-IP admission."""
+        if idle_timeout_seconds is not None:
+            effective_idle_timeout = min(idle_timeout_seconds, self._session_timeout)
+        else:
+            effective_idle_timeout = self._session_timeout
+
         reserved_source_ip: str | None = None
+        reaped_records: list[SessionRecord] = []
         if source_ip and settings.max_sessions_per_ip > 0:
             async with self._lock:
+                # Admission-time reap: remove expired sessions before 429 check
+                if source_ip:
+                    now = time.time()
+                    for sid, record in list(self._sessions.items()):
+                        if record.source_ip != source_ip:
+                            continue
+                        limit = min(
+                            record.effective_idle_timeout or self._session_timeout,
+                            self._session_timeout,
+                        )
+                        if now - record.last_activity > limit:
+                            del self._sessions[sid]
+                            reaped_records.append(record)
+
                 active = sum(
                     1 for record in self._sessions.values() if record.source_ip == source_ip
                 )
@@ -387,6 +415,19 @@ class SSHSessionManager:
                     )
                 self._pending_sessions_by_ip[source_ip] = pending + 1
                 reserved_source_ip = source_ip
+
+            # Network close outside lock
+            for record in reaped_records:
+                logger.info(
+                    "Admission-reaped stale session %s (idle %.0fs, limit %ds)",
+                    record.session_id,
+                    record.idle_time,
+                    record.effective_idle_timeout or self._session_timeout,
+                )
+                try:
+                    record.client.close()
+                except Exception as exc:
+                    logger.warning("Error closing reaped session %s: %s", record.session_id, exc)
 
         try:
             return await self._create_session_unreserved(
@@ -403,6 +444,8 @@ class SSHSessionManager:
                 tenant_labels=tenant_labels,
                 session_id=session_id,
                 pinned_ip=pinned_ip,
+                effective_idle_timeout=effective_idle_timeout,
+                ephemeral=ephemeral,
             )
         finally:
             if reserved_source_ip is not None:
@@ -428,6 +471,8 @@ class SSHSessionManager:
         tenant_labels: tuple[str, ...] = (),
         session_id: str | None = None,
         pinned_ip: str | None = None,
+        effective_idle_timeout: int = 0,
+        ephemeral: bool = False,
     ) -> str:
         """Create a new SSH session after admission has been reserved.
 
@@ -565,6 +610,8 @@ class SSHSessionManager:
             credential_fingerprint=credential_fingerprint,
             destination_ip=destination_ip,
             tenant_labels=tuple(tenant_labels or ()),
+            effective_idle_timeout=effective_idle_timeout,
+            ephemeral=ephemeral,
         )
 
         async with self._lock:
