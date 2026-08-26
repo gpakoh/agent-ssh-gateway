@@ -1674,15 +1674,73 @@ async def test_slow_pg_emit_does_not_block_manager_operations(monkeypatch):
                 break
             await asyncio.sleep(0.02)
         assert job.supervisor_state == "stale"  # inside hung emit window now
-        t0 = time.monotonic()
+
+        ops_t0 = time.monotonic()
         j2 = await asyncio.wait_for(jm.create_job("s2", "nd-ok", owner_id="o2"), timeout=2)
         got = await asyncio.wait_for(jm.get_job(j2), timeout=2)
-        await asyncio.wait_for(jm.cancel_job(j2), timeout=2)
-        assert time.monotonic() - t0 < 2.0
         assert got is not None
+
+        # cancel_job() itself must not be blocked by the supervisor's hung PG emit.
+        cancel_ret = await asyncio.wait_for(jm.cancel_job(j2), timeout=2)
+        ops_elapsed = time.monotonic() - ops_t0
+
+        # Manager operations (create/get/cancel) must complete within budget.
+        assert ops_elapsed < 2.0
+
+        # The _run_job task races with cancel_job: if it promoted the job to
+        # "running" before cancel ran, the cancel path returns "cancelling".
+        assert cancel_ret in {"cancelled", "cancelling"}
+
+        # Terminal convergence has its own explicit bound (separate from the
+        # manager-operation latency budget).
+        if cancel_ret == "cancelling":
+            await asyncio.wait_for(got.completed_event.wait(), timeout=5)
+
         assert got.status == "cancelled"
     finally:
         await jm.stop_supervisor_task()
+
+
+@pytest.mark.asyncio
+async def test_cancel_on_running_job_reaches_terminal(monkeypatch):
+    """Deterministically prove the pending vs running race: block
+    execute_stream until cancel_event, ensuring the job is in 'running'
+    when cancel_job is called.  cancel_job returns 'cancelling' (not
+    'cancelled').  The old synchronous assertion would immediately RED;
+    the corrected path reaches terminal 'cancelled' via completed_event."""
+    emitter, pg = _wire_state_emitter(monkeypatch)
+
+    async def blocking_stream(*_args, cancel_event=None, **_kwargs):
+        """Simulate a long-running command that stops only when cancelled."""
+        if cancel_event is not None:
+            await cancel_event.wait()
+        return
+        yield  # pragma: no cover — async generator marker only
+
+    ssh = AsyncMock()
+    ssh.execute_stream = blocking_stream
+    jm = JobManager(ssh_manager=ssh, max_jobs=10)
+
+    j2 = await asyncio.wait_for(jm.create_job("s2", "long-cmd", owner_id="o2"), timeout=2)
+    got = await asyncio.wait_for(jm.get_job(j2), timeout=2)
+    assert got is not None
+
+    # Wait for _run_job to promote to "running".
+    for _ in range(200):
+        if got.status == "running":
+            break
+        await asyncio.sleep(0.01)
+    assert got.status == "running"
+
+    # cancel_job on a running job returns "cancelling", never "cancelled".
+    cancel_ret = await asyncio.wait_for(jm.cancel_job(j2), timeout=2)
+    assert cancel_ret == "cancelling"
+    # Old broken assertion: assert got.status == "cancelled"  — would RED here.
+
+    # The corrected path: _run_job detects cancel_event and transitions
+    # the job to terminal "cancelled", signaling completed_event.
+    await asyncio.wait_for(got.completed_event.wait(), timeout=5)
+    assert got.status == "cancelled"
 
 
 class _FakeMixedOwnerStore(_FakeQueryStore):
