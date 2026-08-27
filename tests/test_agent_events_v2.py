@@ -984,6 +984,25 @@ async def test_hung_pg_emit_does_not_defer_lease_renewal(monkeypatch):
     assert job.status == "completed"  # observability timeout never fails the job
 
 
+def _assert_renewal_gaps_within_budget(timestamps: list[float], interval: float) -> None:
+    """Assert renewal gaps stay within the absolute-scheduling budget.
+
+    With absolute (monotonic) scheduling each gap should be ~``interval``,
+    NOT ``interval + pg_delay``.  The 20% margin absorbs event-loop jitter
+    while still rejecting the ``interval + pg_delay`` drift that a naive
+    relative schedule would produce.
+
+    Raises AssertionError if any collected gap exceeds the budget.
+    """
+    assert len(timestamps) >= 2, f"need ≥2 renewal timestamps, got {len(timestamps)}"
+    gaps = [timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)]
+    assert all(g > 0 for g in gaps), f"renewal timestamps must be monotonic: {gaps}"
+    max_allowed = interval * 1.2
+    assert max(gaps) <= max_allowed, (
+        f"renewal gaps drifted beyond {max_allowed:.3f}s (interval={interval:.3f}s): {gaps}"
+    )
+
+
 @pytest.mark.asyncio
 async def test_slow_pg_does_not_drift_renewal_deadline(monkeypatch):
     """BLOCKER B: absolute-monotonic scheduling.
@@ -991,10 +1010,22 @@ async def test_slow_pg_does_not_drift_renewal_deadline(monkeypatch):
     A deliberately slow PG insert (0.15s) must not push Redis renewal gaps
     above lease_ttl/3 + margin.  Without absolute scheduling the gaps would
     include the PG delay and drift to interval + 0.15s each iteration.
+
+    Uses an INTEGER TTL (the only valid production contract — Redis
+    ``SET ... EX`` accepts integer seconds).  The expected interval is
+    derived from the exact effective TTL production receives.
     """
-    lease_ttl = 1.5
-    interval = lease_ttl / 3  # 0.5s
-    monkeypatch.setattr(job_manager_module, "DURABLE_LEASE_TTL_SECONDS", int(lease_ttl))
+    lease_ttl = 1  # integer seconds; fractional durable Redis leases are not a production contract
+    # Pass the TTL through unmodified: production reads DURABLE_LEASE_TTL_SECONDS
+    # verbatim for both the redis lease and the heartbeat cadence, so the test
+    # must derive its expected interval from the exact value production sees.
+    monkeypatch.setattr(job_manager_module, "DURABLE_LEASE_TTL_SECONDS", lease_ttl)
+    # No second independent copy of the interval: derive it exactly the way the
+    # job manager does (job_manager._durable_heartbeat_interval).
+    effective_ttl = job_manager_module.DURABLE_LEASE_TTL_SECONDS
+    assert effective_ttl == 1
+    interval = effective_ttl / 3.0
+    assert interval == pytest.approx(1 / 3)
     emitter, pg = _wire_state_emitter(monkeypatch)
 
     async def slow_insert(**kwargs):
@@ -1017,10 +1048,14 @@ async def test_slow_pg_does_not_drift_renewal_deadline(monkeypatch):
 
     q.heartbeat_durable_execution = recording_renewal
     started = asyncio.Event()
+    stream_done = asyncio.Event()
 
     async def stream(*args, **kwargs):
         started.set()
-        await asyncio.sleep(2.0)  # ~4 renewal cycles at 0.5s
+        # ~6 renewal cycles at a 1/3s cadence; long enough to prove the
+        # invariant but short enough to stay well inside the completion watchdog.
+        await asyncio.sleep(2.0)
+        stream_done.set()  # measurement window ends here, independent of cleanup
         yield "exit", "0"
 
     jm = _v2_manager(q, stream)
@@ -1028,18 +1063,44 @@ async def test_slow_pg_does_not_drift_renewal_deadline(monkeypatch):
         "sid", "durable-slow-pg", owner_id="owner", submission_key="key:v2-slowpg"
     )
     job = await jm.get_job(job_id)
-    await asyncio.wait_for(started.wait(), timeout=2)
-    await asyncio.wait_for(job.completed_event.wait(), timeout=8)
+    # Setup/admission latency: the fake SSH transport starts the stream and
+    # the heartbeat loop comes up. This is not part of the timing invariant.
+    await asyncio.wait_for(started.wait(), timeout=5)
+    # The heartbeat invariant is measured over the stream window, not against
+    # an arbitrary wall-clock completion deadline.
+    await asyncio.wait_for(stream_done.wait(), timeout=8)
+    # Give the stream's heartbeat loop a moment to surface its renewals, then
+    # assert the invariant on the samples collected inside the window.
+    await asyncio.sleep(interval)
+    renewals_in_window = [t for t in renewal_times if t <= time.monotonic()]
 
-    assert len(renewal_times) >= 3, f"expected ≥3 renewals, got {len(renewal_times)}"
-    gaps = [renewal_times[i + 1] - renewal_times[i] for i in range(len(renewal_times) - 1)]
-    # With absolute scheduling each gap should be ~interval (0.5s), not
-    # interval + PG_delay (0.65s).  Allow 20% margin for event-loop jitter.
-    max_allowed = interval * 1.2
-    assert all(g <= max_allowed for g in gaps), (
-        f"renewal gaps drifted beyond {max_allowed:.3f}s: {gaps}"
+    assert len(renewals_in_window) >= 3, (
+        f"expected ≥3 renewals in stream window, got {len(renewals_in_window)} "
+        f"(all={renewal_times})"
     )
+    _assert_renewal_gaps_within_budget(renewals_in_window, interval)
+
+    # Eventual completion is a separate, generous state-convergence watchdog.
+    # It must NOT participate in the heartbeat timing assertion above.
+    await asyncio.wait_for(job.completed_event.wait(), timeout=12)
     assert job.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_renewal_drift_assertion_is_sensitive():
+    """Sensitivity proof: the production guard MUST fail on real drift.
+
+    Uses the exact same assertion helper as the real test
+    (``_assert_renewal_gaps_within_budget``) with a drifted cadence —
+    ``interval + pg_delay`` per gap (the timing WITHOUT absolute scheduling).
+    The guard must reject that sequence, proving the real test is not
+    vacuously green.
+    """
+    interval = 0.5
+    pg_delay = 0.15
+    drifted = [0.0, interval + pg_delay, 2 * (interval + pg_delay), 3 * (interval + pg_delay)]
+    with pytest.raises(AssertionError):
+        _assert_renewal_gaps_within_budget(drifted, interval)
 
 
 @pytest.mark.asyncio
