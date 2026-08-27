@@ -241,6 +241,15 @@ jobs:
     timeout-minutes: 20
     env:
       REGISTRY: ${{ secrets.REGISTRY_HOST }}
+      # Self-hosted runner pool has no direct internet; outbound egress goes
+      # through the local Squid proxy (192.0.2.199:3128). docker build
+      # (BuildKit) does NOT inherit proxy vars from the client env into
+      # RUN layers, so they must be passed explicitly as --build-arg (both
+      # case variants: apt reads lowercase, other tools uppercase).
+      # NO_PROXY keeps internal hosts (Gitea, registry, CI network) direct.
+      DOCKER_HTTP_PROXY: http://192.0.2.199:3128
+      DOCKER_HTTPS_PROXY: http://192.0.2.199:3128
+      DOCKER_NO_PROXY: 127.0.0.1,localhost,::1,198.51.100.103,.example.com,git.example.com,gitea,198.51.100.0/24,172.17.0.0/16,172.18.0.0/16,172.19.0.0/16,172.20.0.0/16
     steps:
       - uses: actions/checkout@v7
       - name: Log in to the Gitea container registry
@@ -255,6 +264,12 @@ jobs:
           docker build -f docker/Dockerfile \
             --build-arg BUILD_SHA=${{ github.sha }} \
             --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            --build-arg http_proxy="$DOCKER_HTTP_PROXY" \
+            --build-arg https_proxy="$DOCKER_HTTPS_PROXY" \
+            --build-arg no_proxy="$DOCKER_NO_PROXY" \
+            --build-arg HTTP_PROXY="$DOCKER_HTTP_PROXY" \
+            --build-arg HTTPS_PROXY="$DOCKER_HTTPS_PROXY" \
+            --build-arg NO_PROXY="$DOCKER_NO_PROXY" \
             -t "$REGISTRY/gpakoh/agent-ssh-gateway:${{ github.sha }}" \
             -t "$REGISTRY/gpakoh/agent-ssh-gateway:latest" \
             .
@@ -263,6 +278,12 @@ jobs:
           docker build -f docker/Dockerfile.mcp-server \
             --build-arg BUILD_SHA=${{ github.sha }} \
             --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            --build-arg http_proxy="$DOCKER_HTTP_PROXY" \
+            --build-arg https_proxy="$DOCKER_HTTPS_PROXY" \
+            --build-arg no_proxy="$DOCKER_NO_PROXY" \
+            --build-arg HTTP_PROXY="$DOCKER_HTTP_PROXY" \
+            --build-arg HTTPS_PROXY="$DOCKER_HTTPS_PROXY" \
+            --build-arg NO_PROXY="$DOCKER_NO_PROXY" \
             -t "$REGISTRY/gpakoh/mcp-server:${{ github.sha }}" \
             -t "$REGISTRY/gpakoh/mcp-server:latest" \
             .
@@ -271,6 +292,12 @@ jobs:
           docker build -f docker/sshd/Dockerfile \
             --build-arg BUILD_SHA=${{ github.sha }} \
             --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            --build-arg http_proxy="$DOCKER_HTTP_PROXY" \
+            --build-arg https_proxy="$DOCKER_HTTPS_PROXY" \
+            --build-arg no_proxy="$DOCKER_NO_PROXY" \
+            --build-arg HTTP_PROXY="$DOCKER_HTTP_PROXY" \
+            --build-arg HTTPS_PROXY="$DOCKER_HTTPS_PROXY" \
+            --build-arg NO_PROXY="$DOCKER_NO_PROXY" \
             -t "$REGISTRY/gpakoh/ssh-gateway-sshd:${{ github.sha }}" \
             -t "$REGISTRY/gpakoh/ssh-gateway-sshd:latest" \
             docker/sshd
