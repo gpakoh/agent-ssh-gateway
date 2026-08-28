@@ -6,6 +6,7 @@ This server is intentionally kept outside the gateway core.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import sys
@@ -157,12 +158,47 @@ def _current_mcp_lifecycle_owner() -> Any | None:
         return None
 
 
+def _current_auth_reuse_key() -> str | None:
+    """Return an opaque authenticated identity key for logical SID reuse.
+
+    The raw bearer token never leaves request context and is never logged or
+    stored. Dynamic OAuth clients use their stable ``client_id`` so routine
+    access-token refresh does not strand otherwise reusable SSH sessions.
+    Static-token mode deliberately falls back to a token fingerprint because
+    all static tokens share the synthetic ``mcp_static`` client id. If auth
+    context is unavailable, fail closed to the historical destroy-on-transport-
+    close behavior.
+    """
+    try:
+        from mcp.server.auth.middleware.auth_context import get_access_token
+
+        access_token = get_access_token()
+        if access_token is None:
+            return None
+        token = str(getattr(access_token, "token", "") or "")
+        client_id = str(getattr(access_token, "client_id", "") or "")
+        if client_id and client_id != "mcp_static":
+            material = b"client\0" + client_id.encode("utf-8")
+        elif token:
+            material = b"token\0" + token.encode("utf-8")
+        else:
+            return None
+        return hashlib.sha256(material).hexdigest()
+    except Exception:
+        return None
+
+
 def get_gateway_client() -> Any:
     """Resolve gateway client state for the current logical MCP transport."""
     session = _current_mcp_session()
     if session is None:
         return client
-    return _gateway_client_sessions.get(client, session, _current_mcp_lifecycle_owner())
+    return _gateway_client_sessions.get(
+        client,
+        session,
+        _current_mcp_lifecycle_owner(),
+        reuse_key=_current_auth_reuse_key(),
+    )
 
 
 def get_agent_client() -> Any:
@@ -172,7 +208,12 @@ def get_agent_client() -> Any:
     session = _current_mcp_session()
     if session is None:
         return agent_client
-    return _agent_client_sessions.get(agent_client, session, _current_mcp_lifecycle_owner())
+    return _agent_client_sessions.get(
+        agent_client,
+        session,
+        _current_mcp_lifecycle_owner(),
+        reuse_key=_current_auth_reuse_key(),
+    )
 
 
 register_tool = tool_registry.register_tool
