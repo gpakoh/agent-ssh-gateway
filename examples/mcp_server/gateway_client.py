@@ -918,27 +918,37 @@ class GatewayClient:
 
 
 class GatewayClientSessionPool:
-    """Bind mutable GatewayClient state to a server-side MCP session lifecycle.
+    """Bind mutable GatewayClient state to server-side MCP lifecycles.
 
-    The key is the SDK-created ``ServerSession`` object, never a client-supplied
-    header or bearer token. Explicit lifecycle-owner release is the resource
-    contract; weak keys are only a cache-safety fallback and do not substitute for
-    disconnecting an owned gateway SID. If a future SDK changes the session object
-    so it can no longer be used as a weak key, resolution fails closed instead of
-    silently falling back to shared mutable session state.
+    Active SDK ``ServerSession`` objects never share a mutable ``GatewayClient``.
+    Authenticated transports may, however, return an owned logical SSH client to
+    a bounded idle pool after their lifecycle ends. A later transport carrying
+    the same opaque reuse key can borrow that idle client instead of destroying
+    and recreating its gateway SID on every short-lived MCP transport.
+
+    The reuse key is supplied by ``server.py`` from authenticated request context;
+    this class never derives identity from client-supplied headers. Callers that
+    provide no reuse key retain the historical destroy-on-teardown behavior.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._clients: weakref.WeakKeyDictionary[
-            Any, tuple[GatewayClient, GatewayClient, Any | None]
+            Any, tuple[GatewayClient, GatewayClient, Any | None, str | None]
         ] = weakref.WeakKeyDictionary()
+        self._idle: list[tuple[GatewayClient, GatewayClient, str]] = []
+        try:
+            idle_limit = int(os.environ.get("MCP_GATEWAY_REUSABLE_SESSION_IDLE_LIMIT", "4"))
+        except ValueError:
+            idle_limit = 4
+        self._idle_limit = max(0, idle_limit)
 
     def get(
         self,
         base: Any,
         mcp_session: Any,
         lifecycle_owner: Any | None = None,
+        reuse_key: str | None = None,
     ) -> Any:
         if not isinstance(base, GatewayClient):
             # Tests and embedding applications deliberately replace the server
@@ -965,15 +975,40 @@ class GatewayClientSessionPool:
                     " teardown"
                 )
 
-            scoped = base.fork_session()
-            self._clients[mcp_session] = (base, scoped, lifecycle_owner)
+            scoped: GatewayClient | None = None
+            if reuse_key:
+                for index in range(len(self._idle) - 1, -1, -1):
+                    idle_base, idle_client, idle_key = self._idle[index]
+                    if idle_base is base and idle_key == reuse_key:
+                        self._idle.pop(index)
+                        scoped = idle_client
+                        break
+
+            if scoped is None:
+                scoped = base.fork_session()
+                if reuse_key:
+                    # Authenticated reusable transports must never concurrently
+                    # borrow the process-global seed SID. With no idle owned
+                    # client available, force this scoped client through the
+                    # existing credential-backed auto-connect path instead.
+                    scoped.session_id = ""
+            self._clients[mcp_session] = (
+                base,
+                scoped,
+                lifecycle_owner,
+                reuse_key,
+            )
             return scoped
 
     def detach_owner(self, lifecycle_owner: Any) -> list[tuple[GatewayClient, CleanupTargets]]:
-        """Detach one lifecycle's clients and atomically end their local ownership.
+        """Detach one lifecycle without forcing reusable logical SIDs closed.
 
-        Returns cleanup targets.  Network I/O happens only in the callers
-        (``release_owner()`` / lifespan teardown), *after* pool lock is released.
+        A reusable client is inserted into the idle pool only after its active
+        lifecycle is detached, so parallel MCP transports cannot borrow the same
+        mutable client. Clients with retired-SID cleanup debt are never reused.
+
+        Returns cleanup targets for non-reusable clients and bounded-pool
+        eviction. Network I/O remains outside the pool lock.
         """
         detached: list[tuple[GatewayClient, CleanupTargets]] = []
         with self._lock:
@@ -981,11 +1016,42 @@ class GatewayClientSessionPool:
                 if entry[2] is lifecycle_owner:
                     self._clients.pop(mcp_session, None)
                     scoped = entry[1]
-                    detached.append((scoped, scoped.prepare_release()))
+                    reuse_key = entry[3]
+                    reusable = bool(
+                        reuse_key
+                        and self._idle_limit > 0
+                        and scoped._owns_session
+                        and scoped.session_id
+                        and not scoped._retired
+                        and not scoped._released
+                    )
+                    if reusable and reuse_key is not None:
+                        self._idle.append((entry[0], scoped, reuse_key))
+                    else:
+                        targets = scoped.prepare_release()
+                        if targets.all_sids:
+                            detached.append((scoped, targets))
+
+            while len(self._idle) > self._idle_limit:
+                _base, evicted, _key = self._idle.pop(0)
+                targets = evicted.prepare_release()
+                if targets.all_sids:
+                    detached.append((evicted, targets))
+        return detached
+
+    def drain_idle(self) -> list[tuple[GatewayClient, CleanupTargets]]:
+        """Detach all reusable idle clients for process shutdown/tests."""
+        detached: list[tuple[GatewayClient, CleanupTargets]] = []
+        with self._lock:
+            idle, self._idle = self._idle, []
+            for _base, scoped, _key in idle:
+                targets = scoped.prepare_release()
+                if targets.all_sids:
+                    detached.append((scoped, targets))
         return detached
 
     def release_owner(self, lifecycle_owner: Any) -> int:
-        """Synchronously release all scoped clients belonging to one MCP lifespan."""
+        """Synchronously release all non-reusable clients for one lifespan."""
         detached = self.detach_owner(lifecycle_owner)
         for scoped, targets in detached:
             for sid in targets.all_sids:
