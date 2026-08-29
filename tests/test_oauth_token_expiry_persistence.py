@@ -8,9 +8,6 @@ Phase 20B PR1: tests-only, no production code changes.
 Tests marked xfail(strict=True) reproduce the bug against unfixed code.
 """
 
-import os
-import tempfile
-
 import pytest
 
 from examples.mcp_server.oauth_provider import (
@@ -21,15 +18,8 @@ from examples.mcp_server.token_store import StoredTokenEntry, TokenStore
 
 
 @pytest.fixture
-def store_path():
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-        path = f.name
-    yield path
-    if os.path.exists(path):
-        os.unlink(path)
-    lock_path = path + ".lock"
-    if os.path.exists(lock_path):
-        os.unlink(lock_path)
+def store_path(tmp_path):
+    return str(tmp_path / "tokens.json")
 
 
 @pytest.fixture
@@ -223,12 +213,11 @@ def test_no_raw_token_in_log_output(store_path, capsys):
     assert raw not in captured.err
 
 
-def test_dcr_pkce_flow_unaffected():
+def test_dcr_pkce_flow_unaffected(tmp_path):
     """DCR + PKCE + authorization-code exchange must work unchanged.
 
-    This exercises the in-memory-only token issuance path (never
-    touching TokenStore), proving the expiry fix is additive to the
-    reload path and does not touch authorization-code/PKCE flow.
+    This exercises token issuance with durable refresh storage attached,
+    proving the expiry fix remains compatible with authorization-code/PKCE flow.
     """
     import secrets
 
@@ -237,6 +226,7 @@ def test_dcr_pkce_flow_unaffected():
     )
 
     provider = GatewayOAuthProvider()
+    provider.set_token_store(TokenStore(str(tmp_path / "oauth-tokens.json")))
 
     # Register a client
     client_id = "mcp_client_expiry_test"

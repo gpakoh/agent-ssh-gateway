@@ -14,7 +14,10 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
+
+TOKEN_STORE_VERSION = 2
+TokenType = Literal["access", "refresh"]
 
 
 @dataclass
@@ -27,6 +30,8 @@ class StoredTokenEntry:
     profile: str
     scopes: list[str]
     created_at: str
+    client_id: str = "mcp_static"
+    type: TokenType = "access"
     expires_at: str | None = None
     revoked_at: str | None = None
     last_used_at: str | None = None
@@ -69,6 +74,12 @@ def _entry_to_dict(e: StoredTokenEntry) -> dict[str, Any]:
 
 
 def _dict_to_entry(d: dict[str, Any]) -> StoredTokenEntry:
+    token_type_raw = d.get("type", "access")
+    if token_type_raw not in ("access", "refresh"):
+        raise ValueError("Token store record has invalid token type")
+    if token_type_raw == "refresh" and not d.get("client_id"):
+        raise ValueError("OAuth refresh token store record is missing client_id")
+    token_type = cast(TokenType, token_type_raw)
     return StoredTokenEntry(
         id=d["id"],
         token_hash=d["token_hash"],
@@ -76,6 +87,8 @@ def _dict_to_entry(d: dict[str, Any]) -> StoredTokenEntry:
         profile=d["profile"],
         scopes=d["scopes"],
         created_at=d["created_at"],
+        client_id=d.get("client_id", "mcp_static"),
+        type=token_type,
         expires_at=d.get("expires_at"),
         revoked_at=d.get("revoked_at"),
         last_used_at=d.get("last_used_at"),
@@ -94,8 +107,41 @@ class TokenStore:
     def __init__(self, store_path: str | None = None) -> None:
         self._path = store_path or _default_store_path()
         self._lock_path = self._path + ".lock"
+        _check_not_world_writable(self._path)
+
+    def prepare_durable_storage(self) -> None:
+        """Prepare and validate the backing store for durable writes.
+
+        Construction and reads intentionally never create filesystem state.
+        OAuth application startup and mutating administrative entrypoints call
+        this method explicitly before promising durable token persistence.
+        """
+        # Validate an existing store before creating any supporting state.  A
+        # corrupt or unreadable file remains an infrastructure failure.
+        self.load()
         _ensure_parent(self._path)
         _check_not_world_writable(self._path)
+
+        parent = os.path.dirname(self._path) or "."
+        probe_fd, probe_path = tempfile.mkstemp(
+            dir=parent,
+            prefix=".mcp_tokens_probe_",
+            suffix=".tmp",
+        )
+        try:
+            os.fchmod(probe_fd, stat.S_IRUSR | stat.S_IWUSR)
+            os.fsync(probe_fd)
+        finally:
+            os.close(probe_fd)
+            os.unlink(probe_path)
+
+        # Mutations serialize through this exact companion lock.  Opening and
+        # locking it here proves that startup can establish the same primitive
+        # issuance will require later.
+        with open(self._lock_path, "a+") as lock_file:
+            os.chmod(self._lock_path, stat.S_IRUSR | stat.S_IWUSR)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def load(self) -> list[StoredTokenEntry]:
         """Load all token entries from the store file."""
@@ -104,8 +150,8 @@ class TokenStore:
                 data = json.load(f)
         except FileNotFoundError:
             return []
-        except json.JSONDecodeError:
-            return []
+        except json.JSONDecodeError as exc:
+            raise ValueError("Token store contains invalid JSON") from exc
         entries = data.get("tokens", [])
         return [_dict_to_entry(e) for e in entries]
 
@@ -150,7 +196,7 @@ class TokenStore:
     def _write(self, entries: list[StoredTokenEntry]) -> None:
         """Atomically write entries. Caller must hold the store lock."""
         payload: dict[str, Any] = {
-            "version": 1,
+            "version": TOKEN_STORE_VERSION,
             "tokens": [_entry_to_dict(e) for e in entries],
         }
         raw = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"

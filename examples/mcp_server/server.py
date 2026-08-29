@@ -67,6 +67,12 @@ _auth_settings, _auth_provider, _agent_router = auth_setup.setup()
 _MCP_SESSION_RELEASE_DEADLINE_SECONDS = 4.0
 
 
+def prepare_oauth_token_store() -> None:
+    """Prepare durable OAuth refresh storage at application startup."""
+    if _auth_settings is not None:
+        auth_setup.prepare_oauth_token_store(_auth_provider)
+
+
 @asynccontextmanager
 async def _mcp_lifespan(_server: FastMCP) -> AsyncIterator[Any]:
     """Own resources for one SDK ServerSession and release them on transport close.
@@ -603,4 +609,5 @@ _docker_rmi_impl = docker._docker_rmi_impl
 _docker_volume_rm_impl = docker._docker_volume_rm_impl
 
 if __name__ == "__main__":
+    prepare_oauth_token_store()
     mcp.run()

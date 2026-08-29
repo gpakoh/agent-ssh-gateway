@@ -13,6 +13,7 @@ from examples.mcp_server.oauth_provider import (
     _verify_pkce,
     hash_token,
 )
+from examples.mcp_server.token_store import TokenStore
 
 
 def test_hash_token_has_prefix():
@@ -187,8 +188,10 @@ async def test_dcr_client_with_docker_admin_scope_receives_admin_token(provider)
 
 
 @pytest.fixture
-def provider():
-    return GatewayOAuthProvider()
+def provider(tmp_path):
+    oauth_provider = GatewayOAuthProvider()
+    oauth_provider.set_token_store(TokenStore(str(tmp_path / "tokens.json")))
+    return oauth_provider
 
 
 @pytest.mark.anyio

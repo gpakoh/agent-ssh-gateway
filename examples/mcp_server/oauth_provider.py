@@ -1,7 +1,7 @@
 """OAuth provider for agent-ssh-gateway MCP fleet.
 
-Uses FastMCP's native OAuthAuthorizationServerProvider with in-memory
-storage. Supports PKCE S256, public DCR, and 7 scopes.
+Uses FastMCP's native OAuthAuthorizationServerProvider with hashed token
+storage. Supports PKCE S256, public DCR, and scoped access.
 """
 
 from __future__ import annotations
@@ -11,11 +11,13 @@ import hashlib
 import secrets
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from mcp.server.auth.provider import AccessToken
+from mcp.server.auth.provider import AccessToken, RefreshToken, TokenError
+from pydantic import Field
 
-from examples.mcp_server.token_store import TokenStore
+from examples.mcp_server.token_store import StoredTokenEntry, TokenStore, TokenType
 
 if TYPE_CHECKING:
     # Deferred: client_store.py imports StoredClient from this module, so a
@@ -78,7 +80,13 @@ class StoredToken:
     client_id: str
     scopes: list[str]
     expires_at: float
-    type: str = "access"  # "access" or "refresh"
+    type: TokenType = "access"
+
+
+class _SafeRefreshToken(RefreshToken):
+    """SDK refresh token whose raw credential is excluded from representations."""
+
+    token: str = Field(repr=False, exclude=True)
 
 
 def _generate_id(prefix: str = "", length: int = 32) -> str:
@@ -133,16 +141,19 @@ def _parse_persisted_expiry(expires_at: str | None) -> float | None:
     if expires_at is None:
         return None
     try:
-        from datetime import datetime
-
         dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
         return dt.timestamp()
     except (ValueError, OSError):
         return 0.0
 
 
+def _format_persisted_time(timestamp: float) -> str:
+    """Serialize epoch seconds without losing sub-second expiry data."""
+    return datetime.fromtimestamp(timestamp, tz=UTC).isoformat().replace("+00:00", "Z")
+
+
 class GatewayOAuthProvider:
-    """In-memory OAuth 2.1 + PKCE provider for the MCP Gateway.
+    """OAuth 2.1 + PKCE provider with durable hashed refresh records.
 
     Uses FastMCP-compatible interface for integration with
     BearerAuthBackend and AuthContextMiddleware.
@@ -197,6 +208,8 @@ class GatewayOAuthProvider:
                 token_hash=entry.token_hash,
                 profile=entry.profile,
                 scopes=list(entry.scopes),
+                client_id=entry.client_id,
+                token_type=entry.type,
                 expires_at=expires,
             )
             count += 1
@@ -234,6 +247,7 @@ class GatewayOAuthProvider:
         profile: str = "operator",
         name: str = "hashed",
         client_id: str = "mcp_static",
+        token_type: TokenType = "access",
         expires_at: float | None = None,
     ) -> None:
         """Register a pre-hashed token (from persistent store).
@@ -243,13 +257,32 @@ class GatewayOAuthProvider:
         as having no expiry (``float("inf")``).
         """
         if not token_hash.startswith("sha256:"):
-            raise ValueError(f"token_hash must start with 'sha256:', got {token_hash[:20]}...")
+            raise ValueError("token_hash must start with 'sha256:'")
         self._tokens[token_hash] = StoredToken(
             token=token_hash,
             client_id=client_id,
             scopes=list(scopes),
             expires_at=expires_at if expires_at is not None else float("inf"),
-            type="access",
+            type=token_type,
+        )
+
+    def _persist_oauth_refresh_token(self, token: StoredToken) -> None:
+        """Durably store a hashed refresh record before exposing its credential."""
+        if self._token_store is None:
+            raise RuntimeError("OAuth refresh-token persistence is not configured")
+        now = time.time()
+        self._token_store.add(
+            StoredTokenEntry(
+                id=_generate_id("oauth_rt_", 16),
+                token_hash=token.token,
+                name="oauth-refresh",
+                profile="oauth",
+                scopes=list(token.scopes),
+                created_at=_format_persisted_time(now),
+                client_id=token.client_id,
+                type="refresh",
+                expires_at=_format_persisted_time(token.expires_at),
+            )
         )
 
     # --- Client Registration ---
@@ -377,20 +410,23 @@ class GatewayOAuthProvider:
         refresh_token = _generate_id("mcp_rt_", 32)
         at_hash = hash_token(access_token)
         rt_hash = hash_token(refresh_token)
-        self._tokens[at_hash] = StoredToken(
+        access_record = StoredToken(
             token=at_hash,
             client_id=client_id,
-            scopes=stored.scopes,
+            scopes=list(stored.scopes),
             expires_at=time.time() + 7200,
             type="access",
         )
-        self._tokens[rt_hash] = StoredToken(
+        refresh_record = StoredToken(
             token=rt_hash,
             client_id=client_id,
-            scopes=stored.scopes,
+            scopes=list(stored.scopes),
             expires_at=time.time() + 604800,
             type="refresh",
         )
+        self._persist_oauth_refresh_token(refresh_record)
+        self._tokens[at_hash] = access_record
+        self._tokens[rt_hash] = refresh_record
         return {
             "access_token": access_token,
             "token_type": "Bearer",
@@ -403,13 +439,25 @@ class GatewayOAuthProvider:
         rt_hash = hash_token(refresh_token)
         stored = self._tokens.get(rt_hash)
         if not stored:
-            raise ValueError("Refresh token not found")
+            raise TokenError(
+                error="invalid_grant",
+                error_description="refresh token is invalid",
+            )
         if stored.client_id != client_id:
-            raise ValueError("Client ID mismatch")
+            raise TokenError(
+                error="invalid_grant",
+                error_description="refresh token is invalid",
+            )
         if stored.type != "refresh":
-            raise ValueError("Token is not a refresh token")
+            raise TokenError(
+                error="invalid_grant",
+                error_description="refresh token is invalid",
+            )
         if time.time() > stored.expires_at:
-            raise ValueError("Refresh token expired")
+            raise TokenError(
+                error="invalid_grant",
+                error_description="refresh token has expired",
+            )
         new_access = _generate_id("mcp_at_", 32)
         at_hash = hash_token(new_access)
         self._tokens[at_hash] = StoredToken(
@@ -492,7 +540,10 @@ class GatewayOAuthProvider:
 
         token = getattr(refresh_token, "token", "") or ""
         if not token:
-            raise ValueError("Missing refresh token")
+            raise TokenError(
+                error="invalid_grant",
+                error_description="refresh token is invalid",
+            )
         result = self.refresh_access_token(client_info.client_id, token)
         return OAuthToken(
             access_token=result["access_token"],
@@ -525,8 +576,6 @@ class GatewayOAuthProvider:
         )
 
     async def load_refresh_token(self, client_info: Any, refresh_token: str) -> Any | None:
-        from mcp.server.auth.provider import RefreshToken
-
         rt_hash = hash_token(refresh_token)
         stored = self._tokens.get(rt_hash)
         if not stored or stored.type != "refresh":
@@ -534,8 +583,8 @@ class GatewayOAuthProvider:
         if stored.expires_at < time.time():
             self._tokens.pop(rt_hash, None)
             return None
-        return RefreshToken(
-            token=stored.token,
+        return _SafeRefreshToken(
+            token=refresh_token,
             client_id=stored.client_id,
             scopes=stored.scopes,
             expires_at=int(stored.expires_at) if stored.expires_at != float("inf") else None,

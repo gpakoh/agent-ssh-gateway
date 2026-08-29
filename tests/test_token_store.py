@@ -2,29 +2,80 @@
 
 import json
 import os
-import tempfile
+import stat
 
 import pytest
 
-from examples.mcp_server.token_store import StoredTokenEntry, TokenStore
+from examples.mcp_server import token_store as token_store_module
+from examples.mcp_server.token_store import TOKEN_STORE_VERSION, StoredTokenEntry, TokenStore
 
 
 @pytest.fixture
-def store_path():
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-        path = f.name
-    yield path
-    if os.path.exists(path):
-        os.unlink(path)
-    lock_path = path + ".lock"
-    if os.path.exists(lock_path):
-        os.unlink(lock_path)
+def store_path(tmp_path):
+    return str(tmp_path / "tokens.json")
+
+
+def _write_private_text(path, content):
+    """Create a semantic token-store fixture with production-valid permissions."""
+    path.write_text(content)
+    path.chmod(0o600)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_token_store_create_empty(store_path):
     store = TokenStore(store_path)
     entries = store.load()
     assert entries == []
+
+
+def test_token_store_constructor_does_not_create_missing_parent(tmp_path):
+    store_path = tmp_path / "missing" / "nested" / "tokens.json"
+
+    TokenStore(str(store_path))
+
+    assert not store_path.parent.exists()
+
+
+def test_token_store_constructor_does_not_require_parent_write_access(
+    tmp_path,
+    monkeypatch,
+):
+    store_path = tmp_path / "read-only-construction" / "tokens.json"
+
+    def fail_if_parent_creation_is_attempted(_path: str) -> None:
+        raise PermissionError("constructor attempted filesystem preparation")
+
+    monkeypatch.setattr(token_store_module, "_ensure_parent", fail_if_parent_creation_is_attempted)
+
+    TokenStore(str(store_path))
+
+
+def test_existing_corrupt_token_store_still_fails_closed(tmp_path):
+    store_path = tmp_path / "tokens.json"
+    _write_private_text(store_path, "{not-json")
+
+    with pytest.raises(ValueError, match="invalid JSON"):
+        TokenStore(str(store_path)).load()
+
+
+def test_prepare_durable_storage_creates_parent_and_supports_writes(tmp_path):
+    store_path = tmp_path / "missing" / "nested" / "tokens.json"
+    store = TokenStore(str(store_path))
+
+    store.prepare_durable_storage()
+    store.add(
+        StoredTokenEntry(
+            id="prepared-store",
+            token_hash="sha256:prepared",
+            name="prepared",
+            profile="viewer",
+            scopes=["mcp:read"],
+            created_at="2026-08-29T00:00:00Z",
+        )
+    )
+
+    assert store_path.parent.is_dir()
+    assert [entry.id for entry in store.load()] == ["prepared-store"]
 
 
 def test_token_store_add_and_load(store_path):
@@ -114,10 +165,42 @@ def test_token_store_version_in_file(store_path):
     )
     with open(store_path) as f:
         data = json.load(f)
-    assert data["version"] == 1
+    assert data["version"] == TOKEN_STORE_VERSION == 2
 
 
-def test_token_store_enforces_permissions(store_path):
+def test_token_store_persisted_mode_is_secure_under_umask_000(store_path):
+    previous_umask = os.umask(0o000)
+    try:
+        store = TokenStore(store_path)
+        store.add(
+            StoredTokenEntry(
+                id="mode-first",
+                token_hash="sha256:mode-first",
+                name="mode-first",
+                profile="viewer",
+                scopes=["mcp:read"],
+                created_at="2026-08-29T00:00:00Z",
+            )
+        )
+        assert stat.S_IMODE(os.stat(store_path).st_mode) == 0o600
+
+        # A subsequent mutation publishes a new tempfile inode via os.replace.
+        store.add(
+            StoredTokenEntry(
+                id="mode-replacement",
+                token_hash="sha256:mode-replacement",
+                name="mode-replacement",
+                profile="viewer",
+                scopes=["mcp:read"],
+                created_at="2026-08-29T00:00:01Z",
+            )
+        )
+        assert stat.S_IMODE(os.stat(store_path).st_mode) == 0o600
+    finally:
+        os.umask(previous_umask)
+
+
+def test_world_writable_existing_token_store_is_rejected(store_path):
     # Make store world-writable
     with open(store_path, "w") as f:
         json.dump({"version": 1, "tokens": []}, f)

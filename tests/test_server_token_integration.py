@@ -1,8 +1,5 @@
 """Integration tests: GatewayOAuthProvider + TokenStore."""
 
-import os
-import tempfile
-
 import pytest
 
 from examples.mcp_server.oauth_provider import GatewayOAuthProvider, hash_token
@@ -10,15 +7,8 @@ from examples.mcp_server.token_store import StoredTokenEntry, TokenStore
 
 
 @pytest.fixture
-def store_path():
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-        path = f.name
-    yield path
-    if os.path.exists(path):
-        os.unlink(path)
-    lock_path = path + ".lock"
-    if os.path.exists(lock_path):
-        os.unlink(lock_path)
+def store_path(tmp_path):
+    return str(tmp_path / "tokens.json")
 
 
 def test_set_token_store(store_path):

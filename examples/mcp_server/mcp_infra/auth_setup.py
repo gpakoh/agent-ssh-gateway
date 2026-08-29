@@ -24,6 +24,22 @@ from examples.mcp_server.oauth_provider import (
 )
 
 
+def prepare_oauth_token_store(auth_provider: GatewayOAuthProvider | None) -> None:
+    """Fail closed unless OAuth refresh persistence is ready for writes.
+
+    Called only by executable OAuth application entrypoints.  Keeping this
+    outside ``setup()`` lets imports construct and load auth state without
+    creating directories or requiring write access.
+    """
+    token_store = auth_provider._token_store if auth_provider is not None else None
+    if token_store is None:
+        raise RuntimeError("OAuth durable token store is not configured")
+    try:
+        token_store.prepare_durable_storage()
+    except Exception as exc:
+        raise RuntimeError("OAuth durable token store preparation failed") from exc
+
+
 def setup() -> tuple[Any, Any, Any]:
     """Bootstrap auth provider/settings and the agent backend router.
 
@@ -155,6 +171,8 @@ def setup() -> tuple[Any, Any, Any]:
                 )
         except Exception as _exc:
             print(f"  TokenStore: error loading tokens: {_exc}", file=sys.stderr)
+            if auth_mode == "oauth":
+                raise RuntimeError("OAuth token store initialization failed") from _exc
 
     # ── ClientStore: load persisted dynamically-registered OAuth clients ──
     # Without this, GatewayOAuthProvider._clients was purely in-memory --
