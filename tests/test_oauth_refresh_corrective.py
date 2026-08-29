@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import stat
 import time
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,13 @@ from examples.mcp_server.token_store import StoredTokenEntry, TokenStore
 
 CALLBACK_URL = "https://example.com/callback"
 SCOPES = ["mcp:read", "mcp:project"]
+
+
+def _write_private_text(path: Path, content: str) -> None:
+    """Create a semantic token-store fixture with production-valid permissions."""
+    path.write_text(content)
+    path.chmod(0o600)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 class _ClientAuthenticator:
@@ -396,7 +404,7 @@ def test_refresh_access_token_uses_typed_invalid_grant(tmp_path: Path) -> None:
 
 def test_corrupt_token_store_is_infrastructure_failure(tmp_path: Path) -> None:
     store_path = tmp_path / "tokens.json"
-    store_path.write_text("{not-json")
+    _write_private_text(store_path, "{not-json")
 
     with pytest.raises(ValueError, match="invalid JSON"):
         TokenStore(str(store_path)).load()
@@ -440,7 +448,7 @@ def test_oauth_setup_fails_closed_on_corrupt_token_store(
     from examples.mcp_server.mcp_infra.auth_setup import setup
 
     store_path = tmp_path / "tokens.json"
-    store_path.write_text("{not-json")
+    _write_private_text(store_path, "{not-json")
     monkeypatch.setenv("MCP_AUTH_MODE", "oauth")
     monkeypatch.setenv("MCP_TOKEN_STORE_FILE", str(store_path))
     monkeypatch.setenv("MCP_CLIENT_STORE_FILE", str(tmp_path / "clients.json"))
@@ -453,7 +461,8 @@ def test_oauth_setup_fails_closed_on_corrupt_token_store(
 def test_v1_static_token_entry_remains_access_mcp_static(tmp_path: Path) -> None:
     store_path = tmp_path / "tokens.json"
     raw_static_token = "legacy-static-credential"
-    store_path.write_text(
+    _write_private_text(
+        store_path,
         json.dumps(
             {
                 "version": 1,

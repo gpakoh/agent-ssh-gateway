@@ -2,6 +2,7 @@
 
 import json
 import os
+import stat
 
 import pytest
 
@@ -12,6 +13,13 @@ from examples.mcp_server.token_store import TOKEN_STORE_VERSION, StoredTokenEntr
 @pytest.fixture
 def store_path(tmp_path):
     return str(tmp_path / "tokens.json")
+
+
+def _write_private_text(path, content):
+    """Create a semantic token-store fixture with production-valid permissions."""
+    path.write_text(content)
+    path.chmod(0o600)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_token_store_create_empty(store_path):
@@ -44,7 +52,7 @@ def test_token_store_constructor_does_not_require_parent_write_access(
 
 def test_existing_corrupt_token_store_still_fails_closed(tmp_path):
     store_path = tmp_path / "tokens.json"
-    store_path.write_text("{not-json")
+    _write_private_text(store_path, "{not-json")
 
     with pytest.raises(ValueError, match="invalid JSON"):
         TokenStore(str(store_path)).load()
@@ -160,7 +168,39 @@ def test_token_store_version_in_file(store_path):
     assert data["version"] == TOKEN_STORE_VERSION == 2
 
 
-def test_token_store_enforces_permissions(store_path):
+def test_token_store_persisted_mode_is_secure_under_umask_000(store_path):
+    previous_umask = os.umask(0o000)
+    try:
+        store = TokenStore(store_path)
+        store.add(
+            StoredTokenEntry(
+                id="mode-first",
+                token_hash="sha256:mode-first",
+                name="mode-first",
+                profile="viewer",
+                scopes=["mcp:read"],
+                created_at="2026-08-29T00:00:00Z",
+            )
+        )
+        assert stat.S_IMODE(os.stat(store_path).st_mode) == 0o600
+
+        # A subsequent mutation publishes a new tempfile inode via os.replace.
+        store.add(
+            StoredTokenEntry(
+                id="mode-replacement",
+                token_hash="sha256:mode-replacement",
+                name="mode-replacement",
+                profile="viewer",
+                scopes=["mcp:read"],
+                created_at="2026-08-29T00:00:01Z",
+            )
+        )
+        assert stat.S_IMODE(os.stat(store_path).st_mode) == 0o600
+    finally:
+        os.umask(previous_umask)
+
+
+def test_world_writable_existing_token_store_is_rejected(store_path):
     # Make store world-writable
     with open(store_path, "w") as f:
         json.dump({"version": 1, "tokens": []}, f)
