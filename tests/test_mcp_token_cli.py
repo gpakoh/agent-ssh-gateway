@@ -1,8 +1,6 @@
 """Tests for the mcp-token CLI tool."""
 
 import json
-import os
-import tempfile
 
 import pytest
 
@@ -11,17 +9,10 @@ from scripts.mcp_token_cli import main
 
 
 @pytest.fixture
-def store_path():
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-        path = f.name
-    os.environ["MCP_TOKEN_STORE_FILE"] = path
-    yield path
-    if os.path.exists(path):
-        os.unlink(path)
-    lock_path = path + ".lock"
-    if os.path.exists(lock_path):
-        os.unlink(lock_path)
-    del os.environ["MCP_TOKEN_STORE_FILE"]
+def store_path(tmp_path, monkeypatch):
+    path = str(tmp_path / "tokens.json")
+    monkeypatch.setenv("MCP_TOKEN_STORE_FILE", path)
+    return path
 
 
 def test_cli_create_output_text(store_path):

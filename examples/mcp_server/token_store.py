@@ -14,7 +14,10 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
+
+TOKEN_STORE_VERSION = 2
+TokenType = Literal["access", "refresh"]
 
 
 @dataclass
@@ -27,6 +30,8 @@ class StoredTokenEntry:
     profile: str
     scopes: list[str]
     created_at: str
+    client_id: str = "mcp_static"
+    type: TokenType = "access"
     expires_at: str | None = None
     revoked_at: str | None = None
     last_used_at: str | None = None
@@ -69,6 +74,12 @@ def _entry_to_dict(e: StoredTokenEntry) -> dict[str, Any]:
 
 
 def _dict_to_entry(d: dict[str, Any]) -> StoredTokenEntry:
+    token_type_raw = d.get("type", "access")
+    if token_type_raw not in ("access", "refresh"):
+        raise ValueError("Token store record has invalid token type")
+    if token_type_raw == "refresh" and not d.get("client_id"):
+        raise ValueError("OAuth refresh token store record is missing client_id")
+    token_type = cast(TokenType, token_type_raw)
     return StoredTokenEntry(
         id=d["id"],
         token_hash=d["token_hash"],
@@ -76,6 +87,8 @@ def _dict_to_entry(d: dict[str, Any]) -> StoredTokenEntry:
         profile=d["profile"],
         scopes=d["scopes"],
         created_at=d["created_at"],
+        client_id=d.get("client_id", "mcp_static"),
+        type=token_type,
         expires_at=d.get("expires_at"),
         revoked_at=d.get("revoked_at"),
         last_used_at=d.get("last_used_at"),
@@ -104,8 +117,8 @@ class TokenStore:
                 data = json.load(f)
         except FileNotFoundError:
             return []
-        except json.JSONDecodeError:
-            return []
+        except json.JSONDecodeError as exc:
+            raise ValueError("Token store contains invalid JSON") from exc
         entries = data.get("tokens", [])
         return [_dict_to_entry(e) for e in entries]
 
@@ -150,7 +163,7 @@ class TokenStore:
     def _write(self, entries: list[StoredTokenEntry]) -> None:
         """Atomically write entries. Caller must hold the store lock."""
         payload: dict[str, Any] = {
-            "version": 1,
+            "version": TOKEN_STORE_VERSION,
             "tokens": [_entry_to_dict(e) for e in entries],
         }
         raw = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"

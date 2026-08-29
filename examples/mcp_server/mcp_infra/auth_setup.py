@@ -155,6 +155,8 @@ def setup() -> tuple[Any, Any, Any]:
                 )
         except Exception as _exc:
             print(f"  TokenStore: error loading tokens: {_exc}", file=sys.stderr)
+            if auth_mode == "oauth":
+                raise RuntimeError("OAuth token store initialization failed") from _exc
 
     # ── ClientStore: load persisted dynamically-registered OAuth clients ──
     # Without this, GatewayOAuthProvider._clients was purely in-memory --

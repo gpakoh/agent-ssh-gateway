@@ -2,23 +2,15 @@
 
 import json
 import os
-import tempfile
 
 import pytest
 
-from examples.mcp_server.token_store import StoredTokenEntry, TokenStore
+from examples.mcp_server.token_store import TOKEN_STORE_VERSION, StoredTokenEntry, TokenStore
 
 
 @pytest.fixture
-def store_path():
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-        path = f.name
-    yield path
-    if os.path.exists(path):
-        os.unlink(path)
-    lock_path = path + ".lock"
-    if os.path.exists(lock_path):
-        os.unlink(lock_path)
+def store_path(tmp_path):
+    return str(tmp_path / "tokens.json")
 
 
 def test_token_store_create_empty(store_path):
@@ -114,7 +106,7 @@ def test_token_store_version_in_file(store_path):
     )
     with open(store_path) as f:
         data = json.load(f)
-    assert data["version"] == 1
+    assert data["version"] == TOKEN_STORE_VERSION == 2
 
 
 def test_token_store_enforces_permissions(store_path):
