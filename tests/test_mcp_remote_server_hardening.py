@@ -12,9 +12,40 @@ Findings from a live security audit:
 from __future__ import annotations
 
 import os
+import threading
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
+
+def test_oauth_run_prepares_durable_store_before_starting_servers(monkeypatch):
+    with patch.dict(os.environ, {"MCP_AUTH_MODE": "oauth"}, clear=False):
+        import importlib
+
+        import examples.mcp_client_remote.server as srv
+
+        importlib.reload(srv)
+        events: list[str] = []
+
+        monkeypatch.setattr(
+            srv._mcp_mod,
+            "prepare_oauth_token_store",
+            lambda: events.append("prepare"),
+        )
+
+        class FakeThread:
+            def __init__(self, *args, **kwargs):
+                events.append("thread-created")
+
+            def start(self):
+                events.append("thread-started")
+
+        monkeypatch.setattr(threading, "Thread", FakeThread)
+        monkeypatch.setattr(srv.uvicorn, "run", lambda *args, **kwargs: events.append("uvicorn"))
+
+        srv.run()
+
+    assert events == ["prepare", "thread-created", "thread-started", "uvicorn"]
 
 
 class TestScopeEnforcementDefaultsClosed:

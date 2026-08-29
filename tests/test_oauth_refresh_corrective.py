@@ -402,6 +402,37 @@ def test_corrupt_token_store_is_infrastructure_failure(tmp_path: Path) -> None:
         TokenStore(str(store_path)).load()
 
 
+def test_oauth_startup_fails_when_durable_store_cannot_be_prepared(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server.mcp_infra.auth_setup import (
+        prepare_oauth_token_store,
+        setup,
+    )
+
+    monkeypatch.setenv("MCP_AUTH_MODE", "oauth")
+    monkeypatch.setenv("MCP_TOKEN_STORE_FILE", str(tmp_path / "tokens.json"))
+    monkeypatch.setenv("MCP_CLIENT_STORE_FILE", str(tmp_path / "clients.json"))
+    monkeypatch.setenv("MCP_AGENT_BACKEND_ROUTER_ENABLED", "false")
+    _, provider, _ = setup()
+    assert provider is not None
+    assert provider._token_store is not None
+
+    def fail_preparation() -> None:
+        raise PermissionError("durable store is not writable")
+
+    monkeypatch.setattr(
+        provider._token_store,
+        "prepare_durable_storage",
+        fail_preparation,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="OAuth durable token store preparation failed"):
+        prepare_oauth_token_store(provider)
+
+
 def test_oauth_setup_fails_closed_on_corrupt_token_store(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

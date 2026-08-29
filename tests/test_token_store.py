@@ -5,6 +5,7 @@ import os
 
 import pytest
 
+from examples.mcp_server import token_store as token_store_module
 from examples.mcp_server.token_store import TOKEN_STORE_VERSION, StoredTokenEntry, TokenStore
 
 
@@ -17,6 +18,56 @@ def test_token_store_create_empty(store_path):
     store = TokenStore(store_path)
     entries = store.load()
     assert entries == []
+
+
+def test_token_store_constructor_does_not_create_missing_parent(tmp_path):
+    store_path = tmp_path / "missing" / "nested" / "tokens.json"
+
+    TokenStore(str(store_path))
+
+    assert not store_path.parent.exists()
+
+
+def test_token_store_constructor_does_not_require_parent_write_access(
+    tmp_path,
+    monkeypatch,
+):
+    store_path = tmp_path / "read-only-construction" / "tokens.json"
+
+    def fail_if_parent_creation_is_attempted(_path: str) -> None:
+        raise PermissionError("constructor attempted filesystem preparation")
+
+    monkeypatch.setattr(token_store_module, "_ensure_parent", fail_if_parent_creation_is_attempted)
+
+    TokenStore(str(store_path))
+
+
+def test_existing_corrupt_token_store_still_fails_closed(tmp_path):
+    store_path = tmp_path / "tokens.json"
+    store_path.write_text("{not-json")
+
+    with pytest.raises(ValueError, match="invalid JSON"):
+        TokenStore(str(store_path)).load()
+
+
+def test_prepare_durable_storage_creates_parent_and_supports_writes(tmp_path):
+    store_path = tmp_path / "missing" / "nested" / "tokens.json"
+    store = TokenStore(str(store_path))
+
+    store.prepare_durable_storage()
+    store.add(
+        StoredTokenEntry(
+            id="prepared-store",
+            token_hash="sha256:prepared",
+            name="prepared",
+            profile="viewer",
+            scopes=["mcp:read"],
+            created_at="2026-08-29T00:00:00Z",
+        )
+    )
+
+    assert store_path.parent.is_dir()
+    assert [entry.id for entry in store.load()] == ["prepared-store"]
 
 
 def test_token_store_add_and_load(store_path):

@@ -61,6 +61,7 @@ def _output_text(entries: list[dict], verb: str) -> None:
 
 def _handle_create(args: argparse.Namespace) -> int:
     store = TokenStore()
+    store.prepare_durable_storage()
     raw_token = _generate_raw_token()
     token_hash = hash_token(raw_token)
     token_id = _generate_token_id()
@@ -133,6 +134,7 @@ def _handle_list(args: argparse.Namespace) -> int:
 
 def _handle_revoke(args: argparse.Namespace) -> int:
     store = TokenStore()
+    store.prepare_durable_storage()
     result = store.revoke(args.id)
     if result is None:
         print(f"Error: token '{args.id}' not found or already revoked.", file=sys.stderr)
@@ -143,6 +145,7 @@ def _handle_revoke(args: argparse.Namespace) -> int:
 
 def _handle_rotate(args: argparse.Namespace) -> int:
     store = TokenStore()
+    store.prepare_durable_storage()
     entries = store.load()
     old_entry = next((e for e in entries if e.id == args.id), None)
     if old_entry is None:

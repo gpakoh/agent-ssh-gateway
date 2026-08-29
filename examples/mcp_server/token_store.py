@@ -107,8 +107,41 @@ class TokenStore:
     def __init__(self, store_path: str | None = None) -> None:
         self._path = store_path or _default_store_path()
         self._lock_path = self._path + ".lock"
+        _check_not_world_writable(self._path)
+
+    def prepare_durable_storage(self) -> None:
+        """Prepare and validate the backing store for durable writes.
+
+        Construction and reads intentionally never create filesystem state.
+        OAuth application startup and mutating administrative entrypoints call
+        this method explicitly before promising durable token persistence.
+        """
+        # Validate an existing store before creating any supporting state.  A
+        # corrupt or unreadable file remains an infrastructure failure.
+        self.load()
         _ensure_parent(self._path)
         _check_not_world_writable(self._path)
+
+        parent = os.path.dirname(self._path) or "."
+        probe_fd, probe_path = tempfile.mkstemp(
+            dir=parent,
+            prefix=".mcp_tokens_probe_",
+            suffix=".tmp",
+        )
+        try:
+            os.fchmod(probe_fd, stat.S_IRUSR | stat.S_IWUSR)
+            os.fsync(probe_fd)
+        finally:
+            os.close(probe_fd)
+            os.unlink(probe_path)
+
+        # Mutations serialize through this exact companion lock.  Opening and
+        # locking it here proves that startup can establish the same primitive
+        # issuance will require later.
+        with open(self._lock_path, "a+") as lock_file:
+            os.chmod(self._lock_path, stat.S_IRUSR | stat.S_IWUSR)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def load(self) -> list[StoredTokenEntry]:
         """Load all token entries from the store file."""

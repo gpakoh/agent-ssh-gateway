@@ -540,6 +540,9 @@ def run():
     """Start both internal MCP server and public proxy."""
     import threading
 
+    if MCP_AUTH_MODE == "oauth":
+        _mcp_mod.prepare_oauth_token_store()
+
     internal_host = MCP_INTERNAL_HOST
     internal_port = MCP_INTERNAL_PORT
     public_host = os.environ.get("MCP_HOST", "127.0.0.1")
