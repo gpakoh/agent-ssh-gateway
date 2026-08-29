@@ -27,8 +27,12 @@
 # PYTEST_UNIT_ARGS='--junitxml=test-results.xml' for its own artifact
 # upload; local runs leave it empty.
 PYTEST_UNIT_ARGS ?=
+# Hard run-away guard: runner-level timeout enforcement has been inconsistent.
+# Keep this deterministic process-level guard inside the workflow's outer
+# budget so pytest terminates with evidence before the runner kills the job.
+# 15m is more than twice the typical 6-7m unit run.
 test-unit:
-	uv run pytest -m "not host_smoke and not e2e and not integration and not smoke" --reruns 2 --reruns-delay 2 --only-rerun 'WebSocketDisconnect' --cov=app --cov-report=term-missing --cov-fail-under=69 -q $(PYTEST_UNIT_ARGS)
+	timeout --signal=TERM --kill-after=30s 15m uv run pytest -m "not host_smoke and not e2e and not integration and not smoke" --reruns 2 --reruns-delay 2 --only-rerun 'WebSocketDisconnect' --cov=app --cov-report=term-missing --cov-fail-under=69 -q $(PYTEST_UNIT_ARGS)
 
 test: test-unit
 

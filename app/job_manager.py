@@ -291,45 +291,48 @@ class JobManager:
         """
         interval = max(0.1, float(settings.stale_scan_interval))
         while True:
-            await asyncio.sleep(interval)
-            now = time.time()
-            async with self._lock:
-                candidates = [job for job in self._jobs.values() if job.status == "running"]
-            for job in candidates:
-                if job.last_heartbeat_at is None:
-                    continue  # not claimed yet — never flag unclaimed jobs
-                fresh = now - job.last_heartbeat_at <= settings.stale_threshold
-                if fresh and job.supervisor_state == "stale":
-                    stale_duration = round(now - (job.stale_since or now), 3)
-                    job.supervisor_state = "healthy"
-                    job.stale_since = None
-                    await self._emit_bounded(
-                        job,
-                        "recovered",
-                        {"stale_duration": stale_duration},
-                        budget=OBSERVABILITY_EMIT_BUDGET_SECONDS,
-                    )
-                    await job.notify_listeners(
-                        {
-                            "type": "supervisor",
-                            "state": "healthy",
-                            "stale_duration": stale_duration,
-                        }
-                    )
-                elif not fresh and job.supervisor_state != "stale":
-                    job.supervisor_state = "stale"
-                    job.stale_since = now
-                    await self._emit_bounded(
-                        job,
-                        "stale",
-                        {
-                            "last_heartbeat_at": job.last_heartbeat_at,
-                            "missed_seconds": round(now - (job.last_heartbeat_at or now), 3),
-                            "stale_since": job.stale_since,
-                        },
-                        budget=OBSERVABILITY_EMIT_BUDGET_SECONDS,
-                    )
-                    await job.notify_listeners({"type": "supervisor", "state": "stale"})
+            try:
+                await asyncio.sleep(interval)
+                now = time.time()
+                async with self._lock:
+                    candidates = [job for job in self._jobs.values() if job.status == "running"]
+                for job in candidates:
+                    if job.last_heartbeat_at is None:
+                        continue  # not claimed yet — never flag unclaimed jobs
+                    fresh = now - job.last_heartbeat_at <= settings.stale_threshold
+                    if fresh and job.supervisor_state == "stale":
+                        stale_duration = round(now - (job.stale_since or now), 3)
+                        job.supervisor_state = "healthy"
+                        job.stale_since = None
+                        await self._emit_bounded(
+                            job,
+                            "recovered",
+                            {"stale_duration": stale_duration},
+                            budget=OBSERVABILITY_EMIT_BUDGET_SECONDS,
+                        )
+                        await job.notify_listeners(
+                            {
+                                "type": "supervisor",
+                                "state": "healthy",
+                                "stale_duration": stale_duration,
+                            }
+                        )
+                    elif not fresh and job.supervisor_state != "stale":
+                        job.supervisor_state = "stale"
+                        job.stale_since = now
+                        await self._emit_bounded(
+                            job,
+                            "stale",
+                            {
+                                "last_heartbeat_at": job.last_heartbeat_at,
+                                "missed_seconds": round(now - (job.last_heartbeat_at or now), 3),
+                                "stale_since": job.stale_since,
+                            },
+                            budget=OBSERVABILITY_EMIT_BUDGET_SECONDS,
+                        )
+                        await job.notify_listeners({"type": "supervisor", "state": "stale"})
+            except asyncio.CancelledError:
+                break
 
     async def stop_cleanup_task(self) -> None:
         """Stop background cleanup."""
@@ -647,13 +650,14 @@ class JobManager:
         Guarantees that observability I/O can never stall the calling loop
         beyond ``budget`` seconds — a hung PostgreSQL write is abandoned
         (the in-flight insert is cancelled before commit, so nothing partial
-        is persisted) and the caller keeps its deadline. Never raises and
-        never fails the job.
+        is persisted) and the caller keeps its deadline. Operational emit
+        failures never fail the job; cancellation of the caller propagates.
         """
         try:
-            await asyncio.wait_for(
-                self._emit_observability_event(job, event_type, payload), timeout=budget
-            )
+            async with asyncio.timeout(budget):
+                await self._emit_observability_event(job, event_type, payload)
+        except asyncio.CancelledError:
+            raise
         except TimeoutError:
             logger.warning(
                 "Observability emit for job %s (%s) exceeded %.2fs budget; "
@@ -775,6 +779,16 @@ class JobManager:
         worker_token: str | None = None
         lease_ttl = DURABLE_LEASE_TTL_SECONDS
         heartbeat_task: asyncio.Task | None = None
+
+        async def _reap_nondurable_heartbeat() -> None:
+            """Cancel and await the non-durable heartbeat child, if one exists."""
+            if is_durable or heartbeat_task is None:
+                return
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
         if is_durable:
             worker_token = uuid.uuid4().hex
@@ -1034,37 +1048,37 @@ class JobManager:
                         "exit_code": job.exit_code,
                     }
                 )
-                if job.status == "completed":
-                    await self._emit_bounded(
-                        job,
-                        "completed",
-                        {"exit_code": job.exit_code, "duration": job.duration},
-                        budget=OBSERVABILITY_EMIT_BUDGET_SECONDS,
-                    )
-                else:
-                    # cancelled/ambiguous keep their own event types: history
-                    # must never mask a user cancellation as a failure, nor an
-                    # unproven remote outcome as either completed or cancelled.
-                    await self._emit_bounded(
-                        job,
-                        _TERMINAL_EVENT_BY_STATUS.get(job.status, "failed"),
-                        {
-                            "status": job.status,
-                            "exit_code": job.exit_code,
-                            "error": job.error_message,
-                            "duration": job.duration,
-                        },
-                        budget=OBSERVABILITY_EMIT_BUDGET_SECONDS,
-                    )
+                try:
+                    if job.status == "completed":
+                        await self._emit_bounded(
+                            job,
+                            "completed",
+                            {"exit_code": job.exit_code, "duration": job.duration},
+                            budget=OBSERVABILITY_EMIT_BUDGET_SECONDS,
+                        )
+                    else:
+                        # cancelled/ambiguous keep their own event types: history
+                        # must never mask a user cancellation as a failure, nor an
+                        # unproven remote outcome as either completed or cancelled.
+                        await self._emit_bounded(
+                            job,
+                            _TERMINAL_EVENT_BY_STATUS.get(job.status, "failed"),
+                            {
+                                "status": job.status,
+                                "exit_code": job.exit_code,
+                                "error": job.error_message,
+                                "duration": job.duration,
+                            },
+                            budget=OBSERVABILITY_EMIT_BUDGET_SECONDS,
+                        )
+                except asyncio.CancelledError:
+                    await _reap_nondurable_heartbeat()
+                    raise
 
             # Non-durable reap: after persistence and terminal emissions so
             # the cancellation yield cannot reorder them (see comment above).
-            if not is_durable and heartbeat_task is not None:
-                heartbeat_task.cancel()
-                try:
-                    await heartbeat_task
-                except asyncio.CancelledError:
-                    pass
+            if not is_durable:
+                await _reap_nondurable_heartbeat()
 
     # ------------------------------------------------------------------
     # Get Job

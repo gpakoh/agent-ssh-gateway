@@ -627,12 +627,21 @@ def test_g_publication_reuse_rebinds_identical_digest(tmp_path, managed_env):
 def _craft_same_head_variant(source: Path, destination: Path) -> None:
     """Bundle the SAME commit into byte-different artifacts.
 
-    A forced repack changes packfile layout/deltas, so the new bundle
-    advertises the identical head while its bytes differ.
+    Bundle format v3 changes the artifact header deterministically while
+    preserving the single advertised HEAD required by managed-source policy.
+    This does not depend on repack implementation details or ambient packing.
     """
-    _git(source, "repack", "-a", "-d", "-f", "-q")
     subprocess.run(
-        ["git", "-C", str(source), "bundle", "create", str(destination), "HEAD"],
+        [
+            "git",
+            "-C",
+            str(source),
+            "bundle",
+            "create",
+            "--version=3",
+            str(destination),
+            "HEAD",
+        ],
         check=True,
         capture_output=True,
         text=True,
@@ -652,7 +661,16 @@ def test_h1_same_head_different_bytes_swap_rejected_before_worker_copy(tmp_path,
     target = Path(managed_source_bundle_path("proj-h", head))
     target.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["git", "-C", str(origin), "bundle", "create", str(target), "HEAD"],
+        [
+            "git",
+            "-C",
+            str(origin),
+            "bundle",
+            "create",
+            "--version=2",
+            str(target),
+            "HEAD",
+        ],
         check=True,
         capture_output=True,
         text=True,
@@ -666,7 +684,7 @@ def test_h1_same_head_different_bytes_swap_rejected_before_worker_copy(tmp_path,
     variant = tmp_path / "variant-b.bundle"
     _craft_same_head_variant(origin, variant)
     bytes_b = variant.read_bytes()
-    assert bytes_b != bytes_a, "repacked same-commit bundle must differ in bytes"
+    assert bytes_b != bytes_a, "same-commit v2/v3 bundles must differ in bytes"
     heads_b = subprocess.run(
         ["git", "bundle", "list-heads", str(variant)],
         capture_output=True,
@@ -674,7 +692,12 @@ def test_h1_same_head_different_bytes_swap_rejected_before_worker_copy(tmp_path,
         check=True,
     ).stdout.split()
     assert heads_b[0] == head, "attacker bundle must advertise the same commit"
-    subprocess.run(["git", "bundle", "verify", str(variant)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "bundle", "verify", str(variant)],
+        cwd=origin,
+        check=True,
+        capture_output=True,
+    )
 
     target.write_bytes(bytes_b)
 
@@ -696,7 +719,16 @@ def test_h2_publication_digest_immune_to_post_snapshot_replacement(tmp_path, mon
     target = Path(managed_source_bundle_path("proj-h2", head))
     target.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["git", "-C", str(origin), "bundle", "create", str(target), "HEAD"],
+        [
+            "git",
+            "-C",
+            str(origin),
+            "bundle",
+            "create",
+            "--version=2",
+            str(target),
+            "HEAD",
+        ],
         check=True,
         capture_output=True,
         text=True,
