@@ -324,6 +324,7 @@ class GatewayClient:
                 json=payload,
                 headers=self._headers(),
                 timeout=30,
+                trust_env=False,
             )
         except httpx.RequestError as exc:
             raise _transport_error(exc) from exc
@@ -411,7 +412,7 @@ class GatewayClient:
         timeout: float | int,
     ) -> dict[str, Any]:
         try:
-            async with httpx.AsyncClient() as async_client:
+            async with httpx.AsyncClient(trust_env=False) as async_client:
                 response = await async_client.post(
                     f"{self.base_url}{path}",
                     json=payload,
@@ -477,6 +478,7 @@ class GatewayClient:
                 params=params,
                 headers=self._headers(),
                 timeout=timeout,
+                trust_env=False,
             )
         except httpx.RequestError as exc:
             raise _transport_error(exc) from exc
@@ -513,6 +515,7 @@ class GatewayClient:
                 json=payload,
                 headers=self._headers(),
                 timeout=self._http_timeout if timeout is None else timeout,
+                trust_env=False,
             )
         except httpx.RequestError as exc:
             raise _transport_error(exc) from exc

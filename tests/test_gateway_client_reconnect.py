@@ -94,6 +94,7 @@ class TestReconnectSession:
             },
             headers={"X-API-Key": "test-api-key"},
             timeout=30,
+            trust_env=False,
         )
 
     def test_includes_private_key_when_set(self):

@@ -179,6 +179,10 @@ services:
     environment:
       - GATEWAY_BASE_URL=http://web-ssh-gateway:8085
       - GATEWAY_API_KEY=${MCP_GATEWAY_API_KEY:?set MCP_GATEWAY_API_KEY}
+      # Defense-in-depth only: GatewayClient also enforces trust_env=False so
+      # internal authenticated traffic never depends on hostname bypass lists.
+      - NO_PROXY=${NO_PROXY:-127.0.0.1,localhost},web-ssh-gateway
+      - no_proxy=${no_proxy:-127.0.0.1,localhost},web-ssh-gateway
       # Default stays "mcp_client" (fully read-only) -- override via
       # docker/.env to "mcp_client_write" for project file write/edit/patch
       # + git add/commit/push. require_safe_mode() (scripts/mcp_sse_serve.py,
@@ -250,6 +254,10 @@ services:
     environment:
       - GATEWAY_BASE_URL=http://web-ssh-gateway:8085
       - GATEWAY_API_KEY=${MCP_OAUTH_GATEWAY_API_KEY:?set MCP_OAUTH_GATEWAY_API_KEY}
+      # Defense-in-depth only: GatewayClient also enforces trust_env=False so
+      # internal authenticated traffic never depends on hostname bypass lists.
+      - NO_PROXY=${NO_PROXY:-127.0.0.1,localhost},web-ssh-gateway
+      - no_proxy=${no_proxy:-127.0.0.1,localhost},web-ssh-gateway
       - GATEWAY_SSH_HOST=${MCP_OAUTH_SSH_HOST:?set MCP_OAUTH_SSH_HOST}
       - GATEWAY_SSH_PORT=${MCP_OAUTH_SSH_PORT:?set MCP_OAUTH_SSH_PORT}
       - GATEWAY_SSH_USERNAME=${MCP_OAUTH_SSH_USERNAME:?set MCP_OAUTH_SSH_USERNAME}
