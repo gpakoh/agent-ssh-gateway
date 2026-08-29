@@ -2013,3 +2013,390 @@ async def test_replay_get_events_timeout_yields_max_duration(monkeypatch):
     # No data events delivered — replay was cancelled before yielding
     datas = [c for c in chunks if c["event"] != "error"]
     assert len(datas) == 0, f"expected 0 data events during blocked replay, got {len(datas)}"
+
+
+# ---------------------------------------------------------------------------
+# Regression: Python 3.11 cancellation at bounded observability awaits
+# ---------------------------------------------------------------------------
+
+
+def _live_heartbeat_tasks() -> list[asyncio.Task]:
+    """Return live JobManager heartbeat children without relying on task names."""
+    return [
+        task
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+        and not task.done()
+        and "heartbeat_loop" in getattr(task.get_coro(), "__qualname__", "")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_emit_bounded_external_cancel_reraises_cancelled(monkeypatch, caplog):
+    """Ordinary caller cancellation must propagate and never look like timeout."""
+    import logging
+
+    _wire_state_emitter(monkeypatch)
+    jm = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+    job = _running_job(jm, hb_age=0.0)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def parked_emit(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(jm, "_emit_observability_event", parked_emit)
+    task = asyncio.create_task(
+        jm._emit_bounded(job, "stale", {"missed_seconds": 1.0}, budget=5.0)
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    with caplog.at_level(logging.WARNING, logger="app.job_manager"):
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert task.cancelled() is True
+    assert not any(
+        "exceeded" in record.message and "budget" in record.message
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_emit_bounded_same_turn_completion_cancel_race(monkeypatch, caplog):
+    """Completion and caller cancellation in one loop turn must cancel caller."""
+    import logging
+
+    _wire_state_emitter(monkeypatch)
+    jm = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+    job = _running_job(jm, hb_age=0.0)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def race_emit(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(jm, "_emit_observability_event", race_emit)
+    task = asyncio.create_task(
+        jm._emit_bounded(job, "stale", {"missed_seconds": 1.0}, budget=5.0)
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    loop = asyncio.get_running_loop()
+    with caplog.at_level(logging.WARNING, logger="app.job_manager"):
+        loop.call_soon(release.set)
+        loop.call_soon(task.cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert task.cancelled() is True
+    assert not any(
+        "exceeded" in record.message and "budget" in record.message
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_durable_heartbeat_cancel_during_bounded_emit_propagates(monkeypatch, caplog):
+    """Cancel the real durable heartbeat at a proven bounded-emit barrier."""
+    import logging
+
+    monkeypatch.setattr(job_manager_module, "_durable_heartbeat_interval", lambda _ttl: 0.0)
+    _wire_state_emitter(monkeypatch)
+    queue = _make_queue()
+    stream_release = asyncio.Event()
+    stream_started = asyncio.Event()
+    emit_entered = asyncio.Event()
+    emit_release = asyncio.Event()
+    emit_reentered = asyncio.Event()
+    reentry_blocker = asyncio.Event()
+    renewal_calls = 0
+
+    original_renewal = queue.heartbeat_durable_execution
+
+    async def controlled_renewal(*args, **kwargs):
+        nonlocal renewal_calls
+        renewal_calls += 1
+        if renewal_calls == 2:
+            emit_reentered.set()
+            await reentry_blocker.wait()
+        return await original_renewal(*args, **kwargs)
+
+    queue.heartbeat_durable_execution = controlled_renewal
+
+    async def stream(*_args, **_kwargs):
+        stream_started.set()
+        await stream_release.wait()
+        yield "exit", "0"
+
+    manager = _v2_manager(queue, stream)
+    original_emit = manager._emit_observability_event
+    heartbeat_emits = 0
+
+    async def controlled_emit(job, event_type, payload=None):
+        nonlocal heartbeat_emits
+        if event_type != "heartbeat":
+            return await original_emit(job, event_type, payload)
+        heartbeat_emits += 1
+        if heartbeat_emits == 1:
+            emit_entered.set()
+            await emit_release.wait()
+            return None
+        return await original_emit(job, event_type, payload)
+
+    monkeypatch.setattr(manager, "_emit_observability_event", controlled_emit)
+    job_id = await manager.create_job(
+        "sid", "durable-heartbeat-cancel", owner_id="owner", submission_key="key:hb-cancel"
+    )
+    job = await manager.get_job(job_id)
+    parent = manager._job_tasks[job_id]
+    await asyncio.wait_for(stream_started.wait(), timeout=1)
+    await asyncio.wait_for(emit_entered.wait(), timeout=1)
+    heartbeats = _live_heartbeat_tasks()
+    assert len(heartbeats) == 1
+    heartbeat = heartbeats[0]
+    reentered_wait = asyncio.create_task(emit_reentered.wait())
+    cancelled_error_observed = False
+    first_cancel_terminated = False
+
+    try:
+        loop = asyncio.get_running_loop()
+        with caplog.at_level(logging.WARNING, logger="app.job_manager"):
+            loop.call_soon(emit_release.set)
+            loop.call_soon(heartbeat.cancel)
+            done, _pending = await asyncio.wait(
+                {heartbeat, reentered_wait},
+                timeout=1,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if heartbeat in done:
+                try:
+                    await heartbeat
+                except asyncio.CancelledError:
+                    cancelled_error_observed = True
+            first_cancel_terminated = heartbeat in done
+    finally:
+        if not heartbeat.done():
+            heartbeat.cancel()
+        emit_release.set()
+        reentry_blocker.set()
+        try:
+            await heartbeat
+        except asyncio.CancelledError:
+            pass
+        reentered_wait.cancel()
+        try:
+            await reentered_wait
+        except asyncio.CancelledError:
+            pass
+        stream_release.set()
+        await asyncio.wait_for(parent, timeout=1)
+        assert job.completed_event.is_set() is True
+
+    assert first_cancel_terminated is True, "cancelled heartbeat re-entered its loop"
+    assert emit_reentered.is_set() is False
+    assert cancelled_error_observed is True
+    assert heartbeat.cancelled() is True
+    assert not any(
+        "exceeded" in record.message and "budget" in record.message
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_emit_bounded_true_timeout_warns(monkeypatch, caplog):
+    """A genuine hung emit stays bounded, warns, and returns normally."""
+    import logging
+
+    _wire_state_emitter(monkeypatch)
+    jm = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+    job = _running_job(jm, hb_age=0.0)
+    entered = asyncio.Event()
+    never_released = asyncio.Event()
+
+    async def blocked_emit(*_args, **_kwargs):
+        entered.set()
+        await never_released.wait()
+
+    monkeypatch.setattr(jm, "_emit_observability_event", blocked_emit)
+    with caplog.at_level(logging.WARNING, logger="app.job_manager"):
+        await asyncio.wait_for(
+            jm._emit_bounded(job, "stale", {"missed_seconds": 1.0}, budget=0.03),
+            timeout=1,
+        )
+
+    assert entered.is_set() is True
+    assert any(
+        "exceeded" in record.message and "budget" in record.message
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_durable_run_job_completion_survives_heartbeat_cancel_race(monkeypatch):
+    """Finalization must win a same-turn heartbeat emit/completion race."""
+    monkeypatch.setattr(job_manager_module, "_durable_heartbeat_interval", lambda _ttl: 0.0)
+    _wire_state_emitter(monkeypatch)
+    queue = _make_queue()
+    stream_waiting = asyncio.Event()
+    finish_stream = asyncio.Event()
+    emit_entered = asyncio.Event()
+    emit_release = asyncio.Event()
+    emit_reentered = asyncio.Event()
+    reentry_blocker = asyncio.Event()
+    renewal_calls = 0
+
+    original_renewal = queue.heartbeat_durable_execution
+
+    async def controlled_renewal(*args, **kwargs):
+        nonlocal renewal_calls
+        renewal_calls += 1
+        if renewal_calls == 2:
+            emit_reentered.set()
+            await reentry_blocker.wait()
+        return await original_renewal(*args, **kwargs)
+
+    queue.heartbeat_durable_execution = controlled_renewal
+
+    async def stream(*_args, **_kwargs):
+        stream_waiting.set()
+        await finish_stream.wait()
+        yield "exit", "0"
+
+    manager = _v2_manager(queue, stream)
+    original_emit = manager._emit_observability_event
+    heartbeat_emits = 0
+
+    async def controlled_emit(job, event_type, payload=None):
+        nonlocal heartbeat_emits
+        if event_type != "heartbeat":
+            return await original_emit(job, event_type, payload)
+        heartbeat_emits += 1
+        if heartbeat_emits == 1:
+            emit_entered.set()
+            await emit_release.wait()
+            return None
+        return await original_emit(job, event_type, payload)
+
+    monkeypatch.setattr(manager, "_emit_observability_event", controlled_emit)
+    job_id = await manager.create_job(
+        "sid", "durable-lifecycle-race", owner_id="owner", submission_key="key:lifecycle-race"
+    )
+    job = await manager.get_job(job_id)
+    parent = manager._job_tasks[job_id]
+    await asyncio.wait_for(stream_waiting.wait(), timeout=1)
+    await asyncio.wait_for(emit_entered.wait(), timeout=1)
+    heartbeats = _live_heartbeat_tasks()
+    assert len(heartbeats) == 1
+    heartbeat = heartbeats[0]
+    completed_wait = asyncio.create_task(job.completed_event.wait())
+    reentered_wait = asyncio.create_task(emit_reentered.wait())
+    completed_won = False
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.call_soon(emit_release.set)
+        loop.call_soon(finish_stream.set)
+        done, _pending = await asyncio.wait(
+            {completed_wait, reentered_wait},
+            timeout=1,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        completed_won = completed_wait in done and not emit_reentered.is_set()
+    finally:
+        finish_stream.set()
+        emit_release.set()
+        if not heartbeat.done():
+            heartbeat.cancel()
+        reentry_blocker.set()
+        try:
+            await asyncio.wait_for(asyncio.shield(heartbeat), timeout=1)
+        except asyncio.CancelledError:
+            pass
+        for task in (completed_wait, reentered_wait):
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        if not parent.done():
+            parent.cancel()
+            try:
+                await parent
+            except asyncio.CancelledError:
+                pass
+
+    assert completed_won is True, "_run_job stranded while awaiting cancelled heartbeat"
+    assert emit_reentered.is_set() is False
+    assert job.completed_event.is_set() is True
+    assert job.status == "completed"
+    assert _live_heartbeat_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_stale_detection_loop_breaks_and_completes_on_cancel(monkeypatch):
+    """Supervisor cancellation inside a real bounded emit must converge cleanly."""
+    _wire_state_emitter(monkeypatch)
+    monkeypatch.setattr(_settings, "stale_scan_interval", 0.1)
+    monkeypatch.setattr(_settings, "stale_threshold", 0.1)
+    manager = JobManager(ssh_manager=AsyncMock(), max_jobs=10)
+    _running_job(manager, hb_age=5.0)
+    entered = asyncio.Event()
+    blocker = asyncio.Event()
+
+    async def probe_emit(*_args, **_kwargs):
+        entered.set()
+        await blocker.wait()
+
+    monkeypatch.setattr(manager, "_emit_observability_event", probe_emit)
+    await manager.start_supervisor_task()
+    task = manager._supervisor_task
+    assert task is not None
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    task.cancel()
+    await asyncio.wait_for(task, timeout=1)
+    assert task.done()
+    assert task.cancelled() is False
+
+
+@pytest.mark.asyncio
+async def test_nondurable_heartbeat_reaped_when_terminal_emit_is_cancelled(monkeypatch):
+    """Cancelling _run_job inside terminal emit must not orphan its heartbeat."""
+    monkeypatch.setattr(settings, "heartbeat_interval", 60)
+    _wire_state_emitter(monkeypatch)
+    terminal_entered = asyncio.Event()
+    terminal_release = asyncio.Event()
+
+    async def instant_stream(*_args, **_kwargs):
+        yield "exit", "0"
+
+    ssh = AsyncMock()
+    ssh.execute_stream = instant_stream
+    manager = JobManager(ssh_manager=ssh, max_jobs=10)
+    original_emit = manager._emit_observability_event
+
+    async def controlled_emit(job, event_type, payload=None):
+        if event_type == "completed":
+            terminal_entered.set()
+            await terminal_release.wait()
+            return None
+        return await original_emit(job, event_type, payload)
+
+    monkeypatch.setattr(manager, "_emit_observability_event", controlled_emit)
+    job_id = await manager.create_job("s1", "instant", owner_id="o1")
+    await asyncio.wait_for(terminal_entered.wait(), timeout=2)
+    parent = manager._job_tasks[job_id]
+    heartbeat_children = _live_heartbeat_tasks()
+    assert len(heartbeat_children) == 1
+    heartbeat = heartbeat_children[0]
+
+    parent.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(parent, timeout=1)
+
+    assert parent.cancelled() is True
+    assert heartbeat.done() is True
