@@ -55,9 +55,15 @@ class _McpSession:
 
 
 class _Response:
-    def __init__(self, payload: dict[str, Any], status_code: int = 200) -> None:
+    def __init__(
+        self,
+        payload: dict[str, Any],
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self._payload = payload
         self.status_code = status_code
+        self.headers = headers or {}
         self.text = str(payload)
 
     def json(self) -> dict[str, Any]:
@@ -1523,3 +1529,51 @@ async def test_09_lifespan_retired_sid_cleanup_via_production_path(
     # 6. subsequent connect/reconnect raises closed error
     with pytest.raises(live_server.GatewayClientError, match="MCP session is closed"):
         scoped.connect()
+def test_global_reconnect_governor_suppresses_followup_connects_after_429(
+    monkeypatch: pytest.MonkeyPatch, live_server: Any
+) -> None:
+    first = _base_client(live_server).fork_session()
+    second = _base_client(live_server).fork_session()
+    connect_attempts = 0
+
+    def fake_post(url: str, **kwargs: Any) -> _Response:
+        nonlocal connect_attempts
+        if url.endswith("/api/ssh/connect"):
+            connect_attempts += 1
+            return _Response({"detail": "rate limited"}, 429, {"Retry-After": "60"})
+        raise AssertionError(url)
+
+    monkeypatch.setattr("gateway_client.httpx.post", fake_post)
+    monkeypatch.setattr(live_server.GatewayClient, "_connect_retry_not_before", 0.0)
+
+    with pytest.raises(live_server.GatewayClientError, match="429"):
+        first.connect()
+    with pytest.raises(live_server.GatewayClientError, match="cooldown"):
+        second.connect()
+
+    assert connect_attempts == 1
+
+
+def test_repo_status_project_honors_explicit_session_id(
+    monkeypatch: pytest.MonkeyPatch, live_server: Any
+) -> None:
+    client = _base_client(live_server)
+    client.session_id = "stale-default"
+    seen_sids: list[str] = []
+
+    def fake_post(path: str, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        assert path == "/api/ssh/execute-argv"
+        seen_sids.append(payload["session_id"])
+        return {"exit_code": 0, "stdout": "ok\n", "stderr": ""}
+
+    class _Registry:
+        def project_info(self, _project: str) -> dict[str, str]:
+            return {"root": "/workspace/project"}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    monkeypatch.setattr("app.workspace.registry.get_registry", lambda: _Registry())
+
+    result = client.repo_status(session_id="explicit-healthy", project="project")
+
+    assert result["status"]["exit_code"] == 0
+    assert seen_sids == ["explicit-healthy", "explicit-healthy", "explicit-healthy"]

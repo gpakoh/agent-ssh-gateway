@@ -168,6 +168,9 @@ class GatewayClient:
     """Small HTTP wrapper around agent-ssh-gateway."""
 
     _SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
+    _CONNECT_GOVERNOR_LOCK = threading.Lock()
+    _connect_retry_not_before = 0.0
+    _CONNECT_COOLDOWN_SECONDS = 6.0
 
     def __init__(
         self,
@@ -318,18 +321,28 @@ class GatewayClient:
         if self._idle_timeout_seconds is not None:
             payload["idle_timeout_seconds"] = self._idle_timeout_seconds
 
-        try:
-            response = httpx.post(
-                f"{self.base_url}/api/ssh/connect",
-                json=payload,
-                headers=self._headers(),
-                timeout=30,
-                trust_env=False,
-            )
-        except httpx.RequestError as exc:
-            raise _transport_error(exc) from exc
-        if response.status_code >= 400:
-            raise GatewayClientError(f"auto-reconnect failed: {response.status_code}")
+        with GatewayClient._CONNECT_GOVERNOR_LOCK:
+            if time.monotonic() < GatewayClient._connect_retry_not_before:
+                raise GatewayClientError("auto-reconnect cooldown active after 429")
+            try:
+                response = httpx.post(
+                    f"{self.base_url}/api/ssh/connect",
+                    json=payload,
+                    headers=self._headers(),
+                    timeout=30,
+                    trust_env=False,
+                )
+            except httpx.RequestError as exc:
+                raise _transport_error(exc) from exc
+            if response.status_code >= 400:
+                retry_after = response.headers.get("Retry-After")
+                if response.status_code == 429 and retry_after is not None:
+                    try:
+                        cooldown = max(float(retry_after), 1.0)
+                    except ValueError:
+                        cooldown = GatewayClient._CONNECT_COOLDOWN_SECONDS
+                    GatewayClient._connect_retry_not_before = time.monotonic() + cooldown
+                raise GatewayClientError(f"auto-reconnect failed: {response.status_code}")
         data = response.json()
         self.session_id = data["session_id"]
         if self._release_managed:
@@ -617,8 +630,10 @@ class GatewayClient:
         )
 
     @_retry_on_session_not_found
-    def execute_project_command(self, project: str, command: str) -> dict[str, Any]:
-        sid = self._require_session_id()
+    def execute_project_command(
+        self, project: str, command: str, session_id: str | None = None
+    ) -> dict[str, Any]:
+        sid = session_id or self._require_session_id()
         from app.workspace.registry import get_registry
 
         info = get_registry().project_info(project)
@@ -936,7 +951,7 @@ class GatewayClient:
         output: dict[str, Any] = {}
         for name, command in commands.items():
             if project:
-                result = self.execute_project_command(project, command)
+                result = self.execute_project_command(project, command, session_id=session_id)
             else:
                 job = self.execute_restricted(command, session_id=session_id)
                 result = self.wait_job(job["job_id"])
