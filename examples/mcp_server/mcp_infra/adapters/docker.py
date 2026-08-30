@@ -14,6 +14,8 @@ instance.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import time as _time
 from collections.abc import Callable
@@ -361,7 +363,39 @@ _CONFIRM_HANDLERS: dict[str, Callable[..., Any]] = {
     "docker_volume_rm": _docker_volume_rm_impl,
 }
 
+
+def _get_confirmation_owner_fingerprint() -> str | None:
+    """Return a non-secret fingerprint for the authenticated MCP caller.
+
+    The raw bearer token is used only as input to SHA-256 and is never stored,
+    returned, logged, or included in errors. A 60-second confirmation is thus
+    fenced to the exact authenticated bearer/client pair that created it.
+    Contexts without an authenticated MCP request fail closed for action-id
+    confirmation; the legacy secret-token path remains available for tests and
+    backwards compatibility.
+    """
+    try:
+        from mcp.server.auth.middleware.auth_context import get_access_token
+
+        access_token = get_access_token()
+    except Exception:
+        return None
+    if access_token is None:
+        return None
+
+    token = str(getattr(access_token, "token", "") or "")
+    client_id = str(getattr(access_token, "client_id", "") or "")
+    if not token or not client_id:
+        return None
+    material = client_id.encode("utf-8") + b"\0" + token.encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
 def _confirmation_response(action: ConfirmAction) -> dict[str, Any]:
+    # Bind ownership before action_id becomes observable to the caller. Never
+    # replace an explicitly pre-bound owner on an internally-created action.
+    if action.owner_fingerprint is None:
+        action.owner_fingerprint = _get_confirmation_owner_fingerprint()
     remaining = max(0, int(60 - (_time.monotonic() - action.created_at)))
     return tool_success(
         tool=action.tool,
@@ -744,22 +778,56 @@ async def docker_volume_rm(volumes: list[str]) -> dict[str, Any]:
     )
     return _confirmation_response(action)
 
-async def confirm_operation(token: str) -> dict[str, Any]:
-    """Confirm a pending dangerous Docker operation using the one-time token from the confirmation response."""
-    action, status = _confirm_store().peek_action(token)
-    if action is None:
-        code = {
+async def confirm_operation(
+    token: str | None = None,
+    action_id: str | None = None,
+) -> dict[str, Any]:
+    """Confirm one exact pending Docker action.
+
+    Legacy callers may present the one-time secret ``token``. ChatGPT-facing
+    callers may instead present the public ``action_id`` when the platform
+    cannot safely relay opaque confirmation secrets; that path is additionally
+    fenced to the authenticated bearer/client pair that created the action.
+    Exactly one selector is required.
+    """
+    if bool(token) == bool(action_id):
+        return tool_error(
+            tool="confirm_operation",
+            code="INVALID_INPUT",
+            message="Provide exactly one of token or action_id",
+            retryable=False,
+            source="docker",
+        )
+
+    by_action_id = action_id is not None
+    if by_action_id:
+        action, status = _confirm_store().peek_action_id(action_id or "")
+        code_map = {
+            ConfirmStatus.INVALID: "INVALID_INPUT",
+            ConfirmStatus.EXPIRED: "CONFIRM_TOKEN_EXPIRED",
+            ConfirmStatus.CONSUMED: "CONFIRM_TOKEN_CONSUMED",
+        }
+        msg_map = {
+            ConfirmStatus.INVALID: "Invalid confirmation action",
+            ConfirmStatus.EXPIRED: "Confirmation action expired (TTL 60s)",
+            ConfirmStatus.CONSUMED: "Confirmation action already used",
+        }
+    else:
+        action, status = _confirm_store().peek_action(token or "")
+        code_map = {
             ConfirmStatus.INVALID: "CONFIRM_TOKEN_INVALID",
             ConfirmStatus.EXPIRED: "CONFIRM_TOKEN_EXPIRED",
             ConfirmStatus.CONSUMED: "CONFIRM_TOKEN_CONSUMED",
-        }.get(status, "INTERNAL_ERROR")
-        msg = {
+        }
+        msg_map = {
             ConfirmStatus.INVALID: "Invalid confirmation token",
             ConfirmStatus.EXPIRED: "Confirmation token expired (TTL 60s)",
             ConfirmStatus.CONSUMED: "Confirmation token already used",
-        }.get(status, "Unknown error")
+        }
 
-        # Emit structured audit event
+    if action is None:
+        code = code_map.get(status, "INTERNAL_ERROR")
+        msg = msg_map.get(status, "Unknown error")
         try:
             audit_logger = _get_audit_logger()
             audit_logger.append(McpAuditEvent(
@@ -772,15 +840,38 @@ async def confirm_operation(token: str) -> dict[str, Any]:
             ))
         except Exception:
             pass  # audit failure must not change tool behavior
-
         return tool_error(
             tool="confirm_operation",
             code=code,
             message=msg,
-            hint="Call the dangerous tool again to get a new token.",
+            hint=(
+                "Call the dangerous tool again to create a fresh pending action."
+                if by_action_id
+                else "Call the dangerous tool again to get a new token."
+            ),
             retryable=False,
             source="docker",
         )
+
+    if by_action_id:
+        current_owner = _get_confirmation_owner_fingerprint()
+        expected_owner = action.owner_fingerprint
+        if current_owner is None or expected_owner is None:
+            return tool_error(
+                tool="confirm_operation",
+                code="AUTH_ERROR",
+                message="Authenticated confirmation owner is unavailable",
+                retryable=False,
+                source="docker",
+            )
+        if not hmac.compare_digest(current_owner, expected_owner):
+            return tool_error(
+                tool="confirm_operation",
+                code="PERMISSION_DENIED",
+                message="Pending action belongs to a different authenticated caller",
+                retryable=False,
+                source="docker",
+            )
 
     handler = _CONFIRM_HANDLERS.get(action.tool)
     if not handler:
@@ -832,8 +923,16 @@ async def confirm_operation(token: str) -> dict[str, Any]:
         return tool_error(
             tool="confirm_operation",
             code="CONFIRM_TOKEN_CONSUMED",
-            message="Confirmation token already used",
-            hint="Call the dangerous tool again to get a new token.",
+            message=(
+                "Confirmation action already used"
+                if by_action_id
+                else "Confirmation token already used"
+            ),
+            hint=(
+                "Call the dangerous tool again to create a fresh pending action."
+                if by_action_id
+                else "Call the dangerous tool again to get a new token."
+            ),
             retryable=False,
             source="docker",
         )
