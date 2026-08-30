@@ -24,6 +24,7 @@ SSHD_DOCKERFILE = ROOT / "docker" / "sshd" / "Dockerfile"
 DEPLOY_SCRIPT = ROOT / "scripts" / "deploy-from-registry.sh"
 CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 HOST_SMOKE_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "host-smoke.yml"
+MCP_OAUTH_SMOKE_TEST = ROOT / "tests" / "test_mcp_oauth_host_smoke.py"
 MAKEFILE_PATH = ROOT / "Makefile"
 
 
@@ -792,33 +793,68 @@ class TestE2eActuallyRunsSomewhere:
         assert "CHROMEWEBDRIVER" in steps_text
 
 
-class TestHostSmokePathsMatchRealCoverage:
-    """MAJOR audit finding: host-smoke.yml's paths: filter didn't match
-    what `make host-smoke` (pytest -m host_smoke) actually exercises --
-    verified each test file's real source coverage rather than guessing.
+class TestHostSmokeRunsAfterSuccessfulDeploy:
+    """MANUAL-ONLY + post-deploy sequencing regression gates for host smoke.
+
+    Regression gates: OAuth/SKIP -> RED; stale-SHA -> RED; and (new,
+    unlike the host-smoke paths: filter it replaces) host smoke must run
+    strictly AFTER a successful deploy of the exact commit being smoked —
+    not before it, not in parallel with it, and not against whatever
+    happened to be deployed at the moment.
+
+    The old design ran host-smoke on a push-triggered `paths:` filter
+    with NO ordering guarantee vs the deploy job at all — it could start
+    the moment a relevant master push landed, racing (or landing before)
+    deploy-from-registry.sh's own rollout of that same commit, so a live
+    stack still running the previous BUILD_SHA passed the unverified
+    host-smoke while the new commit's deploy had not even started.
     """
 
-    def test_paths_cover_opencode_runner_wrapper_source(self):
+    def test_host_smoke_is_manual_dispatch_only(self):
         wf = _load_workflow(HOST_SMOKE_WORKFLOW_PATH)
-        # `on:` parses as the boolean True key under PyYAML's YAML-1.1
-        # rules -- see _load_workflow()'s docstring note.
-        paths = wf[True]["push"]["paths"]
-        assert "scripts/opencode_runner_wrapper.py" in paths
+        triggers = wf[True]
+        assert "workflow_dispatch" in triggers
+        assert "push" not in triggers, (
+            "host-smoke must be manual-only; the authoritative run is a "
+            "ci.yml job ordered after deploy, not a parallel push-trigger"
+        )
 
-    def test_paths_cover_compileall_uvx_fallback_source(self):
-        wf = _load_workflow(HOST_SMOKE_WORKFLOW_PATH)
-        # `on:` parses as the boolean True key under PyYAML's YAML-1.1
-        # rules -- see _load_workflow()'s docstring note.
-        paths = wf[True]["push"]["paths"]
-        assert "examples/mcp_server/mcp_client_tools.py" in paths
+    def test_ci_has_post_deploy_host_smoke_job(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        assert "host-smoke" in wf["jobs"]
+        assert "deploy" in wf["jobs"]
+        host_smoke = wf["jobs"]["host-smoke"]
+        assert "deploy" in host_smoke.get("needs", []), (
+            "host-smoke must run after deploy succeeded (needs: deploy)"
+        )
 
-    def test_paths_cover_mtls_related_sources(self):
-        wf = _load_workflow(HOST_SMOKE_WORKFLOW_PATH)
-        # `on:` parses as the boolean True key under PyYAML's YAML-1.1
-        # rules -- see _load_workflow()'s docstring note.
-        paths = wf[True]["push"]["paths"]
-        assert "app/auth_middleware.py" in paths
-        assert any("nginx" in p for p in paths)
+    def test_host_smoke_job_has_fail_closed_pre_smoke_build_sha_check(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["host-smoke"]["steps"]
+        run = "\n".join(s.get("run", "") for s in steps)
+        assert "web-ssh-gateway" in run
+        assert "mcp-server" in run
+        assert "mcp-oauth" in run
+        assert "printenv BUILD_SHA" in run
+        assert "github.sha" in run
+        assert "exit 1" in run
+        assert "|| true" not in run, "fail-closed pre-smoke check must not swallow errors"
+
+    def test_host_smoke_job_runs_full_make_host_smoke(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["host-smoke"]["steps"]
+        run = "\n".join(s.get("run", "") for s in steps)
+        assert "uv run make host-smoke" in run or "make host-smoke" in run
+
+    def test_oauth_testcase_is_exactly_one_host_smoke_test(self):
+        """The OAuth black-box flow must be exactly one runnable testcase —
+        a commit adding a SECOND test would silently weaken the
+        "1 PASS, never SKIP" gate into "any one of these passes, the
+        others may be skipped".  Guard the count instead."""
+        text = MCP_OAUTH_SMOKE_TEST.read_text(encoding="utf-8")
+        test_fns = [ln for ln in text.splitlines() if ln.strip().startswith("def test_")]
+        assert len(test_fns) == 1, f"expected exactly one OAuth host-smoke testcase, got {test_fns}"
+        assert "pytestmark = pytest.mark.host_smoke" in text
 
 
 class TestPrBuildsAndSmokeTestsDockerArtifact:
