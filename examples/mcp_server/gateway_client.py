@@ -429,6 +429,39 @@ class GatewayClient:
         data = response.json()
         return data if isinstance(data, dict) else {}
 
+    async def heartbeat_owned_session_async(self) -> bool:
+        """Touch this scoped client's currently owned SID without reconnecting.
+
+        The SID snapshot is taken under the client's reconnect lock, but network I/O
+        happens after the lock is released. Borrowed seed SIDs and released clients
+        are deliberately ignored: an MCP lifecycle may keep alive only a session it
+        created and owns. A failed heartbeat is advisory only; the next real SSH
+        operation retains the existing SESSION_NOT_FOUND reconnect path, avoiding a
+        background reconnect burst against the rate-limited connect endpoint.
+        """
+        with self._reconnect_lock:
+            if (
+                not self._release_managed
+                or self._released
+                or not self._owns_session
+                or not self.session_id
+            ):
+                return False
+            sid = self.session_id
+            timeout = self._release_http_timeout
+
+        try:
+            with anyio.move_on_after(timeout):
+                await self._post_async(
+                    "/api/ssh/heartbeat",
+                    {"session_id": sid},
+                    timeout=timeout,
+                )
+                return True
+        except Exception:
+            return False
+        return False
+
     async def release_sid_async(self, sid: str) -> None:
         """Best-effort cancellable disconnect for a SID already detached locally."""
         if not sid:
@@ -1002,6 +1035,24 @@ class GatewayClientSessionPool:
                 reuse_key,
             )
             return scoped
+
+    def owned_clients_for_owner(self, lifecycle_owner: Any) -> tuple[GatewayClient, ...]:
+        """Snapshot currently owned active clients for one lifecycle.
+
+        The snapshot is local-only and is taken under the pool lock. Network I/O
+        belongs to the caller after the lock is released. Borrowed seed SIDs are
+        excluded because this lifecycle does not own them.
+        """
+        with self._lock:
+            return tuple(
+                entry[1]
+                for entry in self._clients.values()
+                if entry[2] is lifecycle_owner
+                and entry[1]._release_managed
+                and entry[1]._owns_session
+                and bool(entry[1].session_id)
+                and not entry[1]._released
+            )
 
     def detach_owner(self, lifecycle_owner: Any) -> list[tuple[GatewayClient, CleanupTargets]]:
         """Detach one lifecycle without forcing reusable logical SIDs closed.

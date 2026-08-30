@@ -286,6 +286,141 @@ def _attach_owned_client(
 
 
 @pytest.mark.asyncio
+async def test_active_lifecycle_heartbeats_owned_sid_until_teardown(
+    monkeypatch: pytest.MonkeyPatch, live_server: Any
+) -> None:
+    gateway_pool = live_server.GatewayClientSessionPool()
+    agent_pool = live_server.GatewayClientSessionPool()
+    heartbeat_seen = asyncio.Event()
+    heartbeats: list[str] = []
+    disconnects: list[str] = []
+
+    async def tracking_post_async(
+        _client: Any, path: str, payload: dict[str, Any], *, timeout: float | int
+    ) -> dict[str, Any]:
+        sid = payload["session_id"]
+        if path == "/api/ssh/heartbeat":
+            heartbeats.append(sid)
+            heartbeat_seen.set()
+            return {"status": "ok"}
+        if path == "/api/ssh/disconnect":
+            disconnects.append(sid)
+            return {"status": "disconnected"}
+        raise AssertionError(path)
+
+    async def _noop_close() -> None:
+        return None
+
+    monkeypatch.setattr(live_server, "_gateway_client_sessions", gateway_pool)
+    monkeypatch.setattr(live_server, "_agent_client_sessions", agent_pool)
+    monkeypatch.setattr(live_server, "_MCP_SESSION_KEEPALIVE_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(live_server, "close_fleet_runtime", _noop_close)
+    monkeypatch.setattr(live_server.GatewayClient, "_post_async", tracking_post_async)
+
+    async with live_server._mcp_lifespan(live_server.mcp) as owner:
+        scoped, mcp_session = _attach_owned_client(
+            live_server, gateway_pool, owner, "active-owned-sid"
+        )
+        assert mcp_session is not None
+        await asyncio.wait_for(heartbeat_seen.wait(), timeout=0.2)
+        assert heartbeats == ["active-owned-sid"]
+        assert scoped.session_id == "active-owned-sid"
+        assert scoped._owns_session is True
+
+    heartbeat_count_after_teardown = len(heartbeats)
+    await asyncio.sleep(0.04)
+
+    assert len(heartbeats) == heartbeat_count_after_teardown
+    assert disconnects == ["active-owned-sid"]
+    assert scoped._released is True
+
+
+@pytest.mark.asyncio
+async def test_owned_session_heartbeat_skips_borrowed_and_released_clients(
+    monkeypatch: pytest.MonkeyPatch, live_server: Any
+) -> None:
+    scoped = _base_client(live_server).fork_session()
+    calls: list[tuple[str, str]] = []
+
+    async def tracking_post_async(
+        path: str, payload: dict[str, Any], *, timeout: float | int
+    ) -> dict[str, Any]:
+        calls.append((path, payload["session_id"]))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(scoped, "_post_async", tracking_post_async)
+
+    assert scoped.session_id == "seed-session"
+    assert scoped._owns_session is False
+    assert await scoped.heartbeat_owned_session_async() is False
+    assert calls == []
+
+    scoped.session_id = "owned-sid"
+    scoped._owns_session = True
+    assert await scoped.heartbeat_owned_session_async() is True
+    assert calls == [("/api/ssh/heartbeat", "owned-sid")]
+
+    targets = scoped.prepare_release()
+    assert targets.current_sid == "owned-sid"
+    assert await scoped.heartbeat_owned_session_async() is False
+    assert calls == [("/api/ssh/heartbeat", "owned-sid")]
+
+
+@pytest.mark.asyncio
+async def test_owned_session_heartbeat_failure_never_reconnects(
+    monkeypatch: pytest.MonkeyPatch, live_server: Any
+) -> None:
+    scoped = _base_client(live_server).fork_session()
+    scoped.session_id = "owned-sid"
+    scoped._owns_session = True
+    reconnect_attempts = 0
+
+    async def failed_post_async(
+        path: str, payload: dict[str, Any], *, timeout: float | int
+    ) -> dict[str, Any]:
+        assert path == "/api/ssh/heartbeat"
+        assert payload == {"session_id": "owned-sid"}
+        raise live_server.GatewayClientError("heartbeat unavailable")
+
+    def forbidden_reconnect() -> None:
+        nonlocal reconnect_attempts
+        reconnect_attempts += 1
+        raise AssertionError("heartbeat must never reconnect")
+
+    monkeypatch.setattr(scoped, "_post_async", failed_post_async)
+    monkeypatch.setattr(scoped, "_reconnect_session", forbidden_reconnect)
+
+    assert await scoped.heartbeat_owned_session_async() is False
+    assert reconnect_attempts == 0
+    assert scoped.session_id == "owned-sid"
+    assert scoped._owns_session is True
+
+
+def test_keepalive_snapshot_is_owner_scoped_and_owned_only(live_server: Any) -> None:
+    pool = live_server.GatewayClientSessionPool()
+    base = _base_client(live_server)
+    owner_a = object()
+    owner_b = object()
+    session_a = _McpSession("keepalive-a")
+    session_b = _McpSession("keepalive-b")
+    session_borrowed = _McpSession("keepalive-borrowed")
+
+    owned_a = pool.get(base, session_a, owner_a)
+    owned_a.session_id = "owned-a"
+    owned_a._owns_session = True
+
+    owned_b = pool.get(base, session_b, owner_b)
+    owned_b.session_id = "owned-b"
+    owned_b._owns_session = True
+
+    borrowed = pool.get(base, session_borrowed, owner_a)
+    assert borrowed._owns_session is False
+
+    assert pool.owned_clients_for_owner(owner_a) == (owned_a,)
+    assert pool.owned_clients_for_owner(owner_b) == (owned_b,)
+
+
+@pytest.mark.asyncio
 async def test_lifespan_deadline_leaves_no_orphan_cleanup_side_effect(
     monkeypatch: pytest.MonkeyPatch, live_server: Any
 ) -> None:
