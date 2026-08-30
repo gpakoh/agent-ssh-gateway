@@ -386,7 +386,7 @@ async def gateway_run_agents(project: str, task_ids: str) -> dict[str, Any]:
 
         if fleet is not None:
             try:
-                await fleet.sweep_bound_leases(status_fn)
+                await fleet.reconcile(status_fn)
             except Exception:
                 pass
 

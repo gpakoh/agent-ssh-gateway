@@ -36,6 +36,13 @@ TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
     {"needs-review", "completed", "failed", "cancelled", "rate-limited", "resource-exhausted", "blocked", "error"}
 )
 
+# Submission state discriminates a never-submitted acquire from a lease whose
+# coordinator crashed between gateway dispatch and job bind. Only
+# NEVER_ATTEMPTED leases are automatically reclaimable.
+LEGACY_UNKNOWN: Final = "legacy_unknown"
+NEVER_ATTEMPTED: Final = "never_attempted"
+ATTEMPTED: Final = "attempted"
+
 SCHEMA_SQL: Final = """
 CREATE TABLE IF NOT EXISTS fleet_worker_pool (
     pool TEXT PRIMARY KEY,
@@ -48,6 +55,8 @@ CREATE TABLE IF NOT EXISTS fleet_worker_lease (
     pool TEXT NOT NULL REFERENCES fleet_worker_pool(pool) ON DELETE RESTRICT,
     lease_token UUID NOT NULL UNIQUE,
     coordinator_id TEXT NOT NULL,
+    submit_state TEXT,
+    submit_attempted_at TIMESTAMPTZ,
     job_id TEXT UNIQUE,
     claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -65,6 +74,35 @@ CREATE TABLE IF NOT EXISTS fleet_task_outcome (
     result_json JSONB,
     reported_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ---------------------------------------------------------------
+-- Durable migration to an explicit submission state.
+--
+-- submit_state discriminates submitted vs never-submitted leases so a
+-- crash between "dispatch to gateway" and "bind job" cannot be confused
+-- with a never-submitted leak:
+--   * legacy_unknown   -- pre-existing rows from before this migration; the
+--                        dispatcher cannot prove they were never dispatched,
+--                        so they are NEVER automatically reclaimed.
+--   * never_attempted  -- inserted only by a fresh acquire_slot; the ONLY
+--                        automatically reclaimable state.
+--   * attempted        -- set by the atomic token-fenced transition right
+--                        before the first gateway dispatch.
+--
+-- Race safety: the ALTER ADD COLUMN takes an ACCESS EXCLUSIVE lock and the
+-- whole SCHEMA_SQL runs in one implicit transaction, so no concurrent insert
+-- interleaves. Afterwards new acquires always supply submit_state explicitly
+-- (never NULL), so a later re-run of this backfill (WHERE submit_state IS
+-- NULL) can never mislabel a freshly-inserted row.
+-- ---------------------------------------------------------------
+ALTER TABLE fleet_worker_lease
+    ADD COLUMN IF NOT EXISTS submit_state TEXT;
+ALTER TABLE fleet_worker_lease
+    ADD COLUMN IF NOT EXISTS submit_attempted_at TIMESTAMPTZ;
+
+UPDATE fleet_worker_lease
+SET submit_state = 'legacy_unknown'
+WHERE submit_state IS NULL;
 """
 
 _POOL_INSERT_SQL: Final = """
@@ -86,32 +124,55 @@ WHERE pool = $1
 FOR UPDATE
 """
 
-_GET_LEASE_SQL: Final = """
-SELECT task_id, pool, lease_token::text AS lease_token, coordinator_id,
-       job_id, claimed_at, heartbeat_at
-FROM fleet_worker_lease
-WHERE task_id = $1
-"""
+_LEASE_COLUMNS: Final = (
+    "task_id, pool, lease_token::text AS lease_token, coordinator_id, "
+    "submit_state, submit_attempted_at, job_id, claimed_at, heartbeat_at"
+)
 
-_GET_LEASE_FOR_UPDATE_SQL: Final = _GET_LEASE_SQL + " FOR UPDATE"
+_LEASE_SELECT: Final = f"SELECT {_LEASE_COLUMNS} FROM fleet_worker_lease"
+_LEASE_RETURNING: Final = f"RETURNING {_LEASE_COLUMNS}"
+
+_GET_LEASE_SQL: Final = _LEASE_SELECT + " WHERE task_id = $1"
+
+_GET_LEASE_FOR_UPDATE_SQL: Final = _LEASE_SELECT + " WHERE task_id = $1 FOR UPDATE"
 
 _COUNT_LEASES_SQL: Final = "SELECT count(*) FROM fleet_worker_lease WHERE pool = $1"
 
-_INSERT_LEASE_SQL: Final = """
-INSERT INTO fleet_worker_lease(task_id, pool, lease_token, coordinator_id)
-VALUES($1, $2, $3::uuid, $4)
+_INSERT_LEASE_SQL: Final = f"""
+INSERT INTO fleet_worker_lease(
+    task_id, pool, lease_token, coordinator_id, submit_state
+)
+VALUES($1, $2, $3::uuid, $4, 'never_attempted')
 ON CONFLICT (task_id) DO NOTHING
-RETURNING task_id, pool, lease_token::text AS lease_token, coordinator_id,
-          job_id, claimed_at, heartbeat_at
+{_LEASE_RETURNING}
 """
 
-_BIND_JOB_SQL: Final = """
+_BIND_JOB_SQL: Final = f"""
 UPDATE fleet_worker_lease
 SET job_id = $3, heartbeat_at = now()
 WHERE task_id = $1 AND lease_token = $2::uuid AND job_id IS NULL
-RETURNING task_id, pool, lease_token::text AS lease_token, coordinator_id,
-          job_id, claimed_at, heartbeat_at
+{_LEASE_RETURNING}
 """
+
+_MARK_SUBMIT_ATTEMPTED_SQL: Final = f"""
+UPDATE fleet_worker_lease
+SET submit_state = 'attempted', submit_attempted_at = now(), heartbeat_at = now()
+WHERE task_id = $1 AND lease_token = $2::uuid
+  AND job_id IS NULL AND submit_state = 'never_attempted'
+{_LEASE_RETURNING}
+"""
+
+# Only a lease that was never attempted may be reclaimed by the unbound sweep.
+# legacy_unknown and attempted unbound leases are never released here.
+_RELEASE_NEVER_DISPATCHED_SQL: Final = """
+DELETE FROM fleet_worker_lease
+WHERE task_id = $1 AND lease_token = $2::uuid
+  AND job_id IS NULL AND submit_state = 'never_attempted'
+"""
+
+_GET_UNBOUND_LEASES_SQL: Final = (
+    _LEASE_SELECT + " WHERE job_id IS NULL AND pool = $1"
+)
 
 _HEARTBEAT_SQL: Final = """
 UPDATE fleet_worker_lease
@@ -145,19 +206,11 @@ FROM fleet_task_outcome
 WHERE task_id = $1
 """
 
-_GET_LEASE_BY_JOB_SQL: Final = """
-SELECT task_id, pool, lease_token::text AS lease_token, coordinator_id,
-       job_id, claimed_at, heartbeat_at
-FROM fleet_worker_lease
-WHERE job_id = $1
-"""
+_GET_LEASE_BY_JOB_SQL: Final = _LEASE_SELECT + " WHERE job_id = $1"
 
-_GET_BOUND_LEASES_SQL: Final = """
-SELECT task_id, pool, lease_token::text AS lease_token, coordinator_id,
-       job_id, claimed_at, heartbeat_at
-FROM fleet_worker_lease
-WHERE job_id IS NOT NULL AND pool = $1
-"""
+_GET_BOUND_LEASES_SQL: Final = (
+    _LEASE_SELECT + " WHERE job_id IS NOT NULL AND pool = $1"
+)
 
 
 class FleetStateError(RuntimeError):
@@ -189,6 +242,8 @@ class WorkerLease:
     job_id: str | None
     claimed_at: datetime | None
     heartbeat_at: datetime | None
+    submit_state: str | None = None
+    submit_attempted_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -242,6 +297,8 @@ def _lease_from_row(row: Any) -> WorkerLease:
         job_id=row["job_id"],
         claimed_at=row.get("claimed_at"),
         heartbeat_at=row.get("heartbeat_at"),
+        submit_state=row.get("submit_state"),
+        submit_attempted_at=row.get("submit_attempted_at"),
     )
 
 
@@ -532,6 +589,57 @@ class FleetState:
             rows = await conn.fetch(_GET_BOUND_LEASES_SQL, pool_name)
         return [_lease_from_row(row) for row in rows]
 
+    async def list_unbound_leases(self, pool_name: str) -> list[WorkerLease]:
+        """Return every active lease in ``pool_name`` with no bound job.
+
+        The unbound sweep uses this surface and then applies the submission
+        state guard before releasing anything: only ``never_attempted`` rows
+        (never dispatched, never failed) may be reclaimed.
+        """
+        pool_name = _require_name(pool_name, "pool_name")
+        pg_pool = await self._ensure_pool()
+        async with pg_pool.acquire() as conn:
+            rows = await conn.fetch(_GET_UNBOUND_LEASES_SQL, pool_name)
+        return [_lease_from_row(row) for row in rows]
+
+    async def mark_submit_attempted(
+        self, *, task_id: str, lease_token: str
+    ) -> WorkerLease:
+        """Atomically transition an unbound ``never_attempted`` lease to
+        ``attempted`` immediately before the first gateway dispatch.
+
+        This is the fail-closed safety gate: if the row no longer matches
+        (e.g. an unbound sweep reclaimed the lease concurrently) the UPDATE
+        matches zero rows and we raise, so the gateway is never called with a
+        lost race.
+        """
+        task_id = _require_name(task_id, "task_id")
+        lease_token = _require_name(lease_token, "lease_token")
+        pg_pool = await self._ensure_pool()
+        async with pg_pool.acquire() as conn:
+            row = await conn.fetchrow(_MARK_SUBMIT_ATTEMPTED_SQL, task_id, lease_token)
+        if row is None:
+            raise LeaseNotFoundError("lease not found or token mismatch")
+        return _lease_from_row(row)
+
+    async def release_never_dispatched(
+        self, *, task_id: str, lease_token: str
+    ) -> bool:
+        """Reclaim an unbound lease only if it was never dispatched.
+
+        Only a fresh ``never_attempted`` lease is deleted; ``legacy_unknown``
+        and ``attempted`` unbound leases are untouched so an in-flight gateway
+        job is never assumed dead.
+        """
+        task_id = _require_name(task_id, "task_id")
+        lease_token = _require_name(lease_token, "lease_token")
+        pg_pool = await self._ensure_pool()
+        async with pg_pool.acquire() as conn:
+            result = await conn.execute(_RELEASE_NEVER_DISPATCHED_SQL, task_id, lease_token)
+        if isinstance(result, str):
+            return result.startswith("DELETE 1")
+        return bool(result)
+
     async def get_outcome(self, task_id: str) -> TaskOutcome | None:
         """Return a durable terminal outcome without mutating fleet state."""
         task_id = _require_name(task_id, "task_id")
@@ -617,11 +725,14 @@ class FleetState:
 
 __all__ = [
     "AdmissionResult",
+    "ATTEMPTED",
     "DEFAULT_POOL_CAPACITY",
     "FleetState",
     "FleetStateError",
+    "LEGACY_UNKNOWN",
     "LeaseConflictError",
     "LeaseNotFoundError",
+    "NEVER_ATTEMPTED",
     "PoolCapacityMismatchError",
     "PoolSnapshot",
     "TaskAlreadyTerminalError",

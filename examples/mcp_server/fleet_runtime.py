@@ -32,6 +32,7 @@ from typing import Any, Final
 from examples.mcp_server.agent_paths import project_state_key
 from examples.mcp_server.fleet_state import (
     DEFAULT_POOL_CAPACITY,
+    NEVER_ATTEMPTED,
     FleetState,
     TaskAlreadyTerminalError,
 )
@@ -179,6 +180,11 @@ class FleetRuntime:
         for this submission is unchanged.
         """
         await self.ensure_ready()
+        if sweep_before_submit:
+            try:
+                await self.sweep_unbound_leases()
+            except Exception:
+                pass
         if job_status_fn is not None and sweep_before_submit:
             try:
                 await self.sweep_bound_leases(job_status_fn)
@@ -240,6 +246,31 @@ class FleetRuntime:
                     "capacity": admission.capacity,
                 },
             }
+        if lease.submit_state != NEVER_ATTEMPTED:
+            # A legacy or already-attempted unbound lease has no authoritative
+            # proof it was never dispatched. Re-dispatching could double-execute
+            # an in-flight gateway job, so we fail closed instead.
+            self._gateway_io_gate.release()
+            return {
+                "task_id": task_id,
+                "status": "blocked",
+                "error": "unbound lease is in-flight or indeterminate; refusing to re-dispatch",
+                "fleet": {
+                    "pool": lease.pool,
+                    "existing_lease": True,
+                    "submit_state": lease.submit_state,
+                    "active": admission.active,
+                    "capacity": admission.capacity,
+                },
+            }
+        try:
+            await self.state.mark_submit_attempted(
+                task_id=durable_task_id,
+                lease_token=lease.lease_token,
+            )
+        except BaseException:
+            self._gateway_io_gate.release()
+            raise
         result = await self._run_gateway_io(submit_sync, permit_held=True)
         job_id = result.get("job_id") if isinstance(result, dict) else None
         if isinstance(job_id, str) and job_id:
@@ -326,6 +357,46 @@ class FleetRuntime:
             raise
         finally:
             self._gateway_io_gate.release()
+
+    async def sweep_unbound_leases(self) -> int:
+        """Reclaim only unbound leases that were never dispatched.
+
+        The submission-state guard is applied here: ``never_attempted`` rows
+        (acquired but never sent to the gateway) are reclaimed, while
+        ``legacy_unknown`` and ``attempted`` unbound rows are never touched.
+        """
+        await self.ensure_ready()
+        leases = await self.state.list_unbound_leases(pool_name=self.pool_name)
+        released = 0
+        for lease in leases:
+            if lease.submit_state != NEVER_ATTEMPTED:
+                continue
+            try:
+                ok = await self.state.release_never_dispatched(
+                    task_id=lease.task_id,
+                    lease_token=lease.lease_token,
+                )
+            except Exception:
+                continue
+            if ok:
+                released += 1
+        return released
+
+    async def reconcile(
+        self, job_status_fn: Callable[[str], dict[str, Any]] | None = None
+    ) -> int:
+        """Reclaim abandoned never-dispatched leases and terminal bound leases.
+
+        The unbound sweep always runs; the bound sweep runs only when a
+        gateway status function is supplied (it cannot run without one).
+        """
+        released = await self.sweep_unbound_leases()
+        if job_status_fn is not None:
+            try:
+                released += await self.sweep_bound_leases(job_status_fn)
+            except Exception:
+                pass
+        return released
 
     async def sweep_bound_leases(
         self, job_status_fn: Callable[[str], dict[str, Any]]
