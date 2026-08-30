@@ -266,23 +266,80 @@ class GatewayOAuthProvider:
             type=token_type,
         )
 
-    def _persist_oauth_refresh_token(self, token: StoredToken) -> None:
-        """Durably store a hashed refresh record before exposing its credential."""
+    def _persist_oauth_grant(self, access: StoredToken, refresh: StoredToken) -> None:
+        """Durably store hashed access + refresh records before exposing credentials.
+
+        The pair is written in one atomic store operation so a process
+        restart never observes a grant with a refresh token but no access
+        token (or vice versa).
+        """
         if self._token_store is None:
             raise RuntimeError("OAuth refresh-token persistence is not configured")
         now = time.time()
-        self._token_store.add(
-            StoredTokenEntry(
-                id=_generate_id("oauth_rt_", 16),
-                token_hash=token.token,
-                name="oauth-refresh",
-                profile="oauth",
-                scopes=list(token.scopes),
-                created_at=_format_persisted_time(now),
-                client_id=token.client_id,
-                type="refresh",
-                expires_at=_format_persisted_time(token.expires_at),
-            )
+        self._token_store.add_many(
+            [
+                StoredTokenEntry(
+                    id=_generate_id("oauth_at_", 16),
+                    token_hash=access.token,
+                    name="oauth-access",
+                    profile="oauth",
+                    scopes=list(access.scopes),
+                    created_at=_format_persisted_time(now),
+                    client_id=access.client_id,
+                    type="access",
+                    expires_at=_format_persisted_time(access.expires_at),
+                ),
+                StoredTokenEntry(
+                    id=_generate_id("oauth_rt_", 16),
+                    token_hash=refresh.token,
+                    name="oauth-refresh",
+                    profile="oauth",
+                    scopes=list(refresh.scopes),
+                    created_at=_format_persisted_time(now),
+                    client_id=refresh.client_id,
+                    type="refresh",
+                    expires_at=_format_persisted_time(refresh.expires_at),
+                ),
+            ]
+        )
+
+    def _rotate_oauth_tokens(
+        self, revoke_hash: str, access: StoredToken, refresh: StoredToken
+    ) -> None:
+        """Durably revoke the old refresh and persist the replacement pair.
+
+        Performed before any in-memory mutation so a persistence failure
+        cannot leave the provider with credentials it never stored.
+        """
+        if self._token_store is None:
+            return
+        now = time.time()
+        self._token_store.rotate(
+            revoke_hash,
+            [
+                StoredTokenEntry(
+                    id=_generate_id("oauth_at_", 16),
+                    token_hash=access.token,
+                    name="oauth-access",
+                    profile="oauth",
+                    scopes=list(access.scopes),
+                    created_at=_format_persisted_time(now),
+                    client_id=access.client_id,
+                    type="access",
+                    expires_at=_format_persisted_time(access.expires_at),
+                ),
+                StoredTokenEntry(
+                    id=_generate_id("oauth_rt_", 16),
+                    token_hash=refresh.token,
+                    name="oauth-refresh",
+                    profile="oauth",
+                    scopes=list(refresh.scopes),
+                    created_at=_format_persisted_time(now),
+                    client_id=refresh.client_id,
+                    type="refresh",
+                    expires_at=_format_persisted_time(refresh.expires_at),
+                ),
+            ],
         )
 
     # --- Client Registration ---
@@ -424,7 +481,7 @@ class GatewayOAuthProvider:
             expires_at=time.time() + 604800,
             type="refresh",
         )
-        self._persist_oauth_refresh_token(refresh_record)
+        self._persist_oauth_grant(access_record, refresh_record)
         self._tokens[at_hash] = access_record
         self._tokens[rt_hash] = refresh_record
         return {
@@ -459,18 +516,32 @@ class GatewayOAuthProvider:
                 error_description="refresh token has expired",
             )
         new_access = _generate_id("mcp_at_", 32)
+        new_refresh = _generate_id("mcp_rt_", 32)
         at_hash = hash_token(new_access)
-        self._tokens[at_hash] = StoredToken(
+        new_rt_hash = hash_token(new_refresh)
+        access_record = StoredToken(
             token=at_hash,
             client_id=client_id,
-            scopes=stored.scopes,
+            scopes=list(stored.scopes),
             expires_at=time.time() + 7200,
             type="access",
         )
+        refresh_record = StoredToken(
+            token=new_rt_hash,
+            client_id=client_id,
+            scopes=list(stored.scopes),
+            expires_at=time.time() + 604800,
+            type="refresh",
+        )
+        self._rotate_oauth_tokens(rt_hash, access_record, refresh_record)
+        self._tokens.pop(rt_hash, None)
+        self._tokens[at_hash] = access_record
+        self._tokens[new_rt_hash] = refresh_record
         return {
             "access_token": new_access,
             "token_type": "Bearer",
             "expires_in": 7200,
+            "refresh_token": new_refresh,
             "scope": " ".join(stored.scopes),
         }
 
@@ -547,6 +618,7 @@ class GatewayOAuthProvider:
         result = self.refresh_access_token(client_info.client_id, token)
         return OAuthToken(
             access_token=result["access_token"],
+            refresh_token=result.get("refresh_token"),
             expires_in=result["expires_in"],
             scope=result.get("scope", ""),
         )
