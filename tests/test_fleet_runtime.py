@@ -12,6 +12,7 @@ import examples.mcp_server.fleet_runtime as runtime_module
 from examples.mcp_server.fleet_runtime import FleetRuntime, FleetRuntimeError, fleet_task_id
 from examples.mcp_server.fleet_state import (
     AdmissionResult,
+    LeaseNotFoundError,
     TaskAlreadyTerminalError,
     TaskOutcome,
     WorkerLease,
@@ -22,7 +23,12 @@ def test_default_pool_targets_dedicated_agent_executor():
     assert runtime_module._DEFAULT_POOL == "ssh-gateway/agent-sshd"
 
 
-def _lease(*, job_id: str | None = None) -> WorkerLease:
+def _lease(
+    *,
+    job_id: str | None = None,
+    submit_state: str | None = "never_attempted",
+    submit_attempted_at=None,
+) -> WorkerLease:
     return WorkerLease(
         task_id=fleet_task_id("demo", "task-1"),
         pool="ssh-gateway/sshd",
@@ -31,6 +37,8 @@ def _lease(*, job_id: str | None = None) -> WorkerLease:
         job_id=job_id,
         claimed_at=None,
         heartbeat_at=None,
+        submit_state=submit_state,
+        submit_attempted_at=submit_attempted_at,
     )
 
 
@@ -45,9 +53,21 @@ def _runtime(state) -> FleetRuntime:
     return runtime
 
 
+def _mk_state():
+    """A MagicMock state whose marker transition succeeds by default.
+
+    The r2 submission gate calls ``mark_submit_attempted`` before any gateway
+    dispatch, so dispatch-oriented tests need it preconfigured.
+    """
+    state = MagicMock()
+    state.mark_submit_attempted = AsyncMock(return_value=_lease(submit_state="attempted"))
+    state.release_never_dispatched = AsyncMock(return_value=True)
+    return state
+
+
 @pytest.mark.asyncio
 async def test_full_pool_never_calls_submit():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(
         return_value=AdmissionResult(
             acquired=False,
@@ -70,7 +90,7 @@ async def test_full_pool_never_calls_submit():
 
 @pytest.mark.asyncio
 async def test_bound_existing_lease_returns_job_without_resubmit():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(
         return_value=AdmissionResult(
             acquired=True,
@@ -95,7 +115,7 @@ async def test_bound_existing_lease_returns_job_without_resubmit():
 async def test_new_lease_binds_returned_gateway_job():
     lease = _lease()
     bound = _lease(job_id="job-42")
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(
         return_value=AdmissionResult(True, False, 2, 1, lease)
     )
@@ -120,7 +140,7 @@ async def test_new_lease_binds_returned_gateway_job():
 @pytest.mark.asyncio
 async def test_ambiguous_submit_exception_never_releases_lease():
     lease = _lease()
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(
         return_value=AdmissionResult(True, False, 2, 1, lease)
     )
@@ -142,7 +162,7 @@ async def test_ambiguous_submit_exception_never_releases_lease():
 @pytest.mark.asyncio
 async def test_definite_presubmit_terminal_result_releases_lease():
     lease = _lease()
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(
         return_value=AdmissionResult(True, False, 2, 1, lease)
     )
@@ -162,7 +182,7 @@ async def test_definite_presubmit_terminal_result_releases_lease():
 @pytest.mark.asyncio
 async def test_unknown_submit_shape_keeps_lease_fail_closed():
     lease = _lease()
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(
         return_value=AdmissionResult(True, False, 2, 1, lease)
     )
@@ -179,7 +199,7 @@ async def test_unknown_submit_shape_keeps_lease_fail_closed():
 
 @pytest.mark.asyncio
 async def test_terminal_task_id_is_not_submitted_again():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(side_effect=TaskAlreadyTerminalError("already terminal"))
     state.get_outcome = AsyncMock(
         return_value=TaskOutcome(
@@ -206,7 +226,7 @@ async def test_terminal_task_id_is_not_submitted_again():
 
 @pytest.mark.asyncio
 async def test_running_gateway_result_never_releases_slot():
-    state = MagicMock()
+    state = _mk_state()
     state.get_lease_by_job = AsyncMock()
     runtime = _runtime(state)
 
@@ -220,7 +240,7 @@ async def test_running_gateway_result_never_releases_slot():
 @pytest.mark.asyncio
 async def test_terminal_gateway_result_releases_exact_bound_lease():
     lease = _lease(job_id="job-1")
-    state = MagicMock()
+    state = _mk_state()
     state.get_lease_by_job = AsyncMock(return_value=lease)
     state.complete_task = AsyncMock()
     runtime = _runtime(state)
@@ -242,7 +262,7 @@ async def test_terminal_gateway_result_releases_exact_bound_lease():
 
 @pytest.mark.asyncio
 async def test_terminal_gateway_without_bound_lease_is_noop():
-    state = MagicMock()
+    state = _mk_state()
     state.get_lease_by_job = AsyncMock(return_value=None)
     state.complete_task = AsyncMock()
 
@@ -321,7 +341,7 @@ async def _wait_until(predicate, *, timeout_s: float = 5.0):
 
 @pytest.mark.asyncio
 async def test_gateway_io_concurrency_is_bounded():
-    state = MagicMock()
+    state = _mk_state()
     state.close = AsyncMock()
     runtime = _watch_runtime(state, gateway_io_concurrency=2)
     lock = threading.Lock()
@@ -354,7 +374,7 @@ async def test_gateway_io_concurrency_is_bounded():
 
 @pytest.mark.asyncio
 async def test_cancelled_gateway_io_keeps_capacity_until_worker_finishes():
-    state = MagicMock()
+    state = _mk_state()
     state.close = AsyncMock()
     runtime = _watch_runtime(state, gateway_io_concurrency=2)
     lock = threading.Lock()
@@ -399,7 +419,7 @@ async def test_cancelled_gateway_io_keeps_capacity_until_worker_finishes():
 
 @pytest.mark.asyncio
 async def test_parallel_submissions_share_gateway_io_bound():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(
         return_value=AdmissionResult(True, False, 64, 8, _lease())
     )
@@ -457,7 +477,7 @@ def test_gateway_io_concurrency_must_be_positive():
 @pytest.mark.asyncio
 async def test_bound_job_watcher_releases_lease_when_gateway_turns_terminal():
     lease = _lease()
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, lease))
     state.bind_job = AsyncMock(return_value=_lease(job_id="job-42"))
     state.complete_task = AsyncMock()
@@ -495,7 +515,7 @@ async def test_bound_job_watcher_releases_lease_when_gateway_turns_terminal():
 
 @pytest.mark.asyncio
 async def test_watcher_keeps_lease_while_gateway_job_running():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
     state.bind_job = AsyncMock(return_value=_lease(job_id="job-42"))
     state.complete_task = AsyncMock()
@@ -518,7 +538,7 @@ async def test_watcher_keeps_lease_while_gateway_job_running():
 
 @pytest.mark.asyncio
 async def test_watcher_never_releases_on_job_not_found():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
     state.bind_job = AsyncMock(return_value=_lease(job_id="job-42"))
     state.complete_task = AsyncMock()
@@ -544,7 +564,7 @@ async def test_watcher_never_releases_on_job_not_found():
 
 @pytest.mark.asyncio
 async def test_watcher_recovers_after_transient_errors():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
     state.bind_job = AsyncMock(return_value=_lease(job_id="job-42"))
     state.complete_task = AsyncMock()
@@ -575,7 +595,7 @@ async def test_watcher_recovers_after_transient_errors():
 
 @pytest.mark.asyncio
 async def test_watcher_retries_terminal_reconciliation_after_transient_state_error():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
     state.bind_job = AsyncMock(return_value=_lease(job_id="job-42"))
     state.get_lease_by_job = AsyncMock(return_value=_lease(job_id="job-42"))
@@ -598,7 +618,7 @@ async def test_watcher_retries_terminal_reconciliation_after_transient_state_err
 
 @pytest.mark.asyncio
 async def test_sweep_releases_terminal_bound_lease_before_admission():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
     state.list_bound_leases = AsyncMock(return_value=[_lease(job_id="job-stale")])
     state.bind_job = AsyncMock(return_value=_lease(job_id="job-new"))
@@ -627,7 +647,7 @@ async def test_sweep_releases_terminal_bound_lease_before_admission():
 
 @pytest.mark.asyncio
 async def test_sweep_retains_running_bound_lease():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
     state.list_bound_leases = AsyncMock(return_value=[_lease(job_id="job-running")])
     state.bind_job = AsyncMock(return_value=_lease(job_id="job-new"))
@@ -653,7 +673,7 @@ async def test_sweep_retains_running_bound_lease():
 
 @pytest.mark.asyncio
 async def test_sweep_is_scoped_to_pool():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
     state.list_bound_leases = AsyncMock(return_value=[])
     state.bind_job = AsyncMock(return_value=_lease(job_id="job-new"))
@@ -674,7 +694,7 @@ async def test_sweep_is_scoped_to_pool():
 
 @pytest.mark.asyncio
 async def test_sweep_discovered_running_lease_restores_watcher():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
     state.list_bound_leases = AsyncMock(return_value=[_lease(job_id="job-running")])
     state.bind_job = AsyncMock(return_value=_lease(job_id="job-new"))
@@ -701,7 +721,7 @@ async def test_sweep_discovered_running_lease_restores_watcher():
 
 @pytest.mark.asyncio
 async def test_sweep_restores_watcher_for_unreachable_bound_lease():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
     state.list_bound_leases = AsyncMock(return_value=[_lease(job_id="job-unreachable")])
     state.bind_job = AsyncMock(return_value=_lease(job_id="job-new"))
@@ -729,7 +749,7 @@ async def test_sweep_restores_watcher_for_unreachable_bound_lease():
 
 @pytest.mark.asyncio
 async def test_existing_bound_lease_restores_watcher_on_submit():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, True, 2, 1, _lease(job_id="job-existing")))
     state.list_bound_leases = AsyncMock(return_value=[])
     state.complete_task = AsyncMock()
@@ -753,7 +773,7 @@ async def test_existing_bound_lease_restores_watcher_on_submit():
 
 @pytest.mark.asyncio
 async def test_exactly_one_watcher_per_job_id():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, True, 2, 1, _lease(job_id="job-1")))
     state.list_bound_leases = AsyncMock(return_value=[])
     state.complete_task = AsyncMock()
@@ -774,7 +794,7 @@ async def test_exactly_one_watcher_per_job_id():
 
 @pytest.mark.asyncio
 async def test_submit_can_skip_redundant_pre_sweep_but_still_tracks_new_job():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
     state.list_bound_leases = AsyncMock(return_value=[])
     state.bind_job = AsyncMock(return_value=_lease(job_id="job-batch"))
@@ -797,7 +817,7 @@ async def test_submit_can_skip_redundant_pre_sweep_but_still_tracks_new_job():
 
 @pytest.mark.asyncio
 async def test_close_cancels_watchers_then_closes_state():
-    state = MagicMock()
+    state = _mk_state()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
     state.bind_job = AsyncMock(return_value=_lease(job_id="job-42"))
     state.complete_task = AsyncMock()
@@ -817,3 +837,160 @@ async def test_close_cancels_watchers_then_closes_state():
 
     assert not runtime._watchers_by_job
     state.close.assert_awaited_once()
+
+
+def _lease_state(*, submit_state: str | None = "never_attempted", job_id: str | None = None) -> WorkerLease:
+    return WorkerLease(
+        task_id=fleet_task_id("demo", "lease-state"),
+        pool="ssh-gateway/sshd",
+        lease_token="22222222-2222-2222-2222-222222222222",
+        coordinator_id="gpt-a",
+        job_id=job_id,
+        claimed_at=None,
+        heartbeat_at=None,
+        submit_state=submit_state,
+        submit_attempted_at=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_mark_failure_after_concurrent_reclaim_submits_zero_gateway_io():
+    """RESU red: reconcile deletes the lease, so the marker transition gets
+    0 rows; the gateway submit MUST NOT run."""
+    lease = _lease_state(submit_state="never_attempted")
+    state = _mk_state()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, lease))
+    state.mark_submit_attempted = AsyncMock(
+        side_effect=LeaseNotFoundError("lease not found or token mismatch")
+    )
+    state.complete_task = AsyncMock()
+    gateway_calls = {"n": 0}
+
+    def submit_sync():
+        gateway_calls["n"] += 1
+        return {"task_id": "task-1", "status": "running", "job_id": "job-42"}
+
+    with pytest.raises(LeaseNotFoundError):
+        await _runtime(state).submit(
+            project="demo", task_id="task-1", submit_sync=submit_sync
+        )
+
+    assert gateway_calls["n"] == 0, "gateway submit must be 0 when marker loses race"
+    state.complete_task.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unbound_attempted_lease_is_never_redispatched():
+    """Crash after dispatch-before-bind leaves an unbound 'attempted' lease;
+    we must NOT re-dispatch (could double-execute)."""
+    lease = _lease_state(submit_state="attempted")
+    state = _mk_state()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, lease))
+    state.complete_task = AsyncMock()
+    gateway_calls = {"n": 0}
+
+    def submit_sync():
+        gateway_calls["n"] += 1
+        return {"task_id": "task-1", "status": "running", "job_id": "job-42"}
+
+    result = await _runtime(state).submit(
+        project="demo", task_id="task-1", submit_sync=submit_sync
+    )
+
+    assert gateway_calls["n"] == 0
+    assert result["status"] == "blocked"
+    assert result["fleet"]["submit_state"] == "attempted"
+    state.mark_submit_attempted.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unbound_legacy_unknown_lease_is_never_redispatched():
+    lease = _lease_state(submit_state="legacy_unknown")
+    state = _mk_state()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, lease))
+    state.complete_task = AsyncMock()
+    gateway_calls = {"n": 0}
+
+    def submit_sync():
+        gateway_calls["n"] += 1
+        return {"status": "running", "job_id": "job-42"}
+
+    result = await _runtime(state).submit(
+        project="demo", task_id="task-1", submit_sync=submit_sync
+    )
+
+    assert gateway_calls["n"] == 0
+    assert result["fleet"]["submit_state"] == "legacy_unknown"
+    state.mark_submit_attempted.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_marker_failure_releases_gate_so_next_submit_proceeds():
+    lease1 = _lease_state(submit_state="never_attempted")
+    lease2 = _lease_state(submit_state="never_attempted")
+    calls = {"n": 0}
+    state = _mk_state()
+    state.acquire_slot = AsyncMock(
+        return_value=AdmissionResult(True, False, 2, 1, lease1)
+    )
+
+    async def mark_that_fails_once(task_id=None, lease_token=None):
+        calls["n"] += 1
+        raise LeaseNotFoundError("lease not found or token mismatch")
+
+    state.mark_submit_attempted = AsyncMock(side_effect=mark_that_fails_once)
+    state.complete_task = AsyncMock()
+
+    with pytest.raises(LeaseNotFoundError):
+        await _runtime(state).submit(
+            project="demo", task_id="task-1", submit_sync=lambda: {"status": "running", "job_id": "j1"}
+        )
+    # Gate must be released after the marker failure - a second submit proceeds.
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, lease2))
+    state.mark_submit_attempted = AsyncMock(return_value=_lease_state(submit_state="attempted"))
+    state.bind_job = AsyncMock(return_value=_lease_state(submit_state="attempted", job_id="j2"))
+    result = await _runtime(state).submit(
+        project="demo", task_id="task-1", submit_sync=lambda: {"status": "running", "job_id": "j2"}
+    )
+    assert result["job_id"] == "j2"
+
+
+@pytest.mark.asyncio
+async def test_sweep_unbound_releases_only_never_attempted():
+    never = _lease_state(submit_state="never_attempted")
+    attempted = _lease_state(submit_state="attempted")
+    legacy = _lease_state(submit_state="legacy_unknown")
+    state = _mk_state()
+    state.list_unbound_leases = AsyncMock(return_value=[never, attempted, legacy])
+    state.release_never_dispatched = AsyncMock(return_value=True)
+    runtime = _runtime(state)
+
+    released = await runtime.sweep_unbound_leases()
+
+    assert released == 1
+    state.release_never_dispatched.assert_awaited_once_with(
+        task_id=never.task_id, lease_token=never.lease_token
+    )
+
+
+@pytest.mark.asyncio
+async def test_sweep_unbound_skips_rows_without_never_attempted():
+    state = _mk_state()
+    state.list_unbound_leases = AsyncMock(return_value=[])
+    runtime = _runtime(state)
+
+    assert await runtime.sweep_unbound_leases() == 0
+    state.release_never_dispatched.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_sweeps_unbound_always_and_bound_with_status_fn():
+    state = _mk_state()
+    state.list_unbound_leases = AsyncMock(return_value=[])
+    state.list_bound_leases = AsyncMock(return_value=[])
+    runtime = _runtime(state)
+
+    await runtime.reconcile(job_status_fn=lambda jid: {"job_id": jid, "status": "running"})
+
+    state.list_unbound_leases.assert_awaited_once()
+    state.list_bound_leases.assert_awaited_once()

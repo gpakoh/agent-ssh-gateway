@@ -702,7 +702,7 @@ class TestGatewayRunAgents:
         from examples.mcp_server.mcp_infra.adapters.agent import gateway_run_agents
 
         fleet = MagicMock()
-        fleet.sweep_bound_leases = AsyncMock(return_value=0)
+        fleet.reconcile = AsyncMock(return_value=0)
 
         async def submit(**kwargs):
             return {
@@ -729,7 +729,7 @@ class TestGatewayRunAgents:
             "task-a",
             "task-b",
         ]
-        fleet.sweep_bound_leases.assert_awaited_once()
+        fleet.reconcile.assert_awaited_once()
         assert fleet.submit.await_count == 2
         assert all(
             call.kwargs["sweep_before_submit"] is False
@@ -746,7 +746,7 @@ class TestGatewayRunAgents:
         both_started = asyncio.Event()
         started: set[str] = set()
         fleet = MagicMock()
-        fleet.sweep_bound_leases = AsyncMock(return_value=0)
+        fleet.reconcile = AsyncMock(return_value=0)
 
         async def submit(**kwargs):
             started.add(kwargs["task_id"])
@@ -777,7 +777,7 @@ class TestGatewayRunAgents:
         from examples.mcp_server.mcp_infra.adapters.agent import gateway_run_agents
 
         fleet = MagicMock()
-        fleet.sweep_bound_leases = AsyncMock(return_value=0)
+        fleet.reconcile = AsyncMock(return_value=0)
 
         async def submit(**kwargs):
             if kwargs["task_id"] == "bad":
