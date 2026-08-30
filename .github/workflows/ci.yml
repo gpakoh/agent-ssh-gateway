@@ -508,3 +508,103 @@ jobs:
         env:
           DEPLOY_SHA: ${{ github.sha }}
         run: bash scripts/deploy-from-registry.sh
+
+  host-smoke:
+    # Authoritative live host-smoke gate. Sequential regression contract
+    # (see tests/test_deploy_config_seams.py::TestHostSmokeRunsAfterSuccessfulDeploy):
+    #   1. This job cannot run before deploy -- it only starts after a
+    #      successful deploy of THIS exact commit (needs: [deploy]).
+    #      The old push-triggered paths:-filtered standalone workflow had
+    #      no ordering guarantee vs deploy-from-registry.sh at all and
+    #      could PASS against a stack still running the previous BUILD_SHA
+    #      while the triggering commit's own deploy had not even started.
+    #   2. Fail-closed pre-smoke check: the live BUILD_SHA of all three
+    #      runtime containers must equal ${{ github.sha }} before any
+# smoke runs -- a stale/unset SHA aborts (exit 1, no `|| true`).
+      #   3. The OAuth black-box testcase must be EXACTLY 1 PASS, never
+      #      SKIP -- a skip here means the live OAuth->Gateway->SSH chain
+      #      was not actually exercised; pytest reports skips with exit 0,
+      #      so the step greps its own output and fails on "skipped".
+    #   4. After the OAuth smoke, BUILD_SHA is re-checked (the OAuth flow
+    #      may not itself change containers, but the gate is re-asserted
+    #      on the box that just ran 8788 for real), then the full
+    #      `make host-smoke` (pytest -m host_smoke) runs.
+    # Runs on the host-smoke-ci runner (real /media, nginx, Redis, and the
+    # live Docker stack), not GitHub-hosted and not docker-in-docker.
+    needs: [deploy]
+    if: github.ref_name == 'master' && github.event_name == 'push' && github.server_url != 'https://github.com'
+    runs-on: host-smoke-ci
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Smoke the exact commit that was deployed, never whatever the
+          # runner's mutable working tree happens to be.
+          ref: ${{ github.sha }}
+
+      - name: Set up Python
+        run: |
+          python3 --version
+          /media/1TB/Anaconda/bin/uv sync --frozen --extra dev
+
+      - name: Fail-closed pre-smoke — all three containers must run this commit
+        # BUILD_SHA is baked into each image at build time; the only way a
+        # smoke test proves anything about THIS commit is if the live
+        # containers are running it. Stale container (old image), unset
+        # BUILD_SHA, or an unreachable container -> exit 1 before smoke.
+        run: |
+          set -euo pipefail
+          expected="${{ github.sha }}"
+          for name in web-ssh-gateway mcp-server mcp-oauth; do
+            sha="$(docker exec "$name" printenv BUILD_SHA 2>/dev/null)"
+            echo "$name: BUILD_SHA=$sha"
+            if [ "$sha" != "$expected" ]; then
+              echo "::error::$name is running BUILD_SHA=$sha, expected $expected"
+              exit 1
+            fi
+          done
+
+      - name: OAuth black-box smoke (must be exactly 1 PASS, never SKIP)
+        # The mcp-oauth DCR->authorize->consent->token->git_status chain is
+        # the P1 #6 gap: the only smoke that actually drives an SSH-executing
+        # tool through the Gateway. `make host-smoke` later re-runs this same
+        # file, but a pytest skip is exit 0, so this dedicated step enforces
+        # "ran and passed" explicitly -- "skipped" or anything other than
+        # exactly one passing testcase fails the job (RED).
+        run: |
+          set -euo pipefail
+          log_file="$(mktemp)"
+          if ! /media/1TB/Anaconda/bin/uv run pytest tests/test_mcp_oauth_host_smoke.py -v --tb=short >"$log_file" 2>&1; then
+            cat "$log_file"
+            exit 1
+          fi
+          cat "$log_file"
+          if grep -Eq "skipped|SKIPPED" "$log_file"; then
+            echo "::error::OAuth black-box host-smoke was SKIPPED, not run — the live OAuth->SSH chain was NOT exercised"
+            exit 1
+          fi
+          if ! grep -Eq "1 passed" "$log_file"; then
+            echo "::error::OAuth black-box host-smoke must be exactly 1 PASS, never SKIP"
+            exit 1
+          fi
+
+      - name: Fail-closed post-OAuth — containers still on this commit
+        run: |
+          set -euo pipefail
+          expected="${{ github.sha }}"
+          for name in web-ssh-gateway mcp-server mcp-oauth; do
+            sha="$(docker exec "$name" printenv BUILD_SHA 2>/dev/null)"
+            echo "$name: BUILD_SHA=$sha"
+            if [ "$sha" != "$expected" ]; then
+              echo "::error::$name is running BUILD_SHA=$sha, expected $expected"
+              exit 1
+            fi
+          done
+
+      - name: Make host-smoke (full suite)
+        run: /media/1TB/Anaconda/bin/uv run make host-smoke
+
+      - name: Report
+        run: |
+          echo "post-deploy host-smoke completed"
+          git rev-parse --short HEAD

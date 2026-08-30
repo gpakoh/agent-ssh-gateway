@@ -2,45 +2,28 @@ name: host-smoke
 
 on:
   workflow_dispatch:
-  push:
-    branches: ["master"]
-    # MAJOR audit finding: paths: here didn't actually match what `make
-    # host-smoke` (pytest -m host_smoke) exercises -- verified each test
-    # file's real coverage rather than guessing:
-    #   - test_opencode_runner_wrapper.py tests scripts/
-    #     opencode_runner_wrapper.py directly (was entirely missing here)
-    #   - test_run_compileall_uv_seam.py shells out to the real uv/uvx
-    #     command examples/mcp_server/mcp_client_tools.py builds for the
-    #     run_compileall fallback (also entirely missing)
-    #   - test_mtls_e2e.py SSHes into the nginx host and greps its live
-    #     config + drives requests through it -- the tracked templates
-    #     for that config, and app/auth_middleware.py (the mTLS/X-SSL-*/
-    #     X-API-Key header handling on the backend side), were missing
-    #   - test_workspace_tools.py -> app/workspace/** (already correct)
-    # The old "SSH execution stack / OAuth-MCP server are not exercised
-    # by any host_smoke test" gap (#6) is now CLOSED:
-    #   - test_mcp_oauth_host_smoke.py runs the FULL live black-box flow
-    #     through the mcp-oauth container: DCR /register -> /authorize
-    #     (PKCE S256) -> /oauth/consent (MCP_AUTHORIZE_PASSWORD) ->
-    #     /token -> initialize -> tools/call git_status, which really
-    #     executes a harmless SSH command (git status --short) through
-    #     the Gateway (/api/ssh/execute-argv -> sshd) and asserts the
-    #     exact result -- the MCP->Gateway->SSH->harmless command chain
-    #     is now covered end to end (see scripts/mcp_oauth_black_box_
-    #     smoke.py, driven by scripts/mcp_black_box_smoke.py's sibling).
-    paths: ["Makefile", ".github/workflows/host-smoke.yml", "tests/test_mtls_e2e.py", "tests/test_opencode_runner_wrapper.py", "tests/test_workspace_tools.py", "tests/test_run_compileall_uv_seam.py", "tests/test_mcp_oauth_host_smoke.py", "tests/test_mcp_oauth_black_box_smoke.py", "app/workspace/**", "app/auth_middleware.py", "scripts/opencode_runner_wrapper.py", "scripts/mcp_oauth_black_box_smoke.py", "examples/mcp_server/mcp_client_tools.py", "nginx-gateway.conf.example", "nginx-ssh-gateway.conf"]
+  # Manual diagnostics ONLY. The authoritative host-smoke gate no longer
+  # lives here -- it runs as a ci.yml job strictly AFTER a successful
+  # deploy of the exact commit being smoked (needs: deploy + a fail-closed
+  # BUILD_SHA == github.sha check on web-ssh-gateway/mcp-server/mcp-oauth
+  # before and after the OAuth black-box smoke).  The old push trigger with
+  # a paths: filter had NO ordering guarantee vs the deploy job: it could
+  # start (and PASS) against whatever was already up while the commit that
+  # triggered it had not even been deployed yet.  `make host-smoke` content
+  # coverage requires no paths: list here precisely because this workflow
+  # no longer gates anything; it exists so an operator can re-run the same
+  # host-level pytest suite by hand against a live stack.
 
-# Same rationale as ci.yml's top-level concurrency block: two
-# close-together master pushes touching these paths would otherwise run
-# host-level smoke tests concurrently against the same shared host
-# resources (real /media, nginx, Redis) -- serialize instead of racing.
+# Manual runs serialize like ci.yml's block does; a manual re-run replaces
+# nothing mid-flight (cancel-in-progress: false keeps them from cancelling
+# each other if two dispatches land close together).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   host-smoke:
-    name: Host smoke
+    name: Host smoke (manual)
     # Self-hosted Gitea runner only (label host-smoke-ci, Gitea at
     # git.example.com) — needs real /media, nginx certs and Redis, which
     # GitHub's hosted runners don't have. GitHub would queue this job
