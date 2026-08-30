@@ -205,6 +205,117 @@ class TestMigrationSemantics:
         assert row is not None and row.submit_state == "attempted"
 
 
+class TestRollingUpgradeCompatibility:
+    """An old writer alive during a rolling deploy must never be mislabelled."""
+
+    async def test_old_writer_after_migration_is_fail_closed_legacy_unknown(
+        self, schema_ready
+    ):
+        pool_name = f"test/r2/roll/{uuid.uuid4().hex[:8]}"
+        task_id = f"old-writer-{uuid.uuid4().hex[:8]}"
+        token = str(uuid.uuid4())
+        async with schema_ready._pool.acquire() as conn:
+            # 1. OLD schema, no new columns.
+            await conn.execute("DROP TABLE IF EXISTS fleet_worker_lease CASCADE")
+            await conn.execute("DROP TABLE IF EXISTS fleet_task_outcome CASCADE")
+            await conn.execute("DROP TABLE IF EXISTS fleet_worker_pool CASCADE")
+            await conn.execute(_OLD_SCHEMA)
+            await conn.execute(
+                "INSERT INTO fleet_worker_pool(pool, capacity) VALUES($1, 2)",
+                pool_name,
+            )
+            # 2. New migration applies completely.
+            await conn.execute(fleet_state_module.SCHEMA_SQL)
+
+            # DDL gate: the columns must be nullable with NO default, so an old
+            # writer's INSERT that omits them yields NULL, never never_attempted,
+            # and never breaks the INSERT itself.
+            cols = await conn.fetch(
+                "SELECT column_name, is_nullable, column_default "
+                "FROM information_schema.columns "
+                "WHERE table_name = 'fleet_worker_lease' "
+                "  AND column_name IN ('submit_state', 'submit_attempted_at')"
+            )
+            colmap = {row["column_name"]: row for row in cols}
+            assert set(colmap) == {"submit_state", "submit_attempted_at"}
+            for row in cols:
+                assert row["is_nullable"] == "YES", (
+                    f"{row['column_name']} must stay nullable for old writers"
+                )
+                assert row["column_default"] is None, (
+                    f"{row['column_name']} must have NO default; an old writer "
+                    "must never get never_attempted automatically"
+                )
+
+            # 3. AFTER migration commit, an old binary (still alive during the
+            # rolling deploy) inserts a lease without the new columns.
+            await conn.execute(
+                """
+                INSERT INTO fleet_worker_lease(
+                    task_id, pool, lease_token, coordinator_id
+                ) VALUES($1, $2, $3::uuid, 'old-coord')
+                """,
+                task_id,
+                pool_name,
+                token,
+            )
+            row = await conn.fetchrow(
+                "SELECT submit_state, submit_attempted_at FROM fleet_worker_lease "
+                "WHERE task_id = $1",
+                task_id,
+            )
+            assert row["submit_state"] is None, (
+                "old-writer row must NOT become never_attempted (or any other "
+                "reclaimable/auto-assigned state)"
+            )
+            assert row["submit_attempted_at"] is None
+
+        # 4. New runtime/reconciler reads the row: it is unbound and unknown.
+        unbound = await schema_ready.list_unbound_leases(pool_name=pool_name)
+        old_row = next(
+            (lease for lease in unbound if lease.task_id == task_id), None
+        )
+        assert old_row is not None, "old-writer row must be visible as unbound"
+        assert old_row.submit_state is None
+        assert old_row.submit_attempted_at is None
+
+        # release_never_dispatched must NOT delete an unknown-state row.
+        released = await schema_ready.release_never_dispatched(
+            task_id=task_id, lease_token=token
+        )
+        assert released is False, (
+            "unknown (NULL) submit_state must never be reclaimable"
+        )
+        surviving = await schema_ready.get_lease(task_id)
+        assert surviving is not None and surviving.submit_state is None, (
+            "unknown-state row must survive the unbound guard"
+        )
+
+        # list_unbound_leases already traversed the NULL row without error,
+        # proving reconciliation does not crash on unknown state; re-list to
+        # assert the row is still there (the sweep predicate skips it).
+        again = await schema_ready.list_unbound_leases(pool_name=pool_name)
+        assert task_id in {lease.task_id for lease in again}, (
+            "sweep-relevant listing must still contain the unknown row"
+        )
+
+        # mark_submit_attempted is the re-dispatch gate: an unknown row cannot
+        # be transitioned, so the runtime's submit() fail-closes instead of
+        # double-dispatching an in-flight gateway job.
+        with pytest.raises(
+            LeaseNotFoundError, match="lease not found or token mismatch"
+        ):
+            await schema_ready.mark_submit_attempted(
+                task_id=task_id, lease_token=token
+            )
+
+        # Cleanup the legacy row so the fixture teardown's DELETE is enough.
+        async with schema_ready._pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM fleet_worker_lease WHERE task_id = $1", task_id
+            )
+
+
 class TestRaceFailClosed:
     """acquire(never_attempted) -> reconcile deletes -> mark 0 rows -> no submit."""
 
