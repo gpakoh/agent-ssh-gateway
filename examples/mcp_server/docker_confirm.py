@@ -9,6 +9,7 @@ import enum
 import hmac
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from secrets import token_urlsafe
 from typing import Any
@@ -32,6 +33,7 @@ class ConfirmAction:
     summary: str
     risk: str = "high"
     required_scope: str = "mcp:docker"
+    owner_fingerprint: str | None = None
     created_at: float = field(default_factory=time.monotonic)
     consumed: bool = False
 
@@ -51,17 +53,19 @@ class ConfirmStore:
         *,
         risk: str = "high",
         required_scope: str = "mcp:docker",
+        owner_fingerprint: str | None = None,
     ) -> ConfirmAction:
         action_id = uuid.uuid4().hex
         confirm_token = token_urlsafe(16)
         action = ConfirmAction(
             action_id=action_id,
             tool=tool,
-            kwargs=kwargs,
+            kwargs=deepcopy(kwargs),
             confirm_token=confirm_token,
             summary=summary,
             risk=risk,
             required_scope=required_scope,
+            owner_fingerprint=owner_fingerprint,
         )
         self._actions[action_id] = action
         self._token_map[confirm_token] = action_id
@@ -87,6 +91,15 @@ class ConfirmStore:
             if action_id is None:
                 return None, ConfirmStatus.INVALID
 
+        return self.peek_action_id(action_id)
+
+    def peek_action_id(self, action_id: str) -> tuple[ConfirmAction | None, ConfirmStatus]:
+        """Resolve a public action id without consuming it.
+
+        ``action_id`` is an identifier, not a confirmation secret. Callers
+        using this lookup must enforce an authenticated-owner fence before
+        execution.
+        """
         action = self._actions.get(action_id)
         if action is None:
             return None, ConfirmStatus.INVALID
