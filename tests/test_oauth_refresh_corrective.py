@@ -60,6 +60,9 @@ class _FailingTokenStore(TokenStore):
     def add(self, entry: StoredTokenEntry) -> None:
         raise OSError("durable token store unavailable")
 
+    def add_many(self, entries: list[StoredTokenEntry]) -> None:
+        raise OSError("durable token store unavailable")
+
 
 def _client(client_id: str) -> OAuthClientInformationFull:
     return OAuthClientInformationFull(
@@ -181,7 +184,7 @@ def test_refresh_record_survives_provider_recreation(tmp_path: Path) -> None:
     raw_refresh_token = _issue_refresh_token(first_provider, client.client_id)
 
     recreated_provider = _provider(store_path)
-    assert recreated_provider.load_tokens() == 1
+    assert recreated_provider.load_tokens() == 2
 
     with _token_client(recreated_provider, client) as http:
         response = http.post(
@@ -204,12 +207,14 @@ def test_persisted_refresh_restores_client_type_scopes_and_expiry(tmp_path: Path
     recreated_provider = _provider(store_path)
     recreated_provider.load_tokens()
     restored = recreated_provider._tokens.get(token_hash)
+    refresh_entries = [e for e in entries if e.type == "refresh"]
 
-    assert len(entries) == 1
+    assert len(entries) == 2
+    assert len(refresh_entries) == 1
     assert restored is not None
-    assert entries[0].client_id == client.client_id
-    assert entries[0].type == "refresh"
-    assert entries[0].scopes == SCOPES
+    assert refresh_entries[0].client_id == client.client_id
+    assert refresh_entries[0].type == "refresh"
+    assert refresh_entries[0].scopes == SCOPES
     assert restored.client_id == original.client_id
     assert restored.type == original.type == "refresh"
     assert restored.scopes == original.scopes
@@ -224,7 +229,7 @@ def test_persisted_refresh_token_preserves_client_isolation(tmp_path: Path) -> N
     raw_refresh_token = _issue_refresh_token(first_provider, owner.client_id)
 
     recreated_provider = _provider(store_path)
-    assert recreated_provider.load_tokens() == 1
+    assert recreated_provider.load_tokens() == 2
     with _token_client(recreated_provider, other) as http:
         response = http.post(
             "/token",
@@ -261,7 +266,7 @@ async def test_persisted_refresh_revocation_survives_recreation(tmp_path: Path) 
     await provider.revoke_token(raw_refresh_token)
     recreated_provider = _provider(store_path)
 
-    assert recreated_provider.load_tokens() == 0
+    assert recreated_provider.load_tokens() == 1
     with _token_client(recreated_provider, client) as http:
         response = http.post(
             "/token",

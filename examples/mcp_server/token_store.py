@@ -157,10 +157,36 @@ class TokenStore:
 
     def add(self, entry: StoredTokenEntry) -> None:
         """Append an entry and persist atomically (locked read-modify-write)."""
+        return self.add_many([entry])
+
+    def add_many(self, entries: list[StoredTokenEntry]) -> None:
+        """Append several entries in one atomic locked read-modify-write."""
+        with self._locked():
+            current = self.load()
+            current.extend(entries)
+            self._write(current)
+
+    def rotate(
+        self, revoke_hash: str, new_entries: list[StoredTokenEntry]
+    ) -> StoredTokenEntry | None:
+        """Atomically revoke one entry (by hash) and append replacement entries.
+
+        Single locked read-modify-write so a rotation is never observed
+        half-applied: the old refresh is marked revoked and the new
+        access/refresh pair is persisted in the same write. Returns the
+        revoked entry, or ``None`` when no non-revoked entry matched.
+        """
         with self._locked():
             entries = self.load()
-            entries.append(entry)
+            revoked: StoredTokenEntry | None = None
+            for e in entries:
+                if e.token_hash == revoke_hash and e.revoked_at is None:
+                    e.revoked_at = _iso_now()
+                    revoked = e
+                    break
+            entries.extend(new_entries)
             self._write(entries)
+            return revoked
 
     def revoke(self, token_id: str) -> StoredTokenEntry | None:
         """Mark a token as revoked by id. Returns the entry or None.
