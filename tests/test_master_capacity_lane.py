@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import time
+from itertools import count
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -180,6 +181,9 @@ async def test_zero_master_session_cap_falls_back_to_legacy_ten(monkeypatch):
     create.assert_not_awaited()
 
 
+_RATE_APP_SEQUENCE = count()
+
+
 def _rate_app(identity: AuthIdentity | None, *, ordinary: int, setting_name: str) -> FastAPI:
     app = FastAPI()
     app.state.limiter = limiter
@@ -196,7 +200,7 @@ def _rate_app(identity: AuthIdentity | None, *, ordinary: int, setting_name: str
         return {"ok": True}
 
     lane_name = identity.token_type if identity is not None else "none"
-    _limited.__name__ = f"_limited_{lane_name}_{setting_name}_{id(app)}"
+    _limited.__name__ = f"_limited_{lane_name}_{setting_name}_{next(_RATE_APP_SEQUENCE)}"
     limited = rate_limit_mutation(
         ordinary,
         "minute",
