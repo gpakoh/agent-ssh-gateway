@@ -196,8 +196,9 @@ async def test_many_requests_share_one_client_and_only_resp_closed(srv, monkeypa
     closed by an individual request; only the upstream Response is released."""
     client = _FakeClient()
     srv._UPSTREAM_CLIENT = client
+    responses = [_FakeResp(200, {}, b"r%d" % i) for i in range(6)]
     # send() pops a fresh response per call
-    client.responses = [_FakeResp(200, {}, b"r%d" % i) for i in range(6)]
+    client.responses = responses.copy()
 
     app = srv.create_proxy_app()
     # run several requests through the same shared client
@@ -208,8 +209,7 @@ async def test_many_requests_share_one_client_and_only_resp_closed(srv, monkeypa
     assert not client.aclosed
     assert srv._UPSTREAM_CLIENT is client
     # but each upstream response was released
-    for resp in client.responses:
-        assert resp.aclosed
+    assert all(resp.aclosed for resp in responses)
 
 
 @pytest.mark.asyncio
@@ -247,14 +247,15 @@ async def test_concurrent_requests_reuse_single_client(srv, monkeypatch):
     client = _FakeClient()
     srv._UPSTREAM_CLIENT = client
     N = 32
-    client.responses = [_FakeResp(200, {}, b"x") for _ in range(N)]
+    responses = [_FakeResp(200, {}, b"x") for _ in range(N)]
+    client.responses = responses.copy()
 
     app = srv.create_proxy_app()
     results = await asyncio.gather(*[_drive(app, "GET", "/mcp") for _ in range(N)])
     assert all(r.status == 200 for r in results)
     assert not client.aclosed
     assert srv._UPSTREAM_CLIENT is client
-    assert all(r.aclosed for r in client.responses)
+    assert all(resp.aclosed for resp in responses)
 
 
 @pytest.mark.asyncio
