@@ -1529,6 +1529,8 @@ async def test_09_lifespan_retired_sid_cleanup_via_production_path(
     # 6. subsequent connect/reconnect raises closed error
     with pytest.raises(live_server.GatewayClientError, match="MCP session is closed"):
         scoped.connect()
+
+
 def test_global_reconnect_governor_suppresses_followup_connects_after_429(
     monkeypatch: pytest.MonkeyPatch, live_server: Any
 ) -> None:
