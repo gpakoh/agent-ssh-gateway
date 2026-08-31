@@ -995,6 +995,11 @@ class GatewayClientSessionPool:
                     # client available, force this scoped client through the
                     # existing credential-backed auto-connect path instead.
                     scoped.session_id = ""
+                    # Reusable logical SIDs outlive one disposable MCP transport.
+                    # Keep them ephemeral (not persisted), but let Gateway apply
+                    # its global idle policy instead of the transport-orphan 600s
+                    # override installed by fork_session().
+                    scoped._idle_timeout_seconds = None
             self._clients[mcp_session] = (
                 base,
                 scoped,
