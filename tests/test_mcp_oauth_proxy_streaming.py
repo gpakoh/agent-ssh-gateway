@@ -117,8 +117,9 @@ class _FakeClient:
         self.req_body = None
         self.responses: list[_FakeResponse] = []
 
-    def build_request(self, method, url, content=None, headers=None):
+    def build_request(self, method, url, content=None, headers=None, timeout=None):
         self.last_url = url
+        self.build_timeout = timeout
         return {"method": method, "url": url, "content": content, "headers": headers}
 
     async def send(self, req, stream=False):
@@ -128,8 +129,9 @@ class _FakeClient:
         self.last_response = self.responses.pop(0)
         return self.last_response
 
-    async def request(self, method, url, content=None, headers=None):
+    async def request(self, method, url, content=None, headers=None, timeout=None):
         self.used_request = True
+        self.last_timeout = timeout
         self.last_url = url
         self.req_body = content
         if self._raiser is not None:
@@ -289,7 +291,7 @@ class TestFirstChunkBeforeEOF:
 
         await task
         client = recorder.clients[0]
-        assert client.aclosed
+        assert not client.aclosed  # shared client survives EOF
         assert stream.aclosed
         assert client.send_stream_flag is True
 
@@ -387,7 +389,7 @@ class TestStreamingTimeout:
 
 class TestResourceOwnership:
     @pytest.mark.asyncio
-    async def test_normal_eof_closes_response_and_client(self, stream_srv, monkeypatch):
+    async def test_normal_eof_closes_response_not_shared_client(self, stream_srv, monkeypatch):
         stream = _FakeStream([b"a\n\n", b"b\n\n"])
         recorder = _Recorder()
 
@@ -403,11 +405,11 @@ class TestResourceOwnership:
         client = recorder.clients[0]
         resp = client.last_response
         assert resp.aclosed
-        assert client.aclosed
+        assert not client.aclosed  # shared client survives a single request
         assert stream.aclosed
 
     @pytest.mark.asyncio
-    async def test_downstream_cancel_closes_response_and_client(self, stream_srv, monkeypatch):
+    async def test_downstream_cancel_closes_response_not_shared_client(self, stream_srv, monkeypatch):
         hold_eof = asyncio.Event()
         stream = _FakeStream([b"part1\n\n", b"part2\n\n"], hold_eof=hold_eof)
         recorder = _Recorder()
@@ -436,10 +438,10 @@ class TestResourceOwnership:
         client = recorder.clients[0]
         resp = client.last_response
         assert resp.aclosed
-        assert client.aclosed
+        assert not client.aclosed
 
     @pytest.mark.asyncio
-    async def test_upstream_read_error_closes_resources(self, stream_srv, monkeypatch):
+    async def test_upstream_read_error_closes_response_not_shared_client(self, stream_srv, monkeypatch):
         stream = _FakeStream(
             [b"ok\n\n", b"boom\n\n"],
             read_error=httpx.ReadError("upstream died mid-body"),
@@ -463,11 +465,11 @@ class TestResourceOwnership:
         client = recorder.clients[0]
         resp = client.last_response
         assert resp.aclosed
-        assert client.aclosed
+        assert not client.aclosed  # shared client survives an upstream read error
         assert stream.aclosed
 
     @pytest.mark.asyncio
-    async def test_preheader_request_error_closes_client_and_returns_502(self, stream_srv, monkeypatch):
+    async def test_preheader_request_error_returns_502_and_preserves_client(self, stream_srv, monkeypatch):
         recorder = _Recorder()
 
         def build():
@@ -479,12 +481,12 @@ class TestResourceOwnership:
 
         assert driver.status == 502
         assert b"Upstream unreachable" in driver.body_buf
-        assert recorder.clients[0].aclosed
+        assert not recorder.clients[0].aclosed  # shared client survives a connect error
 
 
 class TestBoundedPaths:
     @pytest.mark.asyncio
-    async def test_post_stays_bounded(self, stream_srv, monkeypatch):
+    async def test_post_streams_through_shared_client(self, stream_srv, monkeypatch):
         recorder = _Recorder()
 
         def build():
@@ -504,16 +506,22 @@ class TestBoundedPaths:
         )
 
         client = recorder.clients[0]
-        assert client.used_request is True
-        assert client.send_stream_flag is None  # bounded: no stream=True hop
-        assert client.req_body == body
+        # MCP streamable HTTP is SSE even for POST tool calls: the hop is a
+        # stream=True send through the shared client, not a buffered request.
+        assert client.used_request is False
+        assert client.send_stream_flag is True
+        assert client.last_url.endswith("/mcp")
         assert driver.status == 200
         assert driver.body_buf == b'{"ok": true}'
-        # bounded hop keeps the plain finite timeout
-        assert recorder.seen_timeouts[0] == 300.0
+        # every hop keeps the unbounded-read SSE timeout (AUTH-2)
+        stream_t = recorder.seen_timeouts[0]
+        assert isinstance(stream_t, httpx.Timeout)
+        assert stream_t.read is None
 
     @pytest.mark.asyncio
-    async def test_delete_stays_bounded(self, stream_srv, monkeypatch):
+    async def test_delete_session_termination_stays_bounded(self, stream_srv, monkeypatch):
+        """DELETE /mcp terminates a session and must keep a FINITE read timeout
+        (not an unbounded read=None) per the timeout matrix (BLOCKING GATE 3)."""
         recorder = _Recorder()
 
         def build():
@@ -526,16 +534,20 @@ class TestBoundedPaths:
         driver = await _drive(app, "DELETE", "/mcp", headers=_oauth_headers())
 
         client = recorder.clients[0]
-        assert client.used_request is True
-        assert client.send_stream_flag is None
+        assert client.used_request is False
+        assert client.send_stream_flag is True
         assert client.last_url.endswith("/mcp")
         assert driver.status == 204
-        assert recorder.seen_timeouts[0] == 300.0
+        stream_t = recorder.seen_timeouts[0]
+        assert isinstance(stream_t, httpx.Timeout)
+        # bounded: finite read, NOT None
+        assert stream_t.read is not None
+        assert isinstance(stream_t.read, float) and stream_t.read > 0
 
 
 class TestHttpSemantics:
     @pytest.mark.asyncio
-    async def test_401_body_status_header_preserved_and_closed(self, stream_srv, monkeypatch):
+    async def test_401_body_status_header_preserved_response_closed(self, stream_srv, monkeypatch):
         recorder = _Recorder()
 
         def build():
@@ -559,7 +571,7 @@ class TestHttpSemantics:
         client = recorder.clients[0]
         resp = client.last_response
         assert resp.aclosed
-        assert client.aclosed
+        assert not client.aclosed  # shared client survives a 401 pass-through
 
     @pytest.mark.asyncio
     async def test_mcp_session_id_header_preserved(self, stream_srv, monkeypatch):

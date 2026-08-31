@@ -91,13 +91,13 @@ class _FakeUpstreamClient:
     def __init__(self, resp=None):
         self._resp = resp or _FakeUpstreamResponse()
 
-    def build_request(self, method, url, content=None, headers=None):
+    def build_request(self, method, url, content=None, headers=None, timeout=None):
         return object()
 
     async def send(self, req, stream=False):
         return self._resp
 
-    async def request(self, method, url, content=None, headers=None):
+    async def request(self, method, url, content=None, headers=None, timeout=None):
         return self._resp
 
     async def aclose(self):
