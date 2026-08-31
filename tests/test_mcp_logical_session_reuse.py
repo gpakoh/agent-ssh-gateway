@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -241,6 +242,83 @@ async def test_production_lifespan_returns_authenticated_sid_to_idle_pool(
     drained = gateway_pool.drain_idle()
     assert len(drained) == 1
     assert drained[0][1].all_sids == {"stable-sid"}
+
+
+@pytest.mark.asyncio
+async def test_authenticated_idle_pool_reuses_sid_without_transport_600_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    live_server: Any,
+) -> None:
+    gateway_pool = live_server.GatewayClientSessionPool()
+    agent_pool = live_server.GatewayClientSessionPool()
+    base = _base_client(live_server)
+    connect_payloads: list[dict[str, Any]] = []
+
+    class _Response:
+        status_code = 200
+        text = "ok"
+
+        @staticmethod
+        def json() -> dict[str, str]:
+            return {"session_id": "stable-reusable-sid"}
+
+    def fake_post(_url: str, **kwargs: Any) -> _Response:
+        connect_payloads.append(kwargs["json"])
+        return _Response()
+
+    async def noop_close() -> None:
+        return None
+
+    monkeypatch.setattr("gateway_client.httpx.post", fake_post)
+    monkeypatch.setattr(live_server, "_gateway_client_sessions", gateway_pool)
+    monkeypatch.setattr(live_server, "_agent_client_sessions", agent_pool)
+    monkeypatch.setattr(live_server, "close_fleet_runtime", noop_close)
+    now = [1_000.0]
+    monkeypatch.setattr("gateway_client.time.time", lambda: now[0])
+
+    first_session = _McpSession("first-reusable")
+    async with live_server._mcp_lifespan(live_server.mcp) as first_owner:
+        first = gateway_pool.get(
+            base,
+            first_session,
+            first_owner,
+            reuse_key="auth-a",
+        )
+        assert first.connect() == "stable-reusable-sid"
+
+    assert connect_payloads == [
+        {
+            "host": "executor.invalid",
+            "port": 22,
+            "username": "tester",
+            "reuse_existing": False,
+            "ephemeral": True,
+        }
+    ]
+    assert len(gateway_pool._idle) == 1
+    assert gateway_pool._idle[0][1] is first
+    assert first.session_id == "stable-reusable-sid"
+    assert not any(
+        "heartbeat" in repr(task.get_coro()).lower()
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+    )
+
+    # The local reusable pool has no 600-second clock/reaper. Crossing that
+    # boundary locally must not retire the owned SID or force another connect.
+    now[0] += 601
+    second_session = _McpSession("second-reusable")
+    async with live_server._mcp_lifespan(live_server.mcp) as second_owner:
+        second = gateway_pool.get(
+            base,
+            second_session,
+            second_owner,
+            reuse_key="auth-a",
+        )
+        assert second is first
+        assert second.session_id == "stable-reusable-sid"
+
+    assert len(connect_payloads) == 1
 
 
 def test_production_client_resolvers_forward_authenticated_reuse_key(
