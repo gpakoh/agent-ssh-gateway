@@ -114,6 +114,11 @@ OAUTH_PUBLIC_EXACT_OR_NESTED = (
 )
 
 # --- Shared upstream AsyncClient (reusable-pool corrective) ----------------
+# Keep the pool bounded, but do not artificially cap it below the concurrency
+# already exercised by the MCP transport. These values match httpx 0.28.1's
+# bounded defaults and leave headroom above the proven ~40-stream workload.
+_UPSTREAM_MAX_CONNECTIONS = 100
+_UPSTREAM_MAX_KEEPALIVE_CONNECTIONS = 20
 _UPSTREAM_CLIENT: httpx.AsyncClient | None = None
 
 
@@ -138,10 +143,16 @@ async def _startup_upstream_client() -> None:
         return
     _UPSTREAM_CLIENT = httpx.AsyncClient(
         timeout=httpx.Timeout(connect=10.0, write=30.0, pool=10.0, read=5.0),
-        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        limits=httpx.Limits(
+            max_connections=_UPSTREAM_MAX_CONNECTIONS,
+            max_keepalive_connections=_UPSTREAM_MAX_KEEPALIVE_CONNECTIONS,
+        ),
         trust_env=False,
     )
-    logger.info("Created shared upstream AsyncClient (pool=20)")
+    logger.info(
+        "Created shared upstream AsyncClient (max_connections=%d)",
+        _UPSTREAM_MAX_CONNECTIONS,
+    )
 
 
 async def _shutdown_upstream_client() -> None:

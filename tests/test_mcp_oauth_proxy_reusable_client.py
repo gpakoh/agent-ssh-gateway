@@ -332,3 +332,102 @@ async def test_timeout_matrix_non_mcp_route_stays_bounded(srv, monkeypatch):
         assert isinstance(t, httpx.Timeout)
         assert t.read is not None
         assert isinstance(t.read, float) and t.read > 0
+
+
+async def _count_admitted_real_streams(srv, attempts: int) -> int:
+    """Exercise the production httpx/httpcore pool against held TCP responses."""
+    release = asyncio.Event()
+
+    async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: text/event-stream\r\n"
+                b"Transfer-Encoding: chunked\r\n"
+                b"Connection: keep-alive\r\n\r\n"
+            )
+            await writer.drain()
+            await release.wait()
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(handle_connection, "127.0.0.1", 0)
+    assert server.sockets
+    port = server.sockets[0].getsockname()[1]
+    responses: list[httpx.Response] = []
+    admitted = 0
+
+    srv._UPSTREAM_CLIENT = None
+    await srv._startup_upstream_client()
+    request = type("RequestStub", (), {"method": "GET"})()
+    try:
+        for _ in range(attempts):
+            upstream = await srv._proxy_upstream(
+                request,
+                f"http://127.0.0.1:{port}/mcp",
+                b"",
+                {},
+                target_path="/mcp",
+            )
+            if upstream is None:
+                break
+            _, response = upstream
+            responses.append(response)
+            admitted += 1
+    finally:
+        for response in responses:
+            await response.aclose()
+        release.set()
+        await srv._shutdown_upstream_client()
+        server.close()
+        await server.wait_closed()
+
+    return admitted
+
+
+@pytest.mark.asyncio
+async def test_default_real_pool_admits_more_than_twenty_open_mcp_streams(srv, monkeypatch):
+    """The real bounded pool must have headroom above the proven ~40-stream workload."""
+    original_timeout = srv._mcp_proxy_timeout
+
+    def fast_pool_timeout(method: str, target_path: str) -> httpx.Timeout:
+        timeout = original_timeout(method, target_path)
+        return httpx.Timeout(
+            connect=timeout.connect,
+            write=timeout.write,
+            pool=0.05,
+            read=timeout.read,
+        )
+
+    monkeypatch.setattr(srv, "_mcp_proxy_timeout", fast_pool_timeout)
+
+    admitted = await _count_admitted_real_streams(srv, 41)
+
+    assert srv._UPSTREAM_MAX_CONNECTIONS >= 41
+    assert admitted == 41
+
+
+@pytest.mark.asyncio
+async def test_real_pool_capacity_gate_is_sensitive_to_twenty_connection_mutation(srv, monkeypatch):
+    """TEST-09: restoring the old 20-connection cap makes request 21 fail."""
+    original_timeout = srv._mcp_proxy_timeout
+
+    def fast_pool_timeout(method: str, target_path: str) -> httpx.Timeout:
+        timeout = original_timeout(method, target_path)
+        return httpx.Timeout(
+            connect=timeout.connect,
+            write=timeout.write,
+            pool=0.05,
+            read=timeout.read,
+        )
+
+    monkeypatch.setattr(srv, "_mcp_proxy_timeout", fast_pool_timeout)
+    monkeypatch.setattr(srv, "_UPSTREAM_MAX_CONNECTIONS", 20)
+
+    admitted = await _count_admitted_real_streams(srv, 21)
+
+    assert admitted == 20
