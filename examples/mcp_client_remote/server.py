@@ -149,8 +149,7 @@ class OAuthProxyMiddleware(BaseHTTPMiddleware):
 
         if MCP_AUTH_MODE == "oauth":
             if has_bearer:
-                token_preview = auth_header[7:19] + "..."
-                logger.info(f"AUTH OK path={path} token={token_preview}")
+                logger.info(f"AUTH OK path={path}")
                 request.state.auth_token = auth_header.removeprefix("Bearer ")
                 return await call_next(request)
             if has_mcp_token:
@@ -278,6 +277,120 @@ async def _check_tool_scope(request: Request, path: str, body: bytes) -> JSONRes
     return None
 
 
+def _is_streaming_get(request: Request, target_path: str) -> bool:
+    """Only GET /mcp (and public GET / mapped to /mcp) should stream.
+
+    Everything else - POST, DELETE, other GET routes - stays bounded so the
+    whole proxy cannot become an unbounded streaming endpoint. A long-lived
+    SSE/MCP stream only ever lives at /mcp.
+    """
+    return request.method == "GET" and target_path == "/mcp"
+
+
+def _mcp_proxy_timeout(*, streaming: bool) -> float | httpx.Timeout:
+    """Timeout for the upstream hop.
+
+    Streaming needs an unbounded read (a long-idle SSE/MCP stream must never
+    be killed by a read timeout) while connect/write/pool stay finite so a
+    dead upstream cannot wedge a worker forever. Bounded requests keep the
+    previous single finite timeout on every phase.
+    """
+    if streaming:
+        return httpx.Timeout(connect=10.0, write=30.0, pool=10.0, read=None)
+    return 300.0
+
+
+def _make_upstream_client(timeout: float | httpx.Timeout) -> httpx.AsyncClient:
+    """Explicit seam for tests: keeps the timeout out of a global default."""
+    return httpx.AsyncClient(timeout=timeout)
+
+
+async def _proxy_upstream(
+    request: Request,
+    url: str,
+    body: bytes,
+    headers: dict[str, str],
+    *,
+    streaming: bool,
+) -> tuple[httpx.AsyncClient, httpx.Response] | None:
+    """Send the request upstream.
+
+    Streaming sends with stream=True so HTTP response headers arrive before
+    the upstream body has been fully read - the first SSE chunk can then be
+    forwarded downstream before upstream EOF. Returns None on a pre-header
+    RequestError (caller must build the 502 response).
+    """
+    client = _make_upstream_client(_mcp_proxy_timeout(streaming=streaming))
+    try:
+        if streaming:
+            req = client.build_request(
+                method=request.method,
+                url=url,
+                content=body,
+                headers=headers,
+            )
+            resp = await client.send(req, stream=True)
+        else:
+            resp = await client.request(
+                method=request.method,
+                url=url,
+                content=body,
+                headers=headers,
+            )
+    except httpx.RequestError:
+        await client.aclose()
+        return None
+    return client, resp
+
+
+def _log_proxy_path_only(request: Request, resp: httpx.Response) -> None:
+    # Log the path only, never `url` -- in token rollback mode `url`
+    # carries the full query string, including a live ?mcp_token=
+    # secret verbatim, straight into the application log at INFO.
+    logger.info(f"PROXY {request.method} {request.url.path} -> {resp.status_code}")
+
+
+async def _proxy_stream_body(
+    resp: httpx.Response,
+    client: httpx.AsyncClient,
+):
+    """Stream upstream body chunks downstream, owning the resources.
+
+    The generator's finally is the single ownership seam for the streaming
+    lifetime: the upstream httpx.Response and the AsyncClient are closed
+    exactly when the downstream stream ends - normal EOF, downstream
+    cancellation/disconnect, or an upstream read error. Nothing uses the
+    private ``request._receive`` hook and nothing leaks into the background.
+    """
+    try:
+        async for chunk in resp.aiter_bytes():
+            yield chunk
+    finally:
+        await resp.aclose()
+        await client.aclose()
+
+
+async def _proxy_401(request: Request, resp: httpx.Response, client: httpx.AsyncClient) -> Response:
+    """Build a bounded 401 pass-through and release resources.
+
+    Reads the upstream 401 body, returns a plain Response (NOT streaming) so
+    the caller's return annotation must reflect both branches. Never logs the
+    body: a raw OAuth 401 payload can embed credentials/token details. Both
+    the upstream response and its client are closed here.
+    """
+    try:
+        resp_body = await resp.aread()
+        return Response(
+            content=resp_body,
+            status_code=resp.status_code,
+            headers=dict(resp.headers),
+        )
+    finally:
+        await resp.aclose()
+        await client.aclose()
+        logger.warning(f"PROXY 401 method={request.method} path={request.url.path}")
+
+
 async def proxy_request(request: Request) -> StreamingResponse | JSONResponse | Response:
     """Proxy an HTTP request to the internal MCP server."""
     target_path = request.url.path
@@ -301,34 +414,39 @@ async def proxy_request(request: Request) -> StreamingResponse | JSONResponse | 
     if auth_token and "authorization" not in {k.lower() for k in headers}:
         headers["Authorization"] = f"Bearer {auth_token}"
 
-    try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            resp = await client.request(
-                method=request.method,
-                url=url,
-                content=body,
-                headers=headers,
-            )
-            # Log the path only, never `url` -- in token rollback mode `url`
-            # carries the full query string, including a live ?mcp_token=
-            # secret verbatim, straight into the application log at INFO.
-            logger.info(
-                f"PROXY {request.method} {request.url.path} -> {resp.status_code}"
-            )
-            if resp.status_code == 401:
-                resp_body = await resp.aread()
-                logger.warning(f"PROXY 401 body={resp_body[:500]!r}")
-                return Response(content=resp_body, status_code=resp.status_code, headers=dict(resp.headers))
-            return StreamingResponse(
-                content=resp.aiter_bytes(),
-                status_code=resp.status_code,
-                headers=dict(resp.headers),
-            )
-    except httpx.RequestError as exc:
+    streaming = _is_streaming_get(request, target_path)
+
+    upstream = await _proxy_upstream(
+        request, url, body, headers, streaming=streaming
+    )
+    if upstream is None:
         return JSONResponse(
-            {"error": f"Upstream unreachable: {exc}"},
+            {"error": "Upstream unreachable: transport error"},
             status_code=502,
         )
+    client, resp = upstream
+
+    _log_proxy_path_only(request, resp)
+
+    if resp.status_code == 401:
+        return await _proxy_401(request, resp, client)
+
+    if streaming:
+        return StreamingResponse(
+            content=_proxy_stream_body(resp, client),
+            status_code=resp.status_code,
+            headers=dict(resp.headers),
+        )
+    # Bounded path: client.request() already buffered the whole body, so the
+    # upstream response and client are no longer needed - release them now
+    # instead of leaking a pooled connection until GC.
+    await resp.aclose()
+    await client.aclose()
+    return StreamingResponse(
+        content=resp.aiter_bytes(),
+        status_code=resp.status_code,
+        headers=dict(resp.headers),
+    )
 
 
 CONSENT_HTML = """<!DOCTYPE html>
