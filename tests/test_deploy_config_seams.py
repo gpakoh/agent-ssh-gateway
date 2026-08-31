@@ -1303,3 +1303,40 @@ class TestMcpServerBuildMetadataCacheBoundary:
         assert "https://github.com/docker/compose/releases" not in text
         assert "https://nodejs.org/dist" not in text
         assert "--retry-all-errors" not in text
+
+
+class TestMasterCapacitySettingsWiredToGateway:
+    """Regression: production compose did not pass MASTER_MAX_SESSIONS_PER_IP,
+    MASTER_CONNECT_RATE_LIMIT_REQUESTS, or MASTER_EXECUTE_RATE_LIMIT_REQUESTS
+    into web-ssh-gateway. Settings then defaulted to 0 and the postdeploy
+    master capacity lane came up disabled (live /api/ssh/connect still 429).
+    All three must be wired with fail-conservative defaults of 0 and granted
+    to the gateway only, never leaked onto unrelated services.
+    """
+
+    MASTER_WIRES = {
+        "MASTER_MAX_SESSIONS_PER_IP": "${MASTER_MAX_SESSIONS_PER_IP:-0}",
+        "MASTER_CONNECT_RATE_LIMIT_REQUESTS": "${MASTER_CONNECT_RATE_LIMIT_REQUESTS:-0}",
+        "MASTER_EXECUTE_RATE_LIMIT_REQUESTS": "${MASTER_EXECUTE_RATE_LIMIT_REQUESTS:-0}",
+    }
+
+    def test_gateway_wires_all_three_with_fail_conservative_defaults(self):
+        env = _env_dict(_load_compose()["services"]["web-ssh-gateway"]["environment"])
+        for key, expected in self.MASTER_WIRES.items():
+            assert env.get(key) == expected, (
+                f"{key} must be wired on web-ssh-gateway as {expected!r}, "
+                f"got {env.get(key)!r}"
+            )
+
+    def test_master_settings_not_granted_to_unrelated_services(self):
+        services = _load_compose()["services"]
+        exempt = {"web-ssh-gateway"}
+        for name, service in services.items():
+            if name in exempt:
+                continue
+            env = _env_dict(service.get("environment") or [])
+            for key in self.MASTER_WIRES:
+                assert key not in env, (
+                    f"master capacity setting {key} must not be granted to "
+                    f"unrelated service {name}"
+                )
