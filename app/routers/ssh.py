@@ -299,7 +299,11 @@ async def update_session_timeout(
 
 
 @router.post("/api/ssh/connect", response_model=ConnectResponse)
-@rate_limit_mutation(10, "minute")
+@rate_limit_mutation(
+    10,
+    "minute",
+    master_requests_setting="master_connect_rate_limit_requests",
+)
 async def ssh_connect(
     req: ConnectRequest,
     request: Request,
@@ -373,6 +377,7 @@ async def ssh_connect(
             pinned_ip=validated_ips[0],
             ephemeral=req.ephemeral,
             idle_timeout_seconds=req.idle_timeout_seconds,
+            privileged_capacity=(settings.api_auth_enabled and _identity.token_type == "master"),
         )
 
     from app.audit import emit_session_lifecycle_event as _emit_session
@@ -507,6 +512,7 @@ async def ssh_prewarm(
                 pinned_ip=validated_ips[0],
                 ephemeral=req.ephemeral,
                 idle_timeout_seconds=req.idle_timeout_seconds,
+                privileged_capacity=(settings.api_auth_enabled and _identity.token_type == "master"),
             )
             if _state.session_store and not req.ephemeral:
                 try:
@@ -551,7 +557,11 @@ async def ssh_prewarm(
 
 
 @router.post("/api/ssh/execute", response_model=ExecuteResponse | JobRunResponse)
-@rate_limit_mutation(60, "minute")
+@rate_limit_mutation(
+    60,
+    "minute",
+    master_requests_setting="master_execute_rate_limit_requests",
+)
 async def ssh_execute(
     req: ExecuteRequest,
     request: Request,
@@ -707,7 +717,11 @@ async def ssh_execute(
 
 
 @router.post("/api/ssh/execute-argv", response_model=ExecuteArgvResponse)
-@rate_limit_mutation(60, "minute")
+@rate_limit_mutation(
+    60,
+    "minute",
+    master_requests_setting="master_execute_rate_limit_requests",
+)
 async def ssh_execute_argv(
     req: ExecuteArgvRequest,
     request: Request,
