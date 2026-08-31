@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 import threading
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -83,6 +83,26 @@ class _FakeUpstreamResponse:
     async def aread(self):
         return b""
 
+    async def aclose(self):
+        pass
+
+
+class _FakeUpstreamClient:
+    def __init__(self, resp=None):
+        self._resp = resp or _FakeUpstreamResponse()
+
+    def build_request(self, method, url, content=None, headers=None):
+        return object()
+
+    async def send(self, req, stream=False):
+        return self._resp
+
+    async def request(self, method, url, content=None, headers=None):
+        return self._resp
+
+    async def aclose(self):
+        pass
+
 
 class TestProxyLogDoesNotLeakMcpToken:
     @pytest.mark.asyncio
@@ -102,9 +122,9 @@ class TestProxyLogDoesNotLeakMcpToken:
             importlib.reload(srv)
 
             monkeypatch.setattr(
-                srv.httpx.AsyncClient,
-                "request",
-                AsyncMock(return_value=_FakeUpstreamResponse()),
+                srv,
+                "_make_upstream_client",
+                lambda timeout: _FakeUpstreamClient(),
             )
 
             from starlette.testclient import TestClient
