@@ -391,8 +391,8 @@ async def _count_admitted_real_streams(srv, attempts: int) -> int:
 
 
 @pytest.mark.asyncio
-async def test_default_real_pool_admits_more_than_twenty_open_mcp_streams(srv, monkeypatch):
-    """The real bounded pool must have headroom above the proven ~40-stream workload."""
+async def test_real_pool_admits_80_simultaneously_held_mcp_streams(srv, monkeypatch):
+    """The real bounded pool must admit 80 held streams for ~40 two-hop transports."""
     original_timeout = srv._mcp_proxy_timeout
 
     def fast_pool_timeout(method: str, target_path: str) -> httpx.Timeout:
@@ -406,10 +406,10 @@ async def test_default_real_pool_admits_more_than_twenty_open_mcp_streams(srv, m
 
     monkeypatch.setattr(srv, "_mcp_proxy_timeout", fast_pool_timeout)
 
-    admitted = await _count_admitted_real_streams(srv, 41)
+    admitted = await _count_admitted_real_streams(srv, 80)
 
-    assert srv._UPSTREAM_MAX_CONNECTIONS >= 41
-    assert admitted == 41
+    assert srv._UPSTREAM_MAX_CONNECTIONS >= 80
+    assert admitted == 80
 
 
 @pytest.mark.asyncio

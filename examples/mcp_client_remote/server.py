@@ -114,11 +114,11 @@ OAUTH_PUBLIC_EXACT_OR_NESTED = (
 )
 
 # --- Shared upstream AsyncClient (reusable-pool corrective) ----------------
-# Keep the pool bounded, but do not artificially cap it below the concurrency
-# already exercised by the MCP transport. These values match httpx 0.28.1's
-# bounded defaults and leave headroom above the proven ~40-stream workload.
+# Keep the active pool bounded while covering the two-hop MCP concurrency envelope.
+# max_connections=100 is verified with 80 simultaneously held real streams; keepalive
+# stays separately bounded at 10 because idle retention is not active-stream capacity.
 _UPSTREAM_MAX_CONNECTIONS = 100
-_UPSTREAM_MAX_KEEPALIVE_CONNECTIONS = 20
+_UPSTREAM_MAX_KEEPALIVE_CONNECTIONS = 10
 _UPSTREAM_CLIENT: httpx.AsyncClient | None = None
 
 
