@@ -65,12 +65,36 @@ from examples.mcp_server.mcp_infra import auth_setup, gateway_errors, runtime, t
 _auth_settings, _auth_provider, _agent_router = auth_setup.setup()
 
 _MCP_SESSION_RELEASE_DEADLINE_SECONDS = 4.0
+_MCP_SESSION_KEEPALIVE_INTERVAL_SECONDS = 120.0
 
 
 def prepare_oauth_token_store() -> None:
     """Prepare durable OAuth refresh storage at application startup."""
     if _auth_settings is not None:
         auth_setup.prepare_oauth_token_store(_auth_provider)
+
+
+async def _keepalive_owned_sessions(lifecycle_owner: object) -> None:
+    """Keep only lifecycle-owned SSH SIDs below their server idle timeout.
+
+    No reconnect is attempted here. A failed heartbeat is ignored and the next real
+    SSH operation remains responsible for SESSION_NOT_FOUND recovery. This prevents
+    background keepalive from amplifying failures into bursts against /api/ssh/connect.
+    """
+    while True:
+        await anyio.sleep(_MCP_SESSION_KEEPALIVE_INTERVAL_SECONDS)
+        gateway_pool = globals().get("_gateway_client_sessions")
+        agent_pool = globals().get("_agent_client_sessions")
+        owned: list[GatewayClient] = []
+        if isinstance(gateway_pool, GatewayClientSessionPool):
+            owned.extend(gateway_pool.owned_clients_for_owner(lifecycle_owner))
+        if isinstance(agent_pool, GatewayClientSessionPool):
+            owned.extend(agent_pool.owned_clients_for_owner(lifecycle_owner))
+        if not owned:
+            continue
+        async with anyio.create_task_group() as heartbeat_group:
+            for scoped in owned:
+                heartbeat_group.start_soon(scoped.heartbeat_owned_session_async)
 
 
 @asynccontextmanager
@@ -80,10 +104,17 @@ async def _mcp_lifespan(_server: FastMCP) -> AsyncIterator[Any]:
     MCP SDK 1.29 enters this lifespan once per ``Server.run()`` / ``ServerSession``.
     Its handler task group is cancelled before this context exits, so releasing the
     scoped gateway client here cannot race an in-flight tool from the same transport.
+    A lifecycle-owned keepalive task touches only owned SIDs while this context is
+    active and is cancelled/joined before ownership is detached.
     """
     lifecycle_owner = object()
     try:
-        yield lifecycle_owner
+        async with anyio.create_task_group() as keepalive_group:
+            keepalive_group.start_soon(_keepalive_owned_sessions, lifecycle_owner)
+            try:
+                yield lifecycle_owner
+            finally:
+                keepalive_group.cancel_scope.cancel()
     finally:
         gateway_pool = globals().get("_gateway_client_sessions")
         agent_pool = globals().get("_agent_client_sessions")

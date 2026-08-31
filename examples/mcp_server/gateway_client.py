@@ -168,6 +168,9 @@ class GatewayClient:
     """Small HTTP wrapper around agent-ssh-gateway."""
 
     _SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
+    _CONNECT_GOVERNOR_LOCK = threading.Lock()
+    _connect_retry_not_before = 0.0
+    _CONNECT_COOLDOWN_SECONDS = 6.0
 
     def __init__(
         self,
@@ -318,18 +321,28 @@ class GatewayClient:
         if self._idle_timeout_seconds is not None:
             payload["idle_timeout_seconds"] = self._idle_timeout_seconds
 
-        try:
-            response = httpx.post(
-                f"{self.base_url}/api/ssh/connect",
-                json=payload,
-                headers=self._headers(),
-                timeout=30,
-                trust_env=False,
-            )
-        except httpx.RequestError as exc:
-            raise _transport_error(exc) from exc
-        if response.status_code >= 400:
-            raise GatewayClientError(f"auto-reconnect failed: {response.status_code}")
+        with GatewayClient._CONNECT_GOVERNOR_LOCK:
+            if time.monotonic() < GatewayClient._connect_retry_not_before:
+                raise GatewayClientError("auto-reconnect cooldown active after 429")
+            try:
+                response = httpx.post(
+                    f"{self.base_url}/api/ssh/connect",
+                    json=payload,
+                    headers=self._headers(),
+                    timeout=30,
+                    trust_env=False,
+                )
+            except httpx.RequestError as exc:
+                raise _transport_error(exc) from exc
+            if response.status_code >= 400:
+                retry_after = response.headers.get("Retry-After")
+                if response.status_code == 429 and retry_after is not None:
+                    try:
+                        cooldown = max(float(retry_after), 1.0)
+                    except ValueError:
+                        cooldown = GatewayClient._CONNECT_COOLDOWN_SECONDS
+                    GatewayClient._connect_retry_not_before = time.monotonic() + cooldown
+                raise GatewayClientError(f"auto-reconnect failed: {response.status_code}")
         data = response.json()
         self.session_id = data["session_id"]
         if self._release_managed:
@@ -428,6 +441,39 @@ class GatewayClient:
             )
         data = response.json()
         return data if isinstance(data, dict) else {}
+
+    async def heartbeat_owned_session_async(self) -> bool:
+        """Touch this scoped client's currently owned SID without reconnecting.
+
+        The SID snapshot is taken under the client's reconnect lock, but network I/O
+        happens after the lock is released. Borrowed seed SIDs and released clients
+        are deliberately ignored: an MCP lifecycle may keep alive only a session it
+        created and owns. A failed heartbeat is advisory only; the next real SSH
+        operation retains the existing SESSION_NOT_FOUND reconnect path, avoiding a
+        background reconnect burst against the rate-limited connect endpoint.
+        """
+        with self._reconnect_lock:
+            if (
+                not self._release_managed
+                or self._released
+                or not self._owns_session
+                or not self.session_id
+            ):
+                return False
+            sid = self.session_id
+            timeout = self._release_http_timeout
+
+        try:
+            with anyio.move_on_after(timeout):
+                await self._post_async(
+                    "/api/ssh/heartbeat",
+                    {"session_id": sid},
+                    timeout=timeout,
+                )
+                return True
+        except Exception:
+            return False
+        return False
 
     async def release_sid_async(self, sid: str) -> None:
         """Best-effort cancellable disconnect for a SID already detached locally."""
@@ -584,8 +630,10 @@ class GatewayClient:
         )
 
     @_retry_on_session_not_found
-    def execute_project_command(self, project: str, command: str) -> dict[str, Any]:
-        sid = self._require_session_id()
+    def execute_project_command(
+        self, project: str, command: str, session_id: str | None = None
+    ) -> dict[str, Any]:
+        sid = session_id or self._require_session_id()
         from app.workspace.registry import get_registry
 
         info = get_registry().project_info(project)
@@ -903,7 +951,7 @@ class GatewayClient:
         output: dict[str, Any] = {}
         for name, command in commands.items():
             if project:
-                result = self.execute_project_command(project, command)
+                result = self.execute_project_command(project, command, session_id=session_id)
             else:
                 job = self.execute_restricted(command, session_id=session_id)
                 result = self.wait_job(job["job_id"])
@@ -1007,6 +1055,24 @@ class GatewayClientSessionPool:
                 reuse_key,
             )
             return scoped
+
+    def owned_clients_for_owner(self, lifecycle_owner: Any) -> tuple[GatewayClient, ...]:
+        """Snapshot currently owned active clients for one lifecycle.
+
+        The snapshot is local-only and is taken under the pool lock. Network I/O
+        belongs to the caller after the lock is released. Borrowed seed SIDs are
+        excluded because this lifecycle does not own them.
+        """
+        with self._lock:
+            return tuple(
+                entry[1]
+                for entry in self._clients.values()
+                if entry[2] is lifecycle_owner
+                and entry[1]._release_managed
+                and entry[1]._owns_session
+                and bool(entry[1].session_id)
+                and not entry[1]._released
+            )
 
     def detach_owner(self, lifecycle_owner: Any) -> list[tuple[GatewayClient, CleanupTargets]]:
         """Detach one lifecycle without forcing reusable logical SIDs closed.

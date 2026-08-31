@@ -20,9 +20,15 @@ from scripts.mcp_streamable_http_route_probe import (
 
 
 class _Response:
-    def __init__(self, payload: dict[str, Any], status_code: int = 200) -> None:
+    def __init__(
+        self,
+        payload: dict[str, Any],
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self._payload = payload
         self.status_code = status_code
+        self.headers = headers if headers is not None else {}
         self.text = json.dumps(payload)
 
     def json(self) -> dict[str, Any]:
