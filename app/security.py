@@ -33,23 +33,55 @@ def _rate_limit_key(request: Request) -> str:
 limiter = Limiter(key_func=_rate_limit_key)
 
 
-def rate_limit_mutation(requests: int | None = None, period: str | None = None):
-    """Rate-limit decorator for mutation endpoints.
+def _verified_master_rate_lane(request: Request, setting_name: str) -> bool:
+    """Return whether this request may use an explicitly configured master lane."""
+    if not settings.api_auth_enabled:
+        return False
+    identity = getattr(request.state, "auth_identity", None)
+    if getattr(identity, "token_type", None) != "master":
+        return False
+    return int(getattr(settings, setting_name, 0) or 0) > 0
 
-    Limits default to settings.rate_limit_requests / settings.rate_limit_window
-    unless explicit values are passed (T79.11: config is no longer dead).
 
-    Usage:
-        @rate_limit_mutation(10, "minute")
-        async def my_endpoint(req: SomeRequest, request: Request):
-            ...
+def rate_limit_mutation(
+    requests: int | None = None,
+    period: str | None = None,
+    *,
+    master_requests_setting: str | None = None,
+):
+    """Rate-limit a mutation, optionally with a verified-master-only lane.
+
+    The ordinary bucket remains source-IP keyed. A configured master bucket is selected
+    only after auth middleware has populated ``request.state.auth_identity`` with the
+    server-verified master identity. Missing/disabled configuration falls back to the
+    ordinary bucket.
     """
     reqs = settings.rate_limit_requests if requests is None else requests
-    if period is None:
-        period_str = f"{settings.rate_limit_window} seconds"
-    else:
-        period_str = period
-    return limiter.limit(f"{reqs}/{period_str}")
+    period_str = f"{settings.rate_limit_window} seconds" if period is None else period
+    ordinary_limit = f"{reqs}/{period_str}"
+
+    if not master_requests_setting:
+        return limiter.limit(ordinary_limit)
+
+    master_reqs = int(getattr(settings, master_requests_setting, 0) or 0)
+    if master_reqs <= 0:
+        return limiter.limit(ordinary_limit)
+
+    def decorator(func):
+        master_limited = limiter.limit(
+            f"{master_reqs}/{period_str}",
+            exempt_when=lambda request: not _verified_master_rate_lane(
+                request, master_requests_setting
+            ),
+        )(func)
+        return limiter.limit(
+            ordinary_limit,
+            exempt_when=lambda request: _verified_master_rate_lane(
+                request, master_requests_setting
+            ),
+        )(master_limited)
+
+    return decorator
 
 
 # ---------------------------------------------------------------------------

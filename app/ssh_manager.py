@@ -379,6 +379,7 @@ class SSHSessionManager:
         pinned_ip: str | None = None,
         ephemeral: bool = False,
         idle_timeout_seconds: int | None = None,
+        privileged_capacity: bool = False,
     ) -> str:
         """Create a new SSH session with race-free per-IP admission."""
         if idle_timeout_seconds is not None:
@@ -388,7 +389,16 @@ class SSHSessionManager:
 
         reserved_source_ip: str | None = None
         reaped_records: list[SessionRecord] = []
-        if source_ip and settings.max_sessions_per_ip > 0:
+        session_limit = settings.max_sessions_per_ip
+        if (
+            privileged_capacity
+            and settings.api_auth_enabled
+            and owner_type == "master"
+            and settings.master_max_sessions_per_ip > 0
+        ):
+            session_limit = settings.master_max_sessions_per_ip
+
+        if source_ip and session_limit > 0:
             async with self._lock:
                 # Admission-time reap: remove expired sessions before 429 check
                 if source_ip:
@@ -408,10 +418,10 @@ class SSHSessionManager:
                     1 for record in self._sessions.values() if record.source_ip == source_ip
                 )
                 pending = self._pending_sessions_by_ip.get(source_ip, 0)
-                if active + pending >= settings.max_sessions_per_ip:
+                if active + pending >= session_limit:
                     raise SessionLimitError(
                         f"Too many active sessions from {source_ip} "
-                        f"(limit {settings.max_sessions_per_ip})"
+                        f"(limit {session_limit})"
                     )
                 self._pending_sessions_by_ip[source_ip] = pending + 1
                 reserved_source_ip = source_ip
