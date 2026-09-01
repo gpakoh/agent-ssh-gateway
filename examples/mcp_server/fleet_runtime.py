@@ -153,6 +153,8 @@ class FleetRuntime:
             thread_name_prefix="fleet-gateway",
         )
         self._watchers_by_job: dict[str, asyncio.Task] = {}
+        self._close_lock = asyncio.Lock()
+        self._closing = False
         self._closed = False
 
     async def ensure_ready(self) -> None:
@@ -439,7 +441,7 @@ class FleetRuntime:
         self, *, job_id: str, job_status_fn: Callable[[str], dict[str, Any]]
     ) -> None:
         """Start exactly one persistent reconciliation watcher per job_id."""
-        if self._closed or job_id in self._watchers_by_job:
+        if self._closing or self._closed or job_id in self._watchers_by_job:
             return
         task = asyncio.create_task(
             self._watch_gateway_job(job_id=job_id, job_status_fn=job_status_fn)
@@ -477,25 +479,36 @@ class FleetRuntime:
             await asyncio.sleep(self._watch_poll_interval)
 
     async def close(self) -> None:
-        """Join reconciliation work and the gateway executor before state close."""
+        """Join process-owned resources; a failed close remains retryable."""
         if self._closed:
             return
-        self._closed = True
-        watchers = list(self._watchers_by_job.values())
-        for task in watchers:
-            task.cancel()
-        if watchers:
-            await asyncio.gather(*watchers, return_exceptions=True)
-        self._watchers_by_job.clear()
-        # A running sync gateway call cannot be cancelled by cancelling its
-        # asyncio waiter. Process shutdown therefore waits for executor work to
-        # finish instead of abandoning fleet-gateway threads at interpreter exit.
-        await asyncio.to_thread(
-            self._gateway_executor.shutdown,
-            wait=True,
-            cancel_futures=True,
-        )
-        await self.state.close()
+        async with self._close_lock:
+            if self._closed:
+                return
+            # Block creation of new reconciliation watchers as soon as shutdown
+            # begins. Keep this sticky after a failed close: a half-closed
+            # process runtime must never resume background work, but a later
+            # close call may still retry the remaining cleanup.
+            self._closing = True
+            watchers = list(self._watchers_by_job.values())
+            for task in watchers:
+                task.cancel()
+            if watchers:
+                await asyncio.gather(*watchers, return_exceptions=True)
+            self._watchers_by_job.clear()
+            # A running sync gateway call cannot be cancelled by cancelling its
+            # asyncio waiter. Process shutdown therefore waits for executor work
+            # to finish instead of abandoning fleet-gateway threads.
+            await asyncio.to_thread(
+                self._gateway_executor.shutdown,
+                wait=True,
+                cancel_futures=True,
+            )
+            # Mark terminal only after every owned resource has actually closed.
+            # If state.close() raises/cancels, globals retain this runtime so a
+            # later process-level close can retry rather than losing ownership.
+            await self.state.close()
+            self._closed = True
 
 
 _runtime: FleetRuntime | None = None
@@ -536,13 +549,14 @@ async def _close_fleet_runtime_on_owner_loop() -> None:
     """Close and clear the singleton from its owning event loop."""
     global _runtime, _runtime_lock, _runtime_loop
     runtime = _runtime
-    try:
-        if runtime is not None:
-            await runtime.close()
-    finally:
-        _runtime = None
-        _runtime_lock = None
-        _runtime_loop = None
+    if runtime is not None:
+        await runtime.close()
+    # Clear ownership only after successful cleanup. Losing the singleton on
+    # an exception/cancellation would make an unfinished executor/state close
+    # impossible to retry and falsely report that no process runtime remains.
+    _runtime = None
+    _runtime_lock = None
+    _runtime_loop = None
 
 
 async def close_fleet_runtime() -> None:

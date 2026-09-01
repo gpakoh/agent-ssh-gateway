@@ -219,24 +219,30 @@ async def test_duplicate_durable_submission_does_not_add_second_session_lease() 
 
 
 @pytest.mark.asyncio
-async def test_force_cleanup_releases_accepted_job_lease_even_if_task_never_finishes(
+async def test_force_cleanup_releases_lease_when_job_task_is_cancelled_before_first_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Cancellation before _run_job starts must not depend on its finally block."""
     record = _record()
     ssh = _ssh_manager(record)
     jobs = JobManager(ssh_manager=ssh, max_jobs=10)
-    entered = asyncio.Event()
-    never = asyncio.Event()
+    impl_started = False
 
-    async def blocked_impl(_job_id: str) -> None:
-        entered.set()
-        await never.wait()
+    async def forbidden_impl(_job_id: str) -> None:
+        nonlocal impl_started
+        impl_started = True
+        raise AssertionError("scheduled job must be cancelled before first coroutine run")
 
-    monkeypatch.setattr(jobs, "_run_job_impl", blocked_impl)
+    monkeypatch.setattr(jobs, "_run_job_impl", forbidden_impl)
     job_id = await jobs.create_job(record.session_id, "true", owner_id="owner-a")
-    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    # create_job has returned the successful ACK but has not yielded after
+    # create_task(), so the scheduled worker has not had a chance to start.
+    assert impl_started is False
     assert record.active_operations == 1
 
     assert await jobs.force_cleanup() == 1
+    assert impl_started is False
     assert record.active_operations == 0
     assert job_id not in jobs._session_leases
+    record.client.exec_command.assert_not_called()

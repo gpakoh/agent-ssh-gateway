@@ -152,17 +152,18 @@ def _is_missing_session_cleanup(exc: Exception) -> bool:
     """
     if not isinstance(exc, GatewayClientError):
         return False
-    if exc.status_code == 404:
-        return True
-    if exc.status_code is not None:
-        return False
-    if GatewayClient._SESSION_NOT_FOUND in str(exc):
-        return True
     body = exc.body or {}
     detail = body.get("detail")
-    if isinstance(detail, dict):
-        return detail.get("code") == GatewayClient._SESSION_NOT_FOUND
-    return body.get("code") == GatewayClient._SESSION_NOT_FOUND
+    body_code = detail.get("code") if isinstance(detail, dict) else body.get("code")
+    has_missing_code = body_code == GatewayClient._SESSION_NOT_FOUND
+    has_missing_sentinel = GatewayClient._SESSION_NOT_FOUND in str(exc)
+    if exc.status_code == 404:
+        # A bare 404 can also mean an absent route/proxy mismatch. Only the
+        # gateway's machine-readable missing-session outcome is idempotent.
+        return has_missing_code or has_missing_sentinel
+    if exc.status_code is not None:
+        return False
+    return has_missing_code or has_missing_sentinel
 
 
 @dataclasses.dataclass(frozen=True)

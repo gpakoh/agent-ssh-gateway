@@ -13,6 +13,7 @@ the OAuth authorization flow.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import logging
 import os
@@ -31,7 +32,6 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(Path(__file__).resolve().parent / ".env")
 load_dotenv(MCP_SERVER_DIR / ".env", override=False)
 
-import anyio  # noqa: E402
 import httpx  # noqa: E402
 import uvicorn  # noqa: E402
 from starlette.applications import Starlette  # noqa: E402
@@ -165,6 +165,31 @@ async def _shutdown_upstream_client() -> None:
         logger.info("Closed shared upstream AsyncClient")
 
 
+async def _shutdown_process_resources() -> None:
+    """Close process-owned resources in deliberate dependency order."""
+    try:
+        # FleetRuntime may marshal onto the internal FastMCP owner loop and
+        # must finish joining its watchers/executor before the public process
+        # drops the shared upstream client.
+        await _mcp_mod.close_fleet_runtime()
+    finally:
+        await _shutdown_upstream_client()
+
+
+async def _finish_shutdown_despite_cancellation() -> None:
+    """Defer parent/task cancellation until process resource cleanup finishes."""
+    cleanup_task = asyncio.create_task(_shutdown_process_resources())
+    try:
+        await asyncio.shield(cleanup_task)
+    except asyncio.CancelledError:
+        # asyncio.shield prevents cancellation from propagating into cleanup,
+        # but the awaiting lifespan task still receives CancelledError. Join
+        # the cleanup task before re-raising so raw Task.cancel() cannot make
+        # uvicorn exit while FleetRuntime threads/watchers are still owned.
+        await cleanup_task
+        raise
+
+
 @asynccontextmanager
 async def _lifespan(app: Starlette) -> AsyncIterator[dict[str, Any]]:
     """Own process-global MCP resources for the public Starlette process.
@@ -178,14 +203,7 @@ async def _lifespan(app: Starlette) -> AsyncIterator[dict[str, Any]]:
     try:
         yield {}
     finally:
-        # Starlette shutdown can be entered because the serving task itself was
-        # cancelled. Shield the bounded resource join so reconciliation tasks,
-        # asyncpg state and fleet-gateway threads are not abandoned mid-close.
-        with anyio.CancelScope(shield=True):
-            try:
-                await _mcp_mod.close_fleet_runtime()
-            finally:
-                await _shutdown_upstream_client()
+        await _finish_shutdown_despite_cancellation()
 
 
 def _is_oauth_public_path(path: str) -> bool:

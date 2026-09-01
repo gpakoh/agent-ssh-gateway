@@ -1596,7 +1596,7 @@ def test_09_already_gone_sid_cleanup_is_idempotent_across_sequential_reaps(
             if sid in {"conn-001", "conn-002"}:
                 # Both stale SIDs were already reaped server-side: cleanup 404
                 # is idempotent and must not become retired cleanup debt.
-                return _Response({"detail": {"code": "SESSION_NOT_FOUND"}}, 404)
+                return _Response({"code": "SESSION_NOT_FOUND"}, 404)
             return _Response({"status": "disconnected"})
         if url.endswith("/api/ssh/execute"):
             execute_attempts += 1
@@ -1628,6 +1628,33 @@ def test_09_already_gone_sid_cleanup_is_idempotent_across_sequential_reaps(
     assert len(scoped._retired) == 0
 
     scoped.release()
+
+
+def test_09_bare_404_cleanup_is_not_mistaken_for_missing_session(
+    monkeypatch: pytest.MonkeyPatch, live_server: Any
+) -> None:
+    """A route/proxy 404 without SESSION_NOT_FOUND remains cleanup debt."""
+    scoped = _base_client(live_server).fork_session()
+    scoped._owns_session = True
+    scoped.session_id = "conn-001"
+
+    connect_calls = 0
+
+    def fake_post(url: str, **kwargs: Any) -> _Response:
+        nonlocal connect_calls
+        if url.endswith("/api/ssh/connect"):
+            connect_calls += 1
+            return _Response({"session_id": "conn-002"})
+        if url.endswith("/api/ssh/disconnect"):
+            return _Response({"detail": "Not Found"}, 404)
+        raise AssertionError(url)
+
+    monkeypatch.setattr("gateway_client.httpx.post", fake_post)
+    scoped.connect()
+
+    assert scoped.session_id == "conn-002"
+    assert scoped._retired == {"conn-001"}
+    assert connect_calls == 1
 
 
 def test_09_real_cleanup_server_failure_remains_debt_and_blocks_next_connect(
