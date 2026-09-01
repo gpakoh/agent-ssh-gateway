@@ -617,9 +617,13 @@ def test_candidate_commit_date_is_pinned_to_base(
     _, td = _write_evidence(root, monkeypatch)
     expected_date = _git(root, "show", "-s", "--format=%cI", base)
 
-    import examples.mcp_server.task_candidate as task_candidate_module
-
-    original_run_git = task_candidate_module._run_git
+    # Patch the globals dictionary of the exact callable this test invokes.
+    # Other tests may deliberately remove/reimport examples.mcp_server modules,
+    # so resolving task_candidate through sys.modules/package attributes here
+    # can return a different module object from materialize_task_candidate's
+    # captured globals and make this hook silently ineffective.
+    materialize_globals = materialize_task_candidate.__globals__
+    original_run_git = materialize_globals["_run_git"]
     commit_dates: list[tuple[str | None, str | None]] = []
 
     def recording_run_git(
@@ -630,7 +634,7 @@ def test_candidate_commit_date_is_pinned_to_base(
             commit_dates.append((env.get("GIT_AUTHOR_DATE"), env.get("GIT_COMMITTER_DATE")))
         return original_run_git(cwd, args, env=env)
 
-    monkeypatch.setattr(task_candidate_module, "_run_git", recording_run_git)
+    monkeypatch.setitem(materialize_globals, "_run_git", recording_run_git)
     materialize_task_candidate(
         project_root=root,
         project=PROJECT,
