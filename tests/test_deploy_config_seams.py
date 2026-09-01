@@ -175,6 +175,57 @@ class TestAgentRuntimeIsolationWiring:
 
 
 
+class TestSourceBundleConnectivityGate:
+    """Source-bundle publication must fail closed on a shallow/incomplete
+    source and must independently prove the produced bundle reconstructs a
+    connected object graph before atomic publication. `git bundle list-heads`
+    only proves the advertised HEAD object exists -- it does NOT prove the
+    commit graph an agent will clone is connected. A shallow deploy checkout
+    (actions/checkout without fetch-depth: 0) can still produce a bundle whose
+    advertised HEAD exists while its merge parents are missing, which later
+    makes clones fail `git fsck --connectivity-only`. Defense in depth:
+    (1) ci.yml's deploy job must obtain full history, and (2) the publisher
+    must refuse shallow source AND reconstruct the bundle in a fresh clone
+    with git fsck --connectivity-only before anything is published.
+    """
+
+    def test_deploy_checkout_obtains_full_history(self):
+        """actions/checkout in the deploy job must use fetch-depth: 0 so the
+        source bundle is a connected object graph, not a shallow clone."""
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        deploy_job = wf["jobs"]["deploy"]
+        steps = deploy_job["steps"]
+        checkout = next(s for s in steps if s.get("uses", "").startswith("actions/checkout"))
+        assert checkout["with"] == {"fetch-depth": 0}, (
+            "deploy job must checkout with fetch-depth: 0 so the source bundle "
+            "has full ancestry (a shallow checkout publishes an un-clonable bundle)"
+        )
+
+    def test_publisher_has_connectivity_verification_helper(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        fn = text.split("verify_source_bundle_connected() {", 1)[1].split("\n}\n", 1)[0]
+        assert "git bundle" not in fn  # reconstruction, not list-heads
+        assert "clone" in fn
+        assert "fsck --connectivity-only" in fn
+        assert "rev-parse HEAD" in fn
+
+    def test_publisher_refuses_shallow_incomplete_source(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        publish_fn = text[text.index("publish_agent_source_bundle()") : text.index("run_migrations()")]
+        assert "git rev-parse --is-shallow-repository" in publish_fn
+        assert "refusing to publish from a shallow/incomplete source checkout" in publish_fn
+
+    def test_published_bundle_verified_for_connectivity_before_atomic_publish(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        publish_fn = text[text.index("publish_agent_source_bundle()") : text.index("run_migrations()")]
+        # Verification must run on the host-produced bundle and gate publication.
+        verify_idx = publish_fn.index("verify_source_bundle_connected")
+        replace_idx = publish_fn.index("os.replace")
+        assert -1 < verify_idx < replace_idx, (
+            "connectivity verification must run before the atomic publication (os.replace)"
+        )
+
+
 class TestStrictHostKeyCheckingNeedsAStore:
     """Regression: SSH_STRICT_HOST_KEY_CHECKING=true with no KNOWN_HOSTS_STORE
     configured silently falls back to NullHostKeyStore + paramiko.RejectPolicy

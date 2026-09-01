@@ -267,6 +267,34 @@ deploy_services() {
   SSH_GATEWAY_SSHD_IMAGE="$sshd_image" MCP_SERVER_IMAGE="$mcp_image" $COMPOSE up -d --no-deps --no-build mcp-oauth
 }
 
+# Independently reconstruct a produced source bundle exactly as a consuming
+# agent does (git clone) in a throwaway directory and prove the object graph
+# is connected before anything is published. `git bundle list-heads` alone is
+# NOT sufficient: it only proves the advertised HEAD object exists. A shallow
+# or incomplete source can still produce a bundle whose advertised HEAD bytes
+# are present while the commit graph this agent will actually clone is broken
+# (its merge parents are missing) -- the real-world signature is a bundle that
+# passes list-heads yet later fails `git fsck --connectivity-only` on clones.
+# Reconstructing and running `git fsck --connectivity-only` fails closed on
+# exactly that. Returns 0 only if the clone succeeds, connectivity proves out,
+# and the reconstructed HEAD equals the expected SHA.
+verify_source_bundle_connected() {
+  local bundle_path="$1" expected_head="$2" verify_dir clone_dir actual_head
+  verify_dir=$(mktemp -d /tmp/mcp-agent-verify.XXXXXX)
+  clone_dir="$verify_dir/checkout"
+  if ! git -C "$verify_dir" clone -q --no-hardlinks "$bundle_path" "$clone_dir"; then
+    rm -rf "$verify_dir"
+    return 1
+  fi
+  if ! (cd "$clone_dir" && git fsck --connectivity-only >/dev/null 2>&1); then
+    rm -rf "$verify_dir"
+    return 1
+  fi
+  actual_head=$(git -C "$clone_dir" rev-parse HEAD 2>/dev/null || true)
+  rm -rf "$verify_dir"
+  [ "$actual_head" = "$expected_head" ]
+}
+
 publish_agent_source_bundle() {
   # Agents must never clone from the mutable host checkout. CI checked out the
   # exact DEPLOY_SHA that passed the workflow, so publish that Git object graph
@@ -287,6 +315,15 @@ publish_agent_source_bundle() {
     log "Agent source bundle: checkout SHA mismatch ($checkout_sha != $DEPLOY_TAG)."
     return 1
   fi
+  # Fail closed on a shallow/incomplete source checkout before bundling: a
+  # --depth clone can still advertise the tip while the graph behind it
+  # (merge parents in particular) is missing, which would publish an
+  # un-clonable bundle. ci.yml's deploy job now checks out with
+  # fetch-depth: 0, but defense in depth means the publisher refuses anyway.
+  if [ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo true)" = "true" ]; then
+    log "Agent source bundle: refusing to publish from a shallow/incomplete source checkout."
+    return 1
+  fi
   project_key=$(python3 -c 'from examples.mcp_server.agent_paths import project_state_key; print(project_state_key("web-ssh-gateway"))')
   bundle_tmp=$(mktemp /tmp/mcp-agent-source.XXXXXX.bundle)
   if ! git bundle create "$bundle_tmp" HEAD; then
@@ -296,6 +333,14 @@ publish_agent_source_bundle() {
   bundle_head=$(git bundle list-heads "$bundle_tmp" HEAD 2>/dev/null | awk 'NR==1 {print $1}')
   if [ "$bundle_head" != "$DEPLOY_TAG" ]; then
     log "Agent source bundle: generated HEAD mismatch ($bundle_head != $DEPLOY_TAG)."
+    rm -f "$bundle_tmp"
+    return 1
+  fi
+  # Connectivity gate (defense in depth over list-heads): reconstruct the
+  # bundle in a fresh throwaway clone and run git fsck --connectivity-only.
+  # Rejects shallow/incomplete source before anything reaches the container.
+  if ! verify_source_bundle_connected "$bundle_tmp" "$DEPLOY_TAG"; then
+    log "Agent source bundle: produced bundle failed connectivity verification."
     rm -f "$bundle_tmp"
     return 1
   fi

@@ -483,6 +483,16 @@ jobs:
       REGISTRY: ${{ secrets.REGISTRY_HOST }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # MAJOR audit finding: the deploy job publishes a full source
+          # bundle (scripts/deploy-from-registry.sh::publish_agent_source_bundle
+          # runs `git bundle create ... HEAD`) for agents to clone. Without
+          # fetch-depth: 0, actions/checkout does a shallow clone, so a master
+          # merge-deploy could publish a bundle whose advertised HEAD exists
+          # but whose commit graph is missing parent objects (the published
+          # bundles later fail `git fsck --connectivity-only`). Full ancestry
+          # is required so the bundle is a connected object graph.
+          fetch-depth: 0
       - name: Link runtime deployment inputs
         run: |
           test ! -e docker/.env
