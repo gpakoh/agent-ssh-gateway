@@ -11,6 +11,7 @@ after runtime.set_mcp) instead of import-time decorator side effects.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Callable
 from typing import Any
 
@@ -49,6 +50,11 @@ from examples.mcp_server.fleet_runtime import get_fleet_runtime
 from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.adapters.gateway import _split_csv_or_lines, _split_lines
 from examples.mcp_server.mcp_infra.tool_registry import register_tool, run_tool, run_tool_async
+from examples.mcp_server.task_candidate import (
+    bind_task_attempt_job,
+    record_task_delivery_contract,
+    resolve_task_attempt_identity,
+)
 
 
 def _server_client():
@@ -129,6 +135,18 @@ def gateway_write_agent_task(
         # digest, and no supervisor-time recapture fallback exists.
         publication = ensure_managed_source_bundle(project, base_ref)
         managed_source_sha256 = publication.sha256 if publication else None
+        parsed_allowed = _split_scope_patterns(allowed_files) or []
+        parsed_forbidden = _split_scope_patterns(forbidden_files) or []
+        parsed_checks = _split_lines(required_checks) or []
+        if base_ref:
+            record_task_delivery_contract(
+                project=project,
+                task_id=task_id,
+                base_ref=base_ref,
+                allowed_files=parsed_allowed,
+                forbidden_files=parsed_forbidden,
+                required_checks=parsed_checks,
+            )
 
         return _write_agent_task(
             # Script transport (sh + stdin), NOT run_project_command: the
@@ -142,9 +160,9 @@ def gateway_write_agent_task(
             agent=agent,
             task=task,
             scope=scope,
-            allowed_files=_split_scope_patterns(allowed_files),
-            forbidden_files=_split_scope_patterns(forbidden_files),
-            required_checks=_split_lines(required_checks),
+            allowed_files=parsed_allowed,
+            forbidden_files=parsed_forbidden,
+            required_checks=parsed_checks,
             acceptance_criteria=_split_lines(acceptance_criteria),
             commit_message=commit_message,
             constraints=constraints,
@@ -192,16 +210,24 @@ def gateway_read_agent_report(project: str, task_id: str) -> dict[str, Any]:
 
 
 def gateway_read_agent_diff(project: str, task_id: str) -> dict[str, Any]:
-    """Read .ai-bridge/tasks/<task_id>/implementation-diff.patch."""
-    return run_tool(
-        tool="read_agent_diff",
-        title="Read agent diff",
-        fn=lambda: _read_agent_task_file(
+    """Read the review diff and return the SHA-256 of those exact returned bytes."""
+
+    def _fn() -> dict[str, Any]:
+        result = _read_agent_task_file(
             lambda p, c: run_project_command(_server_client(), p, c),
             project=project,
             task_id=task_id,
             filename="implementation-diff.patch",
-        ),
+        )
+        if result.get("exit_code") == 0 and result.get("stdout") != "(not found)":
+            text = str(result.get("stdout", ""))
+            result["sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return result
+
+    return run_tool(
+        tool="read_agent_diff",
+        title="Read agent diff",
+        fn=_fn,
         success_text="Read agent diff.",
     )
 
@@ -301,6 +327,12 @@ async def gateway_run_opencode(
                 lambda _p, s: _server_client().execute_project_script(_p, s), project=p, task_id=t, record=rec
             ),
             job_status=lambda jid: _server_client().job_status(jid),
+            resolve_trusted_attempt=lambda p, t, f: resolve_task_attempt_identity(
+                project=p, task_id=t, fingerprint=f
+            ),
+            record_trusted_attempt=lambda p, t, a, f, j: bind_task_attempt_job(
+                project=p, task_id=t, attempt_id=a, fingerprint=f, job_id=j
+            ),
             async_submit=async_submit,
         )
 
@@ -350,6 +382,12 @@ def _build_agent_submit(
                 lambda _p, s: _server_client().execute_project_script(_p, s), project=p, task_id=t, record=rec
             ),
             job_status=lambda jid: _server_client().job_status(jid),
+            resolve_trusted_attempt=lambda p, t, f: resolve_task_attempt_identity(
+                project=p, task_id=t, fingerprint=f
+            ),
+            record_trusted_attempt=lambda p, t, a, f, j: bind_task_attempt_job(
+                project=p, task_id=t, attempt_id=a, fingerprint=f, job_id=j
+            ),
             async_submit=async_submit,
         )
 

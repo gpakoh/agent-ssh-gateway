@@ -264,7 +264,7 @@ deploy_services() {
   SSH_GATEWAY_SSHD_IMAGE="$sshd_image" WEB_SSH_GATEWAY_IMAGE="$gateway_image" $COMPOSE up -d --no-deps --no-build sshd web-ssh-gateway
   SSH_GATEWAY_SSHD_IMAGE="$sshd_image" $COMPOSE up -d --no-deps --no-build agent-sshd
   MCP_SERVER_IMAGE="$mcp_image" $COMPOSE up -d --no-deps --no-build mcp-server
-  MCP_SERVER_IMAGE="$mcp_image" $COMPOSE up -d --no-deps --no-build mcp-oauth
+  SSH_GATEWAY_SSHD_IMAGE="$sshd_image" MCP_SERVER_IMAGE="$mcp_image" $COMPOSE up -d --no-deps --no-build mcp-oauth
 }
 
 publish_agent_source_bundle() {

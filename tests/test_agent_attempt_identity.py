@@ -1028,3 +1028,120 @@ class TestBlocker1OpencodeParity:
         assert result["status"] == "error"
         assert "current-plan.md not found" in result["error"]
         submit.assert_not_called()
+
+    def test_opencode_trusted_resolver_ignores_forged_executor_attempt_state(self):
+        rc = _run_cmd(task_json=_task_json())
+        read = MagicMock(side_effect=AssertionError("mutable attempt-state must not be identity authority"))
+        claim = MagicMock(side_effect=AssertionError("mutable attempt-state must not be claimed"))
+        write = MagicMock()
+        submit = MagicMock(return_value={"job_id": "job-trusted"})
+        resolver = MagicMock(return_value=("trusted-attempt", None))
+        binder = MagicMock()
+
+        result = project_run_opencode(
+            rc,
+            project="test",
+            task_id=OPENC_TASK_ID,
+            run_script_async=submit,
+            run_script_wait=MagicMock(return_value=_completed()),
+            read_attempt_state=read,
+            claim_attempt_state=claim,
+            write_attempt_state=write,
+            job_status=MagicMock(return_value={"status": "completed", "exit_code": 0}),
+            resolve_trusted_attempt=resolver,
+            record_trusted_attempt=binder,
+        )
+
+        assert result["attempt_id"] == "trusted-attempt"
+        assert result["job_id"] == "job-trusted"
+        read.assert_not_called()
+        claim.assert_not_called()
+        resolver.assert_called_once()
+        binder.assert_called_once_with(
+            "test", OPENC_TASK_ID, "trusted-attempt", resolver.call_args.args[2], "job-trusted"
+        )
+
+    def test_opencode_bound_trusted_job_replay_skips_submit(self):
+        rc = _run_cmd(task_json=_task_json())
+        submit = MagicMock(side_effect=AssertionError("bound trusted job must not resubmit"))
+        resolver = MagicMock(return_value=("trusted-attempt", "job-already-bound"))
+        binder = MagicMock()
+        waiter = MagicMock(return_value=_completed(stdout="trusted replay"))
+
+        result = project_run_opencode(
+            rc,
+            project="test",
+            task_id=OPENC_TASK_ID,
+            run_script_async=submit,
+            run_script_wait=waiter,
+            read_attempt_state=MagicMock(),
+            claim_attempt_state=MagicMock(),
+            write_attempt_state=MagicMock(),
+            job_status=MagicMock(return_value={"status": "completed", "exit_code": 0}),
+            resolve_trusted_attempt=resolver,
+            record_trusted_attempt=binder,
+        )
+
+        assert result["job_id"] == "job-already-bound"
+        assert result["stdout"] == "trusted replay"
+        submit.assert_not_called()
+        binder.assert_called_once()
+        waiter.assert_called_once_with("job-already-bound")
+
+
+class TestTrustedBindingPrecedesMutableMirror:
+    def test_run_agent_binds_control_plane_job_before_mutable_attempt_write(self):
+        rc = _run_cmd(task_json=_task_json())
+        resolver = MagicMock(return_value=("trusted-attempt", None))
+        binder = MagicMock()
+        write = MagicMock(side_effect=RuntimeError("executor attempt-state sabotaged"))
+
+        result = project_run_agent(
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            run_script_async=MagicMock(return_value={"job_id": "job-trusted"}),
+            run_script_wait=MagicMock(),
+            read_attempt_state=MagicMock(),
+            claim_attempt_state=MagicMock(),
+            write_attempt_state=write,
+            job_status=MagicMock(return_value={"status": "running"}),
+            async_submit=True,
+            resolve_trusted_attempt=resolver,
+            record_trusted_attempt=binder,
+        )
+
+        assert result["status"] == "error"
+        assert result["kind"] == "durable-state-error"
+        binder.assert_called_once_with(
+            "test", TASK_ID, "trusted-attempt", resolver.call_args.args[2], "job-trusted"
+        )
+        write.assert_called_once()
+
+    def test_run_opencode_binds_control_plane_job_before_mutable_attempt_write(self):
+        rc = _run_cmd(task_json=_task_json())
+        resolver = MagicMock(return_value=("trusted-attempt", None))
+        binder = MagicMock()
+        write = MagicMock(side_effect=RuntimeError("executor attempt-state sabotaged"))
+
+        result = project_run_opencode(
+            rc,
+            project="test",
+            task_id=OPENC_TASK_ID,
+            run_script_async=MagicMock(return_value={"job_id": "job-trusted"}),
+            run_script_wait=MagicMock(),
+            read_attempt_state=MagicMock(),
+            claim_attempt_state=MagicMock(),
+            write_attempt_state=write,
+            job_status=MagicMock(return_value={"status": "running"}),
+            async_submit=True,
+            resolve_trusted_attempt=resolver,
+            record_trusted_attempt=binder,
+        )
+
+        assert result["status"] == "error"
+        assert result["kind"] == "durable-state-error"
+        binder.assert_called_once_with(
+            "test", OPENC_TASK_ID, "trusted-attempt", resolver.call_args.args[2], "job-trusted"
+        )
+        write.assert_called_once()

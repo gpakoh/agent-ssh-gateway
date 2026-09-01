@@ -56,6 +56,8 @@ def project_run_opencode(
     claim_attempt_state: Callable[[str, str, dict[str, Any]], bool] | None = None,
     write_attempt_state: Callable[[str, str, dict[str, Any]], None] | None = None,
     job_status: Callable[[str], dict[str, Any]] | None = None,
+    resolve_trusted_attempt: Callable[[str, str, str], tuple[str, str | None]] | None = None,
+    record_trusted_attempt: Callable[[str, str, str, str, str], None] | None = None,
     async_submit: bool = False,
 ) -> dict[str, Any]:
     """Execute an existing handoff task via OpenCode CLI on the SSH target.
@@ -213,10 +215,13 @@ def project_run_opencode(
             assert write_attempt_state is not None
             assert job_status is not None
             try:
-                attempt_id, job_id = _resolve_attempt(
-                    read_attempt_state, claim_attempt_state,
-                    project, task_id, fingerprint,
-                )
+                if resolve_trusted_attempt is not None:
+                    attempt_id, job_id = resolve_trusted_attempt(project, task_id, fingerprint)
+                else:
+                    attempt_id, job_id = _resolve_attempt(
+                        read_attempt_state, claim_attempt_state,
+                        project, task_id, fingerprint,
+                    )
             except AttemptConflictError as exc:
                 return {
                     "task_id": task_id,
@@ -269,6 +274,23 @@ def project_run_opencode(
                 "finished_at": _now_iso(),
             }
         if attempt_id:
+            if record_trusted_attempt is not None:
+                try:
+                    record_trusted_attempt(project, task_id, attempt_id, fingerprint, job_id)
+                except Exception as exc:
+                    return {
+                        "task_id": task_id,
+                        "status": "error",
+                        "kind": "trusted-delivery-state-error",
+                        "error": _error_text(exc),
+                        "attempt_id": attempt_id,
+                        "job_id": job_id,
+                        "exit_code": None,
+                        "stdout": "",
+                        "stderr": "",
+                        "started_at": started_at,
+                        "finished_at": _now_iso(),
+                    }
             assert write_attempt_state is not None
             try:
                 write_attempt_state(
@@ -376,10 +398,13 @@ def project_run_opencode(
     assert job_status is not None
 
     try:
-        attempt_id, job_id = _resolve_attempt(
-            read_attempt_state, claim_attempt_state,
-            project, task_id, fingerprint,
-        )
+        if resolve_trusted_attempt is not None:
+            attempt_id, job_id = resolve_trusted_attempt(project, task_id, fingerprint)
+        else:
+            attempt_id, job_id = _resolve_attempt(
+                read_attempt_state, claim_attempt_state,
+                project, task_id, fingerprint,
+            )
     except AttemptConflictError as exc:
         return {
             "task_id": task_id,
@@ -412,7 +437,8 @@ def project_run_opencode(
         }
 
     submission_key = _agent_attempt_key(project, task_id, attempt_id)
-    if job_id is None:
+    submitted_now = job_id is None
+    if submitted_now:
         job_id, submit_error = _submit_same_key_retry(
             run_script_async, project, cmd, submission_key
         )
@@ -430,6 +456,41 @@ def project_run_opencode(
                 "started_at": started_at,
                 "finished_at": _now_iso(),
             }
+
+    if job_id is None:
+        return {
+            "task_id": task_id,
+            "status": "error",
+            "kind": "durable-state-error",
+            "error": "accepted job identity is missing",
+            "attempt_id": attempt_id,
+            "job_id": None,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "started_at": started_at,
+            "finished_at": _now_iso(),
+        }
+
+    if record_trusted_attempt is not None:
+        try:
+            record_trusted_attempt(project, task_id, attempt_id, fingerprint, job_id)
+        except Exception as exc:
+            return {
+                "task_id": task_id,
+                "status": "error",
+                "kind": "trusted-delivery-state-error",
+                "error": _error_text(exc),
+                "attempt_id": attempt_id,
+                "job_id": job_id,
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "started_at": started_at,
+                "finished_at": _now_iso(),
+            }
+
+    if submitted_now:
         try:
             write_attempt_state(
                 project, task_id,

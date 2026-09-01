@@ -60,9 +60,15 @@ class TestAgentRuntimeIsolationWiring:
         assert "MCP_AGENT_STATE_ROOT" in oauth_env
         assert "MCP_AGENT_WORKSPACE_ROOT" in oauth_env
         assert "MCP_AGENT_SOURCE_ROOT" in oauth_env
+        assert "MCP_TASK_CANDIDATE_ROOT" in oauth_env
         assert "/var/lib/mcp-agent/state" in oauth_env["MCP_AGENT_STATE_ROOT"]
         assert "/var/lib/mcp-agent/workspaces" in oauth_env["MCP_AGENT_WORKSPACE_ROOT"]
         assert "/var/lib/mcp-agent/sources" in oauth_env["MCP_AGENT_SOURCE_ROOT"]
+        assert "/var/lib/mcp-candidates" in oauth_env["MCP_TASK_CANDIDATE_ROOT"]
+        candidate_mount = "mcp_candidate_store:/var/lib/mcp-candidates"
+        assert candidate_mount in oauth["volumes"]
+        assert candidate_mount not in sshd["volumes"]
+        assert candidate_mount not in agent_sshd["volumes"]
         mount = "agent_runtime:/var/lib/mcp-agent"
         assert mount in oauth["volumes"]
         assert mount in sshd["volumes"]
@@ -72,6 +78,7 @@ class TestAgentRuntimeIsolationWiring:
         assert "agent_sources:/var/lib/mcp-agent/sources:ro" in agent_sshd["volumes"]
         assert "agent_runtime" in compose["volumes"]
         assert "agent_sources" in compose["volumes"]
+        assert "mcp_candidate_store" in compose["volumes"]
 
     def test_dedicated_agent_executor_has_no_authoritative_workspace_mount(self):
         compose = _load_compose()
@@ -94,6 +101,39 @@ class TestAgentRuntimeIsolationWiring:
         assert env["MCP_AGENT_EXECUTOR_SSH_KEY_PATH"] == "/app/ssh_key"
         assert "agent-sshd" in oauth["depends_on"]
 
+
+    def test_verifier_is_ephemeral_not_a_persistent_service(self):
+        compose = _load_compose()
+        assert "verifier-sshd" not in compose["services"]
+        assert "verifier_net" not in compose["networks"]
+        assert "verifier_sshd_host_keys" not in compose["volumes"]
+
+    def test_oauth_wires_ephemeral_verifier_image_volume_and_timeout(self):
+        compose = _load_compose()
+        oauth = compose["services"]["mcp-oauth"]
+        env = _env_dict(oauth["environment"])
+        assert env["MCP_TASK_CANDIDATE_VOLUME_NAME"] == (
+            "${MCP_TASK_CANDIDATE_VOLUME_NAME:-ssh-gateway-mcp-candidates}"
+        )
+        assert env["MCP_VERIFIER_IMAGE"] == (
+            "${SSH_GATEWAY_SSHD_IMAGE:-web-ssh-gateway-sshd:latest}"
+        )
+        assert env["MCP_CANDIDATE_VERIFY_TIMEOUT_SECONDS"] == (
+            "${MCP_CANDIDATE_VERIFY_TIMEOUT_SECONDS:-1800}"
+        )
+        assert "/var/run/docker.sock:/var/run/docker.sock" in oauth["volumes"]
+        assert compose["volumes"]["mcp_candidate_store"]["name"] == (
+            "${MCP_TASK_CANDIDATE_VOLUME_NAME:-ssh-gateway-mcp-candidates}"
+        )
+
+    def test_no_persistent_verifier_dependency_or_network_is_left(self):
+        compose = _load_compose()
+        oauth = compose["services"]["mcp-oauth"]
+        gateway = compose["services"]["web-ssh-gateway"]
+        assert "verifier-sshd" not in oauth.get("depends_on", {})
+        assert "verifier_net" not in oauth.get("networks", {})
+        assert "verifier_net" not in gateway.get("networks", {})
+
     def test_sshd_image_installs_git_ssh_transport(self):
         text = SSHD_DOCKERFILE.read_text(encoding="utf-8")
         assert "openssh-client-default" in text
@@ -101,6 +141,21 @@ class TestAgentRuntimeIsolationWiring:
     def test_images_prepare_shared_agent_source_directory(self):
         assert "/var/lib/mcp-agent/sources" in SSHD_DOCKERFILE.read_text(encoding="utf-8")
         assert "/var/lib/mcp-agent/sources" in MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+
+    def test_candidate_store_volume_target_is_preowned_by_uid_1000(self):
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        mkdir_line = next(line for line in text.splitlines() if line.startswith("RUN mkdir -p /app/data"))
+        assert "/var/lib/mcp-candidates" in mkdir_line
+        assert "/var/lib/mcp-candidates" in next(
+            line for line in text.splitlines() if "chown -R appuser:appuser" in line
+        )
+
+    def test_mcp_docker_cli_supports_candidate_volume_subpath(self):
+        text = MCP_SERVER_DOCKERFILE.read_text(encoding="utf-8")
+        line = next(line for line in text.splitlines() if line.startswith("FROM docker:") and "-cli@" in line)
+        version = line.split("docker:", 1)[1].split("-cli@", 1)[0]
+        major = int(version.split(".", 1)[0])
+        assert major >= 26
 
     def test_deploy_publishes_exact_ci_sha_source_only_after_smoke(self):
         text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
@@ -449,6 +504,20 @@ class TestMcpOauthIsPartOfTheDeployPipeline:
         text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
         assert 'wait_docker_health "mcp-oauth"' in text
 
+    def test_deploy_has_no_persistent_verifier_lifecycle(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        assert "verifier-sshd" not in text
+        assert "MCP_VERIFIER_SSH_HOST" not in text
+
+    def test_deploy_pins_verifier_image_into_mcp_oauth_environment(self):
+        text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        deploy_fn = text.split("deploy_services() {", 1)[1].split("\n}", 1)[0]
+        oauth_line = next(
+            line for line in deploy_fn.splitlines() if "--no-build mcp-oauth" in line
+        )
+        assert 'SSH_GATEWAY_SSHD_IMAGE="$sshd_image"' in oauth_line
+        assert 'MCP_SERVER_IMAGE="$mcp_image"' in oauth_line
+
 
 class TestDeployVerifiesRunningProvenance:
     """P0 BLOCKER audit finding: nothing ever confirmed the container
@@ -460,7 +529,11 @@ class TestDeployVerifiesRunningProvenance:
     def test_verify_provenance_compares_all_three_containers(self):
         text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
         fn = text.split("verify_provenance() {", 1)[1].split("\n}\n", 1)[0]
-        for name in ("web-ssh-gateway", "mcp-server", "mcp-oauth"):
+        for name in (
+            "web-ssh-gateway",
+            "mcp-server",
+            "mcp-oauth",
+        ):
             assert name in fn
         assert "printenv BUILD_SHA" in fn
         assert 'DEPLOY_TAG"' in fn
@@ -1212,7 +1285,7 @@ class TestAgentExecutorIsPartOfTheDeployPipeline:
             "so the shipped gateway image must package that script"
         )
 
-    def test_executor_memory_gate_applies_to_both_sshd_containers(self):
+    def test_executor_memory_gate_applies_to_all_sshd_containers(self):
         text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
         fn = text.split("wait_docker_health() {", 1)[1].split("\n}\n", 1)[0]
         assert '"ssh-gateway-sshd"' in fn

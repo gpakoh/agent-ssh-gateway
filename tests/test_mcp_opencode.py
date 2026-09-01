@@ -316,11 +316,12 @@ class TestServerWrapperWired:
         not importlib.util.find_spec("mcp"),
         reason="mcp package not installed",
     )
-    def test_server_wrapper_executes_via_client(self, monkeypatch):
+    def test_server_wrapper_executes_via_client(self, monkeypatch, tmp_path):
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
         monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
         monkeypatch.setenv("GITEA_TOKEN", "test-token")
         monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+        monkeypatch.setenv("MCP_TASK_CANDIDATE_ROOT", str(tmp_path / "candidate-store"))
         import importlib
         import sys
         from pathlib import Path
@@ -393,9 +394,10 @@ class TestServerWrapperWired:
             server.client.execute_script.assert_not_called()
             server.client.execute_script_async.assert_called_once()
             server.client.wait_job.assert_called_once_with("job-w1")
-            # Durable attempt identity: one write before submission
-            # (pre-submit intent) and one after submit binds the job_id.
-            assert server.client.execute_project_script.call_count == 2
+            # Production attempt identity is claimed in the control-plane-only
+            # candidate store before submission. Executor attempt-state is now
+            # only a post-submit diagnostic mirror, never the identity authority.
+            assert server.client.execute_project_script.call_count == 1
         finally:
             for name in [
                 n

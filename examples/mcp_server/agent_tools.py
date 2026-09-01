@@ -1217,6 +1217,34 @@ def _supervisor_postrun_script_lines(
             'if [ "$CHECKS_RC" -gt 0 ] && [ "$CHECKS_RC" -ne 127 ]; then FINAL_RC=72; fi',
             'if [ "$PARENT_RC" -ne 0 ]; then FINAL_RC=74; fi',
             'if [ "$CHECKS_RC" -eq 127 ]; then CHECKS_WARNING=1; else CHECKS_WARNING=0; fi',
+            'python3 - "$td/supervisor-verdict.json" "${BASE_HEAD:-}" "${POST_HEAD:-}" "$EVIDENCE_RC" "$SCOPE_RC" "$CHECKS_RC" "$PARENT_RC" "$FINAL_RC" "${SCOPE_RAN:-0}" "${CHECKS_RAN:-0}" <<\'VERDICT_EOF\'',
+            "import json, os, sys, tempfile",
+            "",
+            "path, base_head, post_head, evidence_rc, scope_rc, checks_rc, parent_rc, final_rc, scope_ran, checks_ran = sys.argv[1:]",
+            "payload = {",
+            "    'version': 1,",
+            "    'base_head': base_head,",
+            "    'post_head': post_head,",
+            "    'evidence_rc': int(evidence_rc),",
+            "    'scope_rc': int(scope_rc),",
+            "    'checks_rc': int(checks_rc),",
+            "    'parent_rc': int(parent_rc),",
+            "    'final_rc': int(final_rc),",
+            "    'scope_ran': int(scope_ran),",
+            "    'checks_ran': int(checks_ran),",
+            "}",
+            "directory = os.path.dirname(path) or '.'",
+            "fd, tmp = tempfile.mkstemp(prefix='.supervisor-verdict.', dir=directory)",
+            "try:",
+            "    with os.fdopen(fd, 'w', encoding='utf-8') as fh:",
+            "        json.dump(payload, fh, sort_keys=True, separators=(',', ':'))",
+            "        fh.flush()",
+            "        os.fsync(fh.fileno())",
+            "    os.replace(tmp, path)",
+            "finally:",
+            "    if os.path.exists(tmp): os.unlink(tmp)",
+            "VERDICT_EOF",
+            'if [ "$?" -ne 0 ]; then FINAL_RC=75; fi',
         ]
     )
     return lines
@@ -1687,6 +1715,8 @@ def project_run_agent(
     claim_attempt_state: Callable[[str, str, dict[str, Any]], bool] | None = None,
     write_attempt_state: Callable[[str, str, dict[str, Any]], None] | None = None,
     job_status: Callable[[str], dict[str, Any]] | None = None,
+    resolve_trusted_attempt: Callable[[str, str, str], tuple[str, str | None]] | None = None,
+    record_trusted_attempt: Callable[[str, str, str, str, str], None] | None = None,
     async_submit: bool = False,
 ) -> dict[str, Any]:
     """Execute a handoff task via the agent backend router.
@@ -1947,10 +1977,13 @@ def project_run_agent(
             assert write_attempt_state is not None
             assert job_status is not None
             try:
-                attempt_id, job_id = _resolve_attempt(
-                    read_attempt_state, claim_attempt_state,
-                    project, task_id, fingerprint,
-                )
+                if resolve_trusted_attempt is not None:
+                    attempt_id, job_id = resolve_trusted_attempt(project, task_id, fingerprint)
+                else:
+                    attempt_id, job_id = _resolve_attempt(
+                        read_attempt_state, claim_attempt_state,
+                        project, task_id, fingerprint,
+                    )
             except AttemptConflictError as exc:
                 return {
                     "task_id": task_id,
@@ -2003,6 +2036,23 @@ def project_run_agent(
                 "finished_at": _now_iso(),
             }
         if attempt_id:
+            if record_trusted_attempt is not None:
+                try:
+                    record_trusted_attempt(project, task_id, attempt_id, fingerprint, job_id)
+                except Exception as exc:
+                    return {
+                        "task_id": task_id,
+                        "status": "error",
+                        "kind": "trusted-delivery-state-error",
+                        "error": _error_text(exc),
+                        "attempt_id": attempt_id,
+                        "job_id": job_id,
+                        "exit_code": None,
+                        "stdout": "",
+                        "stderr": "",
+                        "started_at": started_at,
+                        "finished_at": _now_iso(),
+                    }
             assert write_attempt_state is not None
             try:
                 write_attempt_state(
@@ -2118,10 +2168,13 @@ def project_run_agent(
     assert job_status is not None
 
     try:
-        attempt_id, job_id = _resolve_attempt(
-            read_attempt_state, claim_attempt_state,
-            project, task_id, fingerprint,
-        )
+        if resolve_trusted_attempt is not None:
+            attempt_id, job_id = resolve_trusted_attempt(project, task_id, fingerprint)
+        else:
+            attempt_id, job_id = _resolve_attempt(
+                read_attempt_state, claim_attempt_state,
+                project, task_id, fingerprint,
+            )
     except AttemptConflictError as exc:
         return {
             "task_id": task_id,
@@ -2154,7 +2207,8 @@ def project_run_agent(
         }
 
     submission_key = _agent_attempt_key(project, task_id, attempt_id)
-    if job_id is None:
+    submitted_now = job_id is None
+    if submitted_now:
         job_id, submit_error = _submit_same_key_retry(
             run_script_async, project, cmd, submission_key
         )
@@ -2172,6 +2226,41 @@ def project_run_agent(
                 "started_at": started_at,
                 "finished_at": _now_iso(),
             }
+
+    if job_id is None:
+        return {
+            "task_id": task_id,
+            "status": "error",
+            "kind": "durable-state-error",
+            "error": "accepted job identity is missing",
+            "attempt_id": attempt_id,
+            "job_id": None,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "started_at": started_at,
+            "finished_at": _now_iso(),
+        }
+
+    if record_trusted_attempt is not None:
+        try:
+            record_trusted_attempt(project, task_id, attempt_id, fingerprint, job_id)
+        except Exception as exc:
+            return {
+                "task_id": task_id,
+                "status": "error",
+                "kind": "trusted-delivery-state-error",
+                "error": _error_text(exc),
+                "attempt_id": attempt_id,
+                "job_id": job_id,
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "started_at": started_at,
+                "finished_at": _now_iso(),
+            }
+
+    if submitted_now:
         try:
             write_attempt_state(
                 project, task_id,

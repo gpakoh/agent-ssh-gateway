@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 
-def test_write_agent_task_publishes_source_before_remote_write(monkeypatch):
+def test_write_agent_task_publishes_source_before_remote_write(monkeypatch, tmp_path):
     import examples.mcp_server.mcp_infra.adapters.agent as adapter
     import examples.mcp_server.server as server_mod
     from examples.mcp_server.agent_sources import ManagedSourcePublication
@@ -29,6 +29,8 @@ def test_write_agent_task_publishes_source_before_remote_write(monkeypatch):
     client.execute_project_script.side_effect = execute_script
     monkeypatch.setattr(server_mod, "client", client)
     monkeypatch.setattr(adapter, "ensure_managed_source_bundle", publish)
+
+    monkeypatch.setenv("MCP_TASK_CANDIDATE_ROOT", str(tmp_path / "candidates"))
 
     result = adapter.gateway_write_agent_task(
         project="nod",
