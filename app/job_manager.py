@@ -4,9 +4,12 @@ import asyncio
 import base64
 import hashlib
 import logging
+import os
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.agent_events import AgentEventEmitter, ObservabilityDegradedError, agent_events
 from app.command_policy import evaluate_command_policy
@@ -27,6 +30,32 @@ from app.ssh_manager import (
 )
 
 logger = logging.getLogger(__name__)
+
+FORCE_CLEANUP_JOIN_TIMEOUT_ENV = "MCP_JOB_MANAGER_FORCE_CLEANUP_TIMEOUT"
+FORCE_CLEANUP_JOIN_TIMEOUT_DEFAULT = 10.0
+
+
+def _force_cleanup_join_timeout() -> float:
+    """Bounded deadline for joining cancelled job tasks in force_cleanup.
+
+    A job task that blocks on a sync executor thread (or otherwise swallows
+    cancellation) may never join. Bound the join so force_cleanup still
+    releases every accepted SSH lease and surfaces the incomplete cleanup via
+    the warning log instead of hanging manager shutdown forever. Env-tunable
+    for operators; tests override it to keep the slow path fast.
+    """
+    raw = os.environ.get(FORCE_CLEANUP_JOIN_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return FORCE_CLEANUP_JOIN_TIMEOUT_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{FORCE_CLEANUP_JOIN_TIMEOUT_ENV} must be a number"
+        ) from None
+    if value <= 0:
+        raise ValueError(f"{FORCE_CLEANUP_JOIN_TIMEOUT_ENV} must be positive")
+    return value
 
 MAX_STDOUT_SIZE = 10 * 1024 * 1024  # 10 MB per job
 TERMINAL_STATES = frozenset({"completed", "failed", "cancelled", "ambiguous"})
@@ -414,7 +443,15 @@ class JobManager:
             self._jobs.clear()
 
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            unjoined = await self._join_with_budget(tasks)
+            if unjoined:
+                logger.warning(
+                    "force_cleanup: %d of %d job task(s) did not join within %.1fs "
+                    "bounded cleanup deadline; releasing captured leases anyway",
+                    len(unjoined),
+                    len(tasks),
+                    _force_cleanup_join_timeout(),
+                )
         # A Task cancelled before its coroutine ever starts cannot execute the
         # _run_job finally block. Releasing the captured ids after join is
         # idempotent with normal wrapper cleanup and closes that pre-start gap.
@@ -424,6 +461,27 @@ class JobManager:
             await self._persist_terminal_job(job)
         logger.warning("Force-cleaned %d jobs (%d tasks cancelled)", count, len(tasks))
         return count
+
+    @staticmethod
+    async def _join_with_budget(tasks: Sequence[asyncio.Task[Any]]) -> list[asyncio.Task[Any]]:
+        """Join cancelled job tasks up to a deadline; return the unjoined ones.
+
+        ``asyncio.wait`` is used instead of ``gather`` so a deadline expiry does
+        not cascade a second cancellation into tasks that already swallowed
+        cancellation (e.g. a task parked in ``asyncio.shield`` re-await). The
+        unjoined tasks are returned (and intentionally left running/abandoned);
+        their captured leases are released exactly once regardless.
+        """
+        timeout = _force_cleanup_join_timeout()
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        unjoined = [task for task in pending if not task.done()]
+        for task in done:
+            if task.cancelled():
+                continue
+            exc = task.exception()
+            if exc is not None:
+                logger.warning("force_cleanup: job task raised %r", exc)
+        return unjoined
 
     # ------------------------------------------------------------------
     # Create And Run Job

@@ -349,3 +349,119 @@ async def test_fleet_close_waits_for_gateway_executor_before_state_close() -> No
     state.close.assert_awaited_once()
     assert runtime._closed is True
     assert runtime._watchers_by_job == {}
+
+
+async def _run_with_budget(coro, budget: float):
+    """Await a coroutine under an outer timeout; surface a hang clearly."""
+    try:
+        return await asyncio.wait_for(coro, timeout=budget)
+    except TimeoutError as exc:
+        raise AssertionError(
+            f"operation exceeded {budget}s budget (would hang indefinitely)"
+        ) from exc
+
+
+@pytest.mark.asyncio
+async def test_process_lifespan_shutdown_is_bounded_when_fleet_close_never_returns(
+    proxy_server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A never-returning FleetRuntime close must not hang process shutdown forever.
+
+    The proxy lifespan defers FleetRuntime/upstream cleanup until after
+    cancellation. If that cleanup cannot finish (a blocked executor join inside
+    close_fleet_runtime()), process shutdown must still exit within a bounded
+    deadline instead of blocking the event loop forever.
+    """
+    events: list[str] = []
+    body_release = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+
+    async def startup_upstream() -> None:
+        events.append("upstream-start")
+
+    async def close_fleet() -> None:
+        events.append("fleet-close-start")
+        cleanup_started.set()
+        # Never returns: simulates a FleetRuntime close blocked on an executor
+        # worker thread that cannot be interrupted by asyncio cancellation.
+        await cleanup_release.wait()
+        events.append("fleet-close-done")
+
+    async def close_upstream() -> None:
+        events.append("upstream-close")
+
+    monkeypatch.setattr(proxy_server, "_startup_upstream_client", startup_upstream)
+    monkeypatch.setattr(proxy_server._mcp_mod, "close_fleet_runtime", close_fleet)
+    monkeypatch.setattr(proxy_server, "_shutdown_upstream_client", close_upstream)
+
+    # A tiny bounded shutdown deadline keeps the test fast: cleanup that never
+    # completes must be abandoned, not joined forever.
+    monkeypatch.setenv("MCP_PROCESS_SHUTDOWN_TIMEOUT", "0.3")
+
+    async def serve() -> None:
+        async with proxy_server._lifespan(proxy_server.proxy_app):
+            events.append("body")
+            await body_release.wait()
+
+    asyncio.create_task(serve())
+    while "body" not in events:
+        await asyncio.sleep(0)
+    body_release.set()
+    await cleanup_started.wait()
+
+    # close_fleet_runtime never returns: bounded shutdown must exit anyway.
+    await _run_with_budget(proxy_server._finish_shutdown_despite_cancellation(), 5.0)
+    assert "fleet-close-start" in events
+    assert "fleet-close-done" not in events
+    assert "upstream-close" in events
+
+    # The runaway cleanup coroutine must not be left owning the event loop.
+    cleanup_release.set()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_fleet_close_is_bounded_when_gateway_worker_blocks_forever(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A never-finishing gateway worker cannot make FleetRuntime.close hang.
+
+    The executor worker runs in a thread that cannot be interrupted by asyncio
+    cancellation. close() must give up joining the executor within a bounded
+    deadline and still mark the runtime closed, logging the abandoned worker
+    instead of blocking process shutdown forever.
+    """
+    state = MagicMock()
+    state.close = AsyncMock()
+    runtime = FleetRuntime(
+        state,
+        pool_name="ssh-gateway/sshd",
+        capacity=2,
+        coordinator_id="gpt-a",
+        gateway_io_concurrency=1,
+    )
+    runtime._schema_ready = True
+
+    worker_started = threading.Event()
+    worker_release = threading.Event()
+
+    def blocking_gateway_call() -> dict[str, str]:
+        worker_started.set()
+        assert worker_release.wait(timeout=10)
+        return {"status": "running"}
+
+    gateway_task = asyncio.create_task(runtime._run_gateway_io(blocking_gateway_call))
+    assert await asyncio.to_thread(worker_started.wait, 1)
+
+    # A 0.2s executor-join deadline: close abandons the blocked worker thread
+    # instead of waiting forever, and still transitions to closed.
+    monkeypatch.setenv("MCP_FLEET_EXECUTOR_SHUTDOWN_TIMEOUT", "0.2")
+
+    await _run_with_budget(runtime.close(), 5.0)
+
+    assert runtime._closed is True
+    assert runtime._watchers_by_job == {}
+
+    worker_release.set()
+    await gateway_task

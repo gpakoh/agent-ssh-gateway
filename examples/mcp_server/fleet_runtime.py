@@ -23,6 +23,7 @@ Safety properties
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import socket
 from collections.abc import Callable
@@ -38,6 +39,35 @@ from examples.mcp_server.fleet_state import (
 )
 
 _ENABLED_ENV: Final = "MCP_AGENT_FLEET_ENABLED"
+
+_GATEWAY_EXECUTOR_SHUTDOWN_TIMEOUT_ENV: Final = "MCP_FLEET_EXECUTOR_SHUTDOWN_TIMEOUT"
+_GATEWAY_EXECUTOR_SHUTDOWN_TIMEOUT_DEFAULT: Final = 10.0
+
+logger = logging.getLogger("mcp_server.fleet_runtime")
+
+
+def _gateway_executor_shutdown_timeout() -> float:
+    """Bounded deadline for joining the gateway executor during close (seconds).
+
+    A sync gateway worker thread blocked on I/O cannot be interrupted by asyncio
+    cancellation; bounded join forces close() to give up and keep the process
+    shutdown moving. Env-tunable for operators; tests override it to keep the
+    slow path fast.
+    """
+    raw = os.environ.get(_GATEWAY_EXECUTOR_SHUTDOWN_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return _GATEWAY_EXECUTOR_SHUTDOWN_TIMEOUT_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{_GATEWAY_EXECUTOR_SHUTDOWN_TIMEOUT_ENV} must be a number"
+        ) from None
+    if value <= 0:
+        raise ValueError(
+            f"{_GATEWAY_EXECUTOR_SHUTDOWN_TIMEOUT_ENV} must be positive"
+        )
+    return value
 _DSN_ENV: Final = "MCP_FLEET_DATABASE_URL"
 _POOL_ENV: Final = "MCP_AGENT_FLEET_POOL"
 _CAPACITY_ENV: Final = "MCP_AGENT_FLEET_CAPACITY"
@@ -498,12 +528,27 @@ class FleetRuntime:
             self._watchers_by_job.clear()
             # A running sync gateway call cannot be cancelled by cancelling its
             # asyncio waiter. Process shutdown therefore waits for executor work
-            # to finish instead of abandoning fleet-gateway threads.
-            await asyncio.to_thread(
-                self._gateway_executor.shutdown,
-                wait=True,
-                cancel_futures=True,
-            )
+            # to finish instead of abandoning fleet-gateway threads. The wait is
+            # bounded: a worker thread blocked on an unreachable gateway must
+            # not hold the whole process shutdown open forever. On timeout the
+            # asyncio waiter is cancelled while the (uninterruptible) executor
+            # worker keeps running in its thread; close proceeds to terminal
+            # state and logs the abandoned work.
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._gateway_executor.shutdown,
+                        wait=True,
+                        cancel_futures=True,
+                    ),
+                    timeout=_gateway_executor_shutdown_timeout(),
+                )
+            except TimeoutError:
+                logger.warning(
+                    "FleetRuntime gateway executor did not join within %.1fs; "
+                    "abandoning executor join and continuing process shutdown",
+                    _gateway_executor_shutdown_timeout(),
+                )
             # Mark terminal only after every owned resource has actually closed.
             # If state.close() raises/cancels, globals retain this runtime so a
             # later process-level close can retry rather than losing ownership.

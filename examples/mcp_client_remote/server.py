@@ -166,15 +166,60 @@ async def _shutdown_upstream_client() -> None:
         logger.info("Closed shared upstream AsyncClient")
 
 
+_PROCESS_SHUTDOWN_TIMEOUT_ENV: str = "MCP_PROCESS_SHUTDOWN_TIMEOUT"
+_PROCESS_SHUTDOWN_TIMEOUT_DEFAULT: float = 10.0
+
+
+def _process_shutdown_timeout() -> float:
+    """Bounded deadline for one process-shutdown cleanup step (seconds).
+
+    A FleetRuntime close blocked on an executor worker thread cannot be
+    interrupted by asyncio cancellation (see fleet_runtime.close). Without a
+    deadline the proxy lifespan would hang forever during process shutdown.
+    Env-tunable for operators; tests override it to keep hangs fast.
+    """
+    raw = os.environ.get(_PROCESS_SHUTDOWN_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return _PROCESS_SHUTDOWN_TIMEOUT_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{_PROCESS_SHUTDOWN_TIMEOUT_ENV} must be a number") from None
+    if value <= 0:
+        raise ValueError(f"{_PROCESS_SHUTDOWN_TIMEOUT_ENV} must be positive")
+    return value
+
+
 async def _shutdown_process_resources() -> None:
-    """Close process-owned resources in deliberate dependency order."""
+    """Close process-owned resources in deliberate dependency order.
+
+    Each step is bounded so a never-returning close cannot hold process
+    shutdown open forever; an overdue step is logged and abandoned rather
+    than blocking the event loop. Dependency order is preserved for the steps
+    that do complete.
+    """
+    deadline = _process_shutdown_timeout()
     try:
         # FleetRuntime may marshal onto the internal FastMCP owner loop and
         # must finish joining its watchers/executor before the public process
         # drops the shared upstream client.
-        await _mcp_mod.close_fleet_runtime()
+        try:
+            await asyncio.wait_for(_mcp_mod.close_fleet_runtime(), timeout=deadline)
+        except TimeoutError:
+            logger.warning(
+                "close_fleet_runtime exceeded %.1fs bounded shutdown deadline; "
+                "abandoning FleetRuntime close instead of hanging process shutdown",
+                deadline,
+            )
     finally:
-        await _shutdown_upstream_client()
+        try:
+            await asyncio.wait_for(_shutdown_upstream_client(), timeout=deadline)
+        except TimeoutError:
+            logger.warning(
+                "upstream client close exceeded %.1fs bounded shutdown deadline; "
+                "abandoning upstream aclose instead of hanging process shutdown",
+                deadline,
+            )
 
 
 async def _finish_shutdown_despite_cancellation() -> None:
@@ -189,6 +234,8 @@ async def _finish_shutdown_despite_cancellation() -> None:
         try:
             await asyncio.shield(cleanup_task)
         except asyncio.CancelledError:
+            # _shutdown_process_resources is internally bounded, so joining it
+            # here cannot hang even under a second, unrelated cancellation.
             await cleanup_task
             raise
 

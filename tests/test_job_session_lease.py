@@ -246,3 +246,95 @@ async def test_force_cleanup_releases_lease_when_job_task_is_cancelled_before_fi
     assert record.active_operations == 0
     assert job_id not in jobs._session_leases
     record.client.exec_command.assert_not_called()
+
+
+def _stuck_impl(started: asyncio.Event):
+    """Model a job task that swallows cancellation and never joins.
+
+    ``_run_gateway_io`` re-awaits the Shielded future when cancelled so it can
+    keep joining the in-flight sync call. A job whose underlying operation
+    never completes therefore stays pending forever — force_cleanup must stop
+    waiting for it and still release its session lease.
+    """
+    never_done = asyncio.Future()
+
+    async def stuck(_job_id: str) -> None:
+        started.set()
+        try:
+            await asyncio.shield(never_done)
+        except asyncio.CancelledError:
+            await asyncio.shield(never_done)
+            raise
+
+    return stuck, never_done
+
+
+@pytest.mark.asyncio
+async def test_force_cleanup_is_bounded_when_job_task_never_joins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """force_cleanup must not hang forever on a non-joinable job task.
+
+    A job whose asyncio task has already accepted a session lease but re-awaits
+    a Shielded never-completing future (the _run_gateway_io cancellation
+    pattern) cannot be joined. force_cleanup must bound that join, still
+    release the accepted session lease / active_operations exactly once, and
+    surface the incomplete cleanup instead of silently hanging.
+    """
+    record = _record()
+    ssh = _ssh_manager(record)
+    jobs = JobManager(ssh_manager=ssh, max_jobs=10)
+    started = asyncio.Event()
+    stuck, never_done = _stuck_impl(started)
+
+    monkeypatch.setattr(jobs, "_run_job_impl", stuck)
+    monkeypatch.setenv("MCP_JOB_MANAGER_FORCE_CLEANUP_TIMEOUT", "0.3")
+
+    job_id = await jobs.create_job(record.session_id, "true", owner_id="owner-a")
+    assert await asyncio.wait_for(started.wait(), timeout=5.0)
+    assert record.active_operations == 1
+    assert job_id in jobs._session_leases
+
+    try:
+        count = await asyncio.wait_for(jobs.force_cleanup(), timeout=5.0)
+    except TimeoutError as exc:  # RED: current code awaits the stuck task forever
+        raise AssertionError("force_cleanup would hang on a non-joinable job task") from exc
+    finally:
+        never_done.cancel()
+
+    assert count == 1
+    assert record.active_operations == 0
+    assert job_id not in jobs._session_leases
+
+
+@pytest.mark.asyncio
+async def test_force_cleanup_releases_lease_when_task_does_not_join(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lease/active_operations must be freed even when the task never joins.
+
+    force_cleanup gives up on joining a non-joinable task, but the accepted
+    session lease must still be released exactly once so the idle reaper can
+    reclaim the session.
+    """
+    record = _record()
+    ssh = _ssh_manager(record)
+    jobs = JobManager(ssh_manager=ssh, max_jobs=10)
+    started = asyncio.Event()
+    stuck, never_done = _stuck_impl(started)
+
+    monkeypatch.setattr(jobs, "_run_job_impl", stuck)
+    monkeypatch.setenv("MCP_JOB_MANAGER_FORCE_CLEANUP_TIMEOUT", "0.3")
+
+    job_id = await jobs.create_job(record.session_id, "true", owner_id="owner-a")
+    assert await asyncio.wait_for(started.wait(), timeout=5.0)
+    assert record.active_operations == 1
+
+    try:
+        await asyncio.wait_for(jobs.force_cleanup(), timeout=5.0)
+    finally:
+        never_done.cancel()
+
+    # Exactly-once release despite the task never joining.
+    assert record.active_operations == 0
+    assert job_id not in jobs._session_leases
