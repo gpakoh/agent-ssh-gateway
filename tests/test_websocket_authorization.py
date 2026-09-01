@@ -12,6 +12,16 @@ WS_PTY = "/api/ssh/pty/test-session/stream"
 WS_FILE_WATCH = "/api/file/watch"
 
 
+@pytest.fixture(autouse=True)
+def _disable_external_agent_token_store(monkeypatch):
+    """Keep websocket auth tests independent from the shared Redis token slot."""
+
+    async def _connect_unavailable(_self):
+        raise RuntimeError("agent token store disabled for websocket auth tests")
+
+    monkeypatch.setattr("app.agent_token_store.AgentTokenStore.connect", _connect_unavailable)
+
+
 class TestWebSocketScopeEnforcement:
     """Agent token without required scope must be rejected before accept()."""
 
