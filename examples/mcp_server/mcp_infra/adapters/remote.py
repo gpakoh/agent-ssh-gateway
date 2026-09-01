@@ -494,6 +494,86 @@ async def gitea_merge_pull_request(
     return tool_success("gitea_merge_pull_request", result=data, source="gitea")
 
 
+async def gitea_close_pull_request(
+    owner: str,
+    repo: str,
+    pull_number: int,
+    expected_head_sha: str,
+) -> dict[str, Any]:
+    """Close an open PR protected by an exact head-SHA check.
+
+    Never merges and never deletes branches: the only mutation is a
+    single state=closed PATCH issued after a fresh GET confirms the PR
+    is still open and its head still equals expected_head_sha. Any head
+    mismatch fails closed with zero writes. A PR already closed whose
+    head still matches is an idempotent success (already_closed=true).
+    """
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool="gitea_close_pull_request",
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+
+    if pull_number < 1:
+        return tool_error(
+            tool="gitea_close_pull_request",
+            code="INVALID_INPUT",
+            message="pull_number must be >= 1",
+            source="gitea",
+        )
+    expected_head_sha = expected_head_sha.strip().lower()
+    if len(expected_head_sha) != 40 or any(c not in "0123456789abcdef" for c in expected_head_sha):
+        return tool_error(
+            tool="gitea_close_pull_request",
+            code="INVALID_INPUT",
+            message="expected_head_sha must be a 40-character SHA-1",
+            source="gitea",
+        )
+
+    already_closed = False
+    try:
+        async with _server_gitea_client()(token) as client:
+            pr = await client.get_pull_request(owner, repo, pull_number)
+            head = pr.get("head") or {}
+            base = pr.get("base") or {}
+            actual_head_sha = str(head.get("sha") or "").lower()
+            base_ref = str(base.get("ref") or "")
+            html_url = pr.get("html_url")
+
+            if actual_head_sha != expected_head_sha:
+                return tool_error(
+                    tool="gitea_close_pull_request",
+                    code="HEAD_MISMATCH",
+                    message="pull request head changed; re-read the PR before closing",
+                    source="gitea",
+                )
+            if pr.get("state") == "closed":
+                already_closed = True
+            elif pr.get("state") != "open":
+                return tool_error(
+                    tool="gitea_close_pull_request",
+                    code="PR_NOT_OPEN",
+                    message=f"pull request #{pull_number} is not open",
+                    source="gitea",
+                )
+            else:
+                await client.close_pull_request(owner, repo, pull_number)
+            data = {
+                "number": pull_number,
+                "closed": True,
+                "already_closed": already_closed,
+                "head_sha": expected_head_sha,
+                "base": base_ref,
+                "html_url": html_url,
+            }
+    except Exception as exc:
+        return _remote_api_error("gitea_close_pull_request", "gitea", exc)
+    return tool_success("gitea_close_pull_request", result=data, source="gitea")
+
+
 async def gitea_list_action_runs(
     owner: str, repo: str, status: str | None = None, limit: int = 10
 ) -> dict[str, Any]:
@@ -863,6 +943,7 @@ def register_all() -> None:
     register_tool("gitea_get_pull_request")(gitea_get_pull_request)
     register_tool("gitea_create_pull_request")(gitea_create_pull_request)
     register_tool("gitea_merge_pull_request")(gitea_merge_pull_request)
+    register_tool("gitea_close_pull_request")(gitea_close_pull_request)
     register_tool("gitea_push_local_ref")(gitea_push_local_ref)
     register_tool("gitea_list_action_runs")(gitea_list_action_runs)
     register_tool("gitea_get_action_run")(gitea_get_action_run)

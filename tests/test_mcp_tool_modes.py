@@ -214,11 +214,20 @@ class TestChatGPTSafeMode:
         assert should_register_tool("supervisor_register_project")
 
     def test_gitea_pr_writes_are_write_mode_only_and_admin_scoped(self):
-        for name in ("gitea_create_pull_request", "gitea_merge_pull_request", "gitea_push_local_ref"):
+        for name in (
+            "gitea_create_pull_request",
+            "gitea_merge_pull_request",
+            "gitea_close_pull_request",
+            "gitea_push_local_ref",
+        ):
             assert name in TOOL_NAMES_BY_MODE["mcp_client_write"]
             assert name not in TOOL_NAMES_BY_MODE["mcp_client"]
             assert name not in get_mcp_client_safe_tools()
             assert get_required_scopes(name) == ["mcp:repo", "mcp:admin"]
+            for mode, names in TOOL_NAMES_BY_MODE.items():
+                if mode == "mcp_client_write":
+                    continue
+                assert name not in names, mode
 
     def test_safe_mode_filters_registration(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
