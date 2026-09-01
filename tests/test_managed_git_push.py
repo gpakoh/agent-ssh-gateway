@@ -316,7 +316,7 @@ async def test_adapter_post_push_direct_verification_rejects_wrong_sha(
     )
     assert pushed["done"] is True
     assert result["ok"] is False
-    assert result["error"]["code"] == "REMOTE_VERIFY_FAILED"
+    assert result["error"]["code"] == "CHECK_FAILED"
 
 
 @pytest.mark.asyncio

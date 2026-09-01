@@ -865,7 +865,7 @@ async def gitea_push_local_ref(
         )
     return tool_error(
         tool="gitea_push_local_ref",
-        code="REMOTE_VERIFY_FAILED",
+        code="CHECK_FAILED",
         message="Remote branch does not resolve to candidate_head_sha after push",
         source="gitea",
     )
