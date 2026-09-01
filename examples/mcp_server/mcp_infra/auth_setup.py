@@ -134,7 +134,7 @@ def setup() -> tuple[Any, Any, Any]:
                 client_registration_options=ClientRegistrationOptions(
                     enabled=True,
                     valid_scopes=SUPPORTED_SCOPES,
-                    default_scopes=list(SUPPORTED_SCOPES),
+                    default_scopes=list(DEFAULT_SCOPES),
                 ),
                 required_scopes=None,
             )
