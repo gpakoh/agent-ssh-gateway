@@ -1159,6 +1159,29 @@ class SSHSessionManager:
         async with self._lock:
             return self._sessions.get(session_id)
 
+    async def acquire_operation_lease(self, session_id: str) -> SessionRecord:
+        """Pin a session across accepted work that has not entered SSH I/O yet.
+
+        Acquisition shares the session-map lock with both stale reapers, so a
+        successful return means the record cannot be concurrently removed for
+        idleness before ``active_operations`` is incremented. The lease itself
+        is activity caused by a real accepted operation, not a background
+        heartbeat.
+        """
+        async with self._lock:
+            record = self._sessions.get(session_id)
+            if record is None:
+                raise SessionNotFoundError(f"Session {session_id} not found")
+            record.active_operations += 1
+            record.touch()
+            return record
+
+    @staticmethod
+    async def release_operation_lease(record: SessionRecord) -> None:
+        """Release a lease atomically; the coroutine contains no yield point."""
+        record.active_operations = max(0, record.active_operations - 1)
+        record.touch()
+
     async def list_sessions(self) -> list[SessionRecord]:
         """Return list of active session records."""
         async with self._lock:
