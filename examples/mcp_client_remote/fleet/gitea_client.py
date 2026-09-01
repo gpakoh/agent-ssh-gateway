@@ -1,4 +1,4 @@
-"""Gitea REST client: read APIs plus one narrow PR-creation write endpoint."""
+"""Gitea REST client: read APIs plus a narrow, explicitly-allowed PR write surface."""
 
 from __future__ import annotations
 
@@ -48,6 +48,13 @@ ALLOWED_WRITE_ENDPOINTS = frozenset(
     {
         "/repos/{owner}/{repo}/pulls",
         "/repos/{owner}/{repo}/pulls/{number}/merge",
+    }
+)
+# PATCH is not a generic mutation tool either: the close operation may
+# touch exactly one endpoint, and only to set state=closed.
+ALLOWED_CLOSE_ENDPOINTS = frozenset(
+    {
+        "/repos/{owner}/{repo}/pulls/{number}",
     }
 )
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
@@ -153,6 +160,36 @@ class GiteaClient:
             validate_repo_owner_or_name(path_params["repo"], label="repo")
         path = endpoint.format(**path_params)
         resp = await self._client.post(path, json=payload)
+        if resp.status_code in (401, 403):
+            detail = resp.json().get("message", "unauthorized")
+            raise PermissionError(f"gitea api {path}: {detail}")
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise httpx.HTTPStatusError(
+                f"gitea api {path}: {resp.status_code} {resp.reason_phrase}",
+                request=exc.request,
+                response=exc.response,
+            ) from None
+        if not resp.content:
+            return {}
+        return resp.json()
+
+    async def _patch(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        **path_params: Any,
+    ) -> Any:
+        """PATCH the single narrowly-allowlisted PR-state endpoint."""
+        if endpoint not in ALLOWED_CLOSE_ENDPOINTS:
+            raise ValueError(f"Write endpoint not allowed: {endpoint}")
+        if "owner" in path_params:
+            validate_repo_owner_or_name(path_params["owner"], label="owner")
+        if "repo" in path_params:
+            validate_repo_owner_or_name(path_params["repo"], label="repo")
+        path = endpoint.format(**path_params)
+        resp = await self._client.patch(path, json=payload)
         if resp.status_code in (401, 403):
             detail = resp.json().get("message", "unauthorized")
             raise PermissionError(f"gitea api {path}: {detail}")
@@ -347,6 +384,23 @@ class GiteaClient:
         return await self._post(
             "/repos/{owner}/{repo}/pulls/{number}/merge",
             {"Do": method, "head_commit_id": expected_head_sha},
+            owner=owner,
+            repo=repo,
+            number=pull_number,
+        )
+
+    async def close_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        pull_number: int,
+    ) -> dict[str, Any]:
+        """Close one PR (state=closed) without merging it or deleting branches."""
+        if pull_number < 1:
+            raise ValueError("pull_number must be >= 1")
+        return await self._patch(
+            "/repos/{owner}/{repo}/pulls/{number}",
+            {"state": "closed"},
             owner=owner,
             repo=repo,
             number=pull_number,
