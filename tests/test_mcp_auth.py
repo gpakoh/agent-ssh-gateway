@@ -183,3 +183,131 @@ def test_oauth_authorization_server_metadata_exposes_docker_admin_scope():
     body = resp.json()
     assert "scopes_supported" in body
     assert "mcp:docker:admin" in body["scopes_supported"]
+
+
+@pytest.fixture
+def oauth_registration(monkeypatch, tmp_path):
+    """The real production DCR surface.
+
+    Drives auth_setup.setup() -- the exact composition root the deployed
+    MCP OAuth server uses -- and mounts the SDK /register handler, so the
+    stored client scopes reflect the production ClientRegistrationOptions
+    (default_scopes). Store paths are redirected to tmp so the test never
+    touches /var/lib state.
+    """
+    monkeypatch.setenv("MCP_AUTH_MODE", "oauth")
+    monkeypatch.setenv("MCP_TEST_TOKEN_STORE", str(tmp_path))
+    monkeypatch.setenv("MCP_TOKENS_DIR", str(tmp_path))
+    monkeypatch.setenv("MCP_TOKEN_STORE_FILE", str(tmp_path / "mcp_tokens.json"))
+    monkeypatch.setenv("MCP_CLIENT_STORE_FILE", str(tmp_path / "mcp_clients.json"))
+    monkeypatch.delenv("MCP_HEALTHCHECK_BEARER_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_EXTRA_TOKENS_JSON", raising=False)
+
+    from mcp.server.auth.routes import create_auth_routes
+    from pydantic import AnyHttpUrl
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    from examples.mcp_server.mcp_infra import auth_setup
+
+    settings, provider, _ = auth_setup.setup()
+    options = settings.client_registration_options
+    routes = create_auth_routes(
+        provider=provider,
+        issuer_url=AnyHttpUrl(settings.issuer_url),
+        service_documentation_url=AnyHttpUrl(settings.service_documentation_url),
+        client_registration_options=options,
+    )
+    client = TestClient(Starlette(routes=routes))
+    yield provider, client, list(options.default_scopes)
+
+
+def test_dcr_register_without_scope_defaults_to_read_project_only(oauth_registration):
+    """DCR privilege defect regression (P2): a registration that omits the
+    optional scope field must resolve to the safe DEFAULT_SCOPES
+    (mcp:read mcp:project) -- never to the full SUPPORTED_SCOPES list
+    (which includes mcp:admin/mcp:execute/mcp:docker).
+
+    The provider's own _parse_scopes() contract says exactly this; the
+    defect was that the SDK RegistrationHandler substituted default_scopes
+    (= SUPPORTED_SCOPES) before the provider could apply its safe default.
+    This drives the real auth_setup.setup() wiring, so a revert of the
+    default_scopes change fails this test.
+    """
+    provider, client, default_scopes = oauth_registration
+    resp = client.post(
+        "/register",
+        json={
+            "redirect_uris": ["http://localhost:9999/callback"],
+            "client_name": "no-scope-repro",
+        },
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    client_id = body["client_id"]
+    stored = provider._clients[client_id].scopes
+    assert stored == list(default_scopes), (
+        f"DCR without scope registered {stored}; expected DEFAULT_SCOPES {default_scopes}"
+    )
+    assert "mcp:admin" not in stored
+    assert "mcp:execute" not in stored
+
+
+def test_dcr_explicit_admin_scope_still_registrable(oauth_registration):
+    """Corrective must not forbid explicit privileged registration: a client
+    that deliberately asks for mcp:admin keeps working through the existing
+    consent policy. Only the *omitted* scope must default safe."""
+    provider, client, _ = oauth_registration
+    resp = client.post(
+        "/register",
+        json={
+            "redirect_uris": ["http://localhost:9999/callback"],
+            "client_name": "explicit-admin-repro",
+            "scope": "mcp:read mcp:project mcp:admin",
+        },
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    stored = provider._clients[body["client_id"]].scopes
+    assert "mcp:admin" in stored
+
+
+def test_dcr_empty_and_unknown_scope_fail_closed(oauth_registration):
+    """scope='' resolves to DEFAULT_SCOPES, whitespace-only to the empty set
+    (both fail-safe -- never widened to admin/execute/docker), and an unknown
+    scope is rejected outright. None of these may widen grants."""
+    provider, client, default_scopes = oauth_registration
+    privileged = {"mcp:admin", "mcp:execute", "mcp:docker", "mcp:docker:admin"}
+    for scope in ("", "   "):
+        resp = client.post(
+            "/register",
+            json={
+                "redirect_uris": ["http://localhost:9999/callback"],
+                "client_name": "empty-scope-repro",
+                "scope": scope,
+            },
+        )
+        assert resp.status_code == 201
+        stored = provider._clients[resp.json()["client_id"]].scopes
+        assert not (set(stored) & privileged), f"scope {scope!r} widened grants to {stored}"
+    empty_stored = provider._clients[
+        client.post(
+            "/register",
+            json={
+                "redirect_uris": ["http://localhost:9999/callback"],
+                "client_name": "empty-scope-repro-2",
+                "scope": "",
+            },
+        ).json()["client_id"]
+    ].scopes
+    assert empty_stored == list(default_scopes)
+
+    bad = client.post(
+        "/register",
+        json={
+            "redirect_uris": ["http://localhost:9999/callback"],
+            "client_name": "bogus-scope-repro",
+            "scope": "mcp:bogus",
+        },
+    )
+    assert bad.status_code == 400
