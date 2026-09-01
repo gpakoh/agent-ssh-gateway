@@ -842,6 +842,64 @@ class TestGatewayRunAgents:
         assert result["ok"] is True
         assert fleet.submit.await_args.kwargs["sweep_before_submit"] is True
 
+    @pytest.mark.asyncio
+    async def test_sync_run_agent_routes_through_fleet_submit(self, monkeypatch):
+        """BLOCKER A: durable sync admission parity -- async_submit=False
+        must run through fleet.submit, not a silent bypass."""
+        import examples.mcp_server.server as server_mod
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_run_agent
+
+        fleet = MagicMock()
+        fleet.submit = AsyncMock(
+            return_value={"task_id": "single", "status": "running", "job_id": "job-sync-single"}
+        )
+
+        async def get_fleet():
+            return fleet
+
+        monkeypatch.setattr(
+            "examples.mcp_server.mcp_infra.adapters.agent.get_fleet_runtime",
+            get_fleet,
+        )
+        monkeypatch.setattr(server_mod, "client", MagicMock())
+
+        result = await gateway_run_agent("test", "single", async_submit=False)
+
+        assert result["ok"] is True
+        assert fleet.submit.await_count == 1
+        assert fleet.submit.await_args.kwargs["project"] == "test"
+        assert fleet.submit.await_args.kwargs["task_id"] == "single"
+        assert fleet.submit.await_args.kwargs["sweep_before_submit"] is True
+        assert callable(fleet.submit.await_args.kwargs["submit_sync"])
+
+    @pytest.mark.asyncio
+    async def test_sync_run_opencode_routes_through_fleet_submit(self, monkeypatch):
+        """BLOCKER A: the durable sync opencode path admits via fleet too."""
+        import examples.mcp_server.server as server_mod
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_run_opencode
+
+        fleet = MagicMock()
+        fleet.submit = AsyncMock(
+            return_value={"task_id": "single", "status": "running", "job_id": "job-sync-open"}
+        )
+
+        async def get_fleet():
+            return fleet
+
+        monkeypatch.setattr(
+            "examples.mcp_server.mcp_infra.adapters.agent.get_fleet_runtime",
+            get_fleet,
+        )
+        monkeypatch.setattr(server_mod, "client", MagicMock())
+
+        result = await gateway_run_opencode("test", "single", async_submit=False)
+
+        assert result["ok"] is True
+        assert fleet.submit.await_count == 1
+        assert fleet.submit.await_args.kwargs["project"] == "test"
+        assert fleet.submit.await_args.kwargs["task_id"] == "single"
+        assert callable(fleet.submit.await_args.kwargs["submit_sync"])
+
 
 class TestSplitCsvOrLines:
     """Regression: task-id string surface accepts newline and CSV forms."""

@@ -15,8 +15,10 @@ this module itself.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -34,6 +36,7 @@ from examples.mcp_server.agent_sources import (
     ManagedSourceDigestError,
     validate_bundle_digest,
 )
+from examples.mcp_server.agent_tasks import AttemptConflictError, AttemptStateError
 
 TASKS_REL_DIR = ".ai-bridge/tasks"
 
@@ -60,6 +63,274 @@ def _now_iso() -> str:
 def _agent_submission_key(project: str, task_id: str) -> str:
     """Stable gateway idempotency key shared by run_agent/run_opencode."""
     return f"task:{project_state_key(project)}:{task_id}"
+
+
+def _command_fingerprint(cmd: str) -> str:
+    """Hash of the generated shell command ONLY.
+
+    The shell embeds every execution-relevant launch input (model, scope,
+    worktree, base_ref, managed source), but it REFERENCES the plan by path
+    (``$td/current-plan.md``) -- the plan's BYTES are never part of cmd. Use
+    ``_execution_fingerprint`` when the whole execution contract (plan
+    content, canonical task.json, model, cmd) must be bound.
+    """
+    return hashlib.sha256(cmd.encode("utf-8")).hexdigest()
+
+
+def _execution_fingerprint(
+    cmd: str,
+    plan: str | None,
+    task_json: dict[str, Any] | None,
+    model: str | None,
+) -> str:
+    """Cryptographically bind the exact execution contract to the attempt.
+
+    The generated shell references the plan by path, not by bytes, so cmd
+    alone cannot detect a plan rewrite. The fingerprint therefore covers:
+      - current-plan.md CONTENT (exact bytes);
+      - the canonical task.json blob -- while task_id is immutable, EVERY
+        task.json change is treated as changed content, no field guessing;
+      - the explicit model override;
+      - the generated cmd.
+
+    Deterministic JSON serialization only (sort_keys=True, stable
+    separators) -- never repr(dict), whose representations are unstable.
+    A change in any bound input changes the fingerprint, so the identity
+    resolver surfaces a typed immutable-task-conflict instead of replaying
+    an old execution against new content.
+    """
+    contract = {
+        "cmd": cmd,
+        "plan": plan,
+        "task_json": task_json,
+        "model": model,
+    }
+    payload = json.dumps(contract, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _new_attempt_id() -> str:
+    """One durable execution-attempt identity, created before submission."""
+    return uuid.uuid4().hex
+
+
+def _agent_attempt_key(project: str, task_id: str, attempt_id: str | None) -> str:
+    """Gateway idempotency key scoped to one execution attempt.
+
+    task_id alone is NOT an execution identity: the durable attempt_id ties
+    every retry and reconnect of the SAME (immutable) execution to one job,
+    and different content on the same task_id is rejected as a typed
+    immutable-task conflict instead of being allowed a second key/job.
+    """
+    base = _agent_submission_key(project, task_id)
+    if not attempt_id:
+        return base
+    return f"{base}:attempt:{attempt_id}"
+
+
+def _job_status_terminal(snapshot: dict[str, Any] | None) -> bool:
+    """Terminally decided gateway job status, or False when unknown."""
+    return snapshot is not None and snapshot.get("status") in {"completed", "failed", "cancelled"}
+
+
+def _job_status_active(snapshot: dict[str, Any] | None) -> bool:
+    """Nonterminal status the backend proved is still in flight."""
+    return snapshot is not None and snapshot.get("status") in {
+        "pending", "processing", "running", "cancelling",
+    }
+
+
+_SUBMIT_RETRY_ATTEMPTS = 3
+_WAIT_RETRY_ATTEMPTS = 2
+
+
+def _error_text(exc: Exception | None) -> str:
+    return str(exc) if exc is not None else "unknown error"
+
+
+def _submit_same_key_retry(
+    run_script_async: Callable[[str, str, str], dict[str, Any]],
+    project: str,
+    cmd: str,
+    submission_key: str,
+) -> tuple[str | None, Exception | None]:
+    """Submit under one stable idempotency key with bounded retries.
+
+    The backend reserves the key atomically together with the job envelope
+    (reserve_submission_with_job), so a response lost AFTER acceptance is
+    recovered by re-submitting the SAME key: the backend returns the
+    original job_id without enqueuing a second execution. Returns
+    (job_id, last_error); job_id is None only when nothing could be proven
+    accepted -- never a duplicate, never an ambiguous timeout.
+    """
+    last_error: Exception | None = None
+    for _attempt in range(_SUBMIT_RETRY_ATTEMPTS):
+        try:
+            submitted = run_script_async(project, cmd, submission_key)
+            job_id = submitted.get("job_id") if isinstance(submitted, dict) else None
+            if job_id:
+                return job_id, None
+            last_error = RuntimeError("async submit returned no job_id")
+        except Exception as exc:  # transport / gateway outage; key is idempotent
+            last_error = exc
+    return None, last_error
+
+
+def _resolve_attempt(
+    read_attempt_state: Callable[[str, str], dict[str, Any] | None],
+    claim_attempt_state: Callable[[str, str, dict[str, Any]], bool],
+    project: str,
+    task_id: str,
+    fingerprint: str,
+) -> tuple[str, str | None]:
+    """Resolve attempt_id + job_id for a run (ONE task_id = ONE execution).
+
+    The task_id is immutable once any attempt record exists:
+      - existing record + fingerprint MATCH -> REUSE the recorded attempt
+        and its bound job_id UNCONDITIONALLY, terminal or not. A later
+        same-content re-invocation (retry, reconnect, process restart,
+        terminal replay) returns the SAME execution instead of launching a
+        second one; the decision is stateless -- job_status is never
+        consulted (a terminal bound job is just as reusable as an active
+        one).
+      - existing record + fingerprint MISMATCH -> raise AttemptConflictError
+        (the recorded attempt belongs to different content; the caller must
+        create a NEW task_id). The backend is never submitted for it.
+      - NO record -> the FIRST attempt: a fresh attempt_id is claimed with
+        the create-if-absent CAS primitive. A concurrent first-attempt race
+        (two callers that BOTH observed absence) converges on the single
+        winner; the loser re-reads and reuses that record. A lost claim
+        with no winner is an inconsistency -> AttemptStateError.
+
+    The durable decision is written (claimed) BEFORE any submission, so a
+    crash, restart, or transport retry converges on the same attempt
+    instead of a second execution.
+    """
+    existing = read_attempt_state(project, task_id)
+    if existing is not None:
+        if existing.get("fingerprint") == fingerprint:
+            return existing["attempt_id"], existing.get("job_id")
+        raise AttemptConflictError(
+            project=project,
+            task_id=task_id,
+            attempt_id=existing["attempt_id"],
+            job_id=existing.get("job_id"),
+            recorded_fingerprint=existing["fingerprint"],
+            requested_fingerprint=fingerprint,
+        )
+
+    attempt_id = _new_attempt_id()
+    if claim_attempt_state(
+        project,
+        task_id,
+        {"attempt_id": attempt_id, "fingerprint": fingerprint, "job_id": None},
+    ):
+        return attempt_id, None
+
+    winner = read_attempt_state(project, task_id)
+    if winner is None:
+        raise AttemptStateError(
+            f"attempt claim for task {task_id} was lost but no winner record exists"
+        )
+    if winner.get("fingerprint") != fingerprint:
+        raise AttemptConflictError(
+            project=project,
+            task_id=task_id,
+            attempt_id=winner["attempt_id"],
+            job_id=winner.get("job_id"),
+            recorded_fingerprint=winner["fingerprint"],
+            requested_fingerprint=fingerprint,
+        )
+    return winner["attempt_id"], winner.get("job_id")
+
+
+def _wait_same_job(
+    run_script_wait: Callable[[str], dict[str, Any]],
+    job_status: Callable[[str], dict[str, Any]],
+    job_id: str,
+) -> dict[str, Any]:
+    """Wait on a known job_id with bounded transport-tolerant reconciliation.
+
+    The underlying wait call is retried a bounded number of times (waiting
+    is a read; a duplicate is impossible). If the transport never answers,
+    the gateway job_status is consulted: a terminal snapshot is returned as
+    a terminal receipt, a proven-nonterminal snapshot as a running receipt,
+    and an unreachable/ambiguous backend as a typed "unknown" receipt. This
+    never fabricates "running" without proof and never returns an opaque
+    timeout with no way forward -- every receipt carries job_id.
+    """
+    for _attempt in range(_WAIT_RETRY_ATTEMPTS):
+        try:
+            return run_script_wait(job_id)
+        except Exception:
+            continue  # wait is a read; a retry can never duplicate execution
+
+    try:
+        snapshot = job_status(job_id)
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "job_id": job_id,
+            "error": _error_text(exc),
+            "wait_timed_out": False,
+            "reconciled_via": "job_status",
+        }
+
+    if _job_status_terminal(snapshot):
+        return {
+            "status": snapshot.get("status", "completed"),
+            "job_id": job_id,
+            "exit_code": snapshot.get("exit_code"),
+            "stdout": str(snapshot.get("stdout", "")),
+            "stderr": str(snapshot.get("stderr", "")),
+            "reconciled_via": "job_status",
+        }
+    if _job_status_active(snapshot):
+        return {
+            "status": "running",
+            "job_id": job_id,
+            "wait_timed_out": True,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "reconciled_via": "job_status",
+        }
+    return {
+        "status": "unknown",
+        "job_id": job_id,
+        "error": f"job status {snapshot.get('status')!r}; transport unreachable",
+        "wait_timed_out": False,
+        "reconciled_via": "job_status",
+    }
+
+
+def _durable_missing(
+    *,
+    run_script_async: Callable[[str, str, str], dict[str, Any]] | None,
+    run_script_wait: Callable[[str], dict[str, Any]] | None,
+    read_attempt_state: Callable[[str, str], dict[str, Any] | None] | None,
+    claim_attempt_state: Callable[[str, str, dict[str, Any]], bool] | None,
+    write_attempt_state: Callable[[str, str, dict[str, Any]], None] | None,
+    job_status: Callable[[str], dict[str, Any]] | None,
+) -> list[str]:
+    """Names of the durable-submission callables that are missing, in order.
+
+    The durable sync contract is all-or-nothing: a caller that asks for the
+    idempotent submit+wait path but omits even one primitive is prevented
+    from silently degrading to a single blocking execution.
+    """
+    missing: list[str] = []
+    for name, present in (
+        ("run_script_async", run_script_async),
+        ("run_script_wait", run_script_wait),
+        ("read_attempt_state", read_attempt_state),
+        ("claim_attempt_state", claim_attempt_state),
+        ("write_attempt_state", write_attempt_state),
+        ("job_status", job_status),
+    ):
+        if present is None:
+            missing.append(name)
+    return missing
 
 
 def _shell_escape(text: str) -> str:
@@ -122,6 +393,16 @@ def _read_current_plan(
     project: str,
     task_id: str,
 ) -> str | None:
+    """Read current-plan.md content WITHOUT any normalization.
+
+    Returns the EXACT bytes read from the file, untouched by ``.strip()``:
+    the content feeds the contract fingerprint, so a trailing-newline or
+    leading-space mutation must change the fingerprint (the worker executes
+    the real on-disk file, which differs). Whitespace-only output is still
+    treated as ABSENT (None): the presence check strips, the returned bytes
+    do not. ``_execution_fingerprint`` is the only downstream consumer of
+    the plan content -- the shell built later references the file by path.
+    """
     from examples.mcp_server.agent_tasks import read_agent_task_file
 
     result = read_agent_task_file(
@@ -131,9 +412,9 @@ def _read_current_plan(
         filename="current-plan.md",
     )
     raw = result.get("stdout", "")
-    if raw == "(not found)":
+    if raw == "(not found)" or not raw.strip():
         return None
-    return raw.strip() or None
+    return raw
 
 
 def _proxy_fetch_script_lines(
@@ -1401,6 +1682,11 @@ def project_run_agent(
     router: Any | None = None,
     run_script: Callable[[str, str], dict[str, Any]] | None = None,
     run_script_async: Callable[[str, str, str], dict[str, Any]] | None = None,
+    run_script_wait: Callable[[str], dict[str, Any]] | None = None,
+    read_attempt_state: Callable[[str, str], dict[str, Any] | None] | None = None,
+    claim_attempt_state: Callable[[str, str, dict[str, Any]], bool] | None = None,
+    write_attempt_state: Callable[[str, str, dict[str, Any]], None] | None = None,
+    job_status: Callable[[str], dict[str, Any]] | None = None,
     async_submit: bool = False,
 ) -> dict[str, Any]:
     """Execute a handoff task via the agent backend router.
@@ -1426,13 +1712,44 @@ def project_run_agent(
             this process once a job is handed off, so an async run's
             eventual failure/rate-limit never reaches the router. Only the
             synchronous path (async_submit=False) updates cooldown state.
+        run_script_wait: callable(job_id) -> terminal job result dict, or a
+            durable receipt {"job_id", "status": "running",
+            "wait_timed_out": True} when the bounded wait expires while the
+            job is still running. When both run_script_async and
+            run_script_wait are set, the synchronous (async_submit=False)
+            path is durable: it submits under the stable idempotency key
+            and waits on the gateway job instead of a single blocking
+            execute-argv request, so a timeout after acceptance returns a
+            job_id-bearing receipt (status="running", wait_timed_out=True)
+            to poll -- never an opaque timeout with unknown state.
+        read_attempt_state: callable(project, task_id) -> dict with
+            {"attempt_id", "fingerprint", "job_id"} or None. Reads the
+            durable execution-attempt record for this task.
+        claim_attempt_state: callable(project, task_id, record) -> bool.
+            Create-if-absent atomic claim of the FIRST attempt record
+            (claims the new attempt_id only when no record exists yet, so
+            concurrent first attempts converge on one winner). Required for
+            the durable contract -- without it a first-attempt race could
+            launch two executions.
+        write_attempt_state: callable(project, task_id, record) -> None.
+            Binds the submitted job_id back into the attempt record on the
+            target. Required for the durable contract: without it a process
+            restart could not distinguish "retry the same attempt" from
+            "new intentional run" and duplication/reuse errors would return.
+        job_status: callable(job_id) -> {"status": ...} snapshot used to
+            reconcile a wait whose transport failed while the job_id is
+            already known.
         async_submit: submit and return a job_id immediately instead of
             waiting for the full run.
 
     Returns:
         dict with keys: task_id, status, exit_code, stdout, stderr,
-        started_at, finished_at (async: status="running", job_id set,
-        exit_code/stdout/stderr/finished_at are None/empty until polled)
+        started_at, finished_at, attempt_id, job_id. Durable receipts use
+        the documented reconciliation statuses: "not-accepted" (submit
+        could not be proven accepted; retryable=True, same attempt),
+        "running"/"wait_timed_out": True (job_id known), "unknown" (job_id
+        known but no backend proof of terminal or running), or a terminal
+        status when the job is decided.
     """
     from examples.mcp_server.agent_tasks import validate_base_ref, validate_task_id
 
@@ -1602,6 +1919,14 @@ def project_run_agent(
             "finished_at": _now_iso(),
         }
 
+    fingerprint = _execution_fingerprint(cmd, plan, task_json, model)
+    durable_store = (
+        read_attempt_state is not None
+        and claim_attempt_state is not None
+        and write_attempt_state is not None
+        and job_status is not None
+    )
+
     if async_submit:
         if run_script_async is None:
             return {
@@ -1614,11 +1939,95 @@ def project_run_agent(
                 "started_at": started_at,
                 "finished_at": None,
             }
-        submitted = run_script_async(project, cmd, _agent_submission_key(project, task_id))
+        attempt_id = None
+        job_id = None
+        if durable_store:
+            assert read_attempt_state is not None
+            assert claim_attempt_state is not None
+            assert write_attempt_state is not None
+            assert job_status is not None
+            try:
+                attempt_id, job_id = _resolve_attempt(
+                    read_attempt_state, claim_attempt_state,
+                    project, task_id, fingerprint,
+                )
+            except AttemptConflictError as exc:
+                return {
+                    "task_id": task_id,
+                    "status": "error",
+                    "kind": "immutable-task-conflict",
+                    "error": _error_text(exc),
+                    "attempt_id": exc.attempt_id,
+                    "job_id": exc.job_id,
+                    "fingerprint": fingerprint,
+                    "recorded_fingerprint": exc.recorded_fingerprint,
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "started_at": started_at,
+                    "finished_at": _now_iso(),
+                }
+            except Exception as exc:
+                return {
+                    "task_id": task_id,
+                    "status": "error",
+                    "kind": "durable-state-error",
+                    "error": _error_text(exc),
+                    "attempt_id": None,
+                    "job_id": None,
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "started_at": started_at,
+                    "finished_at": _now_iso(),
+                }
+        submission_key = _agent_attempt_key(project, task_id, attempt_id)
+        if job_id is None:
+            job_id, submit_error = _submit_same_key_retry(
+                run_script_async, project, cmd, submission_key
+            )
+        else:
+            submit_error = None
+        if job_id is None:
+            return {
+                "task_id": task_id,
+                "status": "not-accepted",
+                "retryable": True,
+                "error": _error_text(submit_error),
+                "attempt_id": attempt_id,
+                "job_id": None,
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "started_at": started_at,
+                "finished_at": _now_iso(),
+            }
+        if attempt_id:
+            assert write_attempt_state is not None
+            try:
+                write_attempt_state(
+                    project, task_id,
+                    {"attempt_id": attempt_id, "fingerprint": fingerprint, "job_id": job_id},
+                )
+            except Exception as exc:
+                return {
+                    "task_id": task_id,
+                    "status": "error",
+                    "kind": "durable-state-error",
+                    "error": _error_text(exc),
+                    "attempt_id": attempt_id,
+                    "job_id": job_id,
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "started_at": started_at,
+                    "finished_at": _now_iso(),
+                }
         return {
             "task_id": task_id,
             "status": "running",
-            "job_id": submitted.get("job_id"),
+            "job_id": job_id,
+            "attempt_id": attempt_id,
             "exit_code": None,
             "stdout": "",
             "stderr": "",
@@ -1626,19 +2035,207 @@ def project_run_agent(
             "finished_at": None,
         }
 
-    result = (run_script or run_cmd)(project, cmd)
-    exit_code = result.get("exit_code")
+    # Durable sync path (default). Fail closed: a caller that wants the
+    # idempotent submit+wait contract must supply the complete durable
+    # primitive set; anything less is a typed error, never a silent drop to
+    # a single blocking execution. Attempt identity is resolved and
+    # persisted BEFORE the first submission, submit retries reuse the same
+    # key (lost-response recovery), and a transport-lost wait reconciles via
+    # job_status instead of claiming unproven state.
+    if run_script_async is None:
+        # Pure legacy blocking path, reachable only from callers that pass
+        # no durable callables at all (unit harness). Production wiring in
+        # the adapter layer always provides the full durable set.
+        result = (run_script or run_cmd)(project, cmd)
+        exit_code = result.get("exit_code")
+
+        if router is not None and selected:
+            router.record_result(
+                selected,
+                exit_code=exit_code if exit_code is not None else -1,
+                stdout=result.get("stdout", ""),
+                stderr=result.get("stderr", ""),
+            )
+
+        stdout = result.get("stdout", "")
+        stderr = result.get("stderr", "")
+        if project_root:
+            try:
+                from examples.mcp_server.mcp_client_tools import _redact_project_root
+
+                stdout = _redact_project_root(stdout, project_root)
+                stderr = _redact_project_root(stderr, project_root)
+            except Exception:
+                pass  # redaction failure must not hide a real result
+
+        return {
+            "task_id": task_id,
+            "status": "needs-review"
+            if exit_code == 0
+            else "blocked"
+            if exit_code == 76
+            else "resource-exhausted"
+            if exit_code == 137
+            else "failed"
+            if exit_code is not None
+            else "error",
+            "attempt_id": None,
+            "job_id": None,
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "started_at": started_at,
+            "finished_at": _now_iso(),
+        }
+
+    missing = _durable_missing(
+        run_script_async=run_script_async,
+        run_script_wait=run_script_wait,
+        read_attempt_state=read_attempt_state,
+        claim_attempt_state=claim_attempt_state,
+        write_attempt_state=write_attempt_state,
+        job_status=job_status,
+    )
+    if missing:
+        return {
+            "task_id": task_id,
+            "status": "error",
+            "kind": "durable-requirements-not-met",
+            "error": "durable sync execution requires: " + ", ".join(missing),
+            "attempt_id": None,
+            "job_id": None,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "started_at": started_at,
+            "finished_at": _now_iso(),
+        }
+
+    assert run_script_wait is not None
+    assert read_attempt_state is not None
+    assert claim_attempt_state is not None
+    assert write_attempt_state is not None
+    assert job_status is not None
+
+    try:
+        attempt_id, job_id = _resolve_attempt(
+            read_attempt_state, claim_attempt_state,
+            project, task_id, fingerprint,
+        )
+    except AttemptConflictError as exc:
+        return {
+            "task_id": task_id,
+            "status": "error",
+            "kind": "immutable-task-conflict",
+            "error": _error_text(exc),
+            "attempt_id": exc.attempt_id,
+            "job_id": exc.job_id,
+            "fingerprint": fingerprint,
+            "recorded_fingerprint": exc.recorded_fingerprint,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "started_at": started_at,
+            "finished_at": _now_iso(),
+        }
+    except Exception as exc:
+        return {
+            "task_id": task_id,
+            "status": "error",
+            "kind": "durable-state-error",
+            "error": _error_text(exc),
+            "attempt_id": None,
+            "job_id": None,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "started_at": started_at,
+            "finished_at": _now_iso(),
+        }
+
+    submission_key = _agent_attempt_key(project, task_id, attempt_id)
+    if job_id is None:
+        job_id, submit_error = _submit_same_key_retry(
+            run_script_async, project, cmd, submission_key
+        )
+        if job_id is None:
+            return {
+                "task_id": task_id,
+                "status": "not-accepted",
+                "retryable": True,
+                "error": _error_text(submit_error),
+                "attempt_id": attempt_id,
+                "job_id": None,
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "started_at": started_at,
+                "finished_at": _now_iso(),
+            }
+        try:
+            write_attempt_state(
+                project, task_id,
+                {"attempt_id": attempt_id, "fingerprint": fingerprint, "job_id": job_id},
+            )
+        except Exception as exc:
+            return {
+                "task_id": task_id,
+                "status": "error",
+                "kind": "durable-state-error",
+                "error": _error_text(exc),
+                "attempt_id": attempt_id,
+                "job_id": job_id,
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "started_at": started_at,
+                "finished_at": _now_iso(),
+            }
+
+    waiter = _wait_same_job(run_script_wait, job_status, job_id)
+
+    if waiter.get("wait_timed_out") or waiter.get("status") == "running":
+        return {
+            "task_id": task_id,
+            "status": "running",
+            "job_id": job_id,
+            "attempt_id": attempt_id,
+            "wait_timed_out": True,
+            "reconciled_via": waiter.get("reconciled_via"),
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "started_at": started_at,
+            "finished_at": None,
+        }
+
+    if waiter.get("status") == "unknown":
+        return {
+            "task_id": task_id,
+            "status": "unknown",
+            "job_id": job_id,
+            "attempt_id": attempt_id,
+            "error": waiter.get("error", "job state unresolved after transport loss"),
+            "reconciled_via": waiter.get("reconciled_via"),
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "started_at": started_at,
+            "finished_at": None,
+        }
+
+    exit_code = waiter.get("exit_code")
 
     if router is not None and selected:
         router.record_result(
             selected,
             exit_code=exit_code if exit_code is not None else -1,
-            stdout=result.get("stdout", ""),
-            stderr=result.get("stderr", ""),
+            stdout=waiter.get("stdout", ""),
+            stderr=waiter.get("stderr", ""),
         )
 
-    stdout = result.get("stdout", "")
-    stderr = result.get("stderr", "")
+    stdout = waiter.get("stdout", "")
+    stderr = waiter.get("stderr", "")
     if project_root:
         try:
             from examples.mcp_server.mcp_client_tools import _redact_project_root
@@ -1659,6 +2256,9 @@ def project_run_agent(
         else "failed"
         if exit_code is not None
         else "error",
+        "attempt_id": attempt_id,
+        "job_id": job_id,
+        "reconciled_via": waiter.get("reconciled_via"),
         "exit_code": exit_code,
         "stdout": stdout,
         "stderr": stderr,
