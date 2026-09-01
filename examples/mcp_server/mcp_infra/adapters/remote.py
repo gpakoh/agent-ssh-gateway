@@ -782,6 +782,36 @@ async def gitea_push_local_ref(
                     message="Configured Gitea identity does not have push access to repository",
                     source="gitea",
                 )
+            default_branch = str(metadata.get("default_branch") or "").strip()
+            if not default_branch:
+                return tool_error(
+                    tool="gitea_push_local_ref",
+                    code="POLICY_DENIED",
+                    message="Repository default branch is unavailable; refusing trusted push",
+                    source="gitea",
+                )
+            if destination_branch == default_branch:
+                return tool_error(
+                    tool="gitea_push_local_ref",
+                    code="POLICY_DENIED",
+                    message="Trusted candidate push to the repository default branch is not allowed",
+                    source="gitea",
+                )
+
+            remote_branch: dict[str, Any] | None = None
+            try:
+                remote_branch = await client.get_branch(owner, repo, destination_branch)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+            if remote_branch is not None and remote_branch.get("protected") is not False:
+                return tool_error(
+                    tool="gitea_push_local_ref",
+                    code="POLICY_DENIED",
+                    message="Trusted candidate push to a protected or unverifiable branch is not allowed",
+                    source="gitea",
+                )
+
             username = str(user.get("login") or user.get("username") or "").strip()
             if not username:
                 return tool_error(
@@ -801,7 +831,12 @@ async def gitea_push_local_ref(
                 token=token,
                 git_base=git_base,
             )
-            branches = await client.list_branches(owner, repo, limit=50)
+            try:
+                remote_branch = await client.get_branch(owner, repo, destination_branch)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+                remote_branch = None
     except ManagedGitError as exc:
         return tool_error(
             tool="gitea_push_local_ref",
@@ -813,24 +848,21 @@ async def gitea_push_local_ref(
         return _remote_api_error("gitea_push_local_ref", "gitea", exc)
 
     expected = receipt["candidate_head_sha"]
-    for branch in branches:
-        if branch.get("name") != destination_branch:
-            continue
-        commit = branch.get("commit") or {}
-        if str(commit.get("id") or "").lower() == expected:
-            return tool_success(
-                "gitea_push_local_ref",
-                result={
-                    "project": project,
-                    "task_id": task_id,
-                    "owner": owner,
-                    "repo": repo,
-                    "branch": destination_branch,
-                    "sha": expected,
-                    "verified": True,
-                },
-                source="gitea",
-            )
+    commit = (remote_branch or {}).get("commit") or {}
+    if str(commit.get("id") or "").lower() == expected:
+        return tool_success(
+            "gitea_push_local_ref",
+            result={
+                "project": project,
+                "task_id": task_id,
+                "owner": owner,
+                "repo": repo,
+                "branch": destination_branch,
+                "sha": expected,
+                "verified": True,
+            },
+            source="gitea",
+        )
     return tool_error(
         tool="gitea_push_local_ref",
         code="REMOTE_VERIFY_FAILED",

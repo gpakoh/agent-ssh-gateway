@@ -1040,7 +1040,7 @@ def _supervisor_postrun_script_lines(
         'if GIT_INDEX_FILE="$SUPERVISOR_INDEX" git read-tree "$BASE_HEAD" >/dev/null 2>&1 && \\',
         '   GIT_INDEX_FILE="$SUPERVISOR_INDEX" git add -A -- . >/dev/null 2>&1 && \\',
         '   GIT_INDEX_FILE="$SUPERVISOR_INDEX" git diff --cached --binary --no-color "$BASE_HEAD" -- > "$td/implementation-diff.patch" 2>/dev/null && \\',
-        '   GIT_INDEX_FILE="$SUPERVISOR_INDEX" git diff --cached --name-only -z "$BASE_HEAD" -- > "$td/changed-files.z" 2>/dev/null; then',
+        '   GIT_INDEX_FILE="$SUPERVISOR_INDEX" git diff --cached --no-renames --name-only -z "$BASE_HEAD" -- > "$td/changed-files.z" 2>/dev/null; then',
         '  echo "Supervisor evidence collected" >> "$td/agent-status.md"',
         "else",
         "  EVIDENCE_RC=1",

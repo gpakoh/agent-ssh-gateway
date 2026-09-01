@@ -622,7 +622,7 @@ def _validate_receipt_shape(receipt: dict[str, Any]) -> None:
 def _changed_candidate_paths(repo: Path, base_head: str, candidate_head: str) -> list[str]:
     try:
         result = subprocess.run(
-            ["git", "diff", "--name-only", "-z", base_head, candidate_head, "--"],
+            ["git", "diff", "--no-renames", "--name-only", "-z", base_head, candidate_head, "--"],
             cwd=repo,
             capture_output=True,
             timeout=30,

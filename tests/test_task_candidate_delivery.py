@@ -15,6 +15,8 @@ from examples.mcp_server.task_candidate import (
     RECEIPT_VERSION,
     CandidateError,
     _candidate_record_dir,
+    _changed_candidate_paths,
+    _enforce_candidate_scope,
     _staging_repo,
     bind_task_attempt_job,
     materialize_task_candidate,
@@ -500,6 +502,33 @@ def test_mutable_scope_json_cannot_authorize_out_of_scope_diff(tmp_path: Path, m
     (td / "scope-violations.json").write_text(json.dumps({"violations": []}), encoding="utf-8")
     with pytest.raises(CandidateError, match="outside immutable allowed scope"):
         materialize_task_candidate(project_root=root, project=PROJECT, task_id=TASK, destination_owner=OWNER, destination_repo=REPO, destination_branch=BRANCH, expected_diff_sha256=_diff_sha(td), job_result=_job_success, verify_candidate=_verify_success)
+
+
+def test_candidate_scope_rename_cannot_hide_forbidden_source(tmp_path: Path) -> None:
+    root = tmp_path / "rename-repo"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "config", "user.email", "test@example.invalid")
+    (root / "forbidden.txt").write_text("secret\n", encoding="utf-8")
+    _git(root, "add", "forbidden.txt")
+    _git(root, "commit", "-q", "-m", "base")
+    base = _git(root, "rev-parse", "HEAD")
+
+    _git(root, "mv", "forbidden.txt", "allowed.txt")
+    _git(root, "commit", "-q", "-m", "rename")
+    candidate = _git(root, "rev-parse", "HEAD")
+
+    changed = set(_changed_candidate_paths(root, base, candidate))
+    assert changed == {"forbidden.txt", "allowed.txt"}
+    with pytest.raises(CandidateError, match="outside immutable allowed scope|forbidden file"):
+        _enforce_candidate_scope(
+            root,
+            base_head=base,
+            candidate_head=candidate,
+            allowed_files=["allowed.txt"],
+            forbidden_files=["forbidden.txt"],
+        )
 
 
 def test_nonterminal_trusted_job_is_denied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
