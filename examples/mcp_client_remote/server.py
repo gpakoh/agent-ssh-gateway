@@ -32,6 +32,7 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(Path(__file__).resolve().parent / ".env")
 load_dotenv(MCP_SERVER_DIR / ".env", override=False)
 
+import anyio  # noqa: E402
 import httpx  # noqa: E402
 import uvicorn  # noqa: E402
 from starlette.applications import Starlette  # noqa: E402
@@ -177,17 +178,19 @@ async def _shutdown_process_resources() -> None:
 
 
 async def _finish_shutdown_despite_cancellation() -> None:
-    """Defer parent/task cancellation until process resource cleanup finishes."""
-    cleanup_task = asyncio.create_task(_shutdown_process_resources())
-    try:
-        await asyncio.shield(cleanup_task)
-    except asyncio.CancelledError:
-        # asyncio.shield prevents cancellation from propagating into cleanup,
-        # but the awaiting lifespan task still receives CancelledError. Join
-        # the cleanup task before re-raising so raw Task.cancel() cannot make
-        # uvicorn exit while FleetRuntime threads/watchers are still owned.
-        await cleanup_task
-        raise
+    """Defer AnyIO-scope and raw-task cancellation until cleanup finishes."""
+    # Starlette/AnyIO shutdown may enter this function inside an already-
+    # cancelled CancelScope. Raw asyncio.Task.cancel() is a separate channel.
+    # Shield both: create the cleanup task inside an AnyIO shield so inherited
+    # cancel-scope state cannot abort its checkpoints, and use asyncio.shield so
+    # cancelling the lifespan task itself does not propagate into cleanup.
+    with anyio.CancelScope(shield=True):
+        cleanup_task = asyncio.create_task(_shutdown_process_resources())
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            await cleanup_task
+            raise
 
 
 @asynccontextmanager
