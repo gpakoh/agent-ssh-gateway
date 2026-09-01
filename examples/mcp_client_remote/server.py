@@ -18,9 +18,10 @@ import logging
 import os
 import secrets
 import sys
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 EXAMPLES_DIR = Path(__file__).resolve().parents[1]
 MCP_SERVER_DIR = EXAMPLES_DIR / "mcp_server"
@@ -111,6 +112,66 @@ OAUTH_PUBLIC_EXACT_OR_NESTED = (
     "/register",
     "/health",
 )
+
+# --- Shared upstream AsyncClient (reusable-pool corrective) ----------------
+# Keep the active pool bounded while covering the two-hop MCP concurrency envelope.
+# max_connections=100 is verified with 80 simultaneously held real streams; keepalive
+# stays separately bounded at 10 because idle retention is not active-stream capacity.
+_UPSTREAM_MAX_CONNECTIONS = 100
+_UPSTREAM_MAX_KEEPALIVE_CONNECTIONS = 10
+_UPSTREAM_CLIENT: httpx.AsyncClient | None = None
+
+
+def _make_upstream_client(timeout: float | httpx.Timeout) -> httpx.AsyncClient:
+    """Return the process-shared upstream client.
+
+    Kept a plain sync getter so the per-request timeout is applied on each
+    ``send``/``request`` hop (see ``_proxy_upstream``), not baked into a
+    fresh client. The client is created once at lifespan startup and reused
+    for every upstream hop; it is never closed per-request.
+    """
+    client = _UPSTREAM_CLIENT
+    if client is None:
+        raise RuntimeError("shared upstream client not initialized (lifespan startup missing)")
+    return client
+
+
+async def _startup_upstream_client() -> None:
+    """Create the shared upstream client once (idempotent)."""
+    global _UPSTREAM_CLIENT  # noqa: PLW0603
+    if _UPSTREAM_CLIENT is not None:
+        return
+    _UPSTREAM_CLIENT = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=10.0, write=30.0, pool=10.0, read=5.0),
+        limits=httpx.Limits(
+            max_connections=_UPSTREAM_MAX_CONNECTIONS,
+            max_keepalive_connections=_UPSTREAM_MAX_KEEPALIVE_CONNECTIONS,
+        ),
+        trust_env=False,
+    )
+    logger.info(
+        "Created shared upstream AsyncClient (max_connections=%d)",
+        _UPSTREAM_MAX_CONNECTIONS,
+    )
+
+
+async def _shutdown_upstream_client() -> None:
+    """Gracefully close the shared upstream client."""
+    global _UPSTREAM_CLIENT  # noqa: PLW0603
+    if _UPSTREAM_CLIENT is not None:
+        await _UPSTREAM_CLIENT.aclose()
+        _UPSTREAM_CLIENT = None
+        logger.info("Closed shared upstream AsyncClient")
+
+
+@asynccontextmanager
+async def _lifespan(app: Starlette) -> AsyncIterator[dict[str, Any]]:
+    """Manage shared upstream client lifecycle."""
+    await _startup_upstream_client()
+    try:
+        yield {}
+    finally:
+        await _shutdown_upstream_client()
 
 
 def _is_oauth_public_path(path: str) -> bool:
@@ -277,32 +338,28 @@ async def _check_tool_scope(request: Request, path: str, body: bytes) -> JSONRes
     return None
 
 
-def _is_streaming_get(request: Request, target_path: str) -> bool:
-    """Only GET /mcp (and public GET / mapped to /mcp) should stream.
+def _mcp_proxy_timeout(method: str, target_path: str) -> httpx.Timeout:
+    """Per-hop timeout matrix (BLOCKING REVIEW GATE).
 
-    Everything else - POST, DELETE, other GET routes - stays bounded so the
-    whole proxy cannot become an unbounded streaming endpoint. A long-lived
-    SSE/MCP stream only ever lives at /mcp.
+    MCP streamable HTTP carries its response as a server-sent event stream
+    even for POST tool-call replies: the body stays open (heartbeat pings),
+    so a buffered read would block forever. Only the two MCP streamable hops
+    (GET /mcp and POST /mcp) get an unbounded read (read=None) with finite
+    connect/write/pool so a dead upstream cannot wedge a worker forever.
+
+    DELETE /mcp terminates a session and must stay bounded (finite read) --
+    it is not given an unbounded read without separate proof. Non-MCP routes
+    (GET/POST/DELETE on any other path) also keep the finite timeout contract
+    that the original bounded path used (300s).
+
+    Note: timeout selection happens at request-build time from the request
+    method + normalized path. A POST whose upstream replies with plain JSON
+    instead of SSE still rides the read=None hop (it simply returns fast); the
+    unbounded read only matters if that response were to stream.
     """
-    return request.method == "GET" and target_path == "/mcp"
-
-
-def _mcp_proxy_timeout(*, streaming: bool) -> float | httpx.Timeout:
-    """Timeout for the upstream hop.
-
-    Streaming needs an unbounded read (a long-idle SSE/MCP stream must never
-    be killed by a read timeout) while connect/write/pool stay finite so a
-    dead upstream cannot wedge a worker forever. Bounded requests keep the
-    previous single finite timeout on every phase.
-    """
-    if streaming:
+    if method in ("GET", "POST") and target_path == "/mcp":
         return httpx.Timeout(connect=10.0, write=30.0, pool=10.0, read=None)
-    return 300.0
-
-
-def _make_upstream_client(timeout: float | httpx.Timeout) -> httpx.AsyncClient:
-    """Explicit seam for tests: keeps the timeout out of a global default."""
-    return httpx.AsyncClient(timeout=timeout)
+    return httpx.Timeout(connect=10.0, write=30.0, pool=10.0, read=300.0)
 
 
 async def _proxy_upstream(
@@ -311,34 +368,32 @@ async def _proxy_upstream(
     body: bytes,
     headers: dict[str, str],
     *,
-    streaming: bool,
+    target_path: str,
 ) -> tuple[httpx.AsyncClient, httpx.Response] | None:
-    """Send the request upstream.
+    """Send the request upstream (streaming for GET/POST MCP hops).
 
-    Streaming sends with stream=True so HTTP response headers arrive before
-    the upstream body has been fully read - the first SSE chunk can then be
-    forwarded downstream before upstream EOF. Returns None on a pre-header
-    RequestError (caller must build the 502 response).
+    MCP streamable HTTP is SSE even for tool calls/POST: the response body is
+    a stream of server-sent events that stays open (heartbeat pings), so it
+    can never be buffered with a blocking read. We always use stream=True so
+    the upstream status/headers arrive first and event chunks are forwarded
+    downstream as they arrive. The per-request timeout (method/path-aware --
+    see ``_mcp_proxy_timeout``) is attached to the Request via build_request
+    (httpx's AsyncClient.send() takes no `timeout` kwarg but honors the one on
+    the Request). Returns None on a pre-header RequestError (caller must build
+    the 502 response).
     """
-    client = _make_upstream_client(_mcp_proxy_timeout(streaming=streaming))
+    client = _make_upstream_client(_mcp_proxy_timeout(request.method, target_path))
+    per_request_timeout = _mcp_proxy_timeout(request.method, target_path)
     try:
-        if streaming:
-            req = client.build_request(
-                method=request.method,
-                url=url,
-                content=body,
-                headers=headers,
-            )
-            resp = await client.send(req, stream=True)
-        else:
-            resp = await client.request(
-                method=request.method,
-                url=url,
-                content=body,
-                headers=headers,
-            )
+        req = client.build_request(
+            method=request.method,
+            url=url,
+            content=body,
+            headers=headers,
+            timeout=per_request_timeout,
+        )
+        resp = await client.send(req, stream=True)
     except httpx.RequestError:
-        await client.aclose()
         return None
     return client, resp
 
@@ -354,29 +409,25 @@ async def _proxy_stream_body(
     resp: httpx.Response,
     client: httpx.AsyncClient,
 ):
-    """Stream upstream body chunks downstream, owning the resources.
+    """Stream upstream body chunks downstream.
 
-    The generator's finally is the single ownership seam for the streaming
-    lifetime: the upstream httpx.Response and the AsyncClient are closed
-    exactly when the downstream stream ends - normal EOF, downstream
-    cancellation/disconnect, or an upstream read error. Nothing uses the
-    private ``request._receive`` hook and nothing leaks into the background.
+    The generator's finally closes only the upstream httpx.Response; the
+    shared AsyncClient is closed once during lifespan shutdown.
     """
     try:
         async for chunk in resp.aiter_bytes():
             yield chunk
     finally:
         await resp.aclose()
-        await client.aclose()
 
 
 async def _proxy_401(request: Request, resp: httpx.Response, client: httpx.AsyncClient) -> Response:
-    """Build a bounded 401 pass-through and release resources.
+    """Build a bounded 401 pass-through and release the upstream response.
 
     Reads the upstream 401 body, returns a plain Response (NOT streaming) so
     the caller's return annotation must reflect both branches. Never logs the
-    body: a raw OAuth 401 payload can embed credentials/token details. Both
-    the upstream response and its client are closed here.
+    body: a raw OAuth 401 payload can embed credentials/token details. The
+    upstream response is closed here; the shared client is closed at shutdown.
     """
     try:
         resp_body = await resp.aread()
@@ -387,7 +438,6 @@ async def _proxy_401(request: Request, resp: httpx.Response, client: httpx.Async
         )
     finally:
         await resp.aclose()
-        await client.aclose()
         logger.warning(f"PROXY 401 method={request.method} path={request.url.path}")
 
 
@@ -414,10 +464,8 @@ async def proxy_request(request: Request) -> StreamingResponse | JSONResponse | 
     if auth_token and "authorization" not in {k.lower() for k in headers}:
         headers["Authorization"] = f"Bearer {auth_token}"
 
-    streaming = _is_streaming_get(request, target_path)
-
     upstream = await _proxy_upstream(
-        request, url, body, headers, streaming=streaming
+        request, url, body, headers, target_path=target_path
     )
     if upstream is None:
         return JSONResponse(
@@ -431,19 +479,8 @@ async def proxy_request(request: Request) -> StreamingResponse | JSONResponse | 
     if resp.status_code == 401:
         return await _proxy_401(request, resp, client)
 
-    if streaming:
-        return StreamingResponse(
-            content=_proxy_stream_body(resp, client),
-            status_code=resp.status_code,
-            headers=dict(resp.headers),
-        )
-    # Bounded path: client.request() already buffered the whole body, so the
-    # upstream response and client are no longer needed - release them now
-    # instead of leaking a pooled connection until GC.
-    await resp.aclose()
-    await client.aclose()
     return StreamingResponse(
-        content=resp.aiter_bytes(),
+        content=_proxy_stream_body(resp, client),
         status_code=resp.status_code,
         headers=dict(resp.headers),
     )
@@ -642,7 +679,7 @@ async def openid_configuration(request: Request) -> JSONResponse:
 
 def create_proxy_app() -> Starlette:
     """Create auth-guarded proxy to internal MCP server."""
-    proxy = Starlette()
+    proxy = Starlette(lifespan=_lifespan)
     proxy.add_middleware(OAuthProxyMiddleware)
     proxy.add_route("/oauth/consent", consent_handler, methods=["GET", "POST"])
     proxy.add_route("/.well-known/openid-configuration", openid_configuration, methods=["GET"])
