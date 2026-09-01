@@ -477,7 +477,9 @@ class FleetRuntime:
             await asyncio.sleep(self._watch_poll_interval)
 
     async def close(self) -> None:
-        """Cancel and await reconciliation watchers before closing state."""
+        """Join reconciliation work and the gateway executor before state close."""
+        if self._closed:
+            return
         self._closed = True
         watchers = list(self._watchers_by_job.values())
         for task in watchers:
@@ -485,12 +487,20 @@ class FleetRuntime:
         if watchers:
             await asyncio.gather(*watchers, return_exceptions=True)
         self._watchers_by_job.clear()
-        self._gateway_executor.shutdown(wait=False, cancel_futures=True)
+        # A running sync gateway call cannot be cancelled by cancelling its
+        # asyncio waiter. Process shutdown therefore waits for executor work to
+        # finish instead of abandoning fleet-gateway threads at interpreter exit.
+        await asyncio.to_thread(
+            self._gateway_executor.shutdown,
+            wait=True,
+            cancel_futures=True,
+        )
         await self.state.close()
 
 
 _runtime: FleetRuntime | None = None
 _runtime_lock: asyncio.Lock | None = None
+_runtime_loop: asyncio.AbstractEventLoop | None = None
 
 
 def fleet_enabled() -> bool:
@@ -499,10 +509,13 @@ def fleet_enabled() -> bool:
 
 async def get_fleet_runtime() -> FleetRuntime | None:
     """Return the process singleton when fleet admission is enabled."""
-    global _runtime, _runtime_lock
+    global _runtime, _runtime_lock, _runtime_loop
     if not fleet_enabled():
         return None
+    current_loop = asyncio.get_running_loop()
     if _runtime is not None:
+        if _runtime_loop is not current_loop:
+            raise FleetRuntimeError("FleetRuntime accessed from a non-owner event loop")
         return _runtime
     if _runtime_lock is None:
         _runtime_lock = asyncio.Lock()
@@ -515,16 +528,50 @@ async def get_fleet_runtime() -> FleetRuntime | None:
                 capacity=_configured_capacity(),
                 coordinator_id=_configured_coordinator_id(),
             )
+            _runtime_loop = current_loop
         return _runtime
 
 
+async def _close_fleet_runtime_on_owner_loop() -> None:
+    """Close and clear the singleton from its owning event loop."""
+    global _runtime, _runtime_lock, _runtime_loop
+    runtime = _runtime
+    try:
+        if runtime is not None:
+            await runtime.close()
+    finally:
+        _runtime = None
+        _runtime_lock = None
+        _runtime_loop = None
+
+
 async def close_fleet_runtime() -> None:
-    """Cancel watchers and close the asyncpg pool during MCP shutdown/tests."""
-    global _runtime, _runtime_lock
-    if _runtime is not None:
-        await _runtime.close()
-    _runtime = None
-    _runtime_lock = None
+    """Close the process singleton on the event loop that created it.
+
+    The public Starlette proxy runs in the process main thread while FastMCP
+    owns a separate loop in its internal server thread. Process shutdown may
+    therefore originate off-loop; marshal cleanup back to the owner rather
+    than awaiting asyncpg/tasks from the wrong loop.
+    """
+    global _runtime, _runtime_lock, _runtime_loop
+    if _runtime is None:
+        _runtime_lock = None
+        _runtime_loop = None
+        return
+
+    owner_loop = _runtime_loop
+    current_loop = asyncio.get_running_loop()
+    if owner_loop is None or owner_loop is current_loop:
+        await _close_fleet_runtime_on_owner_loop()
+        return
+    if not owner_loop.is_running():
+        raise FleetRuntimeError("FleetRuntime owner loop is not running during process shutdown")
+
+    future = asyncio.run_coroutine_threadsafe(
+        _close_fleet_runtime_on_owner_loop(),
+        owner_loop,
+    )
+    await asyncio.wrap_future(future)
 
 
 __all__ = [

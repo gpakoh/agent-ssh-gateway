@@ -31,6 +31,7 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(Path(__file__).resolve().parent / ".env")
 load_dotenv(MCP_SERVER_DIR / ".env", override=False)
 
+import anyio  # noqa: E402
 import httpx  # noqa: E402
 import uvicorn  # noqa: E402
 from starlette.applications import Starlette  # noqa: E402
@@ -166,12 +167,25 @@ async def _shutdown_upstream_client() -> None:
 
 @asynccontextmanager
 async def _lifespan(app: Starlette) -> AsyncIterator[dict[str, Any]]:
-    """Manage shared upstream client lifecycle."""
+    """Own process-global MCP resources for the public Starlette process.
+
+    FastMCP ServerSession lifespans are transport-scoped and must never close
+    FleetRuntime. The outer process lifespan is the single shutdown owner.
+    Shutdown first joins FleetRuntime background coordination on its owning
+    event loop, then closes the shared upstream HTTP pool from #117.
+    """
     await _startup_upstream_client()
     try:
         yield {}
     finally:
-        await _shutdown_upstream_client()
+        # Starlette shutdown can be entered because the serving task itself was
+        # cancelled. Shield the bounded resource join so reconciliation tasks,
+        # asyncpg state and fleet-gateway threads are not abandoned mid-close.
+        with anyio.CancelScope(shield=True):
+            try:
+                await _mcp_mod.close_fleet_runtime()
+            finally:
+                await _shutdown_upstream_client()
 
 
 def _is_oauth_public_path(path: str) -> bool:
