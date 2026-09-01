@@ -11,8 +11,11 @@ import pytest
 from examples.mcp_server.agent_paths import task_dir
 from examples.mcp_server.task_candidate import (
     CONTRACT_FILENAME,
+    RECEIPT_FILENAME,
     RECEIPT_VERSION,
     CandidateError,
+    _candidate_record_dir,
+    _staging_repo,
     bind_task_attempt_job,
     materialize_task_candidate,
     record_task_delivery_contract,
@@ -557,3 +560,140 @@ def test_changed_trusted_contract_after_receipt_is_denied(
             destination_branch=BRANCH,
             expected_sha=receipt["candidate_head_sha"],
         )
+
+
+def _attempt_id(td: Path) -> str:
+    return json.loads((td / "attempt-state.json").read_text(encoding="utf-8"))["attempt_id"]
+
+
+def test_receipt_less_staging_is_recovered_by_reverification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, _, receipt = _materialize(tmp_path, monkeypatch)
+    staging = _staging_repo(_candidate_record_dir(PROJECT, TASK, receipt["attempt_id"]))
+    assert staging.is_dir()
+    receipt_path = _candidate_record_dir(PROJECT, TASK, receipt["attempt_id"]) / RECEIPT_FILENAME
+    receipt_path.unlink()
+    td = Path(task_dir(PROJECT, TASK))
+
+    verifier_calls = {"n": 0}
+
+    def verifier(repo: Path, expected_sha: str, checks: list[str]) -> None:
+        verifier_calls["n"] += 1
+        _verify_success(repo, expected_sha, checks)
+
+    recovered = materialize_task_candidate(
+        project_root=root,
+        project=PROJECT,
+        task_id=TASK,
+        destination_owner=OWNER,
+        destination_repo=REPO,
+        destination_branch=BRANCH,
+        expected_diff_sha256=_diff_sha(td),
+        job_result=_job_success,
+        verify_candidate=verifier,
+    )
+    assert verifier_calls["n"] == 1
+    assert recovered["version"] == RECEIPT_VERSION
+    assert recovered["candidate_head_sha"] == receipt["candidate_head_sha"]
+    assert staging.is_dir()
+    checked, _ = validate_task_candidate_for_push(
+        project_root=root,
+        project=PROJECT,
+        task_id=TASK,
+        destination_owner=OWNER,
+        destination_repo=REPO,
+        destination_branch=BRANCH,
+        expected_sha=recovered["candidate_head_sha"],
+    )
+    assert checked == recovered
+
+
+def test_symlink_staging_is_denied_and_external_target_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _, td = _write_evidence(root, monkeypatch)
+    record_dir = _candidate_record_dir(PROJECT, TASK, _attempt_id(td))
+    staging = _staging_repo(record_dir)
+    external = tmp_path / "external-target"
+    external.mkdir()
+    sentinel = external / "sentinel.txt"
+    sentinel.write_text("keep\n", encoding="utf-8")
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    staging.symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(CandidateError, match="orphan candidate staging"):
+        materialize_task_candidate(
+            project_root=root,
+            project=PROJECT,
+            task_id=TASK,
+            destination_owner=OWNER,
+            destination_repo=REPO,
+            destination_branch=BRANCH,
+            expected_diff_sha256=_diff_sha(td),
+            job_result=_job_success,
+            verify_candidate=_verify_success,
+        )
+    assert staging.is_symlink()
+    assert sentinel.read_text(encoding="utf-8") == "keep\n"
+    assert (external / "base.txt").exists() is False
+
+
+def test_verifier_failure_leaves_no_materialize_residue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _, td = _write_evidence(root, monkeypatch)
+    candidate_root = tmp_path / "candidate-store"
+
+    def failing(_repo: Path, _sha: str, _checks: list[str]) -> None:
+        raise RuntimeError("isolated verifier boom")
+
+    with pytest.raises(CandidateError, match="verification failed"):
+        materialize_task_candidate(
+            project_root=root,
+            project=PROJECT,
+            task_id=TASK,
+            destination_owner=OWNER,
+            destination_repo=REPO,
+            destination_branch=BRANCH,
+            expected_diff_sha256=_diff_sha(td),
+            job_result=_job_success,
+            verify_candidate=failing,
+        )
+    residue = [p for p in candidate_root.rglob(".materialize-*") if p.is_dir()]
+    assert residue == []
+    assert not any(p.name.startswith(".materialize-") for p in candidate_root.rglob("*"))
+
+
+def test_existing_receipt_idempotency_does_not_rerun_verifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _, td = _write_evidence(root, monkeypatch)
+    verifier_calls = {"n": 0}
+
+    def verifier(repo: Path, expected_sha: str, checks: list[str]) -> None:
+        verifier_calls["n"] += 1
+        _verify_success(repo, expected_sha, checks)
+
+    kwargs = dict(
+        project_root=root,
+        project=PROJECT,
+        task_id=TASK,
+        destination_owner=OWNER,
+        destination_repo=REPO,
+        destination_branch=BRANCH,
+        expected_diff_sha256=_diff_sha(td),
+        job_result=_job_success,
+        verify_candidate=verifier,
+    )
+    first = materialize_task_candidate(**kwargs)
+    second = materialize_task_candidate(**kwargs)
+    assert verifier_calls["n"] == 1
+    assert first == second
+    assert first["candidate_head_sha"] == second["candidate_head_sha"]

@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -683,8 +684,12 @@ def _materialize_task_candidate_unlocked(
             expected_sha=existing["candidate_head_sha"],
         )
         return existing
-    if staging.exists() or staging.is_symlink():
+    if staging.is_symlink():
         raise CandidateError("orphan candidate staging exists without a trusted receipt")
+    if staging.exists() and not staging.is_dir():
+        raise CandidateError("orphan candidate staging exists without a trusted receipt")
+    if staging.is_dir():
+        shutil.rmtree(staging)
 
     staging.parent.mkdir(parents=True, exist_ok=True)
     _assert_no_symlink_chain(_candidate_root(), staging.parent)
@@ -759,13 +764,8 @@ def _materialize_task_candidate_unlocked(
         _atomic_write_json(receipt_path, receipt)
         return receipt
     finally:
-        patch_path = tmp / "implementation-diff.patch"
         try:
-            patch_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        try:
-            tmp.rmdir()
+            shutil.rmtree(tmp)
         except OSError:
             pass
 
