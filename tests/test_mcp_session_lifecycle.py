@@ -106,7 +106,7 @@ def test_scoped_reconnect_never_requests_reuse_of_another_logical_sid(
             "username": "tester",
             "reuse_existing": False,
             "ephemeral": True,
-            "idle_timeout_seconds": 600,
+            "idle_timeout_seconds": 300,
         }
     ]
 
@@ -292,14 +292,14 @@ def _attach_owned_client(
 
 
 @pytest.mark.asyncio
-async def test_active_lifecycle_heartbeats_owned_sid_until_teardown(
+async def test_lifespan_does_not_keep_abandoned_sid_alive_or_close_global_fleet_runtime(
     monkeypatch: pytest.MonkeyPatch, live_server: Any
 ) -> None:
     gateway_pool = live_server.GatewayClientSessionPool()
     agent_pool = live_server.GatewayClientSessionPool()
-    heartbeat_seen = asyncio.Event()
     heartbeats: list[str] = []
     disconnects: list[str] = []
+    fleet_closes = 0
 
     async def tracking_post_async(
         _client: Any, path: str, payload: dict[str, Any], *, timeout: float | int
@@ -307,20 +307,19 @@ async def test_active_lifecycle_heartbeats_owned_sid_until_teardown(
         sid = payload["session_id"]
         if path == "/api/ssh/heartbeat":
             heartbeats.append(sid)
-            heartbeat_seen.set()
             return {"status": "ok"}
         if path == "/api/ssh/disconnect":
             disconnects.append(sid)
             return {"status": "disconnected"}
         raise AssertionError(path)
 
-    async def _noop_close() -> None:
-        return None
+    async def forbidden_global_close() -> None:
+        nonlocal fleet_closes
+        fleet_closes += 1
 
     monkeypatch.setattr(live_server, "_gateway_client_sessions", gateway_pool)
     monkeypatch.setattr(live_server, "_agent_client_sessions", agent_pool)
-    monkeypatch.setattr(live_server, "_MCP_SESSION_KEEPALIVE_INTERVAL_SECONDS", 0.01)
-    monkeypatch.setattr(live_server, "close_fleet_runtime", _noop_close)
+    monkeypatch.setattr(live_server, "close_fleet_runtime", forbidden_global_close)
     monkeypatch.setattr(live_server.GatewayClient, "_post_async", tracking_post_async)
 
     async with live_server._mcp_lifespan(live_server.mcp) as owner:
@@ -328,16 +327,16 @@ async def test_active_lifecycle_heartbeats_owned_sid_until_teardown(
             live_server, gateway_pool, owner, "active-owned-sid"
         )
         assert mcp_session is not None
-        await asyncio.wait_for(heartbeat_seen.wait(), timeout=0.2)
-        assert heartbeats == ["active-owned-sid"]
+        assert scoped._idle_timeout_seconds == 300
+        await asyncio.sleep(0.04)
+        assert heartbeats == []
+        assert fleet_closes == 0
         assert scoped.session_id == "active-owned-sid"
         assert scoped._owns_session is True
 
-    heartbeat_count_after_teardown = len(heartbeats)
-    await asyncio.sleep(0.04)
-
-    assert len(heartbeats) == heartbeat_count_after_teardown
+    assert heartbeats == []
     assert disconnects == ["active-owned-sid"]
+    assert fleet_closes == 0
     assert scoped._released is True
 
 

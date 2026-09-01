@@ -161,6 +161,7 @@ class SessionRecord:
     tenant_labels: tuple[str, ...] = ()
     effective_idle_timeout: int = 0
     ephemeral: bool = False
+    active_operations: int = 0
 
     def touch(self) -> None:
         """Update last activity timestamp."""
@@ -261,7 +262,7 @@ class SSHSessionManager:
                     record.effective_idle_timeout or self._session_timeout,
                     self._session_timeout,
                 )
-                if now - record.last_activity > limit:
+                if getattr(record, "active_operations", 0) == 0 and now - record.last_activity > limit:
                     del self._sessions[sid]
                     stale.append(record)
 
@@ -410,7 +411,7 @@ class SSHSessionManager:
                             record.effective_idle_timeout or self._session_timeout,
                             self._session_timeout,
                         )
-                        if now - record.last_activity > limit:
+                        if getattr(record, "active_operations", 0) == 0 and now - record.last_activity > limit:
                             del self._sessions[sid]
                             reaped_records.append(record)
 
@@ -760,6 +761,7 @@ class SSHSessionManager:
             command=command,
         )
 
+        record.active_operations += 1
         channel = None
         try:
             stdin, stdout, stderr = await asyncio.wait_for(
@@ -791,9 +793,11 @@ class SSHSessionManager:
             raise ExecutionError(f"SSH error during execution: {exc}") from exc
         except Exception as exc:
             raise ExecutionError(f"Execution error: {exc}") from exc
+        finally:
+            record.active_operations = max(0, record.active_operations - 1)
+            record.touch()
 
         duration = time.time() - start
-        record.touch()
 
         out_text = out_data.decode("utf-8", errors="replace")
         err_text = err_data.decode("utf-8", errors="replace")
@@ -859,6 +863,7 @@ class SSHSessionManager:
             command=command_str,
         )
 
+        record.active_operations += 1
         channel = None
         try:
             stdin, stdout, stderr = await asyncio.wait_for(
@@ -901,9 +906,11 @@ class SSHSessionManager:
             raise ExecutionError(f"SSH error during execution: {exc}") from exc
         except Exception as exc:
             raise ExecutionError(f"Execution error: {exc}") from exc
+        finally:
+            record.active_operations = max(0, record.active_operations - 1)
+            record.touch()
 
         duration = time.time() - start
-        record.touch()
 
         out_text = out_data.decode("utf-8", errors="replace")
         err_text = err_data.decode("utf-8", errors="replace")
@@ -968,6 +975,7 @@ class SSHSessionManager:
             command=command,
         )
 
+        record.active_operations += 1
         out_channel = None
         try:
             stdin, stdout, stderr = await loop.run_in_executor(
@@ -1058,6 +1066,7 @@ class SSHSessionManager:
             )
             yield ("error", str(exc))
         finally:
+            record.active_operations = max(0, record.active_operations - 1)
             record.touch()
 
     # ------------------------------------------------------------------

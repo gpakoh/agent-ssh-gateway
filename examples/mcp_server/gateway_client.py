@@ -279,7 +279,7 @@ class GatewayClient:
         fork._release_managed = True
         fork._owns_session = False
         fork._ephemeral = True
-        fork._idle_timeout_seconds = 600
+        fork._idle_timeout_seconds = 300
         return fork
 
     def _reconnect_session(self) -> None:
@@ -1042,12 +1042,11 @@ class GatewayClientSessionPool:
                     # borrow the process-global seed SID. With no idle owned
                     # client available, force this scoped client through the
                     # existing credential-backed auto-connect path instead.
+                    # Keep fork_session()'s finite ephemeral idle timeout: an MCP
+                    # transport that the client abandons without DELETE must not
+                    # retain a gateway SID forever. A later tool call can safely
+                    # auto-reconnect after the gateway reaps that idle SID.
                     scoped.session_id = ""
-                    # Reusable logical SIDs outlive one disposable MCP transport.
-                    # Keep them ephemeral (not persisted), but let Gateway apply
-                    # its global idle policy instead of the transport-orphan 600s
-                    # override installed by fork_session().
-                    scoped._idle_timeout_seconds = None
             self._clients[mcp_session] = (
                 base,
                 scoped,

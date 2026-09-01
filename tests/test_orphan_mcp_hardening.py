@@ -283,7 +283,7 @@ class TestEphemeralPropagation:
 
 
 # ────────────────────────────────────────────────────────────────────
-# Test 7: Scoped fork sets ephemeral=True, idle_timeout_seconds=600
+# Test 7: Scoped fork sets ephemeral=True, idle_timeout_seconds=300
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -293,10 +293,10 @@ class TestScopedForkEphemeral:
         scoped = base.fork_session()
         assert scoped._ephemeral is True
 
-    def test_fork_sets_idle_timeout_600(self, live_server: Any) -> None:
+    def test_fork_sets_idle_timeout_300(self, live_server: Any) -> None:
         base = _base_client(live_server)
         scoped = base.fork_session()
-        assert scoped._idle_timeout_seconds == 600
+        assert scoped._idle_timeout_seconds == 300
 
     def test_base_not_ephemeral(self, live_server: Any) -> None:
         base = _base_client(live_server)
@@ -329,7 +329,7 @@ class TestScopedForkPayload:
         scoped.connect()
         payload = seen_payloads[0]
         assert payload["ephemeral"] is True
-        assert payload["idle_timeout_seconds"] == 600
+        assert payload["idle_timeout_seconds"] == 300
 
     def test_base_connect_payload_no_ephemeral_fields(
         self, monkeypatch: pytest.MonkeyPatch, live_server: Any
