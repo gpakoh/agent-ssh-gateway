@@ -142,6 +142,29 @@ def _transport_error(exc: httpx.RequestError) -> GatewayClientError:
     )
 
 
+def _is_missing_session_cleanup(exc: Exception) -> bool:
+    """Return True only when disconnect says the target SID is already gone.
+
+    Reconnect cleanup is idempotent: a gateway-side idle reaper may delete the
+    stale SID before the scoped client gets a chance to disconnect it. That
+    specific outcome must not become permanent ``_retired`` debt. Transport
+    failures and other server errors remain real cleanup failures.
+    """
+    if not isinstance(exc, GatewayClientError):
+        return False
+    if exc.status_code == 404:
+        return True
+    if exc.status_code is not None:
+        return False
+    if GatewayClient._SESSION_NOT_FOUND in str(exc):
+        return True
+    body = exc.body or {}
+    detail = body.get("detail")
+    if isinstance(detail, dict):
+        return detail.get("code") == GatewayClient._SESSION_NOT_FOUND
+    return body.get("code") == GatewayClient._SESSION_NOT_FOUND
+
+
 @dataclasses.dataclass(frozen=True)
 class CleanupTargets:
     """Frozen set of SIDs that need network disconnect after pool lock release.
@@ -295,8 +318,9 @@ class GatewayClient:
                     timeout=self._release_http_timeout,
                 )
                 self._retired.discard(retired_sid)
-            except Exception:
-                pass
+            except Exception as exc:
+                if _is_missing_session_cleanup(exc):
+                    self._retired.discard(retired_sid)
         if self._retired:
             raise GatewayClientError(
                 f"reconnect blocked: {len(self._retired)} retired SID(s) still awaiting cleanup"
@@ -354,8 +378,8 @@ class GatewayClient:
                     {"session_id": old_owned_sid},
                     timeout=self._release_http_timeout,
                 )
-            except Exception:
-                if self._release_managed:
+            except Exception as exc:
+                if self._release_managed and not _is_missing_session_cleanup(exc):
                     self._retired.add(old_owned_sid)
 
     def connect(self) -> str:
