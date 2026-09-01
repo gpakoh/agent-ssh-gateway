@@ -502,6 +502,52 @@ def _staging_repo(record_dir: Path) -> Path:
     return record_dir / STAGING_DIRNAME / "repo"
 
 
+def _remove_candidate_tree(path: Path) -> None:
+    """Remove a candidate directory without following attacker-controlled symlinks."""
+    root = _candidate_root().absolute()
+    target = path.absolute()
+    try:
+        relative = target.relative_to(root)
+    except ValueError as exc:
+        raise CandidateError("candidate cleanup path escapes trusted state root") from exc
+    if not relative.parts:
+        raise CandidateError("candidate cleanup cannot remove trusted state root")
+
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    odirectory = getattr(os, "O_DIRECTORY", None)
+    if (
+        nofollow is None
+        or odirectory is None
+        or not getattr(shutil.rmtree, "avoids_symlink_attacks", False)
+    ):
+        raise CandidateError("secure candidate cleanup is unavailable")
+
+    flags = os.O_RDONLY | nofollow | odirectory | getattr(os, "O_CLOEXEC", 0)
+    opened: list[int] = []
+    try:
+        current_fd = os.open(root, flags)
+        opened.append(current_fd)
+        for part in relative.parts[:-1]:
+            current_fd = os.open(part, flags, dir_fd=current_fd)
+            opened.append(current_fd)
+
+        leaf = relative.parts[-1]
+        metadata = os.stat(leaf, dir_fd=current_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise CandidateError("orphan candidate staging is not a trusted directory")
+        shutil.rmtree(leaf, dir_fd=current_fd)
+    except CandidateError:
+        raise
+    except OSError as exc:
+        raise CandidateError("orphan candidate staging cannot be safely removed") from exc
+    finally:
+        for fd in reversed(opened):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     _assert_no_symlink_chain(_candidate_root(), path.parent)
@@ -689,7 +735,7 @@ def _materialize_task_candidate_unlocked(
     if staging.exists() and not staging.is_dir():
         raise CandidateError("orphan candidate staging exists without a trusted receipt")
     if staging.is_dir():
-        shutil.rmtree(staging)
+        _remove_candidate_tree(staging)
 
     staging.parent.mkdir(parents=True, exist_ok=True)
     _assert_no_symlink_chain(_candidate_root(), staging.parent)
@@ -708,6 +754,11 @@ def _materialize_task_candidate_unlocked(
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_TERMINAL_PROMPT": "0",
     }
+    commit_date = _run_git(
+        root, ["show", "-s", "--format=%cI", evidence["base_head"]], env=clean_env
+    )
+    if not commit_date:
+        raise CandidateError("candidate base commit date is unavailable")
     commit_env = dict(clean_env)
     commit_env.update(
         {
@@ -715,6 +766,8 @@ def _materialize_task_candidate_unlocked(
             "GIT_AUTHOR_EMAIL": "control-plane@gateway.invalid",
             "GIT_COMMITTER_NAME": "MCP Control Plane",
             "GIT_COMMITTER_EMAIL": "control-plane@gateway.invalid",
+            "GIT_AUTHOR_DATE": commit_date,
+            "GIT_COMMITTER_DATE": commit_date,
         }
     )
     try:

@@ -609,6 +609,42 @@ def test_receipt_less_staging_is_recovered_by_reverification(
     assert checked == recovered
 
 
+def test_candidate_commit_date_is_pinned_to_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    base = _init_repo(root)
+    _, td = _write_evidence(root, monkeypatch)
+    expected_date = _git(root, "show", "-s", "--format=%cI", base)
+
+    import examples.mcp_server.task_candidate as task_candidate_module
+
+    original_run_git = task_candidate_module._run_git
+    commit_dates: list[tuple[str | None, str | None]] = []
+
+    def recording_run_git(
+        cwd: Path, args: list[str], *, env: dict[str, str] | None = None
+    ) -> str:
+        if args and args[0] == "commit":
+            assert env is not None
+            commit_dates.append((env.get("GIT_AUTHOR_DATE"), env.get("GIT_COMMITTER_DATE")))
+        return original_run_git(cwd, args, env=env)
+
+    monkeypatch.setattr(task_candidate_module, "_run_git", recording_run_git)
+    materialize_task_candidate(
+        project_root=root,
+        project=PROJECT,
+        task_id=TASK,
+        destination_owner=OWNER,
+        destination_repo=REPO,
+        destination_branch=BRANCH,
+        expected_diff_sha256=_diff_sha(td),
+        job_result=_job_success,
+        verify_candidate=_verify_success,
+    )
+    assert commit_dates == [(expected_date, expected_date)]
+
+
 def test_symlink_staging_is_denied_and_external_target_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -639,6 +675,39 @@ def test_symlink_staging_is_denied_and_external_target_untouched(
     assert staging.is_symlink()
     assert sentinel.read_text(encoding="utf-8") == "keep\n"
     assert (external / "base.txt").exists() is False
+
+
+def test_symlink_staging_parent_is_denied_and_external_target_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _, td = _write_evidence(root, monkeypatch)
+    record_dir = _candidate_record_dir(PROJECT, TASK, _attempt_id(td))
+    staging = _staging_repo(record_dir)
+    external = tmp_path / "external-parent"
+    external_repo = external / "repo"
+    external_repo.mkdir(parents=True)
+    sentinel = external_repo / "sentinel.txt"
+    sentinel.write_text("keep\n", encoding="utf-8")
+    staging.parent.parent.mkdir(parents=True, exist_ok=True)
+    staging.parent.symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(CandidateError, match="safely removed"):
+        materialize_task_candidate(
+            project_root=root,
+            project=PROJECT,
+            task_id=TASK,
+            destination_owner=OWNER,
+            destination_repo=REPO,
+            destination_branch=BRANCH,
+            expected_diff_sha256=_diff_sha(td),
+            job_result=_job_success,
+            verify_candidate=_verify_success,
+        )
+    assert staging.parent.is_symlink()
+    assert sentinel.read_text(encoding="utf-8") == "keep\n"
+    assert external_repo.is_dir()
 
 
 def test_verifier_failure_leaves_no_materialize_residue(
