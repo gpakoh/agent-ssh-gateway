@@ -25,6 +25,7 @@ BASE_REF_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 AGENT_LOG_FILENAME = "opencode-output.log"
 AGENT_LOG_MAX_BYTES = 64 * 1024
 AGENT_LOG_MAX_TAIL_LINES = 1000
+ATTEMPT_STATE_FILENAME = "attempt-state.json"
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 _SENTENCE_ENDINGS = (".", "?", "!")
@@ -147,6 +148,110 @@ def _encoded_write(path: str, content: str) -> str:
     """Build one shell-safe file write without interpolating raw content."""
     payload = base64.b64encode(content.encode("utf-8")).decode("ascii")
     return f"printf %s {shlex.quote(payload)} | base64 -d > {shlex.quote(path)}"
+
+
+class AttemptStateError(RuntimeError):
+    """Raised when the durable attempt state exists but cannot be trusted.
+
+    The durable record binds (attempt_id, fingerprint, job_id) for one logical
+    execution attempt. A ``None`` return from the reader means the record is
+    definitely ABSENT and it is safe to create the first attempt. Any record
+    that exists but cannot be fully validated fails CLOSED with this error:
+    treating it as absent would spin up a second execution that can never see
+    the first one's fleet job, double-charging the caller.
+    """
+
+
+class AttemptConflictError(AttemptStateError):
+    """A task_id is immutable: the record already binds the task to a
+    DIFFERENT execution fingerprint, so the request must create a NEW task_id.
+
+    Raised by the identity resolver when the task's durable record and the
+    requested fingerprint disagree. Carries both fingerprints and the recorded
+    binding so callers can surface a typed ``immutable-task-conflict`` error.
+    """
+
+    def __init__(
+        self,
+        *,
+        project: str,
+        task_id: str,
+        attempt_id: str,
+        job_id: str | None,
+        recorded_fingerprint: str,
+        requested_fingerprint: str,
+    ) -> None:
+        self.project = project
+        self.task_id = task_id
+        self.attempt_id = attempt_id
+        self.job_id = job_id
+        self.recorded_fingerprint = recorded_fingerprint
+        self.requested_fingerprint = requested_fingerprint
+        super().__init__(
+            f"task {task_id} is immutable: it is already bound to attempt "
+            f"{attempt_id} (fingerprint {recorded_fingerprint}), which does not "
+            f"match the requested fingerprint {requested_fingerprint}; "
+            "create a NEW task_id for this different execution"
+        )
+
+
+def _attempt_state_record_errors(record: Any) -> str | None:
+    """Return a human-readable reason when ``record`` is not a valid attempt.
+
+    Valid records are dicts with a non-empty string ``attempt_id``, a
+    non-empty string ``fingerprint``, and a ``job_id`` that is absent, null,
+    or a string. Returns None when the record is acceptable.
+    """
+    if not isinstance(record, dict):
+        return "must be a JSON object"
+    attempt_id = record.get("attempt_id")
+    if not isinstance(attempt_id, str) or not attempt_id:
+        return "must contain a non-empty string 'attempt_id'"
+    fingerprint = record.get("fingerprint")
+    if not isinstance(fingerprint, str) or not fingerprint:
+        return "must contain a non-empty string 'fingerprint'"
+    job_id = record.get("job_id")
+    if job_id is not None and not isinstance(job_id, str):
+        return "'job_id' must be absent, null, or a string"
+    return None
+
+
+def _atomic_encoded_write(
+    path: str,
+    content: str,
+    *,
+    tmp_path: str | None = None,
+) -> list[str]:
+    """Build trusted-script lines that atomically replace ``path``.
+
+    Production acquires the temp via ``mktemp "$base.XXXXXX"`` in the SAME
+    directory: O_EXCL + an unpredictable name, so a planted symlink or a stale
+    partial file at a plausible temp name is never followed or reused -- the
+    freshly acquired exclusive temp supersedes it. The full write lands in
+    that temp and the canonical ``path`` is only ever the destination of an
+    atomic ``mv``, so the canonical file is always a complete record (old or
+    new), never a partially-written one.
+
+    ``tmp_path`` pins the temp location for tests ONLY: the pinned path must
+    collide with nothing (guard exit 51) so a test-induced collision fails
+    closed before any write.
+    """
+    payload = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    lines = [
+        f"base={shlex.quote(path)}",
+    ]
+    if tmp_path is None:
+        lines.append('tmp=$(mktemp "$base.XXXXXX") || exit 50')
+    else:
+        lines.append(f"tmp={tmp_path}")
+        lines.append('if [ -e "$tmp" ] || [ -L "$tmp" ]; then exit 51; fi')
+    lines += [
+        f"printf %s {shlex.quote(payload)} | base64 -d > \"$tmp\" "
+        '|| { rm -f -- "$tmp"; exit 48; }',
+        f"mv -f -- \"$tmp\" {shlex.quote(path)} "
+        '|| { rm -f -- "$tmp"; exit 49; }',
+    ]
+    return lines
 
 
 def _coordination_path_prefixes(path: str) -> list[str]:
@@ -608,3 +713,145 @@ def write_agent_task(
             "exit_code": 1,
         }
     return result
+
+
+def read_agent_attempt_state(
+    run_cmd,
+    *,
+    project: str,
+    task_id: str,
+) -> dict[str, Any] | None:
+    """Read the durable execution-attempt record.
+
+    The record binds (attempt_id, command fingerprint, job_id) for one
+    logical execution attempt so a retry / reconnect / process restart
+    converges on the SAME gateway job instead of launching a second agent.
+    Returns None ONLY when the record is definitely absent (the whole task
+    directory chain does not exist yet); a first attempt is then safe to
+    create. Any existing-but-untrustworthy record (symlink-unsafe path,
+    permission failure, unparseable/truncated JSON, missing required fields,
+    invalid types) fails CLOSED with AttemptStateError: the durable sync
+    path surfaces kind=durable-state-error instead of launching a second,
+    identity-less execution.
+    """
+    validate_task_id(task_id)
+    td = task_dir(project, task_id)
+    path = f"{td}/{ATTEMPT_STATE_FILENAME}"
+    for prefix in _coordination_path_prefixes(path):
+        result = run_cmd(project, f"ls -ld -- {shlex.quote(prefix)}")
+        if result.get("exit_code") == 0:
+            if str(result.get("stdout", "")).startswith("l"):
+                raise AttemptStateError(
+                    f"attempt state path for task {task_id} resolves through a symlink"
+                )
+            continue
+        if "No such file" in str(result.get("stderr", "")):
+            return None
+        raise AttemptStateError(
+            f"cannot verify attempt state path for task {task_id}: remote probe failed"
+        )
+    result = run_cmd(project, f"cat {shlex.quote(path)}")
+    if result.get("exit_code") != 0:
+        raise AttemptStateError(
+            f"attempt state for task {task_id} exists but cannot be read"
+        )
+    try:
+        record = json.loads(str(result.get("stdout", "")))
+    except (ValueError, TypeError) as exc:
+        raise AttemptStateError(
+            f"attempt state for task {task_id} is not valid JSON"
+        ) from exc
+    reason = _attempt_state_record_errors(record)
+    if reason:
+        raise AttemptStateError(
+            f"invalid attempt state for task {task_id}: record {reason}"
+        )
+    return record
+
+
+def write_agent_attempt_state(
+    run_cmd,
+    *,
+    project: str,
+    task_id: str,
+    record: dict[str, Any],
+) -> None:
+    """Persist the attempt record BEFORE the first submission.
+
+    Mirrors write_agent_task's trusted-generated-script invariants: the
+    write is symlink-guarded around mkdir, the content travels base64-encoded
+    so EOF/quoting can never corrupt it, and the canonical file is replaced
+    atomically (a full write to a unique same-dir temp file, then an atomic
+    mv). Raises RuntimeError when the remote write fails so the caller fails
+    closed instead of submitting a second, identity-less execution.
+    """
+    validate_task_id(task_id)
+    td = task_dir(project, task_id)
+    tasks_dir = task_tasks_dir(project)
+    target = f"{td}/{ATTEMPT_STATE_FILENAME}"
+    payload = json.dumps(record, sort_keys=True)
+    guard_lines = _symlink_guard_lines([tasks_dir, td, target])
+    parts = [
+        f"td={shlex.quote(td)}",
+        *guard_lines,
+        'mkdir -p "$td" || exit 47',
+        *guard_lines,
+        *_atomic_encoded_write(target, payload),
+    ]
+    result = run_cmd(project, "\n".join(parts))
+    if result.get("exit_code") != 0:
+        raise RuntimeError(f"failed to persist attempt state for task {task_id}")
+
+
+def claim_agent_attempt_state(
+    run_cmd,
+    *,
+    project: str,
+    task_id: str,
+    record: dict[str, Any],
+) -> bool:
+    """Atomically create the attempt record, create-if-absent (CAS).
+
+    The producer of the concurrent first-attempt race -- two callers BOTH
+    observed the task absent on their initial read -- is resolved remotely and
+    atomically: a same-directory exclusive ``mktemp`` file is fully written
+    (its name is opaque, so a pre-planted symlink is ignored), then hard-linked
+    into place with ``ln``. ``ln`` fails exactly when the canonical already
+    exists, so exactly ONE caller wins the claim; the loser re-reads the winner
+    instead of creating a parallel execution. The claim never overwrites.
+
+    Returns True when THIS call created the record (winner); False when the
+    canonical already belonged to someone else (the caller must re-read the
+    winner). Any other remote failure raises AttemptStateError (fail closed).
+    """
+    validate_task_id(task_id)
+    td = task_dir(project, task_id)
+    tasks_dir = task_tasks_dir(project)
+    target = f"{td}/{ATTEMPT_STATE_FILENAME}"
+    payload = base64.b64encode(
+        json.dumps(record, sort_keys=True).encode("utf-8")
+    ).decode("ascii")
+    guard_lines = _symlink_guard_lines([tasks_dir, td, target])
+    parts = [
+        f"td={shlex.quote(td)}",
+        *guard_lines,
+        'mkdir -p "$td" || exit 47',
+        *guard_lines,
+        f'payload={shlex.quote(payload)}',
+        f'tmp=$(mktemp {shlex.quote(target + ".XXXXXX")}) || exit 50',
+        'printf %s "$payload" | base64 -d > "$tmp" || { rm -f -- "$tmp"; exit 48; }',
+        f'if ln "$tmp" {shlex.quote(target)} 2> /dev/null; then '
+        'rm -f -- "$tmp"; exit 0; fi',
+        f'if [ -e {shlex.quote(target)} ] || [ -L {shlex.quote(target)} ]; then '
+        'rm -f -- "$tmp"; exit 52; fi',
+        'rm -f -- "$tmp"; exit 53',
+    ]
+    result = run_cmd(project, "\n".join(parts))
+    code = result.get("exit_code")
+    if code == 0:
+        return True
+    if code == 52:
+        return False
+    stderr = str(result.get("stderr", "")).strip()
+    detail = stderr or (f"remote claim exited {code}" if code is not None else "no response")
+    raise AttemptStateError(f"attempt claim for task {task_id} failed: {detail}")

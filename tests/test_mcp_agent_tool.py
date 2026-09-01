@@ -14,6 +14,7 @@ sets) at the server.py/tool_modes.py layer -- not tested here.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -50,6 +51,28 @@ def test_read_agent_log_redacts_obvious_secrets(monkeypatch):
     assert "abc123" not in result["result"]["stdout"]
     assert "[REDACTED]" in result["result"]["stdout"]
     assert result["meta"]["redacted"] is True
+
+
+
+def test_read_agent_diff_returns_hash_of_exact_review_text(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    patch = "diff --git a/a.py b/a.py\n+approved\n"
+    monkeypatch.setattr(
+        agent_adapter,
+        "_read_agent_task_file",
+        lambda *args, **kwargs: {
+            "stdout": patch,
+            "stderr": "",
+            "exit_code": 0,
+        },
+    )
+
+    result = agent_adapter.gateway_read_agent_diff("test", TASK_ID)
+
+    assert result["ok"] is True
+    assert result["result"]["stdout"] == patch
+    assert result["result"]["sha256"] == hashlib.sha256(patch.encode("utf-8")).hexdigest()
 
 
 
@@ -572,7 +595,7 @@ class TestGatewayWriteAgentTaskScriptTransport:
         client.execute_argv.assert_not_called()
         client.execute_project_command.assert_not_called()
 
-    def test_forwards_base_ref_into_contract_and_base_ref_txt(self, monkeypatch):
+    def test_forwards_base_ref_into_contract_and_base_ref_txt(self, monkeypatch, tmp_path):
         import examples.mcp_server.server as server_mod
         from examples.mcp_server.mcp_infra.adapters.agent import gateway_write_agent_task
 
@@ -580,6 +603,7 @@ class TestGatewayWriteAgentTaskScriptTransport:
         client.execute_project_script.return_value = {"exit_code": 0, "stdout": "ok", "stderr": ""}
         monkeypatch.setattr(server_mod, "client", client)
         sha = "0" * 40
+        monkeypatch.setenv("MCP_TASK_CANDIDATE_ROOT", str(tmp_path / "candidate-store"))
 
         result = gateway_write_agent_task(
             project="test",
@@ -841,6 +865,64 @@ class TestGatewayRunAgents:
 
         assert result["ok"] is True
         assert fleet.submit.await_args.kwargs["sweep_before_submit"] is True
+
+    @pytest.mark.asyncio
+    async def test_sync_run_agent_routes_through_fleet_submit(self, monkeypatch):
+        """BLOCKER A: durable sync admission parity -- async_submit=False
+        must run through fleet.submit, not a silent bypass."""
+        import examples.mcp_server.server as server_mod
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_run_agent
+
+        fleet = MagicMock()
+        fleet.submit = AsyncMock(
+            return_value={"task_id": "single", "status": "running", "job_id": "job-sync-single"}
+        )
+
+        async def get_fleet():
+            return fleet
+
+        monkeypatch.setattr(
+            "examples.mcp_server.mcp_infra.adapters.agent.get_fleet_runtime",
+            get_fleet,
+        )
+        monkeypatch.setattr(server_mod, "client", MagicMock())
+
+        result = await gateway_run_agent("test", "single", async_submit=False)
+
+        assert result["ok"] is True
+        assert fleet.submit.await_count == 1
+        assert fleet.submit.await_args.kwargs["project"] == "test"
+        assert fleet.submit.await_args.kwargs["task_id"] == "single"
+        assert fleet.submit.await_args.kwargs["sweep_before_submit"] is True
+        assert callable(fleet.submit.await_args.kwargs["submit_sync"])
+
+    @pytest.mark.asyncio
+    async def test_sync_run_opencode_routes_through_fleet_submit(self, monkeypatch):
+        """BLOCKER A: the durable sync opencode path admits via fleet too."""
+        import examples.mcp_server.server as server_mod
+        from examples.mcp_server.mcp_infra.adapters.agent import gateway_run_opencode
+
+        fleet = MagicMock()
+        fleet.submit = AsyncMock(
+            return_value={"task_id": "single", "status": "running", "job_id": "job-sync-open"}
+        )
+
+        async def get_fleet():
+            return fleet
+
+        monkeypatch.setattr(
+            "examples.mcp_server.mcp_infra.adapters.agent.get_fleet_runtime",
+            get_fleet,
+        )
+        monkeypatch.setattr(server_mod, "client", MagicMock())
+
+        result = await gateway_run_opencode("test", "single", async_submit=False)
+
+        assert result["ok"] is True
+        assert fleet.submit.await_count == 1
+        assert fleet.submit.await_args.kwargs["project"] == "test"
+        assert fleet.submit.await_args.kwargs["task_id"] == "single"
+        assert callable(fleet.submit.await_args.kwargs["submit_sync"])
 
 
 class TestSplitCsvOrLines:

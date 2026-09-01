@@ -28,13 +28,19 @@ from examples.mcp_client_remote.fleet.shared import (
     list_pagination_meta,
     minimize_issue_payload,
 )
+from examples.mcp_server.candidate_verifier import verify_candidate_via_docker
 from examples.mcp_server.managed_git import (
     ManagedGitError,
     configured_gitea_git_base,
-    push_exact_sha,
+    push_trusted_staging_sha,
 )
 from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.tool_registry import register_tool
+from examples.mcp_server.task_candidate import (
+    CandidateError,
+    materialize_task_candidate,
+    validate_task_candidate_for_push,
+)
 
 
 def _server_gitea_client():
@@ -43,6 +49,10 @@ def _server_gitea_client():
 
 def _server_github_client():
     return server_attr("GitHubClient")
+
+def _server_agent_client():
+    return server_attr("get_agent_client")()
+
 
 def _server_workspace_registry():
     return server_attr("_get_workspace_registry")()
@@ -652,15 +662,78 @@ async def gitea_list_workflows(owner: str, repo: str) -> dict[str, Any]:
 # ── GitHub tools ─────────────────────────────────────────────────
 
 
+async def gitea_materialize_task_candidate(
+    project: str,
+    task_id: str,
+    owner: str,
+    repo: str,
+    destination_branch: str,
+    expected_diff_sha256: str,
+) -> dict[str, Any]:
+    """Materialize BASE_HEAD + supervisor diff and atomically record its receipt."""
+    try:
+        info = _server_workspace_registry().project_info(project)
+        agent_client = _server_agent_client()
+
+        def _verify(staging, expected_sha, checks):
+            verify_candidate_via_docker(
+                staging_root=staging,
+                expected_sha=expected_sha,
+                required_checks=checks,
+            )
+
+        receipt = await asyncio.to_thread(
+            materialize_task_candidate,
+            project_root=info["root"],
+            project=project,
+            task_id=task_id,
+            destination_owner=owner,
+            destination_repo=repo,
+            destination_branch=destination_branch,
+            expected_diff_sha256=expected_diff_sha256,
+            job_result=lambda jid: agent_client.job_result(jid, redact_output=True),
+            verify_candidate=_verify,
+        )
+    except CandidateError as exc:
+        return tool_error(
+            tool="gitea_materialize_task_candidate",
+            code="POLICY_DENIED",
+            message=str(exc),
+            source="gitea",
+        )
+    except Exception:
+        return tool_error(
+            tool="gitea_materialize_task_candidate",
+            code="INVALID_INPUT",
+            message=f"Unknown registered project or unavailable candidate evidence: {project!r}",
+            source="gitea",
+        )
+    return tool_success(
+        "gitea_materialize_task_candidate",
+        result={
+            "project": project,
+            "task_id": task_id,
+            "owner": owner,
+            "repo": repo,
+            "branch": destination_branch,
+            "base_head": receipt["base_head"],
+            "implementation_diff_sha256": receipt["implementation_diff_sha256"],
+            "candidate_head_sha": receipt["candidate_head_sha"],
+            "created_at": receipt["created_at"],
+        },
+        source="gitea",
+    )
+
+
 async def gitea_push_local_ref(
     project: str,
+    task_id: str,
     owner: str,
     repo: str,
     destination_branch: str,
     expected_sha: str,
 ) -> dict[str, Any]:
-    """Push one exact local commit through the trusted MCP credential boundary."""
-
+    """Push only the exact receipt-bound task candidate from trusted staging."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
@@ -671,19 +744,28 @@ async def gitea_push_local_ref(
         )
     try:
         info = _server_workspace_registry().project_info(project)
+        receipt, staging = await asyncio.to_thread(
+            validate_task_candidate_for_push,
+            project_root=info["root"],
+            project=project,
+            task_id=task_id,
+            destination_owner=owner,
+            destination_repo=repo,
+            destination_branch=destination_branch,
+            expected_sha=expected_sha,
+        )
+    except CandidateError as exc:
+        return tool_error(
+            tool="gitea_push_local_ref",
+            code="POLICY_DENIED",
+            message=str(exc),
+            source="gitea",
+        )
     except Exception:
         return tool_error(
             tool="gitea_push_local_ref",
             code="INVALID_INPUT",
             message=f"Unknown registered project: {project!r}",
-            source="gitea",
-        )
-
-    if info.get("type") != "supervisor-workspace":
-        return tool_error(
-            tool="gitea_push_local_ref",
-            code="INVALID_INPUT",
-            message="Managed Git push requires a supervisor-workspace project",
             source="gitea",
         )
 
@@ -700,6 +782,36 @@ async def gitea_push_local_ref(
                     message="Configured Gitea identity does not have push access to repository",
                     source="gitea",
                 )
+            default_branch = str(metadata.get("default_branch") or "").strip()
+            if not default_branch:
+                return tool_error(
+                    tool="gitea_push_local_ref",
+                    code="POLICY_DENIED",
+                    message="Repository default branch is unavailable; refusing trusted push",
+                    source="gitea",
+                )
+            if destination_branch == default_branch:
+                return tool_error(
+                    tool="gitea_push_local_ref",
+                    code="POLICY_DENIED",
+                    message="Trusted candidate push to the repository default branch is not allowed",
+                    source="gitea",
+                )
+
+            remote_branch: dict[str, Any] | None = None
+            try:
+                remote_branch = await client.get_branch(owner, repo, destination_branch)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+            if remote_branch is not None and remote_branch.get("protected") is not False:
+                return tool_error(
+                    tool="gitea_push_local_ref",
+                    code="POLICY_DENIED",
+                    message="Trusted candidate push to a protected or unverifiable branch is not allowed",
+                    source="gitea",
+                )
+
             username = str(user.get("login") or user.get("username") or "").strip()
             if not username:
                 return tool_error(
@@ -708,19 +820,23 @@ async def gitea_push_local_ref(
                     message="Configured Gitea identity has no usable username",
                     source="gitea",
                 )
-
             await asyncio.to_thread(
-                push_exact_sha,
-                project_root=info["root"],
+                push_trusted_staging_sha,
+                staging_root=staging,
                 owner=owner,
                 repo=repo,
                 destination_branch=destination_branch,
-                expected_sha=expected_sha,
+                expected_sha=receipt["candidate_head_sha"],
                 username=username,
                 token=token,
                 git_base=git_base,
             )
-            branches = await client.list_branches(owner, repo, limit=50)
+            try:
+                remote_branch = await client.get_branch(owner, repo, destination_branch)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+                remote_branch = None
     except ManagedGitError as exc:
         return tool_error(
             tool="gitea_push_local_ref",
@@ -731,29 +847,26 @@ async def gitea_push_local_ref(
     except Exception as exc:
         return _remote_api_error("gitea_push_local_ref", "gitea", exc)
 
-    expected = expected_sha.strip().lower()
-    for branch in branches:
-        if branch.get("name") != destination_branch:
-            continue
-        commit = branch.get("commit") or {}
-        if str(commit.get("id") or "").lower() == expected:
-            return tool_success(
-                "gitea_push_local_ref",
-                result={
-                    "project": project,
-                    "owner": owner,
-                    "repo": repo,
-                    "branch": destination_branch,
-                    "sha": expected,
-                    "verified": True,
-                },
-                source="gitea",
-            )
-        break
+    expected = receipt["candidate_head_sha"]
+    commit = (remote_branch or {}).get("commit") or {}
+    if str(commit.get("id") or "").lower() == expected:
+        return tool_success(
+            "gitea_push_local_ref",
+            result={
+                "project": project,
+                "task_id": task_id,
+                "owner": owner,
+                "repo": repo,
+                "branch": destination_branch,
+                "sha": expected,
+                "verified": True,
+            },
+            source="gitea",
+        )
     return tool_error(
         tool="gitea_push_local_ref",
-        code="REMOTE_VERIFY_FAILED",
-        message="Remote branch does not resolve to expected_sha after push",
+        code="CHECK_FAILED",
+        message="Remote branch does not resolve to candidate_head_sha after push",
         source="gitea",
     )
 
@@ -944,6 +1057,7 @@ def register_all() -> None:
     register_tool("gitea_create_pull_request")(gitea_create_pull_request)
     register_tool("gitea_merge_pull_request")(gitea_merge_pull_request)
     register_tool("gitea_close_pull_request")(gitea_close_pull_request)
+    register_tool("gitea_materialize_task_candidate")(gitea_materialize_task_candidate)
     register_tool("gitea_push_local_ref")(gitea_push_local_ref)
     register_tool("gitea_list_action_runs")(gitea_list_action_runs)
     register_tool("gitea_get_action_run")(gitea_get_action_run)

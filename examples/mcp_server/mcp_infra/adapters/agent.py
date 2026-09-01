@@ -11,6 +11,7 @@ after runtime.set_mcp) instead of import-time decorator side effects.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Callable
 from typing import Any
 
@@ -18,7 +19,13 @@ from agent_tasks import (
     archive_agent_task as _archive_agent_task,
 )
 from agent_tasks import (
+    claim_agent_attempt_state as _claim_agent_attempt_state,
+)
+from agent_tasks import (
     list_agent_tasks as _list_agent_tasks,
+)
+from agent_tasks import (
+    read_agent_attempt_state as _read_agent_attempt_state,
 )
 from agent_tasks import (
     read_agent_log_tail as _read_agent_log_tail,
@@ -27,9 +34,13 @@ from agent_tasks import (
     read_agent_task_file as _read_agent_task_file,
 )
 from agent_tasks import (
+    write_agent_attempt_state as _write_agent_attempt_state,
+)
+from agent_tasks import (
     write_agent_task as _write_agent_task,
 )
 from agent_tools import project_run_agent as _project_run_agent
+from gateway_client import GatewayClientError
 from mcp_audit import redact_secrets
 from mcp_client_tools import run_project_command
 from opencode_tools import project_run_opencode as _project_run_opencode
@@ -39,6 +50,11 @@ from examples.mcp_server.fleet_runtime import get_fleet_runtime
 from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.adapters.gateway import _split_csv_or_lines, _split_lines
 from examples.mcp_server.mcp_infra.tool_registry import register_tool, run_tool, run_tool_async
+from examples.mcp_server.task_candidate import (
+    bind_task_attempt_job,
+    record_task_delivery_contract,
+    resolve_task_attempt_identity,
+)
 
 
 def _server_client():
@@ -47,6 +63,24 @@ def _server_client():
 
 def _server_agent_client():
     return server_attr("get_agent_client")()
+
+
+def _wait_job_contract(job_id: str) -> dict[str, Any]:
+    """Wait on a durable job and normalize the outcome for the sync path.
+
+    wait_job() raises GatewayClientError with body {"job_id", "status":
+    "running", "wait_timed_out": True} when the bounded wait expires while
+    the job is still running; translate it into the durable receipt the
+    sync submission path returns to the caller so they can poll
+    job_status/job_result with the embedded job_id instead of seeing an
+    opaque timeout.
+    """
+    try:
+        return _server_client().wait_job(job_id)
+    except GatewayClientError as exc:
+        if exc.body and exc.body.get("wait_timed_out"):
+            return exc.body
+        raise
 
 
 def _server_agent_router():
@@ -101,6 +135,18 @@ def gateway_write_agent_task(
         # digest, and no supervisor-time recapture fallback exists.
         publication = ensure_managed_source_bundle(project, base_ref)
         managed_source_sha256 = publication.sha256 if publication else None
+        parsed_allowed = _split_scope_patterns(allowed_files) or []
+        parsed_forbidden = _split_scope_patterns(forbidden_files) or []
+        parsed_checks = _split_lines(required_checks) or []
+        if base_ref:
+            record_task_delivery_contract(
+                project=project,
+                task_id=task_id,
+                base_ref=base_ref,
+                allowed_files=parsed_allowed,
+                forbidden_files=parsed_forbidden,
+                required_checks=parsed_checks,
+            )
 
         return _write_agent_task(
             # Script transport (sh + stdin), NOT run_project_command: the
@@ -114,9 +160,9 @@ def gateway_write_agent_task(
             agent=agent,
             task=task,
             scope=scope,
-            allowed_files=_split_scope_patterns(allowed_files),
-            forbidden_files=_split_scope_patterns(forbidden_files),
-            required_checks=_split_lines(required_checks),
+            allowed_files=parsed_allowed,
+            forbidden_files=parsed_forbidden,
+            required_checks=parsed_checks,
             acceptance_criteria=_split_lines(acceptance_criteria),
             commit_message=commit_message,
             constraints=constraints,
@@ -164,16 +210,24 @@ def gateway_read_agent_report(project: str, task_id: str) -> dict[str, Any]:
 
 
 def gateway_read_agent_diff(project: str, task_id: str) -> dict[str, Any]:
-    """Read .ai-bridge/tasks/<task_id>/implementation-diff.patch."""
-    return run_tool(
-        tool="read_agent_diff",
-        title="Read agent diff",
-        fn=lambda: _read_agent_task_file(
+    """Read the review diff and return the SHA-256 of those exact returned bytes."""
+
+    def _fn() -> dict[str, Any]:
+        result = _read_agent_task_file(
             lambda p, c: run_project_command(_server_client(), p, c),
             project=project,
             task_id=task_id,
             filename="implementation-diff.patch",
-        ),
+        )
+        if result.get("exit_code") == 0 and result.get("stdout") != "(not found)":
+            text = str(result.get("stdout", ""))
+            result["sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return result
+
+    return run_tool(
+        tool="read_agent_diff",
+        title="Read agent diff",
+        fn=_fn,
         success_text="Read agent diff.",
     )
 
@@ -259,21 +313,35 @@ async def gateway_run_opencode(
             task_id=task_id,
             model=model,
             run_script=lambda _p, s: _server_agent_client().execute_script(s),
-            run_script_async=lambda _p, s, k: _server_agent_client().execute_script_async(s, k),
+            run_script_async=lambda _p, s, k: _server_agent_client().execute_script_async(
+                s, k
+            ),
+            run_script_wait=lambda jid: _wait_job_contract(jid),
+            read_attempt_state=lambda p, t: _read_agent_attempt_state(
+                lambda _p, c: run_project_command(_server_client(), _p, c), project=p, task_id=t
+            ),
+            claim_attempt_state=lambda p, t, rec: _claim_agent_attempt_state(
+                lambda _p, s: _server_client().execute_project_script(_p, s), project=p, task_id=t, record=rec
+            ),
+            write_attempt_state=lambda p, t, rec: _write_agent_attempt_state(
+                lambda _p, s: _server_client().execute_project_script(_p, s), project=p, task_id=t, record=rec
+            ),
+            job_status=lambda jid: _server_client().job_status(jid),
+            resolve_trusted_attempt=lambda p, t, f: resolve_task_attempt_identity(
+                project=p, task_id=t, fingerprint=f
+            ),
+            record_trusted_attempt=lambda p, t, a, f, j: bind_task_attempt_job(
+                project=p, task_id=t, attempt_id=a, fingerprint=f, job_id=j
+            ),
             async_submit=async_submit,
         )
 
     async def _fn() -> dict[str, Any]:
-        if async_submit:
-            fleet = await get_fleet_runtime()
-            if fleet is not None:
-                return await fleet.submit(
-                    project=project,
-                    task_id=task_id,
-                    submit_sync=_submit,
-                    job_status_fn=lambda jid: _server_client().job_status(jid),
-                )
-        return await asyncio.to_thread(_submit)
+        return await _submit_agent_with_fleet(
+            project=project,
+            task_id=task_id,
+            submit_sync=_submit,
+        )
 
     return await run_tool_async(
         tool="run_opencode",
@@ -300,7 +368,26 @@ def _build_agent_submit(
             model=model,
             router=_server_agent_router(),
             run_script=lambda _p, s: _server_agent_client().execute_script(s),
-            run_script_async=lambda _p, s, k: _server_agent_client().execute_script_async(s, k),
+            run_script_async=lambda _p, s, k: _server_agent_client().execute_script_async(
+                s, k
+            ),
+            run_script_wait=lambda jid: _wait_job_contract(jid),
+            read_attempt_state=lambda p, t: _read_agent_attempt_state(
+                lambda _p, c: run_project_command(_server_client(), _p, c), project=p, task_id=t
+            ),
+            claim_attempt_state=lambda p, t, rec: _claim_agent_attempt_state(
+                lambda _p, s: _server_client().execute_project_script(_p, s), project=p, task_id=t, record=rec
+            ),
+            write_attempt_state=lambda p, t, rec: _write_agent_attempt_state(
+                lambda _p, s: _server_client().execute_project_script(_p, s), project=p, task_id=t, record=rec
+            ),
+            job_status=lambda jid: _server_client().job_status(jid),
+            resolve_trusted_attempt=lambda p, t, f: resolve_task_attempt_identity(
+                project=p, task_id=t, fingerprint=f
+            ),
+            record_trusted_attempt=lambda p, t, a, f, j: bind_task_attempt_job(
+                project=p, task_id=t, attempt_id=a, fingerprint=f, job_id=j
+            ),
             async_submit=async_submit,
         )
 
@@ -345,13 +432,11 @@ async def gateway_run_agent(
     )
 
     async def _fn() -> dict[str, Any]:
-        if async_submit:
-            return await _submit_agent_with_fleet(
-                project=project,
-                task_id=task_id,
-                submit_sync=submit_sync,
-            )
-        return await asyncio.to_thread(submit_sync)
+        return await _submit_agent_with_fleet(
+            project=project,
+            task_id=task_id,
+            submit_sync=submit_sync,
+        )
 
     return await run_tool_async(
         tool="run_agent",

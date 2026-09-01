@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from examples.mcp_server import managed_git
@@ -167,18 +168,220 @@ class _FakeGiteaClient:
 
     async def get_repo(self, owner: str, repo: str) -> dict[str, Any]:
         assert (owner, repo) == ("gpakoh", "gpt-browser-bridge")
-        return {"permissions": {"push": True}}
+        return {"permissions": {"push": True}, "default_branch": "master"}
 
-    async def list_branches(self, owner: str, repo: str, limit: int = 30) -> list[dict[str, Any]]:
-        assert limit == 50
-        return [{"name": "hardening/runtime-deploy", "commit": {"id": SHA}}]
+    async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+        assert (owner, repo, branch) == (
+            "gpakoh",
+            "gpt-browser-bridge",
+            "hardening/runtime-deploy",
+        )
+        return {
+            "name": "hardening/runtime-deploy",
+            "protected": False,
+            "commit": {"id": SHA},
+        }
+
+    async def list_branches(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        raise AssertionError("trusted push must verify the exact branch directly, not via pagination")
+
+
+def _install_push_adapter_mocks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    client_type: type[_FakeGiteaClient],
+    push_impl: Any,
+) -> None:
+    staging = tmp_path / "trusted-candidate-staging"
+    staging.mkdir(exist_ok=True)
+    monkeypatch.setenv("GITEA_TOKEN", "managed-token")
+    monkeypatch.setenv("GITEA_GIT_BASE", "https://git.example.test")
+    monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _Registry(tmp_path))
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: client_type)
+    monkeypatch.setattr(
+        remote,
+        "validate_task_candidate_for_push",
+        lambda **_kwargs: ({"candidate_head_sha": SHA}, staging),
+    )
+    monkeypatch.setattr(remote, "push_trusted_staging_sha", push_impl)
 
 
 @pytest.mark.asyncio
-async def test_adapter_verifies_remote_branch_after_managed_push(
+async def test_adapter_denies_actual_nonstandard_default_branch_before_push(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class DefaultDevelopClient(_FakeGiteaClient):
+        async def get_repo(self, owner: str, repo: str) -> dict[str, Any]:
+            assert (owner, repo) == ("gpakoh", "gpt-browser-bridge")
+            return {"permissions": {"push": True}, "default_branch": "develop"}
+
+    def must_not_push(**_kwargs: Any) -> None:
+        raise AssertionError("default branch must be denied before mutation")
+
+    _install_push_adapter_mocks(monkeypatch, tmp_path, DefaultDevelopClient, must_not_push)
+    result = await remote.gitea_push_local_ref(
+        project="gpt-browser-bridge-hardening",
+        task_id="candidate-task-123",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="develop",
+        expected_sha=SHA,
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "POLICY_DENIED"
+    assert "default branch" in result["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_adapter_denies_protected_branch_before_push(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class ProtectedClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            return {"name": branch, "protected": True, "commit": {"id": SHA}}
+
+    def must_not_push(**_kwargs: Any) -> None:
+        raise AssertionError("protected branch must be denied before mutation")
+
+    _install_push_adapter_mocks(monkeypatch, tmp_path, ProtectedClient, must_not_push)
+    result = await remote.gitea_push_local_ref(
+        project="gpt-browser-bridge-hardening",
+        task_id="candidate-task-123",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_sha=SHA,
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "POLICY_DENIED"
+    assert "protected" in result["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_adapter_allows_new_branch_then_verifies_exact_branch_directly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pushed = {"done": False}
+
+    class NewBranchClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            if not pushed["done"]:
+                request = httpx.Request("GET", "https://git.example.test/branch")
+                response = httpx.Response(404, request=request)
+                raise httpx.HTTPStatusError("not found", request=request, response=response)
+            return {"name": branch, "protected": False, "commit": {"id": SHA}}
+
+    def push(**_kwargs: Any) -> None:
+        pushed["done"] = True
+
+    _install_push_adapter_mocks(monkeypatch, tmp_path, NewBranchClient, push)
+    result = await remote.gitea_push_local_ref(
+        project="gpt-browser-bridge-hardening",
+        task_id="candidate-task-123",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_sha=SHA,
+    )
+    assert pushed["done"] is True
+    assert result["ok"] is True
+    assert result["result"]["verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_adapter_post_push_direct_verification_rejects_wrong_sha(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pushed = {"done": False}
+
+    class WrongHeadClient(_FakeGiteaClient):
+        async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+            return {
+                "name": branch,
+                "protected": False,
+                "commit": {"id": "0" * 40 if pushed["done"] else "1" * 40},
+            }
+
+    def push(**_kwargs: Any) -> None:
+        pushed["done"] = True
+
+    _install_push_adapter_mocks(monkeypatch, tmp_path, WrongHeadClient, push)
+    result = await remote.gitea_push_local_ref(
+        project="gpt-browser-bridge-hardening",
+        task_id="candidate-task-123",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_sha=SHA,
+    )
+    assert pushed["done"] is True
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CHECK_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_materialize_adapter_uses_authoritative_job_and_isolated_verifier(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     captured: dict[str, Any] = {}
+
+    class AgentClient:
+        def job_result(self, job_id: str, redact_output: bool = True) -> dict[str, Any]:
+            captured["job_id"] = job_id
+            captured["redact_output"] = redact_output
+            return {"status": "completed", "exit_code": 0}
+
+    def fake_verify(*, staging_root, expected_sha, required_checks):
+        captured["staging_root"] = staging_root
+        captured["expected_sha"] = expected_sha
+        captured["required_checks"] = required_checks
+
+    def fake_materialize(**kwargs: Any) -> dict[str, Any]:
+        captured["materialize"] = kwargs
+        assert kwargs["expected_diff_sha256"] == "a" * 64
+        assert kwargs["job_result"]("job-trusted")["status"] == "completed"
+        kwargs["verify_candidate"](tmp_path / "candidate", SHA, ["pytest -q"])
+        return {
+            "base_head": "0" * 40,
+            "implementation_diff_sha256": "a" * 64,
+            "candidate_head_sha": SHA,
+            "created_at": "2026-08-31T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _Registry(tmp_path))
+    monkeypatch.setattr(remote, "_server_agent_client", lambda: AgentClient())
+    monkeypatch.setattr(remote, "verify_candidate_via_docker", fake_verify)
+    monkeypatch.setattr(remote, "materialize_task_candidate", fake_materialize)
+
+    result = await remote.gitea_materialize_task_candidate(
+        project="gpt-browser-bridge-hardening",
+        task_id="candidate-task-123",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_diff_sha256="a" * 64,
+    )
+
+    assert result["ok"] is True
+    assert captured["job_id"] == "job-trusted"
+    assert captured["redact_output"] is True
+    assert captured["required_checks"] == ["pytest -q"]
+    assert captured["materialize"]["project_root"] == str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_adapter_pushes_only_validator_selected_trusted_staging(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, Any] = {}
+    staging = tmp_path / "trusted-candidate-staging"
+    staging.mkdir()
+
+    def fake_validate(**kwargs: Any):
+        assert kwargs["project"] == "gpt-browser-bridge-hardening"
+        assert kwargs["task_id"] == "candidate-task-123"
+        assert kwargs["expected_sha"] == SHA
+        return {"candidate_head_sha": SHA}, staging
 
     def fake_push(**kwargs: Any) -> None:
         captured.update(kwargs)
@@ -187,10 +390,12 @@ async def test_adapter_verifies_remote_branch_after_managed_push(
     monkeypatch.setenv("GITEA_GIT_BASE", "https://git.example.test")
     monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _Registry(tmp_path))
     monkeypatch.setattr(remote, "_server_gitea_client", lambda: _FakeGiteaClient)
-    monkeypatch.setattr(remote, "push_exact_sha", fake_push)
+    monkeypatch.setattr(remote, "validate_task_candidate_for_push", fake_validate)
+    monkeypatch.setattr(remote, "push_trusted_staging_sha", fake_push)
 
     result = await remote.gitea_push_local_ref(
         project="gpt-browser-bridge-hardening",
+        task_id="candidate-task-123",
         owner="gpakoh",
         repo="gpt-browser-bridge",
         destination_branch="hardening/runtime-deploy",
@@ -200,34 +405,71 @@ async def test_adapter_verifies_remote_branch_after_managed_push(
     assert result["ok"] is True
     assert result["result"]["verified"] is True
     assert result["result"]["sha"] == SHA
-    assert captured["project_root"] == str(tmp_path)
+    assert captured["staging_root"] == staging
+    assert captured["expected_sha"] == SHA
     assert captured["token"] == "managed-token"
 
 
 @pytest.mark.asyncio
-async def test_adapter_rejects_non_supervisor_workspace_before_remote_access(
+async def test_adapter_candidate_denial_happens_before_remote_access(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    class NonSupervisorRegistry:
+    class OrdinaryRegistry:
         def project_info(self, project: str) -> dict[str, Any]:
             assert project == "gpt-browser-bridge-hardening"
             return {"root": str(tmp_path), "type": "repository"}
 
+    candidate_calls: list[dict[str, Any]] = []
+
+    def deny_candidate(**kwargs: Any):
+        candidate_calls.append(kwargs)
+        raise remote.CandidateError("candidate receipt project/task binding mismatch")
+
     def remote_client_must_not_run() -> Any:
-        raise AssertionError("Gitea client must not be created for a non-supervisor project")
+        raise AssertionError("Gitea client must not run before candidate authorization")
 
     monkeypatch.setenv("GITEA_TOKEN", "managed-token")
-    monkeypatch.setattr(remote, "_server_workspace_registry", lambda: NonSupervisorRegistry())
+    monkeypatch.setattr(remote, "_server_workspace_registry", lambda: OrdinaryRegistry())
+    monkeypatch.setattr(remote, "validate_task_candidate_for_push", deny_candidate)
     monkeypatch.setattr(remote, "_server_gitea_client", remote_client_must_not_run)
+
+    async def inline_to_thread(func, *args: Any, **kwargs: Any):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(remote.asyncio, "to_thread", inline_to_thread)
+    assert remote.gitea_push_local_ref.__globals__["validate_task_candidate_for_push"] is deny_candidate
+    assert remote.gitea_push_local_ref.__globals__["CandidateError"] is remote.CandidateError
 
     result = await remote.gitea_push_local_ref(
         project="gpt-browser-bridge-hardening",
+        task_id="candidate-task-123",
         owner="gpakoh",
         repo="gpt-browser-bridge",
         destination_branch="hardening/runtime-deploy",
         expected_sha=SHA,
     )
 
+    assert len(candidate_calls) == 1
     assert result["ok"] is False
-    assert result["error"]["code"] == "INVALID_INPUT"
-    assert "supervisor-workspace" in result["error"]["message"]
+    assert result["error"]["code"] == "POLICY_DENIED"
+    assert "project/task" in result["error"]["message"]
+
+
+def test_trusted_staging_push_never_clones_or_uses_another_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    staging = tmp_path / "trusted-staging"
+    staging.mkdir()
+    calls: list[tuple[list[str], Path]] = []
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        cwd = Path(kwargs["cwd"])
+        calls.append((list(argv), cwd))
+        assert cwd == staging
+        assert argv[1] != "clone"
+        if argv[1:3] == ["rev-parse", "--verify"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{SHA}\n", stderr="")
+        if argv[1:3] == ["rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{SHA}\n", stderr="")
+        assert argv[1:3] == ["push", "--porcelain"]
+        return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+    monkeypatch.setattr(managed_git.subprocess, "run", fake_run)
+    managed_git.push_trusted_staging_sha(staging_root=staging, owner="gpakoh", repo="gpt-browser-bridge", destination_branch="hardening/runtime-deploy", expected_sha=SHA, username="gpakoh", token="x", git_base="https://git.example.test")
+    assert len(calls) == 3

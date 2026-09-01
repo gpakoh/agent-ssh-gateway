@@ -12,6 +12,16 @@ WS_PTY = "/api/ssh/pty/test-session/stream"
 WS_FILE_WATCH = "/api/file/watch"
 
 
+@pytest.fixture(autouse=True)
+def _disable_external_agent_token_store(monkeypatch):
+    """Keep websocket auth tests independent from the shared Redis token slot."""
+
+    async def _connect_unavailable(_self):
+        raise RuntimeError("agent token store disabled for websocket auth tests")
+
+    monkeypatch.setattr("app.agent_token_store.AgentTokenStore.connect", _connect_unavailable)
+
+
 class TestWebSocketScopeEnforcement:
     """Agent token without required scope must be rejected before accept()."""
 
@@ -21,6 +31,7 @@ class TestWebSocketScopeEnforcement:
         monkeypatch.setattr(settings, "api_key", "master-key-99")
         monkeypatch.setattr(settings, "agent_token", "agent-no-scope")
         monkeypatch.setattr(settings, "agent_token_scopes", [])
+        monkeypatch.setattr(settings, "agent_token_expires_at", None)
         monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
         monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
         monkeypatch.setattr("app.auth_middleware.is_ip_allowed", lambda ip, nets: True)
@@ -31,6 +42,7 @@ class TestWebSocketScopeEnforcement:
         monkeypatch.setattr(settings, "api_key", "master-key-99")
         monkeypatch.setattr(settings, "agent_token", "agent-exec")
         monkeypatch.setattr(settings, "agent_token_scopes", ["ssh:execute"])
+        monkeypatch.setattr(settings, "agent_token_expires_at", None)
         monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
         monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
         monkeypatch.setattr("app.auth_middleware.is_ip_allowed", lambda ip, nets: True)
@@ -77,6 +89,7 @@ class TestWebSocketScopeEnforcement:
         monkeypatch.setattr(settings, "api_key", "master-key-99")
         monkeypatch.setattr(settings, "agent_token", "agent-pty")
         monkeypatch.setattr(settings, "agent_token_scopes", ["ssh:pty"])
+        monkeypatch.setattr(settings, "agent_token_expires_at", None)
         monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
         monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
         monkeypatch.setattr("app.auth_middleware.is_ip_allowed", lambda ip, nets: True)
@@ -146,6 +159,7 @@ class TestWebSocketCommandPolicy:
         monkeypatch.setattr(settings, "api_key", "master-key-99")
         monkeypatch.setattr(settings, "agent_token", "agent-exec")
         monkeypatch.setattr(settings, "agent_token_scopes", ["ssh:execute"])
+        monkeypatch.setattr(settings, "agent_token_expires_at", None)
         monkeypatch.setattr(settings, "allowed_client_cidrs", "0.0.0.0/0,::1/128")
         monkeypatch.setattr(settings, "trusted_proxy_cidrs", "127.0.0.1/32")
         monkeypatch.setattr(settings, "command_policy_mode", "enforce")

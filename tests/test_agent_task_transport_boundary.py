@@ -496,12 +496,17 @@ def test_adapter_transport_classification_matrix_is_explicit():
     run_opencode_source = inspect.getsource(adapter.gateway_run_opencode)
     assert "run_project_command" in run_opencode_source
     assert "_server_agent_client().execute_script" in run_opencode_source
-    assert "_server_client().execute_project_script" not in run_opencode_source
+    # The RUN itself stays on the managed agent client; the durable
+    # execution-attempt state file is a coordination-file mutation, so its
+    # persistence is project-bound (same classification as write_agent_task).
+    assert "_server_client().execute_project_script" in run_opencode_source
+    assert "_server_agent_client().execute_script_async" in run_opencode_source
 
     run_agent_source = inspect.getsource(adapter._build_agent_submit)
     assert "run_project_command" in run_agent_source
     assert "_server_agent_client().execute_script" in run_agent_source
-    assert "_server_client().execute_project_script" not in run_agent_source
+    assert "_server_client().execute_project_script" in run_agent_source
+    assert "_server_agent_client().execute_script_async" in run_agent_source
 
 
 def test_read_agent_log_rejects_task_directory_symlink(tmp_path, monkeypatch):

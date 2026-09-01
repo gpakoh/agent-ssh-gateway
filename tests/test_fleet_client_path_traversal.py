@@ -123,6 +123,33 @@ class TestGiteaClientPathTraversal:
         assert seen["url"] == "https://gitea.example/api/v1/repos/owner/repo/contents"
         await client.aclose()
 
+    @pytest.mark.asyncio
+    async def test_get_branch_encodes_nested_branch_name(self):
+        seen: dict = {}
+        client = GiteaClient("fake-token")
+        client._client = httpx.AsyncClient(
+            base_url="https://gitea.example/api/v1",
+            transport=_recording_transport(seen),
+        )
+        await client.get_branch("owner", "repo", "feature/security-hardening")
+        assert seen["url"] == (
+            "https://gitea.example/api/v1/repos/owner/repo/branches/feature%2Fsecurity-hardening"
+        )
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_get_branch_rejects_ref_path_injection(self):
+        seen: dict = {}
+        client = GiteaClient("fake-token")
+        client._client = httpx.AsyncClient(
+            base_url="https://gitea.example/api/v1",
+            transport=_recording_transport(seen),
+        )
+        with pytest.raises(ValueError, match="Invalid branch"):
+            await client.get_branch("owner", "repo", "feature/../../admin")
+        assert "url" not in seen
+        await client.aclose()
+
 
 class TestGitHubClientPathTraversal:
     @pytest.mark.asyncio

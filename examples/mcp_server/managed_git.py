@@ -213,3 +213,95 @@ def push_exact_sha(
             raise ManagedGitError(
                 f"managed Git push failed with exit code {pushed.returncode}"
             )
+
+
+
+def push_trusted_staging_sha(
+    *,
+    staging_root: Path,
+    owner: str,
+    repo: str,
+    destination_branch: str,
+    expected_sha: str,
+    username: str,
+    token: str,
+    git_base: str,
+    timeout: int = 60,
+) -> None:
+    """Push one already-authorized commit from a receipt-bound staging repo.
+
+    ``staging_root`` is deliberately not an MCP/user argument.  The only caller
+    is the task-candidate adapter after ``validate_task_candidate_for_push``
+    derived the path from the control-plane-only candidate store and verified
+    that its HEAD is exactly the receipt's candidate SHA.
+    """
+    owner = validate_repo_owner_or_name(owner, label="owner")
+    repo = validate_repo_owner_or_name(repo, label="repo")
+    destination_branch = validate_feature_branch(destination_branch)
+    expected_sha = validate_expected_sha(expected_sha)
+    if not username or not token:
+        raise ManagedGitError("managed Git credentials are not configured")
+    root = staging_root.resolve()
+    if not root.is_dir():
+        raise ManagedGitError("trusted candidate staging repository is unavailable")
+
+    clean_env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(root.parent),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    try:
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{expected_sha}^{{commit}}"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+            env=clean_env,
+        )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+            env=clean_env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ManagedGitError("trusted candidate object verification did not complete") from exc
+    if (
+        resolved.returncode != 0
+        or resolved.stdout.strip().lower() != expected_sha
+        or head.returncode != 0
+        or head.stdout.strip().lower() != expected_sha
+    ):
+        raise ManagedGitError("trusted candidate staging does not resolve to expected_sha")
+
+    remote = f"{git_base.rstrip('/')}/{owner}/{repo}.git"
+    auth_env = _minimal_git_env(username, token)
+    auth_env["HOME"] = str(root.parent)
+    auth_env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    try:
+        pushed = subprocess.run(
+            [
+                "git",
+                "push",
+                "--porcelain",
+                remote,
+                f"{expected_sha}:refs/heads/{destination_branch}",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            env=auth_env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ManagedGitError("managed Git push did not complete") from exc
+    if pushed.returncode != 0:
+        raise ManagedGitError(f"managed Git push failed with exit code {pushed.returncode}")

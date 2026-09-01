@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -27,6 +28,7 @@ ALLOWED_ENDPOINTS = frozenset(
         "/user",
         "/repos/{owner}/{repo}",
         "/repos/{owner}/{repo}/branches",
+        "/repos/{owner}/{repo}/branches/{branch}",
         "/repos/{owner}/{repo}/commits",
         "/repos/{owner}/{repo}/contents",
         "/repos/{owner}/{repo}/contents/{path}",
@@ -115,6 +117,10 @@ class GiteaClient:
             validate_repo_owner_or_name(path_params["repo"], label="repo")
         if "path" in path_params:
             validate_repo_path(path_params["path"])
+        if "branch" in path_params:
+            path_params = dict(path_params)
+            branch = _validate_branch_name(str(path_params["branch"]), "branch")
+            path_params["branch"] = quote(branch, safe="")
         path = endpoint.format(**path_params)
         resp = await self._client.get(path, params=params)
         if resp.status_code in (401, 403):
@@ -220,6 +226,15 @@ class GiteaClient:
             params={"limit": limit},
             owner=owner,
             repo=repo,
+        )
+
+    async def get_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+        """Get one branch including Gitea's effective protection fields."""
+        return await self._get(
+            "/repos/{owner}/{repo}/branches/{branch}",
+            owner=owner,
+            repo=repo,
+            branch=branch,
         )
 
     async def list_commits(

@@ -316,11 +316,12 @@ class TestServerWrapperWired:
         not importlib.util.find_spec("mcp"),
         reason="mcp package not installed",
     )
-    def test_server_wrapper_executes_via_client(self, monkeypatch):
+    def test_server_wrapper_executes_via_client(self, monkeypatch, tmp_path):
         monkeypatch.setenv("MCP_GATEWAY_TOOL_MODE", "mcp_client")
         monkeypatch.setenv("MCP_GATEWAY_WRITE_MODE", "handoff")
         monkeypatch.setenv("GITEA_TOKEN", "test-token")
         monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+        monkeypatch.setenv("MCP_TASK_CANDIDATE_ROOT", str(tmp_path / "candidate-store"))
         import importlib
         import sys
         from pathlib import Path
@@ -353,20 +354,50 @@ class TestServerWrapperWired:
             tool_fn = getattr(server, "gateway_run_opencode", None)
             assert tool_fn is not None
 
-            server.client.execute_project_command = MagicMock(
-                return_value={"exit_code": 0, "stdout": "# Plan", "stderr": ""}
-            )
+            # All coordination file reads (task.json, current-plan.md,
+            # attempt-state probes) travel the project-command transport.
+            # The attempt-state ls probe reports "No such file" so the
+            # fail-closed reader treats the record as definitely ABSENT and
+            # a fresh (durable) attempt is created; everything else answers
+            # "# Plan" (task.json parses as {} and is optional on the
+            # run_opencode path, current-plan.md is the run contract).
+            def _project_command(_project, command):
+                if "attempt-state.json" in command:
+                    return {
+                        "exit_code": 1,
+                        "stdout": "",
+                        "stderr": "ls: cannot access '.ai-bridge': No such file or directory",
+                    }
+                return {"exit_code": 0, "stdout": "# Plan", "stderr": ""}
+
+            server.client.execute_project_command = MagicMock(side_effect=_project_command)
             server.client.execute_script = MagicMock(
                 return_value={"exit_code": 0, "stdout": "done", "stderr": ""}
             )
             server.client.execute_project_script = MagicMock(
-                side_effect=AssertionError("managed runner must not use project-bound execution")
+                return_value={"exit_code": 0, "stdout": "", "stderr": ""}
+            )
+            # Durable sync contract: the default (async_submit=False) path
+            # persists the execution-attempt identity (via project-bound
+            # execute_project_script for the attempt-state file), submits
+            # under the idempotency key and waits on the gateway job -- it
+            # must NOT fall back to the single blocking execute_script.
+            server.client.execute_script_async = MagicMock(
+                return_value={"job_id": "job-w1"}
+            )
+            server.client.wait_job = MagicMock(
+                return_value={"status": "completed", "exit_code": 0, "stdout": "done", "stderr": ""}
             )
 
             result = anyio.run(lambda: tool_fn(project="test", task_id=TASK_ID))
             assert result.get("ok") is True
-            server.client.execute_script.assert_called_once()
-            server.client.execute_project_script.assert_not_called()
+            server.client.execute_script.assert_not_called()
+            server.client.execute_script_async.assert_called_once()
+            server.client.wait_job.assert_called_once_with("job-w1")
+            # Production attempt identity is claimed in the control-plane-only
+            # candidate store before submission. Executor attempt-state is now
+            # only a post-submit diagnostic mirror, never the identity authority.
+            assert server.client.execute_project_script.call_count == 1
         finally:
             for name in [
                 n

@@ -292,6 +292,10 @@ services:
       - MCP_AGENT_STATE_ROOT=${MCP_AGENT_STATE_ROOT:-/var/lib/mcp-agent/state}
       - MCP_AGENT_WORKSPACE_ROOT=${MCP_AGENT_WORKSPACE_ROOT:-/var/lib/mcp-agent/workspaces}
       - MCP_AGENT_SOURCE_ROOT=${MCP_AGENT_SOURCE_ROOT:-/var/lib/mcp-agent/sources}
+      - MCP_TASK_CANDIDATE_ROOT=${MCP_TASK_CANDIDATE_ROOT:-/var/lib/mcp-candidates}
+      - MCP_TASK_CANDIDATE_VOLUME_NAME=${MCP_TASK_CANDIDATE_VOLUME_NAME:-ssh-gateway-mcp-candidates}
+      - MCP_VERIFIER_IMAGE=${SSH_GATEWAY_SSHD_IMAGE:-web-ssh-gateway-sshd:latest}
+      - MCP_CANDIDATE_VERIFY_TIMEOUT_SECONDS=${MCP_CANDIDATE_VERIFY_TIMEOUT_SECONDS:-1800}
       - MCP_AUTHORIZE_PASSWORD=${MCP_OAUTH_AUTHORIZE_PASSWORD:?set MCP_OAUTH_AUTHORIZE_PASSWORD}
       - MCP_TOKEN_STORE_FILE=/app/data/mcp_tokens.json
       - MCP_CLIENT_STORE_FILE=/app/data/mcp_clients.json
@@ -331,6 +335,7 @@ services:
       # independent of the bearer-only service's.
       - mcp_oauth_data:/app/data
       - mcp_supervisor_journal:/var/lib/mcp-supervisor
+      - mcp_candidate_store:/var/lib/mcp-candidates
       - agent_runtime:/var/lib/mcp-agent
       - agent_sources:/var/lib/mcp-agent/sources
       - type: bind
@@ -554,6 +559,9 @@ volumes:
   mcp_oauth_data:
     driver: local
   mcp_supervisor_journal:
+    driver: local
+  mcp_candidate_store:
+    name: ${MCP_TASK_CANDIDATE_VOLUME_NAME:-ssh-gateway-mcp-candidates}
     driver: local
   agent_runtime:
     driver: local

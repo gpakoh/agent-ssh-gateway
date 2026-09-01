@@ -34,6 +34,13 @@ from examples.mcp_server.agent_tools import (
 
 TD = ".ai-bridge/tasks/a12345678901"
 TASK_ID = "a12345678901"
+
+
+def test_supervisor_scope_diff_disables_rename_detection() -> None:
+    script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
+    assert 'git diff --cached --no-renames --name-only -z "$BASE_HEAD"' in script
+
+
 PROVIDER = "http://proxy-parser-worker:8080/proxy?format=provider"
 
 
