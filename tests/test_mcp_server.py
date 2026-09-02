@@ -62,6 +62,7 @@ def test_supervisor_tools_registered_in_live_server():
     assert "gitea_push_local_ref" in names
     assert "gitea_merge_pull_request" in names
     assert "gitea_close_pull_request" in names
+    assert "gitea_delete_branch" in names
 
 
 @patch.dict(os.environ, {"MCP_AUTH_MODE": "token", "MCP_PUBLIC_TOKEN": "test-token"})

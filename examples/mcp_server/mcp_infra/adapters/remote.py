@@ -32,7 +32,10 @@ from examples.mcp_server.candidate_verifier import verify_candidate_via_docker
 from examples.mcp_server.managed_git import (
     ManagedGitError,
     configured_gitea_git_base,
+    delete_remote_branch_with_lease,
     push_trusted_staging_sha,
+    validate_expected_sha,
+    validate_feature_branch,
 )
 from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.tool_registry import register_tool
@@ -584,6 +587,185 @@ async def gitea_close_pull_request(
     return tool_success("gitea_close_pull_request", result=data, source="gitea")
 
 
+def _same_gitea_repo_from_pr_head(
+    head: dict[str, Any], *, owner: str, repo: str
+) -> bool | None:
+    """Return whether a PR head is proven to belong to the target repo.
+
+    True means the head repo is the same repository being mutated. False means
+    the payload proves a different repo/fork. None means the head repo identity
+    is unavailable or ambiguous, so destructive branch deletion must fail closed.
+    """
+    head_repo = head.get("repo")
+    if not isinstance(head_repo, dict):
+        return None
+
+    expected_full_name = f"{owner}/{repo}".lower()
+    full_name = str(head_repo.get("full_name") or "").strip().lower()
+    if full_name:
+        return full_name == expected_full_name
+
+    repo_name = str(head_repo.get("name") or "").strip().lower()
+    owner_payload = head_repo.get("owner") or {}
+    if isinstance(owner_payload, dict):
+        owner_name = str(
+            owner_payload.get("login") or owner_payload.get("username") or ""
+        ).strip().lower()
+    else:
+        owner_name = ""
+    if owner_name and repo_name:
+        return owner_name == owner.lower() and repo_name == repo.lower()
+    return None
+
+
+async def gitea_delete_branch(
+    owner: str,
+    repo: str,
+    branch: str,
+    expected_head_sha: str,
+) -> dict[str, Any]:
+    """Delete one remote feature branch with an exact-SHA server-side Git lease."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool="gitea_delete_branch",
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+
+    try:
+        branch = validate_feature_branch(branch)
+        expected_head_sha = validate_expected_sha(expected_head_sha)
+    except ValueError as exc:
+        return _remote_api_error("gitea_delete_branch", "gitea", exc)
+
+    try:
+        async with _server_gitea_client()(token) as client:
+            metadata = await client.get_repo(owner, repo)
+            default_branch = str(metadata.get("default_branch") or "").strip()
+            if branch == default_branch:
+                return tool_error(
+                    tool="gitea_delete_branch",
+                    code="POLICY_DENIED",
+                    message=f"deleting default branch {branch!r} is not allowed",
+                    source="gitea",
+                )
+            if metadata.get("archived") is True:
+                return tool_error(
+                    tool="gitea_delete_branch",
+                    code="POLICY_DENIED",
+                    message="deleting branches from an archived repository is not allowed",
+                    source="gitea",
+                )
+
+            branch_info = await client.get_branch(owner, repo, branch)
+            if branch_info.get("protected") is True or branch_info.get(
+                "effective_branch_protection_name"
+            ):
+                return tool_error(
+                    tool="gitea_delete_branch",
+                    code="POLICY_DENIED",
+                    message=f"deleting protected branch {branch!r} is not allowed",
+                    source="gitea",
+                )
+            commit = branch_info.get("commit") or {}
+            actual_head_sha = str(commit.get("id") or commit.get("sha") or "").lower()
+            if actual_head_sha != expected_head_sha:
+                return tool_error(
+                    tool="gitea_delete_branch",
+                    code="HEAD_MISMATCH",
+                    message="remote branch head changed; re-read the branch before deleting",
+                    source="gitea",
+                )
+
+            open_prs = await client.list_pull_requests(owner, repo, state="open", limit=50)
+            for pr in open_prs:
+                head = pr.get("head") or {}
+                if str(head.get("ref") or "") != branch:
+                    continue
+                same_repo = _same_gitea_repo_from_pr_head(head, owner=owner, repo=repo)
+                if same_repo is False:
+                    continue
+                if same_repo is None:
+                    return tool_error(
+                        tool="gitea_delete_branch",
+                        code="POLICY_DENIED",
+                        message=(
+                            f"open pull request head repository for branch {branch!r} "
+                            "could not be verified"
+                        ),
+                        source="gitea",
+                    )
+                return tool_error(
+                    tool="gitea_delete_branch",
+                    code="POLICY_DENIED",
+                    message=f"branch {branch!r} is still the head of an open pull request",
+                    source="gitea",
+                )
+            if len(open_prs) >= 50:
+                return tool_error(
+                    tool="gitea_delete_branch",
+                    code="POLICY_DENIED",
+                    message="too many open pull requests to prove the branch is unused",
+                    source="gitea",
+                )
+
+            permissions = metadata.get("permissions") or {}
+            if not permissions.get("push"):
+                return tool_error(
+                    tool="gitea_delete_branch",
+                    code="AUTH_ERROR",
+                    message="Configured Gitea identity does not have push access to repository",
+                    source="gitea",
+                )
+            user = await client.get_user()
+            username = str(user.get("login") or user.get("username") or "").strip()
+            if not username:
+                return tool_error(
+                    tool="gitea_delete_branch",
+                    code="AUTH_ERROR",
+                    message="Configured Gitea identity has no usable username",
+                    source="gitea",
+                )
+
+            git_base = configured_gitea_git_base()
+            await asyncio.to_thread(
+                delete_remote_branch_with_lease,
+                owner=owner,
+                repo=repo,
+                branch=branch,
+                expected_sha=expected_head_sha,
+                username=username,
+                token=token,
+                git_base=git_base,
+            )
+    except ManagedGitError as exc:
+        return tool_error(
+            tool="gitea_delete_branch",
+            code="GIT_PUSH_FAILED",
+            message=str(exc),
+            retryable=True,
+            source="gitea",
+        )
+    except Exception as exc:
+        return _remote_api_error("gitea_delete_branch", "gitea", exc)
+
+    return tool_success(
+        "gitea_delete_branch",
+        result={
+            "owner": owner,
+            "repo": repo,
+            "branch": branch,
+            "deleted": True,
+            "head_sha": expected_head_sha,
+            "lease_guarded": True,
+            "verified_absent": True,
+        },
+        source="gitea",
+    )
+
+
 async def gitea_list_action_runs(
     owner: str, repo: str, status: str | None = None, limit: int = 10
 ) -> dict[str, Any]:
@@ -1057,6 +1239,7 @@ def register_all() -> None:
     register_tool("gitea_create_pull_request")(gitea_create_pull_request)
     register_tool("gitea_merge_pull_request")(gitea_merge_pull_request)
     register_tool("gitea_close_pull_request")(gitea_close_pull_request)
+    register_tool("gitea_delete_branch")(gitea_delete_branch)
     register_tool("gitea_materialize_task_candidate")(gitea_materialize_task_candidate)
     register_tool("gitea_push_local_ref")(gitea_push_local_ref)
     register_tool("gitea_list_action_runs")(gitea_list_action_runs)

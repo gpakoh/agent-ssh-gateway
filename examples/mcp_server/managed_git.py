@@ -215,7 +215,6 @@ def push_exact_sha(
             )
 
 
-
 def push_trusted_staging_sha(
     *,
     staging_root: Path,
@@ -305,3 +304,102 @@ def push_trusted_staging_sha(
         raise ManagedGitError("managed Git push did not complete") from exc
     if pushed.returncode != 0:
         raise ManagedGitError(f"managed Git push failed with exit code {pushed.returncode}")
+
+
+def delete_remote_branch_with_lease(
+    *,
+    owner: str,
+    repo: str,
+    branch: str,
+    expected_sha: str,
+    username: str,
+    token: str,
+    git_base: str,
+    timeout: int = 60,
+) -> None:
+    """Delete one remote feature branch only while it still equals ``expected_sha``.
+
+    The remote is derived from trusted Gitea configuration and credentials
+    exist only in the one-shot child environment.  The explicit
+    ``--force-with-lease=<ref>:<expect>`` turns deletion into a remote-side
+    compare-and-delete: if another actor moves the branch, Git rejects it.
+    Deletion is confirmed only with an exact ``ls-remote`` ref lookup.
+    """
+
+    owner = validate_repo_owner_or_name(owner, label="owner")
+    repo = validate_repo_owner_or_name(repo, label="repo")
+    branch = validate_feature_branch(branch)
+    expected_sha = validate_expected_sha(expected_sha)
+    if not username or not token:
+        raise ManagedGitError("managed Git credentials are not configured")
+
+    remote = f"{git_base.rstrip('/')}/{owner}/{repo}.git"
+    exact_ref = f"refs/heads/{branch}"
+    with tempfile.TemporaryDirectory(prefix="mcp-managed-git-delete-") as tmp:
+        clean_env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": tmp,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+        try:
+            initialized = subprocess.run(
+                ["git", "init", "--bare", "."],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+                env=clean_env,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ManagedGitError("failed to stage managed branch deletion") from exc
+        if initialized.returncode != 0:
+            raise ManagedGitError("failed to stage managed branch deletion")
+
+        auth_env = _minimal_git_env(username, token)
+        auth_env["HOME"] = tmp
+        auth_env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+        lease = f"--force-with-lease={exact_ref}:{expected_sha}"
+        refspec = f":{exact_ref}"
+        try:
+            deleted = subprocess.run(
+                ["git", "push", "--porcelain", lease, remote, refspec],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+                env=auth_env,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ManagedGitError("managed Git branch deletion did not complete") from exc
+        if deleted.returncode != 0:
+            # Do not surface stdout/stderr; Git may echo remote/auth diagnostics.
+            raise ManagedGitError(
+                f"managed Git branch deletion rejected with exit code {deleted.returncode}"
+            )
+
+        try:
+            checked = subprocess.run(
+                ["git", "ls-remote", "--exit-code", remote, exact_ref],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+                env=auth_env,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ManagedGitError("managed Git branch existence check did not complete") from exc
+        if checked.returncode == 2:
+            return
+        if checked.returncode == 0:
+            refs = [line.split() for line in checked.stdout.splitlines() if line.strip()]
+            if any(len(parts) == 2 and parts[1] == exact_ref for parts in refs):
+                raise ManagedGitError("remote branch still exists after managed deletion")
+            raise ManagedGitError("managed Git branch existence check returned ambiguous output")
+        raise ManagedGitError(
+            f"managed Git branch existence check failed with exit code {checked.returncode}"
+        )
