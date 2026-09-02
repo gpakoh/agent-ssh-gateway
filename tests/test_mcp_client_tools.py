@@ -459,6 +459,26 @@ class TestProjectAwareHandoffWrite:
         assert not (project_root / ".ai-bridge").exists()
 
 
+class TestProjectCommandCwdMetadata:
+    def test_run_project_command_reports_project_relative_cwd(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+
+        class Client:
+            def execute_project_command(self, project: str, command: str) -> dict[str, object]:
+                assert project == "demo"
+                assert command == "git status --short"
+                return {"exit_code": 0, "stdout": "ok\n", "stderr": "", "duration": 0.01}
+
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        result = mod.run_project_command(Client(), "demo", "git status --short")
+
+        assert result["cwd"] == "."
+        assert "/" not in result["cwd"]
+
+
 class TestProjectInfoVerificationHints:
     def test_info_exposes_cwd_bound_uv_verification_hints(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

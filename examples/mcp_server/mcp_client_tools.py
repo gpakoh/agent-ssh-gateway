@@ -911,6 +911,7 @@ def _fallback_result(
                 stderr=_redact_project_root(r2.get("stderr", ""), project_dir),
                 execution_duration_ms=_execution_duration_ms(r2),
                 job_id=r2.get("job_id"),
+                cwd=".",
             ),
             tool_name=tool_name,
         )
@@ -923,6 +924,7 @@ def _fallback_result(
             stderr=_redact_project_root(r2.get("stderr", ""), project_dir),
             execution_duration_ms=_execution_duration_ms(r2),
             job_id=r2.get("job_id"),
+            cwd=".",
         ),
     )
 
@@ -1091,6 +1093,7 @@ def _run_uv_tool(
                 stderr=_redact_project_root(raw.get("stderr", ""), str(project_dir)),
                 execution_duration_ms=_execution_duration_ms(raw),
                 job_id=raw.get("job_id"),
+                cwd=".",
             ),
             tool_name=tool_name,
         )
@@ -1103,6 +1106,7 @@ def _run_uv_tool(
             stderr=_redact_project_root(raw.get("stderr", ""), str(project_dir)),
             execution_duration_ms=_execution_duration_ms(raw),
             job_id=raw.get("job_id"),
+            cwd=".",
         ),
     )
 
@@ -1329,6 +1333,7 @@ def run_project_command(
         stderr=_redact_project_root(result.get("stderr", ""), root),
         execution_duration_ms=_execution_duration_ms(result),
         job_id=result.get("job_id"),
+        cwd=".",
     )
 
 

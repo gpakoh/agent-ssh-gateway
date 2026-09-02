@@ -62,12 +62,15 @@ patch, test, or deliver a safe candidate.
    receipt-bound task candidate. Add a supervised salvage/promote flow for a
    clean commit in a writeable clone: capture base SHA, post SHA, diff SHA,
    checks, exact workspace path, and materialize a trusted candidate receipt.
-7. ⬜ **Verification commands need deterministic project cwd.** Running tests
+7. ◐ **Verification commands need deterministic project cwd.** Running tests
    via `uv run --project /path ...` set the project metadata correctly but did
    not make relative runtime paths such as `app/static` resolve from project
    root. The green invocation was `uv --directory /path run --extra dev ...`.
    Gateway-provided test/verify tools should always execute from the registered
    project root and expose that cwd in their result metadata.
+   - **Partial candidate fix (2026-09-02):** project-bound command results now
+     include `cwd="."` when the command is executed in the registered project
+     namespace, keeping host paths hidden while making cwd assumptions explicit.
 
 ## 🆕 Runtime/CI findings — 2026-08-19
 

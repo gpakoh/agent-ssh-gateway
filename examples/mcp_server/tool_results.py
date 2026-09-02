@@ -232,6 +232,7 @@ def build_command_result(
     execution_duration_ms: int | None = None,
     job_id: str | None = None,
     timestamps: dict | None = None,
+    cwd: str | None = None,
 ) -> dict:
     result = {
         "outcome": outcome,
@@ -243,6 +244,8 @@ def build_command_result(
     }
     if timestamps:
         result["timestamps"] = timestamps
+    if cwd is not None:
+        result["cwd"] = cwd
     return result
 
 
