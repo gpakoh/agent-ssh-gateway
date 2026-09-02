@@ -379,7 +379,7 @@ class TestProjectRunAgentAsyncSubmit:
 
         script = run_script_async.call_args.args[1]
         assert "agent-heartbeat.json" in script
-        assert "agent_heartbeat_loop &" in script
+        assert "agent_heartbeat_loop >/dev/null 2>&1 &" in script
         assert "write_agent_heartbeat running starting" in script
         assert "finish_agent_heartbeat" in script
         assert "write_agent_heartbeat exited trap" in script
