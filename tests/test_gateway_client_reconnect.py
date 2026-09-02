@@ -131,7 +131,7 @@ class TestReconnectSession:
         client = _client()
         body = {
             "message": "Too many active sessions (limit 64)",
-            "code": "SESSION_LIMIT_EXCEEDED",
+            "code": "RATE_LIMIT_EXCEEDED",
             "retryable": True,
             "hint": "Reduce request frequency and retry after the indicated wait time",
             "http_status": 429,
@@ -147,7 +147,7 @@ class TestReconnectSession:
         assert err.status_code == 429
         assert err.body == body
         assert "429" in str(err)
-        assert "SESSION_LIMIT_EXCEEDED" in str(err)
+        assert "RATE_LIMIT_EXCEEDED" in str(err)
 
     def test_raises_structured_error_on_429_without_retry_after(self):
         """429 without a Retry-After header still surfaces the structured

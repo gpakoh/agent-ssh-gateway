@@ -52,21 +52,6 @@ _PROTECTED_BRANCHES = frozenset({"main", "master"})
 class CandidateError(RuntimeError):
     """A sanitized task-candidate failure safe to expose through MCP."""
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        code: str = "POLICY_DENIED",
-        retryable: bool = False,
-        hint: str | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.code = code
-        self.retryable = retryable
-        self.hint = hint
-        self.details = details
-
 
 def implementation_diff_sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -662,18 +647,10 @@ def _enforce_candidate_scope(
     forbidden = [(pattern, _compile_scope_glob(pattern)) for pattern in forbidden_files]
     for path in _changed_candidate_paths(repo, base_head, candidate_head):
         if not any(regex.fullmatch(path) for regex in allowed):
-            raise CandidateError(
-                f"candidate changes file outside immutable allowed scope: {path}",
-                code="CANDIDATE_SCOPE_VIOLATION",
-                details={"path": path},
-            )
+            raise CandidateError(f"candidate changes file outside immutable allowed scope: {path}")
         for pattern, regex in forbidden:
             if regex.fullmatch(path):
-                raise CandidateError(
-                    f"candidate changes forbidden file for pattern {pattern!r}",
-                    code="CANDIDATE_SCOPE_VIOLATION",
-                    details={"path": path, "pattern": pattern},
-                )
+                raise CandidateError(f"candidate changes forbidden file for pattern {pattern!r}")
 
 
 def _make_verifier_readable(root: Path) -> None:
@@ -695,34 +672,33 @@ def _make_verifier_readable(root: Path) -> None:
         raise CandidateError("candidate staging cannot be exposed read-only to verifier") from exc
 
 
-def _require_terminal_success(
+def _require_terminal_job(
     job_id: str, job_result: Callable[[str], dict[str, Any]] | None
-) -> None:
+) -> tuple[str, int | None]:
+    """Require an authoritative terminal job, but do not trust worker success.
+
+    A failed/cancelled agent can still leave a useful supervisor-owned diff.
+    Once the gateway proves the job is terminal those bytes are stable enough
+    for architect approval by digest.  Candidate materialization then rebuilds
+    from the immutable BASE_HEAD, enforces the immutable file scope, and runs
+    the required checks again in the isolated verifier.  Worker exit zero is
+    therefore not a trust prerequisite; terminality is.
+    """
     if job_result is None:
-        raise CandidateError(
-            "authoritative job result verifier is required",
-            code="DEPENDENCY_MISSING",
-        )
+        raise CandidateError("authoritative job result verifier is required")
     try:
         result = job_result(job_id)
     except Exception as exc:
-        raise CandidateError(
-            "authoritative agent job result is unavailable",
-            code="CANDIDATE_EVIDENCE_MISSING",
-            retryable=True,
-            hint="Retry after the agent job store is reachable, then materialize again.",
-        ) from exc
-    status = str(result.get("status") or "") if isinstance(result, dict) else ""
-    exit_code = result.get("exit_code") if isinstance(result, dict) else None
-    if status != "completed" or exit_code != 0:
-        retryable = status not in {"completed", "failed", "cancelled", "canceled"}
-        raise CandidateError(
-            "agent job is not terminal-successful",
-            code="CANDIDATE_JOB_NOT_SUCCESSFUL",
-            retryable=retryable,
-            hint="Wait for the agent job to finish, or inspect its report before retrying.",
-            details={"job_status": status, "exit_code": exit_code},
-        )
+        raise CandidateError("authoritative agent job result is unavailable") from exc
+    if not isinstance(result, dict):
+        raise CandidateError("authoritative agent job result is invalid")
+    status = str(result.get("status") or "").strip().lower()
+    if status not in {"completed", "failed", "cancelled"}:
+        raise CandidateError("agent job is not terminal")
+    exit_code_raw = result.get("exit_code")
+    if exit_code_raw is not None and not isinstance(exit_code_raw, int):
+        raise CandidateError("authoritative agent job exit_code is invalid")
+    return status, exit_code_raw
 
 
 def _materialize_task_candidate_unlocked(
@@ -746,11 +722,10 @@ def _materialize_task_candidate_unlocked(
         expected_diff_sha256, label="expected_diff_sha256"
     )
     if evidence["implementation_diff_sha256"] != approved_diff:
-        raise CandidateError(
-            "implementation diff changed since architect approval",
-            code="CANDIDATE_DIFF_MISMATCH",
-        )
-    _require_terminal_success(evidence["job_id"], job_result)
+        raise CandidateError("implementation diff changed since architect approval")
+    job_terminal_status, job_exit_code = _require_terminal_job(
+        evidence["job_id"], job_result
+    )
     destination = _receipt_destination(
         destination_owner, destination_repo, destination_branch
     )
@@ -831,21 +806,14 @@ def _materialize_task_candidate_unlocked(
             forbidden_files=evidence["forbidden_files"],
         )
         if verify_candidate is None:
-            raise CandidateError(
-                "isolated candidate verifier is required",
-                code="DEPENDENCY_MISSING",
-            )
+            raise CandidateError("isolated candidate verifier is required")
         _make_verifier_readable(tmp)
         try:
             verify_candidate(repo_tmp, candidate_head, evidence["required_checks"])
         except CandidateError:
             raise
         except Exception as exc:
-            raise CandidateError(
-                "isolated candidate verification failed",
-                code="CANDIDATE_VERIFICATION_FAILED",
-                details={"candidate_head_sha": candidate_head},
-            ) from exc
+            raise CandidateError("isolated candidate verification failed") from exc
         os.replace(repo_tmp, staging)
         receipt = {
             "version": RECEIPT_VERSION,
@@ -854,6 +822,8 @@ def _materialize_task_candidate_unlocked(
             "attempt_id": evidence["attempt_id"],
             "fingerprint": evidence["fingerprint"],
             "job_id": evidence["job_id"],
+            "job_terminal_status": job_terminal_status,
+            "job_exit_code": job_exit_code,
             "base_head": evidence["base_head"],
             "implementation_diff_sha256": evidence["implementation_diff_sha256"],
             "delivery_contract_sha256": evidence["delivery_contract_sha256"],

@@ -208,6 +208,31 @@ def _reset_project_registry_caches() -> bool:
     return ok
 
 
+def _registration_visibility(
+    result_project_id: str,
+    result_root: str,
+) -> dict[str, Any]:
+    """Check whether the newly persisted project is visible to live tools."""
+    try:
+        info = _get_workspace_registry().project_info(result_project_id)
+    except Exception:
+        return {
+            "usable": False,
+            "visibility_error": "PROJECT_NOT_VISIBLE_AFTER_REGISTRATION",
+        }
+
+    visible: dict[str, Any] = {
+        "project_id": result_project_id,
+        # Use the registry-relative root already validated/persisted by the
+        # control plane.  The workspace registry returns an absolute host path;
+        # do not echo that through ChatGPT-facing tooling.
+        "root": result_root,
+    }
+    if isinstance(info.get("parent"), str) and info["parent"]:
+        visible["parent"] = info["parent"]
+    return {"usable": True, "visible_project": visible}
+
+
 def _register_project_impl(
     project_id: str,
     root: str,
@@ -254,19 +279,18 @@ def _register_project_impl(
         )
 
     cache_reset = _reset_project_registry_caches()
-    return tool_success(
-        tool=tool,
-        result={
-            "project_id": result.project_id,
-            "root": result.root,
-            "type": result.project_type,
-            "description": result.description,
-            "tags": result.tags,
-            "parent": result.parent,
-            "registry_hash": result.registry_hash,
-            "cache_reset": cache_reset,
-        },
-    )
+    payload: dict[str, Any] = {
+        "project_id": result.project_id,
+        "root": result.root,
+        "type": result.project_type,
+        "description": result.description,
+        "tags": result.tags,
+        "parent": result.parent,
+        "registry_hash": result.registry_hash,
+        "cache_reset": cache_reset,
+    }
+    payload.update(_registration_visibility(result.project_id, result.root))
+    return tool_success(tool=tool, result=payload)
 
 
 def supervisor_register_project(

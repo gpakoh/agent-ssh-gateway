@@ -247,6 +247,16 @@ class TestProjectRunAgentDisabled:
         assert result["status"] == "failed"
         assert result["exit_code"] == 1
 
+    @pytest.mark.parametrize(
+        ("exit_code", "expected_status"),
+        [(77, "rate-limited"), (78, "startup-timeout"), (79, "run-timeout")],
+    )
+    def test_operational_failure_exit_is_actionable(self, exit_code, expected_status):
+        rc = _make_run_cmd(task_json=_make_task_json(), exit_code=exit_code)
+        result = project_run_agent(rc, project="test", task_id=TASK_ID)
+        assert result["status"] == expected_status
+        assert result["exit_code"] == exit_code
+
     def test_no_allowed_backends(self):
         rc = _make_run_cmd(task_json=_make_task_json(allowed=[]))
         result = project_run_agent(rc, project="test", task_id=TASK_ID)

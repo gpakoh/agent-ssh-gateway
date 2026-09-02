@@ -62,6 +62,59 @@ def test_supervisor_tools_registered_in_live_server():
     assert "gitea_push_local_ref" in names
     assert "gitea_merge_pull_request" in names
     assert "gitea_close_pull_request" in names
+    assert "gitea_delete_branch" in names
+
+
+@patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
+def test_gitea_push_local_ref_schema_requires_task_candidate_receipt():
+    """Trusted push schema must reflect the receipt-bound task contract."""
+    import importlib
+
+    import examples.mcp_server.server as srv
+
+    importlib.reload(srv)
+    tool = next(
+        tool
+        for tool in srv.mcp._tool_manager.list_tools()
+        if tool.name == "gitea_push_local_ref"
+    )
+    assert tool.parameters["required"] == [
+        "project",
+        "task_id",
+        "owner",
+        "repo",
+        "destination_branch",
+        "expected_sha",
+    ]
+    assert "task_id" in tool.parameters["properties"]
+
+
+@patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
+def test_tools_manifest_gitea_delete_branch_matches_invokable_schema():
+    """Manifest must not advertise a Gitea delete tool missing from live schema."""
+    import importlib
+
+    import examples.mcp_server.server as srv
+
+    importlib.reload(srv)
+    tools = {tool.name: tool for tool in srv.mcp._tool_manager.list_tools()}
+
+    manifest = srv.gateway_tools_manifest(
+        name_prefix="gitea_delete_branch",
+        include_descriptions=False,
+    )
+
+    assert manifest["ok"] is True
+    items = manifest["result"]["tools"]
+    assert [item["name"] for item in items] == ["gitea_delete_branch"]
+    assert "gitea_delete_branch" in tools
+    tool = tools["gitea_delete_branch"]
+    assert tool.parameters["required"] == [
+        "owner",
+        "repo",
+        "branch",
+        "expected_head_sha",
+    ]
 
 
 @patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
