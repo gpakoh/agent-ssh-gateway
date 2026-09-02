@@ -108,6 +108,8 @@ patch, test, or deliver a safe candidate.
    - **Partial candidate fix (2026-09-02):** `project_file_preview_patch()` now
      preserves CRLF line endings the same way `project_apply_patch()` does, so
      preview `after_hash` matches the real post-write hash for CRLF files.
+     `workspace_verify`/`project_file_verify()` also report `expected_hash` and
+     `verified`, matching the vocabulary used by mutation `post_write` receipts.
 
 ## 🆕 Runtime/CI findings — 2026-08-19
 

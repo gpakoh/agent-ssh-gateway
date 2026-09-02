@@ -318,7 +318,9 @@ class TestVerify:
             registry=preview_workspace["registry"],
         )
         assert result["matches"] is True
+        assert result["verified"] is True
         assert result["current_hash"] == expected_hash
+        assert result["expected_hash"] == expected_hash
         assert result["file_exists"] is True
 
     def test_verify_mismatched_hash(self, preview_workspace):
@@ -329,7 +331,9 @@ class TestVerify:
             registry=preview_workspace["registry"],
         )
         assert result["matches"] is False
+        assert result["verified"] is False
         assert result["current_hash"] is not None
+        assert result["expected_hash"] == "sha256:wrong"
         assert result["file_exists"] is True
 
     def test_verify_nonexistent_file(self, preview_workspace):
@@ -340,7 +344,9 @@ class TestVerify:
             registry=preview_workspace["registry"],
         )
         assert result["matches"] is False
+        assert result["verified"] is False
         assert result["current_hash"] is None
+        assert result["expected_hash"] == "sha256:anything"
         assert result["file_exists"] is False
 
     def test_verify_hidden_path(self, preview_workspace):

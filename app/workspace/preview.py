@@ -328,7 +328,9 @@ def project_file_verify(
             "project_id": project_id,
             "path": relative_path,
             "matches": False,
+            "verified": False,
             "current_hash": None,
+            "expected_hash": expected_hash,
             "file_exists": False,
         }
 
@@ -341,7 +343,9 @@ def project_file_verify(
             "project_id": project_id,
             "path": relative_path,
             "matches": False,
+            "verified": False,
             "current_hash": None,
+            "expected_hash": expected_hash,
             "file_exists": True,
         }
 
@@ -351,6 +355,8 @@ def project_file_verify(
         "project_id": project_id,
         "path": relative_path,
         "matches": matches,
+        "verified": matches,
         "current_hash": current_hash,
+        "expected_hash": expected_hash,
         "file_exists": True,
     }
