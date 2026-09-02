@@ -82,6 +82,30 @@ def test_git_commit_schema_exposes_optional_workspace_guards():
     assert "expected_status_sha256" in properties
 
 
+@patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
+def test_gitea_push_local_ref_schema_requires_task_candidate_receipt():
+    """Trusted push schema must reflect the receipt-bound task contract."""
+    import importlib
+
+    import examples.mcp_server.server as srv
+
+    importlib.reload(srv)
+    tool = next(
+        tool
+        for tool in srv.mcp._tool_manager.list_tools()
+        if tool.name == "gitea_push_local_ref"
+    )
+    assert tool.parameters["required"] == [
+        "project",
+        "task_id",
+        "owner",
+        "repo",
+        "destination_branch",
+        "expected_sha",
+    ]
+    assert "task_id" in tool.parameters["properties"]
+
+
 @patch.dict(os.environ, {"MCP_AUTH_MODE": "token", "MCP_PUBLIC_TOKEN": "test-token"})
 def test_token_mode_initializes_provider():
     """Token mode initializes GatewayOAuthProvider with MCP_PUBLIC_TOKEN."""

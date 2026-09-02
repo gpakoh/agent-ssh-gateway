@@ -72,7 +72,13 @@ patch, test, or deliver a safe candidate.
    - **Partial candidate fix (2026-09-02):** post-push remote-ref mismatch now
      returns retryable `CHECK_FAILED` with `remote_ref`, `expected_sha`,
      `remote_observed_sha`, owner/repo/branch and a recovery hint instead of a
-     bare boolean failure.
+     bare boolean failure. Managed source fallback now checks trusted remotes in
+     deterministic order (`origin`, `gitea`, `mcp-gitea`) and the Gitea remote
+     host allowlist accepts `mcp-gitea`, hostnames derived from
+     `GITEA_GIT_BASE`, and explicit `GITEA_TRUSTED_REMOTE_HOSTS`. The live MCP
+     schema also has a regression asserting `gitea_push_local_ref` remains
+     receipt-bound by required `task_id`. Still open: first-class salvage/promote
+     flow for clean local commits and partial failed agent runs.
 7. ◐ **Verification commands need deterministic project cwd.** Running tests
    via `uv run --project /path ...` set the project metadata correctly but did
    not make relative runtime paths such as `app/static` resolve from project

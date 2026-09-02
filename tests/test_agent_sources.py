@@ -260,6 +260,58 @@ class _FakeRegistry:
         return {"project_id": project, "root": str(self._root)}
 
 
+def test_resolve_trusted_remote_tries_named_gitea_remotes_when_origin_is_untrusted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from examples.mcp_server.agent_sources import _resolve_trusted_remote
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setenv("GITEA_TOKEN", "fake-token")
+    monkeypatch.setenv("GITEA_API_BASE", "http://gitea:3000/api/v1")
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd == ["git", "remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="/srv/not-a-gitea-remote\n", stderr=""
+            )
+        if cmd == ["git", "remote", "get-url", "gitea"]:
+            return subprocess.CompletedProcess(
+                cmd, 2, stdout="", stderr="error: No such remote 'gitea'\n"
+            )
+        if cmd == ["git", "remote", "get-url", "mcp-gitea"]:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="ssh://git@mcp-gitea:2222/gpakoh/test-repo.git\n",
+                stderr="",
+            )
+        raise AssertionError(f"unexpected subprocess call: {cmd!r}")
+
+    def fake_gitea_get(path: str, *, token: str) -> dict[str, str]:
+        assert token == "fake-token"
+        if path == "/user":
+            return {"login": "testuser"}
+        assert path == "/repos/gpakoh/test-repo"
+        return {"clone_url": "https://git.example.test/gpakoh/test-repo.git"}
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "examples.mcp_server.control_plane_git._gitea_get", fake_gitea_get
+    )
+
+    clone_url, token = _resolve_trusted_remote(project_root)
+
+    assert clone_url == "https://git.example.test/gpakoh/test-repo.git"
+    assert token == "fake-token"
+    assert ["git", "remote", "get-url", "origin"] in calls
+    assert ["git", "remote", "get-url", "gitea"] in calls
+    assert ["git", "remote", "get-url", "mcp-gitea"] in calls
+
+
 def _make_bare_clone(tmp_path: Path, source_repo: Path) -> tuple[Path, str]:
     """Create a bare clone of *source_repo* that contains all objects."""
     bare = tmp_path / "remote.git"
