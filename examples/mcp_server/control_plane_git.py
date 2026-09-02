@@ -168,14 +168,26 @@ def _verify_staged_ref(staging_git_dir: Path, branch: str) -> str:
     return result.stdout.strip()
 
 
+def _add_allowed_remote_host(allowed_hosts: set[str], raw: str) -> None:
+    value = raw.strip()
+    if not value:
+        return
+    if "://" in value:
+        host = urlparse(value).hostname or ""
+    else:
+        host = urlparse(f"//{value}").hostname or value.split(":", 1)[0]
+    if host:
+        allowed_hosts.add(host.lower())
+
+
 def _parse_gitea_remote(remote_url: str) -> tuple[str, str, str]:
     if remote_url.startswith("git@") and ":" in remote_url:
         host_part, repo_part = remote_url.split(":", 1)
-        host = host_part.split("@", 1)[1]
+        host = host_part.split("@", 1)[1].lower()
         path = repo_part
     elif remote_url.startswith("ssh://") or remote_url.startswith("http://") or remote_url.startswith("https://"):
         parsed = urlparse(remote_url)
-        host = parsed.hostname or ""
+        host = (parsed.hostname or "").lower()
         path = parsed.path.lstrip("/")
     else:
         raise RuntimeError("GIT_REMOTE_NOT_ALLOWED")
@@ -186,18 +198,12 @@ def _parse_gitea_remote(remote_url: str) -> tuple[str, str, str]:
         raise RuntimeError("GIT_REMOTE_NOT_ALLOWED")
     owner, repo = parts
 
-    allowed_hosts = set()
-    forwarded_host = os.environ.get("GITEA_FORWARDED_HOST", "").strip()
-    if forwarded_host:
-        allowed_hosts.add(forwarded_host.split(":", 1)[0])
-    api_base = os.environ.get("GITEA_API_BASE", "").strip()
-    if api_base:
-        api_host = urlparse(api_base).hostname
-        if api_host:
-            allowed_hosts.add(api_host)
-    allowed_hosts.add("gitea")
-    allowed_hosts.add("192.0.2.103")
-    allowed_hosts.add("git.example.com")
+    allowed_hosts: set[str] = set()
+    for env_name in ("GITEA_FORWARDED_HOST", "GITEA_API_BASE", "GITEA_GIT_BASE"):
+        _add_allowed_remote_host(allowed_hosts, os.environ.get(env_name, ""))
+    for item in re.split(r"[,\s]+", os.environ.get("GITEA_TRUSTED_REMOTE_HOSTS", "")):
+        _add_allowed_remote_host(allowed_hosts, item)
+    allowed_hosts.update({"gitea", "mcp-gitea", "192.0.2.103", "git.example.com"})
 
     if host not in allowed_hosts:
         raise RuntimeError("GIT_REMOTE_NOT_ALLOWED")

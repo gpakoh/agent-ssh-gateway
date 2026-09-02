@@ -525,6 +525,120 @@ def test_token_never_in_url_or_config(tmp_path, monkeypatch):
         assert "fake-token" not in url, f"Token leaked in URL: {url}"
 
 
+def test_resolve_trusted_remote_uses_named_trusted_remote_when_origin_missing(tmp_path, monkeypatch):
+    """Managed source publication must not require a remote literally named origin."""
+    from examples.mcp_server.agent_sources import _resolve_trusted_remote
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setenv("GITEA_TOKEN", "fake-token")
+    monkeypatch.setenv("GITEA_API_BASE", "http://gitea:3000/api/v1")
+
+    def fake_run(argv, **kwargs):
+        if argv == ["git", "remote"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="gitea\nmcp-gitea\n", stderr="")
+        if argv == ["git", "remote", "get-url", "--push", "gitea"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="ssh://git@198.51.100.103:2222/gpakoh/agent-ssh-gateway.git\n",
+                stderr="",
+            )
+        if argv == ["git", "remote", "get-url", "--push", "mcp-gitea"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="ssh://git@gitea/gpakoh/agent-ssh-gateway.git\n",
+                stderr="",
+            )
+        raise AssertionError(f"unexpected subprocess call: {argv!r}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "examples.mcp_server.control_plane_git._repo_https_target",
+        lambda owner, repo, *, token: (
+            "gpakoh",
+            f"https://git.example.test/{owner}/{repo}.git",
+        ),
+    )
+
+    clone_url, token = _resolve_trusted_remote(project_root)
+    assert clone_url == "https://git.example.test/gpakoh/agent-ssh-gateway.git"
+    assert token == "fake-token"
+
+
+def test_resolve_trusted_remote_accepts_configured_local_ssh_identity_only(
+    tmp_path, monkeypatch
+):
+    """A configured local SSH Gitea host can be the sole trusted identity."""
+    from examples.mcp_server.agent_sources import _resolve_trusted_remote
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setenv("GITEA_TOKEN", "fake-token")
+    monkeypatch.setenv("GITEA_API_BASE", "http://gitea:3000/api/v1")
+    monkeypatch.setenv("GITEA_GIT_BASE", "http://198.51.100.103:3000")
+
+    def fake_run(argv, **kwargs):
+        if argv == ["git", "remote"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="gitea\n", stderr="")
+        if argv == ["git", "remote", "get-url", "--push", "gitea"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="ssh://git@198.51.100.103:2222/gpakoh/agent-ssh-gateway.git\n",
+                stderr="",
+            )
+        raise AssertionError(f"unexpected subprocess call: {argv!r}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "examples.mcp_server.control_plane_git._repo_https_target",
+        lambda owner, repo, *, token: (
+            "gpakoh",
+            f"https://git.example.test/{owner}/{repo}.git",
+        ),
+    )
+
+    clone_url, token = _resolve_trusted_remote(project_root)
+    assert clone_url == "https://git.example.test/gpakoh/agent-ssh-gateway.git"
+    assert token == "fake-token"
+
+
+def test_resolve_trusted_remote_rejects_conflicting_trusted_repo_identities(tmp_path, monkeypatch):
+    """Multiple allowlisted remotes must agree on owner/repo before fallback is trusted."""
+    from examples.mcp_server.agent_sources import _resolve_trusted_remote
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setenv("GITEA_TOKEN", "fake-token")
+    monkeypatch.setenv("GITEA_API_BASE", "http://gitea:3000/api/v1")
+
+    def fake_run(argv, **kwargs):
+        if argv == ["git", "remote"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="gitea\nmcp-gitea\n", stderr="")
+        if argv == ["git", "remote", "get-url", "--push", "gitea"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="ssh://git@gitea/gpakoh/agent-ssh-gateway.git\n",
+                stderr="",
+            )
+        if argv == ["git", "remote", "get-url", "--push", "mcp-gitea"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="ssh://git@gitea/gpakoh/other-repo.git\n",
+                stderr="",
+            )
+        raise AssertionError(f"unexpected subprocess call: {argv!r}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ManagedSourceBundleError, match="conflicting trusted remote identities"):
+        _resolve_trusted_remote(project_root)
+
+
 # ---------------------------------------------------------------------------
 # Digest binding primitives (TOCTOU closure for managed source transport).
 # ---------------------------------------------------------------------------

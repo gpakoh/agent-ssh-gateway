@@ -35,6 +35,25 @@ def test_parse_gitea_remote_accepts_git_and_https(monkeypatch: pytest.MonkeyPatc
     assert cpg._parse_gitea_remote("https://git.example.com/gpakoh/repo.git") == ("git.example.com", "gpakoh", "repo")
 
 
+def test_parse_gitea_remote_accepts_configured_local_ssh_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITEA_FORWARDED_HOST", raising=False)
+    monkeypatch.setenv("GITEA_API_BASE", "http://gitea:3000/api/v1")
+    monkeypatch.setenv("GITEA_GIT_BASE", "http://198.51.100.103:3000")
+
+    assert cpg._parse_gitea_remote(
+        "ssh://git@198.51.100.103:2222/gpakoh/repo.git"
+    ) == ("198.51.100.103", "gpakoh", "repo")
+
+
+def test_parse_gitea_remote_accepts_mcp_gitea_service_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITEA_FORWARDED_HOST", raising=False)
+    monkeypatch.setenv("GITEA_API_BASE", "http://gitea:3000/api/v1")
+
+    assert cpg._parse_gitea_remote(
+        "ssh://git@mcp-gitea:2222/gpakoh/repo.git"
+    ) == ("mcp-gitea", "gpakoh", "repo")
+
+
 def test_parse_gitea_remote_rejects_unknown_host(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GITEA_FORWARDED_HOST", "git.example.com")
     monkeypatch.setenv("GITEA_API_BASE", "http://gitea:3000/api/v1")

@@ -326,11 +326,15 @@ def _is_missing_object_error(exc: ManagedSourceBundleError) -> bool:
 
 
 def _resolve_trusted_remote(project_root: Path) -> tuple[str, str]:
-    """Return ``(clone_url, token)`` for the trusted Gitea remote of *project_root*.
+    """Return ``(clone_url, token)`` for the registered repo's trusted Gitea identity.
 
-    Reads ``git remote get-url origin`` from the registered project root,
-    validates through the Gitea allowlist (``_parse_gitea_remote``), and
-    resolves the HTTPS clone URL via the Gitea API (``_repo_https_target``).
+    Remote *names* are not trust anchors.  Enumerate the registered checkout's
+    configured remotes, keep only URLs accepted by the Gitea host allowlist,
+    and require every accepted remote to resolve to the same ``owner/repo``.
+    This supports deployments where the trusted remote is named ``gitea`` or
+    ``mcp-gitea`` instead of ``origin`` while still failing closed on ambiguous
+    repository identity.  The actual fetch target is always re-resolved via
+    the authenticated Gitea API; checkout remote URLs are never used for auth.
 
     Raises ``ManagedSourceBundleError`` on any failure (fail closed).
     """
@@ -346,20 +350,54 @@ def _resolve_trusted_remote(project_root: Path) -> tuple[str, str]:
         )
 
     try:
-        origin_url = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
+        listed = subprocess.run(
+            ["git", "remote"],
             cwd=str(project_root),
             text=True,
             capture_output=True,
             timeout=10,
             check=False,
         )
-        if origin_url.returncode != 0 or not origin_url.stdout.strip():
+        if listed.returncode != 0:
             raise ManagedSourceBundleError(
-                "registered project has no trusted remote origin"
+                "registered project remotes could not be enumerated"
             )
-        url = origin_url.stdout.strip()
-        _host, owner, repo = _parse_gitea_remote(url)
+        names = sorted({line.strip() for line in listed.stdout.splitlines() if line.strip()})
+        if not names:
+            raise ManagedSourceBundleError(
+                "registered project has no trusted Gitea remote"
+            )
+
+        identities: set[tuple[str, str]] = set()
+        for name in names:
+            remote_url = subprocess.run(
+                ["git", "remote", "get-url", "--push", name],
+                cwd=str(project_root),
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            if remote_url.returncode != 0 or not remote_url.stdout.strip():
+                continue
+            try:
+                _host, owner, repo = _parse_gitea_remote(remote_url.stdout.strip())
+            except RuntimeError as exc:
+                if str(exc) == "GIT_REMOTE_NOT_ALLOWED":
+                    continue
+                raise
+            identities.add((owner, repo))
+
+        if not identities:
+            raise ManagedSourceBundleError(
+                "registered project has no trusted Gitea remote"
+            )
+        if len(identities) != 1:
+            raise ManagedSourceBundleError(
+                "registered project has conflicting trusted remote identities"
+            )
+
+        owner, repo = next(iter(identities))
         _username, clone_url = _repo_https_target(owner, repo, token=token)
     except ManagedSourceBundleError:
         raise
