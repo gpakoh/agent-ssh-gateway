@@ -1,5 +1,82 @@
 # Agent SSH Gateway — TODO
 
+## 🧭 Architect/OpenCode agent-loop findings — 2026-09-03
+
+Rescued from polluted PR #136 (`d68dc4f7`) without carrying its stale ancestry.
+PR #138 already implements part of this area; keep this backlog as the operator
+checklist for what still needs explicit close-out after #138 review/merge.
+
+1. ⬜ **OpenCode startup/proxy rotation must be first-class status, not generic
+   `running`.** Live supervisor-of-agents runs reached managed checkout and then
+   stalled in `OpenCode startup stalled; rotating proxy (attempt N/4)` or
+   `startup-timeout`. For supervisor this is not useful agent work; it is a
+   separate boot/admission/startup phase. `inspect_agent_task`/status aggregation
+   should expose `phase=startup`, `startup_elapsed_seconds`,
+   `proxy_rotation_attempt`, `proxy_rotation_max`, `last_startup_message`,
+   `useful_agent_activity_seen=false`, and a machine-readable verdict such as
+   `startup_stalled`/`startup_timeout`. Closure requires a synthetic
+   `agent-status.md`/`opencode-output.log` regression for repeated proxy rotation
+   that returns structured startup verdict without manual raw-log reading.
+
+2. ⬜ **Stable log access for agent tasks.** One gateway `read_agent_log` call hit
+   a safety false-positive. Operator/supervisor diagnostics for a stuck agent
+   must not depend on arbitrary raw command/log read success. Add a bounded,
+   path-safe, redacted log surface limited to fixed task artifacts such as
+   `opencode-output.log`, `agent-status.md`, `agent-report.md`,
+   `implementation-diff.patch`, `agent-heartbeat.json`, and proxy status files.
+   Closure requires a regression that reproduces the problematic log path/content
+   and proves `inspect_agent_task` still returns sanitized tail or structured
+   `log_unavailable`, not a tool-level false-positive.
+
+3. ⬜ **Separate useful agent work from startup dead time.** Runner/status can show
+   managed source bundle and checkout success without proving OpenCode actually
+   read the plan, wrote a report, or produced a diff. Count useful activity only
+   from semantic artifacts (`agent-report.md`, `implementation-diff.patch`,
+   meaningful status progress). Heartbeat/proxy keepalive must not reset semantic
+   staleness. Closure: fresh heartbeat plus stale semantic artifacts returns
+   `likely_hung`/`startup_stalled`, not ordinary `running`.
+
+4. ⬜ **Proxy rotation feedback needs a durable sidecar.** Proxy rotation is now
+   visible mostly as log/status text, not a stable machine-readable artifact.
+   Normalize a redacted sidecar such as `proxy-status.json` with attempt,
+   max_attempts, provider kind, last_error_class, started_at/updated_at and final
+   outcome. Never store proxy URLs or secrets. Closure requires tests asserting
+   `inspect_agent_task` includes concise startup/proxy data and preserves the
+   no-secret invariant.
+
+5. ⬜ **Local OpenCode smoke path for operator-run agents.** When the ChatGPT-side
+   runner/proxy is unstable, Vanya needs a documented local smoke path for
+   running OpenCode against a prepared task/worktree without changing the trusted
+   delivery contract. The local agent may repair code, but merge-ready remains an
+   architect verdict after diff/tests/security review. Closure: add a short docs
+   recipe covering `current-plan.md`, allowed files, required output artifacts,
+   checks to run, and explicit prohibitions: no push, no merge, no secret reads,
+   no unrelated edits.
+
+6. ⬜ **Tool exposure/catalog mismatch remains a live DX bug.** Runtime
+   `tools_manifest` can report a tool as enabled/available while ChatGPT-side
+   `api_tool.list_resources` does not expose an invokable schema. Live examples:
+   `gitea_delete_branch` and stale-schema symptoms around receipt-bound
+   `gitea_push_local_ref`. Closure requires one source of truth for MCP
+   `tools/list`, `tools_manifest`, and the ChatGPT resource catalog, with a
+   regression asserting advertised tools are either invokable or explicitly marked
+   unavailable with a reason.
+
+7. ⬜ **Git namespace mismatch between SSH tools and control-plane git tools.**
+   `execute_argv`/`repo_status` can observe one branch/ref/HEAD while trusted
+   `git_push` acts from another namespace or reports `GIT_LOCAL_REF_MISSING`.
+   This is dangerous for delivery boundaries because operator-visible Git state
+   may not match the MCP push surface. Closure: `git_push` reports the exact
+   resolved project root/branch/head namespace as host-path-free metadata and
+   fails closed with `WORKSPACE_NAMESPACE_MISMATCH` when it differs from the
+   registry/lease namespace.
+
+8. ⬜ **Close superseded PRs explicitly when the tool surface supports it.** PR
+   #133, #135 and #136 are obsolete/superseded contours. They should be closed
+   with comments pointing to #134/#137/#138 as appropriate, not merged. Current
+   ChatGPT-visible Gitea tool surface exposes list/get/create/merge, but no
+   close/update/comment action.
+
 ## Architect/operator wanted capabilities — 2026-09-03
 
 1. ⬜ **First-class bounded internal service health probe.** Architect/Supervisor work often needs to verify an internal service endpoint such as `http://agent-memory-service:8070/health` or `/ready` from the same network context that future automation will use. Today the safe path is indirect (`docker_compose_ps`, `docker_inspect`, `getent hosts`), while common direct probes (`curl`, `wget`, `nc`, `python -c urllib`) may be blocked by policy. Desired capability: a read-only `http_get_health`/`tcp_connect_check` tool with allowlisted method, explicit host/port/path, timeout, max response bytes, no secrets/env exposure, provenance, and clear distinction between DNS failure, connection refused, timeout, non-2xx response and healthy JSON response. This is a wanted capability, not proof that the target service is unhealthy.
