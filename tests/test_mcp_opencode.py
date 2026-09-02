@@ -89,6 +89,17 @@ class TestProjectRunOpencodeExecutes:
         assert result["status"] == "blocked"
         assert result["exit_code"] == 76
 
+    @pytest.mark.parametrize(
+        ("exit_code", "expected_status"),
+        [(77, "rate-limited"), (78, "startup-timeout"), (79, "run-timeout")],
+    )
+    def test_operational_failure_exit_is_actionable(self, exit_code, expected_status):
+        rc = _fake_run_cmd()
+        run_script = MagicMock(return_value={"exit_code": exit_code, "stdout": "", "stderr": ""})
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert result["status"] == expected_status
+        assert result["exit_code"] == exit_code
+
     def test_sigkill_exit_reports_resource_exhausted(self):
         rc = _fake_run_cmd()
         run_script = MagicMock(return_value={"exit_code": 137, "stdout": "Killed", "stderr": ""})

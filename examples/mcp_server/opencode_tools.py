@@ -33,6 +33,7 @@ from examples.mcp_server.agent_tools import (
     _execution_fingerprint,
     _isolated_worktree_error,
     _now_iso,
+    _opencode_terminal_status,
     _read_current_plan,
     _read_task_json,
     _resolve_attempt,
@@ -350,15 +351,7 @@ def project_run_opencode(
 
         return {
             "task_id": task_id,
-            "status": "needs-review"
-            if exit_code == 0
-            else "blocked"
-            if exit_code == 76
-            else "resource-exhausted"
-            if exit_code == 137
-            else "failed"
-            if exit_code is not None
-            else "error",
+            "status": _opencode_terminal_status(exit_code),
             "attempt_id": None,
             "job_id": None,
             "exit_code": exit_code,
@@ -558,15 +551,7 @@ def project_run_opencode(
 
     return {
         "task_id": task_id,
-        "status": "needs-review"
-        if exit_code == 0
-        else "blocked"
-        if exit_code == 76
-        else "resource-exhausted"
-        if exit_code == 137
-        else "failed"
-        if exit_code is not None
-        else "error",
+        "status": _opencode_terminal_status(exit_code),
         "attempt_id": attempt_id,
         "job_id": job_id,
         "reconciled_via": waiter.get("reconciled_via"),

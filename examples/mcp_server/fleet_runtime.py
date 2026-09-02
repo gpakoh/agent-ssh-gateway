@@ -76,7 +76,7 @@ _DEFAULT_POOL: Final = "ssh-gateway/agent-sshd"
 _DEFAULT_GATEWAY_IO_CONCURRENCY: Final = 4
 _GATEWAY_TERMINAL: Final[frozenset[str]] = frozenset({"completed", "failed", "cancelled"})
 _PRE_SUBMIT_TERMINAL: Final[frozenset[str]] = frozenset(
-    {"needs-review", "completed", "failed", "cancelled", "rate-limited", "resource-exhausted", "blocked", "error"}
+    {"needs-review", "completed", "failed", "cancelled", "rate-limited", "startup-timeout", "run-timeout", "resource-exhausted", "blocked", "error"}
 )
 
 
