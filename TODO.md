@@ -102,6 +102,13 @@ patch, test, or deliver a safe candidate.
    that rehydrates from the last pushed candidate ref and records any lost
    local-only commit as non-delivered.
 
+10. ◐ **Preview/verify hashes must match actual mutation semantics.** Preview
+   tools are part of the trust chain: if `after_hash` differs from what a real
+   write/apply path would persist, agents can approve a false candidate.
+   - **Partial candidate fix (2026-09-02):** `project_file_preview_patch()` now
+     preserves CRLF line endings the same way `project_apply_patch()` does, so
+     preview `after_hash` matches the real post-write hash for CRLF files.
+
 ## 🆕 Runtime/CI findings — 2026-08-19
 
 1. ⬜ **Health-path inconsistency: aggregate `health` can fail at transport/DNS level while control-plane dependencies remain available.** During the same diagnostic window, `health` failed before returning its normal structured payload with `[Errno -2] Name or service not known`, while `postgres_health` returned PostgreSQL healthy and Gitea read-only calls (`gitea_get_action_run`, `gitea_list_action_run_jobs`, `gitea_get_pull_request`, `gitea_get_file`) continued to succeed. This is not a total gateway outage: a specific hostname/upstream resolution path used by aggregate health (or its transport) can become unavailable independently. Investigate which dependency/hostname is resolved only on this path and whether the failure should be represented as bounded `degraded` component status instead of making the whole health call unreachable. Closure requires a regression/fault-injection test that reproduces one upstream DNS failure while another dependency stays healthy, plus proof that the diagnostic result preserves per-component truth instead of collapsing into an unstructured transport error.

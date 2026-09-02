@@ -268,9 +268,10 @@ def project_file_preview_patch(
     except Exception as exc:
         raise PatchError(f"Failed to apply patch: {exc}") from exc
 
-    new_content = "\n".join(new_lines)
+    newline = "\r\n" if "\r\n" in old_content else "\n"
+    new_content = newline.join(new_lines)
     if old_content.endswith("\n") and not new_content.endswith("\n"):
-        new_content += "\n"
+        new_content += newline
 
     new_bytes = new_content.encode("utf-8")
     if len(new_bytes) > max_bytes:

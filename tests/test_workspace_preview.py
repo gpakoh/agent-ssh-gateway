@@ -230,6 +230,50 @@ class TestPreviewPatch:
                 registry=preview_workspace["registry"],
             )
 
+    def test_patch_preview_hash_matches_crlf_apply_result(self, preview_workspace):
+        from app.workspace.edit import project_apply_patch
+
+        project = preview_workspace["project"]
+        target = project / "src" / "crlf.py"
+        target.write_bytes(b"one\r\ntwo\r\n")
+        write_registry = WorkspaceRegistry(
+            projects={
+                "preview-project": ProjectInfo(
+                    project_id="preview-project",
+                    root=project,
+                    type="python",
+                    description="Test project",
+                    tags=["test"],
+                )
+            },
+            allowed_roots=[preview_workspace["tmp_path"]],
+            granted_scopes={"project:read", "project:write"},
+        )
+        patch = """\
+--- a/src/crlf.py
++++ b/src/crlf.py
+@@ -1,2 +1,2 @@
+-one
++ONE
+ two
+"""
+
+        preview = project_file_preview_patch(
+            "preview-project",
+            "src/crlf.py",
+            patch,
+            registry=preview_workspace["registry"],
+        )
+        applied = project_apply_patch(
+            "preview-project",
+            "src/crlf.py",
+            patch,
+            registry=write_registry,
+        )
+
+        assert target.read_bytes() == b"ONE\r\ntwo\r\n"
+        assert preview["after_hash"] == applied["post_write"]["current_hash"]
+
     def test_dev_null_preview_shows_deletion(self, preview_workspace):
         """Regression: a deletion patch (target `/dev/null`) must preview as
         a deletion (file will be removed), not as a no-op/edit leaving a
