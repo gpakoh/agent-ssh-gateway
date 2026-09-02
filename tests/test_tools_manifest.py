@@ -68,6 +68,8 @@ class TestBuildManifest:
         assert guidance["project_metadata_tool"] == "info"
         assert "workspace.recommended_write_plane" in guidance["before_project_writes"]
         assert "verification.cwd" in guidance["before_verification"]
+        assert "inspect_agent_task" in guidance["agent_run_diagnostics"]
+        assert "stale/hung" in guidance["agent_run_diagnostics"]
         serialized = str(guidance)
         assert "/home/" not in serialized
         assert "/media/" not in serialized

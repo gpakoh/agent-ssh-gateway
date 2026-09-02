@@ -92,7 +92,19 @@ patch, test, or deliver a safe candidate.
      hints (`session_health`/`health`, async/background path for long-running
      work) even when the gateway body has no REST hint.
 
-9. ⬜ **Ephemeral SSH sessions do not preserve ad-hoc writeable clones.** A
+9. ◐ **Agent hangs need one-call diagnostics, not separate raw log reads.**
+   Sometimes an agent keeps running or silently stops updating logs. Operators
+   need a single read-only diagnostic that combines `agent-status.md`,
+   attempt/job state, artifact mtimes, stale threshold, and a bounded log tail
+   so they can tell `finished`, `running`, or `likely_hung` without manually
+   correlating several tools.
+   - **Partial candidate fix (2026-09-02):** added `inspect_agent_task` as a
+     read-only aggregated diagnostic with job/status/log tail/staleness verdict.
+     `tools_manifest.agent_guidance` now points agents to this one-call diagnostic
+     before falling back to raw status/log reads. Still open: persistent heartbeat
+     timestamps from the runner itself and optional cancellation/retry flow.
+
+10. ⬜ **Ephemeral SSH sessions do not preserve ad-hoc writeable clones.** A
    recovered default session can land in a filesystem namespace where the
    previous `/home/mcpuser/...` candidate clone is absent, while the shared
    registered project root and local candidate ref still exist. This makes a
@@ -102,7 +114,7 @@ patch, test, or deliver a safe candidate.
    that rehydrates from the last pushed candidate ref and records any lost
    local-only commit as non-delivered.
 
-10. ◐ **Preview/verify hashes must match actual mutation semantics.** Preview
+11. ◐ **Preview/verify hashes must match actual mutation semantics.** Preview
    tools are part of the trust chain: if `after_hash` differs from what a real
    write/apply path would persist, agents can approve a false candidate.
    - **Partial candidate fix (2026-09-02):** `project_file_preview_patch()` now
@@ -925,5 +937,3 @@ pre-fix коде; полный pytest зелёный на каждом шаге.
 Итоговое состояние: полный pytest **4486 passed, 1 skipped, 28
 deselected (203s)**; `ruff check` full CI scope — All checks passed;
 mypy — Success.
-
-- Agent hangs need one-call diagnostics: add inspect_agent_task with log tail and stale verdict.
