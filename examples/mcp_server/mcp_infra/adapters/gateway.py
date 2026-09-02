@@ -81,17 +81,14 @@ from examples.mcp_server.mcp_infra.tool_registry import (
 _classify_gateway_error = gateway_errors._classify_gateway_error
 _gateway_error_message = gateway_errors._gateway_error_message
 _gateway_error_hint = gateway_errors._gateway_error_hint
+_gateway_error_details = gateway_errors._gateway_error_details
 
 
 
 def _gateway_client_tool_error(tool: str, exc: GatewayClientError) -> dict[str, Any]:
     """Return a clean MCP tool_error for a structured gateway failure."""
     code, retryable = _classify_gateway_error(exc)
-    details = (
-        {"job_id": exc.body["job_id"]}
-        if isinstance(exc.body, dict) and exc.body.get("job_id")
-        else None
-    )
+    details = _gateway_error_details(exc)
     return tool_error(
         tool=tool,
         code=code,

@@ -117,6 +117,54 @@ def test_gateway_error_hint_none_when_nothing_available():
     assert _gateway_error_hint(exc, "INTERNAL_ERROR") is None
 
 
+def test_gateway_error_details_preserves_validation_errors():
+    from examples.mcp_server.gateway_client import GatewayClientError
+    from examples.mcp_server.mcp_infra.gateway_errors import _gateway_error_details
+
+    exc = GatewayClientError(
+        "POST /api/ssh/execute failed: 422 {...}",
+        status_code=422,
+        body={
+            "message": "Request validation failed",
+            "code": "VALIDATION_ERROR",
+            "retryable": False,
+            "errors": [{"field": "session_id", "error": "required", "type": "missing"}],
+            "total_errors": 1,
+        },
+    )
+
+    assert _gateway_error_details(exc) == {
+        "errors": [{"field": "session_id", "error": "required", "type": "missing"}],
+        "total_errors": 1,
+    }
+
+
+def test_gateway_error_details_preserves_nested_job_status():
+    from examples.mcp_server.gateway_client import GatewayClientError
+    from examples.mcp_server.mcp_infra.gateway_errors import _gateway_error_details
+
+    exc = GatewayClientError(
+        "timeout",
+        body={
+            "detail": {
+                "code": "TIMEOUT",
+                "retryable": True,
+                "details": {"attempt": 2},
+                "job_id": "job-1",
+                "status": "running",
+                "wait_timed_out": True,
+            }
+        },
+    )
+
+    assert _gateway_error_details(exc) == {
+        "attempt": 2,
+        "job_id": "job-1",
+        "status": "running",
+        "wait_timed_out": True,
+    }
+
+
 class TestJobStatusEndToEnd:
     """Feeds a realistic GatewayClientError through the real run_tool()
     path (via gateway_job_status) to prove the fix reaches an actual tool,

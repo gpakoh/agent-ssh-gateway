@@ -29,13 +29,17 @@ patch, test, or deliver a safe candidate.
    tool: create/reuse writeable clone from project+branch, register it as a
    project, expose its root, branch, base SHA, remote mapping, and cleanup
    policy.
-3. ⬜ **GatewayClientError propagation must be uniform.** Hand-written MCP
+3. ◐ **GatewayClientError propagation must be uniform.** Hand-written MCP
    adapters must not catch `GatewayClientError` and emit generic
    `TOOL_EXECUTION_FAILED`. During this session, stale `session_id` and
    policy-denied commands surfaced as redacted REST JSON (`[API] failed...`)
    instead of actionable codes such as `SESSION_NOT_FOUND` or
    `PERMISSION_DENIED`. Audit every manual catch block and route through the
    shared classifier.
+   - **Partial candidate fix (2026-09-02):** common MCP error handling now
+     preserves safe gateway details such as `job_id`, wait status, and
+     validation `errors[]`/`total_errors`, so agents can repair invalid calls
+     without parsing raw REST JSON.
 4. ◐ **Canonical project test command should be discoverable.** Running
    `uv run --with pytest pytest ...` installed pytest without project dev
    extras and failed on `asyncio_mode`; the correct invocation used
@@ -71,6 +75,16 @@ patch, test, or deliver a safe candidate.
    - **Partial candidate fix (2026-09-02):** project-bound command results now
      include `cwd="."` when the command is executed in the registered project
      namespace, keeping host paths hidden while making cwd assumptions explicit.
+
+8. ⬜ **Ephemeral SSH sessions do not preserve ad-hoc writeable clones.** A
+   recovered default session can land in a filesystem namespace where the
+   previous `/home/mcpuser/...` candidate clone is absent, while the shared
+   registered project root and local candidate ref still exist. This makes a
+   clean-but-unpushed commit effectively disappear from the active agent's
+   workspace. Closure should make writeable candidate clones durable under a
+   shared server-controlled location or expose an explicit clone recovery tool
+   that rehydrates from the last pushed candidate ref and records any lost
+   local-only commit as non-delivered.
 
 ## 🆕 Runtime/CI findings — 2026-08-19
 

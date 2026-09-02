@@ -85,6 +85,36 @@ def _gateway_error_message(exc: GatewayClientError) -> str:
     return str(exc)
 
 
+def _gateway_error_details(exc: GatewayClientError) -> dict[str, Any] | None:
+    """Extract safe machine-readable details from a structured gateway error.
+
+    Keep this deliberately allowlisted.  The gateway body can contain
+    transport/debug fields that do not belong on the MCP surface, but some
+    fields are essential for an agent to recover without guessing: job ids,
+    wait status, and FastAPI validation field errors.
+    """
+    if not isinstance(exc.body, dict):
+        return None
+
+    details: dict[str, Any] = {}
+    for key in ("job_id", "status", "wait_timed_out", "errors", "total_errors"):
+        value = exc.body.get(key)
+        if value is not None:
+            details[key] = value
+
+    detail = exc.body.get("detail")
+    if isinstance(detail, dict):
+        nested_details = detail.get("details")
+        if isinstance(nested_details, dict):
+            details.update(nested_details)
+        for key in ("job_id", "status", "wait_timed_out", "errors", "total_errors"):
+            value = detail.get(key)
+            if value is not None:
+                details[key] = value
+
+    return details or None
+
+
 def _gateway_error_hint(exc: GatewayClientError, code: str) -> str | None:
     """Extract the gateway's own per-error hint, when present.
 
