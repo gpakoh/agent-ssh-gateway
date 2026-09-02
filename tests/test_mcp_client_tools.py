@@ -505,3 +505,39 @@ dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
 
         assert result["verification"]["cwd"] == "."
         assert result["verification"]["commands"] == []
+
+    def test_info_exposes_workspace_write_plane_hints_without_host_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from app.config import settings
+
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+        monkeypatch.setattr(settings, "workspace_readonly", True)
+        monkeypatch.setattr(mod.os, "access", lambda path, mode: False)
+
+        result = mod.info(None, "demo")
+
+        workspace = result["workspace"]
+        assert workspace["root"] == "."
+        assert workspace["configured_readonly"] is True
+        assert workspace["filesystem_writeable"] is False
+        assert workspace["recommended_write_plane"] == "writeable_candidate_clone"
+        assert str(tmp_path) not in str(workspace)
+
+    def test_info_reports_workspace_plane_when_config_and_filesystem_are_writeable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from app.config import settings
+
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+        monkeypatch.setattr(settings, "workspace_readonly", False)
+        monkeypatch.setattr(mod.os, "access", lambda path, mode: True)
+
+        result = mod.info(None, "demo")
+
+        workspace = result["workspace"]
+        assert workspace["configured_readonly"] is False
+        assert workspace["filesystem_writeable"] is True
+        assert workspace["recommended_write_plane"] == "workspace"

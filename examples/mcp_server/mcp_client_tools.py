@@ -1380,6 +1380,32 @@ def _project_verification_hints(resolved: Path) -> dict[str, Any]:
     return hints
 
 
+def _project_workspace_hints(resolved: Path) -> dict[str, Any]:
+    """Return host-path-free workspace write-plane hints for agents."""
+    try:
+        from app.config import settings as _settings
+
+        configured_readonly: bool | None = bool(_settings.workspace_readonly)
+    except Exception:
+        configured_readonly = None
+
+    filesystem_writeable = bool(resolved.is_dir() and os.access(resolved, os.W_OK))
+    needs_candidate_clone = bool(configured_readonly or not filesystem_writeable)
+    return {
+        "root": ".",
+        "configured_readonly": configured_readonly,
+        "filesystem_writeable": filesystem_writeable,
+        "recommended_write_plane": (
+            "writeable_candidate_clone" if needs_candidate_clone else "workspace"
+        ),
+        "note": (
+            "Treat workspace writes as unavailable; create/use a writeable candidate clone before editing."
+            if needs_candidate_clone
+            else "Workspace root appears writeable, but still verify post-write hashes before trusting delivery."
+        ),
+    }
+
+
 def _is_real_git_repo(path: Path) -> bool:
     """Check for an actual git worktree, not just a path named ".git".
 
@@ -1414,6 +1440,7 @@ def info(client: GatewayClient, project: str) -> dict[str, Any]:
         "is_dir": resolved.is_dir(),
         "is_git_repo": _is_real_git_repo(resolved),
         "verification": _project_verification_hints(resolved),
+        "workspace": _project_workspace_hints(resolved),
     }
 
 

@@ -7,7 +7,7 @@ branch `fix/reconnect-429-master-headroom-20260902`. The items below are
 written from the tool user's point of view: they made it harder to inspect,
 patch, test, or deliver a safe candidate.
 
-1. ⬜ **Workspace write plane can diverge from the SSH/git plane.** A
+1. ◐ **Workspace write plane can diverge from the SSH/git plane.** A
    `workspace_file_edit` call returned a successful edit receipt/diff for
    `web-ssh-gateway`, but `git diff`, `git status`, and subsequent SSH-side
    `read_file` did not observe the change in the repository being tested.
@@ -16,6 +16,11 @@ patch, test, or deliver a safe candidate.
    require every workspace mutation response to include the exact resolved
    filesystem path, post-write SHA-256, and a same-plane verifier that proves
    the path is the one used by `git status`/test runners for that project.
+   - **Partial candidate fix (2026-09-02):** `info()` now exposes
+     host-path-free `workspace` hints: configured read-only state,
+     filesystem writeability, and `recommended_write_plane` (`workspace` vs
+     `writeable_candidate_clone`). Still open: same-plane post-write verifier
+     and first-class candidate clone flow.
 2. ⬜ **No ergonomic writeable-candidate-clone flow.** When the primary repo
    root is mounted read-only, the current recovery path requires the agent to
    manually create an ad-hoc clone under `/home/mcpuser`, discover whether it
@@ -42,10 +47,14 @@ patch, test, or deliver a safe candidate.
      argv suggestions for pytest/ruff/mypy when a Python `pyproject.toml` is
      present. Still open: make registered runner tools expose their actual cwd
      and propagate the same hints through `tools_manifest`/candidate-clone flows.
-5. ⬜ **Read-only mount failures need precise recovery hints everywhere.**
+5. ◐ **Read-only mount failures need precise recovery hints everywhere.**
    `EROFS` should consistently map to `WORKSPACE_READONLY`, not a generic
    execution failure, and the hint should point to the writeable clone /
    candidate-materialization path.
+   - **Partial candidate fix (2026-09-02):** MCP workspace mutation adapters
+     classify `OSError(errno.EROFS)` as `WORKSPACE_READONLY` and
+     `PermissionError` as `PERMISSION_DENIED`. Still open: audit non-workspace
+     adapters and live REST endpoints for the same classification.
 6. ⬜ **Delivery boundary remains too manual.** A local candidate commit can be
    clean and tested while trusted Gitea delivery remains impossible without a
    receipt-bound task candidate. Add a supervised salvage/promote flow for a
