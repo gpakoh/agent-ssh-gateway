@@ -42,6 +42,16 @@ def registry_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         return fn()
 
     monkeypatch.setattr(supervisor, "run_tool", immediate_run_tool)
+
+    class FreshRegistry:
+        def project_info(self, project_id: str):
+            from app.workspace.registry import WorkspaceRegistry
+
+            return WorkspaceRegistry.load(config_dir / "projects.yaml").project_info(
+                project_id
+            )
+
+    monkeypatch.setattr(supervisor, "_get_workspace_registry", lambda: FreshRegistry())
     return config_dir, workspace_root, initial
 
 
@@ -133,6 +143,53 @@ def test_parent_must_exist_and_contain_child(registry_layout):
         "missing-parent-child", "outside", parent="missing"
     )
     assert missing_parent["ok"] is False
+
+
+def test_registered_child_project_is_self_verified_without_host_path_leak(
+    registry_layout,
+):
+    _config_dir, workspace_root, _initial = registry_layout
+    (workspace_root / "existing" / "child").mkdir()
+
+    result = supervisor.supervisor_register_project(
+        "child",
+        "existing/child",
+        project_type="supervisor-workspace",
+        description="Scoped supervisor audit target",
+        tags=["supervisor"],
+        parent="existing",
+    )
+
+    assert result["ok"] is True
+    payload = result["result"]
+    assert payload["usable"] is True
+    assert payload["visible_project"] == {
+        "project_id": "child",
+        "root": "existing/child",
+        "parent": "existing",
+    }
+    assert str(workspace_root) not in repr(result)
+
+
+def test_registration_reports_when_project_is_not_visible_after_cache_reset(
+    registry_layout, monkeypatch: pytest.MonkeyPatch
+):
+    _config_dir, workspace_root, _initial = registry_layout
+    (workspace_root / "ECC").mkdir()
+
+    class EmptyRegistry:
+        def project_info(self, project_id: str):
+            raise KeyError(project_id)
+
+    monkeypatch.setattr(supervisor, "_get_workspace_registry", lambda: EmptyRegistry())
+    result = supervisor.supervisor_register_project("ecc-reference", "ECC")
+
+    assert result["ok"] is True
+    assert result["result"]["usable"] is False
+    assert (
+        result["result"]["visibility_error"]
+        == "PROJECT_NOT_VISIBLE_AFTER_REGISTRATION"
+    )
 
 
 def test_registration_metadata_is_bounded(registry_layout):
