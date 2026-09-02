@@ -245,3 +245,56 @@ class TestRunTestsAsyncSubmit:
         assert result["error"]["retryable"] is True
         assert result["error"]["details"]["job_id"] == "j2"
         assert "job_status" in result["error"]["hint"]
+
+
+class TestExecuteArgvGatewayErrorContract:
+    def test_execute_argv_preserves_session_not_found_contract(self, monkeypatch):
+        """Regression: gateway_execute_argv used to bypass run_tool's
+        GatewayClientError classifier and returned TOOL_EXECUTION_FAILED with
+        a redacted raw REST JSON blob instead of SESSION_NOT_FOUND.
+        """
+        from examples.mcp_server import server as mcp_server_mod
+
+        def _raise(**_kwargs):
+            raise mcp_server_mod.GatewayClientError(
+                'POST /api/ssh/execute-argv failed: 404 {"message":"Session not found"}',
+                status_code=404,
+                body={
+                    "message": "Session not found",
+                    "code": "SESSION_NOT_FOUND",
+                    "retryable": False,
+                    "hint": "Create a session first via /api/ssh/connect",
+                    "http_status": 404,
+                },
+            )
+
+        monkeypatch.setattr(mcp_server_mod.client, "execute_argv", _raise)
+
+        result = mcp_server_mod.gateway_execute_argv("dead-session", ["git", "status"])
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "SESSION_NOT_FOUND"
+        assert result["error"]["message"] == "Session not found"
+        assert result["error"]["retryable"] is False
+        assert "TOOL_EXECUTION_FAILED" not in result["error"]["message"]
+        assert "[API]" not in result["error"]["message"]
+        assert "detail" not in result["error"]["message"]
+
+    def test_execute_argv_preserves_wait_timeout_job_id(self, monkeypatch):
+        from examples.mcp_server import server as mcp_server_mod
+
+        def _raise(**_kwargs):
+            raise mcp_server_mod.GatewayClientError(
+                "Job j-timeout did not finish before timeout",
+                body={"job_id": "j-timeout", "status": "running", "wait_timed_out": True},
+            )
+
+        monkeypatch.setattr(mcp_server_mod.client, "execute_argv", _raise)
+
+        result = mcp_server_mod.gateway_execute_argv("sid", ["sleep", "60"], timeout_s=1)
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "WAIT_TIMEOUT"
+        assert result["error"]["retryable"] is True
+        assert result["error"]["details"]["job_id"] == "j-timeout"
+        assert "job_status" in result["error"]["hint"]

@@ -36,7 +36,10 @@ _GATEWAY_ERROR_CODE_MAP: dict[str, str] = {
     # Same systematic audit: the gateway's own name for this is
     # RATE_LIMIT_EXCEEDED (both slowapi's 429 handler and SessionLimitError
     # produce it via app/state.py's (429, "") entry) — not "RATE_LIMITED".
+    # SessionLimitError now emits the more specific SESSION_LIMIT_EXCEEDED;
+    # the MCP surface still reports the existing generic RATE_LIMITED code.
     "RATE_LIMIT_EXCEEDED": "RATE_LIMITED",
+    "SESSION_LIMIT_EXCEEDED": "RATE_LIMITED",
     "TIMEOUT": "TIMEOUT",
     # TimeoutError's handler produces GATEWAY_TIMEOUT (app/state.py's
     # (504, "") entry), never the bare "TIMEOUT" this map already expected.

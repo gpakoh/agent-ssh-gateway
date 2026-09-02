@@ -549,10 +549,20 @@ def gateway_execute_argv(
             session_id=session_id,
         )
     except GatewayClientError as e:
+        code, retryable = _classify_gateway_error(e)
+        details = (
+            {"job_id": e.body["job_id"]}
+            if isinstance(e.body, dict) and e.body.get("job_id")
+            else None
+        )
         return tool_error(
             tool="execute_argv",
-            code="TOOL_EXECUTION_FAILED",
-            message=str(e),
+            code=code,
+            message=_gateway_error_message(e),
+            retryable=retryable,
+            hint=_gateway_error_hint(e, code),
+            details=details,
+            source="gateway",
         )
     return tool_success(
         tool="execute_argv",
