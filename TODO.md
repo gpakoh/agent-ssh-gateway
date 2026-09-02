@@ -80,7 +80,16 @@ patch, test, or deliver a safe candidate.
      include `cwd="."` when the command is executed in the registered project
      namespace, keeping host paths hidden while making cwd assumptions explicit.
 
-8. ⬜ **Ephemeral SSH sessions do not preserve ad-hoc writeable clones.** A
+8. ◐ **Transport-level gateway failures need recovery hints.** The live MCP
+   surface briefly returned a generic gateway transport failure during session
+   churn. The structured code/retryable classification exists, but operators
+   still need a concrete next action at the MCP surface.
+   - **Partial candidate fix (2026-09-02):** local transport
+     `REMOTE_UNAVAILABLE` and `TIMEOUT` errors now receive MCP-native retry
+     hints (`session_health`/`health`, async/background path for long-running
+     work) even when the gateway body has no REST hint.
+
+9. ⬜ **Ephemeral SSH sessions do not preserve ad-hoc writeable clones.** A
    recovered default session can land in a filesystem namespace where the
    previous `/home/mcpuser/...` candidate clone is absent, while the shared
    registered project root and local candidate ref still exist. This makes a

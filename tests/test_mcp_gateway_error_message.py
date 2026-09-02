@@ -139,6 +139,44 @@ def test_gateway_error_details_preserves_validation_errors():
     }
 
 
+def test_gateway_transport_errors_get_recovery_hints():
+    from examples.mcp_server.gateway_client import GatewayClientError
+    from examples.mcp_server.mcp_infra.gateway_errors import (
+        _classify_gateway_error,
+        _gateway_error_hint,
+    )
+
+    exc = GatewayClientError(
+        "Gateway transport unavailable",
+        body={"message": "Gateway transport unavailable", "code": "REMOTE_UNAVAILABLE", "retryable": True},
+    )
+
+    code, retryable = _classify_gateway_error(exc)
+
+    assert code == "REMOTE_UNAVAILABLE"
+    assert retryable is True
+    assert _gateway_error_hint(exc, code)
+
+
+def test_gateway_timeout_errors_get_recovery_hints():
+    from examples.mcp_server.gateway_client import GatewayClientError
+    from examples.mcp_server.mcp_infra.gateway_errors import (
+        _classify_gateway_error,
+        _gateway_error_hint,
+    )
+
+    exc = GatewayClientError(
+        "Gateway request timed out",
+        body={"message": "Gateway request timed out", "code": "TIMEOUT", "retryable": True},
+    )
+
+    code, retryable = _classify_gateway_error(exc)
+
+    assert code == "TIMEOUT"
+    assert retryable is True
+    assert _gateway_error_hint(exc, code)
+
+
 def test_gateway_error_details_preserves_nested_job_status():
     from examples.mcp_server.gateway_client import GatewayClientError
     from examples.mcp_server.mcp_infra.gateway_errors import _gateway_error_details

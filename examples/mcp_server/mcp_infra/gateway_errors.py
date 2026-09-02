@@ -133,6 +133,10 @@ def _gateway_error_hint(exc: GatewayClientError, code: str) -> str | None:
         return "The requested file does not exist at the specified path"
     if code == "WAIT_TIMEOUT":
         return "The command is still running server-side; call job_status/job_result with error.details.job_id to check on it or retrieve the final result once it completes."
+    if code == "REMOTE_UNAVAILABLE":
+        return "The gateway transport is temporarily unavailable; retry the same tool call after checking session_health or health."
+    if code == "TIMEOUT":
+        return "The gateway request timed out; retry may help, or use an async/background path for long-running operations."
     return None
 
 
