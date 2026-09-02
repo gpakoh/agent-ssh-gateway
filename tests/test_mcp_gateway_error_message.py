@@ -203,6 +203,55 @@ def test_gateway_error_details_preserves_nested_job_status():
     }
 
 
+@pytest.mark.asyncio
+async def test_job_cancel_protocol_preserves_gateway_error(monkeypatch):
+    from gateway_client import GatewayClientError
+
+    from examples.mcp_server.mcp_infra.adapters import gateway as gateway_adapter
+
+    class Client:
+        def cancel_job(self, job_id: str) -> dict[str, str]:
+            raise GatewayClientError(
+                "POST /api/jobs/job-1/cancel failed: 404 {...}",
+                status_code=404,
+                body={
+                    "detail": {
+                        "code": "JOB_NOT_FOUND",
+                        "message": "Job job-1 not found",
+                        "retryable": False,
+                    }
+                },
+            )
+
+    monkeypatch.setattr(gateway_adapter, "_server_client", lambda: Client())
+
+    result = await gateway_adapter.gateway_job_cancel_protocol("job-1")
+
+    assert result["ok"] is False
+    assert result["error"]["message"] == "Job job-1 not found"
+    assert "POST /api" not in result["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_job_cancel_protocol_returns_cancel_status(monkeypatch):
+    from examples.mcp_server.mcp_infra.adapters import gateway as gateway_adapter
+
+    class Client:
+        def cancel_job(self, job_id: str) -> dict[str, str]:
+            return {"status": "cancelling", "job_id": job_id}
+
+    async def reconcile(job_id, data):
+        return data
+
+    monkeypatch.setattr(gateway_adapter, "_server_client", lambda: Client())
+    monkeypatch.setattr(gateway_adapter, "_reconcile_fleet_result", reconcile)
+
+    result = await gateway_adapter.gateway_job_cancel_protocol("job-1")
+
+    assert result["ok"] is True
+    assert result["result"] == {"status": "cancelling", "job_id": "job-1"}
+
+
 class TestJobStatusEndToEnd:
     """Feeds a realistic GatewayClientError through the real run_tool()
     path (via gateway_job_status) to prove the fix reaches an actual tool,

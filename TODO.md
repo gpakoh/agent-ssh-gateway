@@ -106,7 +106,9 @@ patch, test, or deliver a safe candidate.
      scripts now also maintain a separate `agent-heartbeat.json` sidecar with
      started/finished timestamps, phase, pid and exit code; `inspect_agent_task`
      reports heartbeat freshness without letting keepalives mask stale semantic
-     progress. Still open: optional cancellation/retry flow.
+     progress. Candidate flow now includes `cancel_agent_task` for attempt-bound
+     cancellation and generic `job_cancel` for gateway jobs. Still open: safe
+     retry/requeue after cancellation.
 
 10. ⬜ **Ephemeral SSH sessions do not preserve ad-hoc writeable clones.** A
    recovered default session can land in a filesystem namespace where the

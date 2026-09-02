@@ -13,6 +13,7 @@ from examples.mcp_server.agent_tasks import (
     build_current_plan,
     build_initial_status,
     build_task_json,
+    cancel_agent_task,
     inspect_agent_task,
     list_agent_tasks,
     read_agent_log_tail,
@@ -659,6 +660,74 @@ class TestInspectAgentHeartbeat:
         assert result["runner_heartbeat"]["state"] == "finished"
         assert result["runner_heartbeat"]["exit_code"] == 0
         assert result["runner_heartbeat_fresh"] is False
+
+
+class TestCancelAgentTask:
+    def test_cancels_bound_attempt_job(self):
+        calls: list[str] = []
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            calls.append(command)
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "attempt-state.json" in command:
+                return {
+                    "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            return {"stdout": "", "stderr": "not found", "exit_code": 1}
+
+        result = cancel_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            cancel_job=lambda job_id: {"status": "cancelling", "job_id": job_id},
+        )
+
+        assert result["cancel_requested"] is True
+        assert result["status"] == "cancelling"
+        assert result["job_id"] == "job-1"
+        assert result["diagnostics"]["inspect_agent_task"]["task_id"] == "a12345678901"
+        assert any("attempt-state.json" in command for command in calls)
+
+    def test_refuses_to_guess_job_without_attempt_state(self):
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "", "stderr": "No such file or directory", "exit_code": 1}
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = cancel_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            cancel_job=lambda _job: pytest.fail("must not cancel without job_id"),
+        )
+
+        assert result["status"] == "missing"
+        assert result["cancel_requested"] is False
+
+    def test_refuses_unsubmitted_attempt(self):
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "attempt-state.json" in command:
+                return {
+                    "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": None}),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = cancel_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            cancel_job=lambda _job: pytest.fail("must not cancel without job_id"),
+        )
+
+        assert result["status"] == "not-submitted"
+        assert result["cancel_requested"] is False
 
 
 class TestListAgentTasks:

@@ -19,6 +19,9 @@ from agent_tasks import (
     archive_agent_task as _archive_agent_task,
 )
 from agent_tasks import (
+    cancel_agent_task as _cancel_agent_task,
+)
+from agent_tasks import (
     claim_agent_attempt_state as _claim_agent_attempt_state,
 )
 from agent_tasks import (
@@ -321,6 +324,23 @@ def gateway_list_agent_tasks(project: str) -> dict[str, Any]:
     )
 
 
+
+def gateway_cancel_agent_task(project: str, task_id: str) -> dict[str, Any]:
+    """Cancel the gateway job bound to an agent task's durable attempt record."""
+
+    return run_tool(
+        tool="cancel_agent_task",
+        title="Cancel agent task",
+        fn=lambda: _cancel_agent_task(
+            lambda p, c: run_project_command(_server_client(), p, c),
+            project=project,
+            task_id=task_id,
+            cancel_job=lambda job_id: _server_client().cancel_job(job_id),
+        ),
+        success_text="Requested agent task cancellation.",
+    )
+
+
 def gateway_archive_agent_task(project: str, task_id: str) -> dict[str, Any]:
     """Move .ai-bridge/tasks/<task_id>/ -> .ai-bridge/archive/<task_id>/."""
     return run_tool(
@@ -565,6 +585,7 @@ def register_all() -> None:
     register_tool("read_agent_log")(gateway_read_agent_log)
     register_tool("inspect_agent_task")(gateway_inspect_agent_task)
     register_tool("list_agent_tasks")(gateway_list_agent_tasks)
+    register_tool("cancel_agent_task")(gateway_cancel_agent_task)
     register_tool("archive_agent_task")(gateway_archive_agent_task)
     register_tool("run_opencode")(gateway_run_opencode)
     register_tool("run_agent")(gateway_run_agent)

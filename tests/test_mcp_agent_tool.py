@@ -89,6 +89,39 @@ def test_inspect_agent_task_redacts_status_and_log(monkeypatch):
     assert result["meta"]["redacted"] is True
 
 
+
+def test_cancel_agent_task_uses_bound_attempt_job(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    cancelled: list[str] = []
+
+    class Client:
+        def cancel_job(self, job_id: str) -> dict[str, str]:
+            cancelled.append(job_id)
+            return {"status": "cancelling", "job_id": job_id}
+
+    monkeypatch.setattr(agent_adapter, "_server_client", lambda: Client())
+    monkeypatch.setattr(
+        agent_adapter,
+        "run_project_command",
+        lambda _client, _project, command: (
+            {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("ls -ld -- ")
+            else {
+                "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+                "stderr": "",
+                "exit_code": 0,
+            }
+        ),
+    )
+
+    result = agent_adapter.gateway_cancel_agent_task("test", TASK_ID)
+
+    assert result["ok"] is True
+    assert cancelled == ["job-1"]
+    assert result["result"]["status"] == "cancelling"
+
+
 def test_read_agent_diff_returns_hash_of_exact_review_text(monkeypatch):
     import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
 

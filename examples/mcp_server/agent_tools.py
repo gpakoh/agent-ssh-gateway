@@ -161,6 +161,11 @@ def _agent_diagnostics_hint(project: str, task_id: str, job_id: str | None = Non
     }
     if job_id:
         hint["job_status"] = {"job_id": job_id, "purpose": "gateway job state"}
+        hint["cancel_agent_task"] = {
+            "project": project,
+            "task_id": task_id,
+            "purpose": "request cancellation if diagnostics show the agent is hung",
+        }
     return hint
 
 

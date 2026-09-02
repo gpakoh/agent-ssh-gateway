@@ -979,6 +979,58 @@ def write_agent_task(
     return result
 
 
+
+def cancel_agent_task(
+    run_cmd,
+    *,
+    project: str,
+    task_id: str,
+    cancel_job,
+) -> dict[str, Any]:
+    """Request cancellation for the gateway job bound to an agent task.
+
+    The caller supplies the gateway cancel primitive; this helper only resolves
+    the durable attempt record and refuses to guess a job identity from logs or
+    status text.
+    """
+    validate_task_id(task_id)
+    record = read_agent_attempt_state(run_cmd, project=project, task_id=task_id)
+    if record is None:
+        return {
+            "task_id": task_id,
+            "status": "missing",
+            "cancel_requested": False,
+            "message": "agent attempt state not found",
+        }
+    job_id = record.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        return {
+            "task_id": task_id,
+            "attempt_id": record.get("attempt_id"),
+            "status": "not-submitted",
+            "cancel_requested": False,
+            "message": "agent attempt exists but has no bound job_id",
+        }
+    cancelled = cancel_job(job_id)
+    if not isinstance(cancelled, dict):
+        cancelled = {"status": "unknown", "job_id": job_id}
+    return {
+        "task_id": task_id,
+        "attempt_id": record.get("attempt_id"),
+        "job_id": job_id,
+        "status": cancelled.get("status"),
+        "cancel_requested": True,
+        "gateway": cancelled,
+        "diagnostics": {
+            "inspect_agent_task": {
+                "project": project,
+                "task_id": task_id,
+                "purpose": "verify cancellation outcome, artifact mtimes, heartbeat, and log tail",
+            },
+            "job_status": {"job_id": job_id, "purpose": "gateway job state after cancellation"},
+        },
+    }
+
 def read_agent_attempt_state(
     run_cmd,
     *,

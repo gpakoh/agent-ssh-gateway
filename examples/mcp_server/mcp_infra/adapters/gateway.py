@@ -755,6 +755,24 @@ async def gateway_job_result_protocol(
     )
 
 
+async def gateway_job_cancel_protocol(job_id: str) -> dict[str, Any]:
+    """Request cancellation of a gateway background job."""
+
+    async def _fn() -> dict[str, Any]:
+        try:
+            data = await asyncio.to_thread(_server_client().cancel_job, job_id)
+        except GatewayClientError as exc:
+            return _gateway_client_tool_error("job_cancel", exc)
+        return await _reconcile_fleet_result(job_id, data)
+
+    return await run_tool_async(
+        tool="job_cancel",
+        title="Cancel job",
+        fn=_fn,
+        success_text=f"Job {job_id} cancellation requested.",
+    )
+
+
 async def gateway_wait_job_protocol(
     job_id: str, timeout_sec: int | None = None
 ) -> dict[str, Any]:
@@ -1207,6 +1225,7 @@ def register_all() -> None:
     register_tool("apply_patch")(instrumented("apply_patch")(gateway_apply_patch))
     register_tool("job_status")(gateway_job_status_protocol)
     register_tool("job_result")(gateway_job_result_protocol)
+    register_tool("job_cancel")(instrumented("job_cancel")(gateway_job_cancel_protocol))
     register_tool("wait_job")(gateway_wait_job_protocol)
     register_tool("job_wait")(instrumented("job_wait")(gateway_job_wait_protocol))
     register_tool("repo_status")(gateway_repo_status)
