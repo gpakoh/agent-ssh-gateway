@@ -52,6 +52,21 @@ _PROTECTED_BRANCHES = frozenset({"main", "master"})
 class CandidateError(RuntimeError):
     """A sanitized task-candidate failure safe to expose through MCP."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "POLICY_DENIED",
+        retryable: bool = False,
+        hint: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+        self.hint = hint
+        self.details = details
+
 
 def implementation_diff_sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -647,10 +662,18 @@ def _enforce_candidate_scope(
     forbidden = [(pattern, _compile_scope_glob(pattern)) for pattern in forbidden_files]
     for path in _changed_candidate_paths(repo, base_head, candidate_head):
         if not any(regex.fullmatch(path) for regex in allowed):
-            raise CandidateError(f"candidate changes file outside immutable allowed scope: {path}")
+            raise CandidateError(
+                f"candidate changes file outside immutable allowed scope: {path}",
+                code="CANDIDATE_SCOPE_VIOLATION",
+                details={"path": path},
+            )
         for pattern, regex in forbidden:
             if regex.fullmatch(path):
-                raise CandidateError(f"candidate changes forbidden file for pattern {pattern!r}")
+                raise CandidateError(
+                    f"candidate changes forbidden file for pattern {pattern!r}",
+                    code="CANDIDATE_SCOPE_VIOLATION",
+                    details={"path": path, "pattern": pattern},
+                )
 
 
 def _make_verifier_readable(root: Path) -> None:
@@ -676,15 +699,30 @@ def _require_terminal_success(
     job_id: str, job_result: Callable[[str], dict[str, Any]] | None
 ) -> None:
     if job_result is None:
-        raise CandidateError("authoritative job result verifier is required")
+        raise CandidateError(
+            "authoritative job result verifier is required",
+            code="DEPENDENCY_MISSING",
+        )
     try:
         result = job_result(job_id)
     except Exception as exc:
-        raise CandidateError("authoritative agent job result is unavailable") from exc
+        raise CandidateError(
+            "authoritative agent job result is unavailable",
+            code="CANDIDATE_EVIDENCE_MISSING",
+            retryable=True,
+            hint="Retry after the agent job store is reachable, then materialize again.",
+        ) from exc
     status = str(result.get("status") or "") if isinstance(result, dict) else ""
     exit_code = result.get("exit_code") if isinstance(result, dict) else None
     if status != "completed" or exit_code != 0:
-        raise CandidateError("agent job is not terminal-successful")
+        retryable = status not in {"completed", "failed", "cancelled", "canceled"}
+        raise CandidateError(
+            "agent job is not terminal-successful",
+            code="CANDIDATE_JOB_NOT_SUCCESSFUL",
+            retryable=retryable,
+            hint="Wait for the agent job to finish, or inspect its report before retrying.",
+            details={"job_status": status, "exit_code": exit_code},
+        )
 
 
 def _materialize_task_candidate_unlocked(
@@ -708,7 +746,10 @@ def _materialize_task_candidate_unlocked(
         expected_diff_sha256, label="expected_diff_sha256"
     )
     if evidence["implementation_diff_sha256"] != approved_diff:
-        raise CandidateError("implementation diff changed since architect approval")
+        raise CandidateError(
+            "implementation diff changed since architect approval",
+            code="CANDIDATE_DIFF_MISMATCH",
+        )
     _require_terminal_success(evidence["job_id"], job_result)
     destination = _receipt_destination(
         destination_owner, destination_repo, destination_branch
@@ -790,14 +831,21 @@ def _materialize_task_candidate_unlocked(
             forbidden_files=evidence["forbidden_files"],
         )
         if verify_candidate is None:
-            raise CandidateError("isolated candidate verifier is required")
+            raise CandidateError(
+                "isolated candidate verifier is required",
+                code="DEPENDENCY_MISSING",
+            )
         _make_verifier_readable(tmp)
         try:
             verify_candidate(repo_tmp, candidate_head, evidence["required_checks"])
         except CandidateError:
             raise
         except Exception as exc:
-            raise CandidateError("isolated candidate verification failed") from exc
+            raise CandidateError(
+                "isolated candidate verification failed",
+                code="CANDIDATE_VERIFICATION_FAILED",
+                details={"candidate_head_sha": candidate_head},
+            ) from exc
         os.replace(repo_tmp, staging)
         receipt = {
             "version": RECEIPT_VERSION,

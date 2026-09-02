@@ -697,8 +697,11 @@ async def gitea_materialize_task_candidate(
     except CandidateError as exc:
         return tool_error(
             tool="gitea_materialize_task_candidate",
-            code="POLICY_DENIED",
+            code=exc.code,
             message=str(exc),
+            retryable=exc.retryable,
+            hint=exc.hint,
+            details=exc.details,
             source="gitea",
         )
     except Exception:
@@ -757,8 +760,11 @@ async def gitea_push_local_ref(
     except CandidateError as exc:
         return tool_error(
             tool="gitea_push_local_ref",
-            code="POLICY_DENIED",
+            code=exc.code,
             message=str(exc),
+            retryable=exc.retryable,
+            hint=exc.hint,
+            details=exc.details,
             source="gitea",
         )
     except Exception:

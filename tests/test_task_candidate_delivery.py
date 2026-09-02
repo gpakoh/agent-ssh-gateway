@@ -535,8 +535,13 @@ def test_nonterminal_trusted_job_is_denied(tmp_path: Path, monkeypatch: pytest.M
     root = tmp_path / "repo"
     _init_repo(root)
     _, td = _write_evidence(root, monkeypatch)
-    with pytest.raises(CandidateError, match="terminal-successful"):
+    with pytest.raises(CandidateError, match="terminal-successful") as exc_info:
         materialize_task_candidate(project_root=root, project=PROJECT, task_id=TASK, destination_owner=OWNER, destination_repo=REPO, destination_branch=BRANCH, expected_diff_sha256=_diff_sha(td), job_result=lambda _job: {"status": "running", "exit_code": None}, verify_candidate=_verify_success)
+
+    err = exc_info.value
+    assert err.code == "CANDIDATE_JOB_NOT_SUCCESSFUL"
+    assert err.retryable is True
+    assert err.details == {"job_status": "running", "exit_code": None}
 
 
 def test_materialized_candidate_is_readable_by_distinct_verifier_uid(
@@ -754,7 +759,7 @@ def test_verifier_failure_leaves_no_materialize_residue(
     def failing(_repo: Path, _sha: str, _checks: list[str]) -> None:
         raise RuntimeError("isolated verifier boom")
 
-    with pytest.raises(CandidateError, match="verification failed"):
+    with pytest.raises(CandidateError, match="verification failed") as exc_info:
         materialize_task_candidate(
             project_root=root,
             project=PROJECT,
@@ -766,6 +771,9 @@ def test_verifier_failure_leaves_no_materialize_residue(
             job_result=_job_success,
             verify_candidate=failing,
         )
+    err = exc_info.value
+    assert err.code == "CANDIDATE_VERIFICATION_FAILED"
+    assert err.details and len(err.details["candidate_head_sha"]) == 40
     residue = [p for p in candidate_root.rglob(".materialize-*") if p.is_dir()]
     assert residue == []
     assert not any(p.name.startswith(".materialize-") for p in candidate_root.rglob("*"))

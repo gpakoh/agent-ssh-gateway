@@ -411,6 +411,43 @@ async def test_adapter_pushes_only_validator_selected_trusted_staging(
 
 
 @pytest.mark.asyncio
+async def test_adapter_candidate_error_preserves_machine_code_and_details(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def deny_candidate(**_kwargs: Any):
+        raise remote.CandidateError(
+            "agent job is not terminal-successful",
+            code="CANDIDATE_JOB_NOT_SUCCESSFUL",
+            retryable=True,
+            hint="Wait for completion.",
+            details={"job_status": "running", "exit_code": None},
+        )
+
+    monkeypatch.setenv("GITEA_TOKEN", "managed-token")
+    monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _Registry(tmp_path))
+    monkeypatch.setattr(remote, "validate_task_candidate_for_push", deny_candidate)
+
+    async def inline_to_thread(func, *args: Any, **kwargs: Any):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(remote.asyncio, "to_thread", inline_to_thread)
+    result = await remote.gitea_push_local_ref(
+        project="gpt-browser-bridge-hardening",
+        task_id="candidate-task-123",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_sha=SHA,
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CANDIDATE_JOB_NOT_SUCCESSFUL"
+    assert result["error"]["retryable"] is True
+    assert result["error"]["hint"] == "Wait for completion."
+    assert result["error"]["details"] == {"job_status": "running", "exit_code": None}
+
+
+@pytest.mark.asyncio
 async def test_adapter_candidate_denial_happens_before_remote_access(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
