@@ -77,6 +77,17 @@ checklist for what still needs explicit close-out after #138 review/merge.
    ChatGPT-visible Gitea tool surface exposes list/get/create/merge, but no
    close/update/comment action.
 
+9. ⬜ **Command-plane/session recovery gap after transient reconnect/cooldown.**
+   After a transient 429 or auto-reconnect cooldown, project-level tools such as
+   `git_status` and `current_branch` can continue to work while `execute_argv`
+   against the previously known session returns `SESSION_NOT_FOUND` or becomes
+   unavailable. This makes safe operator recovery impossible when the exposed
+   project-level branch surface can create+switch a new branch but cannot switch
+   to an existing branch or delete local throwaway refs. Closure requires either
+   restored command-plane session recovery or bounded safe project-level tools
+   for existing-branch switch and local-branch deletion, with regression coverage
+   proving operators do not need to create probe refs to recover branch state.
+
 ## Architect/operator wanted capabilities — 2026-09-03
 
 1. ⬜ **First-class bounded internal service health probe.** Architect/Supervisor work often needs to verify an internal service endpoint such as `http://agent-memory-service:8070/health` or `/ready` from the same network context that future automation will use. Today the safe path is indirect (`docker_compose_ps`, `docker_inspect`, `getent hosts`), while common direct probes (`curl`, `wget`, `nc`, `python -c urllib`) may be blocked by policy. Desired capability: a read-only `http_get_health`/`tcp_connect_check` tool with allowlisted method, explicit host/port/path, timeout, max response bytes, no secrets/env exposure, provenance, and clear distinction between DNS failure, connection refused, timeout, non-2xx response and healthy JSON response. This is a wanted capability, not proof that the target service is unhealthy.
