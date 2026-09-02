@@ -64,6 +64,24 @@ def test_supervisor_tools_registered_in_live_server():
     assert "gitea_close_pull_request" in names
 
 
+@patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
+def test_git_commit_schema_exposes_optional_workspace_guards():
+    """git_commit keeps message required, but exposes optional lease guards."""
+    import importlib
+
+    import examples.mcp_server.server as srv
+
+    importlib.reload(srv)
+    tool = next(
+        tool for tool in srv.mcp._tool_manager.list_tools() if tool.name == "git_commit"
+    )
+    assert tool.parameters["required"] == ["project", "message"]
+    properties = tool.parameters["properties"]
+    assert "expected_branch" in properties
+    assert "expected_head" in properties
+    assert "expected_status_sha256" in properties
+
+
 @patch.dict(os.environ, {"MCP_AUTH_MODE": "token", "MCP_PUBLIC_TOKEN": "test-token"})
 def test_token_mode_initializes_provider():
     """Token mode initializes GatewayOAuthProvider with MCP_PUBLIC_TOKEN."""

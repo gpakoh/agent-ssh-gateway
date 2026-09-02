@@ -26,7 +26,7 @@ def _agent_guidance() -> dict[str, Any]:
     """
     return {
         "project_metadata_tool": "info",
-        "before_project_writes": "Call info(project) and inspect workspace.recommended_write_plane before editing.",
+        "before_project_writes": "Call info(project), inspect workspace.recommended_write_plane, and preserve workspace.git_state for guarded commit/push workflows.",
         "before_verification": "Call info(project) and run verification commands from verification.cwd.",
         "agent_run_diagnostics": "For an existing agent task, call inspect_agent_task(project, task_id) first; it combines status, job state, artifact mtimes, stale/hung verdict, and a bounded log tail.",
         "path_policy": "Manifest guidance never exposes host filesystem paths; project tools use project-relative paths.",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import subprocess
 import sys
 from pathlib import Path
 
@@ -477,6 +478,101 @@ class TestProjectCommandCwdMetadata:
 
         assert result["cwd"] == "."
         assert "/" not in result["cwd"]
+
+
+def _git(repo: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return completed.stdout.strip()
+
+
+def _init_git_repo(repo: Path) -> str:
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test User")
+    (repo / "README.md").write_text("hello\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "initial")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+class TestProjectGitStateGuards:
+    def test_info_exposes_git_state_snapshot_without_host_paths(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        head = _init_git_repo(tmp_path)
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        result = mod.info(None, "demo")
+
+        state = result["workspace"]["git_state"]
+        assert state["available"] is True
+        assert state["branch"] == "main"
+        assert state["head"] == head
+        assert state["dirty"] is False
+        assert state["status_sha256"] == mod.hashlib.sha256(b"").hexdigest()
+        assert str(tmp_path) not in str(state)
+
+    def test_guarded_git_commit_rejects_branch_head_or_status_drift(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        _init_git_repo(tmp_path)
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        class Client:
+            def execute_project_command(self, project: str, command: str) -> dict[str, object]:
+                raise AssertionError("commit must not run after guard mismatch")
+
+        result = mod.git_commit(
+            Client(),
+            "demo",
+            "should not commit",
+            expected_branch="other",
+            expected_head="0" * 40,
+            expected_status_sha256="f" * 64,
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+        fields = {item["field"] for item in result["error"]["details"]["mismatches"]}
+        assert fields == {"branch", "head", "status_sha256"}
+
+    def test_guarded_git_commit_runs_when_snapshot_matches(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        head = _init_git_repo(tmp_path)
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+        status_sha = mod.hashlib.sha256(b"").hexdigest()
+
+        class Client:
+            def __init__(self) -> None:
+                self.commands: list[str] = []
+
+            def execute_project_command(self, project: str, command: str) -> dict[str, object]:
+                self.commands.append(command)
+                return {"exit_code": 0, "stdout": "[main abc] ok\n", "stderr": ""}
+
+        client = Client()
+        result = mod.git_commit(
+            client,
+            "demo",
+            "commit after guard",
+            expected_branch="main",
+            expected_head=head,
+            expected_status_sha256=status_sha,
+        )
+
+        assert result["exit_code"] == 0
+        assert client.commands == ["git commit -m 'commit after guard'"]
 
 
 class TestProjectInfoVerificationHints:

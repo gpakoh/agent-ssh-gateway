@@ -129,7 +129,7 @@ patch, test, or deliver a safe candidate.
      `workspace_verify`/`project_file_verify()` also report `expected_hash` and
      `verified`, matching the vocabulary used by mutation `post_write` receipts.
 
-12. ⬜ **Shared candidate clones need branch/dirty-tree lease guards.** During
+12. ◐ **Shared candidate clones need branch/dirty-tree lease guards.** During
    a scoped cancellation commit, the working clone unexpectedly surfaced on
    branch `fix/trusted-remote-resolution-20260902` with unrelated unstaged
    trusted-remote diffs, even though the previous verified status was the
@@ -140,6 +140,16 @@ patch, test, or deliver a safe candidate.
    workflow to record expected branch + HEAD before edits, re-check them before
    `git add`/`commit`/`push`, and fail with a typed workspace-contended error if
    any unrelated unstaged paths appear.
+   - **Partial candidate fix (2026-09-02):** `info(project)` now exposes a
+     host-path-free `workspace.git_state` snapshot (`branch`, `head`, `dirty`,
+     `status_sha256`, `status_entries`) for agents/operators to preserve before
+     edits. `git_commit()` accepts optional `expected_branch`, `expected_head`,
+     and `expected_status_sha256` guards and refuses to commit with typed
+     retryable `WORKSPACE_CONTENDED` when the live workspace no longer matches
+     the caller's snapshot. `tools_manifest.agent_guidance` now tells agents to
+     preserve `workspace.git_state` before guarded write workflows. Still open:
+     make guards mandatory for write-mode commit/push flows and add an exclusive
+     clone lease instead of relying on voluntary expected-* parameters.
 
 ## 🆕 Runtime/CI findings — 2026-08-19
 

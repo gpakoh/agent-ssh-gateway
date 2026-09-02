@@ -11,6 +11,7 @@ import hashlib
 import os
 import re
 import shlex
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -1401,6 +1402,97 @@ def _project_verification_hints(resolved: Path) -> dict[str, Any]:
     return hints
 
 
+def _local_git_output(resolved: Path, args: list[str]) -> str | None:
+    """Run a fixed read-only git query without a shell; return stdout on success."""
+    try:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=str(resolved),
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout
+
+
+def _project_git_state(resolved: Path) -> dict[str, Any]:
+    """Return host-path-free branch/HEAD/dirty metadata for lease-style guards."""
+    if not _is_real_git_repo(resolved):
+        return {"available": False, "reason": "not_git_repo"}
+
+    branch_raw = _local_git_output(resolved, ["rev-parse", "--abbrev-ref", "HEAD"])
+    head_raw = _local_git_output(resolved, ["rev-parse", "HEAD"])
+    status = _local_git_output(resolved, ["status", "--porcelain=v1"])
+    if branch_raw is None or head_raw is None or status is None:
+        return {"available": False, "reason": "git_state_unavailable"}
+
+    branch = branch_raw.strip()
+    head = head_raw.strip().lower()
+    status_sha256 = hashlib.sha256(status.encode("utf-8")).hexdigest()
+    return {
+        "available": True,
+        "branch": branch,
+        "detached": branch == "HEAD",
+        "head": head,
+        "dirty": bool(status.strip()),
+        "status_sha256": status_sha256,
+        "status_entries": len([line for line in status.splitlines() if line.strip()]),
+    }
+
+
+def _workspace_guard_mismatches(
+    state: dict[str, Any],
+    *,
+    expected_branch: str | None,
+    expected_head: str | None,
+    expected_status_sha256: str | None,
+) -> list[dict[str, Any]]:
+    mismatches: list[dict[str, Any]] = []
+    checks = (
+        ("branch", expected_branch, state.get("branch")),
+        ("head", expected_head.lower() if expected_head else None, state.get("head")),
+        (
+            "status_sha256",
+            expected_status_sha256.lower() if expected_status_sha256 else None,
+            state.get("status_sha256"),
+        ),
+    )
+    for field, expected, actual in checks:
+        if expected is not None and actual != expected:
+            mismatches.append({"field": field, "expected": expected, "actual": actual})
+    return mismatches
+
+
+def _guarded_git_commit_error(
+    project: str,
+    state: dict[str, Any],
+    mismatches: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return tool_error(
+        tool="git_commit",
+        code="WORKSPACE_CONTENDED",
+        message="Project workspace changed since the caller's expected git state snapshot",
+        retryable=True,
+        hint="Refresh info(project), review git_status/show_changes, then retry with the new expected_branch, expected_head, and expected_status_sha256.",
+        details={
+            "project": project,
+            "mismatches": mismatches,
+            "current": {
+                "branch": state.get("branch"),
+                "head": state.get("head"),
+                "dirty": state.get("dirty"),
+                "status_sha256": state.get("status_sha256"),
+                "status_entries": state.get("status_entries"),
+            },
+        },
+    )
+
+
 def _project_workspace_hints(resolved: Path) -> dict[str, Any]:
     """Return host-path-free workspace write-plane hints for agents."""
     try:
@@ -1451,6 +1543,9 @@ def info(client: GatewayClient, project: str) -> dict[str, Any]:
     """Resolve project path metadata — no shell execution."""
     project = _validate_project(project)
     resolved = _resolve_project(project)
+    is_git_repo = _is_real_git_repo(resolved)
+    workspace = _project_workspace_hints(resolved)
+    workspace["git_state"] = _project_git_state(resolved)
     return {
         "project": project,
         # "." — project-relative namespace, never the real host path
@@ -1459,9 +1554,9 @@ def info(client: GatewayClient, project: str) -> dict[str, Any]:
         "resolved_path": ".",
         "exists": resolved.exists(),
         "is_dir": resolved.is_dir(),
-        "is_git_repo": _is_real_git_repo(resolved),
+        "is_git_repo": is_git_repo,
         "verification": _project_verification_hints(resolved),
-        "workspace": _project_workspace_hints(resolved),
+        "workspace": workspace,
     }
 
 
@@ -1513,7 +1608,31 @@ def git_commit(
     client: GatewayClient,
     project: str,
     message: str,
+    expected_branch: str | None = None,
+    expected_head: str | None = None,
+    expected_status_sha256: str | None = None,
 ) -> dict[str, Any]:
+    """Commit staged changes, optionally guarded by an info(project) git snapshot."""
+    if expected_branch or expected_head or expected_status_sha256:
+        project = _validate_project(project)
+        state = _project_git_state(_resolve_project(project))
+        if not state.get("available"):
+            return tool_error(
+                tool="git_commit",
+                code="CHECK_FAILED",
+                message="Current project git state is unavailable; refusing guarded commit",
+                retryable=True,
+                hint="Refresh info(project) and verify the project is a readable Git worktree before retrying.",
+                details={"project": project, "state": state},
+            )
+        mismatches = _workspace_guard_mismatches(
+            state,
+            expected_branch=expected_branch,
+            expected_head=expected_head,
+            expected_status_sha256=expected_status_sha256,
+        )
+        if mismatches:
+            return _guarded_git_commit_error(project, state, mismatches)
     return run_project_command(client, project, f"git commit -m {shlex.quote(message)}")
 
 

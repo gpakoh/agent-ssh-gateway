@@ -898,12 +898,25 @@ def gateway_git_add(project: str, paths: list[str]) -> dict[str, Any]:
     )
 
 
-def gateway_git_commit(project: str, message: str) -> dict[str, Any]:
-    """Commit staged changes with a message (git commit -m)."""
+def gateway_git_commit(
+    project: str,
+    message: str,
+    expected_branch: str | None = None,
+    expected_head: str | None = None,
+    expected_status_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Commit staged changes with optional branch/HEAD/status lease guards."""
     return run_tool(
         tool="git_commit",
         title="git commit",
-        fn=lambda: git_commit(_server_client(), project, message),
+        fn=lambda: git_commit(
+            _server_client(),
+            project,
+            message,
+            expected_branch=expected_branch,
+            expected_head=expected_head,
+            expected_status_sha256=expected_status_sha256,
+        ),
         success_text="Committed changes.",
     )
 
