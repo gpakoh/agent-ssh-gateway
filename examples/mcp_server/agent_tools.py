@@ -55,6 +55,22 @@ PROXY_LIMIT_MARKERS = (
     "please upgrade",
 )
 
+_OPENCODE_TERMINAL_STATUS_BY_EXIT = {
+    0: "needs-review",
+    76: "blocked",
+    77: "rate-limited",
+    78: "startup-timeout",
+    79: "run-timeout",
+    137: "resource-exhausted",
+}
+
+
+def _opencode_terminal_status(exit_code: int | None) -> str:
+    """Map wrapper-owned OpenCode exit codes to the public terminal status."""
+    if exit_code is None:
+        return "error"
+    return _OPENCODE_TERMINAL_STATUS_BY_EXIT.get(exit_code, "failed")
+
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
@@ -1659,15 +1675,26 @@ def _build_opencode_script(
     )
     parts.extend(
         [
+            # 76-79 are wrapper-owned terminal codes. Normalize a raw CLI
+            # collision before exposing the code through the public API.
+            'if [ "$FINAL_RC" -eq 76 ] && [ "$PROXY_BLOCKED" -ne 1 ]; then FINAL_RC=1; fi',
+            'if [ "${RATE_LIMITED:-0}" = "1" ] && [ "$PARENT_RC" -eq 0 ] && [ "$EVIDENCE_RC" -eq 0 ] && [ "$SCOPE_RC" -eq 0 ] && [ "$CHECKS_RC" -eq 0 ]; then FINAL_RC=77; fi',
+            'if [ "$FINAL_RC" -eq 77 ] && [ "${RATE_LIMITED:-0}" != "1" ]; then FINAL_RC=1; fi',
+            'if [ "$FINAL_RC" -eq 78 ] && [ "${FAILURE_REASON:-}" != "opencode-startup-timeout" ]; then FINAL_RC=1; fi',
+            'if [ "$FINAL_RC" -eq 79 ] && [ "${FAILURE_REASON:-}" != "opencode-run-timeout" ]; then FINAL_RC=1; fi',
             'if [ $FINAL_RC -eq 0 ] && [ "${CHECKS_WARNING:-0}" -eq 1 ]; then',
             '  echo "Status: needs-review-warning" > "$td/agent-status.md"',
             'elif [ $FINAL_RC -eq 0 ]; then',
             '  echo "Status: needs-review" > "$td/agent-status.md"',
-            'elif [ "$PROXY_BLOCKED" -eq 1 ] && [ "$PARENT_RC" -eq 0 ] && [ "$EVIDENCE_RC" -eq 0 ] && [ "$SCOPE_RC" -eq 0 ] && [ "$CHECKS_RC" -eq 0 ]; then',
+            'elif [ $FINAL_RC -eq 76 ]; then',
             '  echo "Status: blocked" > "$td/agent-status.md"',
-            'elif [ "${RATE_LIMITED:-0}" = "1" ] && [ "$PARENT_RC" -eq 0 ] && [ "$EVIDENCE_RC" -eq 0 ] && [ "$SCOPE_RC" -eq 0 ] && [ "$CHECKS_RC" -eq 0 ]; then',
+            'elif [ $FINAL_RC -eq 77 ]; then',
             '  echo "Status: rate-limited" > "$td/agent-status.md"',
-            'elif [ "$RESOURCE_EXHAUSTED" -eq 1 ] && [ "$PARENT_RC" -eq 0 ] && [ "$EVIDENCE_RC" -eq 0 ] && [ "$SCOPE_RC" -eq 0 ] && [ "$CHECKS_RC" -eq 0 ]; then',
+            'elif [ $FINAL_RC -eq 78 ]; then',
+            '  echo "Status: startup-timeout" > "$td/agent-status.md"',
+            'elif [ $FINAL_RC -eq 79 ]; then',
+            '  echo "Status: run-timeout" > "$td/agent-status.md"',
+            'elif [ $FINAL_RC -eq 137 ]; then',
             '  echo "Status: resource-exhausted" > "$td/agent-status.md"',
             "else",
             '  echo "Status: failed" > "$td/agent-status.md"',
@@ -2120,15 +2147,7 @@ def project_run_agent(
 
         return {
             "task_id": task_id,
-            "status": "needs-review"
-            if exit_code == 0
-            else "blocked"
-            if exit_code == 76
-            else "resource-exhausted"
-            if exit_code == 137
-            else "failed"
-            if exit_code is not None
-            else "error",
+            "status": _opencode_terminal_status(exit_code),
             "attempt_id": None,
             "job_id": None,
             "exit_code": exit_code,
@@ -2336,15 +2355,7 @@ def project_run_agent(
 
     return {
         "task_id": task_id,
-        "status": "needs-review"
-        if exit_code == 0
-        else "blocked"
-        if exit_code == 76
-        else "resource-exhausted"
-        if exit_code == 137
-        else "failed"
-        if exit_code is not None
-        else "error",
+        "status": _opencode_terminal_status(exit_code),
         "attempt_id": attempt_id,
         "job_id": job_id,
         "reconciled_via": waiter.get("reconciled_via"),

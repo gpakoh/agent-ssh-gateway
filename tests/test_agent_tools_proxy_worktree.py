@@ -140,6 +140,10 @@ class TestBuildOpencodeScriptProxy:
         monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", PROVIDER)
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
         assert 'echo "Status: rate-limited" > "$td/agent-status.md"' in script
+        assert "FINAL_RC=77" in script
+        assert 'echo "Status: startup-timeout" > "$td/agent-status.md"' in script
+        assert 'echo "Status: run-timeout" > "$td/agent-status.md"' in script
+        assert '${FAILURE_REASON:-}' in script
 
     def test_proxy_startup_retry_default_is_bounded_to_four_attempts(self, monkeypatch):
         monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", PROVIDER)
@@ -1246,6 +1250,8 @@ def test_startup_retry_stops_at_configured_attempt_limit(tmp_path, monkeypatch):
         assert len(set(used_proxies)) == 3
         worker_status = (artifacts / "worker-status.md").read_text(encoding="utf-8")
         assert "startup attempts exhausted (3/3)" in worker_status
+        status = (artifacts / "agent-status.md").read_text(encoding="utf-8")
+        assert status.strip() == "Status: startup-timeout"
         for proxy in _ProxyPoolHandler.proxies:
             assert proxy not in worker_status
     finally:
@@ -1810,7 +1816,7 @@ class TestRuntimeTimeout:
         report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
         assert "Failure reason: opencode-run-timeout" in report
         status = (artifacts / "agent-status.md").read_text(encoding="utf-8")
-        assert status.strip() == "Status: failed"
+        assert status.strip() == "Status: run-timeout"
 
     def test_default_runtime_timeout_is_1800_seconds(self, monkeypatch):
         monkeypatch.delenv("OPENCODE_RUN_TIMEOUT_SECONDS", raising=False)
