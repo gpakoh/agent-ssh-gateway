@@ -19,8 +19,10 @@ patch, test, or deliver a safe candidate.
    - **Partial candidate fix (2026-09-02):** `info()` now exposes
      host-path-free `workspace` hints: configured read-only state,
      filesystem writeability, and `recommended_write_plane` (`workspace` vs
-     `writeable_candidate_clone`). Still open: same-plane post-write verifier
-     and first-class candidate clone flow.
+     `writeable_candidate_clone`). Workspace core write/edit/patch results now
+     include a host-path-free `post_write` verifier with current/expected SHA-256
+     and file-existence status. Still open: prove this same plane is the one used
+     by SSH/git runner tools and add the first-class candidate clone flow.
 2. ⬜ **No ergonomic writeable-candidate-clone flow.** When the primary repo
    root is mounted read-only, the current recovery path requires the agent to
    manually create an ad-hoc clone under `/home/mcpuser`, discover whether it

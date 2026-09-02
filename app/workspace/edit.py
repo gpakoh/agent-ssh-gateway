@@ -249,6 +249,12 @@ def project_file_write(
         "path": relative_path,
         "size": len(utf8_bytes),
         "encoding": "utf-8",
+        "post_write": _post_write_confirmation(
+            project_id=project_id,
+            relative_path=relative_path,
+            target_path=full,
+            expected_content=content,
+        ),
     }
 
     if safe:
@@ -323,6 +329,12 @@ def project_file_edit(
             "new_string": new_string,
             "diff": "",
             "replaced": False,
+            "post_write": _post_write_confirmation(
+                project_id=project_id,
+                relative_path=relative_path,
+                target_path=full,
+                expected_content=old_content,
+            ),
         }
         if safe:
             result["receipt"] = {
@@ -357,6 +369,12 @@ def project_file_edit(
         "new_string": new_string,
         "diff": diff,
         "replaced": True,
+        "post_write": _post_write_confirmation(
+            project_id=project_id,
+            relative_path=relative_path,
+            target_path=full,
+            expected_content=new_content,
+        ),
     }
 
     if safe:
@@ -484,6 +502,48 @@ def _compute_backup_hash(content: str) -> str:
     return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _post_write_confirmation(
+    *,
+    project_id: str,
+    relative_path: str,
+    target_path: Path,
+    expected_content: str | None,
+    deleted: bool = False,
+) -> dict[str, Any]:
+    """Return a same-plane, host-path-free post-mutation verification receipt."""
+    exists = target_path.exists()
+    if deleted:
+        return {
+            "project_id": project_id,
+            "path": relative_path,
+            "file_exists": exists,
+            "current_hash": None,
+            "expected_hash": None,
+            "verified": not exists,
+        }
+
+    if expected_content is None:
+        raise WriteError("post-write verification requires expected content")
+    expected_bytes = expected_content.encode("utf-8")
+    expected_hash = "sha256:" + hashlib.sha256(expected_bytes).hexdigest()
+    try:
+        current_bytes = target_path.read_bytes()
+    except OSError as exc:
+        raise WriteError("Post-write verification failed: file could not be read") from exc
+    current_hash = "sha256:" + hashlib.sha256(current_bytes).hexdigest()
+    verified = exists and current_hash == expected_hash
+    if not verified:
+        raise WriteError("Post-write verification failed: persisted bytes do not match expected content")
+    return {
+        "project_id": project_id,
+        "path": relative_path,
+        "file_exists": True,
+        "current_hash": current_hash,
+        "expected_hash": expected_hash,
+        "verified": True,
+    }
+
+
 def _is_deletion_patch(patch_text: str) -> bool:
     """Detect a unified diff whose new-side file is ``/dev/null``.
 
@@ -556,6 +616,13 @@ def project_apply_patch(
             "applied": True,
             "deleted": True,
             "backup_hash": backup_hash,
+            "post_write": _post_write_confirmation(
+                project_id=project_id,
+                relative_path=relative_path,
+                target_path=full,
+                expected_content=None,
+                deleted=True,
+            ),
         }
         if safe:
             from app.workspace.receipts import make_receipt
@@ -610,6 +677,12 @@ def project_apply_patch(
         "encoding": "utf-8",
         "applied": True,
         "backup_hash": backup_hash,
+        "post_write": _post_write_confirmation(
+            project_id=project_id,
+            relative_path=relative_path,
+            target_path=full,
+            expected_content=new_content,
+        ),
     }
 
     if safe:
