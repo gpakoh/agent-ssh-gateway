@@ -531,11 +531,34 @@ def test_candidate_scope_rename_cannot_hide_forbidden_source(tmp_path: Path) -> 
         )
 
 
+def test_terminal_failed_job_can_be_salvaged_by_trusted_reverification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _, td = _write_evidence(root, monkeypatch)
+
+    receipt = materialize_task_candidate(
+        project_root=root,
+        project=PROJECT,
+        task_id=TASK,
+        destination_owner=OWNER,
+        destination_repo=REPO,
+        destination_branch=BRANCH,
+        expected_diff_sha256=_diff_sha(td),
+        job_result=lambda _job: {"status": "failed", "exit_code": 79},
+        verify_candidate=_verify_success,
+    )
+
+    assert receipt["job_terminal_status"] == "failed"
+    assert receipt["job_exit_code"] == 79
+
+
 def test_nonterminal_trusted_job_is_denied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "repo"
     _init_repo(root)
     _, td = _write_evidence(root, monkeypatch)
-    with pytest.raises(CandidateError, match="terminal-successful"):
+    with pytest.raises(CandidateError, match="terminal"):
         materialize_task_candidate(project_root=root, project=PROJECT, task_id=TASK, destination_owner=OWNER, destination_repo=REPO, destination_branch=BRANCH, expected_diff_sha256=_diff_sha(td), job_result=lambda _job: {"status": "running", "exit_code": None}, verify_candidate=_verify_success)
 
 

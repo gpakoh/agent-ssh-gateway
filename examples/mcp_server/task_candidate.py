@@ -672,19 +672,33 @@ def _make_verifier_readable(root: Path) -> None:
         raise CandidateError("candidate staging cannot be exposed read-only to verifier") from exc
 
 
-def _require_terminal_success(
+def _require_terminal_job(
     job_id: str, job_result: Callable[[str], dict[str, Any]] | None
-) -> None:
+) -> tuple[str, int | None]:
+    """Require an authoritative terminal job, but do not trust worker success.
+
+    A failed/cancelled agent can still leave a useful supervisor-owned diff.
+    Once the gateway proves the job is terminal those bytes are stable enough
+    for architect approval by digest.  Candidate materialization then rebuilds
+    from the immutable BASE_HEAD, enforces the immutable file scope, and runs
+    the required checks again in the isolated verifier.  Worker exit zero is
+    therefore not a trust prerequisite; terminality is.
+    """
     if job_result is None:
         raise CandidateError("authoritative job result verifier is required")
     try:
         result = job_result(job_id)
     except Exception as exc:
         raise CandidateError("authoritative agent job result is unavailable") from exc
-    status = str(result.get("status") or "") if isinstance(result, dict) else ""
-    exit_code = result.get("exit_code") if isinstance(result, dict) else None
-    if status != "completed" or exit_code != 0:
-        raise CandidateError("agent job is not terminal-successful")
+    if not isinstance(result, dict):
+        raise CandidateError("authoritative agent job result is invalid")
+    status = str(result.get("status") or "").strip().lower()
+    if status not in {"completed", "failed", "cancelled"}:
+        raise CandidateError("agent job is not terminal")
+    exit_code_raw = result.get("exit_code")
+    if exit_code_raw is not None and not isinstance(exit_code_raw, int):
+        raise CandidateError("authoritative agent job exit_code is invalid")
+    return status, exit_code_raw
 
 
 def _materialize_task_candidate_unlocked(
@@ -709,7 +723,9 @@ def _materialize_task_candidate_unlocked(
     )
     if evidence["implementation_diff_sha256"] != approved_diff:
         raise CandidateError("implementation diff changed since architect approval")
-    _require_terminal_success(evidence["job_id"], job_result)
+    job_terminal_status, job_exit_code = _require_terminal_job(
+        evidence["job_id"], job_result
+    )
     destination = _receipt_destination(
         destination_owner, destination_repo, destination_branch
     )
@@ -806,6 +822,8 @@ def _materialize_task_candidate_unlocked(
             "attempt_id": evidence["attempt_id"],
             "fingerprint": evidence["fingerprint"],
             "job_id": evidence["job_id"],
+            "job_terminal_status": job_terminal_status,
+            "job_exit_code": job_exit_code,
             "base_head": evidence["base_head"],
             "implementation_diff_sha256": evidence["implementation_diff_sha256"],
             "delivery_contract_sha256": evidence["delivery_contract_sha256"],
