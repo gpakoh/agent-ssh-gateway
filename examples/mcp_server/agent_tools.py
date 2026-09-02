@@ -801,6 +801,50 @@ def _proxy_startup_cooldown_script_lines(provider_url: str, timeout: str) -> lis
     ]
 
 
+
+def _agent_heartbeat_script_lines(interval_seconds: int = 30) -> list[str]:
+    """Return shell lines for a runner-owned heartbeat sidecar file."""
+    return [
+        f"AGENT_HEARTBEAT_INTERVAL={interval_seconds}",
+        "write_agent_heartbeat() {",
+        '  _hb_state="$1"',
+        '  _hb_phase="${2:-}"',
+        '  _hb_rc="${3:-}"',
+        '  _hb_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)',
+        '  _hb_epoch=$(date -u +%s)',
+        '  if [ -n "$_hb_rc" ]; then',
+        '    printf \'{"version":1,"state":"%s","phase":"%s","updated_at":"%s","updated_epoch":%s,"runner_pid":%s,"exit_code":%s}\\n\' "$_hb_state" "$_hb_phase" "$_hb_ts" "$_hb_epoch" "$$" "$_hb_rc" > "$td/agent-heartbeat.json"',
+        "  else",
+        '    printf \'{"version":1,"state":"%s","phase":"%s","updated_at":"%s","updated_epoch":%s,"runner_pid":%s,"exit_code":null}\\n\' "$_hb_state" "$_hb_phase" "$_hb_ts" "$_hb_epoch" "$$" > "$td/agent-heartbeat.json"',
+        "  fi",
+        "}",
+        "agent_heartbeat_loop() {",
+        "  while :; do",
+        '    write_agent_heartbeat running loop',
+        '    sleep "$AGENT_HEARTBEAT_INTERVAL" || exit 0',
+        "  done",
+        "}",
+        "stop_agent_heartbeat() {",
+        '  if [ -n "${AGENT_HEARTBEAT_PID:-}" ]; then',
+        '    kill "$AGENT_HEARTBEAT_PID" 2>/dev/null || true',
+        '    wait "$AGENT_HEARTBEAT_PID" 2>/dev/null || true',
+        "  fi",
+        "}",
+        "finish_agent_heartbeat() {",
+        '  _hb_exit="$?"',
+        "  stop_agent_heartbeat",
+        '  if [ "${AGENT_HEARTBEAT_FINALIZED:-0}" != "1" ]; then',
+        '    write_agent_heartbeat exited trap "$_hb_exit"',
+        "  fi",
+        "}",
+        "trap 'finish_agent_heartbeat' EXIT",
+        "AGENT_HEARTBEAT_FINALIZED=0",
+        'write_agent_heartbeat running starting',
+        "agent_heartbeat_loop &",
+        'AGENT_HEARTBEAT_PID="$!"',
+    ]
+
+
 def _opencode_startup_watchdog_script_lines(
     opencode_flags: str,
     startup_timeout_seconds: int,
@@ -1448,6 +1492,7 @@ def _build_opencode_script(
         'echo "Status: running" > "$td/agent-status.md"',
         "OPCODE_BIN=$(command -v opencode 2>/dev/null || echo '/root/.opencode/bin/opencode')",
     ])
+    parts.extend(_agent_heartbeat_script_lines())
     if project_root and worktree_path and not managed_clone:
         parts.extend(_parent_prerun_snapshot_script_lines(project_root))
     if worktree_path:
@@ -1713,7 +1758,13 @@ def _build_opencode_script(
         '  printf "\\n" >> "$td/agent-report.md"',
         "fi",
     ])
-    parts.append("exit $FINAL_RC")
+    parts.extend([
+        "AGENT_HEARTBEAT_FINALIZED=1",
+        "stop_agent_heartbeat",
+        'write_agent_heartbeat finished final "$FINAL_RC"',
+        "trap - EXIT",
+        "exit $FINAL_RC",
+    ])
     return "\n".join(parts)
 
 

@@ -102,8 +102,11 @@ patch, test, or deliver a safe candidate.
      read-only aggregated diagnostic with job/status/log tail/staleness verdict.
      `tools_manifest.agent_guidance` now points agents to this one-call diagnostic
      before falling back to raw status/log reads. `run_agent`/`run_opencode`
-     running/unknown receipts now include diagnostics follow-up calls. Still open: persistent heartbeat
-     timestamps from the runner itself and optional cancellation/retry flow.
+     running/unknown receipts now include diagnostics follow-up calls. Runner
+     scripts now also maintain a separate `agent-heartbeat.json` sidecar with
+     started/finished timestamps, phase, pid and exit code; `inspect_agent_task`
+     reports heartbeat freshness without letting keepalives mask stale semantic
+     progress. Still open: optional cancellation/retry flow.
 
 10. ⬜ **Ephemeral SSH sessions do not preserve ad-hoc writeable clones.** A
    recovered default session can land in a filesystem namespace where the

@@ -24,6 +24,7 @@ FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 BASE_REF_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 AGENT_LOG_FILENAME = "opencode-output.log"
+AGENT_HEARTBEAT_FILENAME = "agent-heartbeat.json"
 AGENT_LOG_MAX_BYTES = 64 * 1024
 AGENT_LOG_MAX_TAIL_LINES = 1000
 AGENT_STALE_AFTER_SECONDS = 600
@@ -676,6 +677,45 @@ def _task_file_stat(run_cmd, *, project: str, task_id: str, filename: str) -> di
     return {"exists": True, "size_bytes": size, "mtime_epoch": mtime}
 
 
+
+def _read_agent_heartbeat(
+    run_cmd,
+    *,
+    project: str,
+    task_id: str,
+    now_epoch: int,
+) -> dict[str, Any]:
+    """Read and sanitize the runner heartbeat record, if present."""
+    result = read_agent_task_file(
+        run_cmd, project=project, task_id=task_id, filename=AGENT_HEARTBEAT_FILENAME
+    )
+    text = str(result.get("stdout", ""))
+    if text == "(not found)":
+        return {"exists": False}
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return {"exists": True, "valid": False, "error": "heartbeat is not valid JSON"}
+    if not isinstance(data, dict):
+        return {"exists": True, "valid": False, "error": "heartbeat is not a JSON object"}
+
+    summary: dict[str, Any] = {"exists": True, "valid": True}
+    for key in ("state", "phase", "updated_at"):
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            summary[key] = value[:120]
+    for key in ("updated_epoch", "runner_pid", "exit_code"):
+        value = data.get(key)
+        if isinstance(value, int) or value is None:
+            summary[key] = value
+    updated_epoch = summary.get("updated_epoch")
+    if isinstance(updated_epoch, int):
+        summary["age_seconds"] = max(0, now_epoch - updated_epoch)
+    else:
+        summary["age_seconds"] = None
+    return summary
+
+
 def _safe_attempt_summary(record: dict[str, Any] | None) -> dict[str, Any] | None:
     if not record:
         return None
@@ -782,12 +822,27 @@ def inspect_agent_task(
     files = {
         "status": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="agent-status.md"),
         "log": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_LOG_FILENAME),
+        "heartbeat": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_HEARTBEAT_FILENAME),
         "report": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="agent-report.md"),
         "diff": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="implementation-diff.patch"),
         "attempt_state": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=ATTEMPT_STATE_FILENAME),
     }
-    activity = _latest_activity(files, now)
+    # Heartbeat proves the wrapper process is alive, but it is deliberately
+    # excluded from semantic activity so a stuck/silent agent is not hidden by
+    # the runner's periodic keepalive.
+    activity = _latest_activity(
+        {name: meta for name, meta in files.items() if name != "heartbeat"}, now
+    )
     age = activity.get("age_seconds")
+    heartbeat = _read_agent_heartbeat(
+        run_cmd, project=project, task_id=task_id, now_epoch=now
+    )
+    heartbeat_age = heartbeat.get("age_seconds")
+    runner_heartbeat_fresh = bool(
+        heartbeat.get("state") == "running"
+        and isinstance(heartbeat_age, int)
+        and heartbeat_age < stale_after_seconds
+    )
 
     terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
     active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
@@ -815,6 +870,8 @@ def inspect_agent_task(
         "attempt_state_error": attempt_error,
         "files": files,
         "last_activity": activity,
+        "runner_heartbeat": heartbeat,
+        "runner_heartbeat_fresh": runner_heartbeat_fresh,
         "stale_after_seconds": stale_after_seconds,
         "terminal": terminal,
         "likely_hung": likely_hung,

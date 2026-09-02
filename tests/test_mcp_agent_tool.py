@@ -302,6 +302,29 @@ class TestProjectRunAgentAsyncSubmit:
         assert submission_key.startswith("task:test-")
         assert submission_key.endswith(f":{TASK_ID}")
 
+
+    def test_async_submit_script_starts_and_finishes_runner_heartbeat(self):
+        rc = _make_run_cmd(task_json=_make_task_json())
+        run_script_async = _make_run_script_async("job-42")
+
+        project_run_agent(
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            async_submit=True,
+            run_script_async=run_script_async,
+        )
+
+        script = run_script_async.call_args.args[1]
+        assert "agent-heartbeat.json" in script
+        assert "agent_heartbeat_loop &" in script
+        assert "write_agent_heartbeat running starting" in script
+        assert "finish_agent_heartbeat" in script
+        assert "write_agent_heartbeat exited trap" in script
+        assert "AGENT_HEARTBEAT_FINALIZED=1" in script
+        assert 'write_agent_heartbeat finished final "$FINAL_RC"' in script
+        assert "trap - EXIT" in script
+
     def test_run_cmd_never_called_for_script_execution(self):
         """Only task.json + current-plan.md are read via run_cmd; the actual
         opencode script goes through run_script_async, not run_cmd.

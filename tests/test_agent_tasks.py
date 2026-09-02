@@ -563,6 +563,104 @@ class TestInspectAgentTask:
         assert calls == []
 
 
+class TestInspectAgentHeartbeat:
+    def test_fresh_runner_heartbeat_does_not_mask_stale_progress(self):
+        now = 2_000
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "agent-status.md" in command:
+                return {"stdout": "Status: running\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "attempt-state.json" in command:
+                return {
+                    "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat ") and "agent-heartbeat.json" in command:
+                return {
+                    "stdout": json.dumps({
+                        "version": 1,
+                        "state": "running",
+                        "phase": "loop",
+                        "updated_at": "2026-09-02T00:00:00Z",
+                        "updated_epoch": now - 5,
+                        "runner_pid": 123,
+                        "exit_code": None,
+                    }),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat "):
+                return {"stdout": "(not found)", "stderr": "", "exit_code": 1}
+            if command.startswith("tail -c "):
+                return {"stdout": "still waiting\n", "stderr": "", "exit_code": 0}
+            if command.startswith("stat -c "):
+                if "agent-heartbeat.json" in command:
+                    return {"stdout": f"120 {now - 5}\n", "stderr": "", "exit_code": 0}
+                return {"stdout": f"20 {now - 700}\n", "stderr": "", "exit_code": 0}
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = inspect_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda _job: {"status": "running"},
+        )
+
+        assert result["runner_heartbeat_fresh"] is True
+        assert result["runner_heartbeat"]["state"] == "running"
+        assert result["last_activity"]["source"] != "heartbeat"
+        assert result["likely_hung"] is True
+        assert result["verdict"] == "likely_hung"
+
+    def test_finished_runner_heartbeat_is_returned(self):
+        now = 2_000
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "agent-status.md" in command:
+                return {"stdout": "Status: needs-review\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "agent-heartbeat.json" in command:
+                return {
+                    "stdout": json.dumps({
+                        "version": 1,
+                        "state": "finished",
+                        "phase": "final",
+                        "updated_at": "2026-09-02T00:00:00Z",
+                        "updated_epoch": now - 1,
+                        "runner_pid": 123,
+                        "exit_code": 0,
+                    }),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat "):
+                return {"stdout": "(not found)", "stderr": "", "exit_code": 1}
+            if command.startswith("tail -c "):
+                return {"stdout": "done\n", "stderr": "", "exit_code": 0}
+            if command.startswith("stat -c "):
+                return {"stdout": f"20 {now - 1}\n", "stderr": "", "exit_code": 0}
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = inspect_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            now_epoch=now,
+        )
+
+        assert result["terminal"] is True
+        assert result["verdict"] == "finished"
+        assert result["runner_heartbeat"]["state"] == "finished"
+        assert result["runner_heartbeat"]["exit_code"] == 0
+        assert result["runner_heartbeat_fresh"] is False
+
+
 class TestListAgentTasks:
     def test_passes_project_and_requests_newest_first(self):
         calls = []
