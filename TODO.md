@@ -129,6 +129,18 @@ patch, test, or deliver a safe candidate.
      `workspace_verify`/`project_file_verify()` also report `expected_hash` and
      `verified`, matching the vocabulary used by mutation `post_write` receipts.
 
+12. ⬜ **Shared candidate clones need branch/dirty-tree lease guards.** During
+   a scoped cancellation commit, the working clone unexpectedly surfaced on
+   branch `fix/trusted-remote-resolution-20260902` with unrelated unstaged
+   trusted-remote diffs, even though the previous verified status was the
+   candidate branch. The commit itself was linear on the candidate HEAD and was
+   pushed by explicit SHA/ref, but this is a serious operator/DX hazard: agents
+   should not be able to share a mutable clone without an exclusive branch/HEAD
+   lease and pre-commit dirty-tree guard. Closure should require every write
+   workflow to record expected branch + HEAD before edits, re-check them before
+   `git add`/`commit`/`push`, and fail with a typed workspace-contended error if
+   any unrelated unstaged paths appear.
+
 ## 🆕 Runtime/CI findings — 2026-08-19
 
 1. ⬜ **Health-path inconsistency: aggregate `health` can fail at transport/DNS level while control-plane dependencies remain available.** During the same diagnostic window, `health` failed before returning its normal structured payload with `[Errno -2] Name or service not known`, while `postgres_health` returned PostgreSQL healthy and Gitea read-only calls (`gitea_get_action_run`, `gitea_list_action_run_jobs`, `gitea_get_pull_request`, `gitea_get_file`) continued to succeed. This is not a total gateway outage: a specific hostname/upstream resolution path used by aggregate health (or its transport) can become unavailable independently. Investigate which dependency/hostname is resolved only on this path and whether the failure should be represented as bounded `degraded` component status instead of making the whole health call unreachable. Closure requires a regression/fault-injection test that reproduces one upstream DNS failure while another dependency stays healthy, plus proof that the diagnostic result preserves per-component truth instead of collapsing into an unstructured transport error.
