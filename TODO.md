@@ -1,5 +1,58 @@
 # Agent SSH Gateway — TODO
 
+## 🧭 Architect/GPT usability findings — 2026-09-02
+
+Context: live GPT/architect session hardening the OpenCode delivery path on
+branch `fix/reconnect-429-master-headroom-20260902`. The items below are
+written from the tool user's point of view: they made it harder to inspect,
+patch, test, or deliver a safe candidate.
+
+1. ⬜ **Workspace write plane can diverge from the SSH/git plane.** A
+   `workspace_file_edit` call returned a successful edit receipt/diff for
+   `web-ssh-gateway`, but `git diff`, `git status`, and subsequent SSH-side
+   `read_file` did not observe the change in the repository being tested.
+   This is dangerous for agents: the tool can make the user believe code was
+   changed while the tested/delivered Git tree is unchanged. Closure should
+   require every workspace mutation response to include the exact resolved
+   filesystem path, post-write SHA-256, and a same-plane verifier that proves
+   the path is the one used by `git status`/test runners for that project.
+2. ⬜ **No ergonomic writeable-candidate-clone flow.** When the primary repo
+   root is mounted read-only, the current recovery path requires the agent to
+   manually create an ad-hoc clone under `/home/mcpuser`, discover whether it
+   is writeable, set local Git identity, and later push a non-checked-out ref
+   back to the main non-bare repo. This should be a first-class supervised
+   tool: create/reuse writeable clone from project+branch, register it as a
+   project, expose its root, branch, base SHA, remote mapping, and cleanup
+   policy.
+3. ⬜ **GatewayClientError propagation must be uniform.** Hand-written MCP
+   adapters must not catch `GatewayClientError` and emit generic
+   `TOOL_EXECUTION_FAILED`. During this session, stale `session_id` and
+   policy-denied commands surfaced as redacted REST JSON (`[API] failed...`)
+   instead of actionable codes such as `SESSION_NOT_FOUND` or
+   `PERMISSION_DENIED`. Audit every manual catch block and route through the
+   shared classifier.
+4. ⬜ **Canonical project test command should be discoverable.** Running
+   `uv run --with pytest pytest ...` installed pytest without project dev
+   extras and failed on `asyncio_mode`; the correct invocation used
+   `--extra dev`. Expose a project-level `test_command`/`dev_command` hint in
+   `info`, `tools_manifest`, or a dedicated verifier tool so agents do not
+   guess validation commands.
+5. ⬜ **Read-only mount failures need precise recovery hints everywhere.**
+   `EROFS` should consistently map to `WORKSPACE_READONLY`, not a generic
+   execution failure, and the hint should point to the writeable clone /
+   candidate-materialization path.
+6. ⬜ **Delivery boundary remains too manual.** A local candidate commit can be
+   clean and tested while trusted Gitea delivery remains impossible without a
+   receipt-bound task candidate. Add a supervised salvage/promote flow for a
+   clean commit in a writeable clone: capture base SHA, post SHA, diff SHA,
+   checks, exact workspace path, and materialize a trusted candidate receipt.
+7. ⬜ **Verification commands need deterministic project cwd.** Running tests
+   via `uv run --project /path ...` set the project metadata correctly but did
+   not make relative runtime paths such as `app/static` resolve from project
+   root. The green invocation was `uv --directory /path run --extra dev ...`.
+   Gateway-provided test/verify tools should always execute from the registered
+   project root and expose that cwd in their result metadata.
+
 ## 🆕 Runtime/CI findings — 2026-08-19
 
 1. ⬜ **Health-path inconsistency: aggregate `health` can fail at transport/DNS level while control-plane dependencies remain available.** During the same diagnostic window, `health` failed before returning its normal structured payload with `[Errno -2] Name or service not known`, while `postgres_health` returned PostgreSQL healthy and Gitea read-only calls (`gitea_get_action_run`, `gitea_list_action_run_jobs`, `gitea_get_pull_request`, `gitea_get_file`) continued to succeed. This is not a total gateway outage: a specific hostname/upstream resolution path used by aggregate health (or its transport) can become unavailable independently. Investigate which dependency/hostname is resolved only on this path and whether the failure should be represented as bounded `degraded` component status instead of making the whole health call unreachable. Closure requires a regression/fault-injection test that reproduces one upstream DNS failure while another dependency stays healthy, plus proof that the diagnostic result preserves per-component truth instead of collapsing into an unstructured transport error.

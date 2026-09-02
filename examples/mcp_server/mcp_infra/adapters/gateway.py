@@ -83,6 +83,25 @@ _gateway_error_message = gateway_errors._gateway_error_message
 _gateway_error_hint = gateway_errors._gateway_error_hint
 
 
+
+def _gateway_client_tool_error(tool: str, exc: GatewayClientError) -> dict[str, Any]:
+    """Return a clean MCP tool_error for a structured gateway failure."""
+    code, retryable = _classify_gateway_error(exc)
+    details = (
+        {"job_id": exc.body["job_id"]}
+        if isinstance(exc.body, dict) and exc.body.get("job_id")
+        else None
+    )
+    return tool_error(
+        tool=tool,
+        code=code,
+        message=_gateway_error_message(exc),
+        retryable=retryable,
+        hint=_gateway_error_hint(exc, code),
+        details=details,
+        source="gateway",
+    )
+
 def _server_client():
     return server_attr("get_gateway_client")()
 
@@ -549,21 +568,7 @@ def gateway_execute_argv(
             session_id=session_id,
         )
     except GatewayClientError as e:
-        code, retryable = _classify_gateway_error(e)
-        details = (
-            {"job_id": e.body["job_id"]}
-            if isinstance(e.body, dict) and e.body.get("job_id")
-            else None
-        )
-        return tool_error(
-            tool="execute_argv",
-            code=code,
-            message=_gateway_error_message(e),
-            retryable=retryable,
-            hint=_gateway_error_hint(e, code),
-            details=details,
-            source="gateway",
-        )
+        return _gateway_client_tool_error("execute_argv", e)
     return tool_success(
         tool="execute_argv",
         result=build_command_result(
@@ -609,11 +614,7 @@ def gateway_apply_patch(
             session_id=session_id,
         )
     except GatewayClientError as e:
-        return tool_error(
-            tool="apply_patch",
-            code="TOOL_EXECUTION_FAILED",
-            message=str(e),
-        )
+        return _gateway_client_tool_error("apply_patch", e)
     return tool_success(
         tool="apply_patch",
         result={
@@ -689,14 +690,7 @@ def gateway_job_wait(job_id: str, timeout_sec: int | None = None) -> dict[str, A
     try:
         result = _server_client().wait_job(job_id, timeout_sec=timeout_sec)
     except GatewayClientError as exc:
-        code, retryable = _classify_gateway_error(exc)
-        return tool_error(
-            tool="job_wait",
-            code=code,
-            message=str(exc),
-            retryable=retryable,
-            source="gateway",
-        )
+        return _gateway_client_tool_error("job_wait", exc)
 
     if result.get("wait_timed_out"):
         return tool_error(
