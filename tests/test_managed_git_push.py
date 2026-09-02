@@ -286,6 +286,8 @@ async def test_adapter_allows_new_branch_then_verifies_exact_branch_directly(
     assert pushed["done"] is True
     assert result["ok"] is True
     assert result["result"]["verified"] is True
+    assert result["result"]["remote_ref"] == "refs/heads/hardening/runtime-deploy"
+    assert result["result"]["remote_observed_sha"] == SHA
 
 
 @pytest.mark.asyncio
@@ -317,6 +319,16 @@ async def test_adapter_post_push_direct_verification_rejects_wrong_sha(
     assert pushed["done"] is True
     assert result["ok"] is False
     assert result["error"]["code"] == "CHECK_FAILED"
+    assert result["error"]["retryable"] is True
+    assert result["error"]["hint"]
+    assert result["error"]["details"] == {
+        "remote_ref": "refs/heads/hardening/runtime-deploy",
+        "expected_sha": SHA,
+        "remote_observed_sha": "0" * 40,
+        "owner": "gpakoh",
+        "repo": "gpt-browser-bridge",
+        "branch": "hardening/runtime-deploy",
+    }
 
 
 @pytest.mark.asyncio

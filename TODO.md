@@ -61,11 +61,15 @@ patch, test, or deliver a safe candidate.
      classify `OSError(errno.EROFS)` as `WORKSPACE_READONLY` and
      `PermissionError` as `PERMISSION_DENIED`. Still open: audit non-workspace
      adapters and live REST endpoints for the same classification.
-6. ⬜ **Delivery boundary remains too manual.** A local candidate commit can be
+6. ◐ **Delivery boundary remains too manual.** A local candidate commit can be
    clean and tested while trusted Gitea delivery remains impossible without a
    receipt-bound task candidate. Add a supervised salvage/promote flow for a
    clean commit in a writeable clone: capture base SHA, post SHA, diff SHA,
    checks, exact workspace path, and materialize a trusted candidate receipt.
+   - **Partial candidate fix (2026-09-02):** post-push remote-ref mismatch now
+     returns retryable `CHECK_FAILED` with `remote_ref`, `expected_sha`,
+     `remote_observed_sha`, owner/repo/branch and a recovery hint instead of a
+     bare boolean failure.
 7. ◐ **Verification commands need deterministic project cwd.** Running tests
    via `uv run --project /path ...` set the project metadata correctly but did
    not make relative runtime paths such as `app/static` resolve from project
