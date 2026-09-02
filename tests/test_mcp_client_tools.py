@@ -495,6 +495,22 @@ dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
             command["argv"] for command in verification["commands"]
         ]
 
+    def test_info_does_not_invent_dev_extra_from_unrelated_text(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndescription = "developer tooling without a dev extra"\ndependencies = ["pytest", "ruff", "mypy"]\n[project.optional-dependencies]\ndocs = ["mkdocs"]',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        result = mod.info(None, "demo")
+
+        for command in result["verification"]["commands"]:
+            assert "--extra" not in command["argv"]
+            assert "dev" not in command["argv"]
+
     def test_info_without_pyproject_keeps_empty_verification_commands(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

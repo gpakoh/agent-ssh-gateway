@@ -1362,13 +1362,29 @@ def _project_verification_hints(resolved: Path) -> dict[str, Any]:
     if not pyproject.is_file():
         return hints
     try:
-        content = pyproject.read_text(encoding="utf-8")[:200_000].lower()
+        raw_content = pyproject.read_text(encoding="utf-8")[:200_000]
     except OSError:
         return hints
 
+    content = raw_content.lower()
+    has_dev_extra = False
+    try:
+        import tomllib
+
+        parsed = tomllib.loads(raw_content)
+        project = parsed.get("project") if isinstance(parsed, dict) else None
+        optional = (
+            project.get("optional-dependencies")
+            if isinstance(project, dict)
+            else None
+        )
+        has_dev_extra = isinstance(optional, dict) and "dev" in optional
+    except tomllib.TOMLDecodeError:
+        has_dev_extra = False
+
     commands: list[dict[str, Any]] = []
     base = ["uv", "run"]
-    if "[project.optional-dependencies]" in content and "dev" in content:
+    if has_dev_extra:
         base.extend(["--extra", "dev"])
     if "pytest" in content:
         commands.append({"name": "pytest", "argv": [*base, "pytest"]})
