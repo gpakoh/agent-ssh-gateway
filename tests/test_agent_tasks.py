@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +17,7 @@ from examples.mcp_server.agent_tasks import (
     cancel_agent_task,
     inspect_agent_task,
     list_agent_tasks,
+    prepare_agent_task_retry,
     read_agent_log_tail,
     read_agent_task_file,
     validate_base_ref,
@@ -1042,3 +1044,162 @@ class TestArchiveAgentTask:
         assert "already contains" in result["stderr"]
         assert (source / "source.txt").read_text(encoding="utf-8") == "source"
         assert (destination / "archived.txt").read_text(encoding="utf-8") == "archive"
+
+
+class TestPrepareAgentTaskRetry:
+    @staticmethod
+    def _shell_run_cmd(cwd: Path):
+        def run_cmd(_project: str, command: str) -> dict:
+            result = subprocess.run(
+                ["sh", "-c", command],
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            return {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exit_code": result.returncode,
+            }
+
+        return run_cmd
+
+    @staticmethod
+    def _shell_run_script(cwd: Path):
+        def run_script(_project: str, script: str) -> dict:
+            result = subprocess.run(
+                ["sh", "-c", script],
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            return {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exit_code": result.returncode,
+            }
+
+        return run_script
+
+    @staticmethod
+    def _write_source_task(cwd: Path, task_id: str, *, status: str = "cancelled", job_id: str = "job-1") -> None:
+        td = cwd / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "task.json").write_text(
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "agent": "opencode",
+                    "allowed_backends": ["opencode"],
+                    "allowed_files": ["src/**"],
+                    "forbidden_files": [".env"],
+                    "required_checks": ["pytest -q"],
+                    "worktree_path": "",
+                    "base_ref": "a" * 40,
+                    "managed_source_sha256": "",
+                    "commit_allowed": False,
+                    "push_allowed": False,
+                    "created": "2026-09-02T00:00:00+00:00",
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        (td / "current-plan.md").write_text("# Original plan\n\nDo the work.\n", encoding="utf-8")
+        (td / "agent-status.md").write_text(f"Status: {status}\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": job_id}),
+            encoding="utf-8",
+        )
+
+    def test_prepares_new_task_from_terminal_source_without_attempt_state(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        source = "source-task-001"
+        retry = "retry-task-001"
+        self._write_source_task(tmp_path, source, status="cancelled", job_id="job-cancelled")
+
+        result = prepare_agent_task_retry(
+            self._shell_run_cmd(tmp_path),
+            self._shell_run_script(tmp_path),
+            project="my-proj",
+            source_task_id=source,
+            retry_task_id=retry,
+            job_status=lambda job_id: {"status": "cancelled", "job_id": job_id},
+        )
+
+        assert result["exit_code"] == 0
+        assert result["source_task_id"] == source
+        assert result["retry_task_id"] == retry
+        retry_dir = tmp_path / ".ai-bridge" / "tasks" / retry
+        assert retry_dir.is_dir()
+        task = json.loads((retry_dir / "task.json").read_text(encoding="utf-8"))
+        assert task["task_id"] == retry
+        assert task["allowed_files"] == ["src/**"]
+        assert not (retry_dir / "attempt-state.json").exists()
+        assert not (retry_dir / "opencode-output.log").exists()
+        plan = (retry_dir / "current-plan.md").read_text(encoding="utf-8")
+        assert f"- Source task ID: {source}" in plan
+        assert f"- Retry task ID: {retry}" in plan
+        assert result["next"]["run_agent"] == {"project": "my-proj", "task_id": retry}
+
+    def test_refuses_retry_when_source_job_is_active(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        source = "source-task-002"
+        self._write_source_task(tmp_path, source, status="running", job_id="job-running")
+
+        result = prepare_agent_task_retry(
+            self._shell_run_cmd(tmp_path),
+            self._shell_run_script(tmp_path),
+            project="my-proj",
+            source_task_id=source,
+            retry_task_id="retry-task-002",
+            job_status=lambda job_id: {"status": "running", "job_id": job_id},
+        )
+
+        assert result["exit_code"] == 1
+        assert result["code"] == "AGENT_TASK_NOT_TERMINAL"
+        assert not (tmp_path / ".ai-bridge" / "tasks" / "retry-task-002").exists()
+
+    def test_refuses_to_overwrite_existing_retry_task(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        source = "source-task-003"
+        retry = "retry-task-003"
+        self._write_source_task(tmp_path, source, status="failed", job_id="job-failed")
+        (tmp_path / ".ai-bridge" / "tasks" / retry).mkdir(parents=True)
+
+        result = prepare_agent_task_retry(
+            self._shell_run_cmd(tmp_path),
+            self._shell_run_script(tmp_path),
+            project="my-proj",
+            source_task_id=source,
+            retry_task_id=retry,
+            job_status=lambda job_id: {"status": "failed", "job_id": job_id},
+        )
+
+        assert result["exit_code"] == 1
+        assert result["code"] == "ALREADY_EXISTS"
+
+    def test_allows_retry_for_never_submitted_attempt(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        source = "source-task-004"
+        retry = "retry-task-004"
+        self._write_source_task(tmp_path, source, status="created", job_id="")
+        td = tmp_path / ".ai-bridge" / "tasks" / source
+        (td / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": None}),
+            encoding="utf-8",
+        )
+
+        result = prepare_agent_task_retry(
+            self._shell_run_cmd(tmp_path),
+            self._shell_run_script(tmp_path),
+            project="my-proj",
+            source_task_id=source,
+            retry_task_id=retry,
+            job_status=lambda _job_id: {"status": "missing"},
+        )
+
+        assert result["exit_code"] == 0
+        assert (tmp_path / ".ai-bridge" / "tasks" / retry / "task.json").is_file()

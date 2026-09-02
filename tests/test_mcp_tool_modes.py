@@ -351,6 +351,7 @@ class TestMcpClientWriteMode:
         assert "write_agent_task" in write_tools
         assert "archive_agent_task" in write_tools
         assert "cancel_agent_task" in write_tools
+        assert "retry_agent_task" in write_tools
         assert "job_cancel" in write_tools
         assert "inspect_agent_task" in write_tools
 

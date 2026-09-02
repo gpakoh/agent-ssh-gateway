@@ -31,6 +31,9 @@ from agent_tasks import (
     list_agent_tasks as _list_agent_tasks,
 )
 from agent_tasks import (
+    prepare_agent_task_retry as _prepare_agent_task_retry,
+)
+from agent_tasks import (
     read_agent_attempt_state as _read_agent_attempt_state,
 )
 from agent_tasks import (
@@ -341,6 +344,28 @@ def gateway_cancel_agent_task(project: str, task_id: str) -> dict[str, Any]:
     )
 
 
+def gateway_retry_agent_task(
+    project: str,
+    source_task_id: str,
+    retry_task_id: str,
+) -> dict[str, Any]:
+    """Prepare a fresh retry task from a terminal/cancelled source task."""
+
+    return run_tool(
+        tool="retry_agent_task",
+        title="Prepare agent task retry",
+        fn=lambda: _prepare_agent_task_retry(
+            lambda p, c: run_project_command(_server_client(), p, c),
+            lambda p, s: _server_client().execute_project_script(p, s),
+            project=project,
+            source_task_id=source_task_id,
+            retry_task_id=retry_task_id,
+            job_status=lambda job_id: _server_client().job_status(job_id),
+        ),
+        success_text="Prepared agent task retry.",
+    )
+
+
 def gateway_archive_agent_task(project: str, task_id: str) -> dict[str, Any]:
     """Move .ai-bridge/tasks/<task_id>/ -> .ai-bridge/archive/<task_id>/."""
     return run_tool(
@@ -586,6 +611,7 @@ def register_all() -> None:
     register_tool("inspect_agent_task")(gateway_inspect_agent_task)
     register_tool("list_agent_tasks")(gateway_list_agent_tasks)
     register_tool("cancel_agent_task")(gateway_cancel_agent_task)
+    register_tool("retry_agent_task")(gateway_retry_agent_task)
     register_tool("archive_agent_task")(gateway_archive_agent_task)
     register_tool("run_opencode")(gateway_run_opencode)
     register_tool("run_agent")(gateway_run_agent)

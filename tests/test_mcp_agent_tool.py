@@ -90,6 +90,35 @@ def test_inspect_agent_task_redacts_status_and_log(monkeypatch):
 
 
 
+def test_retry_agent_task_prepares_new_task(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+    import examples.mcp_server.server as server_mod
+
+    client = MagicMock()
+    client.execute_project_command.return_value = {"exit_code": 0, "stdout": "", "stderr": ""}
+    client.execute_project_script.return_value = {"exit_code": 0, "stdout": "", "stderr": ""}
+    client.job_status.return_value = {"status": "cancelled", "job_id": "job-1"}
+    monkeypatch.setattr(server_mod, "get_gateway_client", lambda: client, raising=False)
+
+    monkeypatch.setattr(
+        agent_adapter,
+        "_prepare_agent_task_retry",
+        lambda run_cmd, run_script, **kwargs: {
+            "exit_code": 0,
+            "stdout": "prepared",
+            "stderr": "",
+            "kwargs": kwargs,
+        },
+    )
+
+    result = agent_adapter.gateway_retry_agent_task("test", "source-task-001", "retry-task-001")
+
+    assert result["ok"] is True
+    assert result["result"]["kwargs"]["project"] == "test"
+    assert result["result"]["kwargs"]["source_task_id"] == "source-task-001"
+    assert result["result"]["kwargs"]["retry_task_id"] == "retry-task-001"
+
+
 def test_cancel_agent_task_uses_bound_attempt_job(monkeypatch):
     import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
 

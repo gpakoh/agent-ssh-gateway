@@ -1096,6 +1096,166 @@ def cancel_agent_task(
         },
     }
 
+
+def _retry_plan_text(plan: str, *, source_task_id: str, retry_task_id: str) -> str:
+    prefix = (
+        f"# Retry of {source_task_id}\n\n"
+        f"- Source task ID: {source_task_id}\n"
+        f"- Retry task ID: {retry_task_id}\n"
+        f"- Prepared: {datetime.now(UTC).isoformat()}\n\n"
+    )
+    return prefix + (plan if plan.endswith("\n") else plan + "\n")
+
+
+def _load_retry_task_contract(
+    run_cmd,
+    *,
+    project: str,
+    source_task_id: str,
+) -> dict[str, Any]:
+    result = read_agent_task_file(
+        run_cmd,
+        project=project,
+        task_id=source_task_id,
+        filename="task.json",
+    )
+    text = str(result.get("stdout", ""))
+    if text == "(not found)":
+        raise AttemptStateError(f"source task {source_task_id} has no task.json")
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError) as exc:
+        raise AttemptStateError(f"source task {source_task_id} task.json is invalid") from exc
+    if not isinstance(data, dict):
+        raise AttemptStateError(f"source task {source_task_id} task.json is invalid")
+    return data
+
+
+def prepare_agent_task_retry(
+    run_cmd,
+    run_script,
+    *,
+    project: str,
+    source_task_id: str,
+    retry_task_id: str,
+    job_status=None,
+) -> dict[str, Any]:
+    """Prepare a new immutable task from a terminal/cancelled source task.
+
+    The retry receives a fresh task directory and intentionally does not copy
+    attempt-state.json, logs, reports, diffs, or heartbeats. The caller must run
+    the returned retry_task_id explicitly through run_agent/run_opencode.
+    """
+    validate_task_id(source_task_id)
+    validate_task_id(retry_task_id)
+    if source_task_id == retry_task_id:
+        raise ValueError("retry_task_id must be different from source_task_id")
+
+    inspection = inspect_agent_task(
+        run_cmd,
+        project=project,
+        task_id=source_task_id,
+        tail_lines=20,
+        job_status=job_status,
+    )
+    if not inspection.get("exists"):
+        return {
+            "stdout": "",
+            "stderr": f"source task {source_task_id} not found",
+            "exit_code": 1,
+            "code": "TASK_NOT_FOUND",
+        }
+    attempt = inspection.get("attempt") if isinstance(inspection.get("attempt"), dict) else None
+    not_submitted = bool(attempt and not attempt.get("job_id"))
+    if not inspection.get("terminal") and not not_submitted:
+        return {
+            "stdout": "",
+            "stderr": "source task is not terminal; cancel it and wait for terminal state before retrying",
+            "exit_code": 1,
+            "code": "AGENT_TASK_NOT_TERMINAL",
+            "source": {
+                "task_id": source_task_id,
+                "status": inspection.get("status"),
+                "verdict": inspection.get("verdict"),
+                "job": inspection.get("job"),
+            },
+        }
+
+    contract = _load_retry_task_contract(
+        run_cmd,
+        project=project,
+        source_task_id=source_task_id,
+    )
+    agent = str(contract.get("agent") or "opencode")
+    retry_contract = dict(contract)
+    retry_contract["task_id"] = retry_task_id
+    retry_contract["created"] = datetime.now(UTC).isoformat()
+    # Validate the copied immutable contract before persisting it.
+    validate_required_checks(retry_contract.get("required_checks") or [])
+    validate_scope_contract(
+        retry_contract.get("allowed_files") or [],
+        retry_contract.get("forbidden_files") or [],
+    )
+    validate_base_ref(retry_contract.get("base_ref") or None)
+
+    plan_result = read_agent_task_file(
+        run_cmd,
+        project=project,
+        task_id=source_task_id,
+        filename="current-plan.md",
+    )
+    plan = str(plan_result.get("stdout", ""))
+    if plan == "(not found)":
+        plan = ""
+    status = build_initial_status(agent, retry_task_id) + f"\nRetry of: {source_task_id}\n"
+    td = task_dir(project, retry_task_id)
+    files = {
+        f"{td}/task.json": json.dumps(retry_contract, indent=2, ensure_ascii=False),
+        f"{td}/current-plan.md": _retry_plan_text(
+            plan,
+            source_task_id=source_task_id,
+            retry_task_id=retry_task_id,
+        ),
+        f"{td}/agent-status.md": status,
+    }
+    tasks_dir = task_tasks_dir(project)
+    guard_paths = [tasks_dir, td, *files]
+    parts = [
+        f"tasks_dir={shlex.quote(tasks_dir)}",
+        f"td={shlex.quote(td)}",
+        *_symlink_guard_lines(guard_paths),
+        'if [ -e "$td" ]; then exit 48; fi',
+        'mkdir -p "$td" || exit 47',
+        *_symlink_guard_lines(guard_paths),
+    ]
+    for target, content in files.items():
+        parts.append(_encoded_write(target, content))
+    result = run_script(project, "\n".join(parts) + "\n")
+    exit_code = int(result.get("exit_code", 1))
+    if exit_code == 0:
+        return {
+            "stdout": f"prepared retry task {retry_task_id} from {source_task_id}",
+            "stderr": "",
+            "exit_code": 0,
+            "source_task_id": source_task_id,
+            "retry_task_id": retry_task_id,
+            "source": {
+                "status": inspection.get("status"),
+                "verdict": inspection.get("verdict"),
+                "job": inspection.get("job"),
+            },
+            "next": {
+                "run_agent": {"project": project, "task_id": retry_task_id},
+                "run_opencode": {"project": project, "task_id": retry_task_id},
+            },
+        }
+    if exit_code == 48:
+        return {"stdout": "", "stderr": f"retry task {retry_task_id} already exists", "exit_code": 1, "code": "ALREADY_EXISTS"}
+    if exit_code == 46:
+        return {"stdout": "", "stderr": "retry task path rejected by symlink guard", "exit_code": 1, "code": "POLICY_DENIED"}
+    return {"stdout": "", "stderr": f"failed to prepare retry task {retry_task_id}", "exit_code": 1, "code": "TOOL_EXECUTION_FAILED"}
+
+
 def read_agent_attempt_state(
     run_cmd,
     *,
