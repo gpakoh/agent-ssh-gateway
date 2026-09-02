@@ -45,8 +45,10 @@ patch, test, or deliver a safe candidate.
    - **Partial candidate fix (2026-09-02):** `info()` now returns
      host-path-free `verification` hints with `cwd="."` and `uv run --extra dev`
      argv suggestions for pytest/ruff/mypy when a Python `pyproject.toml` is
-     present. Still open: make registered runner tools expose their actual cwd
-     and propagate the same hints through `tools_manifest`/candidate-clone flows.
+     present; `tools_manifest` now points agents to `info(project)` before
+     write/verification workflows. Still open: make registered runner tools
+     expose their actual cwd and propagate the same hints through
+     candidate-clone flows.
 5. ◐ **Read-only mount failures need precise recovery hints everywhere.**
    `EROFS` should consistently map to `WORKSPACE_READONLY`, not a generic
    execution failure, and the hint should point to the writeable clone /

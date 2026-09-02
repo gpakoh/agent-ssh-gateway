@@ -17,6 +17,21 @@ from tool_results import validate_pagination
 from tool_scopes import ACCESS_PROFILES, get_required_scopes
 
 
+def _agent_guidance() -> dict[str, Any]:
+    """Return static, host-path-free workflow guidance for tool users.
+
+    The manifest is often the first discovery surface an agent sees.  Keep
+    this intentionally small and non-project-specific: project-specific cwd,
+    verification commands, and write-plane hints belong in info(project).
+    """
+    return {
+        "project_metadata_tool": "info",
+        "before_project_writes": "Call info(project) and inspect workspace.recommended_write_plane before editing.",
+        "before_verification": "Call info(project) and run verification commands from verification.cwd.",
+        "path_policy": "Manifest guidance never exposes host filesystem paths; project tools use project-relative paths.",
+    }
+
+
 def build_manifest(
     registered_tools: list[Any],
     scope_enforcement: str = "audit",
@@ -150,4 +165,5 @@ def build_manifest(
         "tools": paged_tools_list,
         "modes": modes_dict,
         "access_profiles": profiles_dict,
+        "agent_guidance": _agent_guidance(),
     }
