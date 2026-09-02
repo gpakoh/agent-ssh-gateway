@@ -31,12 +31,17 @@ patch, test, or deliver a safe candidate.
    instead of actionable codes such as `SESSION_NOT_FOUND` or
    `PERMISSION_DENIED`. Audit every manual catch block and route through the
    shared classifier.
-4. ⬜ **Canonical project test command should be discoverable.** Running
+4. ◐ **Canonical project test command should be discoverable.** Running
    `uv run --with pytest pytest ...` installed pytest without project dev
    extras and failed on `asyncio_mode`; the correct invocation used
    `--extra dev`. Expose a project-level `test_command`/`dev_command` hint in
    `info`, `tools_manifest`, or a dedicated verifier tool so agents do not
    guess validation commands.
+   - **Partial candidate fix (2026-09-02):** `info()` now returns
+     host-path-free `verification` hints with `cwd="."` and `uv run --extra dev`
+     argv suggestions for pytest/ruff/mypy when a Python `pyproject.toml` is
+     present. Still open: make registered runner tools expose their actual cwd
+     and propagate the same hints through `tools_manifest`/candidate-clone flows.
 5. ⬜ **Read-only mount failures need precise recovery hints everywhere.**
    `EROFS` should consistently map to `WORKSPACE_READONLY`, not a generic
    execution failure, and the hint should point to the writeable clone /

@@ -1348,6 +1348,38 @@ def working_directory(client: GatewayClient, project: str) -> dict[str, Any]:
     }
 
 
+
+
+def _project_verification_hints(resolved: Path) -> dict[str, Any]:
+    """Return host-path-free verification hints for agent/operator workflows."""
+    hints: dict[str, Any] = {
+        "cwd": ".",
+        "cwd_required": True,
+        "note": "Run verification commands from the registered project root; do not use --project as a cwd substitute.",
+        "commands": [],
+    }
+    pyproject = resolved / "pyproject.toml"
+    if not pyproject.is_file():
+        return hints
+    try:
+        content = pyproject.read_text(encoding="utf-8")[:200_000].lower()
+    except OSError:
+        return hints
+
+    commands: list[dict[str, Any]] = []
+    base = ["uv", "run"]
+    if "[project.optional-dependencies]" in content and "dev" in content:
+        base.extend(["--extra", "dev"])
+    if "pytest" in content:
+        commands.append({"name": "pytest", "argv": [*base, "pytest"]})
+    if "ruff" in content:
+        commands.append({"name": "ruff", "argv": [*base, "ruff", "check"]})
+    if "mypy" in content:
+        commands.append({"name": "mypy", "argv": [*base, "mypy"]})
+    hints["commands"] = commands
+    return hints
+
+
 def _is_real_git_repo(path: Path) -> bool:
     """Check for an actual git worktree, not just a path named ".git".
 
@@ -1381,6 +1413,7 @@ def info(client: GatewayClient, project: str) -> dict[str, Any]:
         "exists": resolved.exists(),
         "is_dir": resolved.is_dir(),
         "is_git_repo": _is_real_git_repo(resolved),
+        "verification": _project_verification_hints(resolved),
     }
 
 

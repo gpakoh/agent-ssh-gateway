@@ -457,3 +457,51 @@ class TestProjectAwareHandoffWrite:
             )
 
         assert not (project_root / ".ai-bridge").exists()
+
+
+class TestProjectInfoVerificationHints:
+    def test_info_exposes_cwd_bound_uv_verification_hints(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(
+            """
+[project]
+name = "demo"
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
+""".strip(),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        result = mod.info(None, "demo")
+
+        assert result["root"] == "."
+        assert result["resolved_path"] == "."
+        verification = result["verification"]
+        assert verification["cwd"] == "."
+        assert verification["cwd_required"] is True
+        assert "--project" not in " ".join(
+            part for command in verification["commands"] for part in command["argv"]
+        )
+        assert {command["name"] for command in verification["commands"]} == {
+            "pytest",
+            "ruff",
+            "mypy",
+        }
+        assert ["uv", "run", "--extra", "dev", "pytest"] in [
+            command["argv"] for command in verification["commands"]
+        ]
+
+    def test_info_without_pyproject_keeps_empty_verification_commands(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        result = mod.info(None, "demo")
+
+        assert result["verification"]["cwd"] == "."
+        assert result["verification"]["commands"] == []
