@@ -101,7 +101,8 @@ patch, test, or deliver a safe candidate.
    - **Partial candidate fix (2026-09-02):** added `inspect_agent_task` as a
      read-only aggregated diagnostic with job/status/log tail/staleness verdict.
      `tools_manifest.agent_guidance` now points agents to this one-call diagnostic
-     before falling back to raw status/log reads. Still open: persistent heartbeat
+     before falling back to raw status/log reads. `run_agent`/`run_opencode`
+     running/unknown receipts now include diagnostics follow-up calls. Still open: persistent heartbeat
      timestamps from the runner itself and optional cancellation/retry flow.
 
 10. ⬜ **Ephemeral SSH sessions do not preserve ad-hoc writeable clones.** A

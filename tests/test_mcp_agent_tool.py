@@ -291,6 +291,12 @@ class TestProjectRunAgentAsyncSubmit:
         assert result["job_id"] == "job-42"
         assert result["exit_code"] is None
         assert result["finished_at"] is None
+        assert result["diagnostics"]["inspect_agent_task"] == {
+            "project": "test",
+            "task_id": TASK_ID,
+            "purpose": "status, job state, artifact mtimes, stale/hung verdict, and log tail",
+        }
+        assert result["diagnostics"]["job_status"]["job_id"] == "job-42"
         run_script_async.assert_called_once()
         submission_key = run_script_async.call_args.args[2]
         assert submission_key.startswith("task:test-")
@@ -359,6 +365,33 @@ class TestProjectRunAgentAsyncSubmit:
         )
         assert result["status"] == "error"
         run_script_async.assert_not_called()
+
+
+class TestProjectRunAgentDiagnosticsHint:
+    def test_sync_wait_timeout_returns_inspection_followups(self):
+        rc = _make_run_cmd(task_json=_make_task_json())
+        run_script_async = _make_run_script_async("job-sync-1")
+        result = project_run_agent(
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            run_script_async=run_script_async,
+            run_script_wait=lambda job_id: {
+                "job_id": job_id,
+                "status": "running",
+                "wait_timed_out": True,
+            },
+            read_attempt_state=lambda _project, _task_id: None,
+            claim_attempt_state=lambda _project, _task_id, _record: True,
+            write_attempt_state=lambda *_args: None,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["status"] == "running"
+        assert result["wait_timed_out"] is True
+        assert result["diagnostics"]["inspect_agent_task"]["task_id"] == TASK_ID
+        assert result["diagnostics"]["read_agent_log"]["project"] == "test"
+        assert result["diagnostics"]["job_status"]["job_id"] == "job-sync-1"
 
 
 # ── project_run_agent: host-path redaction (sync path) ──────────────────────

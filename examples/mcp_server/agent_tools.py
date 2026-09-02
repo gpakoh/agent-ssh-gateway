@@ -148,6 +148,22 @@ def _error_text(exc: Exception | None) -> str:
     return str(exc) if exc is not None else "unknown error"
 
 
+def _agent_diagnostics_hint(project: str, task_id: str, job_id: str | None = None) -> dict[str, Any]:
+    """Return MCP-native follow-up calls for inspecting a submitted agent task."""
+    hint: dict[str, Any] = {
+        "inspect_agent_task": {
+            "project": project,
+            "task_id": task_id,
+            "purpose": "status, job state, artifact mtimes, stale/hung verdict, and log tail",
+        },
+        "read_agent_log": {"project": project, "task_id": task_id, "purpose": "raw bounded log tail"},
+        "read_agent_status": {"project": project, "task_id": task_id, "purpose": "agent-status.md"},
+    }
+    if job_id:
+        hint["job_status"] = {"job_id": job_id, "purpose": "gateway job state"}
+    return hint
+
+
 def _submit_same_key_retry(
     run_script_async: Callable[[str, str, str], dict[str, Any]],
     project: str,
@@ -2078,6 +2094,7 @@ def project_run_agent(
             "status": "running",
             "job_id": job_id,
             "attempt_id": attempt_id,
+            "diagnostics": _agent_diagnostics_hint(project, task_id, job_id),
             "exit_code": None,
             "stdout": "",
             "stderr": "",
@@ -2291,6 +2308,7 @@ def project_run_agent(
             "attempt_id": attempt_id,
             "wait_timed_out": True,
             "reconciled_via": waiter.get("reconciled_via"),
+            "diagnostics": _agent_diagnostics_hint(project, task_id, job_id),
             "exit_code": None,
             "stdout": "",
             "stderr": "",
@@ -2306,6 +2324,7 @@ def project_run_agent(
             "attempt_id": attempt_id,
             "error": waiter.get("error", "job state unresolved after transport loss"),
             "reconciled_via": waiter.get("reconciled_via"),
+            "diagnostics": _agent_diagnostics_hint(project, task_id, job_id),
             "exit_code": None,
             "stdout": "",
             "stderr": "",
