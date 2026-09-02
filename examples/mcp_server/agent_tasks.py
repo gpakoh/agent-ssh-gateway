@@ -635,12 +635,29 @@ _AGENT_TERMINAL_STATUSES = frozenset(
         "blocked",
         "rate-limited",
         "resource-exhausted",
+        "startup-timeout",
+        "run-timeout",
+        "evidence-failed",
+        "scope-failed",
+        "checks-failed",
+        "parent-guard-failed",
+        "supervisor-failed",
         "failed",
         "completed",
         "cancelled",
     }
 )
 _AGENT_ACTIVE_STATUSES = frozenset({"created", "pending", "processing", "running", "cancelling"})
+_STARTUP_STALLED_RE = re.compile(r"OpenCode startup stalled; rotating proxy \(attempt (\d+)/(\d+)\)")
+_USEFUL_AGENT_ACTIVITY_MARKERS = (
+    "← Write ",
+    "Wrote file successfully",
+    "$ cd ",
+    "# Todos",
+    "Implementation",
+    "agent-report.md",
+    "implementation-diff.patch",
+)
 
 
 def _parse_agent_status(text: str) -> str | None:
@@ -766,6 +783,43 @@ def _latest_activity(files: dict[str, dict[str, Any]], now_epoch: int) -> dict[s
     }
 
 
+
+def _agent_startup_diagnostics(
+    *,
+    status: str | None,
+    status_text: str,
+    log_stdout: str,
+    files: dict[str, dict[str, Any]],
+    active: bool,
+) -> dict[str, Any]:
+    """Classify OpenCode startup/proxy dead time separately from useful work."""
+    combined = f"{status_text}\n{log_stdout}"
+    matches = list(_STARTUP_STALLED_RE.finditer(combined))
+    attempts = [int(match.group(1)) for match in matches]
+    max_attempts = [int(match.group(2)) for match in matches]
+    opencode_startup_stalled = bool(matches or "OpenCode startup stalled" in combined)
+    startup_timeout = status == "startup-timeout" or "opencode-startup-timeout" in combined
+    useful_agent_activity_seen = bool(
+        (files.get("report") or {}).get("exists")
+        or (files.get("diff") or {}).get("exists")
+        or any(marker in combined for marker in _USEFUL_AGENT_ACTIVITY_MARKERS)
+    )
+    dead_time_kind = None
+    if active and opencode_startup_stalled and not useful_agent_activity_seen:
+        dead_time_kind = "opencode_startup"
+    return {
+        "startup_timeout": startup_timeout,
+        "opencode_startup_stalled": opencode_startup_stalled,
+        "proxy_rotation": {
+            "observed": bool(matches),
+            "attempt": max(attempts) if attempts else None,
+            "max_attempts": max(max_attempts) if max_attempts else None,
+            "count": len(matches),
+        },
+        "useful_agent_activity_seen": useful_agent_activity_seen,
+        "dead_time_kind": dead_time_kind,
+    }
+
 def inspect_agent_task(
     run_cmd,
     *,
@@ -847,8 +901,20 @@ def inspect_agent_task(
     terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
     active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
     likely_hung = bool(active and not terminal and isinstance(age, int) and age >= stale_after_seconds)
+
+    log = read_agent_log_tail(run_cmd, project=project, task_id=task_id, tail_lines=tail_lines)
+    startup = _agent_startup_diagnostics(
+        status=status_token,
+        status_text=status_text if status_text != "(not found)" else "",
+        log_stdout=str(log.get("stdout", "")),
+        files=files,
+        active=active,
+    )
+
     if terminal:
         verdict = "finished"
+    elif startup.get("dead_time_kind") == "opencode_startup":
+        verdict = "startup_stalled"
     elif likely_hung:
         verdict = "likely_hung"
     elif active:
@@ -857,8 +923,6 @@ def inspect_agent_task(
         verdict = "unknown"
     else:
         verdict = "needs_attention"
-
-    log = read_agent_log_tail(run_cmd, project=project, task_id=task_id, tail_lines=tail_lines)
 
     result: dict[str, Any] = {
         "project": project,
@@ -872,6 +936,7 @@ def inspect_agent_task(
         "last_activity": activity,
         "runner_heartbeat": heartbeat,
         "runner_heartbeat_fresh": runner_heartbeat_fresh,
+        "startup": startup,
         "stale_after_seconds": stale_after_seconds,
         "terminal": terminal,
         "likely_hung": likely_hung,

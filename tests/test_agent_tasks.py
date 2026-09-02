@@ -563,6 +563,139 @@ class TestInspectAgentTask:
             )
         assert calls == []
 
+    def test_running_startup_proxy_rotation_is_not_plain_running(self):
+        now = 2_000
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "agent-status.md" in command:
+                return {
+                    "stdout": (
+                        "Status: running\n"
+                        "Using exclusive live proxy from configured provider\n"
+                        "OpenCode startup stalled; rotating proxy (attempt 3/4)\n"
+                    ),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat ") and "attempt-state.json" in command:
+                return {
+                    "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat "):
+                return {"stdout": "(not found)", "stderr": "", "exit_code": 1}
+            if command.startswith("tail -c "):
+                return {
+                    "stdout": (
+                        "Using exclusive live proxy from configured provider\n"
+                        "OpenCode startup stalled; rotating proxy (attempt 2/4)\n"
+                        "OpenCode startup stalled; rotating proxy (attempt 3/4)\n"
+                    ),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("stat -c "):
+                if "agent-report.md" in command or "implementation-diff.patch" in command:
+                    return {"stdout": "", "stderr": "not found", "exit_code": 1}
+                return {"stdout": f"20 {now - 90}\n", "stderr": "", "exit_code": 0}
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = inspect_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda _job: {"status": "running"},
+        )
+
+        assert result["verdict"] == "startup_stalled"
+        assert result["likely_hung"] is False
+        assert result["startup"] == {
+            "startup_timeout": False,
+            "opencode_startup_stalled": True,
+            "proxy_rotation": {"observed": True, "attempt": 3, "max_attempts": 4, "count": 3},
+            "useful_agent_activity_seen": False,
+            "dead_time_kind": "opencode_startup",
+        }
+
+    def test_startup_stall_with_useful_agent_work_remains_running(self):
+        now = 2_000
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "agent-status.md" in command:
+                return {"stdout": "Status: running\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "attempt-state.json" in command:
+                return {
+                    "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat "):
+                return {"stdout": "(not found)", "stderr": "", "exit_code": 1}
+            if command.startswith("tail -c "):
+                return {
+                    "stdout": (
+                        "OpenCode startup stalled; rotating proxy (attempt 1/4)\n"
+                        "← Write agent-report.md\n"
+                        "Wrote file successfully.\n"
+                    ),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("stat -c "):
+                if "agent-report.md" in command or "implementation-diff.patch" in command:
+                    return {"stdout": "", "stderr": "not found", "exit_code": 1}
+                return {"stdout": f"20 {now - 30}\n", "stderr": "", "exit_code": 0}
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = inspect_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda _job: {"status": "running"},
+        )
+
+        assert result["verdict"] == "running"
+        assert result["startup"]["opencode_startup_stalled"] is True
+        assert result["startup"]["useful_agent_activity_seen"] is True
+        assert result["startup"]["dead_time_kind"] is None
+
+    def test_startup_timeout_status_is_terminal_and_classified(self):
+        now = 2_000
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "agent-status.md" in command:
+                return {"stdout": "Status: startup-timeout\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat "):
+                return {"stdout": "(not found)", "stderr": "", "exit_code": 1}
+            if command.startswith("tail -c "):
+                return {"stdout": "Failure reason: opencode-startup-timeout\n", "stderr": "", "exit_code": 0}
+            if command.startswith("stat -c "):
+                return {"stdout": f"20 {now - 700}\n", "stderr": "", "exit_code": 0}
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = inspect_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            stale_after_seconds=600,
+            now_epoch=now,
+        )
+
+        assert result["terminal"] is True
+        assert result["verdict"] == "finished"
+        assert result["startup"]["startup_timeout"] is True
+
 
 class TestInspectAgentHeartbeat:
     def test_fresh_runner_heartbeat_does_not_mask_stale_progress(self):
