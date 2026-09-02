@@ -384,8 +384,12 @@ class FleetRuntime:
             if future is not None:
                 try:
                     await asyncio.shield(future)
-                finally:
-                    raise
+                except Exception:
+                    # The worker already failed (e.g. JOB_NOT_FOUND), so there
+                    # is nothing left to join. Cancellation must win: the
+                    # caller expects CancelledError, not the worker's error,
+                    # otherwise its own cleanup/shutdown logic misbehaves.
+                    pass
             raise
         finally:
             self._gateway_io_gate.release()
@@ -488,7 +492,11 @@ class FleetRuntime:
         self, *, job_id: str, job_status_fn: Callable[[str], dict[str, Any]]
     ) -> None:
         """Poll until terminal reconciliation succeeds or runtime closes."""
-        while not self._closed:
+        # Exit as soon as shutdown begins, not only after it has completed.
+        # A status call that keeps raising can turn the watcher's cancellation
+        # into a plain error (see _run_gateway_io); relying on _closed alone
+        # would keep close() blocked in its gather forever.
+        while not (self._closing or self._closed):
             try:
                 result = await self._run_gateway_io(job_status_fn, job_id)
             except asyncio.CancelledError:
