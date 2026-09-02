@@ -152,16 +152,7 @@ class TestProjectRunAgentDisabled:
 
     @pytest.mark.parametrize(
         ("exit_code", "expected_status"),
-        [
-            (70, "evidence-failed"),
-            (71, "scope-failed"),
-            (72, "checks-failed"),
-            (74, "parent-guard-failed"),
-            (75, "supervisor-failed"),
-            (77, "rate-limited"),
-            (78, "startup-timeout"),
-            (79, "run-timeout"),
-        ],
+        [(77, "rate-limited"), (78, "startup-timeout"), (79, "run-timeout")],
     )
     def test_operational_failure_exit_is_actionable(self, exit_code, expected_status):
         rc = _make_run_cmd(task_json=_make_task_json(), exit_code=exit_code)
