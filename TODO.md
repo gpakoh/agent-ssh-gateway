@@ -58,9 +58,10 @@ patch, test, or deliver a safe candidate.
    execution failure, and the hint should point to the writeable clone /
    candidate-materialization path.
    - **Partial candidate fix (2026-09-02):** MCP workspace mutation adapters
-     classify `OSError(errno.EROFS)` as `WORKSPACE_READONLY` and
-     `PermissionError` as `PERMISSION_DENIED`. Still open: audit non-workspace
-     adapters and live REST endpoints for the same classification.
+     and supervisor integration/registration adapters classify
+     `OSError(errno.EROFS)` as `WORKSPACE_READONLY` and `PermissionError` as
+     `PERMISSION_DENIED`. Still open: audit live REST endpoints for the same
+     classification.
 6. ◐ **Delivery boundary remains too manual.** A local candidate commit can be
    clean and tested while trusted Gitea delivery remains impossible without a
    receipt-bound task candidate. Add a supervised salvage/promote flow for a
