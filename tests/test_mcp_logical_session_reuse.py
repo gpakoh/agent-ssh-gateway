@@ -245,7 +245,7 @@ async def test_production_lifespan_returns_authenticated_sid_to_idle_pool(
 
 
 @pytest.mark.asyncio
-async def test_authenticated_idle_pool_reuses_sid_without_transport_600_policy(
+async def test_authenticated_idle_pool_keeps_finite_gateway_idle_policy(
     monkeypatch: pytest.MonkeyPatch,
     live_server: Any,
 ) -> None:
@@ -293,6 +293,7 @@ async def test_authenticated_idle_pool_reuses_sid_without_transport_600_policy(
             "username": "tester",
             "reuse_existing": False,
             "ephemeral": True,
+            "idle_timeout_seconds": 300,
         }
     ]
     assert len(gateway_pool._idle) == 1
@@ -304,9 +305,10 @@ async def test_authenticated_idle_pool_reuses_sid_without_transport_600_policy(
         if task is not asyncio.current_task()
     )
 
-    # The local reusable pool has no 600-second clock/reaper. Crossing that
-    # boundary locally must not retire the owned SID or force another connect.
-    now[0] += 601
+    # The local reusable pool keeps the object for auth-key reuse, but the remote
+    # gateway owns the 300-second SID TTL. Advancing only this local fake clock
+    # therefore must not mutate pool membership by itself.
+    now[0] += 301
     second_session = _McpSession("second-reusable")
     async with live_server._mcp_lifespan(live_server.mcp) as second_owner:
         second = gateway_pool.get(

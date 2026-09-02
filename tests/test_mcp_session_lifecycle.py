@@ -38,10 +38,15 @@ from examples.mcp_server.mcp_infra._server_ref import server_module
 #        │        │ (pool_size + agent_pool_size) * 2.
 # M      │ GREEN  │ Failed disconnect doesn't cause unbounded SID
 #        │        │ accumulation (bounded by leaked + 2).
+# TEST-09│ GREEN  │ OLD already-gone SID (HTTP 404 / SESSION_NOT_FOUND)
+#        │        │ cleanup is idempotent across repeated reaps; a
+#        │        │ genuine cleanup failure still blocks (test M).
 #
 # RED evidence: original test D proved pool.get() orphan on unfixed
 # code.  That test was replaced by the GREEN regression after the fix
-# in gateway_client.py pool.get().
+# in gateway_client.py pool.get().  TEST-09 is RED on code without the
+# idempotent already-gone cleanup: the reaped SID stays in _retired and
+# the second reconnect chain is blocked.
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -106,7 +111,7 @@ def test_scoped_reconnect_never_requests_reuse_of_another_logical_sid(
             "username": "tester",
             "reuse_existing": False,
             "ephemeral": True,
-            "idle_timeout_seconds": 600,
+            "idle_timeout_seconds": 300,
         }
     ]
 
@@ -292,14 +297,14 @@ def _attach_owned_client(
 
 
 @pytest.mark.asyncio
-async def test_active_lifecycle_heartbeats_owned_sid_until_teardown(
+async def test_lifespan_does_not_keep_abandoned_sid_alive_or_close_global_fleet_runtime(
     monkeypatch: pytest.MonkeyPatch, live_server: Any
 ) -> None:
     gateway_pool = live_server.GatewayClientSessionPool()
     agent_pool = live_server.GatewayClientSessionPool()
-    heartbeat_seen = asyncio.Event()
     heartbeats: list[str] = []
     disconnects: list[str] = []
+    fleet_closes = 0
 
     async def tracking_post_async(
         _client: Any, path: str, payload: dict[str, Any], *, timeout: float | int
@@ -307,20 +312,19 @@ async def test_active_lifecycle_heartbeats_owned_sid_until_teardown(
         sid = payload["session_id"]
         if path == "/api/ssh/heartbeat":
             heartbeats.append(sid)
-            heartbeat_seen.set()
             return {"status": "ok"}
         if path == "/api/ssh/disconnect":
             disconnects.append(sid)
             return {"status": "disconnected"}
         raise AssertionError(path)
 
-    async def _noop_close() -> None:
-        return None
+    async def forbidden_global_close() -> None:
+        nonlocal fleet_closes
+        fleet_closes += 1
 
     monkeypatch.setattr(live_server, "_gateway_client_sessions", gateway_pool)
     monkeypatch.setattr(live_server, "_agent_client_sessions", agent_pool)
-    monkeypatch.setattr(live_server, "_MCP_SESSION_KEEPALIVE_INTERVAL_SECONDS", 0.01)
-    monkeypatch.setattr(live_server, "close_fleet_runtime", _noop_close)
+    monkeypatch.setattr(live_server, "close_fleet_runtime", forbidden_global_close)
     monkeypatch.setattr(live_server.GatewayClient, "_post_async", tracking_post_async)
 
     async with live_server._mcp_lifespan(live_server.mcp) as owner:
@@ -328,16 +332,16 @@ async def test_active_lifecycle_heartbeats_owned_sid_until_teardown(
             live_server, gateway_pool, owner, "active-owned-sid"
         )
         assert mcp_session is not None
-        await asyncio.wait_for(heartbeat_seen.wait(), timeout=0.2)
-        assert heartbeats == ["active-owned-sid"]
+        assert scoped._idle_timeout_seconds == 300
+        await asyncio.sleep(0.04)
+        assert heartbeats == []
+        assert fleet_closes == 0
         assert scoped.session_id == "active-owned-sid"
         assert scoped._owns_session is True
 
-    heartbeat_count_after_teardown = len(heartbeats)
-    await asyncio.sleep(0.04)
-
-    assert len(heartbeats) == heartbeat_count_after_teardown
+    assert heartbeats == []
     assert disconnects == ["active-owned-sid"]
+    assert fleet_closes == 0
     assert scoped._released is True
 
 
@@ -1554,6 +1558,150 @@ def test_global_reconnect_governor_suppresses_followup_connects_after_429(
         second.connect()
 
     assert connect_attempts == 1
+
+
+def test_09_already_gone_sid_cleanup_is_idempotent_across_sequential_reaps(
+    monkeypatch: pytest.MonkeyPatch, live_server: Any
+) -> None:
+    """TEST-09 adversarial regression: OLD already-gone SID cleanup is
+    idempotent and must not build blocked cleanup debt across a real
+    reconnect chain.
+
+    Sequence: old SID reaped -> real tool call reconnects to new-1 ->
+    new-1 reaped -> second real tool call reconnects to new-2.  Both
+    reconnects must succeed, the second must reach /connect, and after
+    the already-gone cleanup _retired must be empty.  If the
+    idempotent-cleanup fix is removed, disconnecting the reaped SID
+    (HTTP 404) lands it in _retired and the second reconnect is blocked
+    with "reconnect blocked".
+    """
+    monkeypatch.setattr(live_server.GatewayClient, "_connect_retry_not_before", 0.0)
+    base = _base_client(live_server)
+    scoped = base.fork_session()
+    scoped._owns_session = True
+    scoped.session_id = "conn-001"
+
+    disconnect_calls: list[str] = []
+    connect_calls = 0
+    execute_attempts = 0
+
+    def fake_post(url: str, **kwargs: Any) -> _Response:
+        nonlocal connect_calls, execute_attempts
+        if url.endswith("/api/ssh/connect"):
+            connect_calls += 1
+            return _Response({"session_id": f"conn-{connect_calls + 1:03d}"})
+        if url.endswith("/api/ssh/disconnect"):
+            sid = kwargs["json"]["session_id"]
+            disconnect_calls.append(sid)
+            if sid in {"conn-001", "conn-002"}:
+                # Both stale SIDs were already reaped server-side: cleanup 404
+                # is idempotent and must not become retired cleanup debt.
+                return _Response({"code": "SESSION_NOT_FOUND"}, 404)
+            return _Response({"status": "disconnected"})
+        if url.endswith("/api/ssh/execute"):
+            execute_attempts += 1
+            if execute_attempts % 2 == 1:
+                raise _SESSION_NOT_FOUND_ERROR()
+            return _Response({"exit_code": 0, "stdout": "ok", "stderr": "", "duration": 0.0})
+        raise AssertionError(url)
+
+    monkeypatch.setattr("gateway_client.httpx.post", fake_post)
+    monkeypatch.setattr("gateway_client.validate_readonly_command", lambda cmd: cmd)
+
+    # old SID reaped -> real tool call reconnects conn-001 -> conn-002
+    result1 = scoped.execute_restricted("echo ok")
+    assert result1["exit_code"] == 0
+    assert scoped.session_id == "conn-002"
+    assert scoped._owns_session is True
+
+    # new-1 reaped -> second real tool call reconnects conn-002 -> conn-003
+    result2 = scoped.execute_restricted("echo ok")
+    assert result2["exit_code"] == 0
+    assert scoped.session_id == "conn-003"
+    assert scoped._owns_session is True
+
+    # Both reconnects succeeded; the second reached /connect.
+    assert connect_calls == 2
+    assert disconnect_calls == ["conn-001", "conn-002"]
+    # Already-gone cleanup is idempotent: no retired debt remains.
+    assert "conn-001" not in scoped._retired
+    assert len(scoped._retired) == 0
+
+    scoped.release()
+
+
+def test_09_bare_404_cleanup_is_not_mistaken_for_missing_session(
+    monkeypatch: pytest.MonkeyPatch, live_server: Any
+) -> None:
+    """A route/proxy 404 without SESSION_NOT_FOUND remains cleanup debt."""
+    scoped = _base_client(live_server).fork_session()
+    scoped._owns_session = True
+    scoped.session_id = "conn-001"
+
+    connect_calls = 0
+
+    def fake_post(url: str, **kwargs: Any) -> _Response:
+        nonlocal connect_calls
+        if url.endswith("/api/ssh/connect"):
+            connect_calls += 1
+            return _Response({"session_id": "conn-002"})
+        if url.endswith("/api/ssh/disconnect"):
+            return _Response({"detail": "Not Found"}, 404)
+        raise AssertionError(url)
+
+    monkeypatch.setattr("gateway_client.httpx.post", fake_post)
+    scoped.connect()
+
+    assert scoped.session_id == "conn-002"
+    assert scoped._retired == {"conn-001"}
+    assert connect_calls == 1
+
+
+def test_09_real_cleanup_server_failure_remains_debt_and_blocks_next_connect(
+    monkeypatch: pytest.MonkeyPatch, live_server: Any
+) -> None:
+    """A real disconnect failure remains fail-closed cleanup debt."""
+    monkeypatch.setattr(live_server.GatewayClient, "_connect_retry_not_before", 0.0)
+    scoped = _base_client(live_server).fork_session()
+    scoped._owns_session = True
+    scoped.session_id = "conn-001"
+
+    connect_calls = 0
+    execute_attempts = 0
+    disconnect_calls: list[str] = []
+
+    def fake_post(url: str, **kwargs: Any) -> _Response:
+        nonlocal connect_calls, execute_attempts
+        if url.endswith("/api/ssh/connect"):
+            connect_calls += 1
+            return _Response({"session_id": f"conn-{connect_calls + 1:03d}"})
+        if url.endswith("/api/ssh/disconnect"):
+            sid = kwargs["json"]["session_id"]
+            disconnect_calls.append(sid)
+            if sid == "conn-001":
+                return _Response({"detail": {"code": "REMOTE_FAILURE"}}, 500)
+            return _Response({"status": "disconnected"})
+        if url.endswith("/api/ssh/execute"):
+            execute_attempts += 1
+            if execute_attempts in {1, 3}:
+                raise _SESSION_NOT_FOUND_ERROR()
+            return _Response({"exit_code": 0, "stdout": "ok", "stderr": "", "duration": 0.0})
+        raise AssertionError(url)
+
+    monkeypatch.setattr("gateway_client.httpx.post", fake_post)
+    monkeypatch.setattr("gateway_client.validate_readonly_command", lambda cmd: cmd)
+
+    first = scoped.execute_restricted("echo first")
+    assert first["exit_code"] == 0
+    assert scoped.session_id == "conn-002"
+    assert scoped._retired == {"conn-001"}
+
+    with pytest.raises(live_server.GatewayClientError, match="reconnect blocked"):
+        scoped.execute_restricted("echo second")
+
+    assert connect_calls == 1
+    assert disconnect_calls == ["conn-001", "conn-001"]
+    assert scoped._retired == {"conn-001"}
 
 
 def test_repo_status_project_honors_explicit_session_id(

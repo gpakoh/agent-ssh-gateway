@@ -13,6 +13,7 @@ the OAuth authorization flow.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import logging
 import os
@@ -31,6 +32,7 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(Path(__file__).resolve().parent / ".env")
 load_dotenv(MCP_SERVER_DIR / ".env", override=False)
 
+import anyio  # noqa: E402
 import httpx  # noqa: E402
 import uvicorn  # noqa: E402
 from starlette.applications import Starlette  # noqa: E402
@@ -164,14 +166,94 @@ async def _shutdown_upstream_client() -> None:
         logger.info("Closed shared upstream AsyncClient")
 
 
+_PROCESS_SHUTDOWN_TIMEOUT_ENV: str = "MCP_PROCESS_SHUTDOWN_TIMEOUT"
+_PROCESS_SHUTDOWN_TIMEOUT_DEFAULT: float = 10.0
+
+
+def _process_shutdown_timeout() -> float:
+    """Bounded deadline for one process-shutdown cleanup step (seconds).
+
+    A FleetRuntime close blocked on an executor worker thread cannot be
+    interrupted by asyncio cancellation (see fleet_runtime.close). Without a
+    deadline the proxy lifespan would hang forever during process shutdown.
+    Env-tunable for operators; tests override it to keep hangs fast.
+    """
+    raw = os.environ.get(_PROCESS_SHUTDOWN_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return _PROCESS_SHUTDOWN_TIMEOUT_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{_PROCESS_SHUTDOWN_TIMEOUT_ENV} must be a number") from None
+    if value <= 0:
+        raise ValueError(f"{_PROCESS_SHUTDOWN_TIMEOUT_ENV} must be positive")
+    return value
+
+
+async def _shutdown_process_resources() -> None:
+    """Close process-owned resources in deliberate dependency order.
+
+    Each step is bounded so a never-returning close cannot hold process
+    shutdown open forever; an overdue step is logged and abandoned rather
+    than blocking the event loop. Dependency order is preserved for the steps
+    that do complete.
+    """
+    deadline = _process_shutdown_timeout()
+    try:
+        # FleetRuntime may marshal onto the internal FastMCP owner loop and
+        # must finish joining its watchers/executor before the public process
+        # drops the shared upstream client.
+        try:
+            await asyncio.wait_for(_mcp_mod.close_fleet_runtime(), timeout=deadline)
+        except TimeoutError:
+            logger.warning(
+                "close_fleet_runtime exceeded %.1fs bounded shutdown deadline; "
+                "abandoning FleetRuntime close instead of hanging process shutdown",
+                deadline,
+            )
+    finally:
+        try:
+            await asyncio.wait_for(_shutdown_upstream_client(), timeout=deadline)
+        except TimeoutError:
+            logger.warning(
+                "upstream client close exceeded %.1fs bounded shutdown deadline; "
+                "abandoning upstream aclose instead of hanging process shutdown",
+                deadline,
+            )
+
+
+async def _finish_shutdown_despite_cancellation() -> None:
+    """Defer AnyIO-scope and raw-task cancellation until cleanup finishes."""
+    # Starlette/AnyIO shutdown may enter this function inside an already-
+    # cancelled CancelScope. Raw asyncio.Task.cancel() is a separate channel.
+    # Shield both: create the cleanup task inside an AnyIO shield so inherited
+    # cancel-scope state cannot abort its checkpoints, and use asyncio.shield so
+    # cancelling the lifespan task itself does not propagate into cleanup.
+    with anyio.CancelScope(shield=True):
+        cleanup_task = asyncio.create_task(_shutdown_process_resources())
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            # _shutdown_process_resources is internally bounded, so joining it
+            # here cannot hang even under a second, unrelated cancellation.
+            await cleanup_task
+            raise
+
+
 @asynccontextmanager
 async def _lifespan(app: Starlette) -> AsyncIterator[dict[str, Any]]:
-    """Manage shared upstream client lifecycle."""
+    """Own process-global MCP resources for the public Starlette process.
+
+    FastMCP ServerSession lifespans are transport-scoped and must never close
+    FleetRuntime. The outer process lifespan is the single shutdown owner.
+    Shutdown first joins FleetRuntime background coordination on its owning
+    event loop, then closes the shared upstream HTTP pool from #117.
+    """
     await _startup_upstream_client()
     try:
         yield {}
     finally:
-        await _shutdown_upstream_client()
+        await _finish_shutdown_despite_cancellation()
 
 
 def _is_oauth_public_path(path: str) -> bool:

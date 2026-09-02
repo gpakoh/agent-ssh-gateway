@@ -748,6 +748,72 @@ async def test_sweep_restores_watcher_for_unreachable_bound_lease():
 
 
 @pytest.mark.asyncio
+async def test_close_finishes_when_watcher_status_fn_keeps_raising():
+    """close() must not hang when a watcher polls an unreachable job.
+
+    Regression: #128 moved ``_closed = True`` after the watcher gather. A
+    watcher whose gateway status call raises (JOB_NOT_FOUND) has its
+    CancelledError converted into that RuntimeError by the gateway-io shield,
+    so it keeps polling while ``_closed`` is still False and close() never
+    leaves the gather.
+    """
+    state = _mk_state()
+    state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
+    state.list_bound_leases = AsyncMock(return_value=[_lease(job_id="job-unreachable")])
+    state.bind_job = AsyncMock(return_value=_lease(job_id="job-new"))
+    state.complete_task = AsyncMock()
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state)
+
+    def status_fn(job_id: str) -> dict:
+        if job_id == "job-unreachable":
+            raise RuntimeError("JOB_NOT_FOUND")
+        return {"job_id": job_id, "status": "running"}
+
+    await runtime.submit(
+        project="demo",
+        task_id="task-1",
+        submit_sync=lambda: {"task_id": "task-1", "status": "running", "job_id": "job-new"},
+        job_status_fn=status_fn,
+    )
+
+    assert "job-unreachable" in runtime._watchers_by_job
+    await asyncio.wait_for(runtime.close(), timeout=5.0)
+    assert runtime._closed
+
+
+@pytest.mark.asyncio
+async def test_gateway_io_cancel_preserved_when_worker_already_failed():
+    """Cancelling a gateway-io await must raise CancelledError, not the
+    worker's own exception.
+
+    Regression: the shield re-await in the CancelledError handler re-raised
+    the already-completed worker failure (RuntimeError), swallowing the
+    cancellation. Callers rely on CancelledError to stop their loops.
+    """
+    state = _mk_state()
+    state.close = AsyncMock()
+    runtime = _watch_runtime(state, gateway_io_concurrency=2)
+    started = threading.Event()
+    release = threading.Event()
+
+    def boom(job_id: str) -> dict:
+        started.set()
+        release.wait(timeout=2)
+        raise RuntimeError("JOB_NOT_FOUND")
+
+    task = asyncio.create_task(runtime._run_gateway_io(boom, "job-x"))
+    assert await _wait_until(started.is_set)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_existing_bound_lease_restores_watcher_on_submit():
     state = _mk_state()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, True, 2, 1, _lease(job_id="job-existing")))

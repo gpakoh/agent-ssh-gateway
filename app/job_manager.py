@@ -4,9 +4,12 @@ import asyncio
 import base64
 import hashlib
 import logging
+import os
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.agent_events import AgentEventEmitter, ObservabilityDegradedError, agent_events
 from app.command_policy import evaluate_command_policy
@@ -22,10 +25,37 @@ from app.security import redact_secrets
 from app.ssh_manager import (
     ExecutionError,
     SessionNotFoundError,
+    SessionRecord,
     SSHSessionManager,
 )
 
 logger = logging.getLogger(__name__)
+
+FORCE_CLEANUP_JOIN_TIMEOUT_ENV = "MCP_JOB_MANAGER_FORCE_CLEANUP_TIMEOUT"
+FORCE_CLEANUP_JOIN_TIMEOUT_DEFAULT = 10.0
+
+
+def _force_cleanup_join_timeout() -> float:
+    """Bounded deadline for joining cancelled job tasks in force_cleanup.
+
+    A job task that blocks on a sync executor thread (or otherwise swallows
+    cancellation) may never join. Bound the join so force_cleanup still
+    releases every accepted SSH lease and surfaces the incomplete cleanup via
+    the warning log instead of hanging manager shutdown forever. Env-tunable
+    for operators; tests override it to keep the slow path fast.
+    """
+    raw = os.environ.get(FORCE_CLEANUP_JOIN_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return FORCE_CLEANUP_JOIN_TIMEOUT_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{FORCE_CLEANUP_JOIN_TIMEOUT_ENV} must be a number"
+        ) from None
+    if value <= 0:
+        raise ValueError(f"{FORCE_CLEANUP_JOIN_TIMEOUT_ENV} must be positive")
+    return value
 
 MAX_STDOUT_SIZE = 10 * 1024 * 1024  # 10 MB per job
 TERMINAL_STATES = frozenset({"completed", "failed", "cancelled", "ambiguous"})
@@ -255,6 +285,10 @@ class JobManager:
         # history/results survive a gateway restart; see save_terminal_job().
         self.redis_queue = redis_queue
         self._job_tasks: dict[str, asyncio.Task] = {}
+        # Accepted async jobs pin their SSH SessionRecord before any pre-start
+        # await can yield to the 300s idle reaper. The wrapper around _run_job
+        # releases exactly one lease on every terminal/exception/cancel path.
+        self._session_leases: dict[str, SessionRecord] = {}
         # Agent lifecycle event emission (observability only — never affects
         # execution outcomes). Defaults to the process-wide store.
         self._events = event_emitter if event_emitter is not None else agent_events
@@ -401,6 +435,7 @@ class JobManager:
                     # a proven terminal snapshot.
                     proven_terminal.append(job)
             tasks = list(self._job_tasks.values())
+            job_ids = list(self._jobs)
             self._job_tasks.clear()
             for task in tasks:
                 task.cancel()
@@ -408,15 +443,55 @@ class JobManager:
             self._jobs.clear()
 
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            unjoined = await self._join_with_budget(tasks)
+            if unjoined:
+                logger.warning(
+                    "force_cleanup: %d of %d job task(s) did not join within %.1fs "
+                    "bounded cleanup deadline; releasing captured leases anyway",
+                    len(unjoined),
+                    len(tasks),
+                    _force_cleanup_join_timeout(),
+                )
+        # A Task cancelled before its coroutine ever starts cannot execute the
+        # _run_job finally block. Releasing the captured ids after join is
+        # idempotent with normal wrapper cleanup and closes that pre-start gap.
+        for job_id in job_ids:
+            await self._release_job_session_lease(job_id)
         for job in proven_terminal:
             await self._persist_terminal_job(job)
         logger.warning("Force-cleaned %d jobs (%d tasks cancelled)", count, len(tasks))
         return count
 
+    @staticmethod
+    async def _join_with_budget(tasks: Sequence[asyncio.Task[Any]]) -> list[asyncio.Task[Any]]:
+        """Join cancelled job tasks up to a deadline; return the unjoined ones.
+
+        ``asyncio.wait`` is used instead of ``gather`` so a deadline expiry does
+        not cascade a second cancellation into tasks that already swallowed
+        cancellation (e.g. a task parked in ``asyncio.shield`` re-await). The
+        unjoined tasks are returned (and intentionally left running/abandoned);
+        their captured leases are released exactly once regardless.
+        """
+        timeout = _force_cleanup_join_timeout()
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        unjoined = [task for task in pending if not task.done()]
+        for task in done:
+            if task.cancelled():
+                continue
+            exc = task.exception()
+            if exc is not None:
+                logger.warning("force_cleanup: job task raised %r", exc)
+        return unjoined
+
     # ------------------------------------------------------------------
     # Create And Run Job
     # ------------------------------------------------------------------
+
+    async def _release_job_session_lease(self, job_id: str) -> None:
+        """Release exactly one accepted-job SSH lease, if one is held."""
+        record = self._session_leases.pop(job_id, None)
+        if record is not None:
+            await self._ssh_manager.release_operation_lease(record)
 
     async def create_job(
         self,
@@ -463,6 +538,11 @@ class JobManager:
                         return existing
                 raise ExecutionError("Maximum number of jobs reached")
 
+            # Atomically pin the SSH record before any acceptance-path await
+            # (notably durable Redis reservation) can yield to the idle reaper.
+            # A duplicate durable reservation releases this provisional lease
+            # before returning the already-existing job id.
+            lease_record = await self._ssh_manager.acquire_operation_lease(session_id)
             job_id = str(uuid.uuid4())
             if submission_key:
                 if self.redis_queue is None:
@@ -498,17 +578,23 @@ class JobManager:
                     "error": None,
                     "cancel_requested": False,
                 }
-                reserved_job_id, created = await self.redis_queue.reserve_submission_with_job(
-                    submission_key,
-                    job_id=job_id,
-                    owner_id=owner_id,
-                    payload_hash=payload_hash,
-                    envelope=envelope,
-                )
+                try:
+                    reserved_job_id, created = await self.redis_queue.reserve_submission_with_job(
+                        submission_key,
+                        job_id=job_id,
+                        owner_id=owner_id,
+                        payload_hash=payload_hash,
+                        envelope=envelope,
+                    )
+                except BaseException:
+                    await self._ssh_manager.release_operation_lease(lease_record)
+                    raise
                 if not created:
                     # A previous submission with the same key+payload exists —
                     # the durable envelope was already committed, so the ACK
-                    # contract is satisfied.
+                    # contract is satisfied. This caller did not create a new
+                    # execution and therefore must not retain a second SSH pin.
+                    await self._ssh_manager.release_operation_lease(lease_record)
                     return reserved_job_id
                 job_id = reserved_job_id
 
@@ -526,6 +612,7 @@ class JobManager:
             if job.is_durable:
                 job.progress["durable_persisted"] = False
             self._jobs[job_id] = job
+            self._session_leases[job_id] = lease_record
 
         # Schedule only after a keyed submission is durably reserved.
         task = asyncio.create_task(self._run_job(job_id))
@@ -615,6 +702,11 @@ class JobManager:
         async with self._lock:
             if job_id in self._jobs:
                 return None  # already scheduled (concurrent recovery)
+            try:
+                lease_record = await self._ssh_manager.acquire_operation_lease(session_id)
+            except SessionNotFoundError:
+                logger.warning("Durable job %s waiting for restored session %s", job_id, session_id)
+                return None
 
             job = JobRecord(
                 job_id=job_id,
@@ -629,6 +721,7 @@ class JobManager:
             job.queued_at_mono = time.monotonic()
             job.progress["durable_persisted"] = False
             self._jobs[job_id] = job
+            self._session_leases[job_id] = lease_record
 
         task = asyncio.create_task(self._run_job(job_id))
         task.add_done_callback(_make_job_error_logger(job_id))
@@ -739,6 +832,13 @@ class JobManager:
             self._events.emit(job.job_id, job.owner_id, event_type, payload)
 
     async def _run_job(self, job_id: str) -> None:
+        """Run one accepted job and always release its SSH session lease."""
+        try:
+            await self._run_job_impl(job_id)
+        finally:
+            await self._release_job_session_lease(job_id)
+
+    async def _run_job_impl(self, job_id: str) -> None:
         """Execute a command in the background.
 
         For keyed durable jobs the execution flow is:

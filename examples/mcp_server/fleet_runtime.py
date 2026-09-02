@@ -23,6 +23,7 @@ Safety properties
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import socket
 from collections.abc import Callable
@@ -38,6 +39,35 @@ from examples.mcp_server.fleet_state import (
 )
 
 _ENABLED_ENV: Final = "MCP_AGENT_FLEET_ENABLED"
+
+_GATEWAY_EXECUTOR_SHUTDOWN_TIMEOUT_ENV: Final = "MCP_FLEET_EXECUTOR_SHUTDOWN_TIMEOUT"
+_GATEWAY_EXECUTOR_SHUTDOWN_TIMEOUT_DEFAULT: Final = 10.0
+
+logger = logging.getLogger("mcp_server.fleet_runtime")
+
+
+def _gateway_executor_shutdown_timeout() -> float:
+    """Bounded deadline for joining the gateway executor during close (seconds).
+
+    A sync gateway worker thread blocked on I/O cannot be interrupted by asyncio
+    cancellation; bounded join forces close() to give up and keep the process
+    shutdown moving. Env-tunable for operators; tests override it to keep the
+    slow path fast.
+    """
+    raw = os.environ.get(_GATEWAY_EXECUTOR_SHUTDOWN_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return _GATEWAY_EXECUTOR_SHUTDOWN_TIMEOUT_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{_GATEWAY_EXECUTOR_SHUTDOWN_TIMEOUT_ENV} must be a number"
+        ) from None
+    if value <= 0:
+        raise ValueError(
+            f"{_GATEWAY_EXECUTOR_SHUTDOWN_TIMEOUT_ENV} must be positive"
+        )
+    return value
 _DSN_ENV: Final = "MCP_FLEET_DATABASE_URL"
 _POOL_ENV: Final = "MCP_AGENT_FLEET_POOL"
 _CAPACITY_ENV: Final = "MCP_AGENT_FLEET_CAPACITY"
@@ -153,6 +183,8 @@ class FleetRuntime:
             thread_name_prefix="fleet-gateway",
         )
         self._watchers_by_job: dict[str, asyncio.Task] = {}
+        self._close_lock = asyncio.Lock()
+        self._closing = False
         self._closed = False
 
     async def ensure_ready(self) -> None:
@@ -352,8 +384,12 @@ class FleetRuntime:
             if future is not None:
                 try:
                     await asyncio.shield(future)
-                finally:
-                    raise
+                except Exception:
+                    # The worker already failed (e.g. JOB_NOT_FOUND), so there
+                    # is nothing left to join. Cancellation must win: the
+                    # caller expects CancelledError, not the worker's error,
+                    # otherwise its own cleanup/shutdown logic misbehaves.
+                    pass
             raise
         finally:
             self._gateway_io_gate.release()
@@ -439,7 +475,7 @@ class FleetRuntime:
         self, *, job_id: str, job_status_fn: Callable[[str], dict[str, Any]]
     ) -> None:
         """Start exactly one persistent reconciliation watcher per job_id."""
-        if self._closed or job_id in self._watchers_by_job:
+        if self._closing or self._closed or job_id in self._watchers_by_job:
             return
         task = asyncio.create_task(
             self._watch_gateway_job(job_id=job_id, job_status_fn=job_status_fn)
@@ -456,7 +492,11 @@ class FleetRuntime:
         self, *, job_id: str, job_status_fn: Callable[[str], dict[str, Any]]
     ) -> None:
         """Poll until terminal reconciliation succeeds or runtime closes."""
-        while not self._closed:
+        # Exit as soon as shutdown begins, not only after it has completed.
+        # A status call that keeps raising can turn the watcher's cancellation
+        # into a plain error (see _run_gateway_io); relying on _closed alone
+        # would keep close() blocked in its gather forever.
+        while not (self._closing or self._closed):
             try:
                 result = await self._run_gateway_io(job_status_fn, job_id)
             except asyncio.CancelledError:
@@ -477,20 +517,56 @@ class FleetRuntime:
             await asyncio.sleep(self._watch_poll_interval)
 
     async def close(self) -> None:
-        """Cancel and await reconciliation watchers before closing state."""
-        self._closed = True
-        watchers = list(self._watchers_by_job.values())
-        for task in watchers:
-            task.cancel()
-        if watchers:
-            await asyncio.gather(*watchers, return_exceptions=True)
-        self._watchers_by_job.clear()
-        self._gateway_executor.shutdown(wait=False, cancel_futures=True)
-        await self.state.close()
+        """Join process-owned resources; a failed close remains retryable."""
+        if self._closed:
+            return
+        async with self._close_lock:
+            if self._closed:
+                return
+            # Block creation of new reconciliation watchers as soon as shutdown
+            # begins. Keep this sticky after a failed close: a half-closed
+            # process runtime must never resume background work, but a later
+            # close call may still retry the remaining cleanup.
+            self._closing = True
+            watchers = list(self._watchers_by_job.values())
+            for task in watchers:
+                task.cancel()
+            if watchers:
+                await asyncio.gather(*watchers, return_exceptions=True)
+            self._watchers_by_job.clear()
+            # A running sync gateway call cannot be cancelled by cancelling its
+            # asyncio waiter. Process shutdown therefore waits for executor work
+            # to finish instead of abandoning fleet-gateway threads. The wait is
+            # bounded: a worker thread blocked on an unreachable gateway must
+            # not hold the whole process shutdown open forever. On timeout the
+            # asyncio waiter is cancelled while the (uninterruptible) executor
+            # worker keeps running in its thread; close proceeds to terminal
+            # state and logs the abandoned work.
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._gateway_executor.shutdown,
+                        wait=True,
+                        cancel_futures=True,
+                    ),
+                    timeout=_gateway_executor_shutdown_timeout(),
+                )
+            except TimeoutError:
+                logger.warning(
+                    "FleetRuntime gateway executor did not join within %.1fs; "
+                    "abandoning executor join and continuing process shutdown",
+                    _gateway_executor_shutdown_timeout(),
+                )
+            # Mark terminal only after every owned resource has actually closed.
+            # If state.close() raises/cancels, globals retain this runtime so a
+            # later process-level close can retry rather than losing ownership.
+            await self.state.close()
+            self._closed = True
 
 
 _runtime: FleetRuntime | None = None
 _runtime_lock: asyncio.Lock | None = None
+_runtime_loop: asyncio.AbstractEventLoop | None = None
 
 
 def fleet_enabled() -> bool:
@@ -499,10 +575,13 @@ def fleet_enabled() -> bool:
 
 async def get_fleet_runtime() -> FleetRuntime | None:
     """Return the process singleton when fleet admission is enabled."""
-    global _runtime, _runtime_lock
+    global _runtime, _runtime_lock, _runtime_loop
     if not fleet_enabled():
         return None
+    current_loop = asyncio.get_running_loop()
     if _runtime is not None:
+        if _runtime_loop is not current_loop:
+            raise FleetRuntimeError("FleetRuntime accessed from a non-owner event loop")
         return _runtime
     if _runtime_lock is None:
         _runtime_lock = asyncio.Lock()
@@ -515,16 +594,51 @@ async def get_fleet_runtime() -> FleetRuntime | None:
                 capacity=_configured_capacity(),
                 coordinator_id=_configured_coordinator_id(),
             )
+            _runtime_loop = current_loop
         return _runtime
 
 
-async def close_fleet_runtime() -> None:
-    """Cancel watchers and close the asyncpg pool during MCP shutdown/tests."""
-    global _runtime, _runtime_lock
-    if _runtime is not None:
-        await _runtime.close()
+async def _close_fleet_runtime_on_owner_loop() -> None:
+    """Close and clear the singleton from its owning event loop."""
+    global _runtime, _runtime_lock, _runtime_loop
+    runtime = _runtime
+    if runtime is not None:
+        await runtime.close()
+    # Clear ownership only after successful cleanup. Losing the singleton on
+    # an exception/cancellation would make an unfinished executor/state close
+    # impossible to retry and falsely report that no process runtime remains.
     _runtime = None
     _runtime_lock = None
+    _runtime_loop = None
+
+
+async def close_fleet_runtime() -> None:
+    """Close the process singleton on the event loop that created it.
+
+    The public Starlette proxy runs in the process main thread while FastMCP
+    owns a separate loop in its internal server thread. Process shutdown may
+    therefore originate off-loop; marshal cleanup back to the owner rather
+    than awaiting asyncpg/tasks from the wrong loop.
+    """
+    global _runtime, _runtime_lock, _runtime_loop
+    if _runtime is None:
+        _runtime_lock = None
+        _runtime_loop = None
+        return
+
+    owner_loop = _runtime_loop
+    current_loop = asyncio.get_running_loop()
+    if owner_loop is None or owner_loop is current_loop:
+        await _close_fleet_runtime_on_owner_loop()
+        return
+    if not owner_loop.is_running():
+        raise FleetRuntimeError("FleetRuntime owner loop is not running during process shutdown")
+
+    future = asyncio.run_coroutine_threadsafe(
+        _close_fleet_runtime_on_owner_loop(),
+        owner_loop,
+    )
+    await asyncio.wrap_future(future)
 
 
 __all__ = [

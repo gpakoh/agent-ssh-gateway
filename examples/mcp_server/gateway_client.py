@@ -142,6 +142,30 @@ def _transport_error(exc: httpx.RequestError) -> GatewayClientError:
     )
 
 
+def _is_missing_session_cleanup(exc: Exception) -> bool:
+    """Return True only when disconnect says the target SID is already gone.
+
+    Reconnect cleanup is idempotent: a gateway-side idle reaper may delete the
+    stale SID before the scoped client gets a chance to disconnect it. That
+    specific outcome must not become permanent ``_retired`` debt. Transport
+    failures and other server errors remain real cleanup failures.
+    """
+    if not isinstance(exc, GatewayClientError):
+        return False
+    body = exc.body or {}
+    detail = body.get("detail")
+    body_code = detail.get("code") if isinstance(detail, dict) else body.get("code")
+    has_missing_code = body_code == GatewayClient._SESSION_NOT_FOUND
+    has_missing_sentinel = GatewayClient._SESSION_NOT_FOUND in str(exc)
+    if exc.status_code == 404:
+        # A bare 404 can also mean an absent route/proxy mismatch. Only the
+        # gateway's machine-readable missing-session outcome is idempotent.
+        return has_missing_code or has_missing_sentinel
+    if exc.status_code is not None:
+        return False
+    return has_missing_code or has_missing_sentinel
+
+
 @dataclasses.dataclass(frozen=True)
 class CleanupTargets:
     """Frozen set of SIDs that need network disconnect after pool lock release.
@@ -279,7 +303,7 @@ class GatewayClient:
         fork._release_managed = True
         fork._owns_session = False
         fork._ephemeral = True
-        fork._idle_timeout_seconds = 600
+        fork._idle_timeout_seconds = 300
         return fork
 
     def _reconnect_session(self) -> None:
@@ -295,8 +319,9 @@ class GatewayClient:
                     timeout=self._release_http_timeout,
                 )
                 self._retired.discard(retired_sid)
-            except Exception:
-                pass
+            except Exception as exc:
+                if _is_missing_session_cleanup(exc):
+                    self._retired.discard(retired_sid)
         if self._retired:
             raise GatewayClientError(
                 f"reconnect blocked: {len(self._retired)} retired SID(s) still awaiting cleanup"
@@ -354,8 +379,8 @@ class GatewayClient:
                     {"session_id": old_owned_sid},
                     timeout=self._release_http_timeout,
                 )
-            except Exception:
-                if self._release_managed:
+            except Exception as exc:
+                if self._release_managed and not _is_missing_session_cleanup(exc):
                     self._retired.add(old_owned_sid)
 
     def connect(self) -> str:
@@ -1042,12 +1067,11 @@ class GatewayClientSessionPool:
                     # borrow the process-global seed SID. With no idle owned
                     # client available, force this scoped client through the
                     # existing credential-backed auto-connect path instead.
+                    # Keep fork_session()'s finite ephemeral idle timeout: an MCP
+                    # transport that the client abandons without DELETE must not
+                    # retain a gateway SID forever. A later tool call can safely
+                    # auto-reconnect after the gateway reaps that idle SID.
                     scoped.session_id = ""
-                    # Reusable logical SIDs outlive one disposable MCP transport.
-                    # Keep them ephemeral (not persisted), but let Gateway apply
-                    # its global idle policy instead of the transport-orphan 600s
-                    # override installed by fork_session().
-                    scoped._idle_timeout_seconds = None
             self._clients[mcp_session] = (
                 base,
                 scoped,

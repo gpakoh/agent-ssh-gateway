@@ -13,6 +13,7 @@ def _make_mock_record():
     record = MagicMock()
     record.is_connected.return_value = True
     record.touch = MagicMock()
+    record.active_operations = 0
 
     stdin_file = MagicMock()
     stdout_file = MagicMock()
