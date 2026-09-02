@@ -180,6 +180,47 @@ class TestListProjects:
         assert web["description"] == "SSH gateway"
         assert web["tags"] == ["gateway", "ssh"]
 
+    def test_summary_exposes_relative_root_and_parent_without_host_paths(self, tmp_path):
+        registry_root = tmp_path / "python"
+        registry_root.mkdir()
+        (registry_root / "quart-platform" / "engineering-supervisor-service").mkdir(
+            parents=True
+        )
+        yaml_path = tmp_path / "projects.yaml"
+        yaml_path.write_text(
+            yaml.dump(
+                {
+                    "version": 1,
+                    "registry_root": str(registry_root),
+                    "projects": {
+                        "quart-platform": {
+                            "root": "quart-platform",
+                            "type": "platform",
+                            "description": "Umbrella",
+                            "tags": ["quart"],
+                        },
+                        "engineering-supervisor-service": {
+                            "root": "quart-platform/engineering-supervisor-service",
+                            "parent": "quart-platform",
+                            "type": "supervisor-workspace",
+                            "description": "Scoped supervisor audit target",
+                            "tags": ["supervisor"],
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        projects = WorkspaceRegistry.load(yaml_path).list_projects()
+        child = next(
+            p for p in projects if p["project_id"] == "engineering-supervisor-service"
+        )
+
+        assert child["root"] == "quart-platform/engineering-supervisor-service"
+        assert child["parent"] == "quart-platform"
+        assert str(tmp_path) not in repr(projects)
+
     def test_sorted_order(self, registry):
         projects = registry.list_projects()
         ids = [p["project_id"] for p in projects]

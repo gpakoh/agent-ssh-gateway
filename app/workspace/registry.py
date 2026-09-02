@@ -213,16 +213,32 @@ class WorkspaceRegistry:
             allowed_roots = [yaml_registry_root]
         return cls(projects, allowed_roots, granted_scopes)
 
+    def _display_project_root(self, root: Path) -> str:
+        """Return a registry-relative project root without exposing host paths."""
+        resolved = root.resolve()
+        for allowed_root in self._allowed_roots:
+            try:
+                relative = resolved.relative_to(allowed_root.resolve())
+            except ValueError:
+                continue
+            rendered = relative.as_posix()
+            return "." if rendered == "." else rendered
+        return root.name
+
     def list_projects(self) -> list[dict[str, Any]]:
-        """Return summary of all registered projects."""
+        """Return summary of all registered projects with visible root metadata."""
         result: list[dict[str, Any]] = []
         for pid, info in sorted(self._projects.items()):
-            result.append({
+            row = {
                 "project_id": pid,
+                "root": self._display_project_root(info.root),
                 "type": info.type,
                 "description": info.description,
                 "tags": info.tags,
-            })
+            }
+            if info.parent:
+                row["parent"] = info.parent
+            result.append(row)
         return result
 
     def project_info(self, project_id: str) -> dict[str, Any]:
