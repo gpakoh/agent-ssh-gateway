@@ -367,7 +367,25 @@ class GatewayClient:
                     except ValueError:
                         cooldown = GatewayClient._CONNECT_COOLDOWN_SECONDS
                     GatewayClient._connect_retry_not_before = time.monotonic() + cooldown
-                raise GatewayClientError(f"auto-reconnect failed: {response.status_code}")
+                body: dict[str, Any] = {}
+                try:
+                    parsed = response.json()
+                    if isinstance(parsed, dict):
+                        body = parsed
+                except Exception:
+                    pass
+                err_body = body or {
+                    "message": "Gateway returned an error",
+                    "code": "HTTP_ERROR",
+                    "retryable": response.status_code >= 500,
+                    "http_status": response.status_code,
+                }
+                code = err_body.get("code") or "HTTP_ERROR"
+                raise GatewayClientError(
+                    f"auto-reconnect failed: {response.status_code} ({code})",
+                    status_code=response.status_code,
+                    body=err_body,
+                )
         data = response.json()
         self.session_id = data["session_id"]
         if self._release_managed:

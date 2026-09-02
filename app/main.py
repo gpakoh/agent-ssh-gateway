@@ -1204,18 +1204,30 @@ async def ssh_exception_handler(request, exc: SSHManagerError):
     # apart from a generic 404 — pass its code explicitly instead. The message
     # itself is still made specific for the one case where the cause is local
     # and unambiguous (a missing session), without leaking anything upstream.
-    code_map: dict[type[SSHManagerError], str] = {SessionNotFoundError: "SESSION_NOT_FOUND"}
+    # SessionLimitError is deliberately NOT given an explicit code here: its
+    # status 429 already maps through _err -> _auto_code to the established
+    # RATE_LIMIT_EXCEEDED code (in ERROR_CODE_MAP and RETRYABLE_CODES), which
+    # downstream MCP clients translate to RATE_LIMITED. A bespoke
+    # SESSION_LIMIT_EXCEEDED would break that round-trip. We only add the
+    # Retry-After signal and rely on the shared retryable vocabulary.
+    code_map: dict[type[SSHManagerError], str] = {
+        SessionNotFoundError: "SESSION_NOT_FOUND",
+    }
     message_map: dict[type[SSHManagerError], str] = {
         SessionNotFoundError: "SSH session not found or expired; create a new session first",
+        SessionLimitError: "Too many sessions from this origin; retry after a short wait",
     }
     status_code = status_map.get(type(exc), 500)
     logger.warning("SSH manager error %s: %s", type(exc).__name__, exc)
+    is_session_limit = isinstance(exc, SessionLimitError)
     return JSONResponse(
         status_code=status_code,
+        headers={"Retry-After": str(60)} if is_session_limit else None,
         content=_err(
             status_code,
             message_map.get(type(exc), "SSH operation failed"),
             code=code_map.get(type(exc)),
+            retryable=True if is_session_limit else None,
         ),
     )
 

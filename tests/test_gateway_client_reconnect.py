@@ -123,6 +123,57 @@ class TestReconnectSession:
             with pytest.raises(GatewayClientError, match="auto-reconnect failed"):
                 client._reconnect_session()
 
+    def test_raises_structured_error_on_429_with_body_and_code(self):
+        """auto-reconnect 429 must preserve the structured gateway error:
+        status_code=429, the JSON body intact, and the machine code
+        surfaced in the message so callers can branch on it."""
+        GatewayClient._connect_retry_not_before = 0.0
+        client = _client()
+        body = {
+            "message": "Too many active sessions (limit 64)",
+            "code": "RATE_LIMIT_EXCEEDED",
+            "retryable": True,
+            "hint": "Reduce request frequency and retry after the indicated wait time",
+            "http_status": 429,
+        }
+        with patch("gateway_client.httpx.post") as mock_post:
+            mock_post.return_value.status_code = 429
+            mock_post.return_value.json.return_value = body
+            mock_post.return_value.headers = {"Retry-After": "7"}
+            with pytest.raises(GatewayClientError) as exc_info:
+                client._reconnect_session()
+
+        err = exc_info.value
+        assert err.status_code == 429
+        assert err.body == body
+        assert "429" in str(err)
+        assert "RATE_LIMIT_EXCEEDED" in str(err)
+
+    def test_raises_structured_error_on_429_without_retry_after(self):
+        """429 without a Retry-After header still surfaces the structured
+        error (code + body preserved); the governor falls back to its
+        default cooldown internally."""
+        GatewayClient._connect_retry_not_before = 0.0
+        client = _client()
+        body = {
+            "message": "rate limit",
+            "code": "RATE_LIMIT_EXCEEDED",
+            "retryable": True,
+            "hint": "Reduce request frequency",
+            "http_status": 429,
+        }
+        with patch("gateway_client.httpx.post") as mock_post:
+            mock_post.return_value.status_code = 429
+            mock_post.return_value.json.return_value = body
+            mock_post.return_value.headers = {}
+            with pytest.raises(GatewayClientError) as exc_info:
+                client._reconnect_session()
+
+        err = exc_info.value
+        assert err.status_code == 429
+        assert err.body == body
+        assert "RATE_LIMIT_EXCEEDED" in str(err)
+
     def test_custom_port(self):
         client = _client(GATEWAY_SSH_PORT="2222")
         assert client._ssh_port == 2222
