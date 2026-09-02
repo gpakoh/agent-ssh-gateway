@@ -17,6 +17,12 @@ from typing import Any
 
 from tool_results import tool_error, tool_success
 
+from examples.mcp_server.candidate_clone import (
+    CandidateCloneError,
+)
+from examples.mcp_server.candidate_clone import (
+    prepare_candidate_clone as _prepare_candidate_clone,
+)
 from examples.mcp_server.mcp_infra.tool_registry import (
     _validate_project,
     instrumented,
@@ -282,6 +288,45 @@ def supervisor_register_project(
     )
 
 
+def prepare_candidate_clone(
+    project: str,
+    branch: str,
+    base_ref: str | None = None,
+) -> dict[str, Any]:
+    """Create/recover a durable writeable candidate clone and register it."""
+
+    def _fn() -> dict[str, Any]:
+        config_dir = _resolve_registry_config_dir()
+        journal_root = _journal_root_for_project("workspace-registry", config_dir)
+        try:
+            receipt = _prepare_candidate_clone(
+                project,
+                branch,
+                base_ref,
+                config_dir=config_dir,
+                journal_root=journal_root,
+            )
+        except CandidateCloneError as exc:
+            return tool_error(
+                tool="prepare_candidate_clone",
+                code=exc.code,
+                message=exc.message,
+                retryable=exc.retryable,
+                details=exc.details,
+            )
+        cache_reset = _reset_project_registry_caches()
+        result = receipt.as_dict()
+        result["cache_reset"] = cache_reset
+        return result
+
+    return run_tool(
+        tool="prepare_candidate_clone",
+        title="Prepare candidate clone",
+        fn=_fn,
+        success_text="Prepared candidate clone.",
+    )
+
+
 def _integrate_impl(
     project: str,
     relative_path: str,
@@ -440,6 +485,9 @@ def register_all() -> None:
     register_tool("supervisor_register_project")(
         instrumented("supervisor_register_project")(supervisor_register_project)
     )
+    register_tool("prepare_candidate_clone")(
+        instrumented("prepare_candidate_clone")(prepare_candidate_clone)
+    )
 
 
 __all__ = [
@@ -447,4 +495,5 @@ __all__ = [
     "supervisor_integrate_file",
     "supervisor_recover_integrations",
     "supervisor_register_project",
+    "prepare_candidate_clone",
 ]

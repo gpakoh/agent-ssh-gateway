@@ -293,6 +293,7 @@ def test_register_all_registers_exactly_three_tools(monkeypatch):
         "supervisor_integrate_file",
         "supervisor_recover_integrations",
         "supervisor_register_project",
+        "prepare_candidate_clone",
     ]
 
 
