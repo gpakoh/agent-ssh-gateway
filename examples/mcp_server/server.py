@@ -496,6 +496,7 @@ gateway_read_agent_status = agent.gateway_read_agent_status
 gateway_read_agent_report = agent.gateway_read_agent_report
 gateway_read_agent_diff = agent.gateway_read_agent_diff
 gateway_read_agent_log = agent.gateway_read_agent_log
+gateway_inspect_agent_task = agent.gateway_inspect_agent_task
 gateway_list_agent_tasks = agent.gateway_list_agent_tasks
 gateway_archive_agent_task = agent.gateway_archive_agent_task
 gateway_run_opencode = agent.gateway_run_opencode

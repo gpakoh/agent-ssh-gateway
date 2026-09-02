@@ -54,6 +54,41 @@ def test_read_agent_log_redacts_obvious_secrets(monkeypatch):
 
 
 
+
+def test_inspect_agent_task_redacts_status_and_log(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setattr(
+        agent_adapter,
+        "_inspect_agent_task",
+        lambda *args, **kwargs: {
+            "project": "test",
+            "task_id": TASK_ID,
+            "exists": True,
+            "status": "running",
+            "verdict": "running",
+            "terminal": False,
+            "likely_hung": False,
+            "status_text": "Status: running\npassword=hunter2\n",
+            "log": {
+                "stdout": "token=abc123\nworking\n",
+                "stderr": "",
+                "truncated": False,
+                "tail_lines": 20,
+            },
+        },
+    )
+
+    result = agent_adapter.gateway_inspect_agent_task("test", TASK_ID, tail_lines=20)
+
+    assert result["ok"] is True
+    rendered = repr(result["result"])
+    assert "hunter2" not in rendered
+    assert "abc123" not in rendered
+    assert "[REDACTED]" in rendered
+    assert result["meta"]["redacted"] is True
+
+
 def test_read_agent_diff_returns_hash_of_exact_review_text(monkeypatch):
     import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
 

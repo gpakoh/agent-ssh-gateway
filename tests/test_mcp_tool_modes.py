@@ -341,6 +341,7 @@ class TestMcpClientWriteMode:
         assert "write_handoff_plan" in write_tools
         assert "write_agent_task" in write_tools
         assert "archive_agent_task" in write_tools
+        assert "inspect_agent_task" in write_tools
 
     def test_get_mcp_client_write_tools_matches_mode_entry(self):
         assert get_mcp_client_write_tools() == frozenset(TOOL_NAMES_BY_MODE["mcp_client_write"])

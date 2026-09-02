@@ -22,6 +22,9 @@ from agent_tasks import (
     claim_agent_attempt_state as _claim_agent_attempt_state,
 )
 from agent_tasks import (
+    inspect_agent_task as _inspect_agent_task,
+)
+from agent_tasks import (
     list_agent_tasks as _list_agent_tasks,
 )
 from agent_tasks import (
@@ -260,6 +263,48 @@ def gateway_read_agent_log(
         title="Read agent live log",
         fn=_fn,
         success_text="Read agent live log.",
+    )
+
+
+
+def gateway_inspect_agent_task(
+    project: str,
+    task_id: str,
+    tail_lines: int = 120,
+    stale_after_seconds: int = 600,
+) -> dict[str, Any]:
+    """Inspect one agent task: status, job, artifact mtimes, stale verdict, and log tail."""
+
+    def _fn() -> dict[str, Any]:
+        result = _inspect_agent_task(
+            lambda p, c: run_project_command(_server_client(), p, c),
+            project=project,
+            task_id=task_id,
+            tail_lines=tail_lines,
+            stale_after_seconds=stale_after_seconds,
+            job_status=lambda jid: _server_client().job_status(jid),
+        )
+        log = result.get("log")
+        if isinstance(log, dict):
+            stdout = str(log.get("stdout", ""))
+            stderr = str(log.get("stderr", ""))
+            redacted_stdout = str(redact_secrets(stdout))
+            redacted_stderr = str(redact_secrets(stderr))
+            log["stdout"] = redacted_stdout
+            log["stderr"] = redacted_stderr
+            result["redacted"] = redacted_stdout != stdout or redacted_stderr != stderr
+        status_text = result.get("status_text")
+        if isinstance(status_text, str):
+            redacted_status = str(redact_secrets(status_text))
+            result["status_text"] = redacted_status
+            result["redacted"] = bool(result.get("redacted")) or redacted_status != status_text
+        return result
+
+    return run_tool(
+        tool="inspect_agent_task",
+        title="Inspect agent task",
+        fn=_fn,
+        success_text="Inspected agent task.",
     )
 
 
@@ -518,6 +563,7 @@ def register_all() -> None:
     register_tool("read_agent_report")(gateway_read_agent_report)
     register_tool("read_agent_diff")(gateway_read_agent_diff)
     register_tool("read_agent_log")(gateway_read_agent_log)
+    register_tool("inspect_agent_task")(gateway_inspect_agent_task)
     register_tool("list_agent_tasks")(gateway_list_agent_tasks)
     register_tool("archive_agent_task")(gateway_archive_agent_task)
     register_tool("run_opencode")(gateway_run_opencode)

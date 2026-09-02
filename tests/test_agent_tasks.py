@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
 import pytest
@@ -12,6 +13,7 @@ from examples.mcp_server.agent_tasks import (
     build_current_plan,
     build_initial_status,
     build_task_json,
+    inspect_agent_task,
     list_agent_tasks,
     read_agent_log_tail,
     read_agent_task_file,
@@ -459,6 +461,106 @@ class TestReadAgentLogTail:
         assert result["stdout"] == "(not found)"
         assert result["exit_code"] == 0
         assert result["truncated"] is False
+
+
+class TestInspectAgentTask:
+    @staticmethod
+    def _shell_runner(cwd):
+        def run_cmd(_project: str, command: str) -> dict:
+            result = subprocess.run(
+                ["sh", "-c", command],
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            return {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exit_code": result.returncode,
+            }
+
+        return run_cmd
+
+    def test_missing_task_returns_missing_verdict(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id="a12345678901",
+        )
+        assert result["exists"] is False
+        assert result["verdict"] == "missing"
+        assert result["likely_hung"] is False
+
+    def test_running_job_with_old_artifacts_is_likely_hung(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n\nWorking\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text("line 1\nline 2\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"},
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        old = 1_000
+        for child in td.iterdir():
+            os.utime(child, (old, old))
+
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            tail_lines=1,
+            stale_after_seconds=600,
+            now_epoch=2_000,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["exists"] is True
+        assert result["status"] == "running"
+        assert result["job"]["status"] == "running"
+        assert result["last_activity"]["age_seconds"] == 1_000
+        assert result["verdict"] == "likely_hung"
+        assert result["likely_hung"] is True
+        assert result["log"]["stdout"] == "line 2\n"
+
+    def test_terminal_status_is_finished_even_with_old_logs(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: needs-review\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text("done\n", encoding="utf-8")
+        for child in td.iterdir():
+            os.utime(child, (1_000, 1_000))
+
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=10_000,
+        )
+
+        assert result["verdict"] == "finished"
+        assert result["terminal"] is True
+        assert result["likely_hung"] is False
+
+    def test_rejects_invalid_stale_threshold_before_commands(self):
+        calls = []
+        with pytest.raises(ValueError):
+            inspect_agent_task(
+                lambda project, command: calls.append((project, command)),
+                project="my-proj",
+                task_id="a12345678901",
+                stale_after_seconds=59,
+            )
+        assert calls == []
 
 
 class TestListAgentTasks:

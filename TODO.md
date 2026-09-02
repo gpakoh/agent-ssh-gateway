@@ -925,3 +925,5 @@ pre-fix коде; полный pytest зелёный на каждом шаге.
 Итоговое состояние: полный pytest **4486 passed, 1 skipped, 28
 deselected (203s)**; `ruff check` full CI scope — All checks passed;
 mypy — Success.
+
+- Agent hangs need one-call diagnostics: add inspect_agent_task with log tail and stale verdict.

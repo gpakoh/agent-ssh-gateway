@@ -6,6 +6,7 @@ import base64
 import json
 import re
 import shlex
+import time
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any
@@ -25,6 +26,7 @@ BASE_REF_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 AGENT_LOG_FILENAME = "opencode-output.log"
 AGENT_LOG_MAX_BYTES = 64 * 1024
 AGENT_LOG_MAX_TAIL_LINES = 1000
+AGENT_STALE_AFTER_SECONDS = 600
 ATTEMPT_STATE_FILENAME = "attempt-state.json"
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -622,6 +624,211 @@ def read_agent_log_tail(
         "tail_lines": tail_lines,
         "max_bytes": AGENT_LOG_MAX_BYTES,
     }
+
+
+
+_AGENT_TERMINAL_STATUSES = frozenset(
+    {
+        "needs-review",
+        "needs-review-warning",
+        "blocked",
+        "rate-limited",
+        "resource-exhausted",
+        "failed",
+        "completed",
+        "cancelled",
+    }
+)
+_AGENT_ACTIVE_STATUSES = frozenset({"created", "pending", "processing", "running", "cancelling"})
+
+
+def _parse_agent_status(text: str) -> str | None:
+    """Extract the first-line ``Status: ...`` token from agent-status.md."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.lower().startswith("status:"):
+            return None
+        value = stripped.split(":", 1)[1].strip().split()
+        return value[0].lower() if value else None
+    return None
+
+
+def _task_file_stat(run_cmd, *, project: str, task_id: str, filename: str) -> dict[str, Any]:
+    """Return path-safe size/mtime metadata for a fixed task artifact."""
+    validate_task_id(task_id)
+    validate_filename(filename)
+    path = f"{task_dir(project, task_id)}/{filename}"
+    if not _readonly_path_is_safe(run_cmd, project=project, path=path):
+        return {"exists": False}
+    result = run_cmd(project, f"stat -c '%s %Y' -- {shlex.quote(path)}")
+    if result.get("exit_code") != 0:
+        return {"exists": False}
+    parts = str(result.get("stdout", "")).strip().split()
+    if len(parts) < 2:
+        return {"exists": True, "size_bytes": None, "mtime_epoch": None}
+    try:
+        size = int(parts[0])
+        mtime = int(float(parts[1]))
+    except ValueError:
+        return {"exists": True, "size_bytes": None, "mtime_epoch": None}
+    return {"exists": True, "size_bytes": size, "mtime_epoch": mtime}
+
+
+def _safe_attempt_summary(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not record:
+        return None
+    summary: dict[str, Any] = {}
+    for key in ("attempt_id", "job_id", "created_at", "submitted_at", "status"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            summary[key] = value
+    return summary or None
+
+
+def _safe_job_summary(job_status, job_id: str | None) -> dict[str, Any] | None:
+    if not job_id or job_status is None:
+        return None
+    try:
+        snapshot = job_status(job_id)
+    except Exception as exc:
+        return {"job_id": job_id, "known": False, "error": str(exc)[:500]}
+    if not isinstance(snapshot, dict):
+        return {"job_id": job_id, "known": False, "error": "job_status returned non-object"}
+    summary: dict[str, Any] = {"job_id": job_id, "known": True}
+    for key in ("status", "exit_code", "created_at", "started_at", "finished_at"):
+        value = snapshot.get(key)
+        if isinstance(value, (str, int)) or value is None:
+            summary[key] = value
+    return summary
+
+
+def _job_status_token(job: dict[str, Any] | None) -> str | None:
+    value = (job or {}).get("status")
+    return value.lower() if isinstance(value, str) and value else None
+
+
+def _latest_activity(files: dict[str, dict[str, Any]], now_epoch: int) -> dict[str, Any]:
+    latest_name: str | None = None
+    latest_mtime: int | None = None
+    for name, meta in files.items():
+        mtime = meta.get("mtime_epoch")
+        if isinstance(mtime, int) and (latest_mtime is None or mtime > latest_mtime):
+            latest_name = name
+            latest_mtime = mtime
+    if latest_mtime is None:
+        return {"source": None, "mtime_epoch": None, "age_seconds": None}
+    return {
+        "source": latest_name,
+        "mtime_epoch": latest_mtime,
+        "age_seconds": max(0, now_epoch - latest_mtime),
+    }
+
+
+def inspect_agent_task(
+    run_cmd,
+    *,
+    project: str,
+    task_id: str,
+    tail_lines: int = 120,
+    stale_after_seconds: int = AGENT_STALE_AFTER_SECONDS,
+    job_status=None,
+    now_epoch: int | None = None,
+) -> dict[str, Any]:
+    """Inspect one agent task and classify whether it is active, done, or stale.
+
+    This is a read-only operator diagnostic: it aggregates agent-status.md,
+    attempt-state.json, gateway job status, fixed artifact metadata and a
+    bounded log tail into one path-safe result so a caller does not need to
+    infer "hung" from several separate tools.
+    """
+    validate_task_id(task_id)
+    if isinstance(stale_after_seconds, bool) or not isinstance(stale_after_seconds, int):
+        raise TypeError("stale_after_seconds must be an integer")
+    if not 60 <= stale_after_seconds <= 86_400:
+        raise ValueError("stale_after_seconds must be between 60 and 86400")
+    now = int(time.time()) if now_epoch is None else int(now_epoch)
+
+    td = task_dir(project, task_id)
+    if not _readonly_path_is_safe(run_cmd, project=project, path=td):
+        return {
+            "project": project,
+            "task_id": task_id,
+            "exists": False,
+            "verdict": "missing",
+            "terminal": False,
+            "likely_hung": False,
+            "stale_after_seconds": stale_after_seconds,
+        }
+
+    status_result = read_agent_task_file(
+        run_cmd, project=project, task_id=task_id, filename="agent-status.md"
+    )
+    status_text = str(status_result.get("stdout", ""))
+    status_token = None if status_text == "(not found)" else _parse_agent_status(status_text)
+
+    try:
+        attempt_record = read_agent_attempt_state(run_cmd, project=project, task_id=task_id)
+        attempt_error = None
+    except AttemptStateError as exc:
+        attempt_record = None
+        attempt_error = str(exc)[:500]
+    attempt = _safe_attempt_summary(attempt_record)
+    job_id = attempt.get("job_id") if attempt else None
+    job = _safe_job_summary(job_status, job_id if isinstance(job_id, str) else None)
+    job_token = _job_status_token(job)
+
+    files = {
+        "status": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="agent-status.md"),
+        "log": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_LOG_FILENAME),
+        "report": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="agent-report.md"),
+        "diff": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="implementation-diff.patch"),
+        "attempt_state": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=ATTEMPT_STATE_FILENAME),
+    }
+    activity = _latest_activity(files, now)
+    age = activity.get("age_seconds")
+
+    terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
+    active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
+    likely_hung = bool(active and not terminal and isinstance(age, int) and age >= stale_after_seconds)
+    if terminal:
+        verdict = "finished"
+    elif likely_hung:
+        verdict = "likely_hung"
+    elif active:
+        verdict = "running"
+    elif status_token is None and job is None and attempt_error is None:
+        verdict = "unknown"
+    else:
+        verdict = "needs_attention"
+
+    log = read_agent_log_tail(run_cmd, project=project, task_id=task_id, tail_lines=tail_lines)
+
+    result: dict[str, Any] = {
+        "project": project,
+        "task_id": task_id,
+        "exists": True,
+        "status": status_token,
+        "job": job,
+        "attempt": attempt,
+        "attempt_state_error": attempt_error,
+        "files": files,
+        "last_activity": activity,
+        "stale_after_seconds": stale_after_seconds,
+        "terminal": terminal,
+        "likely_hung": likely_hung,
+        "verdict": verdict,
+        "log": {
+            "stdout": log.get("stdout", ""),
+            "stderr": log.get("stderr", ""),
+            "truncated": bool(log.get("truncated", False)),
+            "tail_lines": log.get("tail_lines", tail_lines),
+        },
+    }
+    if status_text != "(not found)":
+        result["status_text"] = status_text
+    return result
 
 
 def write_agent_task(
