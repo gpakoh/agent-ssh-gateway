@@ -52,6 +52,21 @@ _PROTECTED_BRANCHES = frozenset({"main", "master"})
 class CandidateError(RuntimeError):
     """A sanitized task-candidate failure safe to expose through MCP."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "POLICY_DENIED",
+        retryable: bool = False,
+        hint: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+        self.hint = hint
+        self.details = details
+
 
 def implementation_diff_sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
