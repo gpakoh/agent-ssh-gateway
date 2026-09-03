@@ -389,9 +389,9 @@ class DockerClient:
         result = await self._run(argv)
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
         self.last_truncated = total > len(rows)
-        sanitized = [self._sanitize_ps_row(r) for r in rows]
-        self.last_redacted = sanitized != rows
-        return sanitized
+        redacted = [self._redact_ps_row(r) for r in rows]
+        self.last_redacted = redacted != rows
+        return [self._annotate_ps_health(r) for r in redacted]
 
     async def images(
         self,
@@ -562,7 +562,14 @@ class DockerClient:
         Docker health flag at all; expose that distinction instead of making
         callers parse the human ``Status`` string or treating the row as
         unhealthy.
+
+        Rows in older/unit fixtures may intentionally omit ``State``; without
+        it there is not enough evidence to derive runtime health, so preserve
+        the original row shape.
         """
+        if "State" not in row:
+            return row
+
         state = str(row.get("State") or "").strip().lower()
         status = str(row.get("Status") or "")
         docker_health = "not_configured"
@@ -587,14 +594,8 @@ class DockerClient:
         return row
 
     @staticmethod
-    def _sanitize_ps_row(row: dict) -> dict:
-        """Reduce one `docker ps --format json` row to safe fields.
-
-        Drops nothing structural but redacts host paths that ride along in
-        the Labels string (compose config_files/working_dir) and bind-mount
-        sources in the Mounts string — the same topology leak the inspect
-        allowlist kills structurally.
-        """
+    def _redact_ps_row(row: dict) -> dict:
+        """Redact host topology in one `docker ps --format json` row."""
         out = dict(row)
         labels = out.get("Labels")
         if isinstance(labels, str) and labels:
@@ -614,7 +615,19 @@ class DockerClient:
                 REDACTED if chunk.startswith("/") else chunk
                 for chunk in mounts.split(",")
             )
-        return DockerClient._annotate_ps_health(out)
+        return out
+
+    @staticmethod
+    def _sanitize_ps_row(row: dict) -> dict:
+        """Reduce one `docker ps --format json` row to safe fields.
+
+        Drops nothing structural but redacts host paths that ride along in
+        the Labels string (compose config_files/working_dir) and bind-mount
+        sources in the Mounts string — the same topology leak the inspect
+        allowlist kills structurally. When Docker supplies container State,
+        annotate the row with derived health metadata.
+        """
+        return DockerClient._annotate_ps_health(DockerClient._redact_ps_row(row))
 
     def _sanitize_value(self, value: object) -> object:
         """Recursively sanitize a JSON value, redacting secrets."""
@@ -697,9 +710,9 @@ class DockerClient:
         result = await self._run(argv, timeout=60.0)
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
         self.last_truncated = total > len(rows)
-        sanitized = [self._sanitize_ps_row(r) for r in rows]
-        self.last_redacted = sanitized != rows
-        return sanitized
+        redacted = [self._redact_ps_row(r) for r in rows]
+        self.last_redacted = redacted != rows
+        return [self._annotate_ps_health(r) for r in redacted]
 
     async def compose_services(
         self,
