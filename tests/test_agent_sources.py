@@ -260,7 +260,7 @@ class _FakeRegistry:
         return {"project_id": project, "root": str(self._root)}
 
 
-def test_resolve_trusted_remote_tries_named_gitea_remotes_when_origin_is_untrusted(
+def test_resolve_trusted_remote_enumerates_configured_gitea_remotes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from examples.mcp_server.agent_sources import _resolve_trusted_remote
@@ -274,15 +274,15 @@ def test_resolve_trusted_remote_tries_named_gitea_remotes_when_origin_is_untrust
 
     def fake_run(cmd, **kwargs):
         calls.append(list(cmd))
-        if cmd == ["git", "remote", "get-url", "origin"]:
+        if cmd == ["git", "remote"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="origin\nmcp-gitea\n", stderr=""
+            )
+        if cmd == ["git", "remote", "get-url", "--push", "origin"]:
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="/srv/not-a-gitea-remote\n", stderr=""
             )
-        if cmd == ["git", "remote", "get-url", "gitea"]:
-            return subprocess.CompletedProcess(
-                cmd, 2, stdout="", stderr="error: No such remote 'gitea'\n"
-            )
-        if cmd == ["git", "remote", "get-url", "mcp-gitea"]:
+        if cmd == ["git", "remote", "get-url", "--push", "mcp-gitea"]:
             return subprocess.CompletedProcess(
                 cmd,
                 0,
@@ -307,9 +307,9 @@ def test_resolve_trusted_remote_tries_named_gitea_remotes_when_origin_is_untrust
 
     assert clone_url == "https://git.example.test/gpakoh/test-repo.git"
     assert token == "fake-token"
-    assert ["git", "remote", "get-url", "origin"] in calls
-    assert ["git", "remote", "get-url", "gitea"] in calls
-    assert ["git", "remote", "get-url", "mcp-gitea"] in calls
+    assert ["git", "remote"] in calls
+    assert ["git", "remote", "get-url", "--push", "origin"] in calls
+    assert ["git", "remote", "get-url", "--push", "mcp-gitea"] in calls
 
 
 def _make_bare_clone(tmp_path: Path, source_repo: Path) -> tuple[Path, str]:
