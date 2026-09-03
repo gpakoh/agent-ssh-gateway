@@ -1682,6 +1682,119 @@ def _validate_expected_git_head(value: str | None) -> str | None:
     return normalized
 
 
+def _git_unmerged_paths(status: str | None) -> list[str]:
+    """Return unmerged/conflicted paths from porcelain v1 status output."""
+    paths: list[str] = []
+    for line in (status or "").splitlines():
+        if len(line) < 4:
+            continue
+        code = line[:2]
+        if "U" not in code and code not in {"AA", "DD"}:
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        if path.startswith('"') and path.endswith('"'):
+            path = path[1:-1]
+        paths.append(path)
+    return paths
+
+
+def _git_merge_conflict_error(
+    client: GatewayClient,
+    project: str,
+    branch: str,
+    source_branch: str,
+    target_head: str,
+    source_head: str,
+    original_branch: str,
+    original_ref: str,
+    original_head: str,
+    stdout: str,
+    stderr: str,
+) -> dict[str, Any]:
+    """Type a merge conflict, run merge --abort, and restore the caller's branch.
+
+    Fails closed: if abort/restore does not fully succeed the error is upgraded
+    to WORKSPACE_CONTENDED and the contaminated state is not hidden.
+    """
+    status_before_recovery = _local_git_output(_resolve_project(project), ["status", "--porcelain=v1"])
+    conflicted_paths = _git_unmerged_paths(status_before_recovery)
+
+    abort_result = run_project_command(client, project, "git merge --abort")
+    merge_aborted = abort_result.get("exit_code") == 0
+
+    switch_back_result: dict[str, Any] | None = None
+    if original_ref == "DETACHED_HEAD":
+        switch_back_result = run_project_command(
+            client, project, f"git switch --detach {shlex.quote(original_head)}"
+        )
+    elif original_branch and original_branch != branch:
+        switch_back_result = run_project_command(
+            client, project, f"git switch {shlex.quote(original_branch)}"
+        )
+    restored_original_ref = switch_back_result is None or switch_back_result.get("exit_code") == 0
+
+    recovery_state = _project_git_state(_resolve_project(project))
+    final_branch = recovery_state.get("branch") if recovery_state.get("available") else None
+    final_head = recovery_state.get("head") if recovery_state.get("available") else None
+    final_status_entries = (
+        recovery_state.get("status_entries") if recovery_state.get("available") else None
+    )
+    recovered = (
+        merge_aborted
+        and restored_original_ref
+        and recovery_state.get("available")
+        and final_head == original_head
+        and not recovery_state.get("dirty")
+    )
+
+    recovery = {
+        "merge_aborted": merge_aborted,
+        "restored_original_ref": restored_original_ref,
+        "final_branch": final_branch,
+        "final_head": final_head,
+        "final_status_entries": final_status_entries,
+    }
+
+    if recovered:
+        message = "Merge conflict while updating branch; merge aborted and original clean HEAD restored"
+        hint = (
+            f"Resolve the conflict on {branch!r} and retry, or update {source_branch!r} and merge again. "
+            "The working tree was restored to its pre-merge state."
+        )
+    else:
+        message = "Merge conflict while updating branch; automatic recovery did not fully clean the worktree"
+        hint = "Inspect `git status` and the recovery metadata before retrying; the workspace may still be contaminated."
+
+    return tool_error(
+        tool="git_update_branch_by_merge",
+        code="MERGE_CONFLICT" if recovered else "WORKSPACE_CONTENDED",
+        message=message,
+        retryable=True,
+        hint=hint,
+        details={
+            "project": project,
+            "branch": branch,
+            "source_branch": source_branch,
+            "previous_head": target_head,
+            "source_head": source_head,
+            "original_branch": original_branch,
+            "original_ref": original_ref,
+            "original_head": original_head,
+            "conflicted_paths": conflicted_paths,
+            "recovery": recovery,
+        },
+        result={
+            "outcome": "failed",
+            "exit_code": 1,
+            "stdout": stdout,
+            "stderr": stderr,
+        },
+        source="gateway",
+    )
+
+
 def git_update_branch_by_merge(
     client: GatewayClient,
     project: str,
@@ -1694,6 +1807,8 @@ def git_update_branch_by_merge(
     This closes the safe-tool gap between create-only branch tooling and a
     generic shell. It refuses protected targets, dirty worktrees, missing local
     refs, and optional expected-head mismatches before running ``git merge``.
+    A real merge conflict aborts the merge, restores the caller's original
+    branch/HEAD, and returns a typed ``MERGE_CONFLICT`` error.
     """
     branch = _validate_git_name(branch, "branch")
     source_branch = _validate_git_name(source_branch, "source_branch")
@@ -1731,6 +1846,15 @@ def git_update_branch_by_merge(
             },
             source="gateway",
         )
+
+    original_branch = str(state.get("branch", ""))
+    original_head = str(state.get("head", "")).lower()
+    if original_branch == "HEAD":
+        original_ref = "DETACHED_HEAD"
+    else:
+        original_ref = f"refs/heads/{original_branch}"
+        if original_branch:
+            _validate_git_name(original_branch, "current_branch")
 
     target_ref = f"refs/heads/{branch}^{{commit}}"
     target_head = _local_git_output(resolved, ["rev-parse", "--verify", target_ref])
@@ -1788,8 +1912,28 @@ def git_update_branch_by_merge(
         stdout_parts.append(str(last.get("stdout", "")))
         stderr_parts.append(str(last.get("stderr", "")))
         if last.get("exit_code") != 0:
-            last["stdout"] = "".join(stdout_parts)
-            last["stderr"] = "".join(stderr_parts)
+            stdout = "".join(stdout_parts)
+            stderr = "".join(stderr_parts)
+            status_after_failure = _local_git_output(resolved, ["status", "--porcelain=v1"])
+            has_merge_head = (
+                _local_git_output(resolved, ["rev-parse", "--verify", "-q", "MERGE_HEAD"]) is not None
+            )
+            if has_merge_head or _git_unmerged_paths(status_after_failure):
+                return _git_merge_conflict_error(
+                    client,
+                    project,
+                    branch,
+                    source_branch,
+                    target_head,
+                    source_head,
+                    original_branch,
+                    original_ref,
+                    original_head,
+                    stdout,
+                    stderr,
+                )
+            last["stdout"] = stdout
+            last["stderr"] = stderr
             last["branch"] = branch
             last["source_branch"] = source_branch
             last["previous_head"] = target_head

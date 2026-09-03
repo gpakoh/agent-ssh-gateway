@@ -223,3 +223,111 @@ def test_git_update_branch_by_merge_rejects_dirty_worktree(tmp_path):
     assert result["ok"] is False
     assert result["error"]["code"] == "WORKSPACE_CONTENDED"
     assert client.commands == []
+
+
+def _init_conflict_repo(tmp_path, start_branch: str):
+    """Build a repo where feature/update and master modified the same file.
+
+    Returns (repo, feature_head, master_head) with the repo left on
+    ``start_branch`` so the caller's original branch is predictable.
+    """
+    repo = tmp_path / "conflict-repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test User")
+    (repo / "same.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "same.txt")
+    _git(repo, "commit", "-m", "base")
+    _git(repo, "switch", "-c", "feature/update")
+    (repo / "same.txt").write_text("feature\n", encoding="utf-8")
+    _git(repo, "add", "same.txt")
+    _git(repo, "commit", "-m", "feature change")
+    feature_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", "master")
+    (repo / "same.txt").write_text("master\n", encoding="utf-8")
+    _git(repo, "add", "same.txt")
+    _git(repo, "commit", "-m", "master change")
+    master_head = _git(repo, "rev-parse", "HEAD")
+    if start_branch == "feature/update":
+        _git(repo, "switch", start_branch)
+    else:
+        _git(repo, "switch", "-c", start_branch)
+    return repo, feature_head, master_head
+
+
+def test_git_update_branch_by_merge_conflict_recovers_to_target_branch(tmp_path):
+    repo, feature_head, master_head = _init_conflict_repo(tmp_path, "feature/update")
+    client = _LocalGitClient(repo)
+    from unittest.mock import patch
+
+    with patch("mcp_client_tools._resolve_project", return_value=repo):
+        result = git_update_branch_by_merge(
+            client,
+            "proj",
+            branch="feature/update",
+            source_branch="master",
+            expected_head=feature_head,
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MERGE_CONFLICT"
+    assert result["error"]["retryable"] is True
+    details = result["error"]["details"]
+    assert details["branch"] == "feature/update"
+    assert details["source_branch"] == "master"
+    assert details["previous_head"] == feature_head
+    assert details["source_head"] == master_head
+    assert details["original_branch"] == "feature/update"
+    assert details["original_head"] == feature_head
+    assert details["conflicted_paths"] == ["same.txt"]
+    recovery = details["recovery"]
+    assert recovery["merge_aborted"] is True
+    assert recovery["restored_original_ref"] is True
+    assert recovery["final_branch"] == "feature/update"
+    assert recovery["final_head"] == feature_head
+    assert recovery["final_status_entries"] == 0
+
+    assert _git(repo, "branch", "--show-current") == "feature/update"
+    assert _git(repo, "rev-parse", "HEAD") == feature_head
+    assert _git(repo, "status", "--porcelain=v1") == ""
+    assert _git(repo, "rev-parse", "master") == master_head
+
+
+def test_git_update_branch_by_merge_conflict_recovers_to_original_branch(tmp_path):
+    repo, feature_head, master_head = _init_conflict_repo(tmp_path, "staging")
+    client = _LocalGitClient(repo)
+    from unittest.mock import patch
+
+    with patch("mcp_client_tools._resolve_project", return_value=repo):
+        result = git_update_branch_by_merge(
+            client,
+            "proj",
+            branch="feature/update",
+            source_branch="master",
+            expected_head=feature_head,
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MERGE_CONFLICT"
+    assert result["error"]["retryable"] is True
+    details = result["error"]["details"]
+    assert details["branch"] == "feature/update"
+    assert details["source_branch"] == "master"
+    assert details["previous_head"] == feature_head
+    assert details["source_head"] == master_head
+    assert details["original_branch"] == "staging"
+    assert details["original_ref"] == "refs/heads/staging"
+    assert details["original_head"] == master_head
+    assert details["conflicted_paths"] == ["same.txt"]
+    recovery = details["recovery"]
+    assert recovery["merge_aborted"] is True
+    assert recovery["restored_original_ref"] is True
+    assert recovery["final_branch"] == "staging"
+    assert recovery["final_head"] == master_head
+    assert recovery["final_status_entries"] == 0
+
+    assert _git(repo, "branch", "--show-current") == "staging"
+    assert _git(repo, "rev-parse", "HEAD") == master_head
+    assert _git(repo, "status", "--porcelain=v1") == ""
+    assert _git(repo, "rev-parse", "feature/update") == feature_head
