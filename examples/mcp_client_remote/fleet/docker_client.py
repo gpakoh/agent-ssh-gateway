@@ -39,9 +39,8 @@ IMAGE_TAG_RE = re.compile(r"^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$")
 IMAGE_REF_RE = re.compile(r"^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$")
 VOLUME_NAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
 
-EXEC_ARGV_DENYLIST: set[str] = {
-    "env",
-    "printenv",
+EXEC_ARGV_COMMAND_DENYLIST: set[str] = {"env", "printenv"}
+EXEC_ARGV_PATTERN_DENYLIST: set[str] = {
     "/proc/self/environ",
     "/proc/1/environ",
     "/etc/shadow",
@@ -311,13 +310,22 @@ class DockerClient:
     def _validate_exec_argv(self, argv: list[str]) -> None:
         if not isinstance(argv, list) or not argv:
             raise ValueError("command must be a non-empty array of strings")
-        for el in argv:
+        for index, el in enumerate(argv):
             if not isinstance(el, str) or not el:
                 raise ValueError("each argv element must be a non-empty string")
             if not el.isprintable() or not el.isascii():
                 raise ValueError(f"non-printable/non-ASCII argv element: {shlex.quote(el)}")
-            # denylist check (case-sensitive exact or substring)
-            for blocked in EXEC_ARGV_DENYLIST:
+            # Deny the executable name by exact basename, but keep sensitive
+            # path patterns as substring checks across every argv element.
+            # This avoids blocking safe data arguments such as branch names
+            # containing "env" while still refusing real env-dump commands
+            # and known sensitive paths.
+            basename = el.rsplit("/", 1)[-1]
+            if index == 0 and basename in EXEC_ARGV_COMMAND_DENYLIST:
+                raise ValueError(
+                    f"argv element contains blocked pattern: {shlex.quote(basename)}"
+                )
+            for blocked in EXEC_ARGV_PATTERN_DENYLIST:
                 if blocked in el:
                     raise ValueError(
                         f"argv element contains blocked pattern: {shlex.quote(blocked)}"
