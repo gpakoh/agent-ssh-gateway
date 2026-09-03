@@ -111,12 +111,18 @@ def test_retry_agent_task_prepares_new_task(monkeypatch):
         },
     )
 
-    result = agent_adapter.gateway_retry_agent_task("test", "source-task-001", "retry-task-001")
+    result = agent_adapter.gateway_retry_agent_task(
+        "test",
+        "source-task-001",
+        "retry-task-001",
+        continuation_prompt="Продолжай",
+    )
 
     assert result["ok"] is True
     assert result["result"]["kwargs"]["project"] == "test"
     assert result["result"]["kwargs"]["source_task_id"] == "source-task-001"
     assert result["result"]["kwargs"]["retry_task_id"] == "retry-task-001"
+    assert result["result"]["kwargs"]["continuation_prompt"] == "Продолжай"
 
 
 def test_cancel_agent_task_uses_bound_attempt_job(monkeypatch):

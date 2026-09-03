@@ -722,6 +722,119 @@ class TestInspectAgentTask:
         assert result["startup"]["useful_agent_activity_seen"] is True
         assert result["startup"]["dead_time_kind"] is None
 
+
+    def test_running_repetitive_reasoning_without_progress_is_reasoning_loop(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n\nVerification phase.\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text(
+            "\n".join(
+                [
+                    "I should execute the verification gates now.",
+                    "Let me run the tests and checks together.",
+                    "I'll run ruff, mypy, compileall, and diff check.",
+                    "I need to execute the full gate set.",
+                    "Давай запущу все проверки сейчас.",
+                    "I will run the required verification batch.",
+                    "Let me execute the tests and static checks.",
+                    "I should run the checks in one batch.",
+                    "I'll verify with tests, ruff and mypy.",
+                    "I need to run all required checks now.",
+                    "Давай снова проверю тесты и статические проверки.",
+                    "I will run the full verification batch.",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (td / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "running",
+                    "phase": "loop",
+                    "updated_at": "2026-09-03T12:00:00Z",
+                    "updated_epoch": now - 5,
+                    "runner_pid": 123,
+                    "exit_code": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 1, now - 1))
+        for name in ("agent-status.md", "attempt-state.json"):
+            os.utime(td / name, (now - 500, now - 500))
+
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            reasoning_loop_after_seconds=60,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["verdict"] == "reasoning_loop"
+        assert result["likely_hung"] is True
+        assert result["runner_heartbeat_fresh"] is True
+        assert result["reasoning_loop"]["detected"] is True
+        assert result["reasoning_loop"]["continuation_prompt"] == "Продолжай"
+        assert result["recovery"]["action"] == "cancel_and_retry_with_continuation"
+        assert result["recovery"]["retry_agent_task"]["continuation_prompt"] == "Продолжай"
+
+    def test_recent_progress_artifact_suppresses_reasoning_loop(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        loop_text = "\n".join(["I will run the verification checks now."] * 12) + "\n"
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text(loop_text, encoding="utf-8")
+        (td / "consensus.md").write_text("# Agent consensus\n\nChecks are actually running.\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 500, now - 500))
+        os.utime(td / "opencode-output.log", (now - 1, now - 1))
+        os.utime(td / "consensus.md", (now - 10, now - 10))
+
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            reasoning_loop_after_seconds=60,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["verdict"] == "running"
+        assert result["reasoning_loop"]["detected"] is False
+        assert "recovery" not in result
+
+    def test_rejects_invalid_reasoning_loop_threshold_before_commands(self):
+        calls = []
+        with pytest.raises(ValueError):
+            inspect_agent_task(
+                lambda project, command: calls.append((project, command)),
+                project="my-proj",
+                task_id="a12345678901",
+                reasoning_loop_after_seconds=29,
+            )
+        assert calls == []
+
     def test_startup_timeout_status_is_terminal_and_classified(self):
         now = 2_000
 
@@ -1198,6 +1311,30 @@ class TestPrepareAgentTaskRetry:
         assert f"- Source task ID: {source}" in plan
         assert f"- Retry task ID: {retry}" in plan
         assert result["next"]["run_agent"] == {"project": "my-proj", "task_id": retry}
+
+
+    def test_continuation_prompt_is_written_to_retry_plan(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        source = "source-task-010"
+        retry = "retry-task-010"
+        self._write_source_task(tmp_path, source, status="cancelled", job_id="job-cancelled")
+
+        result = prepare_agent_task_retry(
+            self._shell_run_cmd(tmp_path),
+            self._shell_run_script(tmp_path),
+            project="my-proj",
+            source_task_id=source,
+            retry_task_id=retry,
+            job_status=lambda job_id: {"status": "cancelled", "job_id": job_id},
+            continuation_prompt="Продолжай",
+        )
+
+        assert result["exit_code"] == 0
+        assert result["continuation_prompt"] == "Продолжай"
+        plan = (tmp_path / ".ai-bridge" / "tasks" / retry / "current-plan.md").read_text(encoding="utf-8")
+        assert "## Continuation prompt" in plan
+        assert "Продолжай" in plan
+        assert "do not repeat intent-only planning" in plan
 
     def test_refuses_retry_when_source_job_is_active(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
