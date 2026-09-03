@@ -107,14 +107,6 @@ items are explicitly verified as implemented, documented and safe in production.
    or branch creation must fail with a typed ownership diagnostic and recovery
    path such as `GIT_OWNERSHIP_BLOCKED`.
 
-5. ⬜ **Docker exec denylist must avoid substring false positives.**
-   `docker_exec` blocked a cleanup attempt because the ordinary branch name
-   `chore/canonical-gitea-env-20260903` contains the substring `env`. Closure
-   requires denylist checks to classify dangerous argument forms precisely
-   enough to block environment/secret exfiltration attempts without rejecting
-   safe identifiers, branch names, paths or command arguments that merely contain
-   words such as `env` as a substring.
-
 ## 🆕 Runtime/CI findings — 2026-08-19
 
 1. ⬜ **Correlated ~18-minute CI failures across Docker runners/phases.** Prior
