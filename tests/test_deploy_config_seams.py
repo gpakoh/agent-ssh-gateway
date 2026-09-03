@@ -1429,6 +1429,39 @@ class TestMcpServerBuildMetadataCacheBoundary:
         assert "--retry-all-errors" not in text
 
 
+class TestCanonicalGiteaEnvironmentNames:
+    """Gitea MCP tools and managed Git code read GITEA_* directly.
+
+    Production compose should expose the same canonical names instead of
+    translating from legacy MCP_OAUTH_GITEA_* aliases; otherwise a live env can
+    contain a usable token under one name while the deployed tools look under
+    another and report GITEA_TOKEN missing.
+    """
+
+    CANONICAL_WIRES = {
+        "GITEA_TOKEN": "${GITEA_TOKEN:-}",
+        "GITEA_API_BASE": "${GITEA_API_BASE:-}",
+        "GITEA_FORWARDED_HOST": "${GITEA_FORWARDED_HOST:-}",
+        "GITEA_FORWARDED_PROTO": "${GITEA_FORWARDED_PROTO:-}",
+    }
+
+    def test_mcp_oauth_service_uses_canonical_gitea_env_names(self):
+        env = _env_dict(_load_compose()["services"]["mcp-oauth"]["environment"])
+
+        for key, expected in self.CANONICAL_WIRES.items():
+            assert env.get(key) == expected
+
+        assert not any("MCP_OAUTH_GITEA_" in value for value in env.values())
+
+    def test_docker_env_example_documents_canonical_gitea_env_names(self):
+        text = ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+
+        for key in self.CANONICAL_WIRES:
+            assert f"{key}=" in text
+
+        assert "MCP_OAUTH_GITEA_" not in text
+
+
 class TestMasterCapacitySettingsWiredToGateway:
     """Regression: production compose must ship a *non-zero* default master
     capacity lane so reconnects get headroom even before an operator sets the
