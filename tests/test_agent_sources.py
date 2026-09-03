@@ -272,17 +272,20 @@ def test_resolve_trusted_remote_enumerates_configured_gitea_remotes(
 
     calls: list[list[str]] = []
 
+    def git_cmd(*args: str) -> list[str]:
+        return ["git", "-c", f"safe.directory={project_root}", *args]
+
     def fake_run(cmd, **kwargs):
         calls.append(list(cmd))
-        if cmd == ["git", "remote"]:
+        if cmd == git_cmd("remote"):
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="origin\nmcp-gitea\n", stderr=""
             )
-        if cmd == ["git", "remote", "get-url", "--push", "origin"]:
+        if cmd == git_cmd("remote", "get-url", "--push", "origin"):
             return subprocess.CompletedProcess(
                 cmd, 0, stdout="/srv/not-a-gitea-remote\n", stderr=""
             )
-        if cmd == ["git", "remote", "get-url", "--push", "mcp-gitea"]:
+        if cmd == git_cmd("remote", "get-url", "--push", "mcp-gitea"):
             return subprocess.CompletedProcess(
                 cmd,
                 0,
@@ -307,9 +310,9 @@ def test_resolve_trusted_remote_enumerates_configured_gitea_remotes(
 
     assert clone_url == "https://git.example.test/gpakoh/test-repo.git"
     assert token == "fake-token"
-    assert ["git", "remote"] in calls
-    assert ["git", "remote", "get-url", "--push", "origin"] in calls
-    assert ["git", "remote", "get-url", "--push", "mcp-gitea"] in calls
+    assert git_cmd("remote") in calls
+    assert git_cmd("remote", "get-url", "--push", "origin") in calls
+    assert git_cmd("remote", "get-url", "--push", "mcp-gitea") in calls
 
 
 def _make_bare_clone(tmp_path: Path, source_repo: Path) -> tuple[Path, str]:
@@ -586,17 +589,20 @@ def test_resolve_trusted_remote_uses_named_trusted_remote_when_origin_missing(tm
     monkeypatch.setenv("GITEA_TOKEN", "fake-token")
     monkeypatch.setenv("GITEA_API_BASE", "http://gitea:3000/api/v1")
 
+    def git_cmd(*args: str) -> list[str]:
+        return ["git", "-c", f"safe.directory={project_root}", *args]
+
     def fake_run(argv, **kwargs):
-        if argv == ["git", "remote"]:
+        if argv == git_cmd("remote"):
             return subprocess.CompletedProcess(argv, 0, stdout="gitea\nmcp-gitea\n", stderr="")
-        if argv == ["git", "remote", "get-url", "--push", "gitea"]:
+        if argv == git_cmd("remote", "get-url", "--push", "gitea"):
             return subprocess.CompletedProcess(
                 argv,
                 0,
                 stdout="ssh://git@198.51.100.103:2222/gpakoh/agent-ssh-gateway.git\n",
                 stderr="",
             )
-        if argv == ["git", "remote", "get-url", "--push", "mcp-gitea"]:
+        if argv == git_cmd("remote", "get-url", "--push", "mcp-gitea"):
             return subprocess.CompletedProcess(
                 argv,
                 0,
@@ -631,10 +637,13 @@ def test_resolve_trusted_remote_accepts_configured_local_ssh_identity_only(
     monkeypatch.setenv("GITEA_API_BASE", "http://gitea:3000/api/v1")
     monkeypatch.setenv("GITEA_GIT_BASE", "http://198.51.100.103:3000")
 
+    def git_cmd(*args: str) -> list[str]:
+        return ["git", "-c", f"safe.directory={project_root}", *args]
+
     def fake_run(argv, **kwargs):
-        if argv == ["git", "remote"]:
+        if argv == git_cmd("remote"):
             return subprocess.CompletedProcess(argv, 0, stdout="gitea\n", stderr="")
-        if argv == ["git", "remote", "get-url", "--push", "gitea"]:
+        if argv == git_cmd("remote", "get-url", "--push", "gitea"):
             return subprocess.CompletedProcess(
                 argv,
                 0,
@@ -666,17 +675,20 @@ def test_resolve_trusted_remote_rejects_conflicting_trusted_repo_identities(tmp_
     monkeypatch.setenv("GITEA_TOKEN", "fake-token")
     monkeypatch.setenv("GITEA_API_BASE", "http://gitea:3000/api/v1")
 
+    def git_cmd(*args: str) -> list[str]:
+        return ["git", "-c", f"safe.directory={project_root}", *args]
+
     def fake_run(argv, **kwargs):
-        if argv == ["git", "remote"]:
+        if argv == git_cmd("remote"):
             return subprocess.CompletedProcess(argv, 0, stdout="gitea\nmcp-gitea\n", stderr="")
-        if argv == ["git", "remote", "get-url", "--push", "gitea"]:
+        if argv == git_cmd("remote", "get-url", "--push", "gitea"):
             return subprocess.CompletedProcess(
                 argv,
                 0,
                 stdout="ssh://git@gitea/gpakoh/agent-ssh-gateway.git\n",
                 stderr="",
             )
-        if argv == ["git", "remote", "get-url", "--push", "mcp-gitea"]:
+        if argv == git_cmd("remote", "get-url", "--push", "mcp-gitea"):
             return subprocess.CompletedProcess(
                 argv,
                 0,

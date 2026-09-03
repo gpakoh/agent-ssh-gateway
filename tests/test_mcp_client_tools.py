@@ -520,6 +520,38 @@ class TestProjectGitStateGuards:
         assert state["status_sha256"] == mod.hashlib.sha256(b"").hexdigest()
         assert str(tmp_path) not in str(state)
 
+    def test_info_git_state_uses_scoped_safe_directory(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            args = list(argv[3:])
+            if args == ["rev-parse", "--abbrev-ref", "HEAD"]:
+                return subprocess.CompletedProcess(argv, 0, stdout="main\n", stderr="")
+            if args == ["rev-parse", "HEAD"]:
+                return subprocess.CompletedProcess(argv, 0, stdout=f"{'a' * 40}\n", stderr="")
+            if args == ["status", "--porcelain=v1"]:
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+            raise AssertionError(f"unexpected git argv: {argv!r}")
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+        result = mod.info(None, "demo")
+
+        state = result["workspace"]["git_state"]
+        assert state["available"] is True
+        assert state["head"] == "a" * 40
+        assert calls
+        assert all(call[:3] == ["git", "-c", f"safe.directory={tmp_path}"] for call in calls)
+        assert not any("safe.directory=*" in part for call in calls for part in call)
+
     def test_guarded_git_commit_rejects_branch_head_or_status_drift(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
