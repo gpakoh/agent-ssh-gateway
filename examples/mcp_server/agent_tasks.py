@@ -28,6 +28,9 @@ AGENT_HEARTBEAT_FILENAME = "agent-heartbeat.json"
 AGENT_LOG_MAX_BYTES = 64 * 1024
 AGENT_LOG_MAX_TAIL_LINES = 1000
 AGENT_STALE_AFTER_SECONDS = 600
+AGENT_REASONING_LOOP_AFTER_SECONDS = 120
+AGENT_REASONING_LOOP_MIN_LINES = 10
+AGENT_REASONING_LOOP_CONTINUATION_PROMPT = "Продолжай"
 ATTEMPT_STATE_FILENAME = "attempt-state.json"
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -893,6 +896,180 @@ def _agent_startup_diagnostics(
         "dead_time_kind": dead_time_kind,
     }
 
+
+_REASONING_LOOP_FILLER_WORDS = _FUNCTION_WORDS | frozenset(
+    {
+        "again",
+        "all",
+        "batch",
+        "complete",
+        "every",
+        "everything",
+        "full",
+        "once",
+        "same",
+        "single",
+        "together",
+        "now",
+        "сейчас",
+        "давай",
+        "все",
+        "всё",
+        "снова",
+        "опять",
+    }
+)
+_REASONING_LOOP_CATEGORY_TOKENS = {
+    "act": {
+        "add",
+        "apply",
+        "check",
+        "continue",
+        "do",
+        "execute",
+        "fix",
+        "implement",
+        "inspect",
+        "make",
+        "run",
+        "start",
+        "test",
+        "update",
+        "verify",
+        "добавить",
+        "делать",
+        "запустить",
+        "исправить",
+        "проверить",
+        "продолжать",
+    },
+    "verify": {
+        "check",
+        "checks",
+        "compileall",
+        "diff",
+        "gate",
+        "gates",
+        "lint",
+        "mypy",
+        "ruff",
+        "static",
+        "test",
+        "tests",
+        "verify",
+        "проверка",
+        "проверки",
+        "тест",
+        "тесты",
+    },
+    "plan": {
+        "decide",
+        "plan",
+        "review",
+        "think",
+        "validate",
+        "план",
+        "решить",
+        "смотреть",
+    },
+}
+_REASONING_LOOP_SUFFIXES = ("ing", "ed", "es", "s")
+
+
+def _reasoning_loop_stem(token: str) -> str:
+    for suffix in _REASONING_LOOP_SUFFIXES:
+        if len(token) > len(suffix) + 3 and token.endswith(suffix):
+            return token[: -len(suffix)]
+    return token
+
+
+def _reasoning_loop_signature(line: str) -> frozenset[str]:
+    """Return a compact semantic-ish signature for one agent thought line.
+
+    The detector intentionally does not key on one English sentence such as
+    "Let me run ...". It strips filler words, stems small variants and maps
+    broad action/verification/planning vocabulary into coarse buckets so loops
+    are recognized by repeated intent without progress, not by a literal phrase.
+    """
+    clean = _ANSI_ESCAPE_RE.sub("", line).strip().lower()
+    if not clean or re.match(r"^>\s*build\s*[·:-]", clean, re.I):
+        return frozenset()
+    if any(marker.lower() in clean for marker in _USEFUL_AGENT_ACTIVITY_MARKERS):
+        return frozenset()
+    tokens = [_reasoning_loop_stem(t) for t in re.findall(r"[a-zа-яё0-9_+-]{2,}", clean)]
+    important = [t for t in tokens if t not in _REASONING_LOOP_FILLER_WORDS]
+    if not important:
+        return frozenset()
+    buckets = {
+        bucket
+        for bucket, words in _REASONING_LOOP_CATEGORY_TOKENS.items()
+        if any(token in words for token in important)
+    }
+    # Keep a few concrete tokens so unrelated repetitive logs do not collapse
+    # into a single generic "act" bucket.
+    concrete = [t for t in important if all(t not in words for words in _REASONING_LOOP_CATEGORY_TOKENS.values())]
+    return frozenset((*sorted(buckets), *sorted(concrete)[:4]))
+
+
+def _jaccard(left: frozenset[str], right: frozenset[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def _progress_artifact_activity(files: dict[str, dict[str, Any]], now_epoch: int) -> dict[str, Any]:
+    # Log and heartbeat activity alone can hide a thinking loop. attempt-state
+    # is job bookkeeping, not agent progress. Treat status/consensus/report/diff
+    # as semantic progress signals.
+    ignored = {"log", "heartbeat", "attempt_state"}
+    return _latest_activity({name: meta for name, meta in files.items() if name not in ignored}, now_epoch)
+
+
+def _detect_agent_reasoning_loop(
+    *,
+    log_stdout: str,
+    files: dict[str, dict[str, Any]],
+    active: bool,
+    terminal: bool,
+    now_epoch: int,
+    reasoning_loop_after_seconds: int,
+) -> dict[str, Any]:
+    progress = _progress_artifact_activity(files, now_epoch)
+    progress_age = progress.get("age_seconds")
+    raw_lines = [line.strip() for line in log_stdout.splitlines() if line.strip()]
+    signatures = [_reasoning_loop_signature(line) for line in raw_lines[-80:]]
+    signatures = [sig for sig in signatures if sig]
+    recent = signatures[-32:]
+    if len(recent) >= 2:
+        adjacent = [_jaccard(left, right) for left, right in zip(recent, recent[1:], strict=False)]
+        average_adjacent_similarity = round(sum(adjacent) / len(adjacent), 3)
+    else:
+        average_adjacent_similarity = 0.0
+    coverage = 0.0
+    if recent:
+        token_counts: dict[str, int] = {}
+        for sig in recent:
+            for token in sig:
+                token_counts[token] = token_counts.get(token, 0) + 1
+        coverage = round(max(token_counts.values()) / len(recent), 3) if token_counts else 0.0
+    no_recent_progress = isinstance(progress_age, int) and progress_age >= reasoning_loop_after_seconds
+    detected = bool(
+        active
+        and not terminal
+        and no_recent_progress
+        and len(recent) >= AGENT_REASONING_LOOP_MIN_LINES
+        and (coverage >= 0.72 or average_adjacent_similarity >= 0.34)
+    )
+    return {
+        "detected": detected,
+        "progress": progress,
+        "progress_age_seconds": progress_age,
+        "window_lines": len(recent),
+        "dominant_token_coverage": coverage,
+        "average_adjacent_similarity": average_adjacent_similarity,
+        "continuation_prompt": AGENT_REASONING_LOOP_CONTINUATION_PROMPT,
+    }
+
 def inspect_agent_task(
     run_cmd,
     *,
@@ -900,6 +1077,7 @@ def inspect_agent_task(
     task_id: str,
     tail_lines: int = 120,
     stale_after_seconds: int = AGENT_STALE_AFTER_SECONDS,
+    reasoning_loop_after_seconds: int = AGENT_REASONING_LOOP_AFTER_SECONDS,
     job_status=None,
     now_epoch: int | None = None,
 ) -> dict[str, Any]:
@@ -915,6 +1093,10 @@ def inspect_agent_task(
         raise TypeError("stale_after_seconds must be an integer")
     if not 60 <= stale_after_seconds <= 86_400:
         raise ValueError("stale_after_seconds must be between 60 and 86400")
+    if isinstance(reasoning_loop_after_seconds, bool) or not isinstance(reasoning_loop_after_seconds, int):
+        raise TypeError("reasoning_loop_after_seconds must be an integer")
+    if not 30 <= reasoning_loop_after_seconds <= 86_400:
+        raise ValueError("reasoning_loop_after_seconds must be between 30 and 86400")
     now = int(time.time()) if now_epoch is None else int(now_epoch)
 
     td = task_dir(project, task_id)
@@ -952,6 +1134,9 @@ def inspect_agent_task(
         "heartbeat": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_HEARTBEAT_FILENAME),
         "report": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="agent-report.md"),
         "diff": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="implementation-diff.patch"),
+        "consensus": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="consensus.md"),
+        "worker_status": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="worker-status.md"),
+        "required_checks": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="required-checks.log"),
         "attempt_state": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=ATTEMPT_STATE_FILENAME),
     }
     # Heartbeat proves the wrapper process is alive, but it is deliberately
@@ -983,11 +1168,22 @@ def inspect_agent_task(
         files=files,
         active=active,
     )
+    reasoning_loop = _detect_agent_reasoning_loop(
+        log_stdout=str(log.get("stdout", "")),
+        files=files,
+        active=active,
+        terminal=terminal,
+        now_epoch=now,
+        reasoning_loop_after_seconds=reasoning_loop_after_seconds,
+    )
 
     if terminal:
         verdict = "finished"
     elif startup.get("dead_time_kind") == "opencode_startup":
         verdict = "startup_stalled"
+    elif reasoning_loop.get("detected"):
+        verdict = "reasoning_loop"
+        likely_hung = True
     elif likely_hung:
         verdict = "likely_hung"
     elif active:
@@ -1010,7 +1206,9 @@ def inspect_agent_task(
         "runner_heartbeat": heartbeat,
         "runner_heartbeat_fresh": runner_heartbeat_fresh,
         "startup": startup,
+        "reasoning_loop": reasoning_loop,
         "stale_after_seconds": stale_after_seconds,
+        "reasoning_loop_after_seconds": reasoning_loop_after_seconds,
         "terminal": terminal,
         "likely_hung": likely_hung,
         "verdict": verdict,
@@ -1021,6 +1219,18 @@ def inspect_agent_task(
             "tail_lines": log.get("tail_lines", tail_lines),
         },
     }
+    if reasoning_loop.get("detected"):
+        result["recovery"] = {
+            "action": "cancel_and_retry_with_continuation",
+            "cancel_agent_task": {"project": project, "task_id": task_id},
+            "retry_agent_task": {
+                "project": project,
+                "source_task_id": task_id,
+                "retry_task_id": "<new-task-id>",
+                "continuation_prompt": AGENT_REASONING_LOOP_CONTINUATION_PROMPT,
+            },
+            "run_agent": {"project": project, "task_id": "<new-task-id>"},
+        }
     if status_text != "(not found)":
         result["status_text"] = status_text
     return result
@@ -1181,13 +1391,40 @@ def cancel_agent_task(
     }
 
 
-def _retry_plan_text(plan: str, *, source_task_id: str, retry_task_id: str) -> str:
+def _validate_continuation_prompt(value: str | None) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise TypeError("continuation_prompt must be a string or None")
+    prompt = value.strip()
+    if not prompt:
+        return None
+    if len(prompt) > 400:
+        raise ValueError("continuation_prompt must be at most 400 characters")
+    return prompt
+
+
+def _retry_plan_text(
+    plan: str,
+    *,
+    source_task_id: str,
+    retry_task_id: str,
+    continuation_prompt: str | None = None,
+) -> str:
+    prompt = _validate_continuation_prompt(continuation_prompt)
     prefix = (
         f"# Retry of {source_task_id}\n\n"
         f"- Source task ID: {source_task_id}\n"
         f"- Retry task ID: {retry_task_id}\n"
         f"- Prepared: {datetime.now(UTC).isoformat()}\n\n"
     )
+    if prompt:
+        prefix += (
+            "## Continuation prompt\n\n"
+            f"{prompt}\n\n"
+            "The previous attempt may have been stopped for a reasoning loop; continue from durable task files, "
+            "do not repeat intent-only planning, and make the next observable progress step.\n\n"
+        )
     return prefix + (plan if plan.endswith("\n") else plan + "\n")
 
 
@@ -1223,6 +1460,7 @@ def prepare_agent_task_retry(
     source_task_id: str,
     retry_task_id: str,
     job_status=None,
+    continuation_prompt: str | None = None,
 ) -> dict[str, Any]:
     """Prepare a new immutable task from a terminal/cancelled source task.
 
@@ -1232,6 +1470,7 @@ def prepare_agent_task_retry(
     """
     validate_task_id(source_task_id)
     validate_task_id(retry_task_id)
+    continuation_prompt = _validate_continuation_prompt(continuation_prompt)
     if source_task_id == retry_task_id:
         raise ValueError("retry_task_id must be different from source_task_id")
 
@@ -1306,6 +1545,7 @@ def prepare_agent_task_retry(
             plan,
             source_task_id=source_task_id,
             retry_task_id=retry_task_id,
+            continuation_prompt=continuation_prompt,
         ),
         f"{td}/consensus.md": consensus,
         f"{td}/agent-status.md": status,
@@ -1336,6 +1576,7 @@ def prepare_agent_task_retry(
                 "verdict": inspection.get("verdict"),
                 "job": inspection.get("job"),
             },
+            "continuation_prompt": continuation_prompt,
             "next": {
                 "run_agent": {"project": project, "task_id": retry_task_id},
                 "run_opencode": {"project": project, "task_id": retry_task_id},

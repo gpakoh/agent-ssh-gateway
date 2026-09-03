@@ -280,6 +280,7 @@ def gateway_inspect_agent_task(
     task_id: str,
     tail_lines: int = 120,
     stale_after_seconds: int = 600,
+    reasoning_loop_after_seconds: int = 120,
 ) -> dict[str, Any]:
     """Inspect one agent task: status, job, artifact mtimes, stale verdict, and log tail."""
 
@@ -290,6 +291,7 @@ def gateway_inspect_agent_task(
             task_id=task_id,
             tail_lines=tail_lines,
             stale_after_seconds=stale_after_seconds,
+            reasoning_loop_after_seconds=reasoning_loop_after_seconds,
             job_status=lambda jid: _server_client().job_status(jid),
         )
         log = result.get("log")
@@ -350,6 +352,7 @@ def gateway_retry_agent_task(
     project: str,
     source_task_id: str,
     retry_task_id: str,
+    continuation_prompt: str | None = None,
 ) -> dict[str, Any]:
     """Prepare a fresh retry task from a terminal/cancelled source task."""
 
@@ -363,6 +366,7 @@ def gateway_retry_agent_task(
             source_task_id=source_task_id,
             retry_task_id=retry_task_id,
             job_status=lambda job_id: _server_client().job_status(job_id),
+            continuation_prompt=continuation_prompt,
         ),
         success_text="Prepared agent task retry.",
     )
