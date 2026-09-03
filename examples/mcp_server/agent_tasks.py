@@ -32,6 +32,7 @@ AGENT_REASONING_LOOP_AFTER_SECONDS = 120
 AGENT_REASONING_LOOP_MIN_LINES = 10
 AGENT_REASONING_LOOP_CONTINUATION_PROMPT = "Продолжай"
 AGENT_TRAILING_COLON_AFTER_SECONDS = 120
+AGENT_EMITTED_INVOKE_AFTER_SECONDS = 120
 ATTEMPT_STATE_FILENAME = "attempt-state.json"
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -1125,6 +1126,76 @@ def _detect_agent_trailing_colon_stall(
     }
 
 
+_INVOKE_OPEN_RE = re.compile(r"<\s*invoke\b", re.IGNORECASE)
+_INVOKE_TAIL_TOKEN_RE = re.compile(r"^<\s*/?\s*(invoke|parameter)(\s|>)", re.IGNORECASE)
+
+
+def _log_ends_with_emitted_invoke(log_stdout: str) -> str | None:
+    """Return the opening ``<invoke ...>`` line if the log tail stalls at an
+    emitted XML-like tool-call block.
+
+    An agent that prints a tool invocation verbatim (``<invoke name="bash">
+    <parameter name="command">...`` and typically ``</invoke>``) as plain text
+    and then never makes progress leaves that block as its final meaningful
+    output. We look for the structural shape — an ``<invoke`` opener somewhere
+    in the tail and a final line that is invoke/parameter syntax — not any
+    specific command text or path, so any such emitted call is caught whether
+    the ``</invoke>`` closing tag is present or not.
+
+    Returns the opening ``<invoke ...>`` line as a diagnostic excerpt, or
+    ``None`` when the log does not stall at an emitted block.
+    """
+    lines = [_ANSI_ESCAPE_RE.sub("", line).strip() for line in log_stdout.splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        return None
+    invoke_line = None
+    for line in lines:
+        if _INVOKE_OPEN_RE.search(line):
+            invoke_line = line
+    if invoke_line is None:
+        return None
+    if not _INVOKE_TAIL_TOKEN_RE.match(lines[-1]):
+        return None
+    return invoke_line
+
+
+def _detect_agent_emitted_invoke_stall(
+    *,
+    log_stdout: str,
+    files: dict[str, dict[str, Any]],
+    active: bool,
+    terminal: bool,
+    now_epoch: int,
+    emitted_invoke_after_seconds: int,
+) -> dict[str, Any]:
+    """Detect an agent stalled after emitting a tool-call block as plain text.
+
+    An active, non-terminal agent whose log tail ends at an emitted XML-like
+    ``<invoke>`` block and whose progress artifacts have not advanced for a
+    threshold has likely printed a tool call instead of executing it. The
+    ``<invoke`` block itself must not count as progress; only fresh semantic
+    artifacts (status/consensus/report/diff/required-checks) may silence it.
+    """
+    progress = _progress_artifact_activity(files, now_epoch)
+    progress_age = progress.get("age_seconds")
+    invoke_line = _log_ends_with_emitted_invoke(log_stdout)
+    no_recent_progress = isinstance(progress_age, int) and progress_age >= emitted_invoke_after_seconds
+    detected = bool(
+        active
+        and not terminal
+        and invoke_line is not None
+        and no_recent_progress
+    )
+    return {
+        "detected": detected,
+        "last_invoke_line": invoke_line,
+        "progress": progress,
+        "progress_age_seconds": progress_age,
+        "continuation_prompt": AGENT_REASONING_LOOP_CONTINUATION_PROMPT,
+    }
+
+
 def inspect_agent_task(
     run_cmd,
     *,
@@ -1134,6 +1205,7 @@ def inspect_agent_task(
     stale_after_seconds: int = AGENT_STALE_AFTER_SECONDS,
     reasoning_loop_after_seconds: int = AGENT_REASONING_LOOP_AFTER_SECONDS,
     trailing_colon_after_seconds: int = AGENT_TRAILING_COLON_AFTER_SECONDS,
+    emitted_invoke_after_seconds: int = AGENT_EMITTED_INVOKE_AFTER_SECONDS,
     job_status=None,
     now_epoch: int | None = None,
 ) -> dict[str, Any]:
@@ -1157,6 +1229,10 @@ def inspect_agent_task(
         raise TypeError("trailing_colon_after_seconds must be an integer")
     if not 30 <= trailing_colon_after_seconds <= 86_400:
         raise ValueError("trailing_colon_after_seconds must be between 30 and 86400")
+    if isinstance(emitted_invoke_after_seconds, bool) or not isinstance(emitted_invoke_after_seconds, int):
+        raise TypeError("emitted_invoke_after_seconds must be an integer")
+    if not 30 <= emitted_invoke_after_seconds <= 86_400:
+        raise ValueError("emitted_invoke_after_seconds must be between 30 and 86400")
     now = int(time.time()) if now_epoch is None else int(now_epoch)
 
     td = task_dir(project, task_id)
@@ -1244,6 +1320,14 @@ def inspect_agent_task(
         now_epoch=now,
         trailing_colon_after_seconds=trailing_colon_after_seconds,
     )
+    emitted_invoke_stall = _detect_agent_emitted_invoke_stall(
+        log_stdout=str(log.get("stdout", "")),
+        files=files,
+        active=active,
+        terminal=terminal,
+        now_epoch=now,
+        emitted_invoke_after_seconds=emitted_invoke_after_seconds,
+    )
 
     if terminal:
         verdict = "finished"
@@ -1254,6 +1338,9 @@ def inspect_agent_task(
         likely_hung = True
     elif trailing_colon_stall.get("detected"):
         verdict = "trailing_colon_stall"
+        likely_hung = True
+    elif emitted_invoke_stall.get("detected"):
+        verdict = "emitted_invoke_stall"
         likely_hung = True
     elif likely_hung:
         verdict = "likely_hung"
@@ -1279,9 +1366,11 @@ def inspect_agent_task(
         "startup": startup,
         "reasoning_loop": reasoning_loop,
         "trailing_colon_stall": trailing_colon_stall,
+        "emitted_invoke_stall": emitted_invoke_stall,
         "stale_after_seconds": stale_after_seconds,
         "reasoning_loop_after_seconds": reasoning_loop_after_seconds,
         "trailing_colon_after_seconds": trailing_colon_after_seconds,
+        "emitted_invoke_after_seconds": emitted_invoke_after_seconds,
         "terminal": terminal,
         "likely_hung": likely_hung,
         "verdict": verdict,
@@ -1313,6 +1402,18 @@ def inspect_agent_task(
                 "source_task_id": task_id,
                 "retry_task_id": "<new-task-id>",
                 "continuation_prompt": trailing_colon_stall["continuation_prompt"],
+            },
+            "run_agent": {"project": project, "task_id": "<new-task-id>"},
+        }
+    elif emitted_invoke_stall.get("detected"):
+        result["recovery"] = {
+            "action": "cancel_and_retry_with_continuation",
+            "cancel_agent_task": {"project": project, "task_id": task_id},
+            "retry_agent_task": {
+                "project": project,
+                "source_task_id": task_id,
+                "retry_task_id": "<new-task-id>",
+                "continuation_prompt": emitted_invoke_stall["continuation_prompt"],
             },
             "run_agent": {"project": project, "task_id": "<new-task-id>"},
         }
