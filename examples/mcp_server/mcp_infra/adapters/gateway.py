@@ -81,7 +81,23 @@ from examples.mcp_server.mcp_infra.tool_registry import (
 _classify_gateway_error = gateway_errors._classify_gateway_error
 _gateway_error_message = gateway_errors._gateway_error_message
 _gateway_error_hint = gateway_errors._gateway_error_hint
+_gateway_error_details = gateway_errors._gateway_error_details
 
+
+
+def _gateway_client_tool_error(tool: str, exc: GatewayClientError) -> dict[str, Any]:
+    """Return a clean MCP tool_error for a structured gateway failure."""
+    code, retryable = _classify_gateway_error(exc)
+    details = _gateway_error_details(exc)
+    return tool_error(
+        tool=tool,
+        code=code,
+        message=_gateway_error_message(exc),
+        retryable=retryable,
+        hint=_gateway_error_hint(exc, code),
+        details=details,
+        source="gateway",
+    )
 
 def _server_client():
     return server_attr("get_gateway_client")()
@@ -549,11 +565,7 @@ def gateway_execute_argv(
             session_id=session_id,
         )
     except GatewayClientError as e:
-        return tool_error(
-            tool="execute_argv",
-            code="TOOL_EXECUTION_FAILED",
-            message=str(e),
-        )
+        return _gateway_client_tool_error("execute_argv", e)
     return tool_success(
         tool="execute_argv",
         result=build_command_result(
@@ -599,11 +611,7 @@ def gateway_apply_patch(
             session_id=session_id,
         )
     except GatewayClientError as e:
-        return tool_error(
-            tool="apply_patch",
-            code="TOOL_EXECUTION_FAILED",
-            message=str(e),
-        )
+        return _gateway_client_tool_error("apply_patch", e)
     return tool_success(
         tool="apply_patch",
         result={
@@ -679,14 +687,7 @@ def gateway_job_wait(job_id: str, timeout_sec: int | None = None) -> dict[str, A
     try:
         result = _server_client().wait_job(job_id, timeout_sec=timeout_sec)
     except GatewayClientError as exc:
-        code, retryable = _classify_gateway_error(exc)
-        return tool_error(
-            tool="job_wait",
-            code=code,
-            message=str(exc),
-            retryable=retryable,
-            source="gateway",
-        )
+        return _gateway_client_tool_error("job_wait", exc)
 
     if result.get("wait_timed_out"):
         return tool_error(
@@ -751,6 +752,24 @@ async def gateway_job_result_protocol(
         title="Job result",
         fn=_fn,
         success_text=f"Job {job_id} result retrieved.",
+    )
+
+
+async def gateway_job_cancel_protocol(job_id: str) -> dict[str, Any]:
+    """Request cancellation of a gateway background job."""
+
+    async def _fn() -> dict[str, Any]:
+        try:
+            data = await asyncio.to_thread(_server_client().cancel_job, job_id)
+        except GatewayClientError as exc:
+            return _gateway_client_tool_error("job_cancel", exc)
+        return await _reconcile_fleet_result(job_id, data)
+
+    return await run_tool_async(
+        tool="job_cancel",
+        title="Cancel job",
+        fn=_fn,
+        success_text=f"Job {job_id} cancellation requested.",
     )
 
 
@@ -879,12 +898,25 @@ def gateway_git_add(project: str, paths: list[str]) -> dict[str, Any]:
     )
 
 
-def gateway_git_commit(project: str, message: str) -> dict[str, Any]:
-    """Commit staged changes with a message (git commit -m)."""
+def gateway_git_commit(
+    project: str,
+    message: str,
+    expected_branch: str | None = None,
+    expected_head: str | None = None,
+    expected_status_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Commit staged changes with optional branch/HEAD/status lease guards."""
     return run_tool(
         tool="git_commit",
         title="git commit",
-        fn=lambda: git_commit(_server_client(), project, message),
+        fn=lambda: git_commit(
+            _server_client(),
+            project,
+            message,
+            expected_branch=expected_branch,
+            expected_head=expected_head,
+            expected_status_sha256=expected_status_sha256,
+        ),
         success_text="Committed changes.",
     )
 
@@ -1206,6 +1238,7 @@ def register_all() -> None:
     register_tool("apply_patch")(instrumented("apply_patch")(gateway_apply_patch))
     register_tool("job_status")(gateway_job_status_protocol)
     register_tool("job_result")(gateway_job_result_protocol)
+    register_tool("job_cancel")(instrumented("job_cancel")(gateway_job_cancel_protocol))
     register_tool("wait_job")(gateway_wait_job_protocol)
     register_tool("job_wait")(instrumented("job_wait")(gateway_job_wait_protocol))
     register_tool("repo_status")(gateway_repo_status)

@@ -69,6 +69,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "execute_argv": ["mcp:execute"],
     "job_status": ["mcp:read"],
     "job_result": ["mcp:read"],
+    "job_cancel": ["mcp:agent-run"],
     "wait_job": ["mcp:read"],
     "job_wait": ["mcp:read"],
     "repo_status": ["mcp:read"],
@@ -114,13 +115,17 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "read_agent_report": ["mcp:handoff"],
     "read_agent_diff": ["mcp:handoff"],
     "read_agent_log": ["mcp:handoff"],
+    "inspect_agent_task": ["mcp:handoff"],
     "list_agent_tasks": ["mcp:handoff"],
+    "cancel_agent_task": ["mcp:agent-run", "mcp:handoff"],
+    "retry_agent_task": ["mcp:agent-run", "mcp:handoff"],
     "archive_agent_task": ["mcp:handoff"],
     # Supervisor-only integration primitives. These are exposed only in
     # mcp_client_write mode and require the admin capability.
     "supervisor_integrate_file": ["mcp:admin"],
     "supervisor_recover_integrations": ["mcp:admin"],
     "supervisor_register_project": ["mcp:admin"],
+    "prepare_candidate_clone": ["mcp:repo", "mcp:admin"],
     # agent-run — mcp:agent-run
     "run_opencode": ["mcp:agent-run"],
     "run_agent": ["mcp:agent-run"],

@@ -6,6 +6,7 @@ import base64
 import json
 import re
 import shlex
+import time
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any
@@ -23,8 +24,10 @@ FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 BASE_REF_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 AGENT_LOG_FILENAME = "opencode-output.log"
+AGENT_HEARTBEAT_FILENAME = "agent-heartbeat.json"
 AGENT_LOG_MAX_BYTES = 64 * 1024
 AGENT_LOG_MAX_TAIL_LINES = 1000
+AGENT_STALE_AFTER_SECONDS = 600
 ATTEMPT_STATE_FILENAME = "attempt-state.json"
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -624,6 +627,332 @@ def read_agent_log_tail(
     }
 
 
+
+_AGENT_TERMINAL_STATUSES = frozenset(
+    {
+        "needs-review",
+        "needs-review-warning",
+        "blocked",
+        "rate-limited",
+        "resource-exhausted",
+        "startup-timeout",
+        "run-timeout",
+        "evidence-failed",
+        "scope-failed",
+        "checks-failed",
+        "parent-guard-failed",
+        "supervisor-failed",
+        "failed",
+        "completed",
+        "cancelled",
+    }
+)
+_AGENT_ACTIVE_STATUSES = frozenset({"created", "pending", "processing", "running", "cancelling"})
+_STARTUP_STALLED_RE = re.compile(r"OpenCode startup stalled; rotating proxy \(attempt (\d+)/(\d+)\)")
+_USEFUL_AGENT_ACTIVITY_MARKERS = (
+    "← Write ",
+    "Wrote file successfully",
+    "$ cd ",
+    "# Todos",
+    "Implementation",
+    "agent-report.md",
+    "implementation-diff.patch",
+)
+
+
+def _parse_agent_status(text: str) -> str | None:
+    """Extract the first-line ``Status: ...`` token from agent-status.md."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.lower().startswith("status:"):
+            return None
+        value = stripped.split(":", 1)[1].strip().split()
+        return value[0].lower() if value else None
+    return None
+
+
+def _task_file_stat(run_cmd, *, project: str, task_id: str, filename: str) -> dict[str, Any]:
+    """Return path-safe size/mtime metadata for a fixed task artifact."""
+    validate_task_id(task_id)
+    validate_filename(filename)
+    path = f"{task_dir(project, task_id)}/{filename}"
+    if not _readonly_path_is_safe(run_cmd, project=project, path=path):
+        return {"exists": False}
+    result = run_cmd(project, f"stat -c '%s %Y' -- {shlex.quote(path)}")
+    if result.get("exit_code") != 0:
+        return {"exists": False}
+    parts = str(result.get("stdout", "")).strip().split()
+    if len(parts) < 2:
+        return {"exists": True, "size_bytes": None, "mtime_epoch": None}
+    try:
+        size = int(parts[0])
+        mtime = int(float(parts[1]))
+    except ValueError:
+        return {"exists": True, "size_bytes": None, "mtime_epoch": None}
+    return {"exists": True, "size_bytes": size, "mtime_epoch": mtime}
+
+
+
+def _read_agent_heartbeat(
+    run_cmd,
+    *,
+    project: str,
+    task_id: str,
+    now_epoch: int,
+) -> dict[str, Any]:
+    """Read and sanitize the runner heartbeat record, if present."""
+    result = read_agent_task_file(
+        run_cmd, project=project, task_id=task_id, filename=AGENT_HEARTBEAT_FILENAME
+    )
+    text = str(result.get("stdout", ""))
+    if text == "(not found)":
+        return {"exists": False}
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return {"exists": True, "valid": False, "error": "heartbeat is not valid JSON"}
+    if not isinstance(data, dict):
+        return {"exists": True, "valid": False, "error": "heartbeat is not a JSON object"}
+
+    summary: dict[str, Any] = {"exists": True, "valid": True}
+    for key in ("state", "phase", "updated_at"):
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            summary[key] = value[:120]
+    for key in ("updated_epoch", "runner_pid", "exit_code"):
+        value = data.get(key)
+        if isinstance(value, int) or value is None:
+            summary[key] = value
+    updated_epoch = summary.get("updated_epoch")
+    if isinstance(updated_epoch, int):
+        summary["age_seconds"] = max(0, now_epoch - updated_epoch)
+    else:
+        summary["age_seconds"] = None
+    return summary
+
+
+def _safe_attempt_summary(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not record:
+        return None
+    summary: dict[str, Any] = {}
+    for key in ("attempt_id", "job_id", "created_at", "submitted_at", "status"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            summary[key] = value
+    return summary or None
+
+
+def _safe_job_summary(job_status, job_id: str | None) -> dict[str, Any] | None:
+    if not job_id or job_status is None:
+        return None
+    try:
+        snapshot = job_status(job_id)
+    except Exception as exc:
+        return {"job_id": job_id, "known": False, "error": str(exc)[:500]}
+    if not isinstance(snapshot, dict):
+        return {"job_id": job_id, "known": False, "error": "job_status returned non-object"}
+    summary: dict[str, Any] = {"job_id": job_id, "known": True}
+    for key in ("status", "exit_code", "created_at", "started_at", "finished_at"):
+        value = snapshot.get(key)
+        if isinstance(value, (str, int)) or value is None:
+            summary[key] = value
+    return summary
+
+
+def _job_status_token(job: dict[str, Any] | None) -> str | None:
+    value = (job or {}).get("status")
+    return value.lower() if isinstance(value, str) and value else None
+
+
+def _latest_activity(files: dict[str, dict[str, Any]], now_epoch: int) -> dict[str, Any]:
+    latest_name: str | None = None
+    latest_mtime: int | None = None
+    for name, meta in files.items():
+        mtime = meta.get("mtime_epoch")
+        if isinstance(mtime, int) and (latest_mtime is None or mtime > latest_mtime):
+            latest_name = name
+            latest_mtime = mtime
+    if latest_mtime is None:
+        return {"source": None, "mtime_epoch": None, "age_seconds": None}
+    return {
+        "source": latest_name,
+        "mtime_epoch": latest_mtime,
+        "age_seconds": max(0, now_epoch - latest_mtime),
+    }
+
+
+
+def _agent_startup_diagnostics(
+    *,
+    status: str | None,
+    status_text: str,
+    log_stdout: str,
+    files: dict[str, dict[str, Any]],
+    active: bool,
+) -> dict[str, Any]:
+    """Classify OpenCode startup/proxy dead time separately from useful work."""
+    combined = f"{status_text}\n{log_stdout}"
+    matches = list(_STARTUP_STALLED_RE.finditer(combined))
+    attempts = [int(match.group(1)) for match in matches]
+    max_attempts = [int(match.group(2)) for match in matches]
+    opencode_startup_stalled = bool(matches or "OpenCode startup stalled" in combined)
+    startup_timeout = status == "startup-timeout" or "opencode-startup-timeout" in combined
+    useful_agent_activity_seen = bool(
+        (files.get("report") or {}).get("exists")
+        or (files.get("diff") or {}).get("exists")
+        or any(marker in combined for marker in _USEFUL_AGENT_ACTIVITY_MARKERS)
+    )
+    dead_time_kind = None
+    if active and opencode_startup_stalled and not useful_agent_activity_seen:
+        dead_time_kind = "opencode_startup"
+    return {
+        "startup_timeout": startup_timeout,
+        "opencode_startup_stalled": opencode_startup_stalled,
+        "proxy_rotation": {
+            "observed": bool(matches),
+            "attempt": max(attempts) if attempts else None,
+            "max_attempts": max(max_attempts) if max_attempts else None,
+            "count": len(matches),
+        },
+        "useful_agent_activity_seen": useful_agent_activity_seen,
+        "dead_time_kind": dead_time_kind,
+    }
+
+def inspect_agent_task(
+    run_cmd,
+    *,
+    project: str,
+    task_id: str,
+    tail_lines: int = 120,
+    stale_after_seconds: int = AGENT_STALE_AFTER_SECONDS,
+    job_status=None,
+    now_epoch: int | None = None,
+) -> dict[str, Any]:
+    """Inspect one agent task and classify whether it is active, done, or stale.
+
+    This is a read-only operator diagnostic: it aggregates agent-status.md,
+    attempt-state.json, gateway job status, fixed artifact metadata and a
+    bounded log tail into one path-safe result so a caller does not need to
+    infer "hung" from several separate tools.
+    """
+    validate_task_id(task_id)
+    if isinstance(stale_after_seconds, bool) or not isinstance(stale_after_seconds, int):
+        raise TypeError("stale_after_seconds must be an integer")
+    if not 60 <= stale_after_seconds <= 86_400:
+        raise ValueError("stale_after_seconds must be between 60 and 86400")
+    now = int(time.time()) if now_epoch is None else int(now_epoch)
+
+    td = task_dir(project, task_id)
+    if not _readonly_path_is_safe(run_cmd, project=project, path=td):
+        return {
+            "project": project,
+            "task_id": task_id,
+            "exists": False,
+            "verdict": "missing",
+            "terminal": False,
+            "likely_hung": False,
+            "stale_after_seconds": stale_after_seconds,
+        }
+
+    status_result = read_agent_task_file(
+        run_cmd, project=project, task_id=task_id, filename="agent-status.md"
+    )
+    status_text = str(status_result.get("stdout", ""))
+    status_token = None if status_text == "(not found)" else _parse_agent_status(status_text)
+
+    try:
+        attempt_record = read_agent_attempt_state(run_cmd, project=project, task_id=task_id)
+        attempt_error = None
+    except AttemptStateError as exc:
+        attempt_record = None
+        attempt_error = str(exc)[:500]
+    attempt = _safe_attempt_summary(attempt_record)
+    job_id = attempt.get("job_id") if attempt else None
+    job = _safe_job_summary(job_status, job_id if isinstance(job_id, str) else None)
+    job_token = _job_status_token(job)
+
+    files = {
+        "status": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="agent-status.md"),
+        "log": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_LOG_FILENAME),
+        "heartbeat": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_HEARTBEAT_FILENAME),
+        "report": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="agent-report.md"),
+        "diff": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="implementation-diff.patch"),
+        "attempt_state": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=ATTEMPT_STATE_FILENAME),
+    }
+    # Heartbeat proves the wrapper process is alive, but it is deliberately
+    # excluded from semantic activity so a stuck/silent agent is not hidden by
+    # the runner's periodic keepalive.
+    activity = _latest_activity(
+        {name: meta for name, meta in files.items() if name != "heartbeat"}, now
+    )
+    age = activity.get("age_seconds")
+    heartbeat = _read_agent_heartbeat(
+        run_cmd, project=project, task_id=task_id, now_epoch=now
+    )
+    heartbeat_age = heartbeat.get("age_seconds")
+    runner_heartbeat_fresh = bool(
+        heartbeat.get("state") == "running"
+        and isinstance(heartbeat_age, int)
+        and heartbeat_age < stale_after_seconds
+    )
+
+    terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
+    active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
+    likely_hung = bool(active and not terminal and isinstance(age, int) and age >= stale_after_seconds)
+
+    log = read_agent_log_tail(run_cmd, project=project, task_id=task_id, tail_lines=tail_lines)
+    startup = _agent_startup_diagnostics(
+        status=status_token,
+        status_text=status_text if status_text != "(not found)" else "",
+        log_stdout=str(log.get("stdout", "")),
+        files=files,
+        active=active,
+    )
+
+    if terminal:
+        verdict = "finished"
+    elif startup.get("dead_time_kind") == "opencode_startup":
+        verdict = "startup_stalled"
+    elif likely_hung:
+        verdict = "likely_hung"
+    elif active:
+        verdict = "running"
+    elif status_token is None and job is None and attempt_error is None:
+        verdict = "unknown"
+    else:
+        verdict = "needs_attention"
+
+    result: dict[str, Any] = {
+        "project": project,
+        "task_id": task_id,
+        "exists": True,
+        "status": status_token,
+        "job": job,
+        "attempt": attempt,
+        "attempt_state_error": attempt_error,
+        "files": files,
+        "last_activity": activity,
+        "runner_heartbeat": heartbeat,
+        "runner_heartbeat_fresh": runner_heartbeat_fresh,
+        "startup": startup,
+        "stale_after_seconds": stale_after_seconds,
+        "terminal": terminal,
+        "likely_hung": likely_hung,
+        "verdict": verdict,
+        "log": {
+            "stdout": log.get("stdout", ""),
+            "stderr": log.get("stderr", ""),
+            "truncated": bool(log.get("truncated", False)),
+            "tail_lines": log.get("tail_lines", tail_lines),
+        },
+    }
+    if status_text != "(not found)":
+        result["status_text"] = status_text
+    return result
+
+
 def write_agent_task(
     run_cmd,
     *,
@@ -713,6 +1042,218 @@ def write_agent_task(
             "exit_code": 1,
         }
     return result
+
+
+
+def cancel_agent_task(
+    run_cmd,
+    *,
+    project: str,
+    task_id: str,
+    cancel_job,
+) -> dict[str, Any]:
+    """Request cancellation for the gateway job bound to an agent task.
+
+    The caller supplies the gateway cancel primitive; this helper only resolves
+    the durable attempt record and refuses to guess a job identity from logs or
+    status text.
+    """
+    validate_task_id(task_id)
+    record = read_agent_attempt_state(run_cmd, project=project, task_id=task_id)
+    if record is None:
+        return {
+            "task_id": task_id,
+            "status": "missing",
+            "cancel_requested": False,
+            "message": "agent attempt state not found",
+        }
+    job_id = record.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        return {
+            "task_id": task_id,
+            "attempt_id": record.get("attempt_id"),
+            "status": "not-submitted",
+            "cancel_requested": False,
+            "message": "agent attempt exists but has no bound job_id",
+        }
+    cancelled = cancel_job(job_id)
+    if not isinstance(cancelled, dict):
+        cancelled = {"status": "unknown", "job_id": job_id}
+    return {
+        "task_id": task_id,
+        "attempt_id": record.get("attempt_id"),
+        "job_id": job_id,
+        "status": cancelled.get("status"),
+        "cancel_requested": True,
+        "gateway": cancelled,
+        "diagnostics": {
+            "inspect_agent_task": {
+                "project": project,
+                "task_id": task_id,
+                "purpose": "verify cancellation outcome, artifact mtimes, heartbeat, and log tail",
+            },
+            "job_status": {"job_id": job_id, "purpose": "gateway job state after cancellation"},
+        },
+    }
+
+
+def _retry_plan_text(plan: str, *, source_task_id: str, retry_task_id: str) -> str:
+    prefix = (
+        f"# Retry of {source_task_id}\n\n"
+        f"- Source task ID: {source_task_id}\n"
+        f"- Retry task ID: {retry_task_id}\n"
+        f"- Prepared: {datetime.now(UTC).isoformat()}\n\n"
+    )
+    return prefix + (plan if plan.endswith("\n") else plan + "\n")
+
+
+def _load_retry_task_contract(
+    run_cmd,
+    *,
+    project: str,
+    source_task_id: str,
+) -> dict[str, Any]:
+    result = read_agent_task_file(
+        run_cmd,
+        project=project,
+        task_id=source_task_id,
+        filename="task.json",
+    )
+    text = str(result.get("stdout", ""))
+    if text == "(not found)":
+        raise AttemptStateError(f"source task {source_task_id} has no task.json")
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError) as exc:
+        raise AttemptStateError(f"source task {source_task_id} task.json is invalid") from exc
+    if not isinstance(data, dict):
+        raise AttemptStateError(f"source task {source_task_id} task.json is invalid")
+    return data
+
+
+def prepare_agent_task_retry(
+    run_cmd,
+    run_script,
+    *,
+    project: str,
+    source_task_id: str,
+    retry_task_id: str,
+    job_status=None,
+) -> dict[str, Any]:
+    """Prepare a new immutable task from a terminal/cancelled source task.
+
+    The retry receives a fresh task directory and intentionally does not copy
+    attempt-state.json, logs, reports, diffs, or heartbeats. The caller must run
+    the returned retry_task_id explicitly through run_agent/run_opencode.
+    """
+    validate_task_id(source_task_id)
+    validate_task_id(retry_task_id)
+    if source_task_id == retry_task_id:
+        raise ValueError("retry_task_id must be different from source_task_id")
+
+    inspection = inspect_agent_task(
+        run_cmd,
+        project=project,
+        task_id=source_task_id,
+        tail_lines=20,
+        job_status=job_status,
+    )
+    if not inspection.get("exists"):
+        return {
+            "stdout": "",
+            "stderr": f"source task {source_task_id} not found",
+            "exit_code": 1,
+            "code": "TASK_NOT_FOUND",
+        }
+    attempt = inspection.get("attempt") if isinstance(inspection.get("attempt"), dict) else None
+    not_submitted = bool(attempt and not attempt.get("job_id"))
+    if not inspection.get("terminal") and not not_submitted:
+        return {
+            "stdout": "",
+            "stderr": "source task is not terminal; cancel it and wait for terminal state before retrying",
+            "exit_code": 1,
+            "code": "AGENT_TASK_NOT_TERMINAL",
+            "source": {
+                "task_id": source_task_id,
+                "status": inspection.get("status"),
+                "verdict": inspection.get("verdict"),
+                "job": inspection.get("job"),
+            },
+        }
+
+    contract = _load_retry_task_contract(
+        run_cmd,
+        project=project,
+        source_task_id=source_task_id,
+    )
+    agent = str(contract.get("agent") or "opencode")
+    retry_contract = dict(contract)
+    retry_contract["task_id"] = retry_task_id
+    retry_contract["created"] = datetime.now(UTC).isoformat()
+    # Validate the copied immutable contract before persisting it.
+    validate_required_checks(retry_contract.get("required_checks") or [])
+    validate_scope_contract(
+        retry_contract.get("allowed_files") or [],
+        retry_contract.get("forbidden_files") or [],
+    )
+    validate_base_ref(retry_contract.get("base_ref") or None)
+
+    plan_result = read_agent_task_file(
+        run_cmd,
+        project=project,
+        task_id=source_task_id,
+        filename="current-plan.md",
+    )
+    plan = str(plan_result.get("stdout", ""))
+    if plan == "(not found)":
+        plan = ""
+    status = build_initial_status(agent, retry_task_id) + f"\nRetry of: {source_task_id}\n"
+    td = task_dir(project, retry_task_id)
+    files = {
+        f"{td}/task.json": json.dumps(retry_contract, indent=2, ensure_ascii=False),
+        f"{td}/current-plan.md": _retry_plan_text(
+            plan,
+            source_task_id=source_task_id,
+            retry_task_id=retry_task_id,
+        ),
+        f"{td}/agent-status.md": status,
+    }
+    tasks_dir = task_tasks_dir(project)
+    guard_paths = [tasks_dir, td, *files]
+    parts = [
+        f"tasks_dir={shlex.quote(tasks_dir)}",
+        f"td={shlex.quote(td)}",
+        *_symlink_guard_lines(guard_paths),
+        'if [ -e "$td" ]; then exit 48; fi',
+        'mkdir -p "$td" || exit 47',
+        *_symlink_guard_lines(guard_paths),
+    ]
+    for target, content in files.items():
+        parts.append(_encoded_write(target, content))
+    result = run_script(project, "\n".join(parts) + "\n")
+    exit_code = int(result.get("exit_code", 1))
+    if exit_code == 0:
+        return {
+            "stdout": f"prepared retry task {retry_task_id} from {source_task_id}",
+            "stderr": "",
+            "exit_code": 0,
+            "source_task_id": source_task_id,
+            "retry_task_id": retry_task_id,
+            "source": {
+                "status": inspection.get("status"),
+                "verdict": inspection.get("verdict"),
+                "job": inspection.get("job"),
+            },
+            "next": {
+                "run_agent": {"project": project, "task_id": retry_task_id},
+                "run_opencode": {"project": project, "task_id": retry_task_id},
+            },
+        }
+    if exit_code == 48:
+        return {"stdout": "", "stderr": f"retry task {retry_task_id} already exists", "exit_code": 1, "code": "ALREADY_EXISTS"}
+    if exit_code == 46:
+        return {"stdout": "", "stderr": "retry task path rejected by symlink guard", "exit_code": 1, "code": "POLICY_DENIED"}
+    return {"stdout": "", "stderr": f"failed to prepare retry task {retry_task_id}", "exit_code": 1, "code": "TOOL_EXECUTION_FAILED"}
 
 
 def read_agent_attempt_state(

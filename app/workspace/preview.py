@@ -268,9 +268,10 @@ def project_file_preview_patch(
     except Exception as exc:
         raise PatchError(f"Failed to apply patch: {exc}") from exc
 
-    new_content = "\n".join(new_lines)
+    newline = "\r\n" if "\r\n" in old_content else "\n"
+    new_content = newline.join(new_lines)
     if old_content.endswith("\n") and not new_content.endswith("\n"):
-        new_content += "\n"
+        new_content += newline
 
     new_bytes = new_content.encode("utf-8")
     if len(new_bytes) > max_bytes:
@@ -327,7 +328,9 @@ def project_file_verify(
             "project_id": project_id,
             "path": relative_path,
             "matches": False,
+            "verified": False,
             "current_hash": None,
+            "expected_hash": expected_hash,
             "file_exists": False,
         }
 
@@ -340,7 +343,9 @@ def project_file_verify(
             "project_id": project_id,
             "path": relative_path,
             "matches": False,
+            "verified": False,
             "current_hash": None,
+            "expected_hash": expected_hash,
             "file_exists": True,
         }
 
@@ -350,6 +355,8 @@ def project_file_verify(
         "project_id": project_id,
         "path": relative_path,
         "matches": matches,
+        "verified": matches,
         "current_hash": current_hash,
+        "expected_hash": expected_hash,
         "file_exists": True,
     }

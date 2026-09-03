@@ -54,6 +54,103 @@ def test_read_agent_log_redacts_obvious_secrets(monkeypatch):
 
 
 
+
+def test_inspect_agent_task_redacts_status_and_log(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setattr(
+        agent_adapter,
+        "_inspect_agent_task",
+        lambda *args, **kwargs: {
+            "project": "test",
+            "task_id": TASK_ID,
+            "exists": True,
+            "status": "running",
+            "verdict": "running",
+            "terminal": False,
+            "likely_hung": False,
+            "status_text": "Status: running\npassword=hunter2\n",
+            "log": {
+                "stdout": "token=abc123\nworking\n",
+                "stderr": "",
+                "truncated": False,
+                "tail_lines": 20,
+            },
+        },
+    )
+
+    result = agent_adapter.gateway_inspect_agent_task("test", TASK_ID, tail_lines=20)
+
+    assert result["ok"] is True
+    rendered = repr(result["result"])
+    assert "hunter2" not in rendered
+    assert "abc123" not in rendered
+    assert "[REDACTED]" in rendered
+    assert result["meta"]["redacted"] is True
+
+
+
+def test_retry_agent_task_prepares_new_task(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+    import examples.mcp_server.server as server_mod
+
+    client = MagicMock()
+    client.execute_project_command.return_value = {"exit_code": 0, "stdout": "", "stderr": ""}
+    client.execute_project_script.return_value = {"exit_code": 0, "stdout": "", "stderr": ""}
+    client.job_status.return_value = {"status": "cancelled", "job_id": "job-1"}
+    monkeypatch.setattr(server_mod, "get_gateway_client", lambda: client, raising=False)
+
+    monkeypatch.setattr(
+        agent_adapter,
+        "_prepare_agent_task_retry",
+        lambda run_cmd, run_script, **kwargs: {
+            "exit_code": 0,
+            "stdout": "prepared",
+            "stderr": "",
+            "kwargs": kwargs,
+        },
+    )
+
+    result = agent_adapter.gateway_retry_agent_task("test", "source-task-001", "retry-task-001")
+
+    assert result["ok"] is True
+    assert result["result"]["kwargs"]["project"] == "test"
+    assert result["result"]["kwargs"]["source_task_id"] == "source-task-001"
+    assert result["result"]["kwargs"]["retry_task_id"] == "retry-task-001"
+
+
+def test_cancel_agent_task_uses_bound_attempt_job(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    cancelled: list[str] = []
+
+    class Client:
+        def cancel_job(self, job_id: str) -> dict[str, str]:
+            cancelled.append(job_id)
+            return {"status": "cancelling", "job_id": job_id}
+
+    monkeypatch.setattr(agent_adapter, "_server_client", lambda: Client())
+    monkeypatch.setattr(
+        agent_adapter,
+        "run_project_command",
+        lambda _client, _project, command: (
+            {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("ls -ld -- ")
+            else {
+                "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+                "stderr": "",
+                "exit_code": 0,
+            }
+        ),
+    )
+
+    result = agent_adapter.gateway_cancel_agent_task("test", TASK_ID)
+
+    assert result["ok"] is True
+    assert cancelled == ["job-1"]
+    assert result["result"]["status"] == "cancelling"
+
+
 def test_read_agent_diff_returns_hash_of_exact_review_text(monkeypatch):
     import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
 
@@ -266,10 +363,39 @@ class TestProjectRunAgentAsyncSubmit:
         assert result["job_id"] == "job-42"
         assert result["exit_code"] is None
         assert result["finished_at"] is None
+        assert result["diagnostics"]["inspect_agent_task"] == {
+            "project": "test",
+            "task_id": TASK_ID,
+            "purpose": "status, job state, artifact mtimes, stale/hung verdict, and log tail",
+        }
+        assert result["diagnostics"]["job_status"]["job_id"] == "job-42"
         run_script_async.assert_called_once()
         submission_key = run_script_async.call_args.args[2]
         assert submission_key.startswith("task:test-")
         assert submission_key.endswith(f":{TASK_ID}")
+
+
+    def test_async_submit_script_starts_and_finishes_runner_heartbeat(self):
+        rc = _make_run_cmd(task_json=_make_task_json())
+        run_script_async = _make_run_script_async("job-42")
+
+        project_run_agent(
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            async_submit=True,
+            run_script_async=run_script_async,
+        )
+
+        script = run_script_async.call_args.args[1]
+        assert "agent-heartbeat.json" in script
+        assert "agent_heartbeat_loop >/dev/null 2>&1 &" in script
+        assert "write_agent_heartbeat running starting" in script
+        assert "finish_agent_heartbeat" in script
+        assert "write_agent_heartbeat exited trap" in script
+        assert "AGENT_HEARTBEAT_FINALIZED=1" in script
+        assert 'write_agent_heartbeat finished final "$FINAL_RC"' in script
+        assert "trap - EXIT" in script
 
     def test_run_cmd_never_called_for_script_execution(self):
         """Only task.json + current-plan.md are read via run_cmd; the actual
@@ -334,6 +460,33 @@ class TestProjectRunAgentAsyncSubmit:
         )
         assert result["status"] == "error"
         run_script_async.assert_not_called()
+
+
+class TestProjectRunAgentDiagnosticsHint:
+    def test_sync_wait_timeout_returns_inspection_followups(self):
+        rc = _make_run_cmd(task_json=_make_task_json())
+        run_script_async = _make_run_script_async("job-sync-1")
+        result = project_run_agent(
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            run_script_async=run_script_async,
+            run_script_wait=lambda job_id: {
+                "job_id": job_id,
+                "status": "running",
+                "wait_timed_out": True,
+            },
+            read_attempt_state=lambda _project, _task_id: None,
+            claim_attempt_state=lambda _project, _task_id, _record: True,
+            write_attempt_state=lambda *_args: None,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["status"] == "running"
+        assert result["wait_timed_out"] is True
+        assert result["diagnostics"]["inspect_agent_task"]["task_id"] == TASK_ID
+        assert result["diagnostics"]["read_agent_log"]["project"] == "test"
+        assert result["diagnostics"]["job_status"]["job_id"] == "job-sync-1"
 
 
 # ── project_run_agent: host-path redaction (sync path) ──────────────────────

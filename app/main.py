@@ -1200,18 +1200,14 @@ async def ssh_exception_handler(request, exc: SSHManagerError):
         ExecutionError: 500,
     }
     # The response message stays generic (avoids echoing upstream SSH server
-    # details), so _auto_code's keyword sniffing can't tell SessionNotFoundError
-    # apart from a generic 404 — pass its code explicitly instead. The message
-    # itself is still made specific for the one case where the cause is local
-    # and unambiguous (a missing session), without leaking anything upstream.
-    # SessionLimitError is deliberately NOT given an explicit code here: its
-    # status 429 already maps through _err -> _auto_code to the established
-    # RATE_LIMIT_EXCEEDED code (in ERROR_CODE_MAP and RETRYABLE_CODES), which
-    # downstream MCP clients translate to RATE_LIMITED. A bespoke
-    # SESSION_LIMIT_EXCEEDED would break that round-trip. We only add the
-    # Retry-After signal and rely on the shared retryable vocabulary.
+    # details), so _auto_code's keyword sniffing can't tell explicit SSH
+    # manager capacity conditions apart from generic HTTP statuses. Preserve
+    # their stable machine-readable codes while keeping the human message
+    # sanitized. Slowapi request-rate 429s still use RATE_LIMIT_EXCEEDED via
+    # _auto_code; SSH session-cap 429s use SESSION_LIMIT_EXCEEDED.
     code_map: dict[type[SSHManagerError], str] = {
         SessionNotFoundError: "SESSION_NOT_FOUND",
+        SessionLimitError: "SESSION_LIMIT_EXCEEDED",
     }
     message_map: dict[type[SSHManagerError], str] = {
         SessionNotFoundError: "SSH session not found or expired; create a new session first",

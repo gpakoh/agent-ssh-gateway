@@ -66,30 +66,6 @@ def test_supervisor_tools_registered_in_live_server():
 
 
 @patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
-def test_gitea_push_local_ref_schema_requires_task_candidate_receipt():
-    """Trusted push schema must reflect the receipt-bound task contract."""
-    import importlib
-
-    import examples.mcp_server.server as srv
-
-    importlib.reload(srv)
-    tool = next(
-        tool
-        for tool in srv.mcp._tool_manager.list_tools()
-        if tool.name == "gitea_push_local_ref"
-    )
-    assert tool.parameters["required"] == [
-        "project",
-        "task_id",
-        "owner",
-        "repo",
-        "destination_branch",
-        "expected_sha",
-    ]
-    assert "task_id" in tool.parameters["properties"]
-
-
-@patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
 def test_tools_manifest_gitea_delete_branch_matches_invokable_schema():
     """Manifest must not advertise a Gitea delete tool missing from live schema."""
     import importlib
@@ -115,6 +91,48 @@ def test_tools_manifest_gitea_delete_branch_matches_invokable_schema():
         "branch",
         "expected_head_sha",
     ]
+
+
+@patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
+def test_git_commit_schema_exposes_optional_workspace_guards():
+    """git_commit keeps message required, but exposes optional lease guards."""
+    import importlib
+
+    import examples.mcp_server.server as srv
+
+    importlib.reload(srv)
+    tool = next(
+        tool for tool in srv.mcp._tool_manager.list_tools() if tool.name == "git_commit"
+    )
+    assert tool.parameters["required"] == ["project", "message"]
+    properties = tool.parameters["properties"]
+    assert "expected_branch" in properties
+    assert "expected_head" in properties
+    assert "expected_status_sha256" in properties
+
+
+@patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
+def test_gitea_push_local_ref_schema_requires_task_candidate_receipt():
+    """Trusted push schema must reflect the receipt-bound task contract."""
+    import importlib
+
+    import examples.mcp_server.server as srv
+
+    importlib.reload(srv)
+    tool = next(
+        tool
+        for tool in srv.mcp._tool_manager.list_tools()
+        if tool.name == "gitea_push_local_ref"
+    )
+    assert tool.parameters["required"] == [
+        "project",
+        "task_id",
+        "owner",
+        "repo",
+        "destination_branch",
+        "expected_sha",
+    ]
+    assert "task_id" in tool.parameters["properties"]
 
 
 @patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)

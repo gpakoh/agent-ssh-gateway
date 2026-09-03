@@ -117,6 +117,141 @@ def test_gateway_error_hint_none_when_nothing_available():
     assert _gateway_error_hint(exc, "INTERNAL_ERROR") is None
 
 
+def test_gateway_error_details_preserves_validation_errors():
+    from examples.mcp_server.gateway_client import GatewayClientError
+    from examples.mcp_server.mcp_infra.gateway_errors import _gateway_error_details
+
+    exc = GatewayClientError(
+        "POST /api/ssh/execute failed: 422 {...}",
+        status_code=422,
+        body={
+            "message": "Request validation failed",
+            "code": "VALIDATION_ERROR",
+            "retryable": False,
+            "errors": [{"field": "session_id", "error": "required", "type": "missing"}],
+            "total_errors": 1,
+        },
+    )
+
+    assert _gateway_error_details(exc) == {
+        "errors": [{"field": "session_id", "error": "required", "type": "missing"}],
+        "total_errors": 1,
+    }
+
+
+def test_gateway_transport_errors_get_recovery_hints():
+    from examples.mcp_server.gateway_client import GatewayClientError
+    from examples.mcp_server.mcp_infra.gateway_errors import (
+        _classify_gateway_error,
+        _gateway_error_hint,
+    )
+
+    exc = GatewayClientError(
+        "Gateway transport unavailable",
+        body={"message": "Gateway transport unavailable", "code": "REMOTE_UNAVAILABLE", "retryable": True},
+    )
+
+    code, retryable = _classify_gateway_error(exc)
+
+    assert code == "REMOTE_UNAVAILABLE"
+    assert retryable is True
+    assert _gateway_error_hint(exc, code)
+
+
+def test_gateway_timeout_errors_get_recovery_hints():
+    from examples.mcp_server.gateway_client import GatewayClientError
+    from examples.mcp_server.mcp_infra.gateway_errors import (
+        _classify_gateway_error,
+        _gateway_error_hint,
+    )
+
+    exc = GatewayClientError(
+        "Gateway request timed out",
+        body={"message": "Gateway request timed out", "code": "TIMEOUT", "retryable": True},
+    )
+
+    code, retryable = _classify_gateway_error(exc)
+
+    assert code == "TIMEOUT"
+    assert retryable is True
+    assert _gateway_error_hint(exc, code)
+
+
+def test_gateway_error_details_preserves_nested_job_status():
+    from examples.mcp_server.gateway_client import GatewayClientError
+    from examples.mcp_server.mcp_infra.gateway_errors import _gateway_error_details
+
+    exc = GatewayClientError(
+        "timeout",
+        body={
+            "detail": {
+                "code": "TIMEOUT",
+                "retryable": True,
+                "details": {"attempt": 2},
+                "job_id": "job-1",
+                "status": "running",
+                "wait_timed_out": True,
+            }
+        },
+    )
+
+    assert _gateway_error_details(exc) == {
+        "attempt": 2,
+        "job_id": "job-1",
+        "status": "running",
+        "wait_timed_out": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_job_cancel_protocol_preserves_gateway_error(monkeypatch):
+    from gateway_client import GatewayClientError
+
+    from examples.mcp_server.mcp_infra.adapters import gateway as gateway_adapter
+
+    class Client:
+        def cancel_job(self, job_id: str) -> dict[str, str]:
+            raise GatewayClientError(
+                "POST /api/jobs/job-1/cancel failed: 404 {...}",
+                status_code=404,
+                body={
+                    "detail": {
+                        "code": "JOB_NOT_FOUND",
+                        "message": "Job job-1 not found",
+                        "retryable": False,
+                    }
+                },
+            )
+
+    monkeypatch.setattr(gateway_adapter, "_server_client", lambda: Client())
+
+    result = await gateway_adapter.gateway_job_cancel_protocol("job-1")
+
+    assert result["ok"] is False
+    assert result["error"]["message"] == "Job job-1 not found"
+    assert "POST /api" not in result["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_job_cancel_protocol_returns_cancel_status(monkeypatch):
+    from examples.mcp_server.mcp_infra.adapters import gateway as gateway_adapter
+
+    class Client:
+        def cancel_job(self, job_id: str) -> dict[str, str]:
+            return {"status": "cancelling", "job_id": job_id}
+
+    async def reconcile(job_id, data):
+        return data
+
+    monkeypatch.setattr(gateway_adapter, "_server_client", lambda: Client())
+    monkeypatch.setattr(gateway_adapter, "_reconcile_fleet_result", reconcile)
+
+    result = await gateway_adapter.gateway_job_cancel_protocol("job-1")
+
+    assert result["ok"] is True
+    assert result["result"] == {"status": "cancelling", "job_id": "job-1"}
+
+
 class TestJobStatusEndToEnd:
     """Feeds a realistic GatewayClientError through the real run_tool()
     path (via gateway_job_status) to prove the fix reaches an actual tool,
@@ -245,3 +380,146 @@ class TestRunTestsAsyncSubmit:
         assert result["error"]["retryable"] is True
         assert result["error"]["details"]["job_id"] == "j2"
         assert "job_status" in result["error"]["hint"]
+
+
+class TestExecuteArgvGatewayErrorContract:
+    def test_execute_argv_preserves_session_not_found_contract(self, monkeypatch):
+        """Regression: gateway_execute_argv used to bypass run_tool's
+        GatewayClientError classifier and returned TOOL_EXECUTION_FAILED with
+        a redacted raw REST JSON blob instead of SESSION_NOT_FOUND.
+        """
+        from examples.mcp_server import server as mcp_server_mod
+
+        def _raise(**_kwargs):
+            raise mcp_server_mod.GatewayClientError(
+                'POST /api/ssh/execute-argv failed: 404 {"message":"Session not found"}',
+                status_code=404,
+                body={
+                    "message": "Session not found",
+                    "code": "SESSION_NOT_FOUND",
+                    "retryable": False,
+                    "hint": "Create a session first via /api/ssh/connect",
+                    "http_status": 404,
+                },
+            )
+
+        monkeypatch.setattr(mcp_server_mod.client, "execute_argv", _raise)
+
+        result = mcp_server_mod.gateway_execute_argv("dead-session", ["git", "status"])
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "SESSION_NOT_FOUND"
+        assert result["error"]["message"] == "Session not found"
+        assert result["error"]["retryable"] is False
+        assert "TOOL_EXECUTION_FAILED" not in result["error"]["message"]
+        assert "[API]" not in result["error"]["message"]
+        assert "detail" not in result["error"]["message"]
+
+    def test_execute_argv_preserves_wait_timeout_job_id(self, monkeypatch):
+        from examples.mcp_server import server as mcp_server_mod
+
+        def _raise(**_kwargs):
+            raise mcp_server_mod.GatewayClientError(
+                "Job j-timeout did not finish before timeout",
+                body={"job_id": "j-timeout", "status": "running", "wait_timed_out": True},
+            )
+
+        monkeypatch.setattr(mcp_server_mod.client, "execute_argv", _raise)
+
+        result = mcp_server_mod.gateway_execute_argv("sid", ["sleep", "60"], timeout_s=1)
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "WAIT_TIMEOUT"
+        assert result["error"]["retryable"] is True
+        assert result["error"]["details"]["job_id"] == "j-timeout"
+        assert "job_status" in result["error"]["hint"]
+
+
+class TestManualGatewayAdapterErrorPropagation:
+    """Manual GatewayClientError catch blocks must preserve structured codes.
+
+    These adapters cannot rely on run_tool() to classify GatewayClientError,
+    so they must use the same shared helper instead of emitting generic
+    TOOL_EXECUTION_FAILED with a redacted REST JSON blob.
+    """
+
+    def test_execute_argv_preserves_session_not_found(self, monkeypatch):
+        from examples.mcp_server import server as mcp_server_mod
+
+        def _raise(**kwargs):
+            raise mcp_server_mod.GatewayClientError(
+                'POST /api/ssh/execute failed: 404 {"message":"Session not found"}',
+                status_code=404,
+                body={
+                    "message": "Session not found",
+                    "code": "SESSION_NOT_FOUND",
+                    "retryable": False,
+                },
+            )
+
+        monkeypatch.setattr(mcp_server_mod.client, "execute_argv", _raise)
+
+        result = mcp_server_mod.gateway_execute_argv("old-session", ["pwd"])
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "SESSION_NOT_FOUND"
+        assert result["error"]["message"] == "Session not found"
+        assert "[API]" not in result["error"]["message"]
+        assert "POST /api" not in result["error"]["message"]
+
+    def test_apply_patch_preserves_structured_gateway_error(self, monkeypatch):
+        from examples.mcp_server import server as mcp_server_mod
+
+        def _raise(**kwargs):
+            raise mcp_server_mod.GatewayClientError(
+                'POST /api/projects/apply-patch failed: 403 {"detail":{"message":"Workspace is read-only"}}',
+                status_code=403,
+                body={
+                    "detail": {
+                        "message": "Workspace is read-only",
+                        "code": "WORKSPACE_READONLY",
+                        "retryable": False,
+                    }
+                },
+            )
+
+        monkeypatch.setattr(mcp_server_mod.client, "apply_patch", _raise)
+
+        result = mcp_server_mod.gateway_apply_patch(
+            session_id="sid",
+            project="proj",
+            patch="diff --git a/a b/a\n",
+            expected_hashes={},
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "PERMISSION_DENIED"
+        assert result["error"]["message"] == "Workspace is read-only"
+        assert "[API]" not in result["error"]["message"]
+        assert "POST /api" not in result["error"]["message"]
+
+    def test_job_wait_preserves_clean_wait_timeout_message_and_details(self, monkeypatch):
+        from examples.mcp_server import server as mcp_server_mod
+
+        def _raise(job_id, **kwargs):
+            raise mcp_server_mod.GatewayClientError(
+                f"GET /api/jobs/{job_id}/wait failed: 504 {{...}}",
+                status_code=504,
+                body={
+                    "message": "Job j1 did not finish before timeout",
+                    "code": "GATEWAY_TIMEOUT",
+                    "retryable": True,
+                    "job_id": "j1",
+                    "wait_timed_out": True,
+                },
+            )
+
+        monkeypatch.setattr(mcp_server_mod.client, "wait_job", _raise)
+
+        result = mcp_server_mod.gateway_job_wait("j1", timeout_sec=1)
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "WAIT_TIMEOUT"
+        assert result["error"]["message"] == "Job j1 did not finish before timeout"
+        assert result["error"]["details"]["job_id"] == "j1"
+        assert result["error"]["retryable"] is True

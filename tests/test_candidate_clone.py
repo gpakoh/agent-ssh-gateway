@@ -1,0 +1,181 @@
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from app.workspace.registry import reset_registry
+from examples.mcp_server.candidate_clone import (
+    CandidateCloneError,
+    prepare_candidate_clone,
+)
+
+
+def _git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def _init_repo(root: Path) -> str:
+    root.mkdir(parents=True)
+    _git(root, "init", "-q")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "config", "user.email", "test@example.invalid")
+    (root / "README.md").write_text("base\n", encoding="utf-8")
+    _git(root, "add", "README.md")
+    _git(root, "commit", "-q", "-m", "base")
+    return _git(root, "rev-parse", "HEAD")
+
+
+@pytest.fixture
+def registry_fixture(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "source"
+    base = _init_repo(source)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "projects.yaml").write_text(
+        "version: 1\n"
+        f"registry_root: {workspace}\n\n"
+        "projects:\n"
+        "  source-project:\n"
+        "    root: source\n"
+        "    type: repository\n"
+        "    description: source project\n"
+        "    tags: [source]\n",
+        encoding="utf-8",
+    )
+    journal_root = tmp_path / "journals"
+    reset_registry()
+    try:
+        yield workspace, source, config_dir, journal_root, base
+    finally:
+        reset_registry()
+
+
+def test_prepare_candidate_clone_creates_registered_clean_clone(registry_fixture) -> None:
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+
+    receipt = prepare_candidate_clone(
+        "source-project",
+        "candidate/test-flow",
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+
+    data = receipt.as_dict()
+    assert data["source_project"] == "source-project"
+    assert data["branch"] == "candidate/test-flow"
+    assert data["base_sha"] == base
+    assert data["head"] == base
+    assert data["root"] == "."
+    assert data["registered"] is True
+    assert data["recovered"] is False
+    assert data["clean"] is True
+    assert data["git_identity"] == {
+        "user.name": "MCP Control Plane",
+        "user.email": "control-plane@gateway.invalid",
+    }
+    clone_root = workspace / ".mcp-candidate-clones" / data["project_id"]
+    assert clone_root.is_dir()
+    assert _git(clone_root, "rev-parse", "--abbrev-ref", "HEAD") == "candidate/test-flow"
+    assert _git(clone_root, "rev-parse", "HEAD") == base
+    assert _git(clone_root, "status", "--short") == ""
+    assert (clone_root / ".git" / "mcp-candidate-clone.json").is_file()
+    registry = (config_dir / "projects.yaml").read_text(encoding="utf-8")
+    assert data["project_id"] in registry
+    assert ".mcp-candidate-clones/" in registry
+
+
+def test_prepare_candidate_clone_recovers_same_clean_clone(registry_fixture) -> None:
+    _workspace, _source, config_dir, journal_root, base = registry_fixture
+    first = prepare_candidate_clone(
+        "source-project",
+        "candidate/recover-flow",
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+
+    second = prepare_candidate_clone(
+        "source-project",
+        "candidate/recover-flow",
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+
+    assert second.project_id == first.project_id
+    assert second.recovered is True
+    assert second.registered is False
+    assert second.clean is True
+
+
+@pytest.mark.parametrize("branch", ["master", "main", "../x", "x..y", "-x", "x:y", "x.lock", "x//y", "x@{1}"])
+def test_prepare_candidate_clone_rejects_unsafe_branches(registry_fixture, branch: str) -> None:
+    _workspace, _source, config_dir, journal_root, base = registry_fixture
+    with pytest.raises(CandidateCloneError) as exc_info:
+        prepare_candidate_clone(
+            "source-project",
+            branch,
+            base,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+    assert exc_info.value.code == "INVALID_INPUT"
+
+
+def test_prepare_candidate_clone_refuses_dirty_existing_clone(registry_fixture) -> None:
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    receipt = prepare_candidate_clone(
+        "source-project",
+        "candidate/dirty-flow",
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    (clone_root / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        prepare_candidate_clone(
+            "source-project",
+            "candidate/dirty-flow",
+            base,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    err = exc_info.value
+    assert err.code == "WORKSPACE_CONTENDED"
+    assert err.retryable is True
+    assert err.details["project_id"] == receipt.project_id
+    assert err.details["dirty"] is True
+
+
+def test_prepare_candidate_clone_resolves_symbolic_base_ref(registry_fixture) -> None:
+    workspace, source, config_dir, journal_root, base = registry_fixture
+    _git(source, "branch", "base-for-candidate", base)
+
+    receipt = prepare_candidate_clone(
+        "source-project",
+        "candidate/symbolic-base",
+        "base-for-candidate",
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    assert receipt.base_ref == "base-for-candidate"
+    assert receipt.base_sha == base
+    assert _git(clone_root, "rev-parse", "HEAD") == base

@@ -81,3 +81,12 @@ def test_supervisor_register_project_fail_closed_for_unknown_tool():
     from examples.mcp_server.tool_scopes import FAIL_CLOSED_SCOPE, get_required_scopes
 
     assert get_required_scopes("nonexistent_tool_xyz") == [FAIL_CLOSED_SCOPE]
+
+
+def test_prepare_candidate_clone_requires_repo_and_admin_scope():
+    from examples.mcp_server.tool_scopes import get_required_scopes, has_required_scope
+
+    assert get_required_scopes("prepare_candidate_clone") == ["mcp:repo", "mcp:admin"]
+    assert not has_required_scope(["mcp:repo"], "prepare_candidate_clone")
+    assert not has_required_scope(["mcp:admin"], "prepare_candidate_clone")
+    assert has_required_scope(["mcp:repo", "mcp:admin"], "prepare_candidate_clone")

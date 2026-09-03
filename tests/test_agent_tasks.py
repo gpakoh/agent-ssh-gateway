@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -12,7 +14,10 @@ from examples.mcp_server.agent_tasks import (
     build_current_plan,
     build_initial_status,
     build_task_json,
+    cancel_agent_task,
+    inspect_agent_task,
     list_agent_tasks,
+    prepare_agent_task_retry,
     read_agent_log_tail,
     read_agent_task_file,
     validate_base_ref,
@@ -461,6 +466,405 @@ class TestReadAgentLogTail:
         assert result["truncated"] is False
 
 
+class TestInspectAgentTask:
+    @staticmethod
+    def _shell_runner(cwd):
+        def run_cmd(_project: str, command: str) -> dict:
+            result = subprocess.run(
+                ["sh", "-c", command],
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            return {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exit_code": result.returncode,
+            }
+
+        return run_cmd
+
+    def test_missing_task_returns_missing_verdict(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id="a12345678901",
+        )
+        assert result["exists"] is False
+        assert result["verdict"] == "missing"
+        assert result["likely_hung"] is False
+
+    def test_running_job_with_old_artifacts_is_likely_hung(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n\nWorking\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text("line 1\nline 2\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"},
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        old = 1_000
+        for child in td.iterdir():
+            os.utime(child, (old, old))
+
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            tail_lines=1,
+            stale_after_seconds=600,
+            now_epoch=2_000,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["exists"] is True
+        assert result["status"] == "running"
+        assert result["job"]["status"] == "running"
+        assert result["last_activity"]["age_seconds"] == 1_000
+        assert result["verdict"] == "likely_hung"
+        assert result["likely_hung"] is True
+        assert result["log"]["stdout"] == "line 2\n"
+
+    def test_terminal_status_is_finished_even_with_old_logs(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: needs-review\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text("done\n", encoding="utf-8")
+        for child in td.iterdir():
+            os.utime(child, (1_000, 1_000))
+
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=10_000,
+        )
+
+        assert result["verdict"] == "finished"
+        assert result["terminal"] is True
+        assert result["likely_hung"] is False
+
+    def test_rejects_invalid_stale_threshold_before_commands(self):
+        calls = []
+        with pytest.raises(ValueError):
+            inspect_agent_task(
+                lambda project, command: calls.append((project, command)),
+                project="my-proj",
+                task_id="a12345678901",
+                stale_after_seconds=59,
+            )
+        assert calls == []
+
+    def test_running_startup_proxy_rotation_is_not_plain_running(self):
+        now = 2_000
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "agent-status.md" in command:
+                return {
+                    "stdout": (
+                        "Status: running\n"
+                        "Using exclusive live proxy from configured provider\n"
+                        "OpenCode startup stalled; rotating proxy (attempt 3/4)\n"
+                    ),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat ") and "attempt-state.json" in command:
+                return {
+                    "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat "):
+                return {"stdout": "(not found)", "stderr": "", "exit_code": 1}
+            if command.startswith("tail -c "):
+                return {
+                    "stdout": (
+                        "Using exclusive live proxy from configured provider\n"
+                        "OpenCode startup stalled; rotating proxy (attempt 2/4)\n"
+                        "OpenCode startup stalled; rotating proxy (attempt 3/4)\n"
+                    ),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("stat -c "):
+                if "agent-report.md" in command or "implementation-diff.patch" in command:
+                    return {"stdout": "", "stderr": "not found", "exit_code": 1}
+                return {"stdout": f"20 {now - 90}\n", "stderr": "", "exit_code": 0}
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = inspect_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda _job: {"status": "running"},
+        )
+
+        assert result["verdict"] == "startup_stalled"
+        assert result["likely_hung"] is False
+        assert result["startup"] == {
+            "startup_timeout": False,
+            "opencode_startup_stalled": True,
+            "proxy_rotation": {"observed": True, "attempt": 3, "max_attempts": 4, "count": 3},
+            "useful_agent_activity_seen": False,
+            "dead_time_kind": "opencode_startup",
+        }
+
+    def test_startup_stall_with_useful_agent_work_remains_running(self):
+        now = 2_000
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "agent-status.md" in command:
+                return {"stdout": "Status: running\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "attempt-state.json" in command:
+                return {
+                    "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat "):
+                return {"stdout": "(not found)", "stderr": "", "exit_code": 1}
+            if command.startswith("tail -c "):
+                return {
+                    "stdout": (
+                        "OpenCode startup stalled; rotating proxy (attempt 1/4)\n"
+                        "← Write agent-report.md\n"
+                        "Wrote file successfully.\n"
+                    ),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("stat -c "):
+                if "agent-report.md" in command or "implementation-diff.patch" in command:
+                    return {"stdout": "", "stderr": "not found", "exit_code": 1}
+                return {"stdout": f"20 {now - 30}\n", "stderr": "", "exit_code": 0}
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = inspect_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda _job: {"status": "running"},
+        )
+
+        assert result["verdict"] == "running"
+        assert result["startup"]["opencode_startup_stalled"] is True
+        assert result["startup"]["useful_agent_activity_seen"] is True
+        assert result["startup"]["dead_time_kind"] is None
+
+    def test_startup_timeout_status_is_terminal_and_classified(self):
+        now = 2_000
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "agent-status.md" in command:
+                return {"stdout": "Status: startup-timeout\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat "):
+                return {"stdout": "(not found)", "stderr": "", "exit_code": 1}
+            if command.startswith("tail -c "):
+                return {"stdout": "Failure reason: opencode-startup-timeout\n", "stderr": "", "exit_code": 0}
+            if command.startswith("stat -c "):
+                return {"stdout": f"20 {now - 700}\n", "stderr": "", "exit_code": 0}
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = inspect_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            stale_after_seconds=600,
+            now_epoch=now,
+        )
+
+        assert result["terminal"] is True
+        assert result["verdict"] == "finished"
+        assert result["startup"]["startup_timeout"] is True
+
+
+class TestInspectAgentHeartbeat:
+    def test_fresh_runner_heartbeat_does_not_mask_stale_progress(self):
+        now = 2_000
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "agent-status.md" in command:
+                return {"stdout": "Status: running\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "attempt-state.json" in command:
+                return {
+                    "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat ") and "agent-heartbeat.json" in command:
+                return {
+                    "stdout": json.dumps({
+                        "version": 1,
+                        "state": "running",
+                        "phase": "loop",
+                        "updated_at": "2026-09-02T00:00:00Z",
+                        "updated_epoch": now - 5,
+                        "runner_pid": 123,
+                        "exit_code": None,
+                    }),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat "):
+                return {"stdout": "(not found)", "stderr": "", "exit_code": 1}
+            if command.startswith("tail -c "):
+                return {"stdout": "still waiting\n", "stderr": "", "exit_code": 0}
+            if command.startswith("stat -c "):
+                if "agent-heartbeat.json" in command:
+                    return {"stdout": f"120 {now - 5}\n", "stderr": "", "exit_code": 0}
+                return {"stdout": f"20 {now - 700}\n", "stderr": "", "exit_code": 0}
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = inspect_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda _job: {"status": "running"},
+        )
+
+        assert result["runner_heartbeat_fresh"] is True
+        assert result["runner_heartbeat"]["state"] == "running"
+        assert result["last_activity"]["source"] != "heartbeat"
+        assert result["likely_hung"] is True
+        assert result["verdict"] == "likely_hung"
+
+    def test_finished_runner_heartbeat_is_returned(self):
+        now = 2_000
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "agent-status.md" in command:
+                return {"stdout": "Status: needs-review\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "agent-heartbeat.json" in command:
+                return {
+                    "stdout": json.dumps({
+                        "version": 1,
+                        "state": "finished",
+                        "phase": "final",
+                        "updated_at": "2026-09-02T00:00:00Z",
+                        "updated_epoch": now - 1,
+                        "runner_pid": 123,
+                        "exit_code": 0,
+                    }),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat "):
+                return {"stdout": "(not found)", "stderr": "", "exit_code": 1}
+            if command.startswith("tail -c "):
+                return {"stdout": "done\n", "stderr": "", "exit_code": 0}
+            if command.startswith("stat -c "):
+                return {"stdout": f"20 {now - 1}\n", "stderr": "", "exit_code": 0}
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = inspect_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            now_epoch=now,
+        )
+
+        assert result["terminal"] is True
+        assert result["verdict"] == "finished"
+        assert result["runner_heartbeat"]["state"] == "finished"
+        assert result["runner_heartbeat"]["exit_code"] == 0
+        assert result["runner_heartbeat_fresh"] is False
+
+
+class TestCancelAgentTask:
+    def test_cancels_bound_attempt_job(self):
+        calls: list[str] = []
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            calls.append(command)
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "attempt-state.json" in command:
+                return {
+                    "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            return {"stdout": "", "stderr": "not found", "exit_code": 1}
+
+        result = cancel_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            cancel_job=lambda job_id: {"status": "cancelling", "job_id": job_id},
+        )
+
+        assert result["cancel_requested"] is True
+        assert result["status"] == "cancelling"
+        assert result["job_id"] == "job-1"
+        assert result["diagnostics"]["inspect_agent_task"]["task_id"] == "a12345678901"
+        assert any("attempt-state.json" in command for command in calls)
+
+    def test_refuses_to_guess_job_without_attempt_state(self):
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "", "stderr": "No such file or directory", "exit_code": 1}
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = cancel_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            cancel_job=lambda _job: pytest.fail("must not cancel without job_id"),
+        )
+
+        assert result["status"] == "missing"
+        assert result["cancel_requested"] is False
+
+    def test_refuses_unsubmitted_attempt(self):
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "attempt-state.json" in command:
+                return {
+                    "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": None}),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = cancel_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            cancel_job=lambda _job: pytest.fail("must not cancel without job_id"),
+        )
+
+        assert result["status"] == "not-submitted"
+        assert result["cancel_requested"] is False
+
+
 class TestListAgentTasks:
     def test_passes_project_and_requests_newest_first(self):
         calls = []
@@ -640,3 +1044,162 @@ class TestArchiveAgentTask:
         assert "already contains" in result["stderr"]
         assert (source / "source.txt").read_text(encoding="utf-8") == "source"
         assert (destination / "archived.txt").read_text(encoding="utf-8") == "archive"
+
+
+class TestPrepareAgentTaskRetry:
+    @staticmethod
+    def _shell_run_cmd(cwd: Path):
+        def run_cmd(_project: str, command: str) -> dict:
+            result = subprocess.run(
+                ["sh", "-c", command],
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            return {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exit_code": result.returncode,
+            }
+
+        return run_cmd
+
+    @staticmethod
+    def _shell_run_script(cwd: Path):
+        def run_script(_project: str, script: str) -> dict:
+            result = subprocess.run(
+                ["sh", "-c", script],
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            return {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exit_code": result.returncode,
+            }
+
+        return run_script
+
+    @staticmethod
+    def _write_source_task(cwd: Path, task_id: str, *, status: str = "cancelled", job_id: str = "job-1") -> None:
+        td = cwd / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "task.json").write_text(
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "agent": "opencode",
+                    "allowed_backends": ["opencode"],
+                    "allowed_files": ["src/**"],
+                    "forbidden_files": [".env"],
+                    "required_checks": ["pytest -q"],
+                    "worktree_path": "",
+                    "base_ref": "a" * 40,
+                    "managed_source_sha256": "",
+                    "commit_allowed": False,
+                    "push_allowed": False,
+                    "created": "2026-09-02T00:00:00+00:00",
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        (td / "current-plan.md").write_text("# Original plan\n\nDo the work.\n", encoding="utf-8")
+        (td / "agent-status.md").write_text(f"Status: {status}\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": job_id}),
+            encoding="utf-8",
+        )
+
+    def test_prepares_new_task_from_terminal_source_without_attempt_state(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        source = "source-task-001"
+        retry = "retry-task-001"
+        self._write_source_task(tmp_path, source, status="cancelled", job_id="job-cancelled")
+
+        result = prepare_agent_task_retry(
+            self._shell_run_cmd(tmp_path),
+            self._shell_run_script(tmp_path),
+            project="my-proj",
+            source_task_id=source,
+            retry_task_id=retry,
+            job_status=lambda job_id: {"status": "cancelled", "job_id": job_id},
+        )
+
+        assert result["exit_code"] == 0
+        assert result["source_task_id"] == source
+        assert result["retry_task_id"] == retry
+        retry_dir = tmp_path / ".ai-bridge" / "tasks" / retry
+        assert retry_dir.is_dir()
+        task = json.loads((retry_dir / "task.json").read_text(encoding="utf-8"))
+        assert task["task_id"] == retry
+        assert task["allowed_files"] == ["src/**"]
+        assert not (retry_dir / "attempt-state.json").exists()
+        assert not (retry_dir / "opencode-output.log").exists()
+        plan = (retry_dir / "current-plan.md").read_text(encoding="utf-8")
+        assert f"- Source task ID: {source}" in plan
+        assert f"- Retry task ID: {retry}" in plan
+        assert result["next"]["run_agent"] == {"project": "my-proj", "task_id": retry}
+
+    def test_refuses_retry_when_source_job_is_active(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        source = "source-task-002"
+        self._write_source_task(tmp_path, source, status="running", job_id="job-running")
+
+        result = prepare_agent_task_retry(
+            self._shell_run_cmd(tmp_path),
+            self._shell_run_script(tmp_path),
+            project="my-proj",
+            source_task_id=source,
+            retry_task_id="retry-task-002",
+            job_status=lambda job_id: {"status": "running", "job_id": job_id},
+        )
+
+        assert result["exit_code"] == 1
+        assert result["code"] == "AGENT_TASK_NOT_TERMINAL"
+        assert not (tmp_path / ".ai-bridge" / "tasks" / "retry-task-002").exists()
+
+    def test_refuses_to_overwrite_existing_retry_task(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        source = "source-task-003"
+        retry = "retry-task-003"
+        self._write_source_task(tmp_path, source, status="failed", job_id="job-failed")
+        (tmp_path / ".ai-bridge" / "tasks" / retry).mkdir(parents=True)
+
+        result = prepare_agent_task_retry(
+            self._shell_run_cmd(tmp_path),
+            self._shell_run_script(tmp_path),
+            project="my-proj",
+            source_task_id=source,
+            retry_task_id=retry,
+            job_status=lambda job_id: {"status": "failed", "job_id": job_id},
+        )
+
+        assert result["exit_code"] == 1
+        assert result["code"] == "ALREADY_EXISTS"
+
+    def test_allows_retry_for_never_submitted_attempt(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        source = "source-task-004"
+        retry = "retry-task-004"
+        self._write_source_task(tmp_path, source, status="created", job_id="")
+        td = tmp_path / ".ai-bridge" / "tasks" / source
+        (td / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": None}),
+            encoding="utf-8",
+        )
+
+        result = prepare_agent_task_retry(
+            self._shell_run_cmd(tmp_path),
+            self._shell_run_script(tmp_path),
+            project="my-proj",
+            source_task_id=source,
+            retry_task_id=retry,
+            job_status=lambda _job_id: {"status": "missing"},
+        )
+
+        assert result["exit_code"] == 0
+        assert (tmp_path / ".ai-bridge" / "tasks" / retry / "task.json").is_file()

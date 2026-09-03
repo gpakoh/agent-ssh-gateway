@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import inspect
 from pathlib import Path
@@ -161,6 +162,56 @@ def test_unknown_project_fails_closed(monkeypatch, immediate_run_tool):
     assert result["error"]["retryable"] is False
 
 
+def test_integrate_readonly_filesystem_is_canonical_and_path_safe(
+    project, immediate_run_tool, monkeypatch
+):
+    root, journal_base = project
+
+    def _raise(*_args, **_kwargs):
+        raise OSError(errno.EROFS, "Read-only file system", str(root / "config.txt"))
+
+    monkeypatch.setattr(supervisor, "integrate_file", _raise)
+
+    result = supervisor.supervisor_integrate_file(
+        "demo",
+        "config.txt",
+        _sha(b"old"),
+        "new",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "WORKSPACE_READONLY"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["hint"]
+    assert str(root) not in repr(result)
+    assert str(journal_base) not in repr(result)
+
+
+def test_integrate_permission_error_is_canonical_and_path_safe(
+    project, immediate_run_tool, monkeypatch
+):
+    root, journal_base = project
+
+    def _raise(*_args, **_kwargs):
+        raise PermissionError(errno.EACCES, "Permission denied", str(root / "config.txt"))
+
+    monkeypatch.setattr(supervisor, "integrate_file", _raise)
+
+    result = supervisor.supervisor_integrate_file(
+        "demo",
+        "config.txt",
+        _sha(b"old"),
+        "new",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PERMISSION_DENIED"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["hint"]
+    assert str(root) not in repr(result)
+    assert str(journal_base) not in repr(result)
+
+
 def test_non_text_content_is_rejected(project, immediate_run_tool):
     result = supervisor.supervisor_integrate_file(
         "demo",
@@ -242,7 +293,31 @@ def test_register_all_registers_exactly_three_tools(monkeypatch):
         "supervisor_integrate_file",
         "supervisor_recover_integrations",
         "supervisor_register_project",
+        "prepare_candidate_clone",
     ]
+
+
+def test_register_project_readonly_filesystem_is_canonical_and_path_safe(
+    tmp_path, immediate_run_tool, monkeypatch
+):
+    config_dir = tmp_path / "registry"
+    config_dir.mkdir()
+    journal_root = tmp_path / "journals"
+    monkeypatch.setattr(supervisor, "_resolve_registry_config_dir", lambda: config_dir)
+    monkeypatch.setattr(supervisor, "_journal_root_for_project", lambda _project, _root: journal_root)
+
+    def _raise(**_kwargs):
+        raise OSError(errno.EROFS, "Read-only file system", str(config_dir / "projects.yaml"))
+
+    monkeypatch.setattr(supervisor, "register_project", _raise)
+
+    result = supervisor.supervisor_register_project("new-project", "new-project")
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "WORKSPACE_READONLY"
+    assert result["error"]["hint"]
+    assert str(config_dir) not in repr(result)
+    assert str(journal_root) not in repr(result)
 
 
 def test_register_project_signature_does_not_expose_server_paths():

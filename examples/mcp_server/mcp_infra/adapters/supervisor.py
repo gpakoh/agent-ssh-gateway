@@ -8,6 +8,7 @@ under a server-controlled persistent directory.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import logging
 import os
@@ -16,6 +17,12 @@ from typing import Any
 
 from tool_results import tool_error, tool_success
 
+from examples.mcp_server.candidate_clone import (
+    CandidateCloneError,
+)
+from examples.mcp_server.candidate_clone import (
+    prepare_candidate_clone as _prepare_candidate_clone,
+)
 from examples.mcp_server.mcp_infra.tool_registry import (
     _validate_project,
     instrumented,
@@ -94,6 +101,33 @@ def _journal_root_for_project(project: str, project_root: Path) -> Path:
 
     digest = hashlib.sha256(f"{project}\0{project_root}".encode()).hexdigest()
     return base / digest
+
+
+def _supervisor_io_error(tool: str, exc: BaseException, message: str) -> dict[str, Any]:
+    """Classify supervisor adapter I/O failures without leaking host paths."""
+    if isinstance(exc, PermissionError):
+        return tool_error(
+            tool=tool,
+            code="PERMISSION_DENIED",
+            message=message,
+            retryable=False,
+            hint="Use a writeable candidate clone or fix the server-side file permissions before retrying.",
+        )
+    if isinstance(exc, OSError) and exc.errno == errno.EROFS:
+        return tool_error(
+            tool=tool,
+            code="WORKSPACE_READONLY",
+            message=message,
+            retryable=False,
+            hint="Use a writeable candidate clone or change the workspace mount before retrying.",
+        )
+    logger.warning("Supervisor adapter I/O failure", exc_info=exc)
+    return tool_error(
+        tool=tool,
+        code="TOOL_EXECUTION_FAILED",
+        message=message,
+        retryable=False,
+    )
 
 
 def _integration_error(tool: str, exc: SupervisorIntegrationError) -> dict[str, Any]:
@@ -238,12 +272,10 @@ def _register_project_impl(
             retryable=False,
         )
     except (OSError, UnicodeError) as exc:
-        logger.warning("Project registration failed", exc_info=exc)
-        return tool_error(
-            tool=tool,
-            code="TOOL_EXECUTION_FAILED",
-            message="Project registration could not be persisted.",
-            retryable=False,
+        return _supervisor_io_error(
+            tool,
+            exc,
+            "Project registration could not be persisted.",
         )
 
     cache_reset = _reset_project_registry_caches()
@@ -277,6 +309,45 @@ def supervisor_register_project(
             project_id, root, project_type, description, tags, parent
         ),
         success_text="Project registration completed.",
+    )
+
+
+def prepare_candidate_clone(
+    project: str,
+    branch: str,
+    base_ref: str | None = None,
+) -> dict[str, Any]:
+    """Create/recover a durable writeable candidate clone and register it."""
+
+    def _fn() -> dict[str, Any]:
+        config_dir = _resolve_registry_config_dir()
+        journal_root = _journal_root_for_project("workspace-registry", config_dir)
+        try:
+            receipt = _prepare_candidate_clone(
+                project,
+                branch,
+                base_ref,
+                config_dir=config_dir,
+                journal_root=journal_root,
+            )
+        except CandidateCloneError as exc:
+            return tool_error(
+                tool="prepare_candidate_clone",
+                code=exc.code,
+                message=exc.message,
+                retryable=exc.retryable,
+                details=exc.details,
+            )
+        cache_reset = _reset_project_registry_caches()
+        result = receipt.as_dict()
+        result["cache_reset"] = cache_reset
+        return result
+
+    return run_tool(
+        tool="prepare_candidate_clone",
+        title="Prepare candidate clone",
+        fn=_fn,
+        success_text="Prepared candidate clone.",
     )
 
 
@@ -324,12 +395,10 @@ def _integrate_impl(
     except SupervisorIntegrationError as exc:
         return _integration_error(tool, exc)
     except (OSError, UnicodeError) as exc:
-        logger.warning("Supervisor integration I/O failure", exc_info=exc)
-        return tool_error(
-            tool=tool,
-            code="TOOL_EXECUTION_FAILED",
-            message="Supervisor integration could not persist the requested change.",
-            retryable=False,
+        return _supervisor_io_error(
+            tool,
+            exc,
+            "Supervisor integration could not persist the requested change.",
         )
 
     # Do not expose result.target_path: it is an absolute host path.
@@ -386,7 +455,7 @@ def _recover_impl(project: str) -> dict[str, Any]:
 
     try:
         recovered = recover_pending(project_root, journal_root)
-    except (SupervisorIntegrationError, OSError) as exc:
+    except SupervisorIntegrationError as exc:
         logger.warning("Supervisor recovery sweep failed", exc_info=exc)
         return tool_error(
             tool=tool,
@@ -394,6 +463,8 @@ def _recover_impl(project: str) -> dict[str, Any]:
             message="Supervisor recovery sweep failed.",
             retryable=False,
         )
+    except OSError as exc:
+        return _supervisor_io_error(tool, exc, "Supervisor recovery sweep failed.")
 
     rows: list[dict[str, Any]] = []
     for item in recovered:
@@ -438,6 +509,9 @@ def register_all() -> None:
     register_tool("supervisor_register_project")(
         instrumented("supervisor_register_project")(supervisor_register_project)
     )
+    register_tool("prepare_candidate_clone")(
+        instrumented("prepare_candidate_clone")(prepare_candidate_clone)
+    )
 
 
 __all__ = [
@@ -445,4 +519,5 @@ __all__ = [
     "supervisor_integrate_file",
     "supervisor_recover_integrations",
     "supervisor_register_project",
+    "prepare_candidate_clone",
 ]

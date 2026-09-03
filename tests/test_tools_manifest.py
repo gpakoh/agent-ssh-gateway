@@ -55,8 +55,25 @@ class TestBuildManifest:
             "tools",
             "modes",
             "access_profiles",
+            "agent_guidance",
         ):
             assert field in result, f"Missing field: {field}"
+
+    def test_agent_guidance_points_to_info_without_host_paths(
+        self, sample_tools: list[FakeTool]
+    ) -> None:
+        result = build_manifest(sample_tools, scope_enforcement="audit", mode_override="mcp_client")
+
+        guidance = result["agent_guidance"]
+        assert guidance["project_metadata_tool"] == "info"
+        assert "workspace.recommended_write_plane" in guidance["before_project_writes"]
+        assert "workspace.git_state" in guidance["before_project_writes"]
+        assert "verification.cwd" in guidance["before_verification"]
+        assert "inspect_agent_task" in guidance["agent_run_diagnostics"]
+        assert "stale/hung" in guidance["agent_run_diagnostics"]
+        serialized = str(guidance)
+        assert "/home/" not in serialized
+        assert "/media/" not in serialized
 
     def test_active_mode_is_string(self, sample_tools: list[FakeTool]) -> None:
         result = build_manifest(sample_tools, mode_override="mcp_client")

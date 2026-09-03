@@ -122,6 +122,10 @@ class TestFileWrite:
         assert result["path"] == "new_file.txt"
         assert result["size"] == 11
         assert result["encoding"] == "utf-8"
+        assert result["post_write"]["path"] == "new_file.txt"
+        assert result["post_write"]["file_exists"] is True
+        assert result["post_write"]["current_hash"] == result["post_write"]["expected_hash"]
+        assert result["post_write"]["verified"] is True
         assert (edit_workspace["project"] / "new_file.txt").read_text() == "hello world"
 
     def test_overwrites_existing(self, edit_workspace):
@@ -284,6 +288,10 @@ class TestFileEdit:
             registry=edit_workspace["registry"],
         )
         assert result["replaced"] is True
+        assert result["post_write"]["path"] == "src/main.py"
+        assert result["post_write"]["file_exists"] is True
+        assert result["post_write"]["current_hash"] == result["post_write"]["expected_hash"]
+        assert result["post_write"]["verified"] is True
         assert "def entry():" in (edit_workspace["project"] / "src" / "main.py").read_text()
 
     def test_empty_old_string(self, edit_workspace):
@@ -386,6 +394,10 @@ class TestApplyPatch:
         )
         assert result["applied"] is True
         assert result["backup_hash"].startswith("sha256:")
+        assert result["post_write"]["path"] == "src/main.py"
+        assert result["post_write"]["file_exists"] is True
+        assert result["post_write"]["current_hash"] == result["post_write"]["expected_hash"]
+        assert result["post_write"]["verified"] is True
         content = (edit_workspace["project"] / "src" / "main.py").read_text()
         assert "def entry():" in content
         assert "return 0" in content

@@ -36,7 +36,10 @@ _GATEWAY_ERROR_CODE_MAP: dict[str, str] = {
     # Same systematic audit: the gateway's own name for this is
     # RATE_LIMIT_EXCEEDED (both slowapi's 429 handler and SessionLimitError
     # produce it via app/state.py's (429, "") entry) — not "RATE_LIMITED".
+    # SessionLimitError now emits the more specific SESSION_LIMIT_EXCEEDED;
+    # the MCP surface still reports the existing generic RATE_LIMITED code.
     "RATE_LIMIT_EXCEEDED": "RATE_LIMITED",
+    "SESSION_LIMIT_EXCEEDED": "RATE_LIMITED",
     "TIMEOUT": "TIMEOUT",
     # TimeoutError's handler produces GATEWAY_TIMEOUT (app/state.py's
     # (504, "") entry), never the bare "TIMEOUT" this map already expected.
@@ -82,6 +85,36 @@ def _gateway_error_message(exc: GatewayClientError) -> str:
     return str(exc)
 
 
+def _gateway_error_details(exc: GatewayClientError) -> dict[str, Any] | None:
+    """Extract safe machine-readable details from a structured gateway error.
+
+    Keep this deliberately allowlisted.  The gateway body can contain
+    transport/debug fields that do not belong on the MCP surface, but some
+    fields are essential for an agent to recover without guessing: job ids,
+    wait status, and FastAPI validation field errors.
+    """
+    if not isinstance(exc.body, dict):
+        return None
+
+    details: dict[str, Any] = {}
+    for key in ("job_id", "status", "wait_timed_out", "errors", "total_errors"):
+        value = exc.body.get(key)
+        if value is not None:
+            details[key] = value
+
+    detail = exc.body.get("detail")
+    if isinstance(detail, dict):
+        nested_details = detail.get("details")
+        if isinstance(nested_details, dict):
+            details.update(nested_details)
+        for key in ("job_id", "status", "wait_timed_out", "errors", "total_errors"):
+            value = detail.get(key)
+            if value is not None:
+                details[key] = value
+
+    return details or None
+
+
 def _gateway_error_hint(exc: GatewayClientError, code: str) -> str | None:
     """Extract the gateway's own per-error hint, when present.
 
@@ -100,6 +133,10 @@ def _gateway_error_hint(exc: GatewayClientError, code: str) -> str | None:
         return "The requested file does not exist at the specified path"
     if code == "WAIT_TIMEOUT":
         return "The command is still running server-side; call job_status/job_result with error.details.job_id to check on it or retrieve the final result once it completes."
+    if code == "REMOTE_UNAVAILABLE":
+        return "The gateway transport is temporarily unavailable; retry the same tool call after checking session_health or health."
+    if code == "TIMEOUT":
+        return "The gateway request timed out; retry may help, or use an async/background path for long-running operations."
     return None
 
 
