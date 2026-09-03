@@ -35,6 +35,7 @@ from mcp_client_tools import (
     git_diff_stat,
     git_push,
     git_status,
+    git_update_branch_by_merge,
     info,
     list_files,
     list_tree,
@@ -931,6 +932,27 @@ def gateway_git_create_branch(project: str, branch: str) -> dict[str, Any]:
     )
 
 
+def gateway_git_update_branch_by_merge(
+    project: str,
+    branch: str,
+    source_branch: str = "master",
+    expected_head: str | None = None,
+) -> dict[str, Any]:
+    """Update an existing local feature branch by merging a source branch/ref into it."""
+    return run_tool(
+        tool="git_update_branch_by_merge",
+        title="git update branch by merge",
+        fn=lambda: git_update_branch_by_merge(
+            _server_client(),
+            project,
+            branch,
+            source_branch=source_branch,
+            expected_head=expected_head,
+        ),
+        success_text="Updated branch by merge.",
+    )
+
+
 def gateway_git_push(
     project: str,
     remote: str = "origin",
@@ -1251,6 +1273,7 @@ def register_all() -> None:
     register_tool("git_add")(gateway_git_add)
     register_tool("git_commit")(gateway_git_commit)
     register_tool("git_create_branch")(gateway_git_create_branch)
+    register_tool("git_update_branch_by_merge")(gateway_git_update_branch_by_merge)
     register_tool("git_push")(gateway_git_push)
     register_tool("run_tests")(gateway_run_tests)
     register_tool("run_lint")(gateway_run_lint)

@@ -1669,6 +1669,149 @@ def git_create_branch(
     return run_project_command(client, project, f"git switch -c {shlex.quote(branch)}")
 
 
+def _validate_expected_git_head(value: str | None) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"INVALID_INPUT: expected_head must be a string or None, got {type(value).__name__}")
+    normalized = value.strip().lower()
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", normalized):
+        raise ValueError(
+            "INVALID_INPUT: expected_head must be a full 40- or 64-character hex commit id"
+        )
+    return normalized
+
+
+def git_update_branch_by_merge(
+    client: GatewayClient,
+    project: str,
+    branch: str,
+    source_branch: str = "master",
+    expected_head: str | None = None,
+) -> dict[str, Any]:
+    """Switch to an existing feature branch and merge a source branch into it.
+
+    This closes the safe-tool gap between create-only branch tooling and a
+    generic shell. It refuses protected targets, dirty worktrees, missing local
+    refs, and optional expected-head mismatches before running ``git merge``.
+    """
+    branch = _validate_git_name(branch, "branch")
+    source_branch = _validate_git_name(source_branch, "source_branch")
+    expected_head = _validate_expected_git_head(expected_head)
+    if branch in {"main", "master"}:
+        raise ValueError(f"POLICY_DENIED: updating protected branch {branch!r} is not allowed")
+    if branch == source_branch:
+        raise ValueError("INVALID_INPUT: branch and source_branch must be different")
+
+    project = _validate_project(project)
+    resolved = _resolve_project(project)
+    state = _project_git_state(resolved)
+    if not state.get("available"):
+        return tool_error(
+            tool="git_update_branch_by_merge",
+            code="CHECK_FAILED",
+            message="Current project git state is unavailable; refusing branch update",
+            retryable=True,
+            hint="Refresh info(project) and verify the project is a readable Git worktree before retrying.",
+            details={"project": project, "state": state},
+            source="gateway",
+        )
+    if state.get("dirty"):
+        return tool_error(
+            tool="git_update_branch_by_merge",
+            code="WORKSPACE_CONTENDED",
+            message="Working tree is dirty; refusing to switch branches or merge",
+            retryable=False,
+            hint="Commit, stash, or discard local changes before updating a branch by merge.",
+            details={
+                "project": project,
+                "branch": state.get("branch"),
+                "head": state.get("head"),
+                "status_entries": state.get("status_entries"),
+            },
+            source="gateway",
+        )
+
+    target_ref = f"refs/heads/{branch}^{{commit}}"
+    target_head = _local_git_output(resolved, ["rev-parse", "--verify", target_ref])
+    if target_head is None:
+        return tool_error(
+            tool="git_update_branch_by_merge",
+            code="GIT_LOCAL_REF_MISSING",
+            message=f"Local target branch {branch!r} was not found",
+            retryable=False,
+            hint="Create or fetch the target branch before requesting a merge update.",
+            details={"project": project, "branch": branch},
+            source="gateway",
+        )
+    target_head = target_head.strip().lower()
+    if expected_head and target_head != expected_head:
+        return tool_error(
+            tool="git_update_branch_by_merge",
+            code="HEAD_MISMATCH",
+            message="Target branch HEAD does not match expected_head; refusing merge",
+            retryable=True,
+            hint="Refresh the branch state and retry with the current target HEAD if the change is intentional.",
+            details={
+                "project": project,
+                "branch": branch,
+                "expected_head": expected_head,
+                "actual_head": target_head,
+            },
+            source="gateway",
+        )
+
+    source_ref = f"{source_branch}^{{commit}}"
+    source_head = _local_git_output(resolved, ["rev-parse", "--verify", source_ref])
+    if source_head is None:
+        return tool_error(
+            tool="git_update_branch_by_merge",
+            code="GIT_LOCAL_REF_MISSING",
+            message=f"Source branch/ref {source_branch!r} was not found",
+            retryable=False,
+            hint="Fetch or create the source branch/ref before requesting a merge update.",
+            details={"project": project, "source_branch": source_branch},
+            source="gateway",
+        )
+    source_head = source_head.strip().lower()
+
+    commands = [
+        f"git switch {shlex.quote(branch)}",
+        f"git merge --no-ff --no-edit {shlex.quote(source_branch)}",
+        "git rev-parse HEAD",
+    ]
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    last: dict[str, Any] | None = None
+    for command in commands:
+        last = run_project_command(client, project, command)
+        stdout_parts.append(str(last.get("stdout", "")))
+        stderr_parts.append(str(last.get("stderr", "")))
+        if last.get("exit_code") != 0:
+            last["stdout"] = "".join(stdout_parts)
+            last["stderr"] = "".join(stderr_parts)
+            last["branch"] = branch
+            last["source_branch"] = source_branch
+            last["previous_head"] = target_head
+            last["source_head"] = source_head
+            return last
+
+    new_head = str(last.get("stdout", "")).strip() if last else ""
+    return {
+        "outcome": "passed",
+        "exit_code": 0,
+        "stdout": "".join(stdout_parts),
+        "stderr": "".join(stderr_parts),
+        "execution_duration_ms": None,
+        "job_id": None,
+        "branch": branch,
+        "source_branch": source_branch,
+        "previous_head": target_head,
+        "source_head": source_head,
+        "new_head": new_head,
+    }
+
+
 def git_push(
     _client: GatewayClient,
     project: str,
