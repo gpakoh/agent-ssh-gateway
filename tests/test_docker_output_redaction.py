@@ -341,3 +341,68 @@ def test_ps_mounts_named_volume_first_still_redacts_later_path():
     out = DockerClient._sanitize_ps_row(row)
     assert "/deploy/web-ssh-gateway" not in out["Mounts"]
     assert out["Mounts"] == f"web-ssh-gateway_data,{REDACTED},46244ecad691da"
+
+
+def test_ps_running_without_docker_health_flag_is_healthy_with_explicit_source():
+    """Gitea-like containers can be running without a Docker HEALTHCHECK.
+
+    The row should be treated as healthy at the runtime level, while still
+    making it explicit that this did not come from Docker's Health.Status.
+    """
+    row = {
+        "Names": "gitea",
+        "Image": "gitea/gitea:latest",
+        "State": "running",
+        "Status": "Up 4 days",
+        "Labels": "",
+        "Mounts": "",
+    }
+    out = DockerClient._sanitize_ps_row(row)
+    assert out["Healthy"] is True
+    assert out["DockerHealth"] == "not_configured"
+    assert out["HealthSource"] == "running_no_docker_health_flag"
+
+
+def test_ps_preserves_docker_health_source_when_status_is_healthy():
+    row = {
+        "Names": "web-ssh-gateway",
+        "Image": "agent-ssh-gateway:latest",
+        "State": "running",
+        "Status": "Up 8 minutes (healthy)",
+        "Labels": "",
+        "Mounts": "",
+    }
+    out = DockerClient._sanitize_ps_row(row)
+    assert out["Healthy"] is True
+    assert out["DockerHealth"] == "healthy"
+    assert out["HealthSource"] == "docker_health"
+
+
+def test_ps_unhealthy_docker_health_overrides_running_state():
+    row = {
+        "Names": "web-ssh-gateway",
+        "Image": "agent-ssh-gateway:latest",
+        "State": "running",
+        "Status": "Up 8 minutes (unhealthy)",
+        "Labels": "",
+        "Mounts": "",
+    }
+    out = DockerClient._sanitize_ps_row(row)
+    assert out["Healthy"] is False
+    assert out["DockerHealth"] == "unhealthy"
+    assert out["HealthSource"] == "docker_health"
+
+
+def test_ps_non_running_without_docker_health_is_not_healthy():
+    row = {
+        "Names": "worker",
+        "Image": "worker:latest",
+        "State": "exited",
+        "Status": "Exited (0) 1 hour ago",
+        "Labels": "",
+        "Mounts": "",
+    }
+    out = DockerClient._sanitize_ps_row(row)
+    assert out["Healthy"] is False
+    assert out["DockerHealth"] == "not_configured"
+    assert out["HealthSource"] == "container_state"
