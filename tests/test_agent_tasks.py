@@ -13,6 +13,7 @@ from examples.mcp_server.agent_tasks import (
     archive_agent_task,
     build_current_plan,
     build_initial_status,
+    build_task_consensus,
     build_task_json,
     cancel_agent_task,
     inspect_agent_task,
@@ -25,6 +26,7 @@ from examples.mcp_server.agent_tasks import (
     validate_required_checks,
     validate_scope_contract,
     validate_task_id,
+    validate_workflow_phase,
     write_agent_task,
 )
 
@@ -184,6 +186,17 @@ class TestValidateScopeContract:
             )
 
 
+class TestValidateWorkflowPhase:
+    def test_default_and_normalization(self):
+        assert validate_workflow_phase(None) == "implementation"
+        assert validate_workflow_phase("") == "implementation"
+        assert validate_workflow_phase(" Validation ") == "validation"
+
+    def test_rejects_unknown_phase(self):
+        with pytest.raises(ValueError):
+            validate_workflow_phase("brainstorm")
+
+
 class TestBuildTaskJson:
     def test_minimal(self):
         result = build_task_json(task_id="a12345678901", agent="opencode")
@@ -192,6 +205,7 @@ class TestBuildTaskJson:
         assert data["agent"] == "opencode"
         assert data["allowed_backends"] == ["opencode"]
         assert data["allowed_files"] == []
+        assert data["workflow_phase"] == "implementation"
         assert data["commit_allowed"] is False
         assert "created" in data
 
@@ -209,12 +223,14 @@ class TestBuildTaskJson:
             worktree_path="../agent-worktrees/task-b",
             commit_allowed=False,
             push_allowed=False,
+            workflow_phase="validation",
         )
         data = json.loads(result)
         assert data["agent"] == "opencode"
         assert data["allowed_backends"] == ["opencode"]
         assert "src/**" in data["allowed_files"]
         assert data["required_checks"] == ["pytest -q", "ruff check"]
+        assert data["workflow_phase"] == "validation"
 
     def test_accepts_base_ref(self):
         sha = "c" * 40
@@ -262,6 +278,27 @@ class TestWriteAgentTask:
         assert contract["base_ref"] == ""
         assert "base-ref.txt" not in script
 
+    def test_writes_consensus_and_workflow_phase(self):
+        fake_run_cmd, calls = self._fake_run_cmd()
+        write_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            agent="opencode",
+            task="Implement handoff",
+            workflow_phase="validation",
+        )
+        script = calls[0][1]
+        contract = json.loads(self._decoded_payload(script, "task.json"))
+        assert contract["workflow_phase"] == "validation"
+        plan = self._decoded_payload(script, "current-plan.md")
+        assert "Current phase: `validation`" in plan
+        assert "pure discussion is not a sufficient deliverable" in plan
+        consensus = self._decoded_payload(script, "consensus.md")
+        assert "# Agent consensus" in consensus
+        assert "Workflow phase: validation" in consensus
+        assert "GO/NO-GO" in consensus
+
     def test_invalid_base_ref_raises_before_script(self):
         fake_run_cmd, calls = self._fake_run_cmd()
         with pytest.raises(ValueError):
@@ -282,12 +319,27 @@ class TestBuildInitialStatus:
         assert "custom-agent" in result
 
 
+class TestBuildTaskConsensus:
+    def test_builds_operator_baton_state(self):
+        result = build_task_consensus(
+            task_id="c34567890123",
+            task="Fix tests",
+            workflow_phase="validation",
+        )
+        assert "# Agent consensus" in result
+        assert "Workflow phase: validation" in result
+        assert "GO/NO-GO" in result
+        assert "Do not re-litigate settled decisions" in result
+
+
 class TestBuildCurrentPlan:
     def test_minimal(self):
         result = build_current_plan(task_id="c34567890123", task="Fix tests")
         assert "# Fix tests" in result
         assert "c34567890123" in result
         assert "implementation-diff.patch" in result
+        assert "consensus.md" in result
+        assert "Current phase: `implementation`" in result
         assert "Do not commit or push" in result
 
     def test_full(self):
@@ -1140,6 +1192,9 @@ class TestPrepareAgentTaskRetry:
         assert not (retry_dir / "attempt-state.json").exists()
         assert not (retry_dir / "opencode-output.log").exists()
         plan = (retry_dir / "current-plan.md").read_text(encoding="utf-8")
+        consensus = (retry_dir / "consensus.md").read_text(encoding="utf-8")
+        assert "# Agent consensus" in consensus
+        assert "Retry of" in consensus
         assert f"- Source task ID: {source}" in plan
         assert f"- Retry task ID: {retry}" in plan
         assert result["next"]["run_agent"] == {"project": "my-proj", "task_id": retry}

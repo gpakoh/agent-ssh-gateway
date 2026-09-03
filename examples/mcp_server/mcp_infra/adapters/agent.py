@@ -130,6 +130,7 @@ def gateway_write_agent_task(
     constraints: str | None = None,
     worktree_path: str | None = None,
     base_ref: str | None = None,
+    workflow_phase: str | None = None,
 ) -> dict[str, Any]:
     """Write task.json + current-plan.md to .ai-bridge/tasks/<task_id>/."""
 
@@ -178,6 +179,7 @@ def gateway_write_agent_task(
             worktree_path=worktree_path,
             base_ref=base_ref,
             managed_source_sha256=managed_source_sha256,
+            workflow_phase=workflow_phase,
         )
 
     return run_tool(
