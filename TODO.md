@@ -88,6 +88,21 @@ checklist for what still needs explicit close-out after #138 review/merge.
    for existing-branch switch and local-branch deletion, with regression coverage
    proving operators do not need to create probe refs to recover branch state.
 
+10. ⬜ **OpenCode worker `UnknownError` needs structured failure reason and server-log correlation.**
+   Two managed delivery tasks (`supervisor-local-router-parser-delivery-20260903`
+   and `deep-researcher-response-mode-forward-port-delivery-managed-20260903`)
+   reached source-bundle verification, clean managed clone and exclusive live
+   proxy selection, then failed before any useful agent work or required checks.
+   `agent-report.md` recorded `Status: failed`, worker/final exit code 1,
+   parent/evidence/scope guards green, `Required-checks exit code: 0 (ran=0)`,
+   but `Failure reason: none`; bounded log tail contained only OpenCode
+   `UnknownError` with refs `err_d12aa02a` and `err_4ae86918`. This makes the
+   operator unable to distinguish provider failure, proxy failure, backend crash,
+   prompt/tool error, or policy denial. Closure requires mapping such failures to
+   a typed phase/verdict (`opencode_server_error`, `provider_error`,
+   `proxy_error`, etc.), preserving the opaque upstream error ref, and surfacing
+   a redacted server-log correlation hint without requiring arbitrary log access.
+
 ## Architect/operator wanted capabilities — 2026-09-03
 
 1. ⬜ **First-class bounded internal service health probe.** Architect/Supervisor work often needs to verify an internal service endpoint such as `http://agent-memory-service:8070/health` or `/ready` from the same network context that future automation will use. Today the safe path is indirect (`docker_compose_ps`, `docker_inspect`, `getent hosts`), while common direct probes (`curl`, `wget`, `nc`, `python -c urllib`) may be blocked by policy. Desired capability: a read-only `http_get_health`/`tcp_connect_check` tool with allowlisted method, explicit host/port/path, timeout, max response bytes, no secrets/env exposure, provenance, and clear distinction between DNS failure, connection refused, timeout, non-2xx response and healthy JSON response. This is a wanted capability, not proof that the target service is unhealthy.
