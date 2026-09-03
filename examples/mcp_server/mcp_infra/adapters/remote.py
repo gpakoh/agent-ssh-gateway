@@ -513,13 +513,15 @@ async def gitea_close_pull_request(
     pull_number: int,
     expected_head_sha: str,
 ) -> dict[str, Any]:
-    """Close an open PR protected by an exact head-SHA check.
+    """Close an open PR protected by exact head-SHA and unmerged-state checks.
 
     Never merges and never deletes branches: the only mutation is a
     single state=closed PATCH issued after a fresh GET confirms the PR
     is still open and its head still equals expected_head_sha. Any head
     mismatch fails closed with zero writes. A PR already closed whose
-    head still matches is an idempotent success (already_closed=true).
+    head still matches and is explicitly merged=false is an idempotent
+    success (already_closed=true). After mutation the PR is re-read and
+    state=closed, merged=false, head SHA and base ref are verified.
     """
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
@@ -554,7 +556,6 @@ async def gitea_close_pull_request(
             base = pr.get("base") or {}
             actual_head_sha = str(head.get("sha") or "").lower()
             base_ref = str(base.get("ref") or "")
-            html_url = pr.get("html_url")
 
             if actual_head_sha != expected_head_sha:
                 return tool_error(
@@ -563,8 +564,16 @@ async def gitea_close_pull_request(
                     message="pull request head changed; re-read the PR before closing",
                     source="gitea",
                 )
+            if pr.get("merged") is True:
+                return tool_error(
+                    tool="gitea_close_pull_request",
+                    code="CLOSE_NOT_CONFIRMED",
+                    message="pull request is already merged; refusing close-without-merge cleanup",
+                    source="gitea",
+                )
             if pr.get("state") == "closed":
                 already_closed = True
+                confirmed_pr = await client.get_pull_request(owner, repo, pull_number)
             elif pr.get("state") != "open":
                 return tool_error(
                     tool="gitea_close_pull_request",
@@ -574,17 +583,62 @@ async def gitea_close_pull_request(
                 )
             else:
                 await client.close_pull_request(owner, repo, pull_number)
+                confirmed_pr = await client.get_pull_request(owner, repo, pull_number)
+
+            confirmed_head = confirmed_pr.get("head") or {}
+            confirmed_base = confirmed_pr.get("base") or {}
+            confirmed_head_sha = str(confirmed_head.get("sha") or "").lower()
+            confirmed_base_ref = str(confirmed_base.get("ref") or "")
+            if confirmed_head_sha != expected_head_sha:
+                return tool_error(
+                    tool="gitea_close_pull_request",
+                    code="CLOSE_NOT_CONFIRMED",
+                    message="pull request head changed while closing",
+                    retryable=True,
+                    details={
+                        "expected_head_sha": expected_head_sha,
+                        "observed_head_sha": confirmed_head_sha,
+                    },
+                    source="gitea",
+                )
+            if confirmed_base_ref != base_ref:
+                return tool_error(
+                    tool="gitea_close_pull_request",
+                    code="CLOSE_NOT_CONFIRMED",
+                    message="pull request base changed while closing",
+                    retryable=True,
+                    details={
+                        "expected_base": base_ref,
+                        "observed_base": confirmed_base_ref,
+                    },
+                    source="gitea",
+                )
+            if confirmed_pr.get("state") != "closed" or confirmed_pr.get("merged") is not False:
+                return tool_error(
+                    tool="gitea_close_pull_request",
+                    code="CLOSE_NOT_CONFIRMED",
+                    message="Gitea accepted the close request but state=closed and merged=false were not observed",
+                    retryable=True,
+                    details={
+                        "observed_state": confirmed_pr.get("state"),
+                        "observed_merged": confirmed_pr.get("merged"),
+                    },
+                    source="gitea",
+                )
             data = {
                 "number": pull_number,
                 "closed": True,
                 "already_closed": already_closed,
+                "merged": False,
                 "head_sha": expected_head_sha,
-                "base": base_ref,
-                "html_url": html_url,
+                "base": confirmed_base_ref,
+                "html_url": confirmed_pr.get("html_url"),
+                "verified": True,
             }
     except Exception as exc:
         return _remote_api_error("gitea_close_pull_request", "gitea", exc)
     return tool_success("gitea_close_pull_request", result=data, source="gitea")
+
 
 
 def _same_gitea_repo_from_pr_head(
