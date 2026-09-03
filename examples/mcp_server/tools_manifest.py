@@ -138,17 +138,46 @@ def build_manifest(
     # are never actually registered in the real deployment and never
     # appear in `tools`/`tool_count` above.
     safe_mode_on = is_mcp_client_safe_mode()
+
+    def _effective_tools_for_mode(mode_name: str, tool_set: set[str]) -> set[str]:
+        effective_set = set(tool_set)
+        if mode_name == "mcp_client" and safe_mode_on:
+            effective_set -= MCP_CLIENT_BLOCKED_TOOLS
+        return effective_set
+
     modes_dict: dict[str, dict[str, Any]] = {}
+    effective_by_mode: dict[str, set[str]] = {}
     for m, tool_set in TOOL_NAMES_BY_MODE.items():
+        effective_set = _effective_tools_for_mode(m, tool_set)
+        effective_by_mode[m] = effective_set
         if mode is not None and m != mode:
             continue
-        effective_set = tool_set
-        if m == "mcp_client" and safe_mode_on:
-            effective_set = tool_set - MCP_CLIENT_BLOCKED_TOOLS
         modes_dict[m] = {
             "tool_count": len(effective_set),
             "tools": sorted(effective_set),
         }
+
+    active_expected_names = effective_by_mode.get(active_mode, set())
+    missing_registered_tools = [
+        {
+            "name": name,
+            "reason": f"configured for active mode {active_mode!r} but not registered in live MCP tool manager",
+        }
+        for name in sorted(active_expected_names - registered_names)
+    ]
+    unexpected_registered_tools = [
+        {
+            "name": name,
+            "reason": f"registered in live MCP tool manager but absent from active mode {active_mode!r} configuration",
+        }
+        for name in sorted(registered_names - active_expected_names)
+    ]
+    catalog_consistency = {
+        "active_mode": active_mode,
+        "ok": not missing_registered_tools and not unexpected_registered_tools,
+        "missing_registered_tools": missing_registered_tools,
+        "unexpected_registered_tools": unexpected_registered_tools,
+    }
 
     # Build access profiles (scope lists only — no token values)
     profiles_dict: dict[str, list[str]] = {
@@ -167,4 +196,5 @@ def build_manifest(
         "modes": modes_dict,
         "access_profiles": profiles_dict,
         "agent_guidance": _agent_guidance(),
+        "catalog_consistency": catalog_consistency,
     }

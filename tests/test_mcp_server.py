@@ -135,6 +135,35 @@ def test_gitea_push_local_ref_schema_requires_task_candidate_receipt():
     assert "task_id" in tool.parameters["properties"]
 
 
+@patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
+def test_tools_manifest_catalog_consistency_matches_live_tool_manager():
+    """General contract: the live FastMCP tool manager is the source of truth.
+
+    If a tool is configured for the active mode but not registered, or
+    registered without active-mode policy coverage, tools_manifest must expose
+    that mismatch instead of silently claiming a coherent catalog.
+    """
+    import importlib
+
+    import examples.mcp_server.server as srv
+
+    importlib.reload(srv)
+    live_names = {tool.name for tool in srv.mcp._tool_manager.list_tools()}
+
+    manifest = srv.gateway_tools_manifest(include_descriptions=False)
+
+    assert manifest["ok"] is True
+    result = manifest["result"]
+    manifest_names = {tool["name"] for tool in result["tools"]}
+    assert manifest_names == live_names
+    assert result["catalog_consistency"] == {
+        "active_mode": "mcp_client_write",
+        "ok": True,
+        "missing_registered_tools": [],
+        "unexpected_registered_tools": [],
+    }
+
+
 @patch.dict(os.environ, {"MCP_AUTH_MODE": "token", "MCP_PUBLIC_TOKEN": "test-token"})
 def test_token_mode_initializes_provider():
     """Token mode initializes GatewayOAuthProvider with MCP_PUBLIC_TOKEN."""
