@@ -65,9 +65,9 @@ Verifies:
 ## Live MCP OAuth Notes
 
 - `mcp-oauth` must use an internal Gitea API base, not the host loopback URL.
-- Set `MCP_OAUTH_GITEA_API_BASE=http://gitea:3000/api/v1` in `docker/.env` for the
+- Set `GITEA_API_BASE=http://gitea:3000/api/v1` in `docker/.env` for the
   compose deployment shown in `docker/docker-compose.yml`.
-- Do not point `MCP_OAUTH_GITEA_API_BASE` at `http://127.0.0.1:3005/...` inside the
+- Do not point `GITEA_API_BASE` at `http://127.0.0.1:3005/...` inside the
   `mcp-oauth` container: container loopback is not the host's Gitea listener and
   live `gitea_*` MCP tools will fail with remote-unavailable errors.
 - Keep `GITEA_FORWARDED_HOST` / `GITEA_FORWARDED_PROTO` aligned with the public Gitea
