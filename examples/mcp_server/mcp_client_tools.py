@@ -1403,10 +1403,18 @@ def _project_verification_hints(resolved: Path) -> dict[str, Any]:
 
 
 def _local_git_output(resolved: Path, args: list[str]) -> str | None:
-    """Run a fixed read-only git query without a shell; return stdout on success."""
+    """Run a fixed read-only git query without a shell; return stdout on success.
+
+    Project roots mounted into the MCP control plane can be owned by a
+    different Unix user than the process executing this local metadata probe.
+    Use a scoped safe.directory exception for the registered root so Git's
+    ownership guard does not make info()/branch-merge guards report opaque
+    git_state_unavailable while project-level SSH git commands still work.
+    Never use safe.directory=*.
+    """
     try:
         completed = subprocess.run(
-            ["git", *args],
+            ["git", "-c", f"safe.directory={resolved}", *args],
             cwd=str(resolved),
             text=True,
             capture_output=True,

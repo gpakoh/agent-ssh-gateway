@@ -350,19 +350,12 @@ def _resolve_trusted_remote(project_root: Path) -> tuple[str, str]:
         )
 
     try:
-        listed = subprocess.run(
-            ["git", "remote"],
-            cwd=str(project_root),
-            text=True,
-            capture_output=True,
-            timeout=10,
-            check=False,
+        listed = _run_git(
+            ["remote"],
+            cwd=project_root,
+            safe_directory=project_root,
         )
-        if listed.returncode != 0:
-            raise ManagedSourceBundleError(
-                "registered project remotes could not be enumerated"
-            )
-        names = sorted({line.strip() for line in listed.stdout.splitlines() if line.strip()})
+        names = sorted({line.strip() for line in listed.splitlines() if line.strip()})
         if not names:
             raise ManagedSourceBundleError(
                 "registered project has no trusted Gitea remote"
@@ -370,18 +363,18 @@ def _resolve_trusted_remote(project_root: Path) -> tuple[str, str]:
 
         identities: set[tuple[str, str]] = set()
         for name in names:
-            remote_url = subprocess.run(
-                ["git", "remote", "get-url", "--push", name],
-                cwd=str(project_root),
-                text=True,
-                capture_output=True,
-                timeout=10,
-                check=False,
-            )
-            if remote_url.returncode != 0 or not remote_url.stdout.strip():
+            try:
+                remote_url = _run_git(
+                    ["remote", "get-url", "--push", name],
+                    cwd=project_root,
+                    safe_directory=project_root,
+                ).strip()
+            except ManagedSourceBundleError:
+                continue
+            if not remote_url:
                 continue
             try:
-                _host, owner, repo = _parse_gitea_remote(remote_url.stdout.strip())
+                _host, owner, repo = _parse_gitea_remote(remote_url)
             except RuntimeError as exc:
                 if str(exc) == "GIT_REMOTE_NOT_ALLOWED":
                     continue
