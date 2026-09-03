@@ -835,6 +835,112 @@ class TestInspectAgentTask:
             )
         assert calls == []
 
+    def test_trailing_colon_without_progress_is_trailing_colon_stall(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        # Log tail ends on a narrator colon announcing the next step, then no
+        # content follows. Progress artifacts (status/log) are old.
+        (td / "opencode-output.log").write_text(
+            "Now the test-only CI workflow (no build-and-push, no deploy):\n",
+            encoding="utf-8",
+        )
+        (td / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "running",
+                    "phase": "stall",
+                    "updated_at": "2026-09-03T12:00:00Z",
+                    "updated_epoch": now - 5,
+                    "runner_pid": 123,
+                    "exit_code": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 500, now - 500))
+        os.utime(td / "opencode-output.log", (now - 500, now - 500))
+        os.utime(td / "agent-status.md", (now - 500, now - 500))
+
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            reasoning_loop_after_seconds=60,
+            trailing_colon_after_seconds=60,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["verdict"] == "trailing_colon_stall"
+        assert result["likely_hung"] is True
+        assert result["trailing_colon_stall"]["detected"] is True
+        assert result["trailing_colon_stall"]["last_meaningful_line"] == (
+            "Now the test-only CI workflow (no build-and-push, no deploy):"
+        )
+        assert result["trailing_colon_stall"]["progress_age_seconds"] == 500
+        assert result["trailing_colon_stall"]["continuation_prompt"] == "Продолжай"
+        assert result["recovery"]["action"] == "cancel_and_retry_with_continuation"
+        assert result["recovery"]["retry_agent_task"]["continuation_prompt"] == "Продолжай"
+
+    def test_fresh_progress_artifact_suppresses_trailing_colon_stall(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text(
+            "Now the test-only CI workflow (no build-and-push, no deploy):\n",
+            encoding="utf-8",
+        )
+        # A fresh semantic progress artifact was produced after the colon line.
+        (td / "consensus.md").write_text("# Agent consensus\n\nChecks are running.\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 500, now - 500))
+        os.utime(td / "opencode-output.log", (now - 20, now - 20))
+        os.utime(td / "consensus.md", (now - 10, now - 10))
+
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            reasoning_loop_after_seconds=60,
+            trailing_colon_after_seconds=60,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["trailing_colon_stall"]["detected"] is False
+        assert result["verdict"] != "trailing_colon_stall"
+        assert "recovery" not in result
+
+    def test_rejects_invalid_trailing_colon_threshold_before_commands(self):
+        calls = []
+        with pytest.raises(ValueError):
+            inspect_agent_task(
+                lambda project, command: calls.append((project, command)),
+                project="my-proj",
+                task_id="a12345678901",
+                trailing_colon_after_seconds=29,
+            )
+        assert calls == []
+
     def test_startup_timeout_status_is_terminal_and_classified(self):
         now = 2_000
 

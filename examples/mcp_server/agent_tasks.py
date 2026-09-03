@@ -31,6 +31,7 @@ AGENT_STALE_AFTER_SECONDS = 600
 AGENT_REASONING_LOOP_AFTER_SECONDS = 120
 AGENT_REASONING_LOOP_MIN_LINES = 10
 AGENT_REASONING_LOOP_CONTINUATION_PROMPT = "Продолжай"
+AGENT_TRAILING_COLON_AFTER_SECONDS = 120
 ATTEMPT_STATE_FILENAME = "attempt-state.json"
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -1070,6 +1071,60 @@ def _detect_agent_reasoning_loop(
         "continuation_prompt": AGENT_REASONING_LOOP_CONTINUATION_PROMPT,
     }
 
+
+def _last_line_with_trailing_colon(log_stdout: str) -> str | None:
+    """Return the last non-empty log line that ends in a colon, if any.
+
+    ``:`` is a common tail when an agent announces the next step it is about to
+    take (a heading, a file list, a working-dir notice) and then never renders
+    the promised content. We only look at the trailing colon, never a specific
+    literal phrase, so any such stall is caught regardless of wording.
+    """
+    for line in reversed(log_stdout.splitlines()):
+        line = _ANSI_ESCAPE_RE.sub("", line).strip()
+        if not line:
+            continue
+        if line.endswith(":"):
+            return line
+    return None
+
+
+def _detect_agent_trailing_colon_stall(
+    *,
+    log_stdout: str,
+    files: dict[str, dict[str, Any]],
+    active: bool,
+    terminal: bool,
+    now_epoch: int,
+    trailing_colon_after_seconds: int,
+) -> dict[str, Any]:
+    """Detect an agent stalled at a trailing-colon without progress.
+
+    An active, non-terminal agent whose most recent meaningful log line ends
+    with ``:`` and whose progress artifacts (status/consensus/report/diff) have
+    not advanced for a threshold is considered to have announced a step it never
+    took. Contrary to a reasoning loop (repeated similar thought lines) the
+    signal here is open-ended silence after a narrative colon.
+    """
+    progress = _progress_artifact_activity(files, now_epoch)
+    progress_age = progress.get("age_seconds")
+    trailing_colon_line = _last_line_with_trailing_colon(log_stdout)
+    no_recent_progress = isinstance(progress_age, int) and progress_age >= trailing_colon_after_seconds
+    detected = bool(
+        active
+        and not terminal
+        and trailing_colon_line is not None
+        and no_recent_progress
+    )
+    return {
+        "detected": detected,
+        "last_meaningful_line": trailing_colon_line,
+        "progress": progress,
+        "progress_age_seconds": progress_age,
+        "continuation_prompt": AGENT_REASONING_LOOP_CONTINUATION_PROMPT,
+    }
+
+
 def inspect_agent_task(
     run_cmd,
     *,
@@ -1078,6 +1133,7 @@ def inspect_agent_task(
     tail_lines: int = 120,
     stale_after_seconds: int = AGENT_STALE_AFTER_SECONDS,
     reasoning_loop_after_seconds: int = AGENT_REASONING_LOOP_AFTER_SECONDS,
+    trailing_colon_after_seconds: int = AGENT_TRAILING_COLON_AFTER_SECONDS,
     job_status=None,
     now_epoch: int | None = None,
 ) -> dict[str, Any]:
@@ -1097,6 +1153,10 @@ def inspect_agent_task(
         raise TypeError("reasoning_loop_after_seconds must be an integer")
     if not 30 <= reasoning_loop_after_seconds <= 86_400:
         raise ValueError("reasoning_loop_after_seconds must be between 30 and 86400")
+    if isinstance(trailing_colon_after_seconds, bool) or not isinstance(trailing_colon_after_seconds, int):
+        raise TypeError("trailing_colon_after_seconds must be an integer")
+    if not 30 <= trailing_colon_after_seconds <= 86_400:
+        raise ValueError("trailing_colon_after_seconds must be between 30 and 86400")
     now = int(time.time()) if now_epoch is None else int(now_epoch)
 
     td = task_dir(project, task_id)
@@ -1176,6 +1236,14 @@ def inspect_agent_task(
         now_epoch=now,
         reasoning_loop_after_seconds=reasoning_loop_after_seconds,
     )
+    trailing_colon_stall = _detect_agent_trailing_colon_stall(
+        log_stdout=str(log.get("stdout", "")),
+        files=files,
+        active=active,
+        terminal=terminal,
+        now_epoch=now,
+        trailing_colon_after_seconds=trailing_colon_after_seconds,
+    )
 
     if terminal:
         verdict = "finished"
@@ -1183,6 +1251,9 @@ def inspect_agent_task(
         verdict = "startup_stalled"
     elif reasoning_loop.get("detected"):
         verdict = "reasoning_loop"
+        likely_hung = True
+    elif trailing_colon_stall.get("detected"):
+        verdict = "trailing_colon_stall"
         likely_hung = True
     elif likely_hung:
         verdict = "likely_hung"
@@ -1207,8 +1278,10 @@ def inspect_agent_task(
         "runner_heartbeat_fresh": runner_heartbeat_fresh,
         "startup": startup,
         "reasoning_loop": reasoning_loop,
+        "trailing_colon_stall": trailing_colon_stall,
         "stale_after_seconds": stale_after_seconds,
         "reasoning_loop_after_seconds": reasoning_loop_after_seconds,
+        "trailing_colon_after_seconds": trailing_colon_after_seconds,
         "terminal": terminal,
         "likely_hung": likely_hung,
         "verdict": verdict,
@@ -1228,6 +1301,18 @@ def inspect_agent_task(
                 "source_task_id": task_id,
                 "retry_task_id": "<new-task-id>",
                 "continuation_prompt": AGENT_REASONING_LOOP_CONTINUATION_PROMPT,
+            },
+            "run_agent": {"project": project, "task_id": "<new-task-id>"},
+        }
+    elif trailing_colon_stall.get("detected"):
+        result["recovery"] = {
+            "action": "cancel_and_retry_with_continuation",
+            "cancel_agent_task": {"project": project, "task_id": task_id},
+            "retry_agent_task": {
+                "project": project,
+                "source_task_id": task_id,
+                "retry_task_id": "<new-task-id>",
+                "continuation_prompt": trailing_colon_stall["continuation_prompt"],
             },
             "run_agent": {"project": project, "task_id": "<new-task-id>"},
         }
