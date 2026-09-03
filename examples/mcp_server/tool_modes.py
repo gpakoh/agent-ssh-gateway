@@ -244,7 +244,7 @@ MCP_CLIENT_WRITE_BLOCKED_TOOLS: frozenset[str] = frozenset()
 # (project inspection, read-only git, gitea/github, tests/lint, workspace
 # write/patch, docker/agent-launch/handoff-write) and removes only
 # MCP_CLIENT_WRITE_BLOCKED_TOOLS, then adds the explicit git mutation tools
-# (git_add/git_commit/git_create_branch/git_push; never present in any other
+# (git_add/git_commit/git_create_branch/git_update_branch_by_merge/git_push; never present in any other
 # mode's list).
 TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     TOOL_NAMES_BY_MODE["mcp_client"] - MCP_CLIENT_WRITE_BLOCKED_TOOLS
@@ -256,6 +256,7 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     "git_add",
     "git_commit",
     "git_create_branch",
+    "git_update_branch_by_merge",
     "git_push",
     "gitea_create_pull_request",
     "gitea_merge_pull_request",

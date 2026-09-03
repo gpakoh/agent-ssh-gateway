@@ -3,7 +3,65 @@
 from __future__ import annotations
 
 import pytest
-from mcp_client_tools import git_add, git_create_branch, git_push
+from mcp_client_tools import git_add, git_create_branch, git_push, git_update_branch_by_merge
+
+
+class _LocalGitClient:
+    def __init__(self, root):
+        self.root = root
+        self.commands: list[str] = []
+
+    def execute_project_command(self, project: str, command: str) -> dict:
+        import subprocess
+
+        self.commands.append(command)
+        completed = subprocess.run(
+            command,
+            shell=True,
+            cwd=self.root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return {
+            "exit_code": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }
+
+
+def _git(root, *args: str) -> str:
+    import subprocess
+
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return completed.stdout.strip()
+
+
+def _init_merge_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test User")
+    (repo / "file.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "file.txt")
+    _git(repo, "commit", "-m", "base")
+    _git(repo, "switch", "-c", "feature/update")
+    (repo / "feature.txt").write_text("feature\n", encoding="utf-8")
+    _git(repo, "add", "feature.txt")
+    _git(repo, "commit", "-m", "feature")
+    feature_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", "master")
+    (repo / "master.txt").write_text("master\n", encoding="utf-8")
+    _git(repo, "add", "master.txt")
+    _git(repo, "commit", "-m", "master")
+    return repo, feature_head
 
 
 class _StubClient:
@@ -83,3 +141,85 @@ def test_git_add_empty_paths_rejected():
     client = _StubClient()
     with pytest.raises(ValueError, match="INVALID_INPUT"):
         git_add(client, "proj", paths=[])
+
+
+def test_git_update_branch_by_merge_merges_source_into_existing_branch(tmp_path):
+    repo, feature_head = _init_merge_repo(tmp_path)
+    client = _LocalGitClient(repo)
+    from unittest.mock import patch
+
+    with patch("mcp_client_tools._resolve_project", return_value=repo):
+        result = git_update_branch_by_merge(
+            client,
+            "proj",
+            branch="feature/update",
+            source_branch="master",
+            expected_head=feature_head,
+        )
+
+    assert result["exit_code"] == 0
+    assert result["branch"] == "feature/update"
+    assert result["source_branch"] == "master"
+    assert result["previous_head"] == feature_head
+    assert _git(repo, "branch", "--show-current") == "feature/update"
+    assert _git(repo, "merge-base", "--is-ancestor", "master", "HEAD") == ""
+    assert client.commands == [
+        "git switch feature/update",
+        "git merge --no-ff --no-edit master",
+        "git rev-parse HEAD",
+    ]
+
+
+def test_git_update_branch_by_merge_rejects_protected_target_before_commands():
+    client = _StubClient()
+    with pytest.raises(ValueError, match="POLICY_DENIED"):
+        git_update_branch_by_merge(client, "proj", branch="master", source_branch="feature/x")
+    assert client.commands == []
+
+
+def test_git_update_branch_by_merge_rejects_option_or_refspec_injection():
+    client = _StubClient()
+    for value in ("--merge", "origin:master", "has space"):
+        with pytest.raises(ValueError, match="INVALID_INPUT"):
+            git_update_branch_by_merge(client, "proj", branch="feature/x", source_branch=value)
+    assert client.commands == []
+
+
+def test_git_update_branch_by_merge_rejects_expected_head_mismatch(tmp_path):
+    repo, feature_head = _init_merge_repo(tmp_path)
+    client = _LocalGitClient(repo)
+    wrong_head = "0" * 40
+    from unittest.mock import patch
+
+    with patch("mcp_client_tools._resolve_project", return_value=repo):
+        result = git_update_branch_by_merge(
+            client,
+            "proj",
+            branch="feature/update",
+            source_branch="master",
+            expected_head=wrong_head,
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "HEAD_MISMATCH"
+    assert result["error"]["details"]["actual_head"] == feature_head
+    assert client.commands == []
+
+
+def test_git_update_branch_by_merge_rejects_dirty_worktree(tmp_path):
+    repo, _feature_head = _init_merge_repo(tmp_path)
+    (repo / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+    client = _LocalGitClient(repo)
+    from unittest.mock import patch
+
+    with patch("mcp_client_tools._resolve_project", return_value=repo):
+        result = git_update_branch_by_merge(
+            client,
+            "proj",
+            branch="feature/update",
+            source_branch="master",
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+    assert client.commands == []

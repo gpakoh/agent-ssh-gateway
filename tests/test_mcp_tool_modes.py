@@ -281,6 +281,7 @@ class TestMcpClientWriteMode:
         assert "git_add" in write_tools
         assert "git_commit" in write_tools
         assert "git_create_branch" in write_tools
+        assert "git_update_branch_by_merge" in write_tools
         assert "git_push" in write_tools
 
     def test_git_write_tools_absent_from_every_other_mode(self):
@@ -293,6 +294,7 @@ class TestMcpClientWriteMode:
             assert "git_add" not in names, mode
             assert "git_commit" not in names, mode
             assert "git_create_branch" not in names, mode
+            assert "git_update_branch_by_merge" not in names, mode
             assert "git_push" not in names, mode
 
     def test_workspace_write_tools_present(self):
@@ -369,6 +371,7 @@ class TestMcpClientWriteMode:
         assert should_register_tool("git_push")
         assert should_register_tool("git_commit")
         assert should_register_tool("git_create_branch")
+        assert should_register_tool("git_update_branch_by_merge")
         assert should_register_tool("workspace_file_write")
         assert should_register_tool("read_file")
         assert should_register_tool("docker_exec")
@@ -383,6 +386,7 @@ class TestMcpClientWriteMode:
         assert "git_add" not in mcp_client_tools
         assert "git_commit" not in mcp_client_tools
         assert "git_create_branch" not in mcp_client_tools
+        assert "git_update_branch_by_merge" not in mcp_client_tools
         assert "git_push" not in mcp_client_tools
         safe = get_mcp_client_safe_tools()
         assert len(safe & MCP_CLIENT_BLOCKED_TOOLS) == 0
