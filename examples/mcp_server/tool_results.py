@@ -72,6 +72,13 @@ ERROR_CODES = {
     "GIT_DETACHED_HEAD",
     "GIT_DEPENDENCY_MISSING",
     "GIT_PUSH_FAILED",
+    "CANDIDATE_DIFF_MISMATCH",
+    "CANDIDATE_EVIDENCE_MISSING",
+    "CANDIDATE_JOB_NOT_SUCCESSFUL",
+    "CANDIDATE_RECEIPT_INVALID",
+    "CANDIDATE_SCOPE_VIOLATION",
+    "CANDIDATE_STAGING_INVALID",
+    "CANDIDATE_VERIFICATION_FAILED",
     "PR_NOT_OPEN",
     "HEAD_MISMATCH",
     "PR_NOT_MERGEABLE",
@@ -80,6 +87,7 @@ ERROR_CODES = {
     "SECRET_PATH_DENIED",
     "FILE_READ_ERROR",
     "WORKSPACE_READONLY",
+    "WORKSPACE_CONTENDED",
 }
 
 SAFE_SOURCE_VALUES = {
@@ -225,6 +233,7 @@ def build_command_result(
     execution_duration_ms: int | None = None,
     job_id: str | None = None,
     timestamps: dict | None = None,
+    cwd: str | None = None,
 ) -> dict:
     result = {
         "outcome": outcome,
@@ -236,6 +245,8 @@ def build_command_result(
     }
     if timestamps:
         result["timestamps"] = timestamps
+    if cwd is not None:
+        result["cwd"] = cwd
     return result
 
 

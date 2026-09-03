@@ -879,8 +879,11 @@ async def gitea_materialize_task_candidate(
     except CandidateError as exc:
         return tool_error(
             tool="gitea_materialize_task_candidate",
-            code="POLICY_DENIED",
+            code=exc.code,
             message=str(exc),
+            retryable=exc.retryable,
+            hint=exc.hint,
+            details=exc.details,
             source="gitea",
         )
     except Exception:
@@ -939,8 +942,11 @@ async def gitea_push_local_ref(
     except CandidateError as exc:
         return tool_error(
             tool="gitea_push_local_ref",
-            code="POLICY_DENIED",
+            code=exc.code,
             message=str(exc),
+            retryable=exc.retryable,
+            hint=exc.hint,
+            details=exc.details,
             source="gitea",
         )
     except Exception:
@@ -1030,8 +1036,18 @@ async def gitea_push_local_ref(
         return _remote_api_error("gitea_push_local_ref", "gitea", exc)
 
     expected = receipt["candidate_head_sha"]
+    remote_ref = f"refs/heads/{destination_branch}"
     commit = (remote_branch or {}).get("commit") or {}
-    if str(commit.get("id") or "").lower() == expected:
+    observed_sha = str(commit.get("id") or "").lower() or None
+    verification = {
+        "remote_ref": remote_ref,
+        "expected_sha": expected,
+        "remote_observed_sha": observed_sha,
+        "owner": owner,
+        "repo": repo,
+        "branch": destination_branch,
+    }
+    if observed_sha == expected:
         return tool_success(
             "gitea_push_local_ref",
             result={
@@ -1040,7 +1056,9 @@ async def gitea_push_local_ref(
                 "owner": owner,
                 "repo": repo,
                 "branch": destination_branch,
+                "remote_ref": remote_ref,
                 "sha": expected,
+                "remote_observed_sha": observed_sha,
                 "verified": True,
             },
             source="gitea",
@@ -1049,6 +1067,9 @@ async def gitea_push_local_ref(
         tool="gitea_push_local_ref",
         code="CHECK_FAILED",
         message="Remote branch does not resolve to candidate_head_sha after push",
+        retryable=True,
+        hint="Fetch the remote ref and compare it with error.details.expected_sha before retrying the trusted push.",
+        details=verification,
         source="gitea",
     )
 

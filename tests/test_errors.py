@@ -187,17 +187,18 @@ async def test_session_not_found_gets_its_own_code_not_generic_internal_error():
 
 
 @pytest.mark.asyncio
-async def test_session_limit_error_gets_rate_limit_exceeded_not_internal_error():
-    """Regression: SessionLimitError (429, too many active sessions from one
-    source IP) had no matching ERROR_CODE_MAP entry for status 429 at all —
-    _auto_code fell all the way through to its bare "INTERNAL_ERROR" default,
-    silently discarding the fact that a client hitting this should back off
-    and retry, not treat it as an unrelated failure.
+async def test_session_limit_error_gets_specific_session_limit_code():
+    """Session-cap 429s must keep their specific retryable error code.
+
+    Slowapi rate-limit 429s still map to RATE_LIMIT_EXCEEDED below; SSH
+    session-cap 429s are a distinct local capacity condition and should be
+    classified as SESSION_LIMIT_EXCEEDED instead of falling back to a generic
+    rate-limit or internal error code.
     """
     resp = await main_module.ssh_exception_handler(None, SessionLimitError("too many sessions"))
     data = json.loads(resp.body)
     assert resp.status_code == 429
-    assert data["code"] == "RATE_LIMIT_EXCEEDED"
+    assert data["code"] == "SESSION_LIMIT_EXCEEDED"
     assert data["retryable"] is True
 
 

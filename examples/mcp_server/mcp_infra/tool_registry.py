@@ -26,6 +26,7 @@ from examples.mcp_server.mcp_infra import runtime
 from examples.mcp_server.mcp_infra._server_ref import server_module as _server_module
 
 from .gateway_errors import (
+    _gateway_error_details,
     _gateway_error_hint,
     _gateway_error_message,
 )
@@ -234,11 +235,7 @@ def run_tool(
             )
         if isinstance(exc, GatewayClientError):
             code, retryable = _server._classify_gateway_error(exc)
-            details = (
-                {"job_id": exc.body["job_id"]}
-                if isinstance(exc.body, dict) and exc.body.get("job_id")
-                else None
-            )
+            details = _gateway_error_details(exc)
             return tool_error(
                 tool=tool,
                 code=code,
@@ -374,11 +371,7 @@ async def run_tool_async(
             )
         if isinstance(exc, GatewayClientError):
             code, retryable = _server._classify_gateway_error(exc)
-            details = (
-                {"job_id": exc.body["job_id"]}
-                if isinstance(exc.body, dict) and exc.body.get("job_id")
-                else None
-            )
+            details = _gateway_error_details(exc)
             return tool_error(
                 tool=tool,
                 code=code,

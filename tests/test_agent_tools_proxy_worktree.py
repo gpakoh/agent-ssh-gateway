@@ -176,6 +176,39 @@ class TestBuildOpencodeScriptProxy:
         assert 'cat "$td/worker-status.md" >> "$td/agent-report.md"' in script
 
 
+    def test_heartbeat_loop_does_not_hold_client_pipes_open(self, monkeypatch):
+        """Background heartbeat must not keep subprocess stdout/stderr pipes open.
+
+        The runner may exit while the heartbeat sleep child is still being
+        stopped; if that background job inherited the parent stdout/stderr,
+        Python subprocess.communicate() can wait until the test timeout even
+        though the shell itself has already produced a return code.
+        """
+        monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+        script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
+
+        assert "agent_heartbeat_loop >/dev/null 2>&1 &" in script
+        assert "agent_heartbeat_loop &" not in script
+
+    def test_managed_source_cleanup_preserves_heartbeat_exit_trap(self, monkeypatch):
+        monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+        script = _build_opencode_script(
+            "/var/lib/mcp-agent/state/task",
+            TASK_ID,
+            None,
+            project_root="/srv/proj",
+            worktree_path="/var/lib/mcp-agent/workspaces/task",
+            managed_clone=True,
+            base_ref="a" * 40,
+            managed_source_path="/var/lib/mcp-agent/sources/source.bundle",
+            managed_source_sha256="b" * 64,
+        )
+
+        assert "cleanup_managed_private_dir()" in script
+        assert "trap \'rm -rf \"$MANAGED_PRIVATE_DIR\"" not in script
+        assert "cleanup_managed_private_dir" in script[script.index("finish_agent_heartbeat()") :]
+
+
 class TestBuildOpencodeScriptWorktree:
     def test_worktree_added_when_path_provided(self):
         script = _build_opencode_script(

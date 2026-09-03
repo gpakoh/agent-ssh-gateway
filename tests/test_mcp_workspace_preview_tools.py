@@ -13,6 +13,7 @@ Architecture
 from __future__ import annotations
 
 import ast
+import errno
 import importlib
 import os
 import sys
@@ -661,3 +662,72 @@ def test_write_safe_error_returns_tool_error():
         )
     assert result["error"]["code"] == "TOOL_EXECUTION_FAILED"
     assert "disk full" in result["error"]["message"]
+
+
+@requires_server
+@pytest.mark.parametrize(
+    ("tool_name", "patched_function", "call_kwargs"),
+    [
+        (
+            "workspace_file_write",
+            "app.workspace.edit.project_file_write",
+            {"project_id": "p", "relative_path": "f.txt", "content": "x"},
+        ),
+        (
+            "workspace_file_edit",
+            "app.workspace.edit.project_file_edit",
+            {
+                "project_id": "p",
+                "relative_path": "f.txt",
+                "old_string": "old",
+                "new_string": "new",
+            },
+        ),
+        (
+            "workspace_apply_patch",
+            "app.workspace.edit.project_apply_patch",
+            {"project_id": "p", "relative_path": "f.txt", "patch": "--- a/f\n+++ b/f\n"},
+        ),
+    ],
+)
+def test_workspace_mutation_erofs_maps_to_workspace_readonly(
+    tool_name, patched_function, call_kwargs
+):
+    """A read-only project mount must be actionable, not TOOL_EXECUTION_FAILED."""
+    with patch(
+        "examples.mcp_server.server._get_workspace_registry"
+    ) as mock_reg, patch(
+        patched_function,
+        side_effect=OSError(errno.EROFS, "Read-only file system"),
+    ):
+        mock_reg.return_value = MagicMock()
+        from examples.mcp_server import server as mcp_server_mod
+
+        result = getattr(mcp_server_mod, f"gateway_{tool_name}")(**call_kwargs)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "WORKSPACE_READONLY"
+    assert result["error"]["retryable"] is False
+    assert "writeable candidate clone" in result["error"]["hint"]
+
+
+@requires_server
+def test_workspace_mutation_permission_error_maps_to_permission_denied():
+    with patch(
+        "examples.mcp_server.server._get_workspace_registry"
+    ) as mock_reg, patch(
+        "app.workspace.edit.project_file_edit",
+        side_effect=PermissionError("permission denied"),
+    ):
+        mock_reg.return_value = MagicMock()
+        from examples.mcp_server.server import gateway_workspace_file_edit
+
+        result = gateway_workspace_file_edit(
+            project_id="p",
+            relative_path="f.txt",
+            old_string="old",
+            new_string="new",
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PERMISSION_DENIED"

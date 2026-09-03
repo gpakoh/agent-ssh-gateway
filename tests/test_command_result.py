@@ -37,3 +37,11 @@ def test_command_result_completed_outcome():
     data = build_command_result(outcome="completed", exit_code=0, stdout="done", stderr="")
     r = tool_success("test_tool", data)["result"]
     assert r["outcome"] == "completed"
+
+
+def test_command_result_includes_cwd_only_when_supplied():
+    without_cwd = build_command_result(outcome="passed", exit_code=0)
+    with_cwd = build_command_result(outcome="passed", exit_code=0, cwd=".")
+
+    assert "cwd" not in without_cwd
+    assert with_cwd["cwd"] == "."

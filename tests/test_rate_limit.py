@@ -214,9 +214,12 @@ async def test_bulk_execute_first_ok_then_429():
 
 
 class TestSessionLimitErrorContract:
-    """Contract: SessionLimitError surfaces as a 429 with the established
-    machine-readable code=RATE_LIMIT_EXCEEDED, retryable=true, and a
-    Retry-After header so reconnect clients can back off deliberately."""
+    """Contract: SessionLimitError surfaces as a specific retryable 429.
+
+    Slowapi request-rate 429s use RATE_LIMIT_EXCEEDED; SSH session-cap 429s
+    use SESSION_LIMIT_EXCEEDED so reconnect clients can distinguish local
+    capacity exhaustion from generic request throttling.
+    """
 
     @pytest.mark.asyncio
     async def test_session_limit_error_returns_429_with_code_and_retryable(self):
@@ -228,7 +231,7 @@ class TestSessionLimitErrorContract:
         )
         body = json.loads(resp.body)
         assert resp.status_code == 429
-        assert body["code"] == "RATE_LIMIT_EXCEEDED"
+        assert body["code"] == "SESSION_LIMIT_EXCEEDED"
         assert body["retryable"] is True
         assert body["http_status"] == 429
 

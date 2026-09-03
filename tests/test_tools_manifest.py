@@ -55,8 +55,25 @@ class TestBuildManifest:
             "tools",
             "modes",
             "access_profiles",
+            "agent_guidance",
         ):
             assert field in result, f"Missing field: {field}"
+
+    def test_agent_guidance_points_to_info_without_host_paths(
+        self, sample_tools: list[FakeTool]
+    ) -> None:
+        result = build_manifest(sample_tools, scope_enforcement="audit", mode_override="mcp_client")
+
+        guidance = result["agent_guidance"]
+        assert guidance["project_metadata_tool"] == "info"
+        assert "workspace.recommended_write_plane" in guidance["before_project_writes"]
+        assert "workspace.git_state" in guidance["before_project_writes"]
+        assert "verification.cwd" in guidance["before_verification"]
+        assert "inspect_agent_task" in guidance["agent_run_diagnostics"]
+        assert "stale/hung" in guidance["agent_run_diagnostics"]
+        serialized = str(guidance)
+        assert "/home/" not in serialized
+        assert "/media/" not in serialized
 
     def test_active_mode_is_string(self, sample_tools: list[FakeTool]) -> None:
         result = build_manifest(sample_tools, mode_override="mcp_client")
@@ -200,6 +217,49 @@ class TestBuildManifest:
         for tool in result["tools"]:
             assert "mode" in tool
             assert isinstance(tool["mode"], str)
+
+
+    def test_catalog_consistency_marks_configured_but_unregistered_tools(
+        self, sample_tools: list[FakeTool]
+    ) -> None:
+        """Configured mode entries that are absent from the live tool manager
+        must be explicit, machine-readable catalog mismatches with reasons.
+        """
+        result = build_manifest(sample_tools, mode_override="mcp_client")
+
+        consistency = result["catalog_consistency"]
+        assert consistency["active_mode"] == "mcp_client"
+        assert consistency["ok"] is False
+        missing = consistency["missing_registered_tools"]
+        assert missing
+        assert all(item["name"] and item["reason"] for item in missing)
+        assert any(item["name"] == "gitea_get_repo" for item in missing)
+
+    def test_catalog_consistency_marks_registered_but_unconfigured_tools(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A live registered tool that is not in the active mode config is
+        just as dangerous: clients can invoke something the catalog policy
+        does not account for.
+        """
+        from tool_modes import TOOL_NAMES_BY_MODE
+
+        monkeypatch.setitem(TOOL_NAMES_BY_MODE, "minimal", {"health", "tools_manifest"})
+        result = build_manifest(
+            [FakeTool("health"), FakeTool("tools_manifest"), FakeTool("ghost_runtime_tool")],
+            mode_override="minimal",
+            include_descriptions=False,
+        )
+
+        consistency = result["catalog_consistency"]
+        assert consistency["ok"] is False
+        unexpected = consistency["unexpected_registered_tools"]
+        assert unexpected == [
+            {
+                "name": "ghost_runtime_tool",
+                "reason": "registered in live MCP tool manager but absent from active mode 'minimal' configuration",
+            }
+        ]
 
 
 class TestManifestAvailability:

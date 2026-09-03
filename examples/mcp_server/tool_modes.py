@@ -31,6 +31,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "execute_argv",
         "job_status",
         "job_result",
+        "job_cancel",
         "wait_job",
         "read_file",
         "repo_status",
@@ -169,6 +170,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "read_agent_report",
         "read_agent_diff",
         "read_agent_log",
+        "inspect_agent_task",
         "list_agent_tasks",
         "archive_agent_task",
         "run_opencode",
@@ -248,6 +250,9 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     TOOL_NAMES_BY_MODE["mcp_client"] - MCP_CLIENT_WRITE_BLOCKED_TOOLS
 ) | {
     "execute_argv",
+    "job_cancel",
+    "cancel_agent_task",
+    "retry_agent_task",
     "git_add",
     "git_commit",
     "git_create_branch",
@@ -264,6 +269,7 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     "supervisor_integrate_file",
     "supervisor_recover_integrations",
     "supervisor_register_project",
+    "prepare_candidate_clone",
 }
 
 

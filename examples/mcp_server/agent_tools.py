@@ -164,6 +164,27 @@ def _error_text(exc: Exception | None) -> str:
     return str(exc) if exc is not None else "unknown error"
 
 
+def _agent_diagnostics_hint(project: str, task_id: str, job_id: str | None = None) -> dict[str, Any]:
+    """Return MCP-native follow-up calls for inspecting a submitted agent task."""
+    hint: dict[str, Any] = {
+        "inspect_agent_task": {
+            "project": project,
+            "task_id": task_id,
+            "purpose": "status, job state, artifact mtimes, stale/hung verdict, and log tail",
+        },
+        "read_agent_log": {"project": project, "task_id": task_id, "purpose": "raw bounded log tail"},
+        "read_agent_status": {"project": project, "task_id": task_id, "purpose": "agent-status.md"},
+    }
+    if job_id:
+        hint["job_status"] = {"job_id": job_id, "purpose": "gateway job state"}
+        hint["cancel_agent_task"] = {
+            "project": project,
+            "task_id": task_id,
+            "purpose": "request cancellation if diagnostics show the agent is hung",
+        }
+    return hint
+
+
 def _submit_same_key_retry(
     run_script_async: Callable[[str, str, str], dict[str, Any]],
     project: str,
@@ -801,6 +822,54 @@ def _proxy_startup_cooldown_script_lines(provider_url: str, timeout: str) -> lis
     ]
 
 
+
+def _agent_heartbeat_script_lines(interval_seconds: int = 30) -> list[str]:
+    """Return shell lines for a runner-owned heartbeat sidecar file."""
+    return [
+        f"AGENT_HEARTBEAT_INTERVAL={interval_seconds}",
+        "write_agent_heartbeat() {",
+        '  _hb_state="$1"',
+        '  _hb_phase="${2:-}"',
+        '  _hb_rc="${3:-}"',
+        '  _hb_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)',
+        '  _hb_epoch=$(date -u +%s)',
+        '  if [ -n "$_hb_rc" ]; then',
+        '    printf \'{"version":1,"state":"%s","phase":"%s","updated_at":"%s","updated_epoch":%s,"runner_pid":%s,"exit_code":%s}\\n\' "$_hb_state" "$_hb_phase" "$_hb_ts" "$_hb_epoch" "$$" "$_hb_rc" > "$td/agent-heartbeat.json"',
+        "  else",
+        '    printf \'{"version":1,"state":"%s","phase":"%s","updated_at":"%s","updated_epoch":%s,"runner_pid":%s,"exit_code":null}\\n\' "$_hb_state" "$_hb_phase" "$_hb_ts" "$_hb_epoch" "$$" > "$td/agent-heartbeat.json"',
+        "  fi",
+        "}",
+        "agent_heartbeat_loop() {",
+        "  while :; do",
+        '    write_agent_heartbeat running loop',
+        '    sleep "$AGENT_HEARTBEAT_INTERVAL" || exit 0',
+        "  done",
+        "}",
+        "stop_agent_heartbeat() {",
+        '  if [ -n "${AGENT_HEARTBEAT_PID:-}" ]; then',
+        '    kill "$AGENT_HEARTBEAT_PID" 2>/dev/null || true',
+        '    wait "$AGENT_HEARTBEAT_PID" 2>/dev/null || true',
+        "  fi",
+        "}",
+        "cleanup_managed_private_dir() {",
+        '  if [ -n "${MANAGED_PRIVATE_DIR:-}" ]; then rm -rf "$MANAGED_PRIVATE_DIR" 2>/dev/null || true; fi',
+        "}",
+        "finish_agent_heartbeat() {",
+        '  _hb_exit="$?"',
+        "  stop_agent_heartbeat",
+        "  cleanup_managed_private_dir",
+        '  if [ "${AGENT_HEARTBEAT_FINALIZED:-0}" != "1" ]; then',
+        '    write_agent_heartbeat exited trap "$_hb_exit"',
+        "  fi",
+        "}",
+        "trap 'finish_agent_heartbeat' EXIT",
+        "AGENT_HEARTBEAT_FINALIZED=0",
+        'write_agent_heartbeat running starting',
+        "agent_heartbeat_loop >/dev/null 2>&1 &",
+        'AGENT_HEARTBEAT_PID="$!"',
+    ]
+
+
 def _opencode_startup_watchdog_script_lines(
     opencode_flags: str,
     startup_timeout_seconds: int,
@@ -821,6 +890,9 @@ def _opencode_startup_watchdog_script_lines(
         "_kill_opencode_process() {",
         '  if [ "$OPENCODE_PROCESS_GROUP" -eq 1 ]; then kill "$1" "-$OPENCODE_PID" 2>/dev/null || true; else kill "$1" "$OPENCODE_PID" 2>/dev/null || true; fi',
         "}",
+        "_opencode_process_is_zombie() {",
+        '  ps -o stat= -p "$OPENCODE_PID" 2>/dev/null | grep -q Z',
+        "}",
         "run_opencode_attempt() {",
         '  : > "$td/opencode-output.log"',
         "  OPENCODE_STARTUP_STALLED=0",
@@ -836,6 +908,11 @@ def _opencode_startup_watchdog_script_lines(
         "  fi",
         "  OPENCODE_STARTUP_STARTED=$(date +%s)",
         '  while kill -0 "$OPENCODE_PID" 2>/dev/null; do',
+        '    if _opencode_process_is_zombie; then',
+        '      wait "$OPENCODE_PID"; RC=$?',
+        '      cat "$td/opencode-output.log"',
+        "      return",
+        "    fi",
         '    if python3 - "$td/opencode-output.log" <<\'OPENCODEPROGRESS_EOF\'',
         "import re, sys",
         "text = open(sys.argv[1], encoding='utf-8', errors='replace').read()",
@@ -854,6 +931,11 @@ def _opencode_startup_watchdog_script_lines(
         "    then",
         '      OPENCODE_RUNTIME_STARTED=$(date +%s)',
         '      while kill -0 "$OPENCODE_PID" 2>/dev/null; do',
+        '        if _opencode_process_is_zombie; then',
+        '          wait "$OPENCODE_PID"; RC=$?',
+        '          cat "$td/opencode-output.log"',
+        "          return",
+        "        fi",
         "        OPENCODE_RUNTIME_NOW=$(date +%s)",
         '        if [ $((OPENCODE_RUNTIME_NOW - OPENCODE_RUNTIME_STARTED)) -ge "$OPENCODE_RUNTIME_TIMEOUT_SECONDS" ]; then',
         '          _kill_opencode_process -TERM',
@@ -1340,7 +1422,6 @@ def _managed_secure_copy_lines() -> list[str]:
         ") || { echo \"Managed source binding failed: $MANAGED_COPY_PLAN\" >> \"$td/agent-status.md\"; exit 73; }",
         'MANAGED_SOURCE_COPY=$(printf "%s\\n" "$MANAGED_COPY_PLAN" | sed -n "1p")',
         'MANAGED_PRIVATE_DIR=$(printf "%s\\n" "$MANAGED_COPY_PLAN" | sed -n "2p")',
-        "trap 'rm -rf \"$MANAGED_PRIVATE_DIR\" 2>/dev/null' EXIT",
     ]
 
 
@@ -1448,6 +1529,7 @@ def _build_opencode_script(
         'echo "Status: running" > "$td/agent-status.md"',
         "OPCODE_BIN=$(command -v opencode 2>/dev/null || echo '/root/.opencode/bin/opencode')",
     ])
+    parts.extend(_agent_heartbeat_script_lines())
     if project_root and worktree_path and not managed_clone:
         parts.extend(_parent_prerun_snapshot_script_lines(project_root))
     if worktree_path:
@@ -1724,7 +1806,14 @@ def _build_opencode_script(
         '  printf "\\n" >> "$td/agent-report.md"',
         "fi",
     ])
-    parts.append("exit $FINAL_RC")
+    parts.extend([
+        "AGENT_HEARTBEAT_FINALIZED=1",
+        "stop_agent_heartbeat",
+        'write_agent_heartbeat finished final "$FINAL_RC"',
+        "cleanup_managed_private_dir",
+        "trap - EXIT",
+        "exit $FINAL_RC",
+    ])
     return "\n".join(parts)
 
 
@@ -2105,6 +2194,7 @@ def project_run_agent(
             "status": "running",
             "job_id": job_id,
             "attempt_id": attempt_id,
+            "diagnostics": _agent_diagnostics_hint(project, task_id, job_id),
             "exit_code": None,
             "stdout": "",
             "stderr": "",
@@ -2310,6 +2400,7 @@ def project_run_agent(
             "attempt_id": attempt_id,
             "wait_timed_out": True,
             "reconciled_via": waiter.get("reconciled_via"),
+            "diagnostics": _agent_diagnostics_hint(project, task_id, job_id),
             "exit_code": None,
             "stdout": "",
             "stderr": "",
@@ -2325,6 +2416,7 @@ def project_run_agent(
             "attempt_id": attempt_id,
             "error": waiter.get("error", "job state unresolved after transport loss"),
             "reconciled_via": waiter.get("reconciled_via"),
+            "diagnostics": _agent_diagnostics_hint(project, task_id, job_id),
             "exit_code": None,
             "stdout": "",
             "stderr": "",

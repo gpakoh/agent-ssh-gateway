@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import subprocess
 import sys
 from pathlib import Path
 
@@ -457,3 +458,218 @@ class TestProjectAwareHandoffWrite:
             )
 
         assert not (project_root / ".ai-bridge").exists()
+
+
+class TestProjectCommandCwdMetadata:
+    def test_run_project_command_reports_project_relative_cwd(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+
+        class Client:
+            def execute_project_command(self, project: str, command: str) -> dict[str, object]:
+                assert project == "demo"
+                assert command == "git status --short"
+                return {"exit_code": 0, "stdout": "ok\n", "stderr": "", "duration": 0.01}
+
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        result = mod.run_project_command(Client(), "demo", "git status --short")
+
+        assert result["cwd"] == "."
+        assert "/" not in result["cwd"]
+
+
+def _git(repo: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return completed.stdout.strip()
+
+
+def _init_git_repo(repo: Path) -> str:
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test User")
+    (repo / "README.md").write_text("hello\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "initial")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+class TestProjectGitStateGuards:
+    def test_info_exposes_git_state_snapshot_without_host_paths(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        head = _init_git_repo(tmp_path)
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        result = mod.info(None, "demo")
+
+        state = result["workspace"]["git_state"]
+        assert state["available"] is True
+        assert state["branch"] == "main"
+        assert state["head"] == head
+        assert state["dirty"] is False
+        assert state["status_sha256"] == mod.hashlib.sha256(b"").hexdigest()
+        assert str(tmp_path) not in str(state)
+
+    def test_guarded_git_commit_rejects_branch_head_or_status_drift(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        _init_git_repo(tmp_path)
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        class Client:
+            def execute_project_command(self, project: str, command: str) -> dict[str, object]:
+                raise AssertionError("commit must not run after guard mismatch")
+
+        result = mod.git_commit(
+            Client(),
+            "demo",
+            "should not commit",
+            expected_branch="other",
+            expected_head="0" * 40,
+            expected_status_sha256="f" * 64,
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+        fields = {item["field"] for item in result["error"]["details"]["mismatches"]}
+        assert fields == {"branch", "head", "status_sha256"}
+
+    def test_guarded_git_commit_runs_when_snapshot_matches(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        head = _init_git_repo(tmp_path)
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+        status_sha = mod.hashlib.sha256(b"").hexdigest()
+
+        class Client:
+            def __init__(self) -> None:
+                self.commands: list[str] = []
+
+            def execute_project_command(self, project: str, command: str) -> dict[str, object]:
+                self.commands.append(command)
+                return {"exit_code": 0, "stdout": "[main abc] ok\n", "stderr": ""}
+
+        client = Client()
+        result = mod.git_commit(
+            client,
+            "demo",
+            "commit after guard",
+            expected_branch="main",
+            expected_head=head,
+            expected_status_sha256=status_sha,
+        )
+
+        assert result["exit_code"] == 0
+        assert client.commands == ["git commit -m 'commit after guard'"]
+
+
+class TestProjectInfoVerificationHints:
+    def test_info_exposes_cwd_bound_uv_verification_hints(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(
+            """
+[project]
+name = "demo"
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
+""".strip(),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        result = mod.info(None, "demo")
+
+        assert result["root"] == "."
+        assert result["resolved_path"] == "."
+        verification = result["verification"]
+        assert verification["cwd"] == "."
+        assert verification["cwd_required"] is True
+        assert "--project" not in " ".join(
+            part for command in verification["commands"] for part in command["argv"]
+        )
+        assert {command["name"] for command in verification["commands"]} == {
+            "pytest",
+            "ruff",
+            "mypy",
+        }
+        assert ["uv", "run", "--extra", "dev", "pytest"] in [
+            command["argv"] for command in verification["commands"]
+        ]
+
+    def test_info_does_not_invent_dev_extra_from_unrelated_text(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndescription = "developer tooling without a dev extra"\ndependencies = ["pytest", "ruff", "mypy"]\n[project.optional-dependencies]\ndocs = ["mkdocs"]',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        result = mod.info(None, "demo")
+
+        for command in result["verification"]["commands"]:
+            assert "--extra" not in command["argv"]
+            assert "dev" not in command["argv"]
+
+    def test_info_without_pyproject_keeps_empty_verification_commands(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        result = mod.info(None, "demo")
+
+        assert result["verification"]["cwd"] == "."
+        assert result["verification"]["commands"] == []
+
+    def test_info_exposes_workspace_write_plane_hints_without_host_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from app.config import settings
+
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+        monkeypatch.setattr(settings, "workspace_readonly", True)
+        monkeypatch.setattr(mod.os, "access", lambda path, mode: False)
+
+        result = mod.info(None, "demo")
+
+        workspace = result["workspace"]
+        assert workspace["root"] == "."
+        assert workspace["configured_readonly"] is True
+        assert workspace["filesystem_writeable"] is False
+        assert workspace["recommended_write_plane"] == "writeable_candidate_clone"
+        assert str(tmp_path) not in str(workspace)
+
+    def test_info_reports_workspace_plane_when_config_and_filesystem_are_writeable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from app.config import settings
+
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+        monkeypatch.setattr(settings, "workspace_readonly", False)
+        monkeypatch.setattr(mod.os, "access", lambda path, mode: True)
+
+        result = mod.info(None, "demo")
+
+        workspace = result["workspace"]
+        assert workspace["configured_readonly"] is False
+        assert workspace["filesystem_writeable"] is True
+        assert workspace["recommended_write_plane"] == "workspace"

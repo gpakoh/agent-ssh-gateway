@@ -893,6 +893,10 @@ class GatewayClient:
             {"redact_output": str(redact_output).lower()},
         )
 
+    def cancel_job(self, job_id: str) -> dict[str, Any]:
+        """Request cancellation of a gateway background job."""
+        return self._post(f"/api/jobs/{job_id}/cancel", {})
+
     def wait_job(self, job_id: str, timeout_sec: int | None = None) -> dict[str, Any]:
         """Wait for job completion using long-poll, falling back to polling.
 

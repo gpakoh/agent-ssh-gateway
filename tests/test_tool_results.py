@@ -120,6 +120,26 @@ class TestToolError:
             result = tool_error("read_file", code, "nope")
             assert result["error"]["code"] == code, code
 
+    def test_error_candidate_delivery_codes_not_degraded(self):
+        """Candidate/delivery failures must remain machine-actionable.
+
+        These codes distinguish diff mismatch, missing evidence, non-terminal
+        jobs, bad receipts, scope denial, staging corruption, and verifier
+        failure instead of collapsing them into INTERNAL_ERROR or a generic
+        policy denial.
+        """
+        for code in (
+            "CANDIDATE_DIFF_MISMATCH",
+            "CANDIDATE_EVIDENCE_MISSING",
+            "CANDIDATE_JOB_NOT_SUCCESSFUL",
+            "CANDIDATE_RECEIPT_INVALID",
+            "CANDIDATE_SCOPE_VIOLATION",
+            "CANDIDATE_STAGING_INVALID",
+            "CANDIDATE_VERIFICATION_FAILED",
+        ):
+            result = tool_error("gitea_materialize_task_candidate", code, "nope")
+            assert result["error"]["code"] == code, code
+
     def test_error_with_result(self):
         result = tool_error("tool", "INVALID_INPUT", "bad param", result={"param": "x"})
         assert result["result"] == {"param": "x"}

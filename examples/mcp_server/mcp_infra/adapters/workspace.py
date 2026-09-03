@@ -12,6 +12,7 @@ after runtime.set_mcp) instead of import-time decorator side effects.
 
 from __future__ import annotations
 
+import errno
 from typing import Any
 
 from tool_results import tool_error, tool_success
@@ -56,6 +57,29 @@ def _get_workspace_registry():
     )
     return _workspace_registry_cache
 
+def _workspace_mutation_error(tool: str, exc: Exception) -> dict[str, Any]:
+    """Classify workspace write failures without hiding the operator action."""
+    if isinstance(exc, OSError) and exc.errno == errno.EROFS:
+        return tool_error(
+            tool=tool,
+            code="WORKSPACE_READONLY",
+            message="Workspace project root is mounted read-only",
+            retryable=False,
+            hint="Use a writeable candidate clone or change the workspace mount before retrying.",
+            source="gateway",
+        )
+    if isinstance(exc, PermissionError):
+        return tool_error(
+            tool=tool,
+            code="PERMISSION_DENIED",
+            message=str(exc),
+            retryable=False,
+            source="gateway",
+        )
+    return tool_error(
+        tool=tool, code="TOOL_EXECUTION_FAILED", message=str(exc), source="gateway"
+    )
+
 
 def gateway_workspace_file_write(
     project_id: str,
@@ -99,11 +123,7 @@ def gateway_workspace_file_write(
         )
         return tool_success(tool="workspace_file_write", result=result)
     except Exception as exc:
-        return tool_error(
-            tool="workspace_file_write",
-            code="TOOL_EXECUTION_FAILED",
-            message=str(exc),
-        )
+        return _workspace_mutation_error("workspace_file_write", exc)
 
 
 def gateway_workspace_file_edit(
@@ -151,11 +171,7 @@ def gateway_workspace_file_edit(
         )
         return tool_success(tool="workspace_file_edit", result=result)
     except Exception as exc:
-        return tool_error(
-            tool="workspace_file_edit",
-            code="TOOL_EXECUTION_FAILED",
-            message=str(exc),
-        )
+        return _workspace_mutation_error("workspace_file_edit", exc)
 
 
 def gateway_workspace_apply_patch(
@@ -202,11 +218,7 @@ def gateway_workspace_apply_patch(
         result.pop("patch", None)
         return tool_success(tool="workspace_apply_patch", result=result)
     except Exception as exc:
-        return tool_error(
-            tool="workspace_apply_patch",
-            code="TOOL_EXECUTION_FAILED",
-            message=str(exc),
-        )
+        return _workspace_mutation_error("workspace_apply_patch", exc)
 
 
 def gateway_workspace_preview_write(

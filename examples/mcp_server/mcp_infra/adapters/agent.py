@@ -19,10 +19,19 @@ from agent_tasks import (
     archive_agent_task as _archive_agent_task,
 )
 from agent_tasks import (
+    cancel_agent_task as _cancel_agent_task,
+)
+from agent_tasks import (
     claim_agent_attempt_state as _claim_agent_attempt_state,
 )
 from agent_tasks import (
+    inspect_agent_task as _inspect_agent_task,
+)
+from agent_tasks import (
     list_agent_tasks as _list_agent_tasks,
+)
+from agent_tasks import (
+    prepare_agent_task_retry as _prepare_agent_task_retry,
 )
 from agent_tasks import (
     read_agent_attempt_state as _read_agent_attempt_state,
@@ -121,6 +130,7 @@ def gateway_write_agent_task(
     constraints: str | None = None,
     worktree_path: str | None = None,
     base_ref: str | None = None,
+    workflow_phase: str | None = None,
 ) -> dict[str, Any]:
     """Write task.json + current-plan.md to .ai-bridge/tasks/<task_id>/."""
 
@@ -169,6 +179,7 @@ def gateway_write_agent_task(
             worktree_path=worktree_path,
             base_ref=base_ref,
             managed_source_sha256=managed_source_sha256,
+            workflow_phase=workflow_phase,
         )
 
     return run_tool(
@@ -263,6 +274,48 @@ def gateway_read_agent_log(
     )
 
 
+
+def gateway_inspect_agent_task(
+    project: str,
+    task_id: str,
+    tail_lines: int = 120,
+    stale_after_seconds: int = 600,
+) -> dict[str, Any]:
+    """Inspect one agent task: status, job, artifact mtimes, stale verdict, and log tail."""
+
+    def _fn() -> dict[str, Any]:
+        result = _inspect_agent_task(
+            lambda p, c: run_project_command(_server_client(), p, c),
+            project=project,
+            task_id=task_id,
+            tail_lines=tail_lines,
+            stale_after_seconds=stale_after_seconds,
+            job_status=lambda jid: _server_client().job_status(jid),
+        )
+        log = result.get("log")
+        if isinstance(log, dict):
+            stdout = str(log.get("stdout", ""))
+            stderr = str(log.get("stderr", ""))
+            redacted_stdout = str(redact_secrets(stdout))
+            redacted_stderr = str(redact_secrets(stderr))
+            log["stdout"] = redacted_stdout
+            log["stderr"] = redacted_stderr
+            result["redacted"] = redacted_stdout != stdout or redacted_stderr != stderr
+        status_text = result.get("status_text")
+        if isinstance(status_text, str):
+            redacted_status = str(redact_secrets(status_text))
+            result["status_text"] = redacted_status
+            result["redacted"] = bool(result.get("redacted")) or redacted_status != status_text
+        return result
+
+    return run_tool(
+        tool="inspect_agent_task",
+        title="Inspect agent task",
+        fn=_fn,
+        success_text="Inspected agent task.",
+    )
+
+
 def gateway_list_agent_tasks(project: str) -> dict[str, Any]:
     """List task directories under .ai-bridge/tasks/."""
     return run_tool(
@@ -273,6 +326,45 @@ def gateway_list_agent_tasks(project: str) -> dict[str, Any]:
             project=project,
         ),
         success_text="Listed agent tasks.",
+    )
+
+
+
+def gateway_cancel_agent_task(project: str, task_id: str) -> dict[str, Any]:
+    """Cancel the gateway job bound to an agent task's durable attempt record."""
+
+    return run_tool(
+        tool="cancel_agent_task",
+        title="Cancel agent task",
+        fn=lambda: _cancel_agent_task(
+            lambda p, c: run_project_command(_server_client(), p, c),
+            project=project,
+            task_id=task_id,
+            cancel_job=lambda job_id: _server_client().cancel_job(job_id),
+        ),
+        success_text="Requested agent task cancellation.",
+    )
+
+
+def gateway_retry_agent_task(
+    project: str,
+    source_task_id: str,
+    retry_task_id: str,
+) -> dict[str, Any]:
+    """Prepare a fresh retry task from a terminal/cancelled source task."""
+
+    return run_tool(
+        tool="retry_agent_task",
+        title="Prepare agent task retry",
+        fn=lambda: _prepare_agent_task_retry(
+            lambda p, c: run_project_command(_server_client(), p, c),
+            lambda p, s: _server_client().execute_project_script(p, s),
+            project=project,
+            source_task_id=source_task_id,
+            retry_task_id=retry_task_id,
+            job_status=lambda job_id: _server_client().job_status(job_id),
+        ),
+        success_text="Prepared agent task retry.",
     )
 
 
@@ -518,7 +610,10 @@ def register_all() -> None:
     register_tool("read_agent_report")(gateway_read_agent_report)
     register_tool("read_agent_diff")(gateway_read_agent_diff)
     register_tool("read_agent_log")(gateway_read_agent_log)
+    register_tool("inspect_agent_task")(gateway_inspect_agent_task)
     register_tool("list_agent_tasks")(gateway_list_agent_tasks)
+    register_tool("cancel_agent_task")(gateway_cancel_agent_task)
+    register_tool("retry_agent_task")(gateway_retry_agent_task)
     register_tool("archive_agent_task")(gateway_archive_agent_task)
     register_tool("run_opencode")(gateway_run_opencode)
     register_tool("run_agent")(gateway_run_agent)
