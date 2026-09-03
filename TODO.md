@@ -52,12 +52,7 @@ items are explicitly verified as implemented, documented and safe in production.
    branch and head for trusted git operations, and fail-closed detection such as
    `WORKSPACE_NAMESPACE_MISMATCH` when namespaces diverge.
 
-7. ⬜ **Close superseded PRs explicitly when the tool surface supports it.** PR
-   #133, #135 and #136 are obsolete/superseded contours and should be closed
-   with comments pointing to their replacements. Current ChatGPT-visible Gitea
-   surface exposes list/get/create/merge, but no close/update/comment action.
-
-8. ⬜ **Command-plane/session recovery gap after transient reconnect/cooldown.**
+7. ⬜ **Command-plane/session recovery gap after transient reconnect/cooldown.**
    After a transient 429 or reconnect cooldown, project-level tools such as
    `git_status` and `current_branch` can continue to work while `execute_argv`
    against the previously known session returns `SESSION_NOT_FOUND` or becomes
@@ -65,7 +60,7 @@ items are explicitly verified as implemented, documented and safe in production.
    project-level tools for existing-branch switch and local-branch deletion, with
    regression coverage proving operators do not need probe refs to recover.
 
-9. ⬜ **OpenCode worker `UnknownError` needs structured failure reason and
+8. ⬜ **OpenCode worker `UnknownError` needs structured failure reason and
    server-log correlation.** Managed delivery tasks can fail after source-bundle
    verification and clean clone setup but before useful work, with
    `Failure reason: none` and only opaque OpenCode `UnknownError` refs. Closure
@@ -73,7 +68,7 @@ items are explicitly verified as implemented, documented and safe in production.
    `opencode_server_error`, `provider_error` or `proxy_error`, preserving the
    upstream ref, and surfacing a redacted server-log correlation hint.
 
-10. ⬜ **Agent job state is not durable across Gateway restart/deploy.** An
+9. ⬜ **Agent job state is not durable across Gateway restart/deploy.** An
    OpenCode corrective task had useful work in `opencode-output.log` and had
    already run targeted tests, but the Gateway restart during CI deploy made the
    returned `job_id` disappear with `JOB_NOT_FOUND` while `agent-status.md`
