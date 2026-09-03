@@ -50,6 +50,16 @@ TASKS_REL_DIR = ".ai-bridge/tasks"
 ARCHIVE_REL_DIR = ".ai-bridge/archive"
 
 KNOWN_CONCRETE_BACKENDS = frozenset({"opencode"})
+WORKFLOW_PHASES = frozenset(
+    {"discovery", "validation", "implementation", "verification", "cleanup"}
+)
+WORKFLOW_PHASE_TRANSITIONS = {
+    "discovery": "Move to validation with evidence, risks, and a GO/NO-GO recommendation.",
+    "validation": "Move to implementation or terminal blocked; do not keep discussing.",
+    "implementation": "Make the smallest scoped change, then move to verification.",
+    "verification": "Run required checks, fix scoped failures, then move to cleanup/final report.",
+    "cleanup": "Tighten the diff and write the final handoff; do not start new scope.",
+}
 
 
 def validate_task_id(task_id: str) -> None:
@@ -76,6 +86,21 @@ def validate_base_ref(base_ref: str | None) -> None:
         raise ValueError(
             f"Invalid base_ref: {base_ref!r}. Must be a full 40- or 64-character hex commit id"
         )
+
+
+def validate_workflow_phase(workflow_phase: str | None) -> str:
+    """Return a normalized workflow phase or raise for unknown phases."""
+    if workflow_phase is None or workflow_phase == "":
+        return "implementation"
+    if not isinstance(workflow_phase, str):
+        raise TypeError(
+            f"workflow_phase must be a string or None, got {type(workflow_phase).__name__}"
+        )
+    phase = workflow_phase.strip().lower()
+    if phase not in WORKFLOW_PHASES:
+        choices = ", ".join(sorted(WORKFLOW_PHASES))
+        raise ValueError(f"Invalid workflow_phase: {workflow_phase!r}. Must be one of: {choices}")
+    return phase
 
 
 def _is_valid_shell_command(entry: str) -> bool:
@@ -385,12 +410,14 @@ def build_task_json(
     base_ref: str | None = None,
     allowed_backends: list[str] | None = None,
     managed_source_sha256: str | None = None,
+    workflow_phase: str | None = None,
 ) -> str:
     """Build machine-readable task.json content."""
     validate_task_id(task_id)
     validate_required_checks(required_checks)
     validate_scope_contract(allowed_files, forbidden_files)
     validate_base_ref(base_ref)
+    normalized_workflow_phase = validate_workflow_phase(workflow_phase)
     if managed_source_sha256 is not None and (
         not isinstance(managed_source_sha256, str)
         or not re.fullmatch(r"[0-9a-f]{64}", managed_source_sha256)
@@ -409,6 +436,7 @@ def build_task_json(
         "worktree_path": worktree_path or "",
         "base_ref": base_ref or "",
         "managed_source_sha256": managed_source_sha256 or "",
+        "workflow_phase": normalized_workflow_phase,
         "commit_allowed": commit_allowed,
         "push_allowed": push_allowed,
         "created": datetime.now(UTC).isoformat(),
@@ -430,6 +458,42 @@ def build_initial_status(agent: str, task_id: str) -> str:
     )
 
 
+def build_task_consensus(
+    *,
+    task_id: str,
+    task: str,
+    workflow_phase: str | None = None,
+    artifact_dir: str | None = None,
+) -> str:
+    """Build operator-readable consensus.md baton-state content."""
+    validate_task_id(task_id)
+    phase = validate_workflow_phase(workflow_phase)
+    artifacts = artifact_dir or f"{TASKS_REL_DIR}/{task_id}"
+    next_action = WORKFLOW_PHASE_TRANSITIONS[phase]
+    return (
+        "# Agent consensus\n\n"
+        "This file is the durable baton state for long-running agent work. "
+        "Keep it short, factual, and updated when decisions change.\n\n"
+        "## Task\n\n"
+        f"- Task ID: {task_id}\n"
+        f"- Title: {task}\n"
+        f"- Workflow phase: {phase}\n"
+        f"- Created: {datetime.now(UTC).isoformat()}\n\n"
+        "## Current consensus\n\n"
+        "- Initial state: read current-plan.md, preserve scope, and record material decisions here.\n"
+        "- Do not re-litigate settled decisions unless new evidence appears.\n\n"
+        "## Convergence rule\n\n"
+        "- Discovery must produce evidence and a validation question.\n"
+        "- Validation must produce GO/NO-GO and an implementation plan.\n"
+        "- Implementation must produce a scoped diff, not more discussion.\n"
+        "- Verification must run required checks or explain a hard blocker.\n"
+        "- Cleanup must finalize the handoff and avoid new scope.\n\n"
+        "## Next action\n\n"
+        f"- {next_action}\n"
+        f"- Update `{artifacts}/agent-status.md` for progress and this file for decisions.\n"
+    )
+
+
 def build_current_plan(
     *,
     task_id: str,
@@ -442,11 +506,13 @@ def build_current_plan(
     commit_message: str | None = None,
     constraints: str | None = None,
     artifact_dir: str | None = None,
+    workflow_phase: str | None = None,
 ) -> str:
     """Build human-readable current-plan.md content."""
     validate_task_id(task_id)
     validate_required_checks(required_checks)
     validate_scope_contract(allowed_files, forbidden_files)
+    phase = validate_workflow_phase(workflow_phase)
     allow = "\n".join(f"- {f}" for f in (allowed_files or []))
     forbid = "\n".join(f"- {f}" for f in (forbidden_files or []))
     checks = "\n".join(f"- `{c}`" for c in (required_checks or []))
@@ -458,7 +524,13 @@ def build_current_plan(
         f"# {task}\n\n"
         f"## Metadata\n\n"
         f"- Task ID: {task_id}\n"
-        f"- Created: {datetime.now(UTC).isoformat()}\n\n"
+        f"- Created: {datetime.now(UTC).isoformat()}\n"
+        f"- Workflow phase: {phase}\n\n"
+        f"## Workflow phase\n\n"
+        f"Current phase: `{phase}`. {WORKFLOW_PHASE_TRANSITIONS[phase]}\n\n"
+        f"Forced convergence: discovery → validation → implementation → "
+        f"verification → cleanup. After validation, pure discussion is not "
+        f"a sufficient deliverable.\n\n"
         f"## Scope\n\n{scope}\n\n"
         f"## Allowed files\n\n{allow}\n\n"
         f"## Forbidden\n\n{forbid}\n\n"
@@ -469,6 +541,7 @@ def build_current_plan(
         + "\n## Agent instructions\n\n"
         + "Read this plan and execute it in small, reviewable steps.\n"
         + f"After each meaningful change, update `{artifacts}/agent-status.md`.\n"
+        + f"Keep durable decisions and handoff state in `{artifacts}/consensus.md`.\n"
         + f"Save final diff to `{artifacts}/implementation-diff.patch`.\n"
         + "Do not commit or push unless explicitly instructed.\n"
     )
@@ -971,6 +1044,7 @@ def write_agent_task(
     base_ref: str | None = None,
     allowed_backends: list[str] | None = None,
     managed_source_sha256: str | None = None,
+    workflow_phase: str | None = None,
 ) -> dict[str, Any]:
     """Write task.json + current-plan.md + agent-status.md to .ai-bridge/tasks/<task_id>/."""
     validate_task_id(task_id)
@@ -985,6 +1059,7 @@ def write_agent_task(
         base_ref=base_ref,
         allowed_backends=allowed_backends,
         managed_source_sha256=managed_source_sha256,
+        workflow_phase=workflow_phase,
     )
     td = task_dir(project, task_id)
     current_plan = build_current_plan(
@@ -998,6 +1073,13 @@ def write_agent_task(
         commit_message=commit_message,
         constraints=constraints,
         artifact_dir=td,
+        workflow_phase=workflow_phase,
+    )
+    consensus = build_task_consensus(
+        task_id=task_id,
+        task=task,
+        workflow_phase=workflow_phase,
+        artifact_dir=td,
     )
     initial_status = build_initial_status(agent=agent, task_id=task_id)
 
@@ -1005,6 +1087,7 @@ def write_agent_task(
     targets = [
         f"{td}/task.json",
         f"{td}/current-plan.md",
+        f"{td}/consensus.md",
         f"{td}/agent-status.md",
     ]
     if worktree_path:
@@ -1027,6 +1110,7 @@ def write_agent_task(
         [
             _encoded_write(f"{td}/task.json", task_json),
             _encoded_write(f"{td}/current-plan.md", current_plan),
+            _encoded_write(f"{td}/consensus.md", consensus),
             _encoded_write(f"{td}/agent-status.md", initial_status),
         ]
     )
@@ -1207,8 +1291,15 @@ def prepare_agent_task_retry(
     plan = str(plan_result.get("stdout", ""))
     if plan == "(not found)":
         plan = ""
+    phase = validate_workflow_phase(str(retry_contract.get("workflow_phase") or "implementation"))
     status = build_initial_status(agent, retry_task_id) + f"\nRetry of: {source_task_id}\n"
     td = task_dir(project, retry_task_id)
+    consensus = build_task_consensus(
+        task_id=retry_task_id,
+        task=f"Retry of {source_task_id}",
+        workflow_phase=phase,
+        artifact_dir=td,
+    )
     files = {
         f"{td}/task.json": json.dumps(retry_contract, indent=2, ensure_ascii=False),
         f"{td}/current-plan.md": _retry_plan_text(
@@ -1216,6 +1307,7 @@ def prepare_agent_task_retry(
             source_task_id=source_task_id,
             retry_task_id=retry_task_id,
         ),
+        f"{td}/consensus.md": consensus,
         f"{td}/agent-status.md": status,
     }
     tasks_dir = task_tasks_dir(project)
