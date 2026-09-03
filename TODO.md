@@ -107,6 +107,17 @@ items are explicitly verified as implemented, documented and safe in production.
    or branch creation must fail with a typed ownership diagnostic and recovery
    path such as `GIT_OWNERSHIP_BLOCKED`.
 
+5. ⬜ **Typed Gitea repo/PR cleanup tools for architect-controlled delivery.**
+   Add first-class, ChatGPT-visible tools for safe repository cleanup operations
+   that currently require manual UI/API fallback: close a Gitea PR without
+   merge, update repository settings such as default branch, and verify
+   `merged=false` / exact head/base state after cleanup. These tools must be
+   surfaced as invokable schemas wherever `tools_manifest` advertises them,
+   fail closed on ambiguous repo/PR identity, require explicit expected state
+   inputs, and return structured audit evidence. Closure requires regression
+   coverage for PR close-without-merge, default-branch switch, already-closed
+   idempotency, and catalog/resource visibility parity.
+
 ## 🆕 Runtime/CI findings — 2026-08-19
 
 1. ⬜ **Correlated ~18-minute CI failures across Docker runners/phases.** Prior
