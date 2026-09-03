@@ -73,6 +73,17 @@ items are explicitly verified as implemented, documented and safe in production.
    `opencode_server_error`, `provider_error` or `proxy_error`, preserving the
    upstream ref, and surfacing a redacted server-log correlation hint.
 
+10. ⬜ **Agent job state is not durable across Gateway restart/deploy.** An
+   OpenCode corrective task had useful work in `opencode-output.log` and had
+   already run targeted tests, but the Gateway restart during CI deploy made the
+   returned `job_id` disappear with `JOB_NOT_FOUND` while `agent-status.md`
+   still reported stale `Status: running` and no `agent-report.md` or
+   `implementation-diff.patch` existed. Closure requires restart-safe task/job
+   reconciliation: after transport restart, an operator must get a typed
+   `lost_after_restart` / `orphaned_attempt` / `artifact_incomplete` state with
+   last useful activity and recovery instructions, not a vanished job plus stale
+   running status.
+
 ## 🧩 Architect/operator wanted capabilities — 2026-09-03
 
 1. ⬜ **First-class bounded internal service health probe.** Add a read-only
