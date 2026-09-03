@@ -1435,12 +1435,12 @@ class TestMasterCapacitySettingsWiredToGateway:
     env explicitly. Earlier the compose wired defaults of 0, so the master
     capacity lane came up disabled (live /api/ssh/connect still 429) whenever
     MASTER_* were absent from the environment. Now the compose defaults are
-    64 (sessions/IP), 120 (connect/min), 240 (execute/min) -- still granted
+    128 (sessions/IP), 120 (connect/min), 240 (execute/min) -- still granted
     to the gateway only, never leaked onto unrelated services.
     """
 
     MASTER_WIRES = {
-        "MASTER_MAX_SESSIONS_PER_IP": "${MASTER_MAX_SESSIONS_PER_IP:-64}",
+        "MASTER_MAX_SESSIONS_PER_IP": "${MASTER_MAX_SESSIONS_PER_IP:-128}",
         "MASTER_CONNECT_RATE_LIMIT_REQUESTS": "${MASTER_CONNECT_RATE_LIMIT_REQUESTS:-120}",
         "MASTER_EXECUTE_RATE_LIMIT_REQUESTS": "${MASTER_EXECUTE_RATE_LIMIT_REQUESTS:-240}",
     }
