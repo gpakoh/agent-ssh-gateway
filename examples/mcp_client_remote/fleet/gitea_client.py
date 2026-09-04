@@ -17,6 +17,10 @@ from .shared import (
 
 MAX_LIMIT = 50
 MAX_FILE_SIZE = 256 * 1024
+# Default bound, in bytes, applied to a file's *decoded* content before it is
+# returned to a caller. Centralized so both the low-level client and the MCP
+# tool can opt in to a smaller, less chat-spammy cap than MAX_FILE_SIZE.
+DEFAULT_GET_FILE_MAX_CONTENT_BYTES = 16 * 1024
 REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 API_BASE = os.environ.get("GITEA_API_BASE", "https://git.example.com/api/v1")
@@ -261,12 +265,25 @@ class GiteaClient:
         repo: str,
         path: str = "",
         branch: str | None = None,
+        *,
+        include_content: bool = True,
+        max_content_bytes: int | None = None,
     ) -> dict[str, Any]:
         """Get a file, a directory listing, or (path="") the repo root
         listing. validate_repo_path() rejects an empty path, so root
         listing must go through the path-less endpoint variant instead
         of substituting {path} at all -- P2 audit finding: there was
         previously no way to list a repo's top level through this tool.
+
+        Content contract (keeps large base64 blobs out of chat by default):
+          * include_content=False drops the "content" field and sets
+            "content_omitted": true, keeping all metadata (path, name, sha,
+            download_url, html_url, last_commit_sha).
+          * max_content_bytes (int > 0) bounds the *decoded* content: larger
+            files come back as a "[truncated N bytes > M limit]" marker with
+            "truncated": true and "content_bytes": original length.
+          * max_content_bytes=None falls back to MAX_FILE_SIZE (256 KiB), so
+            existing callers keep their previous behavior.
         """
         params: dict[str, str] = {}
         if branch:
@@ -287,11 +304,21 @@ class GiteaClient:
                 repo=repo,
             )
         if isinstance(result, dict) and "content" in result:
+            if not include_content:
+                result.pop("content", None)
+                result["content_omitted"] = True
+                return result
             import base64
 
             raw = base64.b64decode(result["content"])
-            if len(raw) > MAX_FILE_SIZE:
-                result["content"] = f"[truncated {len(raw)} bytes > {MAX_FILE_SIZE} limit]"
+            limit = max_content_bytes if max_content_bytes is not None else MAX_FILE_SIZE
+            if limit <= 0:
+                raise ValueError(
+                    f"max_content_bytes must be a positive int or None, got {max_content_bytes}"
+                )
+            if len(raw) > limit:
+                result["content"] = f"[truncated {len(raw)} bytes > {limit} limit]"
+                result["content_bytes"] = len(raw)
                 result["truncated"] = True
         return result
 
