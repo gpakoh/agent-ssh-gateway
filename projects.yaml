@@ -345,3 +345,80 @@ projects:
     type: python-service
     description: "ChatGPT web automation bridge — Quart/FastAPI, undetected-chromedriver, tools API"
     tags: []
+
+  engineering-supervisor-service:
+    root: "quart-platform/engineering-supervisor-service"
+    parent: quart-platform
+    type: "python-service"
+    description: "Engineering Supervisor service"
+    tags: ["quart", "supervisor", "python-service"]
+
+  infra-quart-supervisor-auth-20260903:
+    root: "quart-platform/.infra-quart-wt"
+    parent: quart-platform
+    type: "infra"
+    description: "Isolated clean infra-quart worktree for Supervisor internal API auth wiring corrective"
+    tags: ["infra-quart", "supervisor", "security", "corrective"]
+
+  kojo-bot-service-ci325-hard-deadline-20260904:
+    root: "quart-platform/.supervisor-workspaces/kojo-ci325-hard-deadline-20260904"
+    parent: quart-platform
+    type: "supervisor-workspace"
+    description: "Isolated clean Kojo candidate for #325 CI hard-deadline corrective"
+    tags: ["kojo", "ci", "supervisor", "corrective"]
+
+  astra:
+    root: "astra"
+    type: "node-service"
+    description: "Astra multi-site Astro/Directus project (gpakoh/zalesskiy-sup)"
+    tags: ["astra", "astro", "directus", "multisite"]
+
+  engineering-supervisor-rag-delivery-20260904:
+    root: ".supervisor-workspaces/engineering-supervisor-rag-delivery-20260904"
+    type: "python-service"
+    description: "Temporary delivery clone for engineering-supervisor-service RAG source_ref escaping patch"
+    tags: ["supervisor", "delivery", "temporary"]
+
+  astro-builder-c25c6-20260904:
+    root: "quart-platform/.supervisor-workspaces/astro-builder-c25c6-20260904"
+    parent: quart-platform
+    type: "astro"
+    description: "Temporary supervisor workspace for Astra C.2.5-C6 adversarial hydration tests"
+    tags: ["astro", "supervisor", "c25c6"]
+
+  engineering-supervisor-rag-verify-20260904-0400:
+    root: ".supervisor-workspaces/engineering-supervisor-rag-verify-20260904-0400"
+    type: "python-service"
+    description: "Temporary verified RAG source_ref escaping candidate"
+    tags: ["supervisor", "temporary", "verification"]
+
+  astro-builder-c25c5-metadata-20260904:
+    root: "quart-platform/.supervisor-workspaces/astro-builder-c25c5-metadata-20260904"
+    parent: quart-platform
+    type: "astro"
+    description: "Temporary supervisor workspace for Astra C.2.5-C5 release metadata repair"
+    tags: ["astro", "supervisor", "c25c5"]
+
+  engineering-supervisor-source-r2d-main-verify-20260904-0400:
+    root: ".supervisor-workspaces/engineering-supervisor-source-r2d-main-verify-20260904-0400"
+    type: "python-service"
+    description: "Temporary verified source-processing replay/limit candidate"
+    tags: ["supervisor", "temporary", "verification"]
+
+  infra-quart-faiss-debug-writer-pinning-20260904:
+    root: ".supervisor-workspaces/infra-quart-faiss-debug-writer-pinning-20260904"
+    type: "infra"
+    description: "Temporary writable infra-quart clone for FAISS debug writer-pinning fix"
+    tags: ["infra-quart", "rag", "temporary"]
+
+  infra-quart-docparser-relative-context-20260904:
+    root: ".supervisor-workspaces/infra-quart-docparser-relative-context-20260904"
+    type: "infra"
+    description: "Temporary writable infra-quart clone for document-parser relative build context fix"
+    tags: ["infra-quart", "rag", "temporary"]
+
+  zalesskiy-sup:
+    root: astra
+    type: unknown
+    description: "Zalesskiy SUP — Astro 5 + Directus landing"
+    tags: []
