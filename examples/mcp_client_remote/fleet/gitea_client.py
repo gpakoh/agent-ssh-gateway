@@ -496,12 +496,13 @@ class GiteaClient:
         repo: str,
         run_id: int,
     ) -> dict[str, Any]:
-        return await self._get(
+        run = await self._get(
             "/repos/{owner}/{repo}/actions/runs/{run_id}",
             owner=owner,
             repo=repo,
             run_id=run_id,
         )
+        return minimize_action_run_payload(run)
 
     async def list_action_run_jobs(
         self,
