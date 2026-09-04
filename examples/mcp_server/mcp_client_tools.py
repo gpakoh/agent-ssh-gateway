@@ -1641,7 +1641,14 @@ def git_commit(
         )
         if mismatches:
             return _guarded_git_commit_error(project, state, mismatches)
-    return run_project_command(client, project, f"git commit -m {shlex.quote(message)}")
+    return run_project_command(
+        client,
+        project,
+        "git "
+        f"-c user.name={shlex.quote('MCP Gateway')} "
+        f"-c user.email={shlex.quote('mcp-gateway@gateway.invalid')} "
+        f"commit -m {shlex.quote(message)}",
+    )
 
 
 # git remote/branch names: no leading '-', no refspec ':', no whitespace.
