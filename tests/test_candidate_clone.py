@@ -194,6 +194,67 @@ def test_prepare_candidate_clone_git_failure_returns_redacted_diagnostics(
     assert "--global" not in captured_commands[0]
 
 
+def test_prepare_candidate_clone_local_clone_trusts_source_gitdir(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    _workspace, source, config_dir, journal_root, base = registry_fixture
+    captured_commands: list[list[str]] = []
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        command = list(args[0])
+        captured_commands.append(command)
+        if "rev-parse" in command and "--verify" in command:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=f"{base}\n",
+                stderr="",
+            )
+        if "clone" in command:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=128,
+                stdout="",
+                stderr=(
+                    "fatal: detected dubious ownership in repository at "
+                    f"'{source / '.git'}'\n"
+                ),
+            )
+        raise AssertionError(f"unexpected git command: {command!r}")
+
+    monkeypatch.setattr(candidate_clone_module.subprocess, "run", fake_run)
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_clone_module.prepare_candidate_clone(
+            "source-project",
+            "candidate/local-clone-gitdir-flow",
+            base,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    err = exc_info.value
+    assert err.code == "TOOL_EXECUTION_FAILED"
+    assert err.message == "git clone source repository failed"
+    assert err.details is not None
+    assert err.details["operation"] == "clone source repository"
+
+    clone_command = next(command for command in captured_commands if "clone" in command)
+    assert clone_command[:5] == [
+        "git",
+        "-c",
+        f"safe.directory={source.resolve()}",
+        "-c",
+        f"safe.directory={(source / '.git').resolve()}",
+    ]
+    assert clone_command[5] == "clone"
+    assert "safe.directory=*" not in " ".join(clone_command)
+    assert "--global" not in clone_command
+
+
 def test_prepare_candidate_clone_refuses_dirty_existing_clone(registry_fixture) -> None:
     workspace, _source, config_dir, journal_root, base = registry_fixture
     receipt = prepare_candidate_clone(
