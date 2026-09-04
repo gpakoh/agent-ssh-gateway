@@ -2251,6 +2251,7 @@ class TestGitScanTool:
         ("git push origin --force-with-lease", "git-push-force"),
         ("git push -f origin main", "git-push-force"),
         ("git push origin +main", "git-push-force"),
+        ("git push origin +master", "git-push-force"),
         ("git push origin --force=lease", "git-push-force"),
         ("git push --mirror origin", "git-push-mirror"),
         ("git push origin $BRANCH", "git-push-dynamic-arg"),
@@ -2269,12 +2270,6 @@ class TestGitScanTool:
         ("git add '.'", "git-add-all-dot"),
         ("git add -A", "git-add-all-flag"),
         ("git add --all", "git-add-all-flag"),
-        ("git push origin master", "git-push-to-master"),
-        ("git push origin +master", "git-push-to-master"),
-        ("git push origin HEAD:refs/heads/master", "git-push-to-master"),
-        ("git push origin main", "git-push-to-main"),
-        ("git push origin +main", "git-push-to-main"),
-        ("git push origin HEAD:refs/heads/main", "git-push-to-main"),
     ])
     def test_git_destructive(self, cmd, expected):
         from app.command_policy import scan_command
@@ -2300,16 +2295,22 @@ class TestGitScanTool:
             names = {f.pattern_name for f in r.findings}
             assert expected in names, f"expected {expected} in {names} for {cmd!r}"
 
-    def test_git_push_to_master_separator_variants(self):
-        """Refspec separators: ' ' and ':' and '/' must all work."""
+    def test_git_push_to_default_branch_not_matched(self):
+        """Normal non-force pushes to master/main are intentional delivery paths."""
         from app.command_policy import scan_command
 
-        for cmd in ("git push origin master",
-                     "git push origin HEAD:master",
-                     "git push origin HEAD:refs/heads/master"):
+        for cmd in (
+            "git push origin master",
+            "git push origin HEAD:master",
+            "git push origin HEAD:refs/heads/master",
+            "git push origin main",
+            "git push origin HEAD:main",
+            "git push origin HEAD:refs/heads/main",
+        ):
             r = scan_command(cmd)
             names = {f.pattern_name for f in r.findings}
-            assert "git-push-to-master" in names, f"not found for {cmd!r}"
+            git_matches = [n for n in names if n.startswith("git-")]
+            assert not git_matches, f"False positive for {cmd!r}: {git_matches}"
 
     def test_safe_git_commands_not_matched(self):
         from app.command_policy import scan_command

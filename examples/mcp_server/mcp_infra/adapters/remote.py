@@ -42,6 +42,7 @@ from examples.mcp_server.mcp_infra.tool_registry import register_tool
 from examples.mcp_server.task_candidate import (
     CandidateError,
     materialize_task_candidate,
+    record_task_delivery_contract,
     validate_task_candidate_for_push,
 )
 
@@ -942,11 +943,44 @@ async def gitea_materialize_task_candidate(
     repo: str,
     destination_branch: str,
     expected_diff_sha256: str,
+    base_ref: str | None = None,
+    allowed_files: list[str] | None = None,
+    forbidden_files: list[str] | None = None,
+    required_checks: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Materialize BASE_HEAD + supervisor diff and atomically record its receipt."""
+    """Materialize BASE_HEAD + supervisor diff and atomically record its receipt.
+
+    When a legacy/external task has trusted evidence but is missing the
+    control-plane delivery contract, callers may provide the exact base_ref
+    and immutable scope/check contract here.  The contract is then persisted
+    by the same control-plane primitive used during normal task creation
+    before materialization proceeds.
+    """
     try:
         info = _server_workspace_registry().project_info(project)
         agent_client = _server_agent_client()
+        contract_recorded = False
+        if (
+            base_ref is not None
+            or allowed_files is not None
+            or forbidden_files is not None
+            or required_checks is not None
+        ):
+            if not base_ref:
+                raise CandidateError(
+                    "base_ref is required when seeding a delivery contract",
+                    code="INVALID_INPUT",
+                )
+            await asyncio.to_thread(
+                record_task_delivery_contract,
+                project=project,
+                task_id=task_id,
+                base_ref=base_ref,
+                allowed_files=allowed_files or [],
+                forbidden_files=forbidden_files or [],
+                required_checks=required_checks or [],
+            )
+            contract_recorded = True
 
         def _verify(staging, expected_sha, checks):
             verify_candidate_via_docker(
@@ -996,6 +1030,7 @@ async def gitea_materialize_task_candidate(
             "implementation_diff_sha256": receipt["implementation_diff_sha256"],
             "candidate_head_sha": receipt["candidate_head_sha"],
             "created_at": receipt["created_at"],
+            "delivery_contract_recorded": contract_recorded,
         },
         source="gitea",
     )

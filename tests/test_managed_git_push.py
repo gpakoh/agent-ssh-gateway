@@ -382,6 +382,82 @@ async def test_materialize_adapter_uses_authoritative_job_and_isolated_verifier(
 
 
 @pytest.mark.asyncio
+async def test_materialize_adapter_can_seed_missing_delivery_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class AgentClient:
+        def job_result(self, job_id: str, redact_output: bool = True) -> dict[str, Any]:
+            return {"status": "completed", "exit_code": 0}
+
+    def fake_record_contract(**kwargs: Any) -> dict[str, Any]:
+        captured["contract"] = kwargs
+        return {"ok": True}
+
+    def fake_materialize(**kwargs: Any) -> dict[str, Any]:
+        captured["materialize"] = kwargs
+        return {
+            "base_head": "0" * 40,
+            "implementation_diff_sha256": "a" * 64,
+            "candidate_head_sha": SHA,
+            "created_at": "2026-08-31T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _Registry(tmp_path))
+    monkeypatch.setattr(remote, "_server_agent_client", lambda: AgentClient())
+    monkeypatch.setattr(remote, "record_task_delivery_contract", fake_record_contract)
+    monkeypatch.setattr(remote, "materialize_task_candidate", fake_materialize)
+
+    result = await remote.gitea_materialize_task_candidate(
+        project="gpt-browser-bridge-hardening",
+        task_id="candidate-task-123",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_diff_sha256="a" * 64,
+        base_ref="0" * 40,
+        allowed_files=["src/**"],
+        forbidden_files=["secrets/**"],
+        required_checks=["pytest -q"],
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["delivery_contract_recorded"] is True
+    assert captured["contract"] == {
+        "project": "gpt-browser-bridge-hardening",
+        "task_id": "candidate-task-123",
+        "base_ref": "0" * 40,
+        "allowed_files": ["src/**"],
+        "forbidden_files": ["secrets/**"],
+        "required_checks": ["pytest -q"],
+    }
+    assert captured["materialize"]["expected_diff_sha256"] == "a" * 64
+
+
+@pytest.mark.asyncio
+async def test_materialize_adapter_rejects_partial_delivery_contract_seed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _Registry(tmp_path))
+    monkeypatch.setattr(remote, "_server_agent_client", lambda: object())
+
+    result = await remote.gitea_materialize_task_candidate(
+        project="gpt-browser-bridge-hardening",
+        task_id="candidate-task-123",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_diff_sha256="a" * 64,
+        allowed_files=["src/**"],
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert "base_ref is required" in result["error"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_adapter_pushes_only_validator_selected_trusted_staging(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
