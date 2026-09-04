@@ -604,7 +604,12 @@ class TestProjectGitStateGuards:
         )
 
         assert result["exit_code"] == 0
-        assert client.commands == ["git commit -m 'commit after guard'"]
+        assert client.commands == [
+            "git -c user.name='MCP Gateway' "
+            "-c user.email=mcp-gateway@gateway.invalid "
+            "commit -m 'commit after guard'"
+        ]
+        assert "config --global" not in client.commands[0]
 
 
 class TestProjectInfoVerificationHints:
