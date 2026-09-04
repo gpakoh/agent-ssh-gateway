@@ -460,3 +460,53 @@ projects:
     type: "python-service"
     description: "Kojo release hardening rollup verified local workspace"
     tags: ["kojo", "supervisor-workspace", "release-hardening"]
+
+  gpt-browser-bridge-waiting-stuck-verify-20260904:
+    root: ".supervisor-workspaces/gpt-browser-bridge-waiting-stuck-verify-20260904"
+    type: "python-service"
+    description: "Recovered browser waiting/stuck verified candidate workspace"
+    tags: ["browser", "supervisor", "temporary", "verification"]
+
+  quart-core-rag-router-boundary-20260904-a:
+    root: "quart-platform/.supervisor-workspaces/quart-core-rag-router-boundary-20260904-a"
+    type: "python"
+    description: "quart-core PR #196 rag-router boundary workspace"
+    tags: ["quart-core", "rag-router", "pr-196"]
+
+  agent-ssh-gateway-master-direct-20260904:
+    root: ".supervisor-workspaces/web-ssh-gateway-master-direct-20260904-delivery-contract"
+    type: "python"
+    description: "Clean detached master worktree for direct-master policy and delivery-contract fixes"
+    tags: ["agent-ssh-gateway", "master-direct", "temporary"]
+
+  infra-quart-host-binds-20260904:
+    root: ".supervisor-workspaces/infra-quart-host-binds-20260904"
+    type: "infra"
+    description: "Temporary writable infra-quart clone for internal host port bind hardening"
+    tags: ["infra-quart", "networking", "security", "temporary"]
+
+  engineering-supervisor-service-deploy-3efd3ff-20260904:
+    root: "engineering-supervisor-service-deploy-3efd3ff-20260904T1646"
+    type: "python-service"
+    description: "Temporary deploy context for engineering-supervisor-service 3efd3ff"
+    tags: ["engineering-supervisor-service", "deploy", "temporary"]
+
+  candidate-engineering-supervisor-service-fix-supervisor-verified-stack-20260904-reviewabl-4e332809aa34-a560ad9c1f2b:
+    root: ".mcp-candidate-clones/candidate-engineering-supervisor-service-fix-supervisor-verified-stack-20260904-reviewabl-4e332809aa34-a560ad9c1f2b"
+    type: "candidate-clone"
+    description: "Durable writeable candidate clone for engineering-supervisor-service"
+    tags: ["candidate", "agent", "durable"]
+
+  kojo-docs-readiness-baseline-20260904:
+    root: "quart-platform/.supervisor-workspaces/kojo-docs-readiness-baseline-20260904"
+    parent: quart-platform
+    type: "python-service"
+    description: "Kojo docs readiness baseline cleanup worktree from main 0182d0a"
+    tags: ["kojo", "docs", "temporary"]
+
+  kojo-release-hardening-father-rollup-20260904:
+    root: "quart-platform/.supervisor-workspaces/kojo-release-hardening-father-rollup-20260904"
+    parent: quart-platform
+    type: "python-service"
+    description: "Kojo release hardening father rollup staging worktree"
+    tags: ["kojo", "temporary", "release-hardening"]
