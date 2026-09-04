@@ -16,6 +16,9 @@ from collections.abc import Callable
 from typing import Any
 
 from agent_tasks import (
+    agent_task_status as _agent_task_status,
+)
+from agent_tasks import (
     archive_agent_task as _archive_agent_task,
 )
 from agent_tasks import (
@@ -271,6 +274,28 @@ def gateway_read_agent_log(
         title="Read agent live log",
         fn=_fn,
         success_text="Read agent live log.",
+    )
+
+
+
+def gateway_agent_status(
+    project: str,
+    task_id: str,
+    stale_after_seconds: int = 600,
+) -> dict[str, Any]:
+    """Lightweight agent task status: no log tail, cheap polling first."""
+
+    return run_tool(
+        tool="agent_status",
+        title="Read agent status snapshot",
+        fn=lambda: _agent_task_status(
+            lambda p, c: run_project_command(_server_client(), p, c),
+            project=project,
+            task_id=task_id,
+            stale_after_seconds=stale_after_seconds,
+            job_status=lambda jid: _server_client().job_status(jid),
+        ),
+        success_text="Read agent status snapshot.",
     )
 
 
@@ -614,6 +639,7 @@ def register_all() -> None:
     register_tool("read_agent_report")(gateway_read_agent_report)
     register_tool("read_agent_diff")(gateway_read_agent_diff)
     register_tool("read_agent_log")(gateway_read_agent_log)
+    register_tool("agent_status")(gateway_agent_status)
     register_tool("inspect_agent_task")(gateway_inspect_agent_task)
     register_tool("list_agent_tasks")(gateway_list_agent_tasks)
     register_tool("cancel_agent_task")(gateway_cancel_agent_task)

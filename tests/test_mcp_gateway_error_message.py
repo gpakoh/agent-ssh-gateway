@@ -139,6 +139,37 @@ def test_gateway_error_details_preserves_validation_errors():
     }
 
 
+def test_gateway_error_details_preserves_rate_limit_retry_metadata():
+    from examples.mcp_server.gateway_client import GatewayClientError
+    from examples.mcp_server.mcp_infra.gateway_errors import _gateway_error_details
+
+    exc = GatewayClientError(
+        "POST /api/ssh/execute failed: 429 {...}",
+        status_code=429,
+        body={
+            "detail": {
+                "message": "Rate limit exceeded: 180 per 1 minute",
+                "code": "RATE_LIMIT_EXCEEDED",
+                "retryable": True,
+                "details": {
+                    "retry_after_seconds": 42,
+                    "bucket_class": "master",
+                    "operation_class": "execute",
+                    "limit": "180 per 1 minute",
+                },
+            }
+        },
+    )
+
+    assert _gateway_error_details(exc) == {
+        "gateway_code": "RATE_LIMIT_EXCEEDED",
+        "retry_after_seconds": 42,
+        "bucket_class": "master",
+        "operation_class": "execute",
+        "limit": "180 per 1 minute",
+    }
+
+
 def test_gateway_transport_errors_get_recovery_hints():
     from examples.mcp_server.gateway_client import GatewayClientError
     from examples.mcp_server.mcp_infra.gateway_errors import (

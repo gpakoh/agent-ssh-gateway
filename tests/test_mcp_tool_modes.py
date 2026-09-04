@@ -356,6 +356,7 @@ class TestMcpClientWriteMode:
         assert "cancel_agent_task" in write_tools
         assert "retry_agent_task" in write_tools
         assert "job_cancel" in write_tools
+        assert "agent_status" in write_tools
         assert "inspect_agent_task" in write_tools
 
     def test_get_mcp_client_write_tools_matches_mode_entry(self):

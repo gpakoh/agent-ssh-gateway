@@ -1188,6 +1188,40 @@ async def auth_middleware(request: Request, call_next):
 # ---------------------------------------------------------------------------
 
 
+def _rate_limit_operation_class(request: Request | None) -> str:
+    if request is None:
+        return "unknown"
+    path = request.url.path
+    if path.endswith("/execute") or path.endswith("/execute-argv"):
+        return "execute"
+    if path.endswith("/connect"):
+        return "connect"
+    if path.endswith("/prewarm"):
+        return "prewarm"
+    if path.endswith("/check-port"):
+        return "port-check"
+    return "request"
+
+
+def _request_bucket_class(request: Request | None) -> str:
+    if request is None:
+        return "unknown"
+    identity = getattr(request.state, "auth_identity", None)
+    operation = _rate_limit_operation_class(request)
+    master_setting = 0
+    if operation == "connect":
+        master_setting = settings.master_connect_rate_limit_requests
+    elif operation == "execute":
+        master_setting = settings.master_execute_rate_limit_requests
+    if (
+        settings.api_auth_enabled
+        and getattr(identity, "token_type", None) == "master"
+        and int(master_setting or 0) > 0
+    ):
+        return "master"
+    return "ip"
+
+
 @app.exception_handler(SSHManagerError)
 async def ssh_exception_handler(request, exc: SSHManagerError):
     """Convert SSH manager exceptions to structured HTTP responses."""
@@ -1216,31 +1250,57 @@ async def ssh_exception_handler(request, exc: SSHManagerError):
     status_code = status_map.get(type(exc), 500)
     logger.warning("SSH manager error %s: %s", type(exc).__name__, exc)
     is_session_limit = isinstance(exc, SessionLimitError)
-    return JSONResponse(
-        status_code=status_code,
-        headers={"Retry-After": str(60)} if is_session_limit else None,
-        content=_err(
-            status_code,
-            message_map.get(type(exc), "SSH operation failed"),
-            code=code_map.get(type(exc)),
-            retryable=True if is_session_limit else None,
-        ),
+    retry_after = 60
+    body = _err(
+        status_code,
+        message_map.get(type(exc), "SSH operation failed"),
+        code=code_map.get(type(exc)),
+        retryable=True if is_session_limit else None,
     )
+    headers = None
+    if is_session_limit:
+        body["details"] = {
+            "retry_after_seconds": retry_after,
+            "bucket_class": "session",
+            "operation_class": _rate_limit_operation_class(request),
+        }
+        headers = {
+            "Retry-After": str(retry_after),
+            "X-RateLimit-Bucket": "session",
+        }
+    return JSONResponse(status_code=status_code, headers=headers, content=body)
 
 
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
-    """Return a structured 429 with Retry-After instead of the bare default."""
+    """Return structured retry metadata for operator-safe backoff."""
     retry_after = 60
     try:
         item = exc.limit.limit
         retry_after = max(int(getattr(item, "GRANULARITY", 60)), 1)
     except Exception:
         pass
+    bucket_class = _request_bucket_class(request)
+    body = _err(
+        429,
+        f"Rate limit exceeded: {exc.detail}",
+        code="RATE_LIMIT_EXCEEDED",
+        retryable=True,
+        hint="Reduce request frequency or batch/coalesce polling before retrying.",
+    )
+    body["details"] = {
+        "retry_after_seconds": retry_after,
+        "bucket_class": bucket_class,
+        "operation_class": _rate_limit_operation_class(request),
+        "limit": str(exc.detail),
+    }
     return JSONResponse(
         status_code=429,
-        headers={"Retry-After": str(retry_after)},
-        content=_err(429, f"Rate limit exceeded: {exc.detail}"),
+        headers={
+            "Retry-After": str(retry_after),
+            "X-RateLimit-Bucket": bucket_class,
+        },
+        content=body,
     )
 
 

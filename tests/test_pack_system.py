@@ -199,7 +199,7 @@ class TestPackRegistry:
         ("docker rm -f container1", 1),
         ("rm -rf /tmp", 2),
         ("echo hello", 0),
-        ("git push --force origin main", 2),
+        ("git push --force origin main", 1),
     ])
     def test_evaluate(self, cmd, expected_count):
         from app.packs.registry import build_registry

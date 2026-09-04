@@ -482,6 +482,7 @@ def test_adapter_transport_classification_matrix_is_explicit():
         "gateway_read_agent_report",
         "gateway_read_agent_diff",
         "gateway_read_agent_log",
+        "gateway_agent_status",
         "gateway_list_agent_tasks",
     ):
         source = inspect.getsource(getattr(adapter, name))

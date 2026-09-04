@@ -38,7 +38,7 @@ class TestWorkspaceListProjects:
     def test_returns_all_projects(self):
         projects = workspace_list_projects()
         ids = [p["project_id"] for p in projects]
-        assert "web-ssh-gateway" in ids
+        assert "agent-ssh-gateway" in ids
         assert "quart-platform" in ids
         assert "kojo-bot-service" in ids
         assert "pricetuner-scraper" in ids
@@ -57,8 +57,8 @@ class TestWorkspaceListProjects:
 
 class TestProjectInfo:
     def test_info_returns_metadata(self):
-        info = project_info("web-ssh-gateway")
-        assert info["project_id"] == "web-ssh-gateway"
+        info = project_info("agent-ssh-gateway")
+        assert info["project_id"] == "agent-ssh-gateway"
         assert "root" in info
         assert "type" in info
 
@@ -77,12 +77,12 @@ class TestProjectInfo:
 
 class TestProjectTree:
     def test_tree_root(self):
-        tree = project_tree("web-ssh-gateway")
+        tree = project_tree("agent-ssh-gateway")
         assert tree["type"] == "directory"
         assert "children" in tree
 
     def test_tree_depth_limit(self):
-        tree = project_tree("web-ssh-gateway", depth=1)
+        tree = project_tree("agent-ssh-gateway", depth=1)
         for child in tree.get("children", []):
             if child["type"] == "directory":
                 assert "children" not in child or child.get("children") is None
