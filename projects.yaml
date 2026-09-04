@@ -446,3 +446,10 @@ projects:
     type: "python-service"
     description: "Integrated Supervisor verified stack candidate"
     tags: ["supervisor", "temporary", "verification", "combined-stack"]
+
+  kojo-release-hardening-rollup-20260904:
+    root: "quart-platform/.supervisor-workspaces/kojo-release-hardening-rollup-20260904"
+    parent: quart-platform
+    type: "python-service"
+    description: "Kojo release hardening rollup verified local workspace"
+    tags: ["kojo", "supervisor-workspace", "release-hardening"]
