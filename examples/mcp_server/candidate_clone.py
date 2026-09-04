@@ -25,6 +25,8 @@ _PROTECTED_BRANCHES = frozenset({"master", "main"})
 _METADATA_FILENAME = "mcp-candidate-clone.json"
 _DEFAULT_GIT_NAME = "MCP Control Plane"
 _DEFAULT_GIT_EMAIL = "control-plane@gateway.invalid"
+_GIT_DIAGNOSTIC_LIMIT = 1200
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.:-])/(?:[^\s:'\"]+/)*[^\s:'\"]*")
 
 
 class CandidateCloneError(RuntimeError):
@@ -137,7 +139,27 @@ def _slug(value: str, *, limit: int) -> str:
     return (slug or "x")[:limit].strip("-._") or "x"
 
 
-def _run_git(cwd: Path, args: list[str], *, timeout: int = 60) -> str:
+def _git_diagnostic_tail(text: str | None, cwd: Path) -> str:
+    """Return a bounded, host-path-redacted Git diagnostic snippet."""
+    if not text:
+        return ""
+    cleaned = text
+    for path in {str(cwd), str(cwd.parent)}:
+        if path and path != "/":
+            cleaned = cleaned.replace(f"{path}/", "./").replace(path, ".")
+    cleaned = _ABSOLUTE_PATH_RE.sub("<path>", cleaned).strip()
+    if len(cleaned) <= _GIT_DIAGNOSTIC_LIMIT:
+        return cleaned
+    return cleaned[-_GIT_DIAGNOSTIC_LIMIT:]
+
+
+def _run_git(
+    cwd: Path,
+    args: list[str],
+    *,
+    timeout: int = 60,
+    operation: str = "git command",
+) -> str:
     try:
         result = subprocess.run(
             ["git", *args],
@@ -147,10 +169,32 @@ def _run_git(cwd: Path, args: list[str], *, timeout: int = 60) -> str:
             check=False,
             timeout=timeout,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise _fail("TOOL_EXECUTION_FAILED", "git command did not complete", retryable=True) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise _fail(
+            "TOOL_EXECUTION_FAILED",
+            f"git {operation} did not complete",
+            retryable=True,
+            details={"operation": operation, "timeout_s": timeout},
+        ) from exc
+    except OSError as exc:
+        raise _fail(
+            "TOOL_EXECUTION_FAILED",
+            f"git {operation} could not start",
+            retryable=True,
+            details={"operation": operation, "error": type(exc).__name__},
+        ) from exc
     if result.returncode != 0:
-        raise _fail("TOOL_EXECUTION_FAILED", "git command failed", retryable=False)
+        raise _fail(
+            "TOOL_EXECUTION_FAILED",
+            f"git {operation} failed",
+            retryable=False,
+            details={
+                "operation": operation,
+                "exit_code": result.returncode,
+                "stdout_tail": _git_diagnostic_tail(result.stdout, cwd),
+                "stderr_tail": _git_diagnostic_tail(result.stderr, cwd),
+            },
+        )
     return result.stdout.strip()
 
 
@@ -283,7 +327,11 @@ def prepare_candidate_clone(
         raise _fail("POLICY_DENIED", "source project root is outside workspace registry root") from exc
 
     base_expr = f"{base_ref}^{{commit}}" if base_ref else "HEAD^{commit}"
-    base_sha = _run_git(source_root, ["rev-parse", "--verify", base_expr]).lower()
+    base_sha = _run_git(
+        source_root,
+        ["rev-parse", "--verify", base_expr],
+        operation="resolve base ref",
+    ).lower()
     if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
         raise _fail("TOOL_EXECUTION_FAILED", "base ref did not resolve to a commit")
     project_id = _project_id(project, branch, base_sha)
@@ -295,8 +343,16 @@ def prepare_candidate_clone(
         if not candidate_root.is_dir() or not (candidate_root / ".git").exists():
             raise _fail("WORKSPACE_CONTENDED", "candidate clone path exists but is not a git worktree", retryable=False)
         dirty, status_sha, status_entries = _status_state(candidate_root)
-        current_branch = _run_git(candidate_root, ["rev-parse", "--abbrev-ref", "HEAD"])
-        current_head = _run_git(candidate_root, ["rev-parse", "HEAD"]).lower()
+        current_branch = _run_git(
+            candidate_root,
+            ["rev-parse", "--abbrev-ref", "HEAD"],
+            operation="read candidate branch",
+        )
+        current_head = _run_git(
+            candidate_root,
+            ["rev-parse", "HEAD"],
+            operation="read candidate head",
+        ).lower()
         if dirty or current_branch != branch or current_head != base_sha:
             raise _fail(
                 "WORKSPACE_CONTENDED",
@@ -317,10 +373,27 @@ def prepare_candidate_clone(
         if tmp.exists():
             shutil.rmtree(tmp)
         try:
-            _run_git(source_root, ["clone", "--local", "--no-hardlinks", str(source_root), str(tmp)], timeout=120)
-            _run_git(tmp, ["checkout", "-B", branch, base_sha])
-            _run_git(tmp, ["config", "user.name", _DEFAULT_GIT_NAME])
-            _run_git(tmp, ["config", "user.email", _DEFAULT_GIT_EMAIL])
+            _run_git(
+                source_root,
+                ["clone", "--local", "--no-hardlinks", str(source_root), str(tmp)],
+                timeout=120,
+                operation="clone source repository",
+            )
+            _run_git(
+                tmp,
+                ["checkout", "-B", branch, base_sha],
+                operation="checkout candidate branch",
+            )
+            _run_git(
+                tmp,
+                ["config", "user.name", _DEFAULT_GIT_NAME],
+                operation="configure candidate git user.name",
+            )
+            _run_git(
+                tmp,
+                ["config", "user.email", _DEFAULT_GIT_EMAIL],
+                operation="configure candidate git user.email",
+            )
             tmp.replace(candidate_root)
         except Exception:
             if tmp.exists():
@@ -334,7 +407,11 @@ def prepare_candidate_clone(
         root=relative_root,
         source_project=project,
     )
-    head = _run_git(candidate_root, ["rev-parse", "HEAD"]).lower()
+    head = _run_git(
+        candidate_root,
+        ["rev-parse", "HEAD"],
+        operation="read prepared candidate head",
+    ).lower()
     dirty, status_sha, status_entries = _status_state(candidate_root)
     metadata = {
         "version": 1,
