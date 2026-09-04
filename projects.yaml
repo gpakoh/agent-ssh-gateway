@@ -422,3 +422,27 @@ projects:
     type: unknown
     description: "Zalesskiy SUP — Astro 5 + Directus landing"
     tags: []
+
+  engineering-supervisor-gateway-adapter-manual-20260904-0500:
+    root: ".supervisor-workspaces/engineering-supervisor-gateway-adapter-manual-20260904-0500"
+    type: "python-service"
+    description: "Temporary manual GatewayAdapter candidate"
+    tags: ["supervisor", "temporary", "verification"]
+
+  infra-quart-rag-smoke-blocked-gate-20260904:
+    root: ".supervisor-workspaces/infra-quart-rag-smoke-blocked-gate-20260904c"
+    type: "infra"
+    description: "Temporary writable infra-quart clone for RAG smoke BLOCKED_INFRA gate fix"
+    tags: ["infra-quart", "rag", "ci", "temporary"]
+
+  engineering-supervisor-delivery-bundles-20260904-continue:
+    root: ".supervisor-workspaces/engineering-supervisor-delivery-bundles-20260904-continue"
+    type: "patch-bundle"
+    description: "Supervisor verified patch bundles awaiting delivery tooling"
+    tags: ["supervisor", "delivery", "patch-bundle"]
+
+  engineering-supervisor-combined-stack-20260904-continue:
+    root: ".supervisor-workspaces/engineering-supervisor-combined-stack-20260904-continue"
+    type: "python-service"
+    description: "Integrated Supervisor verified stack candidate"
+    tags: ["supervisor", "temporary", "verification", "combined-stack"]
