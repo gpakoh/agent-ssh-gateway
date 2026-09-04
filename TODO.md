@@ -231,11 +231,19 @@ items are explicitly verified as implemented, documented and safe in production.
     `rm` is correctly denied but leaves operators without a safe cleanup helper
     for failed temporary clones; and registered temporary workspaces can fail
     `run_pytest` / `run_compileall` before useful verification because the runner
-    is pinned to `uv --frozen` / missing or incompatible `uv.lock` state. Closure
-    requires typed policy denials with recommended safe alternate tools,
-    first-class bounded cleanup for Gateway-created scratch workspaces, and
-    verification helpers that distinguish environment/bootstrap failure from
-    project test failure.
+    is pinned to `uv --frozen` / missing or incompatible `uv.lock` state. During
+    Supervisor launch on 2026-09-04, `docker_compose_build` and build-enabled
+    `docker_compose_up` failed before image build with `mkdir [PATH] read-only
+    file system` for both a verified `.supervisor-workspaces` checkout and a
+    separate `/media/1TB/Python/...` deploy context, while no-build compose could
+    create networks/containers from an existing image. Closure requires typed
+    Docker build-context diagnostics that identify whether the read-only path is
+    the compose project dir, Docker builder state, HOME/cache, or daemon-side
+    mount namespace, plus a safe recovery path such as read-only build context
+    with writable builder cache. Also requires typed policy denials with
+    recommended safe alternate tools, first-class bounded cleanup for
+    Gateway-created scratch workspaces, and verification helpers that distinguish
+    environment/bootstrap failure from project test failure.
 
 ## 🆕 Runtime/CI findings — 2026-08-19
 
