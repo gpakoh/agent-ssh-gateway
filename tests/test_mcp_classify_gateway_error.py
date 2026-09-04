@@ -217,6 +217,21 @@ def test_bad_request_maps_to_invalid_input_not_internal_error():
     assert retryable is False
 
 
+def test_request_rate_limit_code_remains_distinct_from_session_capacity():
+    code, retryable = _classify(
+        429,
+        {
+            "detail": {
+                "message": "Rate limit exceeded: 60 per 1 minute",
+                "code": "RATE_LIMIT_EXCEEDED",
+                "retryable": True,
+            }
+        },
+    )
+    assert code == "RATE_LIMIT_EXCEEDED"
+    assert retryable is True
+
+
 def test_wait_timed_out_maps_to_wait_timeout_retryable():
     """Regression: a job outliving wait_job()'s window (e.g. a full test
     suite run) now raises a GatewayClientError with body={"job_id",
@@ -338,9 +353,7 @@ class TestRealGatewayResponseShapeSeam:
     async def test_session_limit_survives_the_real_round_trip(self):
         """Same systematic audit, found by running every SSHManagerError
         subtype through both real sides: SessionLimitError's gateway code
-        (RATE_LIMIT_EXCEEDED) had no entry in _GATEWAY_ERROR_CODE_MAP either
-        — this map already had "RATE_LIMITED" for the MCP vocabulary, just
-        never wired to the gateway's actual name for it.
+        must remain distinguishable from generic request throttling.
         """
         from app.ssh_manager import SessionLimitError
         from examples.mcp_server.gateway_client import GatewayClientError
@@ -352,7 +365,7 @@ class TestRealGatewayResponseShapeSeam:
         exc = GatewayClientError("boom", status_code=status, body=body)
         code, retryable = _classify_gateway_error(exc)
 
-        assert code == "RATE_LIMITED"
+        assert code == "SESSION_LIMIT_EXCEEDED"
         assert retryable is True
 
     @pytest.mark.asyncio

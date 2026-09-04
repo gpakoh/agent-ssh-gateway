@@ -33,13 +33,12 @@ _GATEWAY_ERROR_CODE_MAP: dict[str, str] = {
     "POLICY_DENIED": "PERMISSION_DENIED",
     "INVALID_INPUT": "INVALID_INPUT",
     "RATE_LIMITED": "RATE_LIMITED",
-    # Same systematic audit: the gateway's own name for this is
-    # RATE_LIMIT_EXCEEDED (both slowapi's 429 handler and SessionLimitError
-    # produce it via app/state.py's (429, "") entry) — not "RATE_LIMITED".
-    # SessionLimitError now emits the more specific SESSION_LIMIT_EXCEEDED;
-    # the MCP surface still reports the existing generic RATE_LIMITED code.
-    "RATE_LIMIT_EXCEEDED": "RATE_LIMITED",
-    "SESSION_LIMIT_EXCEEDED": "RATE_LIMITED",
+    # Preserve the gateway's two distinct 429 classes on the MCP surface:
+    # request throttling (RATE_LIMIT_EXCEEDED) is operationally different from
+    # SSH/session capacity exhaustion (SESSION_LIMIT_EXCEEDED). The legacy
+    # RATE_LIMITED gateway code still maps to the generic MCP code.
+    "RATE_LIMIT_EXCEEDED": "RATE_LIMIT_EXCEEDED",
+    "SESSION_LIMIT_EXCEEDED": "SESSION_LIMIT_EXCEEDED",
     "TIMEOUT": "TIMEOUT",
     # TimeoutError's handler produces GATEWAY_TIMEOUT (app/state.py's
     # (504, "") entry), never the bare "TIMEOUT" this map already expected.
@@ -85,32 +84,58 @@ def _gateway_error_message(exc: GatewayClientError) -> str:
     return str(exc)
 
 
+_SAFE_GATEWAY_DETAIL_KEYS = (
+    "job_id",
+    "status",
+    "wait_timed_out",
+    "errors",
+    "total_errors",
+    "retry_after_seconds",
+    "bucket_class",
+    "operation_class",
+    "limit",
+    "attempt",
+)
+_RATE_LIMIT_GATEWAY_CODES = {"RATE_LIMITED", "RATE_LIMIT_EXCEEDED", "SESSION_LIMIT_EXCEEDED"}
+
+
+def _copy_safe_gateway_details(target: dict[str, Any], source: dict[str, Any]) -> None:
+    for key in _SAFE_GATEWAY_DETAIL_KEYS:
+        value = source.get(key)
+        if value is not None:
+            target[key] = value
+
+
 def _gateway_error_details(exc: GatewayClientError) -> dict[str, Any] | None:
     """Extract safe machine-readable details from a structured gateway error.
 
     Keep this deliberately allowlisted.  The gateway body can contain
     transport/debug fields that do not belong on the MCP surface, but some
     fields are essential for an agent to recover without guessing: job ids,
-    wait status, and FastAPI validation field errors.
+    wait status, validation field errors, and rate-limit retry metadata.
     """
     if not isinstance(exc.body, dict):
         return None
 
     details: dict[str, Any] = {}
-    for key in ("job_id", "status", "wait_timed_out", "errors", "total_errors"):
-        value = exc.body.get(key)
-        if value is not None:
-            details[key] = value
+    _copy_safe_gateway_details(details, exc.body)
+    top_level_details = exc.body.get("details")
+    if isinstance(top_level_details, dict):
+        _copy_safe_gateway_details(details, top_level_details)
 
     detail = exc.body.get("detail")
     if isinstance(detail, dict):
+        gateway_code = detail.get("code")
+        if isinstance(gateway_code, str) and gateway_code in _RATE_LIMIT_GATEWAY_CODES:
+            details["gateway_code"] = gateway_code
         nested_details = detail.get("details")
         if isinstance(nested_details, dict):
-            details.update(nested_details)
-        for key in ("job_id", "status", "wait_timed_out", "errors", "total_errors"):
-            value = detail.get(key)
-            if value is not None:
-                details[key] = value
+            _copy_safe_gateway_details(details, nested_details)
+        _copy_safe_gateway_details(details, detail)
+    else:
+        gateway_code = exc.body.get("code")
+        if isinstance(gateway_code, str) and gateway_code in _RATE_LIMIT_GATEWAY_CODES:
+            details["gateway_code"] = gateway_code
 
     return details or None
 

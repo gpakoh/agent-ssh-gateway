@@ -41,6 +41,24 @@ def test_rate_limit_mutation_defaults_to_config(monkeypatch):
     assert str(limits[0].limit) == "7 per 30 second"
 
 
+def test_rate_limit_bucket_class_reports_master_only_for_active_master_lane(monkeypatch):
+    """Bucket metadata must describe the active lane, not just the token label."""
+    from app.main import _request_bucket_class
+
+    request = MagicMock()
+    request.url.path = "/api/ssh/execute"
+    request.state.auth_identity.token_type = "master"
+    monkeypatch.setattr(settings, "api_auth_enabled", True)
+    monkeypatch.setattr(settings, "master_execute_rate_limit_requests", 0)
+    assert _request_bucket_class(request) == "ip"
+
+    monkeypatch.setattr(settings, "master_execute_rate_limit_requests", 900)
+    assert _request_bucket_class(request) == "master"
+
+    request.state.auth_identity.token_type = "agent"
+    assert _request_bucket_class(request) == "ip"
+
+
 @pytest.fixture(autouse=True)
 def _reset_rate_limiter():
     """Clear shared rate-limit storage before each test to avoid cross-test leaks."""
@@ -128,6 +146,14 @@ async def test_connect_first_ok_then_429():
             )
             if r.status_code == 429:
                 assert "application/json" in r.headers.get("content-type", "")
+                assert r.headers.get("X-RateLimit-Bucket") == "ip"
+                body = r.json()
+                assert body["code"] == "RATE_LIMIT_EXCEEDED"
+                assert body["retryable"] is True
+                assert body["details"]["retry_after_seconds"] >= 1
+                assert body["details"]["bucket_class"] == "ip"
+                assert body["details"]["operation_class"] == "connect"
+                assert "per" in body["details"]["limit"]
                 return
         pytest.fail("Never got 429; rate-limiting may not be working")
 
@@ -234,6 +260,11 @@ class TestSessionLimitErrorContract:
         assert body["code"] == "SESSION_LIMIT_EXCEEDED"
         assert body["retryable"] is True
         assert body["http_status"] == 429
+        assert body["details"] == {
+            "retry_after_seconds": 60,
+            "bucket_class": "session",
+            "operation_class": "unknown",
+        }
 
     @pytest.mark.asyncio
     async def test_session_limit_error_sets_retry_after_header(self):
@@ -245,3 +276,4 @@ class TestSessionLimitErrorContract:
         )
         assert resp.headers.get("Retry-After") is not None
         assert int(resp.headers["Retry-After"]) >= 1
+        assert resp.headers.get("X-RateLimit-Bucket") == "session"
