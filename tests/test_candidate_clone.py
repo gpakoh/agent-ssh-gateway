@@ -141,14 +141,17 @@ def test_prepare_candidate_clone_git_failure_returns_redacted_diagnostics(
 ) -> None:
     from examples.mcp_server import candidate_clone as candidate_clone_module
 
-    _workspace, _source, config_dir, journal_root, base = registry_fixture
+    _workspace, source, config_dir, journal_root, base = registry_fixture
+    captured_commands: list[list[str]] = []
 
     def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        command = list(args[0])
+        captured_commands.append(command)
         return subprocess.CompletedProcess(
-            args=args[0],
+            args=command,
             returncode=128,
             stdout="preflight stdout\n",
-            stderr="fatal: /tmp/private/root/source/.git: bad revision\n",
+            stderr="fatal: detected dubious ownership in repository at '/tmp/private/root/source'\n",
         )
 
     monkeypatch.setattr(candidate_clone_module.subprocess, "run", fake_run)
@@ -166,14 +169,29 @@ def test_prepare_candidate_clone_git_failure_returns_redacted_diagnostics(
     assert err.code == "TOOL_EXECUTION_FAILED"
     assert err.message == "git resolve base ref failed"
     assert err.retryable is False
-    assert err.details is not None
-    assert err.details["operation"] == "resolve base ref"
-    assert err.details["exit_code"] == 128
-    assert err.details["stdout_tail"] == "preflight stdout"
-    assert "<path>" in err.details["stderr_tail"]
-    assert "/tmp/private" not in err.details["stderr_tail"]
-    assert "cwd" not in err.details
-    assert "args" not in err.details
+    details = err.details
+    assert details is not None
+    assert details["operation"] == "resolve base ref"
+    assert details["exit_code"] == 128
+    assert details["stdout_tail"] == "preflight stdout"
+    assert "dubious ownership" in details["stderr_tail"]
+    assert "<path>" in details["stderr_tail"]
+    assert "/tmp/private" not in details["stderr_tail"]
+    assert "cwd" not in details
+    assert "args" not in details
+
+    assert captured_commands == [
+        [
+            "git",
+            "-c",
+            f"safe.directory={source.resolve()}",
+            "rev-parse",
+            "--verify",
+            f"{base}^{{commit}}",
+        ]
+    ]
+    assert "safe.directory=*" not in " ".join(captured_commands[0])
+    assert "--global" not in captured_commands[0]
 
 
 def test_prepare_candidate_clone_refuses_dirty_existing_clone(registry_fixture) -> None:
@@ -200,8 +218,10 @@ def test_prepare_candidate_clone_refuses_dirty_existing_clone(registry_fixture) 
     err = exc_info.value
     assert err.code == "WORKSPACE_CONTENDED"
     assert err.retryable is True
-    assert err.details["project_id"] == receipt.project_id
-    assert err.details["dirty"] is True
+    details = err.details
+    assert details is not None
+    assert details["project_id"] == receipt.project_id
+    assert details["dirty"] is True
 
 
 def test_prepare_candidate_clone_resolves_symbolic_base_ref(registry_fixture) -> None:

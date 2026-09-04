@@ -153,6 +153,19 @@ def _git_diagnostic_tail(text: str | None, cwd: Path) -> str:
     return cleaned[-_GIT_DIAGNOSTIC_LIMIT:]
 
 
+def _git_command(cwd: Path, args: list[str]) -> list[str]:
+    """Build a Git command with a single scoped safe.directory exception.
+
+    Candidate clone only calls this helper with registry-derived source roots
+    or candidate clone roots. The exception is deliberately per-command and
+    never widened to '*', so operators do not need mutable global Git config.
+    """
+    safe_directory = str(cwd.resolve())
+    if safe_directory == "*":
+        raise _fail("POLICY_DENIED", "refusing wildcard git safe.directory")
+    return ["git", "-c", f"safe.directory={safe_directory}", *args]
+
+
 def _run_git(
     cwd: Path,
     args: list[str],
@@ -162,7 +175,7 @@ def _run_git(
 ) -> str:
     try:
         result = subprocess.run(
-            ["git", *args],
+            _git_command(cwd, args),
             cwd=str(cwd),
             text=True,
             capture_output=True,
@@ -201,7 +214,7 @@ def _run_git(
 def _status_state(repo: Path) -> tuple[bool, str, int]:
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain=v1"],
+            _git_command(repo, ["status", "--porcelain=v1"]),
             cwd=str(repo),
             text=True,
             capture_output=True,
