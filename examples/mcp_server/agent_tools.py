@@ -167,10 +167,15 @@ def _error_text(exc: Exception | None) -> str:
 def _agent_diagnostics_hint(project: str, task_id: str, job_id: str | None = None) -> dict[str, Any]:
     """Return MCP-native follow-up calls for inspecting a submitted agent task."""
     hint: dict[str, Any] = {
+        "agent_status": {
+            "project": project,
+            "task_id": task_id,
+            "purpose": "cheap status/job/artifact polling without log tail",
+        },
         "inspect_agent_task": {
             "project": project,
             "task_id": task_id,
-            "purpose": "status, job state, artifact mtimes, stale/hung verdict, and log tail",
+            "purpose": "deep diagnostics with bounded log tail and stall detectors",
         },
         "read_agent_log": {"project": project, "task_id": task_id, "purpose": "raw bounded log tail"},
         "read_agent_status": {"project": project, "task_id": task_id, "purpose": "agent-status.md"},

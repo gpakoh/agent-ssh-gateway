@@ -69,8 +69,9 @@ class TestBuildManifest:
         assert "workspace.recommended_write_plane" in guidance["before_project_writes"]
         assert "workspace.git_state" in guidance["before_project_writes"]
         assert "verification.cwd" in guidance["before_verification"]
+        assert "agent_status" in guidance["agent_run_diagnostics"]
         assert "inspect_agent_task" in guidance["agent_run_diagnostics"]
-        assert "stale/hung" in guidance["agent_run_diagnostics"]
+        assert "log-backed" in guidance["agent_run_diagnostics"]
         serialized = str(guidance)
         assert "/home/" not in serialized
         assert "/media/" not in serialized

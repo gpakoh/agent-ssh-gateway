@@ -1196,6 +1196,150 @@ def _detect_agent_emitted_invoke_stall(
     }
 
 
+def agent_task_status(
+    run_cmd,
+    *,
+    project: str,
+    task_id: str,
+    stale_after_seconds: int = AGENT_STALE_AFTER_SECONDS,
+    job_status=None,
+    now_epoch: int | None = None,
+) -> dict[str, Any]:
+    """Return a lightweight task snapshot for cheap operator polling.
+
+    Unlike inspect_agent_task(), this does not read the live log tail and does
+    not run reasoning-loop detectors that need log text. It is intended as the
+    first polling surface while an agent is normally running; operators can
+    escalate to inspect_agent_task only when the compact verdict needs deeper
+    log-backed diagnosis.
+    """
+    validate_task_id(task_id)
+    if isinstance(stale_after_seconds, bool) or not isinstance(stale_after_seconds, int):
+        raise TypeError("stale_after_seconds must be an integer")
+    if not 60 <= stale_after_seconds <= 86_400:
+        raise ValueError("stale_after_seconds must be between 60 and 86400")
+    now = int(time.time()) if now_epoch is None else int(now_epoch)
+
+    td = task_dir(project, task_id)
+    if not _readonly_path_is_safe(run_cmd, project=project, path=td):
+        return {
+            "project": project,
+            "task_id": task_id,
+            "exists": False,
+            "verdict": "missing",
+            "terminal": False,
+            "likely_hung": False,
+            "stale_after_seconds": stale_after_seconds,
+            "next": {
+                "write_agent_task": {"project": project, "task_id": task_id},
+            },
+        }
+
+    status_result = read_agent_task_file(
+        run_cmd, project=project, task_id=task_id, filename="agent-status.md"
+    )
+    status_text = str(status_result.get("stdout", ""))
+    status_token = None if status_text == "(not found)" else _parse_agent_status(status_text)
+
+    try:
+        attempt_record = read_agent_attempt_state(run_cmd, project=project, task_id=task_id)
+        attempt_error = None
+    except AttemptStateError as exc:
+        attempt_record = None
+        attempt_error = str(exc)[:500]
+    attempt = _safe_attempt_summary(attempt_record)
+    job_id = attempt.get("job_id") if attempt else None
+    job = _safe_job_summary(job_status, job_id if isinstance(job_id, str) else None)
+    job_token = _job_status_token(job)
+
+    files = {
+        "status": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="agent-status.md"),
+        "heartbeat": _task_file_stat(
+            run_cmd, project=project, task_id=task_id, filename=AGENT_HEARTBEAT_FILENAME
+        ),
+        "report": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="agent-report.md"),
+        "diff": _task_file_stat(
+            run_cmd, project=project, task_id=task_id, filename="implementation-diff.patch"
+        ),
+        "consensus": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="consensus.md"),
+        "worker_status": _task_file_stat(
+            run_cmd, project=project, task_id=task_id, filename="worker-status.md"
+        ),
+        "required_checks": _task_file_stat(
+            run_cmd, project=project, task_id=task_id, filename="required-checks.log"
+        ),
+        "attempt_state": _task_file_stat(
+            run_cmd, project=project, task_id=task_id, filename=ATTEMPT_STATE_FILENAME
+        ),
+    }
+    activity = _latest_activity(
+        {name: meta for name, meta in files.items() if name != "heartbeat"}, now
+    )
+    age = activity.get("age_seconds")
+    heartbeat = _read_agent_heartbeat(run_cmd, project=project, task_id=task_id, now_epoch=now)
+    heartbeat_age = heartbeat.get("age_seconds")
+    runner_heartbeat_fresh = bool(
+        heartbeat.get("state") == "running"
+        and isinstance(heartbeat_age, int)
+        and heartbeat_age < stale_after_seconds
+    )
+
+    terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
+    active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
+    likely_hung = bool(active and not terminal and isinstance(age, int) and age >= stale_after_seconds)
+
+    if terminal:
+        verdict = "finished"
+    elif likely_hung:
+        verdict = "likely_hung"
+    elif active:
+        verdict = "running"
+    elif status_token is None and job is None and attempt_error is None:
+        verdict = "unknown"
+    else:
+        verdict = "needs_attention"
+
+    next_actions: dict[str, Any] = {
+        "agent_status": {
+            "project": project,
+            "task_id": task_id,
+            "purpose": "cheap polling without log tail",
+        },
+    }
+    if verdict in {"likely_hung", "needs_attention", "unknown"}:
+        next_actions["inspect_agent_task"] = {
+            "project": project,
+            "task_id": task_id,
+            "purpose": "deep diagnostics with bounded log tail and stall detectors",
+        }
+    if terminal:
+        next_actions["read_agent_report"] = {"project": project, "task_id": task_id}
+        next_actions["read_agent_diff"] = {"project": project, "task_id": task_id}
+    elif job_id:
+        next_actions["job_status"] = {"job_id": job_id}
+
+    return {
+        "project": project,
+        "task_id": task_id,
+        "exists": True,
+        "status": status_token,
+        "job": job,
+        "attempt": attempt,
+        "attempt_state_error": attempt_error,
+        "files": files,
+        "last_activity": activity,
+        "runner_heartbeat": heartbeat,
+        "runner_heartbeat_fresh": runner_heartbeat_fresh,
+        "stale_after_seconds": stale_after_seconds,
+        "terminal": terminal,
+        "likely_hung": likely_hung,
+        "verdict": verdict,
+        "log_included": False,
+        "next": next_actions,
+    }
+
+
+
 def inspect_agent_task(
     run_cmd,
     *,
