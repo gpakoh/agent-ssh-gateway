@@ -2,7 +2,7 @@ version: 1
 registry_root: /media/1TB/Python
 
 projects:
-  web-ssh-gateway:
+  agent-ssh-gateway:
     root: web_ssh/web-ssh-gateway
     type: fastapi
     description: "API-first SSH gateway for agents, CI/CD, and infra teams"
@@ -13,6 +13,13 @@ projects:
     type: monorepo
     description: "NOD platform — master server, gateway client, tg bot, web UI, payment"
     tags: [nod, platform]
+
+  nod-shared:
+    root: NOD_gateway/nod-shared
+    parent: nod-gateway
+    type: python-library
+    description: "NOD Gateway shared utilities (ESA crypto, auth signatures)"
+    tags: [nod, shared, crypto]
 
   quart-platform:
     root: quart-platform
@@ -59,6 +66,20 @@ projects:
     type: unknown
     description: "deep-researcher"
     tags: []
+
+  egress-canary:
+    root: quart-platform/egress-canary
+    parent: quart-platform
+    type: docker
+    description: "CI egress proxy canary (temp)"
+    tags: [ci, networking]
+
+  engineering-supervisor-service:
+    root: quart-platform/engineering-supervisor-service
+    parent: quart-platform
+    type: python-service
+    description: "Engineering Supervisor service — B1 durable postgres persistence"
+    tags: [supervisor, python-service]
 
   document-parser-service:
     root: quart-platform/document-parser-service
