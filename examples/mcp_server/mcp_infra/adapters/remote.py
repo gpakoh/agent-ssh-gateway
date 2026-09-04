@@ -45,6 +45,13 @@ from examples.mcp_server.task_candidate import (
     validate_task_candidate_for_push,
 )
 
+# Default cap, in bytes, for the *decoded* content returned by gitea_get_file.
+# Keeps large base64 blobs out of tool responses by default; callers that need
+# a fuller file explicitly raise max_content_bytes (or pass 0 for the client's
+# MAX_FILE_SIZE fallback). See DEFAULT_GET_FILE_MAX_CONTENT_BYTES in
+# gitea_client.py for the client-level counterpart.
+GITEA_GET_FILE_DEFAULT_MAX_CONTENT_BYTES = 16 * 1024
+
 
 def _server_gitea_client():
     return server_attr("GiteaClient")
@@ -241,10 +248,26 @@ async def gitea_list_commits(
 
 
 async def gitea_get_file(
-    owner: str, repo: str, path: str = "", branch: str | None = None
+    owner: str,
+    repo: str,
+    path: str = "",
+    branch: str | None = None,
+    *,
+    include_content: bool = True,
+    max_content_bytes: int = GITEA_GET_FILE_DEFAULT_MAX_CONTENT_BYTES,
 ) -> dict[str, Any]:
     """Get a file or directory from a Gitea repository. Omit path (or
-    pass "") to list the repository root."""
+    pass "") to list the repository root.
+
+    Content contract (keeps large base64 blobs out of chat by default):
+      * include_content=False returns metadata only (path, name, sha,
+        download_url, html_url, last_commit_sha) and marks the result
+        content_omitted -- no "content" blob.
+      * max_content_bytes bounds the decoded content bytes; larger files
+        come back "truncated" with a content_bytes size marker instead of
+        a full blob. Default 16 KiB; pass 0 to fall back to the client's
+        256 KiB safety cap.
+    """
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
@@ -253,9 +276,23 @@ async def gitea_get_file(
             message="GITEA_TOKEN not configured",
             source="gitea",
         )
+    if max_content_bytes < 0:
+        return tool_error(
+            tool="gitea_get_file",
+            code="INVALID_INPUT",
+            message="max_content_bytes must be >= 0",
+            source="gitea",
+        )
     try:
         async with _server_gitea_client()(token) as client:
-            data = await client.get_file(owner, repo, path, branch=branch)
+            data = await client.get_file(
+                owner,
+                repo,
+                path,
+                branch=branch,
+                include_content=include_content,
+                max_content_bytes=(max_content_bytes or None),
+            )
     except Exception as exc:
         return _remote_api_error("gitea_get_file", "gitea", exc)
     return tool_success("gitea_get_file", result=data, source="gitea")
