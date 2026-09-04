@@ -2,7 +2,7 @@ version: 1
 registry_root: /media/1TB/Python
 
 projects:
-  web-ssh-gateway:
+  agent-ssh-gateway:
     root: web_ssh/web-ssh-gateway
     type: fastapi
     description: "API-first SSH gateway for agents, CI/CD, and infra teams"
@@ -14,18 +14,18 @@ projects:
     description: "NOD platform — master server, gateway client, tg bot, web UI, payment"
     tags: [nod, platform]
 
+  nod-shared:
+    root: NOD_gateway/nod-shared
+    parent: nod-gateway
+    type: python-library
+    description: "NOD Gateway shared utilities (ESA crypto, auth signatures)"
+    tags: [nod, shared, crypto]
+
   quart-platform:
     root: quart-platform
     type: platform
     description: "Quart platform umbrella"
     tags: [quart, platform]
-
-  gpt-browser-bridge-hardening:
-    root: quart-platform/.supervisor-workspaces/gpt-browser-bridge-hardening
-    parent: quart-platform
-    type: supervisor-workspace
-    description: "Pinned supervisor workspace for gpt-browser-bridge hardening delivery"
-    tags: [quart, browser, supervisor]
 
   quart-core:
     root: quart-platform/quart-core
@@ -59,6 +59,20 @@ projects:
     type: unknown
     description: "deep-researcher"
     tags: []
+
+  egress-canary:
+    root: quart-platform/egress-canary
+    parent: quart-platform
+    type: docker
+    description: "CI egress proxy canary (temp)"
+    tags: [ci, networking]
+
+  engineering-supervisor-service:
+    root: quart-platform/engineering-supervisor-service
+    parent: quart-platform
+    type: python-service
+    description: "Engineering Supervisor service — B1 durable postgres persistence"
+    tags: [supervisor, python-service]
 
   document-parser-service:
     root: quart-platform/document-parser-service
@@ -418,10 +432,10 @@ projects:
     tags: ["infra-quart", "rag", "temporary"]
 
   zalesskiy-sup:
-    root: astra
-    type: unknown
+    root: astra/zalesskiy-sup
+    type: astro
     description: "Zalesskiy SUP — Astro 5 + Directus landing"
-    tags: []
+    tags: [astro, directus, landing]
 
   engineering-supervisor-gateway-adapter-manual-20260904-0500:
     root: ".supervisor-workspaces/engineering-supervisor-gateway-adapter-manual-20260904-0500"
