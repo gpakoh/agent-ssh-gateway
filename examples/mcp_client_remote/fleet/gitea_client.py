@@ -23,6 +23,14 @@ MAX_FILE_SIZE = 256 * 1024
 DEFAULT_GET_FILE_MAX_CONTENT_BYTES = 16 * 1024
 REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
+# Gitea's Actions run-list API accepts `in_progress`, while the operator-facing
+# tool historically documented `running`. Normalize that alias locally so callers
+# do not get an opaque remote 400 for a supported semantic state.
+_ACTION_RUN_STATUS_ALIASES = {
+    "running": "in_progress",
+}
+_ALLOWED_ACTION_RUN_STATUS_FILTERS = frozenset({"completed", "in_progress", "waiting"})
+
 API_BASE = os.environ.get("GITEA_API_BASE", "https://git.example.com/api/v1")
 GITEA_FORWARDED_HOST = os.environ.get("GITEA_FORWARDED_HOST", "")
 GITEA_FORWARDED_PROTO = os.environ.get("GITEA_FORWARDED_PROTO", "https")
@@ -80,6 +88,16 @@ def _validate_branch_name(value: str, label: str) -> str:
     ):
         raise ValueError(f"Invalid {label} branch name: {value!r}")
     return value
+
+
+def _normalize_action_run_status_filter(status: str | None) -> str | None:
+    if status is None:
+        return None
+    normalized = _ACTION_RUN_STATUS_ALIASES.get(status.strip(), status.strip())
+    if normalized not in _ALLOWED_ACTION_RUN_STATUS_FILTERS:
+        allowed = ", ".join(sorted(_ALLOWED_ACTION_RUN_STATUS_FILTERS | set(_ACTION_RUN_STATUS_ALIASES)))
+        raise ValueError(f"status must be one of: {allowed}")
+    return normalized
 
 
 class GiteaClient:
@@ -459,8 +477,9 @@ class GiteaClient:
     ) -> dict[str, Any]:
         limit = min(limit, MAX_LIMIT)
         params: dict[str, Any] = {"limit": limit}
-        if status:
-            params["status"] = status
+        normalized_status = _normalize_action_run_status_filter(status)
+        if normalized_status:
+            params["status"] = normalized_status
         data = await self._get(
             "/repos/{owner}/{repo}/actions/runs",
             params=params,
