@@ -46,7 +46,11 @@ items are explicitly verified as implemented, documented and safe in production.
    visible `gitea_push_local_ref` schema omitted implementation-required
    `task_id`; after supplying the hidden field, delivery still failed on
    undocumented required artifacts such as `delivery-contract.json` /
-   `candidate-receipt.json`. During NOD delivery on 2026-09-04,
+   `candidate-receipt.json`. During Browser delivery on 2026-09-04,
+   `list_resources(query="gitea_push_local_ref")` again exposed a schema without
+   `task_id`, but invoking it for verified commit
+   `c6df59ee894d3376c7c025c9ca9c53a1292797b8` failed validation with
+   `task_id Field required`. During NOD delivery on 2026-09-04,
    `tools_manifest` advertised `gitea_materialize_task_candidate` /
    `prepare_candidate_clone`, but `list_resources(query="materialize" | "candidate")`
    did not surface invokable schemas. Closure requires advertised tools to be
@@ -101,10 +105,15 @@ items are explicitly verified as implemented, documented and safe in production.
    Read-only Gateway metadata confirms the same class for `quart-core` and
    `rag-router-service`: both are Git worktrees but `filesystem_writeable=false`
    and recommend `writeable_candidate_clone`, while `marx-mind` is writeable.
-   Closure requires handoff/task/write/git tools to fail fast with a typed
-   `WORKSPACE_NOT_WRITEABLE` / `CANDIDATE_REQUIRED` diagnostic or automatically
-   create/use a writable candidate clone, instead of allowing late `.ai-bridge`
-   or `.git/index.lock` permission failures in production roots.
+   Browser delivery on 2026-09-04 reproduced the same class in
+   `gpt-browser-bridge`: `info` reported `filesystem_writeable=false`, focused
+   verification had to run in a writable candidate, and canonical `git add
+   app/loops.py tests/unit/test_loops.py` failed with `.git/index.lock` permission
+   denied even though `git diff --check` passed. Closure requires
+   handoff/task/write/git tools to fail fast with a typed `WORKSPACE_NOT_WRITEABLE`
+   / `CANDIDATE_REQUIRED` diagnostic or automatically create/use a writable
+   candidate clone, instead of allowing late `.ai-bridge` or `.git/index.lock`
+   permission failures in production roots.
 
 ## 🧩 Architect/operator wanted capabilities — 2026-09-03
 
