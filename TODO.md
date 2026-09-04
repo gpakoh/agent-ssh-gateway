@@ -184,3 +184,13 @@ items are explicitly verified as implemented, documented and safe in production.
    question remains open. Closure requires distinguishing runner-specific
    degradation from a shared infrastructure limit and demonstrating a controlled
    build+deploy path that does not hit the hidden deadline.
+
+2. ⬜ **Superseded Gitea Action task containers can keep consuming runner capacity.**
+   During Astra C.2.5-C5/C6 recovery on 2026-09-04, newer PR heads existed and
+   newer runs were authoritative, but older superseded `nod-ci-node22` action
+   task containers still appeared as running with no useful CPU and their Gitea
+   runs still reported `in_progress`. Operators need a safe read-only
+   reconciliation surface showing whether an Action container belongs to the
+   current PR head, a superseded head, or an orphaned run, plus a guarded cleanup
+   path that fails closed unless run id, job id, container id, and head SHA all
+   match the stale/superseded state.
