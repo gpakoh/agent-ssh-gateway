@@ -115,6 +115,17 @@ items are explicitly verified as implemented, documented and safe in production.
    candidate clone, instead of allowing late `.ai-bridge` or `.git/index.lock`
    permission failures in production roots.
 
+11. ⬜ **OpenCode review clones must support dirty-worktree review targets.**
+   During NOD verification on 2026-09-04, a read-only OpenCode review task
+   materialized only repository `HEAD 40d026f8` instead of the current dirty
+   worktree, so the review surface was not suitable for checking uncommitted NOD
+   changes. A related task also stalled with `trailing_colon_stall`, leaving the
+   operator without a usable agent review result. Closure requires the handoff /
+   review clone contract to explicitly distinguish committed-HEAD review from
+   dirty-worktree snapshot review, include the exact snapshot/source evidence in
+   task metadata, and surface typed stall state plus recovery guidance instead
+   of presenting the stale clone as a valid review target.
+
 ## 🧩 Architect/operator wanted capabilities — 2026-09-03
 
 1. ⬜ **First-class bounded internal service health probe.** Add a read-only
@@ -210,6 +221,21 @@ items are explicitly verified as implemented, documented and safe in production.
    read path. Add structured retry metadata and consider coalescing repeated
    schema discovery/status reads so operators can recover without guessing the
    cooldown window or accidentally increasing contention.
+
+10. ⬜ **Command-plane policy and verification ergonomics need typed operator guidance.**
+    Several 2026-09-04 delivery sessions exposed rough edges that overlap with
+    existing namespace/session/environment findings but are not yet captured as a
+    single operator contract: raw SSH `git push` / `git clone` can time out while
+    the specialized `git_push` path succeeds; common diagnostic wrappers such as
+    `sh -lc` and `python3 -c` are blocked by policy; destructive cleanup such as
+    `rm` is correctly denied but leaves operators without a safe cleanup helper
+    for failed temporary clones; and registered temporary workspaces can fail
+    `run_pytest` / `run_compileall` before useful verification because the runner
+    is pinned to `uv --frozen` / missing or incompatible `uv.lock` state. Closure
+    requires typed policy denials with recommended safe alternate tools,
+    first-class bounded cleanup for Gateway-created scratch workspaces, and
+    verification helpers that distinguish environment/bootstrap failure from
+    project test failure.
 
 ## 🆕 Runtime/CI findings — 2026-08-19
 

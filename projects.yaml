@@ -460,3 +460,21 @@ projects:
     type: "python-service"
     description: "Kojo release hardening rollup verified local workspace"
     tags: ["kojo", "supervisor-workspace", "release-hardening"]
+
+  gpt-browser-bridge-waiting-stuck-verify-20260904:
+    root: ".supervisor-workspaces/gpt-browser-bridge-waiting-stuck-verify-20260904"
+    type: "python-service"
+    description: "Recovered browser waiting/stuck verified candidate workspace"
+    tags: ["browser", "supervisor", "temporary", "verification"]
+
+  quart-core-rag-router-boundary-20260904-a:
+    root: "quart-platform/.supervisor-workspaces/quart-core-rag-router-boundary-20260904-a"
+    type: "python"
+    description: "quart-core PR #196 rag-router boundary workspace"
+    tags: ["quart-core", "rag-router", "pr-196"]
+
+  agent-ssh-gateway-master-direct-20260904:
+    root: ".supervisor-workspaces/web-ssh-gateway-master-direct-20260904-delivery-contract"
+    type: "python"
+    description: "Clean detached master worktree for direct-master policy and delivery-contract fixes"
+    tags: ["agent-ssh-gateway", "master-direct", "temporary"]
