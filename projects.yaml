@@ -67,13 +67,6 @@ projects:
     description: "CI egress proxy canary (temp)"
     tags: [ci, networking]
 
-  engineering-supervisor-service:
-    root: quart-platform/engineering-supervisor-service
-    parent: quart-platform
-    type: python-service
-    description: "Engineering Supervisor service — B1 durable postgres persistence"
-    tags: [supervisor, python-service]
-
   document-parser-service:
     root: quart-platform/document-parser-service
     parent: quart-platform
