@@ -159,28 +159,6 @@ DestructivePattern(
             PatternSuggestion(command="git add -p", description="Interactive staging to review each change", kind=SuggestionKind.PREVIEW_FIRST),
         ),
     ),
-DestructivePattern(
-        name="git-push-to-master",
-        regex=r"git\s+(?:\S+\s+)*push\s+(?:.*[\s:/])?\+?master(?:\s|$)",
-        reason="Direct push to master/main branch is blocked",
-        severity=Severity.MEDIUM,
-        description="Push to default branch may bypass review. Use a feature branch and PR.",
-        suggestions=(
-            PatternSuggestion(command="git checkout -b feature/{name}", description="Create a feature branch", kind=SuggestionKind.SAFER_ALTERNATIVE),
-            PatternSuggestion(command="gh pr create", description="Create a PR instead of direct push", kind=SuggestionKind.SAFER_ALTERNATIVE),
-        ),
-    ),
-DestructivePattern(
-        name="git-push-to-main",
-        regex=r"git\s+(?:\S+\s+)*push\s+(?:.*[\s:/])?\+?main(?:\s|$)",
-        reason="Direct push to main branch is blocked",
-        severity=Severity.MEDIUM,
-        description="Push to default branch may bypass review. Use a feature branch and PR.",
-        suggestions=(
-            PatternSuggestion(command="git checkout -b feature/{name}", description="Create a feature branch", kind=SuggestionKind.SAFER_ALTERNATIVE),
-            PatternSuggestion(command="gh pr create", description="Create a PR instead of direct push", kind=SuggestionKind.SAFER_ALTERNATIVE),
-        ),
-    ),
 )
 
 def build_git_pack() -> Pack:
