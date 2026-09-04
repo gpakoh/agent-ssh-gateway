@@ -5,9 +5,25 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "mcp_client_remote"))
 
+from fleet.gitea_client import _normalize_action_run_status_filter
 from fleet.shared import minimize_action_run_payload, normalize_list_response
+
+
+def test_gitea_action_run_status_filter_normalizes_running_alias():
+    assert _normalize_action_run_status_filter(None) is None
+    assert _normalize_action_run_status_filter("completed") == "completed"
+    assert _normalize_action_run_status_filter("waiting") == "waiting"
+    assert _normalize_action_run_status_filter("in_progress") == "in_progress"
+    assert _normalize_action_run_status_filter("running") == "in_progress"
+
+
+def test_gitea_action_run_status_filter_rejects_unknown_status_before_http():
+    with pytest.raises(ValueError, match="status must be one of"):
+        _normalize_action_run_status_filter("queued")
 
 
 def test_gitea_branches_normalized():

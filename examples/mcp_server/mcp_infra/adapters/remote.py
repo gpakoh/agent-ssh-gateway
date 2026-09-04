@@ -823,7 +823,7 @@ async def gitea_delete_branch(
 async def gitea_list_action_runs(
     owner: str, repo: str, status: str | None = None, limit: int = 10
 ) -> dict[str, Any]:
-    """List Gitea Actions workflow runs. Optionally filter by status (completed, running, waiting)."""
+    """List Gitea Actions workflow runs. Optionally filter by status (completed, running/in_progress, waiting)."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
