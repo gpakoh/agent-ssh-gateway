@@ -135,6 +135,47 @@ def test_prepare_candidate_clone_rejects_unsafe_branches(registry_fixture, branc
     assert exc_info.value.code == "INVALID_INPUT"
 
 
+def test_prepare_candidate_clone_git_failure_returns_redacted_diagnostics(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    _workspace, _source, config_dir, journal_root, base = registry_fixture
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=128,
+            stdout="preflight stdout\n",
+            stderr="fatal: /tmp/private/root/source/.git: bad revision\n",
+        )
+
+    monkeypatch.setattr(candidate_clone_module.subprocess, "run", fake_run)
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_clone_module.prepare_candidate_clone(
+            "source-project",
+            "candidate/diagnostic-flow",
+            base,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    err = exc_info.value
+    assert err.code == "TOOL_EXECUTION_FAILED"
+    assert err.message == "git resolve base ref failed"
+    assert err.retryable is False
+    assert err.details is not None
+    assert err.details["operation"] == "resolve base ref"
+    assert err.details["exit_code"] == 128
+    assert err.details["stdout_tail"] == "preflight stdout"
+    assert "<path>" in err.details["stderr_tail"]
+    assert "/tmp/private" not in err.details["stderr_tail"]
+    assert "cwd" not in err.details
+    assert "args" not in err.details
+
+
 def test_prepare_candidate_clone_refuses_dirty_existing_clone(registry_fixture) -> None:
     workspace, _source, config_dir, journal_root, base = registry_fixture
     receipt = prepare_candidate_clone(
