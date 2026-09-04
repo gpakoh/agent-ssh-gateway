@@ -690,6 +690,125 @@ def test_write_safe_error_returns_tool_error():
         ),
     ],
 )
+def test_workspace_mutation_nonwriteable_project_requires_candidate_before_core(
+    tool_name, patched_function, call_kwargs
+):
+    """Known non-writeable project roots must fail before filesystem mutation."""
+    registry = MagicMock()
+    registry.project_info.return_value = {"root": "/host/secret/read-only-project"}
+    with patch(
+        "examples.mcp_server.server._get_workspace_registry",
+        return_value=registry,
+    ), patch(
+        "os.path.isdir",
+        return_value=True,
+    ), patch(
+        "os.access",
+        return_value=False,
+    ), patch(
+        patched_function,
+        return_value={},
+    ) as mutation:
+        from examples.mcp_server import server as mcp_server_mod
+
+        result = getattr(mcp_server_mod, f"gateway_{tool_name}")(**call_kwargs)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CANDIDATE_REQUIRED"
+    assert result["error"]["retryable"] is False
+    assert "writeable candidate clone" in result["error"]["hint"]
+    assert "/host/secret/read-only-project" not in str(result)
+    mutation.assert_not_called()
+
+
+@requires_server
+def test_workspace_mutation_writeable_project_preserves_write_path():
+    """Per-project preflight must not block an ordinary writeable workspace."""
+    registry = MagicMock()
+    registry.project_info.return_value = {"root": "/workspace/writeable-project"}
+    mock_result = {
+        "project_id": "p",
+        "path": "f.txt",
+        "size": 1,
+        "encoding": "utf-8",
+    }
+    with patch(
+        "examples.mcp_server.server._get_workspace_registry",
+        return_value=registry,
+    ), patch(
+        "os.path.isdir",
+        return_value=True,
+    ), patch(
+        "os.access",
+        return_value=True,
+    ), patch(
+        "app.workspace.edit.project_file_write",
+        return_value=mock_result,
+    ) as mutation:
+        from examples.mcp_server.server import gateway_workspace_file_write
+
+        result = gateway_workspace_file_write(
+            project_id="p",
+            relative_path="f.txt",
+            content="x",
+        )
+
+    assert result["ok"] is True
+    mutation.assert_called_once()
+
+
+@requires_server
+def test_workspace_mutation_unknown_project_preserves_core_error_taxonomy():
+    """Preflight must not turn an unknown project into a candidate-routing error."""
+    registry = MagicMock()
+    registry.project_info.side_effect = ValueError("unknown project")
+    with patch(
+        "examples.mcp_server.server._get_workspace_registry",
+        return_value=registry,
+    ), patch(
+        "app.workspace.edit.project_file_write",
+        side_effect=ValueError("unknown project"),
+    ) as mutation:
+        from examples.mcp_server.server import gateway_workspace_file_write
+
+        result = gateway_workspace_file_write(
+            project_id="missing",
+            relative_path="f.txt",
+            content="x",
+        )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "TOOL_EXECUTION_FAILED"
+    assert "unknown project" in result["error"]["message"]
+    mutation.assert_called_once()
+
+
+@requires_server
+@pytest.mark.parametrize(
+    ("tool_name", "patched_function", "call_kwargs"),
+    [
+        (
+            "workspace_file_write",
+            "app.workspace.edit.project_file_write",
+            {"project_id": "p", "relative_path": "f.txt", "content": "x"},
+        ),
+        (
+            "workspace_file_edit",
+            "app.workspace.edit.project_file_edit",
+            {
+                "project_id": "p",
+                "relative_path": "f.txt",
+                "old_string": "old",
+                "new_string": "new",
+            },
+        ),
+        (
+            "workspace_apply_patch",
+            "app.workspace.edit.project_apply_patch",
+            {"project_id": "p", "relative_path": "f.txt", "patch": "--- a/f\n+++ b/f\n"},
+        ),
+    ],
+)
 def test_workspace_mutation_erofs_maps_to_workspace_readonly(
     tool_name, patched_function, call_kwargs
 ):
