@@ -94,6 +94,18 @@ items are explicitly verified as implemented, documented and safe in production.
    the returned job id reported `JOB_NOT_FOUND`, so reconciliation must also
    preserve or derive terminal state for still-visible task artifacts.
 
+10. ⬜ **Handoff/write tools must route around non-writeable production roots.**
+   GPT RAG orchestration on 2026-09-04 reported `Permission denied` when trying
+   to create parallel `.ai-bridge` handoffs for `quart-core`, and `index.lock`
+   permission failures when attempting writes/staging in root project checkouts.
+   Read-only Gateway metadata confirms the same class for `quart-core` and
+   `rag-router-service`: both are Git worktrees but `filesystem_writeable=false`
+   and recommend `writeable_candidate_clone`, while `marx-mind` is writeable.
+   Closure requires handoff/task/write/git tools to fail fast with a typed
+   `WORKSPACE_NOT_WRITEABLE` / `CANDIDATE_REQUIRED` diagnostic or automatically
+   create/use a writable candidate clone, instead of allowing late `.ai-bridge`
+   or `.git/index.lock` permission failures in production roots.
+
 ## 🧩 Architect/operator wanted capabilities — 2026-09-03
 
 1. ⬜ **First-class bounded internal service health probe.** Add a read-only
