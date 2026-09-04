@@ -37,25 +37,28 @@ import os
 import secrets
 import sys
 import urllib.parse
+from typing import Any
 
 TIMEOUT = float(os.environ.get("MCP_SMOKE_TIMEOUT", "30"))
 BASE_HOST = os.environ.get("MCP_SMOKE_BASE_HOST", "127.0.0.1")
 BASE_PORT = int(os.environ.get("MCP_SMOKE_BASE_PORT", "8788"))
 REDIRECT_URI = "http://localhost/callback"
 SCOPE = "mcp:read mcp:project"
-PROJECT = os.environ.get("MCP_SMOKE_PROJECT", "web-ssh-gateway")
+DEFAULT_PROJECT = "agent-ssh-gateway"
+PROJECT = os.environ.get("MCP_SMOKE_PROJECT", DEFAULT_PROJECT)
 
 
 class SmokeError(RuntimeError):
     pass
 
 
-def _req(method: str, path: str, body: dict | None = None, form: bool = False,
-         sid: str | None = None, token: str | None = None) -> tuple[int, dict, str]:
+def _req(method: str, path: str, body: dict[str, Any] | None = None, form: bool = False,
+         sid: str | None = None, token: str | None = None) -> tuple[int, dict[str, Any], str, str]:
     headers = {"Accept": "application/json, text/event-stream"}
+    data: bytes | None
     if form:
         headers["Content-Type"] = "application/x-www-form-urlencoded"
-        data = urllib.parse.urlencode(body).encode()
+        data = urllib.parse.urlencode(body or {}).encode()
     else:
         headers["Content-Type"] = "application/json"
         data = json.dumps(body).encode() if body is not None else None
@@ -77,7 +80,7 @@ def _req(method: str, path: str, body: dict | None = None, form: bool = False,
             if b"\n\n" in buf and path.startswith("/mcp"):
                 break
         raw = buf.decode("utf-8", errors="replace")
-        payload: dict = {}
+        payload: dict[str, Any] = {}
         for line in raw.split("\n"):
             if line.startswith("data:"):
                 payload = json.loads(line[5:])
@@ -158,8 +161,8 @@ def _oauth_flow(client_id: str, password: str) -> str:
     return payload["access_token"]
 
 
-def _mcp_call(token: str, method: str, params: dict, sid: str | None = None
-              ) -> tuple[dict, str]:
+def _mcp_call(token: str, method: str, params: dict[str, Any], sid: str | None = None
+              ) -> tuple[dict[str, Any], str]:
     status, payload, _, ret_sid = _req("POST", "/mcp", {
         "jsonrpc": "2.0",
         "id": 1,

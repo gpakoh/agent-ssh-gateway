@@ -79,6 +79,10 @@ GIT_STATUS_TEXT = json.dumps({
 
 
 class TestMcpOauthBlackBoxSmoke:
+    def test_default_project_matches_registered_gateway_project(self):
+        assert smoke.DEFAULT_PROJECT == "agent-ssh-gateway"
+        assert smoke.PROJECT == smoke.DEFAULT_PROJECT
+
     def test_missing_password_fails(self, monkeypatch):
         monkeypatch.delenv("MCP_AUTHORIZE_PASSWORD", raising=False)
         assert smoke.main() == 1
