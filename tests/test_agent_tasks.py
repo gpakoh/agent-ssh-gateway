@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from examples.mcp_server.agent_tasks import (
+    agent_task_status,
     archive_agent_task,
     build_current_plan,
     build_initial_status,
@@ -516,6 +517,140 @@ class TestReadAgentLogTail:
         assert result["stdout"] == "(not found)"
         assert result["exit_code"] == 0
         assert result["truncated"] is False
+
+
+class TestAgentTaskStatus:
+    @staticmethod
+    def _shell_runner(cwd):
+        def run_cmd(_project: str, command: str) -> dict:
+            result = subprocess.run(
+                ["sh", "-c", command],
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            return {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exit_code": result.returncode,
+            }
+
+        return run_cmd
+
+    def test_running_snapshot_omits_log_tail(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n\nWorking\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text("token=should-not-be-read\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "running",
+                    "phase": "loop",
+                    "updated_at": "2026-09-03T12:00:00Z",
+                    "updated_epoch": now - 5,
+                    "runner_pid": 123,
+                    "exit_code": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 10, now - 10))
+        os.utime(td / "agent-heartbeat.json", (now - 5, now - 5))
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["exists"] is True
+        assert result["status"] == "running"
+        assert result["job"]["status"] == "running"
+        assert result["verdict"] == "running"
+        assert result["terminal"] is False
+        assert result["likely_hung"] is False
+        assert result["log_included"] is False
+        assert "log" not in result
+        assert "opencode-output.log" not in str(result)
+        assert "should-not-be-read" not in str(result)
+        assert result["next"]["agent_status"]["task_id"] == task_id
+        assert result["next"]["job_status"] == {"job_id": "job-1"}
+        assert "inspect_agent_task" not in result["next"]
+
+    def test_likely_hung_snapshot_escalates_without_tail_call(self):
+        now = 2_000
+        calls: list[str] = []
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            calls.append(command)
+            if command.startswith("tail -c "):
+                raise AssertionError("agent_status must not read log tails")
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "agent-status.md" in command:
+                return {"stdout": "Status: running\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "attempt-state.json" in command:
+                return {
+                    "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat "):
+                return {"stdout": "(not found)", "stderr": "", "exit_code": 1}
+            if command.startswith("stat -c "):
+                if "agent-heartbeat.json" in command or "agent-report.md" in command or "implementation-diff.patch" in command:
+                    return {"stdout": "", "stderr": "not found", "exit_code": 1}
+                return {"stdout": f"20 {now - 700}\n", "stderr": "", "exit_code": 0}
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = agent_task_status(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["verdict"] == "likely_hung"
+        assert result["likely_hung"] is True
+        assert result["log_included"] is False
+        assert result["next"]["inspect_agent_task"]["task_id"] == "a12345678901"
+        assert not any(command.startswith("tail -c ") for command in calls)
+
+    def test_terminal_snapshot_points_to_report_and_diff(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: needs-review\n", encoding="utf-8")
+        (td / "agent-report.md").write_text("done\n", encoding="utf-8")
+        (td / "implementation-diff.patch").write_text("diff --git a/a b/a\n", encoding="utf-8")
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+        )
+
+        assert result["verdict"] == "finished"
+        assert result["terminal"] is True
+        assert result["next"]["read_agent_report"] == {"project": "my-proj", "task_id": task_id}
+        assert result["next"]["read_agent_diff"] == {"project": "my-proj", "task_id": task_id}
 
 
 class TestInspectAgentTask:

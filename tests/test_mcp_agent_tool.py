@@ -369,11 +369,14 @@ class TestProjectRunAgentAsyncSubmit:
         assert result["job_id"] == "job-42"
         assert result["exit_code"] is None
         assert result["finished_at"] is None
-        assert result["diagnostics"]["inspect_agent_task"] == {
+        assert result["diagnostics"]["agent_status"] == {
             "project": "test",
             "task_id": TASK_ID,
-            "purpose": "status, job state, artifact mtimes, stale/hung verdict, and log tail",
+            "purpose": "cheap status/job/artifact polling without log tail",
         }
+        assert result["diagnostics"]["inspect_agent_task"]["purpose"] == (
+            "deep diagnostics with bounded log tail and stall detectors"
+        )
         assert result["diagnostics"]["job_status"]["job_id"] == "job-42"
         run_script_async.assert_called_once()
         submission_key = run_script_async.call_args.args[2]
@@ -490,6 +493,7 @@ class TestProjectRunAgentDiagnosticsHint:
 
         assert result["status"] == "running"
         assert result["wait_timed_out"] is True
+        assert result["diagnostics"]["agent_status"]["task_id"] == TASK_ID
         assert result["diagnostics"]["inspect_agent_task"]["task_id"] == TASK_ID
         assert result["diagnostics"]["read_agent_log"]["project"] == "test"
         assert result["diagnostics"]["job_status"]["job_id"] == "job-sync-1"
@@ -882,6 +886,34 @@ def test_agent_adapter_registers_run_agents_tool(monkeypatch):
     adapter.register_all()
 
     assert registered["run_agents"] is adapter.gateway_run_agents
+    assert registered["agent_status"] is adapter.gateway_agent_status
+
+
+def test_gateway_agent_status_wraps_lightweight_status(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as adapter
+
+    captured_kwargs: dict[str, object] = {}
+
+    class Client:
+        def job_status(self, job_id: str) -> dict[str, str]:
+            return {"job_id": job_id, "status": "running"}
+
+    monkeypatch.setattr(adapter, "_server_client", lambda: Client())
+
+    def fake_agent_status(run_cmd, **kwargs):
+        captured_kwargs.update(kwargs)
+        return {"task_id": kwargs["task_id"], "verdict": "running", "log_included": False}
+
+    monkeypatch.setattr(adapter, "_agent_task_status", fake_agent_status)
+
+    result = adapter.gateway_agent_status("test", TASK_ID, stale_after_seconds=600)
+
+    assert result["ok"] is True
+    assert result["result"] == {"task_id": TASK_ID, "verdict": "running", "log_included": False}
+    assert captured_kwargs["project"] == "test"
+    assert captured_kwargs["task_id"] == TASK_ID
+    assert captured_kwargs["stale_after_seconds"] == 600
+    assert callable(captured_kwargs["job_status"])
 
 
 class TestGatewayRunAgents:

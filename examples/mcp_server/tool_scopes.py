@@ -116,6 +116,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "read_agent_report": ["mcp:handoff"],
     "read_agent_diff": ["mcp:handoff"],
     "read_agent_log": ["mcp:handoff"],
+    "agent_status": ["mcp:handoff"],
     "inspect_agent_task": ["mcp:handoff"],
     "list_agent_tasks": ["mcp:handoff"],
     "cancel_agent_task": ["mcp:agent-run", "mcp:handoff"],
