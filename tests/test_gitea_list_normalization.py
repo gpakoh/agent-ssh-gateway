@@ -58,12 +58,8 @@ def test_gitea_action_runs_preserved():
     assert "workflow_runs" in result
 
 
-def test_gitea_action_run_payload_minimized():
-    """Regression: list_action_runs returned raw workflow runs embedding
-    full user objects (email, is_admin, last_login) under actor and
-    trigger_actor, plus a ~50-field repository object — a PII/context
-    flood. minimize_action_run_payload keeps only triage fields."""
-    run = {
+def _raw_gitea_action_run_payload() -> dict[str, object]:
+    return {
         "id": 123,
         "run_number": 45,
         "run_attempt": 1,
@@ -97,7 +93,14 @@ def test_gitea_action_run_payload_minimized():
         "completed_at": "2026-01-01T00:01:00Z",
         "html_url": "https://git.example/gpakoh/web-ssh-gateway/actions/runs/123",
     }
-    out = minimize_action_run_payload(run)
+
+
+def test_gitea_action_run_payload_minimized():
+    """Regression: list_action_runs returned raw workflow runs embedding
+    full user objects (email, is_admin, last_login) under actor and
+    trigger_actor, plus a ~50-field repository object — a PII/context
+    flood. minimize_action_run_payload keeps only triage fields."""
+    out = minimize_action_run_payload(_raw_gitea_action_run_payload())
     assert out["id"] == 123
     assert out["actor"] == {"login": "gpakoh"}
     assert out["trigger_actor"] == {"login": "gpakoh"}
@@ -121,3 +124,35 @@ def test_gitea_single_issue_preserved():
 def test_gitea_empty_list():
     result = normalize_list_response([])
     assert result == {"items": [], "count": 0}
+
+
+@pytest.mark.asyncio
+async def test_gitea_get_action_run_uses_minimized_payload(monkeypatch):
+    from fleet.gitea_client import GiteaClient
+
+    async def fake_get(self, endpoint, params=None, **path_params):
+        assert endpoint == "/repos/{owner}/{repo}/actions/runs/{run_id}"
+        assert path_params == {"owner": "owner", "repo": "repo", "run_id": 123}
+        return _raw_gitea_action_run_payload()
+
+    monkeypatch.setattr(GiteaClient, "_get", fake_get)
+
+    client = GiteaClient("token")
+    try:
+        out = await client.get_action_run("owner", "repo", 123)
+    finally:
+        await client.aclose()
+
+    assert out["id"] == 123
+    assert out["actor"] == {"login": "gpakoh"}
+    assert out["trigger_actor"] == {"login": "gpakoh"}
+    assert out["repository"] == {
+        "name": "web-ssh-gateway",
+        "full_name": "gpakoh/web-ssh-gateway",
+    }
+    serialized = str(out)
+    assert "email" not in serialized
+    assert "is_admin" not in serialized
+    assert "last_login" not in serialized
+    assert "clone_url" not in serialized
+    assert "topics" not in serialized
