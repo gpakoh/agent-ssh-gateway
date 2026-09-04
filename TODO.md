@@ -174,10 +174,15 @@ items are explicitly verified as implemented, documented and safe in production.
    During Supervisor RAG verification on 2026-09-04, project-level
    `run_pytest`, `run_ruff` and `run_mypy` all failed before collection because
    the registered checkout had `.venv/bin/python3` with permission denied, while
-   the same diff passed in a clean verification clone. Verification tools should
-   detect unreadable/broken project virtualenvs, create or select a safe isolated
-   environment, or fail with a typed `VERIFICATION_ENV_UNREADABLE` diagnostic and
-   a recovery path instead of treating environment bootstrap as code failure.
+   the same diff passed in a clean verification clone. During Browser recovery
+   on 2026-09-04, a registered writable candidate workspace was clean at
+   `b7b78df1888f207c5a79af7e5c8cd6a1d163e6ef`, but project-level `run_pytest`
+   failed before collection because the runner used `uv --frozen` and the
+   workspace had no `uv.lock`. Verification tools should detect unreadable,
+   broken, or layout-incomplete environments, create or select a safe isolated
+   environment, or fail with a typed `VERIFICATION_ENV_UNREADABLE` /
+   `VERIFICATION_LOCKFILE_MISSING` diagnostic and a recovery path instead of
+   treating environment bootstrap as code failure.
 
 7. ⬜ **Bounded Gitea Actions job/step log retrieval.** During Astra C.2.5-C5/C6
    recovery on 2026-09-04, `gitea_list_action_run_jobs` exposed the failing
@@ -195,6 +200,16 @@ items are explicitly verified as implemented, documented and safe in production.
    Normalize the single-run endpoint to the same minimized contract or a strict
    allowlist, redact unnecessary identity/contact fields, and add regression
    coverage that single-run reads cannot reintroduce raw Gitea API payloads.
+
+9. ⬜ **Rate-limit responses need operator-safe retry metadata and coalescing.**
+   During Supervisor/browser orchestration on 2026-09-04, repeated schema/tool
+   reloads plus normal verification calls hit `RATE_LIMITED: 180 per 1 minute`,
+   temporarily blocking `inspect_agent_task` while an agent's terminal report
+   was needed for review. The error was retryable but did not expose a bounded
+   `retry_after_seconds`, bucket identity, or suggested lower-cost alternate
+   read path. Add structured retry metadata and consider coalescing repeated
+   schema discovery/status reads so operators can recover without guessing the
+   cooldown window or accidentally increasing contention.
 
 ## 🆕 Runtime/CI findings — 2026-08-19
 
