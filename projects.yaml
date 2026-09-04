@@ -27,13 +27,6 @@ projects:
     description: "Quart platform umbrella"
     tags: [quart, platform]
 
-  gpt-browser-bridge-hardening:
-    root: quart-platform/.supervisor-workspaces/gpt-browser-bridge-hardening
-    parent: quart-platform
-    type: supervisor-workspace
-    description: "Pinned supervisor workspace for gpt-browser-bridge hardening delivery"
-    tags: [quart, browser, supervisor]
-
   quart-core:
     root: quart-platform/quart-core
     parent: quart-platform
@@ -439,10 +432,10 @@ projects:
     tags: ["infra-quart", "rag", "temporary"]
 
   zalesskiy-sup:
-    root: astra
-    type: unknown
+    root: astra/zalesskiy-sup
+    type: astro
     description: "Zalesskiy SUP — Astro 5 + Directus landing"
-    tags: []
+    tags: [astro, directus, landing]
 
   engineering-supervisor-gateway-adapter-manual-20260904-0500:
     root: ".supervisor-workspaces/engineering-supervisor-gateway-adapter-manual-20260904-0500"
