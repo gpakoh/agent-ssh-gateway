@@ -73,10 +73,26 @@ class FakeCloseClient:
     AttributeError and surface as an INTERNAL_ERROR instead of mutating.
     """
 
-    def __init__(self, token: str, *, state: str = "open", head_sha: str = SHA):
+    def __init__(
+        self,
+        token: str,
+        *,
+        state: str = "open",
+        head_sha: str = SHA,
+        merged: bool = False,
+        post_state: str = "closed",
+        post_head_sha: str = SHA,
+        post_base: str = "master",
+        post_merged: bool = False,
+    ):
         assert token == "token"
         self.state = state
         self.head_sha = head_sha
+        self.merged = merged
+        self.post_state = post_state
+        self.post_head_sha = post_head_sha
+        self.post_base = post_base
+        self.post_merged = post_merged
         self.pr_reads = 0
         self.close_calls: list[tuple[str, str, int]] = []
 
@@ -86,15 +102,35 @@ class FakeCloseClient:
     async def __aexit__(self, *args):
         return None
 
-    async def get_pull_request(self, owner: str, repo: str, pull_number: int):
-        self.pr_reads += 1
+    def _payload(
+        self, pull_number: int, *, state: str, head_sha: str, merged: bool, base: str
+    ) -> dict:
         return {
             "number": pull_number,
-            "state": self.state,
-            "head": {"sha": self.head_sha, "ref": "feat/x"},
-            "base": {"ref": "master"},
+            "state": state,
+            "merged": merged,
+            "head": {"sha": head_sha, "ref": "feat/x"},
+            "base": {"ref": base},
             "html_url": "https://git.example/pr/25",
         }
+
+    async def get_pull_request(self, owner: str, repo: str, pull_number: int):
+        self.pr_reads += 1
+        if self.pr_reads == 1:
+            return self._payload(
+                pull_number,
+                state=self.state,
+                head_sha=self.head_sha,
+                merged=self.merged,
+                base="master",
+            )
+        return self._payload(
+            pull_number,
+            state=self.post_state,
+            head_sha=self.post_head_sha,
+            merged=self.post_merged,
+            base=self.post_base,
+        )
 
     async def close_pull_request(self, owner: str, repo: str, pull_number: int):
         self.close_calls.append((owner, repo, pull_number))
@@ -110,15 +146,17 @@ async def test_adapter_closes_exact_open_pr_once(monkeypatch):
     result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA)
 
     assert result["ok"] is True
-    assert client.pr_reads == 1
+    assert client.pr_reads == 2
     assert client.close_calls == [("owner", "repo", 25)]
     assert result["result"] == {
         "number": 25,
         "closed": True,
         "already_closed": False,
+        "merged": False,
         "head_sha": SHA,
         "base": "master",
         "html_url": "https://git.example/pr/25",
+        "verified": True,
     }
 
 
@@ -147,9 +185,12 @@ async def test_adapter_already_closed_same_sha_is_idempotent(monkeypatch):
     assert result["result"]["number"] == 25
     assert result["result"]["closed"] is True
     assert result["result"]["already_closed"] is True
+    assert result["result"]["merged"] is False
     assert result["result"]["head_sha"] == SHA
     assert result["result"]["base"] == "master"
     assert result["result"]["html_url"] == "https://git.example/pr/25"
+    assert result["result"]["verified"] is True
+    assert client.pr_reads == 2
     assert client.close_calls == []
 
 
@@ -197,3 +238,84 @@ async def test_adapter_rejects_invalid_head_sha(monkeypatch):
     result = await remote.gitea_close_pull_request("owner", "repo", 25, "abc")
     assert result["ok"] is False
     assert result["error"]["code"] == "INVALID_INPUT"
+
+
+@pytest.mark.asyncio
+async def test_adapter_post_close_readback_confirms_merged_false_and_exact_state(monkeypatch):
+    """A fresh post-close GET must confirm merged=false and preserved head/base."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeCloseClient("token")
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is True
+    assert client.pr_reads == 2
+    assert result["result"]["closed"] is True
+    assert result["result"]["already_closed"] is False
+    assert result["result"]["merged"] is False
+    assert result["result"]["head_sha"] == SHA
+    assert result["result"]["base"] == "master"
+    assert result["result"]["verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_adapter_fails_closed_when_readback_shows_merged_true(monkeypatch):
+    """Post-close readback reporting merged=true must not be reported as success."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeCloseClient("token", post_merged=True)
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CLOSE_NOT_CONFIRMED"
+    assert "merged" in result["error"]["message"]
+    assert client.close_calls == [("owner", "repo", 25)]
+
+
+@pytest.mark.asyncio
+async def test_adapter_fails_closed_when_readback_head_drifted(monkeypatch):
+    """Post-close head must exactly equal the expected SHA."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeCloseClient("token", post_head_sha="c" * 40)
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CLOSE_NOT_CONFIRMED"
+    assert "head" in result["error"]["message"]
+    assert client.close_calls == [("owner", "repo", 25)]
+
+
+@pytest.mark.asyncio
+async def test_adapter_fails_closed_when_readback_base_drifted(monkeypatch):
+    """Post-close base ref must exactly equal the pre-close base."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeCloseClient("token", post_base="main")
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "CLOSE_NOT_CONFIRMED"
+    assert "base" in result["error"]["message"]
+    assert client.close_calls == [("owner", "repo", 25)]
+
+
+@pytest.mark.asyncio
+async def test_adapter_idempotent_reclose_verifies_merged_false(monkeypatch):
+    """Already-closed PR cleanup still verifies the merged=false invariant."""
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeCloseClient("token", state="closed")
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_close_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is True
+    assert result["result"]["already_closed"] is True
+    assert result["result"]["merged"] is False
+    assert result["result"]["verified"] is True
+    assert client.pr_reads == 2
+    assert client.close_calls == []

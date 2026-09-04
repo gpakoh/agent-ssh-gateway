@@ -490,6 +490,18 @@ def test_validate_exec_argv_valid():
     c._validate_exec_argv(["cat", "/etc/hostname"])
 
 
+def test_validate_exec_argv_allows_safe_arguments_containing_env_substring():
+    """Regression: the command-name denylist entry `env` must not block
+    safe data arguments such as branch names that merely contain those
+    letters.
+    """
+    c = _client()
+    c._validate_exec_argv(["git", "checkout", "chore/canonical-gitea-env-20260903"])
+    c._validate_exec_argv(["git", "checkout", "feature/env"])
+    c._validate_exec_argv(["echo", "development"])
+    c._validate_exec_argv(["echo", "env"])
+
+
 def test_validate_exec_argv_empty():
     c = _client()
     with pytest.raises(ValueError, match="non-empty array"):
@@ -500,6 +512,12 @@ def test_validate_exec_argv_blocked_env():
     c = _client()
     with pytest.raises(ValueError, match="blocked pattern.*env"):
         c._validate_exec_argv(["env"])
+    with pytest.raises(ValueError, match="blocked pattern.*env"):
+        c._validate_exec_argv(["/usr/bin/env"])
+    with pytest.raises(ValueError, match="blocked pattern.*printenv"):
+        c._validate_exec_argv(["printenv"])
+    with pytest.raises(ValueError, match="blocked pattern.*printenv"):
+        c._validate_exec_argv(["/usr/bin/printenv"])
 
 
 def test_validate_exec_argv_blocked_shadow():

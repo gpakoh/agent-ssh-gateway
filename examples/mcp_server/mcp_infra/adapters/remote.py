@@ -45,6 +45,13 @@ from examples.mcp_server.task_candidate import (
     validate_task_candidate_for_push,
 )
 
+# Default cap, in bytes, for the *decoded* content returned by gitea_get_file.
+# Keeps large base64 blobs out of tool responses by default; callers that need
+# a fuller file explicitly raise max_content_bytes (or pass 0 for the client's
+# MAX_FILE_SIZE fallback). See DEFAULT_GET_FILE_MAX_CONTENT_BYTES in
+# gitea_client.py for the client-level counterpart.
+GITEA_GET_FILE_DEFAULT_MAX_CONTENT_BYTES = 16 * 1024
+
 
 def _server_gitea_client():
     return server_attr("GiteaClient")
@@ -241,10 +248,26 @@ async def gitea_list_commits(
 
 
 async def gitea_get_file(
-    owner: str, repo: str, path: str = "", branch: str | None = None
+    owner: str,
+    repo: str,
+    path: str = "",
+    branch: str | None = None,
+    *,
+    include_content: bool = True,
+    max_content_bytes: int = GITEA_GET_FILE_DEFAULT_MAX_CONTENT_BYTES,
 ) -> dict[str, Any]:
     """Get a file or directory from a Gitea repository. Omit path (or
-    pass "") to list the repository root."""
+    pass "") to list the repository root.
+
+    Content contract (keeps large base64 blobs out of chat by default):
+      * include_content=False returns metadata only (path, name, sha,
+        download_url, html_url, last_commit_sha) and marks the result
+        content_omitted -- no "content" blob.
+      * max_content_bytes bounds the decoded content bytes; larger files
+        come back "truncated" with a content_bytes size marker instead of
+        a full blob. Default 16 KiB; pass 0 to fall back to the client's
+        256 KiB safety cap.
+    """
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
@@ -253,9 +276,23 @@ async def gitea_get_file(
             message="GITEA_TOKEN not configured",
             source="gitea",
         )
+    if max_content_bytes < 0:
+        return tool_error(
+            tool="gitea_get_file",
+            code="INVALID_INPUT",
+            message="max_content_bytes must be >= 0",
+            source="gitea",
+        )
     try:
         async with _server_gitea_client()(token) as client:
-            data = await client.get_file(owner, repo, path, branch=branch)
+            data = await client.get_file(
+                owner,
+                repo,
+                path,
+                branch=branch,
+                include_content=include_content,
+                max_content_bytes=(max_content_bytes or None),
+            )
     except Exception as exc:
         return _remote_api_error("gitea_get_file", "gitea", exc)
     return tool_success("gitea_get_file", result=data, source="gitea")
@@ -513,13 +550,15 @@ async def gitea_close_pull_request(
     pull_number: int,
     expected_head_sha: str,
 ) -> dict[str, Any]:
-    """Close an open PR protected by an exact head-SHA check.
+    """Close an open PR protected by exact head-SHA and unmerged-state checks.
 
     Never merges and never deletes branches: the only mutation is a
     single state=closed PATCH issued after a fresh GET confirms the PR
     is still open and its head still equals expected_head_sha. Any head
     mismatch fails closed with zero writes. A PR already closed whose
-    head still matches is an idempotent success (already_closed=true).
+    head still matches and is explicitly merged=false is an idempotent
+    success (already_closed=true). After mutation the PR is re-read and
+    state=closed, merged=false, head SHA and base ref are verified.
     """
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
@@ -554,7 +593,6 @@ async def gitea_close_pull_request(
             base = pr.get("base") or {}
             actual_head_sha = str(head.get("sha") or "").lower()
             base_ref = str(base.get("ref") or "")
-            html_url = pr.get("html_url")
 
             if actual_head_sha != expected_head_sha:
                 return tool_error(
@@ -563,8 +601,16 @@ async def gitea_close_pull_request(
                     message="pull request head changed; re-read the PR before closing",
                     source="gitea",
                 )
+            if pr.get("merged") is True:
+                return tool_error(
+                    tool="gitea_close_pull_request",
+                    code="CLOSE_NOT_CONFIRMED",
+                    message="pull request is already merged; refusing close-without-merge cleanup",
+                    source="gitea",
+                )
             if pr.get("state") == "closed":
                 already_closed = True
+                confirmed_pr = await client.get_pull_request(owner, repo, pull_number)
             elif pr.get("state") != "open":
                 return tool_error(
                     tool="gitea_close_pull_request",
@@ -574,17 +620,62 @@ async def gitea_close_pull_request(
                 )
             else:
                 await client.close_pull_request(owner, repo, pull_number)
+                confirmed_pr = await client.get_pull_request(owner, repo, pull_number)
+
+            confirmed_head = confirmed_pr.get("head") or {}
+            confirmed_base = confirmed_pr.get("base") or {}
+            confirmed_head_sha = str(confirmed_head.get("sha") or "").lower()
+            confirmed_base_ref = str(confirmed_base.get("ref") or "")
+            if confirmed_head_sha != expected_head_sha:
+                return tool_error(
+                    tool="gitea_close_pull_request",
+                    code="CLOSE_NOT_CONFIRMED",
+                    message="pull request head changed while closing",
+                    retryable=True,
+                    details={
+                        "expected_head_sha": expected_head_sha,
+                        "observed_head_sha": confirmed_head_sha,
+                    },
+                    source="gitea",
+                )
+            if confirmed_base_ref != base_ref:
+                return tool_error(
+                    tool="gitea_close_pull_request",
+                    code="CLOSE_NOT_CONFIRMED",
+                    message="pull request base changed while closing",
+                    retryable=True,
+                    details={
+                        "expected_base": base_ref,
+                        "observed_base": confirmed_base_ref,
+                    },
+                    source="gitea",
+                )
+            if confirmed_pr.get("state") != "closed" or confirmed_pr.get("merged") is not False:
+                return tool_error(
+                    tool="gitea_close_pull_request",
+                    code="CLOSE_NOT_CONFIRMED",
+                    message="Gitea accepted the close request but state=closed and merged=false were not observed",
+                    retryable=True,
+                    details={
+                        "observed_state": confirmed_pr.get("state"),
+                        "observed_merged": confirmed_pr.get("merged"),
+                    },
+                    source="gitea",
+                )
             data = {
                 "number": pull_number,
                 "closed": True,
                 "already_closed": already_closed,
+                "merged": False,
                 "head_sha": expected_head_sha,
-                "base": base_ref,
-                "html_url": html_url,
+                "base": confirmed_base_ref,
+                "html_url": confirmed_pr.get("html_url"),
+                "verified": True,
             }
     except Exception as exc:
         return _remote_api_error("gitea_close_pull_request", "gitea", exc)
     return tool_success("gitea_close_pull_request", result=data, source="gitea")
+
 
 
 def _same_gitea_repo_from_pr_head(
@@ -769,7 +860,7 @@ async def gitea_delete_branch(
 async def gitea_list_action_runs(
     owner: str, repo: str, status: str | None = None, limit: int = 10
 ) -> dict[str, Any]:
-    """List Gitea Actions workflow runs. Optionally filter by status (completed, running, waiting)."""
+    """List Gitea Actions workflow runs. Optionally filter by status (completed, running/in_progress, waiting)."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(

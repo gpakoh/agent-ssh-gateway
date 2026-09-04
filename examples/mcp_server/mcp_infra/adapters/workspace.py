@@ -13,6 +13,7 @@ after runtime.set_mcp) instead of import-time decorator side effects.
 from __future__ import annotations
 
 import errno
+import os
 from typing import Any
 
 from tool_results import tool_error, tool_success
@@ -56,6 +57,33 @@ def _get_workspace_registry():
         root / "projects.yaml", granted_scopes=ALL_SCOPES
     )
     return _workspace_registry_cache
+
+def _workspace_candidate_required(
+    tool: str, project_id: str, registry: Any
+) -> dict[str, Any] | None:
+    """Fail fast when a known project root cannot accept source mutations."""
+    try:
+        info = registry.project_info(project_id)
+    except Exception:
+        return None
+    if not isinstance(info, dict):
+        return None
+    root = info.get("root")
+    if not isinstance(root, str) or not root:
+        return None
+    if not os.path.isdir(root):
+        return None
+    if os.access(root, os.W_OK):
+        return None
+    return tool_error(
+        tool=tool,
+        code="CANDIDATE_REQUIRED",
+        message=f"Project {project_id!r} workspace root is not writeable.",
+        retryable=False,
+        hint="Use a registered writeable candidate clone before retrying.",
+        source="gateway",
+    )
+
 
 def _workspace_mutation_error(tool: str, exc: Exception) -> dict[str, Any]:
     """Classify workspace write failures without hiding the operator action."""
@@ -113,6 +141,11 @@ def gateway_workspace_file_write(
         from app.workspace.edit import project_file_write
 
         registry = _server_workspace_registry()
+        candidate_required = _workspace_candidate_required(
+            "workspace_file_write", project_id, registry
+        )
+        if candidate_required is not None:
+            return candidate_required
         result = project_file_write(
             project_id=project_id,
             relative_path=relative_path,
@@ -160,6 +193,11 @@ def gateway_workspace_file_edit(
         from app.workspace.edit import project_file_edit
 
         registry = _server_workspace_registry()
+        candidate_required = _workspace_candidate_required(
+            "workspace_file_edit", project_id, registry
+        )
+        if candidate_required is not None:
+            return candidate_required
         result = project_file_edit(
             project_id=project_id,
             relative_path=relative_path,
@@ -206,6 +244,11 @@ def gateway_workspace_apply_patch(
         from app.workspace.edit import project_apply_patch
 
         registry = _server_workspace_registry()
+        candidate_required = _workspace_candidate_required(
+            "workspace_apply_patch", project_id, registry
+        )
+        if candidate_required is not None:
+            return candidate_required
         result = project_apply_patch(
             project_id=project_id,
             relative_path=relative_path,

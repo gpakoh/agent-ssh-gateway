@@ -39,9 +39,8 @@ IMAGE_TAG_RE = re.compile(r"^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$")
 IMAGE_REF_RE = re.compile(r"^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$")
 VOLUME_NAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
 
-EXEC_ARGV_DENYLIST: set[str] = {
-    "env",
-    "printenv",
+EXEC_ARGV_COMMAND_DENYLIST: set[str] = {"env", "printenv"}
+EXEC_ARGV_PATTERN_DENYLIST: set[str] = {
     "/proc/self/environ",
     "/proc/1/environ",
     "/etc/shadow",
@@ -80,6 +79,11 @@ _DSN_CREDENTIAL_RE = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^:/\s@]+:)([^@\s]+
 _LABEL_URL_VALUE_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _LABEL_EMAIL_VALUE_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _LABEL_SHA_VALUE_RE = re.compile(r"^([0-9a-f]{40}|sha256:[0-9a-f]{64})$", re.IGNORECASE)
+
+_DOCKER_PS_HEALTH_RE = re.compile(
+    r"\((healthy|unhealthy|health: starting|starting)\)$",
+    re.IGNORECASE,
+)
 
 # Strict allowlist for `docker inspect` output. Everything not listed here is
 # dropped, so host topology (GraphDriver paths, ResolvConfPath/HostsPath/
@@ -311,13 +315,22 @@ class DockerClient:
     def _validate_exec_argv(self, argv: list[str]) -> None:
         if not isinstance(argv, list) or not argv:
             raise ValueError("command must be a non-empty array of strings")
-        for el in argv:
+        for index, el in enumerate(argv):
             if not isinstance(el, str) or not el:
                 raise ValueError("each argv element must be a non-empty string")
             if not el.isprintable() or not el.isascii():
                 raise ValueError(f"non-printable/non-ASCII argv element: {shlex.quote(el)}")
-            # denylist check (case-sensitive exact or substring)
-            for blocked in EXEC_ARGV_DENYLIST:
+            # Deny the executable name by exact basename, but keep sensitive
+            # path patterns as substring checks across every argv element.
+            # This avoids blocking safe data arguments such as branch names
+            # containing "env" while still refusing real env-dump commands
+            # and known sensitive paths.
+            basename = el.rsplit("/", 1)[-1]
+            if index == 0 and basename in EXEC_ARGV_COMMAND_DENYLIST:
+                raise ValueError(
+                    f"argv element contains blocked pattern: {shlex.quote(basename)}"
+                )
+            for blocked in EXEC_ARGV_PATTERN_DENYLIST:
                 if blocked in el:
                     raise ValueError(
                         f"argv element contains blocked pattern: {shlex.quote(blocked)}"
@@ -376,9 +389,9 @@ class DockerClient:
         result = await self._run(argv)
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
         self.last_truncated = total > len(rows)
-        sanitized = [self._sanitize_ps_row(r) for r in rows]
-        self.last_redacted = sanitized != rows
-        return sanitized
+        redacted = [self._redact_ps_row(r) for r in rows]
+        self.last_redacted = redacted != rows
+        return [self._annotate_ps_health(r) for r in redacted]
 
     async def images(
         self,
@@ -540,14 +553,49 @@ class DockerClient:
         return ",".join(parts)
 
     @staticmethod
-    def _sanitize_ps_row(row: dict) -> dict:
-        """Reduce one `docker ps --format json` row to safe fields.
+    def _annotate_ps_health(row: dict) -> dict:
+        """Add a derived health flag to a sanitized docker-ps row.
 
-        Drops nothing structural but redacts host paths that ride along in
-        the Labels string (compose config_files/working_dir) and bind-mount
-        sources in the Mounts string — the same topology leak the inspect
-        allowlist kills structurally.
+        Docker's ps output only appends ``(healthy)`` / ``(unhealthy)`` when a
+        container defines a Docker HEALTHCHECK. Long-running infrastructure
+        containers such as Gitea may legitimately be ``State=running`` with no
+        Docker health flag at all; expose that distinction instead of making
+        callers parse the human ``Status`` string or treating the row as
+        unhealthy.
+
+        Rows in older/unit fixtures may intentionally omit ``State``; without
+        it there is not enough evidence to derive runtime health, so preserve
+        the original row shape.
         """
+        if "State" not in row:
+            return row
+
+        state = str(row.get("State") or "").strip().lower()
+        status = str(row.get("Status") or "")
+        docker_health = "not_configured"
+        match = _DOCKER_PS_HEALTH_RE.search(status)
+        if match:
+            raw = match.group(1).lower()
+            docker_health = "starting" if "starting" in raw else raw
+
+        row["DockerHealth"] = docker_health
+        if docker_health == "healthy":
+            row["Healthy"] = True
+            row["HealthSource"] = "docker_health"
+        elif docker_health in {"unhealthy", "starting"}:
+            row["Healthy"] = False
+            row["HealthSource"] = "docker_health"
+        elif state == "running":
+            row["Healthy"] = True
+            row["HealthSource"] = "running_no_docker_health_flag"
+        else:
+            row["Healthy"] = False
+            row["HealthSource"] = "container_state"
+        return row
+
+    @staticmethod
+    def _redact_ps_row(row: dict) -> dict:
+        """Redact host topology in one `docker ps --format json` row."""
         out = dict(row)
         labels = out.get("Labels")
         if isinstance(labels, str) and labels:
@@ -568,6 +616,18 @@ class DockerClient:
                 for chunk in mounts.split(",")
             )
         return out
+
+    @staticmethod
+    def _sanitize_ps_row(row: dict) -> dict:
+        """Reduce one `docker ps --format json` row to safe fields.
+
+        Drops nothing structural but redacts host paths that ride along in
+        the Labels string (compose config_files/working_dir) and bind-mount
+        sources in the Mounts string — the same topology leak the inspect
+        allowlist kills structurally. When Docker supplies container State,
+        annotate the row with derived health metadata.
+        """
+        return DockerClient._annotate_ps_health(DockerClient._redact_ps_row(row))
 
     def _sanitize_value(self, value: object) -> object:
         """Recursively sanitize a JSON value, redacting secrets."""
@@ -650,9 +710,9 @@ class DockerClient:
         result = await self._run(argv, timeout=60.0)
         rows, total = self._truncate_rows(self._parse_json_lines(result), limit)
         self.last_truncated = total > len(rows)
-        sanitized = [self._sanitize_ps_row(r) for r in rows]
-        self.last_redacted = sanitized != rows
-        return sanitized
+        redacted = [self._redact_ps_row(r) for r in rows]
+        self.last_redacted = redacted != rows
+        return [self._annotate_ps_health(r) for r in redacted]
 
     async def compose_services(
         self,

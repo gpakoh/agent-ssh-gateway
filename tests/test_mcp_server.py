@@ -94,6 +94,36 @@ def test_tools_manifest_gitea_delete_branch_matches_invokable_schema():
 
 
 @patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
+def test_tools_manifest_gitea_close_pull_request_matches_invokable_schema():
+    """Manifest must not advertise a Gitea PR close tool missing from live schema."""
+    import importlib
+
+    import examples.mcp_server.server as srv
+
+    importlib.reload(srv)
+    tools = {tool.name: tool for tool in srv.mcp._tool_manager.list_tools()}
+
+    manifest = srv.gateway_tools_manifest(
+        name_prefix="gitea_close_pull_request",
+        include_descriptions=False,
+    )
+
+    assert manifest["ok"] is True
+    items = manifest["result"]["tools"]
+    assert [item["name"] for item in items] == ["gitea_close_pull_request"]
+    assert items[0]["available"] is True
+    assert "unavailable_reason" not in items[0]
+    assert "gitea_close_pull_request" in tools
+    tool = tools["gitea_close_pull_request"]
+    assert tool.parameters["required"] == [
+        "owner",
+        "repo",
+        "pull_number",
+        "expected_head_sha",
+    ]
+
+
+@patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)
 def test_git_commit_schema_exposes_optional_workspace_guards():
     """git_commit keeps message required, but exposes optional lease guards."""
     import importlib

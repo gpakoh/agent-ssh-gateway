@@ -17,7 +17,19 @@ from .shared import (
 
 MAX_LIMIT = 50
 MAX_FILE_SIZE = 256 * 1024
+# Default bound, in bytes, applied to a file's *decoded* content before it is
+# returned to a caller. Centralized so both the low-level client and the MCP
+# tool can opt in to a smaller, less chat-spammy cap than MAX_FILE_SIZE.
+DEFAULT_GET_FILE_MAX_CONTENT_BYTES = 16 * 1024
 REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
+# Gitea's Actions run-list API accepts `in_progress`, while the operator-facing
+# tool historically documented `running`. Normalize that alias locally so callers
+# do not get an opaque remote 400 for a supported semantic state.
+_ACTION_RUN_STATUS_ALIASES = {
+    "running": "in_progress",
+}
+_ALLOWED_ACTION_RUN_STATUS_FILTERS = frozenset({"completed", "in_progress", "waiting"})
 
 API_BASE = os.environ.get("GITEA_API_BASE", "https://git.example.com/api/v1")
 GITEA_FORWARDED_HOST = os.environ.get("GITEA_FORWARDED_HOST", "")
@@ -76,6 +88,16 @@ def _validate_branch_name(value: str, label: str) -> str:
     ):
         raise ValueError(f"Invalid {label} branch name: {value!r}")
     return value
+
+
+def _normalize_action_run_status_filter(status: str | None) -> str | None:
+    if status is None:
+        return None
+    normalized = _ACTION_RUN_STATUS_ALIASES.get(status.strip(), status.strip())
+    if normalized not in _ALLOWED_ACTION_RUN_STATUS_FILTERS:
+        allowed = ", ".join(sorted(_ALLOWED_ACTION_RUN_STATUS_FILTERS | set(_ACTION_RUN_STATUS_ALIASES)))
+        raise ValueError(f"status must be one of: {allowed}")
+    return normalized
 
 
 class GiteaClient:
@@ -261,12 +283,25 @@ class GiteaClient:
         repo: str,
         path: str = "",
         branch: str | None = None,
+        *,
+        include_content: bool = True,
+        max_content_bytes: int | None = None,
     ) -> dict[str, Any]:
         """Get a file, a directory listing, or (path="") the repo root
         listing. validate_repo_path() rejects an empty path, so root
         listing must go through the path-less endpoint variant instead
         of substituting {path} at all -- P2 audit finding: there was
         previously no way to list a repo's top level through this tool.
+
+        Content contract (keeps large base64 blobs out of chat by default):
+          * include_content=False drops the "content" field and sets
+            "content_omitted": true, keeping all metadata (path, name, sha,
+            download_url, html_url, last_commit_sha).
+          * max_content_bytes (int > 0) bounds the *decoded* content: larger
+            files come back as a "[truncated N bytes > M limit]" marker with
+            "truncated": true and "content_bytes": original length.
+          * max_content_bytes=None falls back to MAX_FILE_SIZE (256 KiB), so
+            existing callers keep their previous behavior.
         """
         params: dict[str, str] = {}
         if branch:
@@ -287,11 +322,21 @@ class GiteaClient:
                 repo=repo,
             )
         if isinstance(result, dict) and "content" in result:
+            if not include_content:
+                result.pop("content", None)
+                result["content_omitted"] = True
+                return result
             import base64
 
             raw = base64.b64decode(result["content"])
-            if len(raw) > MAX_FILE_SIZE:
-                result["content"] = f"[truncated {len(raw)} bytes > {MAX_FILE_SIZE} limit]"
+            limit = max_content_bytes if max_content_bytes is not None else MAX_FILE_SIZE
+            if limit <= 0:
+                raise ValueError(
+                    f"max_content_bytes must be a positive int or None, got {max_content_bytes}"
+                )
+            if len(raw) > limit:
+                result["content"] = f"[truncated {len(raw)} bytes > {limit} limit]"
+                result["content_bytes"] = len(raw)
                 result["truncated"] = True
         return result
 
@@ -432,8 +477,9 @@ class GiteaClient:
     ) -> dict[str, Any]:
         limit = min(limit, MAX_LIMIT)
         params: dict[str, Any] = {"limit": limit}
-        if status:
-            params["status"] = status
+        normalized_status = _normalize_action_run_status_filter(status)
+        if normalized_status:
+            params["status"] = normalized_status
         data = await self._get(
             "/repos/{owner}/{repo}/actions/runs",
             params=params,
@@ -450,12 +496,13 @@ class GiteaClient:
         repo: str,
         run_id: int,
     ) -> dict[str, Any]:
-        return await self._get(
+        run = await self._get(
             "/repos/{owner}/{repo}/actions/runs/{run_id}",
             owner=owner,
             repo=repo,
             run_id=run_id,
         )
+        return minimize_action_run_payload(run)
 
     async def list_action_run_jobs(
         self,
