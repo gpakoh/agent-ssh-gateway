@@ -245,6 +245,95 @@ items are explicitly verified as implemented, documented and safe in production.
     Gateway-created scratch workspaces, and verification helpers that distinguish
     environment/bootstrap failure from project test failure.
 
+11. ⬜ **`prepare_candidate_clone` must handle Git safe-directory ownership preflight.**
+    During Quart Chat Engine contract bootstrap on 2026-09-05, `quart-core`
+    correctly reported `filesystem_writeable=false` and recommended
+    `writeable_candidate_clone`, but `prepare_candidate_clone(quart-core,
+    feature/chat-engine-plugin-contract-20260905)` failed before creating the
+    clone with `fatal: detected dubious ownership in repository at '.'` and
+    Git's unsafe suggestion `git config --global --add safe.directory .`. This
+    blocks the intended safe path for read-only/root-owned production checkouts
+    and pushes operators back toward the very canonical-root mutations the
+    candidate-clone path is supposed to avoid. Closure requires clone preparation
+    to perform an explicit source-repo ownership/safe-directory preflight, use a
+    scoped/non-global Git configuration when it intentionally reads an approved
+    registered source repository, or fail closed with a typed
+    `GIT_SAFE_DIRECTORY_REQUIRED` / `SOURCE_REPO_OWNERSHIP_BLOCKED` diagnostic
+    and a safe recovery path. Regression coverage must include a readable but
+    cross-owned source repository whose canonical workspace is not writeable and
+    prove `prepare_candidate_clone` either succeeds without global config or
+    returns the typed diagnostic before any partial candidate workspace is
+    registered.
+
+## 🧩 Frontend/Astro delivery findings — 2026-09-05
+
+1. ⬜ **Route frontend verification through the existing Astro delivery
+   capability, not ad-hoc SSH `npm`.** During Zalesskiy SUP homepage SEO delivery
+   on 2026-09-05, the repository clearly declared an Astro frontend
+   (`package.json`, `npm run build`, Dockerfile based on `node:20-alpine`), but
+   the command-plane verification environment had no `npm` binary. A later host
+   container audit showed the platform already has an Astro/frontend execution
+   lane: `astro-builder-runtime-1`, `astro-builder-control-plane-1`,
+   `astro-builder-studio-1`, `astro-builder-cache-1`, and live
+   `astro-sites-astro` running `npm run build && npm run preview -- --host` on
+   port `4321` with Astro v5.18.2 and generated sitemap output. Therefore the
+   missing capability is not simply "install Node in SSH"; it is Gateway routing
+   from a registered frontend project to the existing Astro Builder / astro-sites
+   delivery path. Closure requires a typed `frontend_build` / `astro_build`
+   helper that detects project metadata and builder affiliation, selects an
+   approved existing builder/runtime or bounded Node container, binds exact
+   project id, working directory, lockfile/package manager and allowlisted script,
+   and returns structured build evidence: toolchain versions, command identity,
+   artifact path, stdout/stderr tail, exit code and typed
+   `FRONTEND_BUILD_CAPABILITY_UNAVAILABLE` / `FRONTEND_BUILD_FAILED` outcomes.
+
+2. ⬜ **Bounded live HTTP smoke via a managed fetch capability, preferably backed
+   by `relay-curl-worker`.** The Zalesskiy SUP delivery needed to verify
+   `robots.txt`, `sitemap-index.xml` and public landing-page headers live, but
+   raw `curl` through `execute_argv` was denied by command policy. This is a
+   sibling of the internal service health probe, but it must support public-site
+   verification and should share bounded fetch primitives rather than duplicate
+   network policy. A later host audit found a long-running `relay-curl-worker`
+   container (`alpine`, `sleep 86400`, `restart: unless-stopped`), which looks
+   like an existing
+   substrate for safe smoke checks but is not exposed as a typed Gateway tool.
+   Do not weaken the raw shell/curl denylist. Implement a bounded `http_smoke` /
+   `public_http_smoke` capability with allowlisted `GET`/`HEAD`, explicit
+   host/path, redirect-chain capture, status, content-type, bounded body sample,
+   timeout, optional XML validation for sitemap files, no cookies/secrets/env
+   exposure, and typed DNS/refused/timeout/non-2xx/invalid-XML outcomes. Closure
+   requires provenance showing the execution substrate used (`relay-curl-worker`
+   or another approved fetch runner), plus regression coverage that operators can
+   verify public `robots.txt`, sitemap and landing-page headers without shelling
+   out.
+
+3. ⬜ **Deploy-contract bridge for Astro/Compose frontend projects.** The
+   Zalesskiy SUP repository has a `deploy.sh` that runs `docker compose up -d
+   --build astro`, but `execute_argv` cannot run it because the SSH session has
+   no `docker` binary, while Docker mutations are intentionally available only
+   through Gateway Docker tools. Treat this as an orchestration gap between repo
+   deploy intent and Gateway capabilities, not as a reason to run arbitrary
+   scripts. Operators need a typed deployment adapter that reads an allowlisted
+   deploy contract, resolves the registered frontend project to the existing
+   Astro Builder / astro-sites / Compose service path, confirms exact compose
+   project/service/image/build sequence, executes through Gateway Docker tools,
+   and reports build/up/restart/smoke evidence. Closure requires avoiding both
+   bad choices: raw deploy scripts that cannot run in SSH and ad-hoc Docker tool
+   calls that bypass the repo's documented deploy path. This item deliberately
+   does not duplicate the existing Docker `read-only file system` build-context
+   finding; it is about the missing bridge between frontend delivery contracts
+   and Gateway Docker actions.
+
+4. ⬜ **CI-gated merge tools need an explicit no-workflow/no-run state.** During
+   the same PR flow, `gitea_list_workflows` and `gitea_list_action_runs` returned
+   no workflows/runs for `gpakoh/zalesskiy-sup`, while the protected merge helper
+   refused with `CI_NOT_GREEN`. That is fail-closed, but the diagnostic should be
+   more precise and actionable: `CI_NOT_CONFIGURED` / `NO_REQUIRED_RUN_FOUND`,
+   including whether manual verification artifacts can satisfy a configured
+   override policy. Closure requires tests for repos with zero workflows, repos
+   with workflows but no run for the exact head SHA, and repos with stale runs
+   from another head.
+
 ## 🆕 Runtime/CI findings — 2026-08-19
 
 1. ⬜ **Correlated ~18-minute CI failures across Docker runners/phases.** Prior
