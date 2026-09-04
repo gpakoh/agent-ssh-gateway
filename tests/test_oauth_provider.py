@@ -107,19 +107,21 @@ def test_generate_code_challenge_differs():
 
 def test_scope_constants():
     assert "mcp:read" in SUPPORTED_SCOPES
-    assert "mcp:admin" not in DEFAULT_SCOPES
+    assert "mcp:admin" in DEFAULT_SCOPES
+    assert set(DEFAULT_SCOPES) == set(SUPPORTED_SCOPES)
 
 
 def test_supported_scopes_cover_full_profile():
     """Regression: ACCESS_PROFILES['full'] (which includes mcp:docker:admin)
     must not drift outside the capability set OAuth advertises/accepts for
-    connector clients. DEFAULT_SCOPES must meanwhile stay non-admin."""
+    connector clients. DEFAULT_SCOPES equals SUPPORTED_SCOPES for full
+    ChatGPT access."""
     from examples.mcp_server.tool_scopes import ACCESS_PROFILES
 
     assert "mcp:docker:admin" in SUPPORTED_SCOPES
     assert set(ACCESS_PROFILES["full"]) <= set(SUPPORTED_SCOPES)
-    assert "mcp:docker:admin" not in DEFAULT_SCOPES
-    assert "mcp:admin" not in DEFAULT_SCOPES
+    assert "mcp:docker:admin" in DEFAULT_SCOPES
+    assert "mcp:admin" in DEFAULT_SCOPES
 
 
 def test_parse_scopes_accepts_docker_admin():
@@ -415,8 +417,8 @@ def test_scope_validation():
     full = _parse_scopes(None)
     assert "mcp:read" in full
     assert "mcp:project" in full
-    assert "mcp:handoff" not in full
-    assert "mcp:admin" not in full
+    assert "mcp:repo" in full
+    assert "mcp:admin" in full
     assert set(full) <= set(DEFAULT_SCOPES)
     assert _parse_scopes("") is _parse_scopes(None) or _parse_scopes("") == full
     with pytest.raises(ValueError, match="Unsupported scope"):
@@ -470,9 +472,9 @@ def test_create_authorization_code_allows_subset_scopes(provider):
     assert stored.scopes == ["mcp:read"]
 
 
-def test_dcr_registration_defaults_to_safe_scopes(provider):
-    """Regression: DCR without a scope must yield DEFAULT_SCOPES,
-    not the full SUPPORTED_SCOPES set."""
+def test_dcr_registration_defaults_to_full_scopes(provider):
+    """DCR without a scope must yield DEFAULT_SCOPES (= SUPPORTED_SCOPES)
+    so ChatGPT gets full access including Gitea Actions and Docker tools."""
     from mcp.shared.auth import OAuthClientInformationFull
 
     client_info = OAuthClientInformationFull(
@@ -489,5 +491,5 @@ def test_dcr_registration_defaults_to_safe_scopes(provider):
     anyio.run(_run)
     stored = provider._clients[client_info.client_id]
     assert set(stored.scopes) <= set(DEFAULT_SCOPES)
-    assert "mcp:admin" not in stored.scopes
-    assert "mcp:docker" not in stored.scopes
+    assert "mcp:admin" in stored.scopes
+    assert "mcp:repo" in stored.scopes

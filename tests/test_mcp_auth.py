@@ -222,11 +222,10 @@ def oauth_registration(monkeypatch, tmp_path):
     yield provider, client, list(options.default_scopes)
 
 
-def test_dcr_register_without_scope_defaults_to_read_project_only(oauth_registration):
-    """DCR privilege defect regression (P2): a registration that omits the
-    optional scope field must resolve to the safe DEFAULT_SCOPES
-    (mcp:read mcp:project) -- never to the full SUPPORTED_SCOPES list
-    (which includes mcp:admin/mcp:execute/mcp:docker).
+def test_dcr_register_without_scope_defaults_to_full_scopes(oauth_registration):
+    """A registration that omits the optional scope field must resolve to
+    DEFAULT_SCOPES (= SUPPORTED_SCOPES) so connector clients like ChatGPT
+    get full access to all tools including Gitea Actions (gitea_get_action_run).
 
     The provider's own _parse_scopes() contract says exactly this; the
     defect was that the SDK RegistrationHandler substituted default_scopes
@@ -249,8 +248,7 @@ def test_dcr_register_without_scope_defaults_to_read_project_only(oauth_registra
     assert stored == list(default_scopes), (
         f"DCR without scope registered {stored}; expected DEFAULT_SCOPES {default_scopes}"
     )
-    assert "mcp:admin" not in stored
-    assert "mcp:execute" not in stored
+    assert "mcp:repo" in stored
 
 
 def test_dcr_explicit_admin_scope_still_registrable(oauth_registration):
@@ -274,10 +272,10 @@ def test_dcr_explicit_admin_scope_still_registrable(oauth_registration):
 
 def test_dcr_empty_and_unknown_scope_fail_closed(oauth_registration):
     """scope='' resolves to DEFAULT_SCOPES, whitespace-only to the empty set
-    (both fail-safe -- never widened to admin/execute/docker), and an unknown
-    scope is rejected outright. None of these may widen grants."""
+    (both fail-safe -- never widened beyond DEFAULT_SCOPES), and an unknown
+    scope is rejected outright. None of these may widen grants beyond what
+    DEFAULT_SCOPES allows."""
     provider, client, default_scopes = oauth_registration
-    privileged = {"mcp:admin", "mcp:execute", "mcp:docker", "mcp:docker:admin"}
     for scope in ("", "   "):
         resp = client.post(
             "/register",
@@ -289,7 +287,7 @@ def test_dcr_empty_and_unknown_scope_fail_closed(oauth_registration):
         )
         assert resp.status_code == 201
         stored = provider._clients[resp.json()["client_id"]].scopes
-        assert not (set(stored) & privileged), f"scope {scope!r} widened grants to {stored}"
+        assert set(stored) <= set(default_scopes), f"scope {scope!r} widened grants to {stored}"
     empty_stored = provider._clients[
         client.post(
             "/register",
