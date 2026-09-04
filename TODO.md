@@ -264,3 +264,14 @@ items are explicitly verified as implemented, documented and safe in production.
    current PR head, a superseded head, or an orphaned run, plus a guarded cleanup
    path that fails closed unless run id, job id, container id, and head SHA all
    match the stale/superseded state.
+
+3. ⬜ **Avoid duplicate heavy CI after already-green PR heads.** Direct default-
+   branch pushes are now allowed, but the workflow still repeats the full heavy
+   Python matrix on `master` after a PR has already passed the same code gate.
+   Add a safe CI/CD fast path: PRs keep the full matrix; the post-merge
+   `master` push should run only quick sanity checks plus build, deploy, and
+   host-smoke when the merge commit is a clean merge of an exact green PR head
+   with no additional code changes. Closure requires explicit evidence binding
+   the green PR run to the merged head, a fallback to full CI for direct pushes
+   or ambiguous histories, and tests/docs proving fail-closed behavior rather
+   than silently weakening the deployment gate.
