@@ -45,7 +45,7 @@ SUPPORTED_SCOPES: list[str] = [
     "mcp:admin",
 ]
 
-DEFAULT_SCOPES: list[str] = ["mcp:read", "mcp:project"]
+DEFAULT_SCOPES: list[str] = list(SUPPORTED_SCOPES)
 
 ADMIN_SCOPE: str = "mcp:admin"
 
