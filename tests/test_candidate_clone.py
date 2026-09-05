@@ -202,12 +202,10 @@ def test_prepare_candidate_clone_local_clone_trusts_source_gitdir(
 
     _workspace, source, config_dir, journal_root, base = registry_fixture
     captured_commands: list[list[str]] = []
-    captured_environments: list[dict[str, str]] = []
 
     def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
         command = list(args[0])
         captured_commands.append(command)
-        captured_environments.append(dict(kwargs.get("env") or {}))
         if "rev-parse" in command and "--verify" in command:
             return subprocess.CompletedProcess(
                 args=command,
@@ -244,8 +242,7 @@ def test_prepare_candidate_clone_local_clone_trusts_source_gitdir(
     assert err.details is not None
     assert err.details["operation"] == "clone source repository"
 
-    clone_index = next(i for i, command in enumerate(captured_commands) if "clone" in command)
-    clone_command = captured_commands[clone_index]
+    clone_command = next(command for command in captured_commands if "clone" in command)
     assert clone_command[:5] == [
         "git",
         "-c",
@@ -256,15 +253,6 @@ def test_prepare_candidate_clone_local_clone_trusts_source_gitdir(
     assert clone_command[5] == "clone"
     assert "safe.directory=*" not in " ".join(clone_command)
     assert "--global" not in clone_command
-
-    clone_env = captured_environments[clone_index]
-    parameters = clone_env.get("GIT_CONFIG_PARAMETERS")
-    assert parameters is not None
-    assert f"safe.directory={source.resolve()}" in parameters
-    assert f"safe.directory={(source / '.git').resolve()}" in parameters
-    assert "*" not in parameters
-    assert "--global" not in parameters
-    assert "safe.directory=*" not in parameters
 
 
 def test_prepare_candidate_clone_refuses_dirty_existing_clone(registry_fixture) -> None:

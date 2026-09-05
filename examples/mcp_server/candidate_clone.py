@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -154,19 +153,17 @@ def _git_diagnostic_tail(text: str | None, cwd: Path) -> str:
     return cleaned[-_GIT_DIAGNOSTIC_LIMIT:]
 
 
-def _sq_quote(value: str) -> str:
-    return "'" + value.replace("'", "'\\''") + "'"
-
-
-def _safe_directories(
+def _git_command(
     cwd: Path,
+    args: list[str],
+    *,
     extra_safe_directories: tuple[Path, ...] = (),
 ) -> list[str]:
-    """Resolve scoped safe.directory entries for one git process.
+    """Build a Git command with scoped per-command safe.directory exceptions.
 
-    Candidate clone only calls this with registry-derived source roots, their
-    Git directories, or candidate clone roots. Exceptions are deliberately
-    per-process and never widened to '*', so operators do not need mutable
+    Candidate clone only calls this helper with registry-derived source roots,
+    their Git directories, or candidate clone roots. Exceptions are deliberately
+    per-command and never widened to '*', so operators do not need mutable
     global Git config.
     """
     safe_directories: list[str] = []
@@ -176,51 +173,11 @@ def _safe_directories(
             raise _fail("POLICY_DENIED", "refusing wildcard git safe.directory")
         if safe_directory not in safe_directories:
             safe_directories.append(safe_directory)
-    return safe_directories
-
-
-def _git_command(
-    cwd: Path,
-    args: list[str],
-    *,
-    extra_safe_directories: tuple[Path, ...] = (),
-) -> list[str]:
-    """Build a Git command with scoped per-command safe.directory exceptions.
-
-    The argv entries trust the top-level process; the sibling
-    `_git_environment` propagates the same scoped exceptions to child Git
-    processes spawned by commands such as `git clone --local`.
-    """
     command = ["git"]
-    for safe_directory in _safe_directories(cwd, extra_safe_directories):
+    for safe_directory in safe_directories:
         command.extend(["-c", f"safe.directory={safe_directory}"])
     command.extend(args)
     return command
-
-
-def _git_environment(
-    cwd: Path,
-    extra_safe_directories: tuple[Path, ...] = (),
-) -> dict[str, str]:
-    """Return the process environment with scoped safe.directory propagation.
-
-    `git clone --local` shells out to child Git processes that re-evaluate
-    ownership of the source worktree and source `.git` directory in a fresh
-    process, where argv `-c` entries for the parent are not consulted. We push
-    the same explicit, registry-derived exceptions through
-    `GIT_CONFIG_PARAMETERS` (git's own child-propagated config channel) so those
-    child processes trust exactly the source/candidate paths and nothing else.
-    """
-    safe_directories = _safe_directories(cwd, extra_safe_directories)
-    if not safe_directories:
-        return dict(os.environ)
-    environment = dict(os.environ)
-    parameters = " ".join(
-        _sq_quote(f"safe.directory={safe_directory}")
-        for safe_directory in safe_directories
-    )
-    environment["GIT_CONFIG_PARAMETERS"] = parameters
-    return environment
 
 
 def _run_git(
@@ -235,7 +192,6 @@ def _run_git(
         result = subprocess.run(
             _git_command(cwd, args, extra_safe_directories=extra_safe_directories),
             cwd=str(cwd),
-            env=_git_environment(cwd, extra_safe_directories),
             text=True,
             capture_output=True,
             check=False,
@@ -275,7 +231,6 @@ def _status_state(repo: Path) -> tuple[bool, str, int]:
         result = subprocess.run(
             _git_command(repo, ["status", "--porcelain=v1"]),
             cwd=str(repo),
-            env=_git_environment(repo),
             text=True,
             capture_output=True,
             check=False,
