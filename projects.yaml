@@ -510,3 +510,17 @@ projects:
     type: "python-service"
     description: "Kojo release hardening father rollup staging worktree"
     tags: ["kojo", "temporary", "release-hardening"]
+
+  JS_chat-engine:
+    root: "quart-platform/JS_chat-engine"
+    parent: quart-platform
+    type: "python-service"
+    description: "Embeddable JS chat engine service: Jivo-like widget runtime over quart-core /v1/answer"
+    tags: ["quart", "widget", "chat", "js", "rag"]
+
+  infra-quart-baseline-sync-20260905-b:
+    root: "quart-platform/.supervisor-workspaces/infra-quart-baseline-sync-20260905-b"
+    parent: quart-platform
+    type: "infra"
+    description: "Temporary writable infra-quart clone for backup/env and gpt-browser-bridge port baseline sync"
+    tags: ["infra-quart", "temporary", "baseline-sync"]
