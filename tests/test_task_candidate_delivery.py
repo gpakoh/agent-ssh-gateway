@@ -564,8 +564,85 @@ def test_nonterminal_trusted_job_is_denied(tmp_path: Path, monkeypatch: pytest.M
     root = tmp_path / "repo"
     _init_repo(root)
     _, td = _write_evidence(root, monkeypatch)
-    with pytest.raises(CandidateError, match="terminal"):
+    with pytest.raises(CandidateError, match="terminal") as excinfo:
         materialize_task_candidate(project_root=root, project=PROJECT, task_id=TASK, destination_owner=OWNER, destination_repo=REPO, destination_branch=BRANCH, expected_diff_sha256=_diff_sha(td), job_result=lambda _job: {"status": "running", "exit_code": None}, verify_candidate=_verify_success)
+    assert excinfo.value.code == "CANDIDATE_JOB_NOT_SUCCESSFUL"
+    assert excinfo.value.retryable is True
+    assert excinfo.value.details == {"job_id": "job-001", "job_status": "running"}
+
+
+def test_ambiguous_gateway_job_can_use_final_runner_verdict_for_terminality(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _, td = _write_evidence(root, monkeypatch)
+    (td / "agent-status.md").write_text("Status: needs-review\n", encoding="utf-8")
+    (td / "agent-heartbeat.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "state": "finished",
+                "phase": "final",
+                "updated_at": "2026-09-05T17:00:00Z",
+                "updated_epoch": 1_778_000_000,
+                "runner_pid": 123,
+                "exit_code": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    receipt = materialize_task_candidate(
+        project_root=root,
+        project=PROJECT,
+        task_id=TASK,
+        destination_owner=OWNER,
+        destination_repo=REPO,
+        destination_branch=BRANCH,
+        expected_diff_sha256=_diff_sha(td),
+        job_result=lambda _job: {"status": "ambiguous", "exit_code": None},
+        verify_candidate=_verify_success,
+    )
+
+    assert receipt["job_terminal_status"] == "needs-review"
+    assert receipt["job_exit_code"] == 0
+    assert receipt["terminal_evidence"] == {
+        "source": "runner_heartbeat",
+        "status": "needs-review",
+        "exit_code": 0,
+        "heartbeat_state": "finished",
+        "heartbeat_phase": "final",
+    }
+
+
+def test_running_gateway_job_overrides_forged_final_runner_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _, td = _write_evidence(root, monkeypatch)
+    (td / "agent-status.md").write_text("Status: needs-review\n", encoding="utf-8")
+    (td / "agent-heartbeat.json").write_text(
+        json.dumps({"state": "finished", "phase": "final", "exit_code": 0}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CandidateError) as excinfo:
+        materialize_task_candidate(
+            project_root=root,
+            project=PROJECT,
+            task_id=TASK,
+            destination_owner=OWNER,
+            destination_repo=REPO,
+            destination_branch=BRANCH,
+            expected_diff_sha256=_diff_sha(td),
+            job_result=lambda _job: {"status": "running", "exit_code": None},
+            verify_candidate=_verify_success,
+        )
+
+    assert excinfo.value.code == "CANDIDATE_JOB_NOT_SUCCESSFUL"
+    assert excinfo.value.details == {"job_id": "job-001", "job_status": "running"}
 
 
 def test_materialized_candidate_is_readable_by_distinct_verifier_uid(

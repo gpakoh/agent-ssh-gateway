@@ -51,6 +51,22 @@ _SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 _PROTECTED_BRANCHES = frozenset({"main", "master"})
+_GATEWAY_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+_GATEWAY_ACTIVE_STATUSES = frozenset({"pending", "processing", "running", "cancelling"})
+_RUNNER_TERMINAL_STATUSES = frozenset(
+    {
+        "needs-review",
+        "needs-review-warning",
+        "blocked",
+        "rate-limited",
+        "resource-exhausted",
+        "startup-timeout",
+        "run-timeout",
+        "failed",
+        "completed",
+        "cancelled",
+    }
+)
 
 
 class CandidateError(RuntimeError):
@@ -188,6 +204,67 @@ def _read_json(path: Path) -> dict[str, Any]:
     return parsed
 
 
+def _try_read_regular(path: Path, *, max_bytes: int = 8 * 1024 * 1024) -> bytes | None:
+    try:
+        return _read_regular(path, max_bytes=max_bytes)
+    except CandidateError:
+        return None
+
+
+def _try_read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        return _read_json(path)
+    except CandidateError:
+        return None
+
+
+def _parse_agent_status_token(text: str) -> str | None:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.lower().startswith("status:"):
+            return None
+        parts = stripped.split(":", 1)[1].strip().split()
+        return parts[0].lower() if parts else None
+    return None
+
+
+def _runner_terminal_verdict(task_path: Path) -> dict[str, Any] | None:
+    """Return wrapper-owned terminal evidence when gateway job_result is ambiguous.
+
+    This is not a replacement for isolated candidate verification. It only
+    proves the generated runner reached its final heartbeat/status write, so
+    materialization can proceed when the HTTP job-result plane is ambiguous.
+    Scope, diff digest and required checks remain revalidated from scratch.
+    """
+    heartbeat = _try_read_json(task_path / "agent-heartbeat.json")
+    if not heartbeat:
+        return None
+    if heartbeat.get("state") != "finished" or heartbeat.get("phase") != "final":
+        return None
+    exit_code = heartbeat.get("exit_code")
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+        return None
+
+    status_raw = _try_read_regular(task_path / "agent-status.md", max_bytes=4096)
+    if status_raw is None:
+        return None
+    try:
+        status = _parse_agent_status_token(status_raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        return None
+    if status not in _RUNNER_TERMINAL_STATUSES:
+        return None
+    return {
+        "source": "runner_heartbeat",
+        "status": status,
+        "exit_code": exit_code,
+        "heartbeat_state": "finished",
+        "heartbeat_phase": "final",
+    }
+
+
 def _compile_scope_glob(pattern: str) -> re.Pattern[str]:
     normalized = pattern.replace("\\", "/").strip()
     while normalized.startswith("./"):
@@ -260,6 +337,7 @@ def _load_evidence(project_root: str | Path, project: str, task_id: str) -> dict
         "forbidden_files": contract["forbidden_files"],
         "required_checks": contract["required_checks"],
         "delivery_contract_sha256": _delivery_contract_sha256(contract),
+        "runner_terminal_verdict": _runner_terminal_verdict(td),
     }
 
 
@@ -767,32 +845,58 @@ def _make_verifier_readable(root: Path) -> None:
 
 
 def _require_terminal_job(
-    job_id: str, job_result: Callable[[str], dict[str, Any]] | None
-) -> tuple[str, int | None]:
-    """Require an authoritative terminal job, but do not trust worker success.
+    job_id: str,
+    job_result: Callable[[str], dict[str, Any]] | None,
+    *,
+    runner_terminal_verdict: dict[str, Any] | None = None,
+) -> tuple[str, int | None, dict[str, Any]]:
+    """Require terminality without trusting worker success.
 
-    A failed/cancelled agent can still leave a useful supervisor-owned diff.
-    Once the gateway proves the job is terminal those bytes are stable enough
-    for architect approval by digest.  Candidate materialization then rebuilds
-    from the immutable BASE_HEAD, enforces the immutable file scope, and runs
-    the required checks again in the isolated verifier.  Worker exit zero is
-    therefore not a trust prerequisite; terminality is.
+    The gateway job-result plane is preferred because it is authoritative.
+    When it is unavailable or returns an ambiguous non-active state, a final
+    runner heartbeat plus terminal agent-status can prove the generated runner
+    finished. That fallback only establishes terminality; materialization still
+    rebuilds from BASE_HEAD, checks the approved diff hash, enforces scope, and
+    reruns required checks in an isolated verifier.
     """
+    fallback = runner_terminal_verdict if isinstance(runner_terminal_verdict, dict) else None
     if job_result is None:
+        if fallback is not None:
+            return str(fallback["status"]), fallback.get("exit_code"), fallback
         raise CandidateError("authoritative job result verifier is required")
     try:
         result = job_result(job_id)
     except Exception as exc:
+        if fallback is not None:
+            return str(fallback["status"]), fallback.get("exit_code"), fallback
         raise CandidateError("authoritative agent job result is unavailable") from exc
     if not isinstance(result, dict):
+        if fallback is not None:
+            return str(fallback["status"]), fallback.get("exit_code"), fallback
         raise CandidateError("authoritative agent job result is invalid")
     status = str(result.get("status") or "").strip().lower()
-    if status not in {"completed", "failed", "cancelled"}:
-        raise CandidateError("agent job is not terminal")
-    exit_code_raw = result.get("exit_code")
-    if exit_code_raw is not None and not isinstance(exit_code_raw, int):
-        raise CandidateError("authoritative agent job exit_code is invalid")
-    return status, exit_code_raw
+    if status in _GATEWAY_TERMINAL_STATUSES:
+        exit_code_raw = result.get("exit_code")
+        if exit_code_raw is not None and (
+            not isinstance(exit_code_raw, int) or isinstance(exit_code_raw, bool)
+        ):
+            raise CandidateError("authoritative agent job exit_code is invalid")
+        return status, exit_code_raw, {"source": "gateway_job_result", "status": status}
+    if status in _GATEWAY_ACTIVE_STATUSES:
+        raise CandidateError(
+            "agent job is not terminal",
+            code="CANDIDATE_JOB_NOT_SUCCESSFUL",
+            retryable=True,
+            details={"job_id": job_id, "job_status": status},
+        )
+    if fallback is not None:
+        return str(fallback["status"]), fallback.get("exit_code"), fallback
+    raise CandidateError(
+        "agent job terminality is ambiguous and no final runner verdict is available",
+        code="CANDIDATE_JOB_NOT_SUCCESSFUL",
+        retryable=True,
+        details={"job_id": job_id, "job_status": status or None},
+    )
 
 
 def _materialize_task_candidate_unlocked(
@@ -817,8 +921,10 @@ def _materialize_task_candidate_unlocked(
     )
     if evidence["implementation_diff_sha256"] != approved_diff:
         raise CandidateError("implementation diff changed since architect approval")
-    job_terminal_status, job_exit_code = _require_terminal_job(
-        evidence["job_id"], job_result
+    job_terminal_status, job_exit_code, terminal_evidence = _require_terminal_job(
+        evidence["job_id"],
+        job_result,
+        runner_terminal_verdict=evidence.get("runner_terminal_verdict"),
     )
     destination = _receipt_destination(
         destination_owner, destination_repo, destination_branch
@@ -943,6 +1049,7 @@ def _materialize_task_candidate_unlocked(
             "job_id": evidence["job_id"],
             "job_terminal_status": job_terminal_status,
             "job_exit_code": job_exit_code,
+            "terminal_evidence": terminal_evidence,
             "base_head": evidence["base_head"],
             "implementation_diff_sha256": evidence["implementation_diff_sha256"],
             "delivery_contract_sha256": evidence["delivery_contract_sha256"],
