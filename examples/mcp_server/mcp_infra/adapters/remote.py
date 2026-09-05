@@ -33,6 +33,7 @@ from examples.mcp_server.managed_git import (
     ManagedGitError,
     configured_gitea_git_base,
     delete_remote_branch_with_lease,
+    push_exact_sha,
     push_trusted_staging_sha,
     validate_expected_sha,
     validate_feature_branch,
@@ -43,6 +44,10 @@ from examples.mcp_server.task_candidate import (
     CandidateError,
     materialize_task_candidate,
     validate_task_candidate_for_push,
+)
+from examples.mcp_server.verified_workspace import (
+    VerifiedWorkspaceError,
+    verify_registered_delivery_workspace,
 )
 
 # Default cap, in bytes, for the *decoded* content returned by gitea_get_file.
@@ -1405,6 +1410,193 @@ async def gitea_push_local_ref(
     )
 
 
+def _contract_lines(value: str) -> list[str]:
+    lines: list[str] = []
+    for raw in str(value or "").replace(",", "\n").splitlines():
+        item = raw.strip()
+        if item:
+            lines.append(item)
+    return lines
+
+
+async def gitea_push_verified_commit(
+    project: str,
+    owner: str,
+    repo: str,
+    destination_branch: str,
+    expected_base_sha: str,
+    expected_head_sha: str,
+    allowed_files: str,
+    required_checks: str,
+) -> dict[str, Any]:
+    """Verify and push one exact commit from a registered clean workspace."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool="gitea_push_verified_commit",
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+    allowed = _contract_lines(allowed_files)
+    checks = [line.strip() for line in str(required_checks or "").splitlines() if line.strip()]
+    if not allowed:
+        return tool_error(
+            tool="gitea_push_verified_commit",
+            code="INVALID_INPUT",
+            message="allowed_files must contain at least one path pattern",
+            source="gitea",
+        )
+
+    try:
+        info = _server_workspace_registry().project_info(project)
+        project_root = info["root"]
+        proof_before = await asyncio.to_thread(
+            verify_registered_delivery_workspace,
+            project_root=project_root,
+            expected_base_sha=expected_base_sha,
+            expected_head_sha=expected_head_sha,
+            allowed_files=allowed,
+        )
+        await asyncio.to_thread(
+            verify_candidate_via_docker,
+            staging_root=project_root,
+            expected_sha=proof_before["head_sha"],
+            required_checks=checks,
+        )
+        proof_after = await asyncio.to_thread(
+            verify_registered_delivery_workspace,
+            project_root=project_root,
+            expected_base_sha=expected_base_sha,
+            expected_head_sha=expected_head_sha,
+            allowed_files=allowed,
+        )
+        if proof_after != proof_before:
+            return tool_error(
+                tool="gitea_push_verified_commit",
+                code="WORKSPACE_CONTENDED",
+                message="delivery workspace changed during isolated verification",
+                retryable=True,
+                source="gitea",
+            )
+    except VerifiedWorkspaceError as exc:
+        return tool_error(
+            tool="gitea_push_verified_commit",
+            code=exc.code,
+            message=exc.message,
+            retryable=exc.retryable,
+            details=exc.details,
+            source="gitea",
+        )
+    except Exception as exc:
+        return tool_error(
+            tool="gitea_push_verified_commit",
+            code="CHECK_FAILED",
+            message=f"isolated delivery verification failed: {type(exc).__name__}",
+            retryable=False,
+            source="gitea",
+        )
+
+    try:
+        destination_branch = validate_feature_branch(destination_branch)
+        expected_head = validate_expected_sha(expected_head_sha)
+        git_base = configured_gitea_git_base()
+        async with _server_gitea_client()(token) as client:
+            user = await client.get_user()
+            metadata = await client.get_repo(owner, repo)
+            permissions = metadata.get("permissions") or {}
+            if not permissions.get("push"):
+                return tool_error(
+                    tool="gitea_push_verified_commit",
+                    code="AUTH_ERROR",
+                    message="Configured Gitea identity does not have push access to repository",
+                    source="gitea",
+                )
+            default_branch = str(metadata.get("default_branch") or "").strip()
+            if not default_branch or destination_branch == default_branch:
+                return tool_error(
+                    tool="gitea_push_verified_commit",
+                    code="POLICY_DENIED",
+                    message="Trusted delivery push to the repository default branch is not allowed",
+                    source="gitea",
+                )
+            try:
+                remote_branch = await client.get_branch(owner, repo, destination_branch)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+                remote_branch = None
+            if remote_branch is not None and remote_branch.get("protected") is not False:
+                return tool_error(
+                    tool="gitea_push_verified_commit",
+                    code="POLICY_DENIED",
+                    message="Trusted delivery push to a protected or unverifiable branch is not allowed",
+                    source="gitea",
+                )
+            username = str(user.get("login") or user.get("username") or "").strip()
+            if not username:
+                return tool_error(
+                    tool="gitea_push_verified_commit",
+                    code="AUTH_ERROR",
+                    message="Configured Gitea identity has no usable username",
+                    source="gitea",
+                )
+            await asyncio.to_thread(
+                push_exact_sha,
+                project_root=project_root,
+                owner=owner,
+                repo=repo,
+                destination_branch=destination_branch,
+                expected_sha=expected_head,
+                username=username,
+                token=token,
+                git_base=git_base,
+            )
+            remote_branch = await client.get_branch(owner, repo, destination_branch)
+    except ManagedGitError as exc:
+        return tool_error(
+            tool="gitea_push_verified_commit",
+            code="GIT_PUSH_FAILED",
+            message=str(exc),
+            retryable=True,
+            source="gitea",
+        )
+    except Exception as exc:
+        return _remote_api_error("gitea_push_verified_commit", "gitea", exc)
+
+    commit = (remote_branch or {}).get("commit") or {}
+    observed_sha = str(commit.get("id") or commit.get("sha") or "").lower() or None
+    if observed_sha != expected_head:
+        return tool_error(
+            tool="gitea_push_verified_commit",
+            code="CHECK_FAILED",
+            message="Remote branch does not resolve to expected_head_sha after trusted push",
+            retryable=True,
+            details={"expected_head_sha": expected_head, "observed_head_sha": observed_sha},
+            source="gitea",
+        )
+    return tool_success(
+        "gitea_push_verified_commit",
+        result={
+            "project": project,
+            "owner": owner,
+            "repo": repo,
+            "branch": destination_branch,
+            "base_sha": proof_after["base_sha"],
+            "head_sha": expected_head,
+            "changed_files": proof_after["changed_files"],
+            "allowed_files": proof_after["allowed_files"],
+            "required_checks": checks,
+            "clean": True,
+            "scope_verified": True,
+            "checks_verified": True,
+            "remote_observed_sha": observed_sha,
+            "verified": True,
+        },
+        source="gitea",
+    )
+
+
 async def github_get_repo(owner: str, repo: str) -> dict[str, Any]:
     """Get GitHub repository metadata (login, visibility, default branch, permissions, counters, topics)."""
     token = os.environ.get("GITHUB_TOKEN", "")
@@ -1594,6 +1786,7 @@ def register_all() -> None:
     register_tool("gitea_delete_branch")(gitea_delete_branch)
     register_tool("gitea_materialize_task_candidate")(gitea_materialize_task_candidate)
     register_tool("gitea_push_local_ref")(gitea_push_local_ref)
+    register_tool("gitea_push_verified_commit")(gitea_push_verified_commit)
     register_tool("gitea_list_action_runs")(gitea_list_action_runs)
     register_tool("gitea_get_action_run")(gitea_get_action_run)
     register_tool("gitea_list_action_run_jobs")(gitea_list_action_run_jobs)

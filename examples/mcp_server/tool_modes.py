@@ -264,6 +264,7 @@ TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     "gitea_delete_branch",
     "gitea_materialize_task_candidate",
     "gitea_push_local_ref",
+    "gitea_push_verified_commit",
     # Supervisor-only integration tools are intentionally absent from the
     # broad mcp_client set and therefore from safe mode. They exist only in
     # the explicit write/admin mode and still require mcp:admin at runtime.
