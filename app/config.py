@@ -151,12 +151,12 @@ class Settings(BaseSettings):
     # Zero preserves the legacy per-IP/rate ceilings (fail-conservative).
     master_max_sessions_per_ip: int = Field(default=0, alias="MASTER_MAX_SESSIONS_PER_IP")
     master_connect_rate_limit_requests: int = Field(
-        default=600, alias="MASTER_CONNECT_RATE_LIMIT_REQUESTS"
+        default=0, alias="MASTER_CONNECT_RATE_LIMIT_REQUESTS"
     )
     master_execute_rate_limit_requests: int = Field(
-        default=600, alias="MASTER_EXECUTE_RATE_LIMIT_REQUESTS"
+        default=0, alias="MASTER_EXECUTE_RATE_LIMIT_REQUESTS"
     )
-    rate_limit_requests: int = Field(default=600, alias="RATE_LIMIT_REQUESTS")
+    rate_limit_requests: int = Field(default=100, alias="RATE_LIMIT_REQUESTS")
     rate_limit_window: int = Field(default=60, alias="RATE_LIMIT_WINDOW")
 
     # Redis
