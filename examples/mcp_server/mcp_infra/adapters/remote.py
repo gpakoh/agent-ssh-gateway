@@ -164,6 +164,102 @@ def _minimize_gitea_pull_request(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_PR_OUTDATED_OPERATOR_CHOICES = [
+    {
+        "action": "update_branch_to_base_and_rerun_ci",
+        "description": "Update the PR branch with the current base branch, then use only CI from the new head.",
+    },
+    {
+        "action": "continue_stale_ci_explicitly",
+        "description": "Continue reviewing the stale head only after accepting that CI did not run on the current base.",
+    },
+]
+
+
+def _pr_ref(data: dict[str, Any], key: str, field: str) -> str | None:
+    ref = data.get(key)
+    if not isinstance(ref, dict):
+        return None
+    value = ref.get(field)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _compare_total_commits(data: Any) -> int | None:
+    if not isinstance(data, dict):
+        return None
+    value = data.get("total_commits")
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    commits = data.get("commits")
+    if isinstance(commits, list):
+        return len(commits)
+    return None
+
+
+async def _gitea_pr_branch_tracking(
+    client: Any,
+    owner: str,
+    repo: str,
+    pr: dict[str, Any],
+) -> dict[str, Any]:
+    """Return whether a PR head contains the current base branch head.
+
+    A green pull_request run proves only that one head SHA was tested. It does
+    not prove that the head was tested against the current target branch. Query
+    Gitea compare in both directions so the operator can see ahead/behind state
+    before relying on CI or merging.
+    """
+    base_ref = _pr_ref(pr, "base", "ref")
+    head_ref = _pr_ref(pr, "head", "ref")
+    base_sha = (_pr_ref(pr, "base", "sha") or "").lower() or None
+    head_sha = (_pr_ref(pr, "head", "sha") or "").lower() or None
+    tracking: dict[str, Any] = {
+        "base_ref": base_ref,
+        "base_sha": base_sha,
+        "head_ref": head_ref,
+        "head_sha": head_sha,
+        "branch_contains_base": None,
+        "branch_is_current": None,
+        "ahead_by": None,
+        "behind_by": None,
+        "warning": "BASE_TRACKING_UNKNOWN",
+        "operator_choices": _PR_OUTDATED_OPERATOR_CHOICES,
+    }
+    if not base_ref or not head_ref:
+        tracking["tracking_error"] = "missing_pr_refs"
+        return tracking
+
+    try:
+        ahead = await client.compare_commits(owner, repo, base=base_ref, head=head_ref)
+        behind = await client.compare_commits(owner, repo, base=head_ref, head=base_ref)
+    except Exception as exc:
+        tracking["tracking_error"] = type(exc).__name__
+        return tracking
+
+    ahead_by = _compare_total_commits(ahead)
+    behind_by = _compare_total_commits(behind)
+    tracking["ahead_by"] = ahead_by
+    tracking["behind_by"] = behind_by
+    if behind_by is None:
+        tracking["tracking_error"] = "compare_response_missing_total_commits"
+        return tracking
+
+    branch_is_current = behind_by == 0
+    tracking["branch_contains_base"] = branch_is_current
+    tracking["branch_is_current"] = branch_is_current
+    if branch_is_current:
+        tracking["warning"] = None
+        tracking["operator_choices"] = []
+    else:
+        tracking["warning"] = "PR_BRANCH_OUTDATED"
+    return tracking
+
+
 def _minimize_github_repo(data: dict[str, Any]) -> dict[str, Any]:
     """Trim a GitHub repo payload to non-PII fields (mirrors _minimize_gitea_repo)."""
     owner = data.get("owner") or {}
@@ -381,6 +477,12 @@ async def gitea_get_pull_request(owner: str, repo: str, pull_number: int) -> dic
         async with _server_gitea_client()(token) as client:
             raw = await client.get_pull_request(owner, repo, pull_number)
             data = minimize_issue_payload(raw, provider="gitea")
+            data["branch_tracking"] = await _gitea_pr_branch_tracking(
+                client,
+                owner,
+                repo,
+                raw,
+            )
     except Exception as exc:
         return _remote_api_error("gitea_get_pull_request", "gitea", exc)
     return tool_success("gitea_get_pull_request", result=data, source="gitea")
@@ -414,6 +516,12 @@ async def gitea_create_pull_request(
                 body=body,
             )
             data = _minimize_gitea_pull_request(raw)
+            data["branch_tracking"] = await _gitea_pr_branch_tracking(
+                client,
+                owner,
+                repo,
+                raw,
+            )
     except Exception as exc:
         return _remote_api_error("gitea_create_pull_request", "gitea", exc)
     return tool_success("gitea_create_pull_request", result=data, source="gitea")
@@ -425,8 +533,9 @@ async def gitea_merge_pull_request(
     pull_number: int,
     expected_head_sha: str,
     method: str = "merge",
+    allow_outdated_base: bool = False,
 ) -> dict[str, Any]:
-    """Merge an open, mergeable PR only when its expected head has green CI."""
+    """Merge an open, mergeable PR only when its expected head has green CI and current base."""
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         return tool_error(
@@ -490,6 +599,28 @@ async def gitea_merge_pull_request(
                     source="gitea",
                 )
 
+            branch_tracking = await _gitea_pr_branch_tracking(client, owner, repo, pr)
+            if branch_tracking["branch_is_current"] is None:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="BASE_TRACKING_UNKNOWN",
+                    message="could not prove that pull request head contains the current base branch",
+                    retryable=True,
+                    hint="Re-read the PR or update the branch to the current base before relying on CI.",
+                    details={"branch_tracking": branch_tracking},
+                    source="gitea",
+                )
+            if branch_tracking["branch_is_current"] is not True and not allow_outdated_base:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="PR_BRANCH_OUTDATED",
+                    message="pull request branch does not contain the current base branch; CI may be stale",
+                    retryable=True,
+                    hint="Use update_branch_to_base_and_rerun_ci, or retry with allow_outdated_base=true only after accepting stale-base risk.",
+                    details={"branch_tracking": branch_tracking},
+                    source="gitea",
+                )
+
             actions = await client.list_action_runs(owner, repo, status=None, limit=50)
             matching_runs = [
                 run
@@ -536,6 +667,8 @@ async def gitea_merge_pull_request(
                 "head_sha": expected_head_sha,
                 "base": base_ref,
                 "method": method,
+                "branch_tracking": branch_tracking,
+                "outdated_base_accepted": branch_tracking["branch_is_current"] is not True,
                 "merge_commit_sha": merged_pr.get("merge_commit_sha"),
                 "html_url": merged_pr.get("html_url"),
             }

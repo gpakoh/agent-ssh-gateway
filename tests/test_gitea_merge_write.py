@@ -54,10 +54,18 @@ async def test_client_merge_pr_rejects_invalid_sha_and_non_merge_methods():
 
 
 class FakeMergeClient:
-    def __init__(self, token: str, *, ci_conclusion: str = "success", head_sha: str = SHA):
+    def __init__(
+        self,
+        token: str,
+        *,
+        ci_conclusion: str = "success",
+        head_sha: str = SHA,
+        behind_by: int = 0,
+    ):
         assert token == "token"
         self.ci_conclusion = ci_conclusion
         self.head_sha = head_sha
+        self.behind_by = behind_by
         self.merge_calls: list[dict] = []
         self.pr_reads = 0
 
@@ -105,6 +113,13 @@ class FakeMergeClient:
             ]
         }
 
+    async def compare_commits(self, owner: str, repo: str, *, base: str, head: str):
+        if base == "master" and head == "feat/x":
+            return {"total_commits": 1, "commits": [{"sha": self.head_sha}]}
+        if base == "feat/x" and head == "master":
+            return {"total_commits": self.behind_by, "commits": [{}] * self.behind_by}
+        raise AssertionError(f"unexpected compare: {base!r}...{head!r}")
+
     async def merge_pull_request(self, owner: str, repo: str, pull_number: int, **kwargs):
         self.merge_calls.append(
             {"owner": owner, "repo": repo, "pull_number": pull_number, **kwargs}
@@ -136,6 +151,19 @@ async def test_adapter_merges_only_expected_green_head_and_confirms_result(monke
         "head_sha": SHA,
         "base": "master",
         "method": "merge",
+        "branch_tracking": {
+            "base_ref": "master",
+            "base_sha": None,
+            "head_ref": "feat/x",
+            "head_sha": SHA,
+            "branch_contains_base": True,
+            "branch_is_current": True,
+            "ahead_by": 1,
+            "behind_by": 0,
+            "warning": None,
+            "operator_choices": [],
+        },
+        "outdated_base_accepted": False,
         "merge_commit_sha": "b" * 40,
         "html_url": "https://git.example/pr/25",
     }
@@ -153,6 +181,44 @@ async def test_adapter_rejects_changed_head_before_merge(monkeypatch):
     assert result["ok"] is False
     assert result["error"]["code"] == "HEAD_MISMATCH"
     assert client.merge_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_rejects_outdated_branch_before_using_ci(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token", behind_by=2)
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "PR_BRANCH_OUTDATED"
+    tracking = result["error"]["details"]["branch_tracking"]
+    assert tracking["branch_is_current"] is False
+    assert tracking["behind_by"] == 2
+    assert tracking["warning"] == "PR_BRANCH_OUTDATED"
+    assert tracking["operator_choices"][0]["action"] == "update_branch_to_base_and_rerun_ci"
+    assert client.merge_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_allows_outdated_branch_only_with_explicit_override(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token", behind_by=1)
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request(
+        "owner",
+        "repo",
+        25,
+        SHA,
+        allow_outdated_base=True,
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["outdated_base_accepted"] is True
+    assert result["result"]["branch_tracking"]["branch_is_current"] is False
+    assert len(client.merge_calls) == 1
 
 
 @pytest.mark.asyncio

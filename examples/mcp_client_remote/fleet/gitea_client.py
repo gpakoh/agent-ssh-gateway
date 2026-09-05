@@ -42,6 +42,7 @@ ALLOWED_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}/branches",
         "/repos/{owner}/{repo}/branches/{branch}",
         "/repos/{owner}/{repo}/commits",
+        "/repos/{owner}/{repo}/compare/{basehead}",
         "/repos/{owner}/{repo}/contents",
         "/repos/{owner}/{repo}/contents/{path}",
         "/repos/{owner}/{repo}/issues",
@@ -88,6 +89,20 @@ def _validate_branch_name(value: str, label: str) -> str:
     ):
         raise ValueError(f"Invalid {label} branch name: {value!r}")
     return value
+
+
+def _validate_compare_basehead(value: str) -> str:
+    """Validate and URL-encode Gitea's single-segment base...head parameter."""
+    value = value.strip()
+    separator = "..." if "..." in value else ".." if ".." in value else ""
+    if not separator:
+        raise ValueError("Invalid compare basehead: expected base...head")
+    parts = value.split(separator)
+    if len(parts) != 2:
+        raise ValueError("Invalid compare basehead: expected exactly two refs")
+    base = _validate_branch_name(parts[0], "compare base")
+    head = _validate_branch_name(parts[1], "compare head")
+    return quote(f"{base}{separator}{head}", safe="")
 
 
 def _normalize_action_run_status_filter(status: str | None) -> str | None:
@@ -139,10 +154,13 @@ class GiteaClient:
             validate_repo_owner_or_name(path_params["repo"], label="repo")
         if "path" in path_params:
             validate_repo_path(path_params["path"])
-        if "branch" in path_params:
+        if "branch" in path_params or "basehead" in path_params:
             path_params = dict(path_params)
+        if "branch" in path_params:
             branch = _validate_branch_name(str(path_params["branch"]), "branch")
             path_params["branch"] = quote(branch, safe="")
+        if "basehead" in path_params:
+            path_params["basehead"] = _validate_compare_basehead(str(path_params["basehead"]))
         path = endpoint.format(**path_params)
         resp = await self._client.get(path, params=params)
         if resp.status_code in (401, 403):
@@ -275,6 +293,24 @@ class GiteaClient:
             params=params,
             owner=owner,
             repo=repo,
+        )
+
+    async def compare_commits(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        base: str,
+        head: str,
+    ) -> dict[str, Any]:
+        """Compare two refs as base...head using Gitea's JSON compare API."""
+        base = _validate_branch_name(base, "compare base")
+        head = _validate_branch_name(head, "compare head")
+        return await self._get(
+            "/repos/{owner}/{repo}/compare/{basehead}",
+            owner=owner,
+            repo=repo,
+            basehead=f"{base}...{head}",
         )
 
     async def get_file(
