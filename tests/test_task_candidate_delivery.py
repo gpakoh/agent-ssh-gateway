@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import examples.mcp_server.task_candidate as task_candidate_module
 from examples.mcp_server.agent_paths import task_dir
 from examples.mcp_server.agent_sources import (
     ManagedSourceBundleError,
@@ -928,3 +929,52 @@ def test_managed_source_publication_failure_fails_closed(
     assert excinfo.value.code == "SOURCE_UNAVAILABLE"
     candidate_root = tmp_path / "candidate-store"
     assert not any(p.name.startswith(".materialize-") for p in candidate_root.rglob("*"))
+
+
+def test_materialize_git_failure_has_typed_phase_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _, td = _write_evidence(root, monkeypatch)
+    (td / "implementation-diff.patch").write_text("not a git patch\n", encoding="utf-8")
+
+    with pytest.raises(CandidateError) as excinfo:
+        materialize_task_candidate(
+            project_root=root,
+            project=PROJECT,
+            task_id=TASK,
+            destination_owner=OWNER,
+            destination_repo=REPO,
+            destination_branch=BRANCH,
+            expected_diff_sha256=_diff_sha(td),
+            job_result=_job_success,
+            verify_candidate=_verify_success,
+        )
+
+    assert excinfo.value.code == "GIT_OPERATION_FAILED"
+    assert excinfo.value.retryable is False
+    assert excinfo.value.details is not None
+    assert excinfo.value.details["phase"] == "apply"
+    assert excinfo.value.details["command_class"] == "git apply"
+    assert excinfo.value.details["returncode"] != 0
+    stderr_tail = excinfo.value.details["stderr_tail"]
+    assert "error" in stderr_tail.lower()
+    assert str(tmp_path) not in stderr_tail
+
+
+def test_materialize_git_timeout_has_retry_guidance(tmp_path: Path) -> None:
+    err = task_candidate_module._candidate_git_error(
+        subcommand="clone",
+        cwd=tmp_path,
+        returncode=None,
+        stderr=f"fatal: stalled in {tmp_path}/repo",
+        did_timeout=True,
+    )
+
+    assert err.code == "GIT_OPERATION_FAILED"
+    assert err.retryable is True
+    assert err.details is not None
+    assert err.details["phase"] == "clone"
+    assert err.details["timeout_seconds"] == 60
+    assert str(tmp_path) not in err.details["stderr_tail"]

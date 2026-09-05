@@ -279,6 +279,46 @@ def _managed_source_bundle(project: str, base_head: str) -> Path | None:
     return Path(publication.path)
 
 
+def _redact_git_stderr(stderr: str, cwd: Path) -> str:
+    """Return bounded Git stderr safe for operator diagnostics.
+
+    Git failures need phase-level context, but stderr can contain host paths.
+    Keep enough text to diagnose the Git class while stripping common absolute
+    filesystem paths and the exact working directory.
+    """
+    text = stderr.strip().replace(str(cwd), "[CWD]")
+    text = re.sub(r"(?<!['\"\w])/(?:media|root|app|home|tmp|var|etc|opt|usr|mnt|data)\S*", "[PATH]", text)
+    return text[:1024]
+
+
+def _candidate_git_error(
+    *,
+    subcommand: str,
+    cwd: Path,
+    returncode: int | None,
+    stderr: str = "",
+    did_timeout: bool = False,
+) -> CandidateError:
+    details: dict[str, Any] = {
+        "phase": subcommand,
+        "command_class": f"git {subcommand}",
+    }
+    if returncode is not None:
+        details["returncode"] = returncode
+    redacted_stderr = _redact_git_stderr(stderr, cwd)
+    if redacted_stderr:
+        details["stderr_tail"] = redacted_stderr
+    if did_timeout:
+        details["timeout_seconds"] = 60
+    return CandidateError(
+        f"candidate Git {subcommand} operation {'timed out' if did_timeout else 'failed'}",
+        code="GIT_OPERATION_FAILED",
+        retryable=did_timeout,
+        hint="Inspect error.details.phase, command_class, returncode, and stderr_tail before retrying materialization.",
+        details=details,
+    )
+
+
 def _run_git(cwd: Path, args: list[str], *, env: dict[str, str] | None = None) -> str:
     subcommand = args[0] if args else "git"
     try:
@@ -291,14 +331,28 @@ def _run_git(cwd: Path, args: list[str], *, env: dict[str, str] | None = None) -
             check=False,
             env=env,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise CandidateError(f"candidate Git {subcommand} operation did not complete") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise _candidate_git_error(
+            subcommand=subcommand,
+            cwd=cwd,
+            returncode=None,
+            stderr=str(exc.stderr or ""),
+            did_timeout=True,
+        ) from exc
+    except OSError as exc:
+        raise _candidate_git_error(
+            subcommand=subcommand,
+            cwd=cwd,
+            returncode=None,
+            stderr=str(exc),
+        ) from exc
     if result.returncode != 0:
-        detail = (result.stderr or "").strip()[:1024]
-        message = f"candidate Git {subcommand} operation failed"
-        if detail:
-            message = f"{message}: {detail}"
-        raise CandidateError(message)
+        raise _candidate_git_error(
+            subcommand=subcommand,
+            cwd=cwd,
+            returncode=result.returncode,
+            stderr=result.stderr or "",
+        )
     return result.stdout.strip()
 
 
