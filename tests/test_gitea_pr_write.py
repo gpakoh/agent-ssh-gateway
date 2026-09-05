@@ -155,9 +155,11 @@ async def test_adapter_minimizes_created_pr(monkeypatch):
             }
 
         async def compare_commits(self, owner, repo, *, base, head):
-            if base == "master" and head == "ai/fleet-hardening":
-                return {"total_commits": 1, "commits": [{"sha": "a" * 40}]}
-            if base == "ai/fleet-hardening" and head == "master":
+            head_sha = "a" * 40
+            base_sha = "b" * 40
+            if base == base_sha and head == head_sha:
+                return {"total_commits": 1, "commits": [{"sha": head_sha}]}
+            if base == head_sha and head == base_sha:
                 return {"total_commits": 0, "commits": []}
             raise AssertionError(f"unexpected compare: {base!r}...{head!r}")
 
@@ -195,6 +197,7 @@ async def test_adapter_minimizes_created_pr(monkeypatch):
             "base_sha": "b" * 40,
             "head_ref": "ai/fleet-hardening",
             "head_sha": "a" * 40,
+            "compare_by": "sha",
             "branch_contains_base": True,
             "branch_is_current": True,
             "ahead_by": 1,

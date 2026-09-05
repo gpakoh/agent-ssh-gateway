@@ -218,11 +218,14 @@ async def _gitea_pr_branch_tracking(
     head_ref = _pr_ref(pr, "head", "ref")
     base_sha = (_pr_ref(pr, "base", "sha") or "").lower() or None
     head_sha = (_pr_ref(pr, "head", "sha") or "").lower() or None
+    compare_base = base_sha or ""
+    compare_head = head_sha or ""
     tracking: dict[str, Any] = {
         "base_ref": base_ref,
         "base_sha": base_sha,
         "head_ref": head_ref,
         "head_sha": head_sha,
+        "compare_by": "sha" if compare_base and compare_head else None,
         "branch_contains_base": None,
         "branch_is_current": None,
         "ahead_by": None,
@@ -233,10 +236,13 @@ async def _gitea_pr_branch_tracking(
     if not base_ref or not head_ref:
         tracking["tracking_error"] = "missing_pr_refs"
         return tracking
+    if not compare_base or not compare_head:
+        tracking["tracking_error"] = "missing_pr_shas"
+        return tracking
 
     try:
-        ahead = await client.compare_commits(owner, repo, base=base_ref, head=head_ref)
-        behind = await client.compare_commits(owner, repo, base=head_ref, head=base_ref)
+        ahead = await client.compare_commits(owner, repo, base=compare_base, head=compare_head)
+        behind = await client.compare_commits(owner, repo, base=compare_head, head=compare_base)
     except Exception as exc:
         tracking["tracking_error"] = type(exc).__name__
         return tracking
@@ -532,6 +538,7 @@ async def gitea_merge_pull_request(
     repo: str,
     pull_number: int,
     expected_head_sha: str,
+    expected_base_sha: str | None = None,
     method: str = "merge",
     allow_outdated_base: bool = False,
 ) -> dict[str, Any]:
@@ -553,6 +560,15 @@ async def gitea_merge_pull_request(
             message="expected_head_sha must be a 40-character SHA-1",
             source="gitea",
         )
+    if expected_base_sha is not None:
+        expected_base_sha = expected_base_sha.strip().lower()
+        if len(expected_base_sha) != 40 or any(c not in "0123456789abcdef" for c in expected_base_sha):
+            return tool_error(
+                tool="gitea_merge_pull_request",
+                code="INVALID_INPUT",
+                message="expected_base_sha must be a 40-character SHA-1 when provided",
+                source="gitea",
+            )
     if method != "merge":
         return tool_error(
             tool="gitea_merge_pull_request",
@@ -567,6 +583,7 @@ async def gitea_merge_pull_request(
             head = pr.get("head") or {}
             base = pr.get("base") or {}
             actual_head_sha = str(head.get("sha") or "").lower()
+            actual_base_sha = str(base.get("sha") or "").lower()
             base_ref = str(base.get("ref") or "")
 
             if pr.get("state") != "open" or pr.get("merged") is True:
@@ -581,6 +598,26 @@ async def gitea_merge_pull_request(
                     tool="gitea_merge_pull_request",
                     code="HEAD_MISMATCH",
                     message="pull request head changed; re-read the PR and CI before merging",
+                    source="gitea",
+                )
+            if not actual_base_sha:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="BASE_TRACKING_UNKNOWN",
+                    message="pull request base SHA is unavailable; refusing merge without immutable base evidence",
+                    retryable=True,
+                    hint="Re-read the PR and ensure the provider returns base.sha before merging.",
+                    source="gitea",
+                )
+            if expected_base_sha is not None and actual_base_sha != expected_base_sha:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="BASE_MISMATCH",
+                    message="pull request base changed; re-read the PR and CI before merging",
+                    details={
+                        "expected_base_sha": expected_base_sha,
+                        "observed_base_sha": actual_base_sha,
+                    },
                     source="gitea",
                 )
             if base_ref not in {"main", "master"}:
@@ -645,6 +682,75 @@ async def gitea_merge_pull_request(
                     source="gitea",
                 )
 
+            latest_pr = await client.get_pull_request(owner, repo, pull_number)
+            latest_head = latest_pr.get("head") or {}
+            latest_base = latest_pr.get("base") or {}
+            latest_head_sha = str(latest_head.get("sha") or "").lower()
+            latest_base_sha = str(latest_base.get("sha") or "").lower()
+            latest_base_ref = str(latest_base.get("ref") or "")
+            if latest_pr.get("state") != "open" or latest_pr.get("merged") is True:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="PR_NOT_OPEN",
+                    message=f"pull request #{pull_number} is not open after CI evidence was read",
+                    source="gitea",
+                )
+            if latest_head_sha != expected_head_sha:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="HEAD_MISMATCH",
+                    message="pull request head changed after CI evidence was read",
+                    source="gitea",
+                )
+            if latest_base_sha != actual_base_sha:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="BASE_MISMATCH",
+                    message="pull request base changed after CI evidence was read",
+                    details={
+                        "expected_base_sha": actual_base_sha,
+                        "observed_base_sha": latest_base_sha or None,
+                    },
+                    source="gitea",
+                )
+            if latest_base_ref != base_ref:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="BASE_MISMATCH",
+                    message="pull request base ref changed after CI evidence was read",
+                    details={"expected_base_ref": base_ref, "observed_base_ref": latest_base_ref},
+                    source="gitea",
+                )
+            if latest_pr.get("mergeable") is not True:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="PR_NOT_MERGEABLE",
+                    message=f"pull request #{pull_number} is no longer mergeable",
+                    retryable=True,
+                    source="gitea",
+                )
+            branch_tracking = await _gitea_pr_branch_tracking(client, owner, repo, latest_pr)
+            if branch_tracking["branch_is_current"] is None:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="BASE_TRACKING_UNKNOWN",
+                    message="could not prove that pull request head contains the current base branch before merge",
+                    retryable=True,
+                    hint="Re-read the PR or update the branch to the current base before relying on CI.",
+                    details={"branch_tracking": branch_tracking},
+                    source="gitea",
+                )
+            if branch_tracking["branch_is_current"] is not True and not allow_outdated_base:
+                return tool_error(
+                    tool="gitea_merge_pull_request",
+                    code="PR_BRANCH_OUTDATED",
+                    message="pull request branch does not contain the current base branch before merge; CI may be stale",
+                    retryable=True,
+                    hint="Use update_branch_to_base_and_rerun_ci, or retry with allow_outdated_base=true only after accepting stale-base risk.",
+                    details={"branch_tracking": branch_tracking},
+                    source="gitea",
+                )
+
             await client.merge_pull_request(
                 owner,
                 repo,
@@ -666,6 +772,7 @@ async def gitea_merge_pull_request(
                 "merged": True,
                 "head_sha": expected_head_sha,
                 "base": base_ref,
+                "base_sha": actual_base_sha,
                 "method": method,
                 "branch_tracking": branch_tracking,
                 "outdated_base_accepted": branch_tracking["branch_is_current"] is not True,
