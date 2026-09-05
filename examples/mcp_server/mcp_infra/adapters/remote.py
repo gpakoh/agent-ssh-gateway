@@ -1507,6 +1507,13 @@ async def gitea_push_verified_commit(
             message="allowed_files must contain at least one path pattern",
             source="gitea",
         )
+    if not checks:
+        return tool_error(
+            tool="gitea_push_verified_commit",
+            code="INVALID_INPUT",
+            message="required_checks must contain at least one verification command",
+            source="gitea",
+        )
 
     try:
         info = _server_workspace_registry().project_info(project)

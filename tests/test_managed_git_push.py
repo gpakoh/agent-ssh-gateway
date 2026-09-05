@@ -565,6 +565,33 @@ async def test_verified_workspace_adapter_rechecks_then_pushes_exact_sha(
 
 
 @pytest.mark.asyncio
+async def test_verified_workspace_adapter_requires_checks_before_workspace_access(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("GITEA_TOKEN", "managed-token")
+
+    def registry_must_not_run() -> Any:
+        raise AssertionError("workspace registry must not run before required_checks validation")
+
+    monkeypatch.setattr(remote, "_server_workspace_registry", registry_must_not_run)
+
+    result = await remote.gitea_push_verified_commit(
+        project="gpt-browser-bridge-hardening",
+        owner="gpakoh",
+        repo="gpt-browser-bridge",
+        destination_branch="hardening/runtime-deploy",
+        expected_base_sha="0" * 40,
+        expected_head_sha=SHA,
+        allowed_files="app/**",
+        required_checks=" \n ",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert "required_checks" in result["error"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_verified_workspace_adapter_denial_happens_before_gitea(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
