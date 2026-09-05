@@ -153,17 +153,31 @@ def _git_diagnostic_tail(text: str | None, cwd: Path) -> str:
     return cleaned[-_GIT_DIAGNOSTIC_LIMIT:]
 
 
-def _git_command(cwd: Path, args: list[str]) -> list[str]:
-    """Build a Git command with a single scoped safe.directory exception.
+def _git_command(
+    cwd: Path,
+    args: list[str],
+    *,
+    extra_safe_directories: tuple[Path, ...] = (),
+) -> list[str]:
+    """Build a Git command with scoped per-command safe.directory exceptions.
 
-    Candidate clone only calls this helper with registry-derived source roots
-    or candidate clone roots. The exception is deliberately per-command and
-    never widened to '*', so operators do not need mutable global Git config.
+    Candidate clone only calls this helper with registry-derived source roots,
+    their Git directories, or candidate clone roots. Exceptions are deliberately
+    per-command and never widened to '*', so operators do not need mutable
+    global Git config.
     """
-    safe_directory = str(cwd.resolve())
-    if safe_directory == "*":
-        raise _fail("POLICY_DENIED", "refusing wildcard git safe.directory")
-    return ["git", "-c", f"safe.directory={safe_directory}", *args]
+    safe_directories: list[str] = []
+    for path in (cwd, *extra_safe_directories):
+        safe_directory = str(path.resolve())
+        if safe_directory == "*":
+            raise _fail("POLICY_DENIED", "refusing wildcard git safe.directory")
+        if safe_directory not in safe_directories:
+            safe_directories.append(safe_directory)
+    command = ["git"]
+    for safe_directory in safe_directories:
+        command.extend(["-c", f"safe.directory={safe_directory}"])
+    command.extend(args)
+    return command
 
 
 def _run_git(
@@ -172,10 +186,11 @@ def _run_git(
     *,
     timeout: int = 60,
     operation: str = "git command",
+    extra_safe_directories: tuple[Path, ...] = (),
 ) -> str:
     try:
         result = subprocess.run(
-            _git_command(cwd, args),
+            _git_command(cwd, args, extra_safe_directories=extra_safe_directories),
             cwd=str(cwd),
             text=True,
             capture_output=True,
@@ -391,6 +406,7 @@ def prepare_candidate_clone(
                 ["clone", "--local", "--no-hardlinks", str(source_root), str(tmp)],
                 timeout=120,
                 operation="clone source repository",
+                extra_safe_directories=(source_root / ".git",),
             )
             _run_git(
                 tmp,
