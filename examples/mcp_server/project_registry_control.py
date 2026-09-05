@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from app.workspace.registry import resolve_runtime_registry_path
 from examples.mcp_server.supervisor_integration import integrate_file
 
 _PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -40,6 +41,7 @@ class ProjectRegistrationResult:
     tags: list[str]
     parent: str | None
     registry_hash: str
+    storage: str
 
 
 def _error(code: str, message: str) -> ProjectRegistrationError:
@@ -252,6 +254,64 @@ def _append_entry(
     return (text.rstrip("\n") + "\n\n" + "\n".join(lines) + "\n").encode("utf-8")
 
 
+def _runtime_registry_seed() -> bytes:
+    return b"version: 1\nprojects:\n"
+
+
+def _read_or_create_runtime_registry(path: Path) -> bytes:
+    if path.exists() and not path.is_file():
+        raise _error("TOOL_EXECUTION_FAILED", "Runtime project registry overlay is not a file.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    if path.exists():
+        return path.read_bytes()
+
+    seed = _runtime_registry_seed()
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return path.read_bytes()
+    try:
+        os.write(fd, seed)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return seed
+
+
+def _load_runtime_registry(config_dir: Path) -> tuple[bytes, dict[str, Any], Path]:
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    if runtime_path is None:
+        raise _error("TOOL_EXECUTION_FAILED", "Runtime project registry overlay is not configured.")
+    try:
+        original = _read_or_create_runtime_registry(runtime_path)
+        data = yaml.safe_load(original) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise _error("TOOL_EXECUTION_FAILED", "Runtime project registry overlay cannot be read.") from exc
+    if not isinstance(data, dict):
+        raise _error("TOOL_EXECUTION_FAILED", "Runtime project registry overlay is malformed.")
+    projects = data.get("projects")
+    if projects is None:
+        data["projects"] = {}
+    elif not isinstance(projects, dict):
+        raise _error("TOOL_EXECUTION_FAILED", "Runtime project registry overlay is malformed.")
+    return original, data, runtime_path
+
+
+def _merged_registry_data(
+    source_data: dict[str, Any],
+    runtime_data: dict[str, Any],
+) -> dict[str, Any]:
+    source_projects = source_data.get("projects", {})
+    runtime_projects = runtime_data.get("projects", {})
+    merged = dict(source_data)
+    merged["projects"] = {
+        **(source_projects if isinstance(source_projects, dict) else {}),
+        **(runtime_projects if isinstance(runtime_projects, dict) else {}),
+    }
+    return merged
+
+
 def register_project(
     *,
     config_dir: Path,
@@ -262,8 +322,9 @@ def register_project(
     description: str = "",
     tags: list[str] | None = None,
     parent: str | None = None,
+    persist_to_source: bool = False,
 ) -> ProjectRegistrationResult:
-    """Validate and atomically append one project registry entry."""
+    """Validate and append one project entry to the selected registry store."""
 
     config_dir = config_dir.resolve()
     (
@@ -283,15 +344,28 @@ def register_project(
     )
 
     original, data, workspace_root = _load_registry(config_dir)
+    storage = "source_registry" if persist_to_source else "runtime_overlay"
+    if persist_to_source:
+        validation_data = data
+        target_root = config_dir
+        target_relative = "projects.yaml"
+        target_original = original
+    else:
+        runtime_original, runtime_data, runtime_path = _load_runtime_registry(config_dir)
+        validation_data = _merged_registry_data(data, runtime_data)
+        target_root = runtime_path.parent
+        target_relative = runtime_path.name
+        target_original = runtime_original
+
     _validate_against_registry(
-        data,
+        validation_data,
         workspace_root,
         project_id=project_id,
         root=root,
         parent=parent,
     )
     updated = _append_entry(
-        original,
+        target_original,
         project_id=project_id,
         root=root,
         project_type=project_type,
@@ -299,10 +373,10 @@ def register_project(
         tags=normalized_tags,
         parent=parent,
     )
-    expected_hash = "sha256:" + hashlib.sha256(original).hexdigest()
+    expected_hash = "sha256:" + hashlib.sha256(target_original).hexdigest()
     persisted = integrate_file(
-        config_dir,
-        "projects.yaml",
+        target_root,
+        target_relative,
         expected_hash,
         updated,
         journal_root,
@@ -315,4 +389,5 @@ def register_project(
         tags=normalized_tags,
         parent=parent,
         registry_hash=persisted.new_hash,
+        storage=storage,
     )

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from app.workspace.registry import WorkspaceRegistry, resolve_runtime_registry_path
 from examples.mcp_server import project_registry_control
 from examples.mcp_server.mcp_infra.adapters import supervisor
 from examples.mcp_server.supervisor_integration import HashMismatchError
@@ -45,8 +46,6 @@ def registry_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     class FreshRegistry:
         def project_info(self, project_id: str):
-            from app.workspace.registry import WorkspaceRegistry
-
             return WorkspaceRegistry.load(config_dir / "projects.yaml").project_info(
                 project_id
             )
@@ -55,7 +54,7 @@ def registry_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return config_dir, workspace_root, initial
 
 
-def test_register_uses_yaml_registry_root_and_preserves_existing_text(registry_layout):
+def test_register_uses_runtime_overlay_and_preserves_source_registry(registry_layout):
     config_dir, workspace_root, initial = registry_layout
     (workspace_root / "ECC").mkdir()
 
@@ -69,10 +68,42 @@ def test_register_uses_yaml_registry_root_and_preserves_existing_text(registry_l
 
     assert result["ok"] is True
     assert result["result"]["root"] == "ECC"
+    assert result["result"]["storage"] == "runtime_overlay"
+    assert result["result"]["source_registry_mutated"] is False
     assert result["result"]["cache_reset"] is True
     assert str(config_dir) not in repr(result)
     assert str(workspace_root) not in repr(result)
 
+    assert (config_dir / "projects.yaml").read_text(encoding="utf-8") == initial
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    assert runtime_path is not None
+    overlay = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
+    assert overlay["projects"]["ecc-reference"] == {
+        "root": "ECC",
+        "type": "reference",
+        "description": "Everything Claude Code reference",
+        "tags": ["reference", "agents"],
+    }
+    visible = WorkspaceRegistry.load(config_dir / "projects.yaml").project_info("ecc-reference")
+    assert visible["root"].endswith("ECC")
+
+
+def test_register_can_persist_to_source_when_explicitly_requested(registry_layout):
+    config_dir, workspace_root, initial = registry_layout
+    (workspace_root / "ECC").mkdir()
+
+    result = supervisor.supervisor_register_project(
+        "ecc-reference",
+        "ECC",
+        project_type="reference",
+        description="Everything Claude Code reference",
+        tags=["reference", "agents"],
+        persist_to_source=True,
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["storage"] == "source_registry"
+    assert result["result"]["source_registry_mutated"] is True
     text = (config_dir / "projects.yaml").read_text(encoding="utf-8")
     assert text.startswith(initial.rstrip("\n"))
     loaded = yaml.safe_load(text)
@@ -248,5 +279,8 @@ def test_cache_reset_failure_is_reported_without_hiding_persisted_write(
 
     assert result["ok"] is True
     assert result["result"]["cache_reset"] is False
-    loaded = yaml.safe_load((config_dir / "projects.yaml").read_text(encoding="utf-8"))
+    assert result["result"]["storage"] == "runtime_overlay"
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    assert runtime_path is not None
+    loaded = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
     assert "ecc-reference" in loaded["projects"]
