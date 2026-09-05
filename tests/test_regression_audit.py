@@ -129,6 +129,8 @@ class TestDeepSshCheck:
         ):
             mock_settings.ssh_health_user = "health"
             mock_settings.ssh_health_password = "pass"
+            mock_settings.ssh_host = "sshd"
+            mock_settings.ssh_port = 22
             mock_settings.redis_url = ""
             mock_settings.persistent_sessions_enabled = False
             mock_settings.api_auth_enabled = False

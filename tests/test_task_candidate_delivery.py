@@ -933,7 +933,7 @@ def _init_unrelated_root(tmp_path: Path) -> Path:
 def test_materialize_from_verified_bundle_when_local_checkout_lacks_base_object(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import examples.mcp_server.task_candidate as tc_mod
+    materialize_globals = materialize_task_candidate.__globals__
 
     bundle_source = tmp_path / "bundle-source"
     _init_repo(bundle_source)
@@ -953,7 +953,7 @@ def test_materialize_from_verified_bundle_when_local_checkout_lacks_base_object(
         assert (project, ref) == (PROJECT, base)
         return ManagedSourcePublication(str(bundle_path), "a" * 64)
 
-    monkeypatch.setattr(tc_mod, "ensure_managed_source_bundle", fake_ensure)
+    monkeypatch.setitem(materialize_globals, "ensure_managed_source_bundle", fake_ensure)
     receipt = materialize_task_candidate(
         project_root=root,
         project=PROJECT,
@@ -981,7 +981,7 @@ def test_materialize_from_verified_bundle_when_local_checkout_lacks_base_object(
 def test_managed_source_publication_failure_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import examples.mcp_server.task_candidate as tc_mod
+    materialize_globals = materialize_task_candidate.__globals__
 
     root = tmp_path / "repo"
     _init_repo(root)
@@ -990,7 +990,7 @@ def test_managed_source_publication_failure_fails_closed(
     def failing_ensure(project: str, ref: str) -> ManagedSourcePublication:
         raise ManagedSourceBundleError("publication boom")
 
-    monkeypatch.setattr(tc_mod, "ensure_managed_source_bundle", failing_ensure)
+    monkeypatch.setitem(materialize_globals, "ensure_managed_source_bundle", failing_ensure)
     with pytest.raises(CandidateError) as excinfo:
         materialize_task_candidate(
             project_root=root,
