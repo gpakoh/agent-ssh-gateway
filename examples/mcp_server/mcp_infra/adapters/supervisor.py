@@ -304,9 +304,8 @@ def supervisor_register_project(
     description: str = "",
     tags: list[str] | None = None,
     parent: str | None = None,
-    persist_to_source: bool = False,
 ) -> dict[str, Any]:
-    """Register one existing directory without dirtying source registry by default."""
+    """Register one existing directory in the runtime overlay."""
     return run_tool(
         tool="supervisor_register_project",
         title="Supervisor register project",
@@ -317,7 +316,7 @@ def supervisor_register_project(
             description,
             tags,
             parent,
-            persist_to_source,
+            False,
         ),
         success_text="Project registration completed.",
     )
