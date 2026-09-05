@@ -9,6 +9,10 @@ from pathlib import Path
 import pytest
 
 from examples.mcp_server.agent_paths import task_dir
+from examples.mcp_server.agent_sources import (
+    ManagedSourceBundleError,
+    ManagedSourcePublication,
+)
 from examples.mcp_server.task_candidate import (
     CONTRACT_FILENAME,
     RECEIPT_FILENAME,
@@ -57,12 +61,13 @@ def _write_evidence(
     *,
     checks_rc: int = 0,
     fingerprint: str = "fingerprint-001",
+    base: str | None = None,
 ) -> tuple[str, Path]:
     state = root.parent / "state"
     candidate = root.parent / "candidate-store"
     monkeypatch.setenv("MCP_AGENT_STATE_ROOT", str(state))
     monkeypatch.setenv("MCP_TASK_CANDIDATE_ROOT", str(candidate))
-    base = _git(root, "rev-parse", "HEAD")
+    base = base if base is not None else _git(root, "rev-parse", "HEAD")
     td = Path(task_dir(PROJECT, TASK))
     td.mkdir(parents=True)
     patch = (
@@ -806,7 +811,72 @@ def test_existing_receipt_idempotency_does_not_rerun_verifier(
         verifier_calls["n"] += 1
         _verify_success(repo, expected_sha, checks)
 
-    kwargs = dict(
+    def materialize_once() -> dict[str, object]:
+        return materialize_task_candidate(
+            project_root=root,
+            project=PROJECT,
+            task_id=TASK,
+            destination_owner=OWNER,
+            destination_repo=REPO,
+            destination_branch=BRANCH,
+            expected_diff_sha256=_diff_sha(td),
+            job_result=_job_success,
+            verify_candidate=verifier,
+        )
+
+    first = materialize_once()
+    second = materialize_once()
+    assert verifier_calls["n"] == 1
+    assert first == second
+    assert first["candidate_head_sha"] == second["candidate_head_sha"]
+
+
+def _build_bundle(tmp_path: Path, source: Path) -> tuple[Path, str]:
+    base = _git(source, "rev-parse", "HEAD")
+    bundle_path = tmp_path / "bundles" / f"{base}.bundle"
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    _git(source, "bundle", "create", str(bundle_path), "HEAD")
+    return bundle_path, base
+
+
+def _init_unrelated_root(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "config", "user.email", "test@example.invalid")
+    (root / "base.txt").write_text("base\n", encoding="utf-8")
+    (root / "root-marker.txt").write_text("distinct\n", encoding="utf-8")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "unrelated root")
+    return root
+
+
+def test_materialize_from_verified_bundle_when_local_checkout_lacks_base_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import examples.mcp_server.task_candidate as tc_mod
+
+    bundle_source = tmp_path / "bundle-source"
+    _init_repo(bundle_source)
+    bundle_path, base = _build_bundle(tmp_path, bundle_source)
+    root = _init_unrelated_root(tmp_path)
+    missing = subprocess.run(
+        ["git", "cat-file", "-e", f"{base}^{{commit}}"],
+        cwd=root,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert missing.returncode != 0
+    _, td = _write_evidence(root, monkeypatch, base=base)
+
+    def fake_ensure(project: str, ref: str) -> ManagedSourcePublication:
+        assert (project, ref) == (PROJECT, base)
+        return ManagedSourcePublication(str(bundle_path), "a" * 64)
+
+    monkeypatch.setattr(tc_mod, "ensure_managed_source_bundle", fake_ensure)
+    receipt = materialize_task_candidate(
         project_root=root,
         project=PROJECT,
         task_id=TASK,
@@ -815,10 +885,46 @@ def test_existing_receipt_idempotency_does_not_rerun_verifier(
         destination_branch=BRANCH,
         expected_diff_sha256=_diff_sha(td),
         job_result=_job_success,
-        verify_candidate=verifier,
+        verify_candidate=_verify_success,
     )
-    first = materialize_task_candidate(**kwargs)
-    second = materialize_task_candidate(**kwargs)
-    assert verifier_calls["n"] == 1
-    assert first == second
-    assert first["candidate_head_sha"] == second["candidate_head_sha"]
+    checked, staging = validate_task_candidate_for_push(
+        project_root=root,
+        project=PROJECT,
+        task_id=TASK,
+        destination_owner=OWNER,
+        destination_repo=REPO,
+        destination_branch=BRANCH,
+        expected_sha=receipt["candidate_head_sha"],
+    )
+    assert checked == receipt
+    assert _git(staging, "show", "HEAD:base.txt") == "candidate"
+
+
+def test_managed_source_publication_failure_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import examples.mcp_server.task_candidate as tc_mod
+
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _, td = _write_evidence(root, monkeypatch)
+
+    def failing_ensure(project: str, ref: str) -> ManagedSourcePublication:
+        raise ManagedSourceBundleError("publication boom")
+
+    monkeypatch.setattr(tc_mod, "ensure_managed_source_bundle", failing_ensure)
+    with pytest.raises(CandidateError) as excinfo:
+        materialize_task_candidate(
+            project_root=root,
+            project=PROJECT,
+            task_id=TASK,
+            destination_owner=OWNER,
+            destination_repo=REPO,
+            destination_branch=BRANCH,
+            expected_diff_sha256=_diff_sha(td),
+            job_result=_job_success,
+            verify_candidate=_verify_success,
+        )
+    assert excinfo.value.code == "SOURCE_UNAVAILABLE"
+    candidate_root = tmp_path / "candidate-store"
+    assert not any(p.name.startswith(".materialize-") for p in candidate_root.rglob("*"))

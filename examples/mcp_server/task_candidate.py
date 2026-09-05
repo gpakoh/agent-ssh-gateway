@@ -28,6 +28,10 @@ from typing import Any
 
 from examples.mcp_client_remote.fleet.shared import validate_repo_owner_or_name
 from examples.mcp_server.agent_paths import task_dir
+from examples.mcp_server.agent_sources import (
+    ManagedSourceBundleError,
+    ensure_managed_source_bundle,
+)
 from examples.mcp_server.agent_tasks import (
     validate_required_checks,
     validate_scope_contract,
@@ -259,7 +263,24 @@ def _load_evidence(project_root: str | Path, project: str, task_id: str) -> dict
     }
 
 
+def _managed_source_bundle(project: str, base_head: str) -> Path | None:
+    """Return a verified immutable source bundle path for ``base_head``."""
+    try:
+        publication = ensure_managed_source_bundle(project, base_head)
+    except (ManagedSourceBundleError, ValueError) as exc:
+        raise CandidateError(
+            "managed source bundle for candidate base_head is unavailable",
+            code="SOURCE_UNAVAILABLE",
+            retryable=True,
+            hint="Confirm the trusted remote contains the exact base commit.",
+        ) from exc
+    if publication is None:
+        return None
+    return Path(publication.path)
+
+
 def _run_git(cwd: Path, args: list[str], *, env: dict[str, str] | None = None) -> str:
+    subcommand = args[0] if args else "git"
     try:
         result = subprocess.run(
             ["git", *args],
@@ -271,9 +292,13 @@ def _run_git(cwd: Path, args: list[str], *, env: dict[str, str] | None = None) -
             env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise CandidateError("candidate Git operation did not complete") from exc
+        raise CandidateError(f"candidate Git {subcommand} operation did not complete") from exc
     if result.returncode != 0:
-        raise CandidateError("candidate Git operation failed")
+        detail = (result.stderr or "").strip()[:1024]
+        message = f"candidate Git {subcommand} operation failed"
+        if detail:
+            message = f"{message}: {detail}"
+        raise CandidateError(message)
     return result.stdout.strip()
 
 
@@ -785,25 +810,50 @@ def _materialize_task_candidate_unlocked(
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_TERMINAL_PROMPT": "0",
     }
-    commit_date = _run_git(
-        root, ["show", "-s", "--format=%cI", evidence["base_head"]], env=clean_env
-    )
-    if not commit_date:
-        raise CandidateError("candidate base commit date is unavailable")
-    commit_env = dict(clean_env)
-    commit_env.update(
-        {
-            "GIT_AUTHOR_NAME": "MCP Control Plane",
-            "GIT_AUTHOR_EMAIL": "control-plane@gateway.invalid",
-            "GIT_COMMITTER_NAME": "MCP Control Plane",
-            "GIT_COMMITTER_EMAIL": "control-plane@gateway.invalid",
-            "GIT_AUTHOR_DATE": commit_date,
-            "GIT_COMMITTER_DATE": commit_date,
-        }
-    )
     try:
-        _run_git(root, ["clone", "--local", "--no-hardlinks", "--no-checkout", str(root), str(repo_tmp)], env=clean_env)
-        _run_git(repo_tmp, ["checkout", "--detach", "--quiet", evidence["base_head"]], env=clean_env)
+        bundle_path = _managed_source_bundle(project, evidence["base_head"])
+        if bundle_path is not None:
+            _run_git(
+                tmp,
+                ["clone", "--no-checkout", str(bundle_path), str(repo_tmp)],
+                env=clean_env,
+            )
+        else:
+            _run_git(
+                root,
+                [
+                    "clone",
+                    "--local",
+                    "--no-hardlinks",
+                    "--no-checkout",
+                    str(root),
+                    str(repo_tmp),
+                ],
+                env=clean_env,
+            )
+        _run_git(
+            repo_tmp,
+            ["checkout", "--detach", "--quiet", evidence["base_head"]],
+            env=clean_env,
+        )
+        commit_date = _run_git(
+            repo_tmp,
+            ["show", "-s", "--format=%cI", evidence["base_head"]],
+            env=clean_env,
+        )
+        if not commit_date:
+            raise CandidateError("candidate base commit date is unavailable")
+        commit_env = dict(clean_env)
+        commit_env.update(
+            {
+                "GIT_AUTHOR_NAME": "MCP Control Plane",
+                "GIT_AUTHOR_EMAIL": "control-plane@gateway.invalid",
+                "GIT_COMMITTER_NAME": "MCP Control Plane",
+                "GIT_COMMITTER_EMAIL": "control-plane@gateway.invalid",
+                "GIT_AUTHOR_DATE": commit_date,
+                "GIT_COMMITTER_DATE": commit_date,
+            }
+        )
         patch_path = tmp / "implementation-diff.patch"
         patch_path.write_bytes(evidence["implementation_diff"])
         _run_git(repo_tmp, ["apply", "--binary", str(patch_path)], env=clean_env)
