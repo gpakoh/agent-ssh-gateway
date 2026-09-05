@@ -21,6 +21,8 @@ MAX_FILE_SIZE = 256 * 1024
 # returned to a caller. Centralized so both the low-level client and the MCP
 # tool can opt in to a smaller, less chat-spammy cap than MAX_FILE_SIZE.
 DEFAULT_GET_FILE_MAX_CONTENT_BYTES = 16 * 1024
+DEFAULT_ACTION_JOB_LOG_MAX_BYTES = 64 * 1024
+MAX_ACTION_JOB_LOG_BYTES = 256 * 1024
 REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 # Gitea's Actions run-list API accepts `in_progress`, while the operator-facing
@@ -52,6 +54,7 @@ ALLOWED_ENDPOINTS = frozenset(
         "/repos/{owner}/{repo}/actions/runs",
         "/repos/{owner}/{repo}/actions/runs/{run_id}",
         "/repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
+        "/repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
         "/repos/{owner}/{repo}/actions/workflows",
     }
 )
@@ -113,6 +116,35 @@ def _normalize_action_run_status_filter(status: str | None) -> str | None:
         allowed = ", ".join(sorted(_ALLOWED_ACTION_RUN_STATUS_FILTERS | set(_ACTION_RUN_STATUS_ALIASES)))
         raise ValueError(f"status must be one of: {allowed}")
     return normalized
+
+
+def _validate_positive_int(value: int, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{label} must be a positive integer")
+    return value
+
+
+def _validate_action_job_log_max_bytes(max_bytes: int) -> int:
+    max_bytes = _validate_positive_int(max_bytes, "max_bytes")
+    if max_bytes > MAX_ACTION_JOB_LOG_BYTES:
+        raise ValueError(f"max_bytes must be <= {MAX_ACTION_JOB_LOG_BYTES}")
+    return max_bytes
+
+
+def _redact_action_job_log(text: str) -> tuple[str, bool]:
+    """Redact common secret-bearing log fragments before returning CI logs."""
+    patterns = (
+        re.compile(
+            r"(?i)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASS|API_KEY|JWT|BEARER|AUTH)[A-Z0-9_]*)\s*=\s*([^\s]+)"
+        ),
+        re.compile(r"(?i)(Authorization:\s*)(?:Bearer|token)\s+[^\s]+"),
+        re.compile(r"https?://[^\s/@:]+:[^\s/@]+@"),
+    )
+    redacted = text
+    redacted = patterns[0].sub(r"\1=<redacted>", redacted)
+    redacted = patterns[1].sub(r"\1<redacted>", redacted)
+    redacted = patterns[2].sub("https://<redacted>@", redacted)
+    return redacted, redacted != text
 
 
 class GiteaClient:
@@ -187,6 +219,36 @@ class GiteaClient:
                 response=exc.response,
             ) from None
         return resp.json()
+
+    async def _get_text(
+        self,
+        endpoint: str,
+        params: dict[str, Any] | None = None,
+        **path_params: Any,
+    ) -> str:
+        if endpoint not in ALLOWED_ENDPOINTS:
+            raise ValueError(f"Endpoint not allowed: {endpoint}")
+        if "owner" in path_params:
+            validate_repo_owner_or_name(path_params["owner"], label="owner")
+        if "repo" in path_params:
+            validate_repo_owner_or_name(path_params["repo"], label="repo")
+        if "job_id" in path_params:
+            path_params = dict(path_params)
+            path_params["job_id"] = _validate_positive_int(path_params["job_id"], "job_id")
+        path = endpoint.format(**path_params)
+        resp = await self._client.get(path, params=params)
+        if resp.status_code in (401, 403):
+            detail = resp.json().get("message", "unauthorized")
+            raise PermissionError(f"gitea api {path}: {detail}")
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise httpx.HTTPStatusError(
+                f"gitea api {path}: {resp.status_code} {resp.reason_phrase}",
+                request=exc.request,
+                response=exc.response,
+            ) from None
+        return resp.text
 
     async def get_user(self) -> dict[str, Any]:
         return await self._get("/user")
@@ -552,6 +614,39 @@ class GiteaClient:
             repo=repo,
             run_id=run_id,
         )
+
+    async def get_action_job_logs(
+        self,
+        owner: str,
+        repo: str,
+        job_id: int,
+        *,
+        max_bytes: int = DEFAULT_ACTION_JOB_LOG_MAX_BYTES,
+    ) -> dict[str, Any]:
+        max_bytes = _validate_action_job_log_max_bytes(max_bytes)
+        job_id = _validate_positive_int(job_id, "job_id")
+        text = await self._get_text(
+            "/repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
+            owner=owner,
+            repo=repo,
+            job_id=job_id,
+        )
+        text, redacted = _redact_action_job_log(text)
+        encoded = text.encode("utf-8", "replace")
+        total_bytes = len(encoded)
+        truncated = total_bytes > max_bytes
+        if truncated:
+            encoded = encoded[-max_bytes:]
+            text = encoded.decode("utf-8", "replace")
+        return {
+            "job_id": job_id,
+            "logs": text,
+            "bytes_returned": len(encoded),
+            "bytes_total_after_redaction": total_bytes,
+            "truncated": truncated,
+            "truncation": "tail" if truncated else None,
+            "redacted": redacted,
+        }
 
     async def list_workflows(
         self,

@@ -14,7 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from .gitea_client import GiteaClient
+from .gitea_client import DEFAULT_ACTION_JOB_LOG_MAX_BYTES, GiteaClient
 from .shared import (
     extract_auth_token,
     get_fleet_env,
@@ -220,6 +220,27 @@ async def gitea_list_action_run_jobs(
     except Exception as exc:
         return remote_api_error("gitea_list_action_run_jobs", "gitea", exc)
     return tool_success("gitea_list_action_run_jobs", data, source="gitea")
+
+
+@mcp.tool()
+async def gitea_get_action_job_logs(
+    owner: str,
+    repo: str,
+    job_id: int,
+    max_bytes: int = DEFAULT_ACTION_JOB_LOG_MAX_BYTES,
+) -> dict[str, Any]:
+    """Download a bounded, redacted tail of one Gitea Actions job log."""
+    try:
+        async with _get_client() as client:
+            data = await client.get_action_job_logs(
+                owner,
+                repo,
+                job_id,
+                max_bytes=max_bytes,
+            )
+    except Exception as exc:
+        return remote_api_error("gitea_get_action_job_logs", "gitea", exc)
+    return tool_success("gitea_get_action_job_logs", data, source="gitea")
 
 
 @mcp.tool()

@@ -239,6 +239,78 @@ class TestGiteaToolsContractV1:
         assert result["error"]["code"] == "INVALID_INPUT"
         list_branches.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_gitea_get_action_job_logs_returns_bounded_contract_result(self, monkeypatch):
+        payload = {
+            "job_id": 39251,
+            "logs": "failure tail",
+            "bytes_returned": 12,
+            "bytes_total_after_redaction": 12,
+            "truncated": False,
+            "truncation": None,
+            "redacted": False,
+        }
+        methods = {"get_action_job_logs": AsyncMock(return_value=payload)}
+        monkeypatch.setattr(
+            mcp_server_mod, "GiteaClient", lambda token: _FakeRemoteClient(methods)
+        )
+        monkeypatch.setenv("GITEA_TOKEN", "tok")
+
+        result = await mcp_server_mod.gitea_get_action_job_logs(
+            "gpakoh",
+            "web-ssh-gateway",
+            39251,
+            max_bytes=100,
+            tail_lines=1,
+        )
+
+        _assert_envelope(result)
+        assert result["meta"]["source"] == "gitea"
+        assert result["result"] == {
+            **payload,
+            "lines_total_after_byte_limit": 1,
+            "lines_returned": 1,
+            "line_truncated": False,
+        }
+        methods["get_action_job_logs"].assert_awaited_once_with(
+            "gpakoh",
+            "web-ssh-gateway",
+            39251,
+            max_bytes=100,
+        )
+
+    @pytest.mark.asyncio
+    async def test_gitea_get_action_job_logs_rejects_bad_tail_lines(self, monkeypatch):
+        get_logs = AsyncMock(return_value={"job_id": 1, "logs": ""})
+        monkeypatch.setattr(
+            mcp_server_mod, "GiteaClient", lambda token: _FakeRemoteClient({"get_action_job_logs": get_logs})
+        )
+        monkeypatch.setenv("GITEA_TOKEN", "tok")
+
+        result = await mcp_server_mod.gitea_get_action_job_logs(
+            "gpakoh",
+            "web-ssh-gateway",
+            39251,
+            tail_lines=0,
+        )
+
+        _assert_envelope(result, ok=False)
+        assert result["error"]["code"] == "INVALID_INPUT"
+        get_logs.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_gitea_get_action_job_logs_missing_token_is_contract_v1_error(self, monkeypatch):
+        monkeypatch.delenv("GITEA_TOKEN", raising=False)
+
+        result = await mcp_server_mod.gitea_get_action_job_logs(
+            "gpakoh",
+            "web-ssh-gateway",
+            39251,
+        )
+
+        _assert_envelope(result, ok=False)
+        assert result["error"]["code"] == "DEPENDENCY_MISSING"
+
 
 class TestGitHubToolsContractV1:
     @pytest.mark.asyncio

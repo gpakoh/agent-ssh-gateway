@@ -56,6 +56,9 @@ from examples.mcp_server.verified_workspace import (
 # MAX_FILE_SIZE fallback). See DEFAULT_GET_FILE_MAX_CONTENT_BYTES in
 # gitea_client.py for the client-level counterpart.
 GITEA_GET_FILE_DEFAULT_MAX_CONTENT_BYTES = 16 * 1024
+GITEA_ACTION_JOB_LOG_DEFAULT_MAX_BYTES = 64 * 1024
+GITEA_ACTION_JOB_LOG_DEFAULT_TAIL_LINES = 300
+GITEA_ACTION_JOB_LOG_MAX_TAIL_LINES = 1000
 
 
 def _server_gitea_client():
@@ -1159,6 +1162,63 @@ async def gitea_list_action_run_jobs(owner: str, repo: str, run_id: int) -> dict
     return tool_success("gitea_list_action_run_jobs", result=data, source="gitea")
 
 
+def _validate_action_log_tail_lines(tail_lines: int) -> int:
+    if (
+        isinstance(tail_lines, bool)
+        or not isinstance(tail_lines, int)
+        or tail_lines < 1
+        or tail_lines > GITEA_ACTION_JOB_LOG_MAX_TAIL_LINES
+    ):
+        raise ValueError(f"tail_lines must be an integer from 1 to {GITEA_ACTION_JOB_LOG_MAX_TAIL_LINES}")
+    return tail_lines
+
+
+def _tail_action_log(data: dict[str, Any], tail_lines: int) -> dict[str, Any]:
+    logs = str(data.get("logs") or "")
+    lines = logs.splitlines()
+    data = dict(data)
+    data["lines_total_after_byte_limit"] = len(lines)
+    if len(lines) > tail_lines:
+        data["logs"] = "\n".join(lines[-tail_lines:])
+        data["lines_returned"] = tail_lines
+        data["line_truncated"] = True
+    else:
+        data["lines_returned"] = len(lines)
+        data["line_truncated"] = False
+    return data
+
+
+async def gitea_get_action_job_logs(
+    owner: str,
+    repo: str,
+    job_id: int,
+    max_bytes: int = GITEA_ACTION_JOB_LOG_DEFAULT_MAX_BYTES,
+    tail_lines: int = GITEA_ACTION_JOB_LOG_DEFAULT_TAIL_LINES,
+) -> dict[str, Any]:
+    """Download a bounded, redacted tail of one Gitea Actions job log."""
+    token = os.environ.get("GITEA_TOKEN", "")
+    if not token:
+        return tool_error(
+            tool="gitea_get_action_job_logs",
+            code="DEPENDENCY_MISSING",
+            message="GITEA_TOKEN not configured",
+            source="gitea",
+        )
+    try:
+        tail_lines = _validate_action_log_tail_lines(tail_lines)
+        async with _server_gitea_client()(token) as client:
+            data = await client.get_action_job_logs(
+                owner,
+                repo,
+                job_id,
+                max_bytes=max_bytes,
+            )
+            data = _tail_action_log(data, tail_lines)
+    except Exception as exc:
+        return _remote_api_error("gitea_get_action_job_logs", "gitea", exc)
+    return tool_success("gitea_get_action_job_logs", result=data, source="gitea")
+
+
 async def gitea_list_workflows(owner: str, repo: str) -> dict[str, Any]:
     """List Gitea Actions workflow files in a repository."""
     token = os.environ.get("GITEA_TOKEN", "")
@@ -1790,6 +1850,7 @@ def register_all() -> None:
     register_tool("gitea_list_action_runs")(gitea_list_action_runs)
     register_tool("gitea_get_action_run")(gitea_get_action_run)
     register_tool("gitea_list_action_run_jobs")(gitea_list_action_run_jobs)
+    register_tool("gitea_get_action_job_logs")(gitea_get_action_job_logs)
     register_tool("gitea_list_workflows")(gitea_list_workflows)
     register_tool("github_get_repo")(github_get_repo)
     register_tool("github_list_branches")(github_list_branches)

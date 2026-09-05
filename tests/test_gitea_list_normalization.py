@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "mcp_client_remote"))
 
-from fleet.gitea_client import _normalize_action_run_status_filter
+from fleet.gitea_client import (
+    MAX_ACTION_JOB_LOG_BYTES,
+    GiteaClient,
+    _normalize_action_run_status_filter,
+)
 from fleet.shared import minimize_action_run_payload, normalize_list_response
 
 
@@ -156,3 +161,71 @@ async def test_gitea_get_action_run_uses_minimized_payload(monkeypatch):
     assert "last_login" not in serialized
     assert "clone_url" not in serialized
     assert "topics" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_gitea_get_action_job_logs_fetches_text_tail_and_redacts(monkeypatch):
+    async def fake_get_text(self, endpoint, params=None, **path_params):
+        assert endpoint == "/repos/{owner}/{repo}/actions/jobs/{job_id}/logs"
+        assert params is None
+        assert path_params == {"owner": "owner", "repo": "repo", "job_id": 456}
+        return "first line\nSECRET_TOKEN=abc123\nAuthorization: Bearer raw-token\nfinal failure\n"
+
+    monkeypatch.setattr(GiteaClient, "_get_text", fake_get_text)
+
+    client = GiteaClient("token")
+    try:
+        out = await client.get_action_job_logs("owner", "repo", 456, max_bytes=200)
+    finally:
+        await client.aclose()
+
+    assert out["job_id"] == 456
+    assert out["truncated"] is False
+    assert out["redacted"] is True
+    assert "final failure" in out["logs"]
+    assert "abc123" not in out["logs"]
+    assert "raw-token" not in out["logs"]
+    assert "SECRET_TOKEN=<redacted>" in out["logs"]
+    assert "Authorization: <redacted>" in out["logs"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_get_action_job_logs_returns_bounded_tail(monkeypatch):
+    async def fake_get_text(self, endpoint, params=None, **path_params):
+        return "prefix\n" + "x" * 100 + "TAIL"
+
+    monkeypatch.setattr(GiteaClient, "_get_text", fake_get_text)
+
+    client = GiteaClient("token")
+    try:
+        out = await client.get_action_job_logs("owner", "repo", 456, max_bytes=8)
+    finally:
+        await client.aclose()
+
+    assert out["truncated"] is True
+    assert out["truncation"] == "tail"
+    assert out["logs"] == "xxxxTAIL"
+    assert out["bytes_returned"] == 8
+    assert out["bytes_total_after_redaction"] > out["bytes_returned"]
+
+
+@pytest.mark.asyncio
+async def test_gitea_get_action_job_logs_rejects_bad_bounds_before_http(monkeypatch):
+    get_text = AsyncMock(return_value="never called")
+    monkeypatch.setattr(GiteaClient, "_get_text", get_text)
+
+    client = GiteaClient("token")
+    try:
+        with pytest.raises(ValueError, match="job_id must be a positive integer"):
+            await client.get_action_job_logs("owner", "repo", 0)
+        with pytest.raises(ValueError, match="max_bytes must be <="):
+            await client.get_action_job_logs(
+                "owner",
+                "repo",
+                456,
+                max_bytes=MAX_ACTION_JOB_LOG_BYTES + 1,
+            )
+    finally:
+        await client.aclose()
+
+    get_text.assert_not_awaited()

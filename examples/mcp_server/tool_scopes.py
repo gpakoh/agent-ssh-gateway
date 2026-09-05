@@ -150,6 +150,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "gitea_list_action_runs": ["mcp:repo"],
     "gitea_get_action_run": ["mcp:repo"],
     "gitea_list_action_run_jobs": ["mcp:repo"],
+    "gitea_get_action_job_logs": ["mcp:repo"],
     "gitea_list_workflows": ["mcp:repo"],
     "github_get_repo": ["mcp:repo"],
     "github_list_branches": ["mcp:repo"],
