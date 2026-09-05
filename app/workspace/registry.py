@@ -208,7 +208,8 @@ def load_registry(path: str | Path) -> tuple[dict[str, ProjectInfo], Path]:
         if not runtime_path.is_file():
             raise WorkspacePolicyError("Runtime registry overlay path is not a file")
         overlay_raw = runtime_path.read_text(encoding="utf-8")
-        overlay_data: dict[str, Any] = yaml.safe_load(overlay_raw) or {}
+        overlay_loaded = yaml.safe_load(overlay_raw)
+        overlay_data: dict[str, Any] = {} if overlay_loaded is None else overlay_loaded
         if not isinstance(overlay_data, dict):
             raise WorkspacePolicyError("Runtime registry overlay must be a YAML mapping")
         overlay_projects = overlay_data.get("projects", {})

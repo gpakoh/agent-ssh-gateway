@@ -7,7 +7,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from app.workspace.registry import WorkspaceRegistry, resolve_runtime_registry_path
+from app.workspace import registry as registry_mod
+from app.workspace.policy import WorkspacePolicyError
+from app.workspace.registry import (
+    WorkspaceRegistry,
+    load_registry,
+    resolve_registry_root,
+    resolve_runtime_registry_path,
+)
 from examples.mcp_server import project_registry_control
 from examples.mcp_server.mcp_infra.adapters import supervisor
 from examples.mcp_server.supervisor_integration import HashMismatchError
@@ -52,6 +59,73 @@ def registry_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(supervisor, "_get_workspace_registry", lambda: FreshRegistry())
     return config_dir, workspace_root, initial
+
+
+def test_registry_root_can_be_overridden_without_cwd_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WORKSPACE_REGISTRY_ROOT", str(tmp_path))
+    monkeypatch.setattr(registry_mod, "_registry_root", None)
+
+    assert resolve_registry_root() == tmp_path.resolve()
+
+    registry_mod.set_registry_root(tmp_path / "explicit")
+    assert registry_mod.get_registry_root() == (tmp_path / "explicit").resolve()
+
+
+def test_runtime_registry_path_prefers_explicit_absolute_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    explicit = tmp_path / "runtime-projects.yaml"
+    journal = tmp_path / "journals"
+    monkeypatch.setenv("MCP_RUNTIME_PROJECTS_PATH", str(explicit))
+    monkeypatch.setenv("MCP_SUPERVISOR_JOURNAL_ROOT", str(journal))
+
+    assert resolve_runtime_registry_path(tmp_path / "projects.yaml") == explicit.resolve()
+
+
+@pytest.mark.parametrize("env_name", ["MCP_RUNTIME_PROJECTS_PATH", "MCP_SUPERVISOR_JOURNAL_ROOT"])
+def test_runtime_registry_path_rejects_relative_overrides(
+    env_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(env_name, "relative/path.yaml")
+    if env_name == "MCP_SUPERVISOR_JOURNAL_ROOT":
+        monkeypatch.delenv("MCP_RUNTIME_PROJECTS_PATH", raising=False)
+
+    with pytest.raises(WorkspacePolicyError, match=f"{env_name} must be absolute"):
+        resolve_runtime_registry_path(Path("projects.yaml"))
+
+
+@pytest.mark.parametrize(
+    ("overlay_content", "message"),
+    [
+        ("[]\n", "Runtime registry overlay must be a YAML mapping"),
+        ("projects: []\n", "Runtime registry overlay must contain a 'projects' mapping"),
+    ],
+)
+def test_load_registry_rejects_invalid_runtime_overlay(
+    registry_layout,
+    overlay_content: str,
+    message: str,
+) -> None:
+    config_dir, _workspace_root, _initial = registry_layout
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    assert runtime_path is not None
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text(overlay_content, encoding="utf-8")
+
+    with pytest.raises(WorkspacePolicyError, match=message):
+        load_registry(config_dir / "projects.yaml")
+
+
+def test_load_registry_rejects_runtime_overlay_directory(registry_layout) -> None:
+    config_dir, _workspace_root, _initial = registry_layout
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    assert runtime_path is not None
+    runtime_path.mkdir(parents=True)
+
+    with pytest.raises(WorkspacePolicyError, match="Runtime registry overlay path is not a file"):
+        load_registry(config_dir / "projects.yaml")
 
 
 def test_register_uses_runtime_overlay_and_preserves_source_registry(registry_layout):
