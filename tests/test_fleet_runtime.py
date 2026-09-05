@@ -84,8 +84,51 @@ async def test_full_pool_never_calls_submit():
     )
 
     assert result["status"] == "blocked"
-    assert result["fleet"]["active"] == 2
+    assert result["error_code"] == "FLEET_CAPACITY_EXHAUSTED"
+    assert result["retryable"] is True
+    assert result["retry_after_seconds"] == 60
+    assert result["queued"] is False
+    assert result["fallback"]["safe_when"] == "a terminal supervised implementation diff already exists"
+    assert result["fleet"] == {
+        "pool": "ssh-gateway/sshd",
+        "capacity": 2,
+        "active": 2,
+        "available": 0,
+        "retry_after_seconds": 60,
+        "queued": False,
+    }
     submit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_capacity_retry_after_is_operator_configurable(monkeypatch):
+    monkeypatch.setenv("MCP_AGENT_FLEET_CAPACITY_RETRY_AFTER_SECONDS", "120")
+    state = _mk_state()
+    state.acquire_slot = AsyncMock(
+        return_value=AdmissionResult(
+            acquired=False,
+            existing=False,
+            capacity=4,
+            active=3,
+            lease=None,
+        )
+    )
+
+    result = await _runtime(state).submit(
+        project="demo", task_id="task-1", submit_sync=MagicMock()
+    )
+
+    assert result["error_code"] == "FLEET_CAPACITY_EXHAUSTED"
+    assert result["retry_after_seconds"] == 120
+    assert result["fleet"]["available"] == 1
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "soon"])
+def test_capacity_retry_after_must_be_positive_integer(monkeypatch, value):
+    monkeypatch.setenv("MCP_AGENT_FLEET_CAPACITY_RETRY_AFTER_SECONDS", value)
+
+    with pytest.raises(FleetRuntimeError, match="MCP_AGENT_FLEET_CAPACITY_RETRY_AFTER_SECONDS"):
+        runtime_module._configured_capacity_retry_after_seconds()
 
 
 @pytest.mark.asyncio
