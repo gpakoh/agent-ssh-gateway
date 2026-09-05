@@ -9,20 +9,30 @@ import asyncio
 import pytest
 from fastapi.testclient import TestClient
 
+from app import user_auth as user_auth_mod
+from app.config import settings
 from app.main import app
 from app.user_auth import init_auth_db
 
-DB_PATH = os.environ["AUTH_DB_PATH"]
 SETUP_TOKEN = os.environ["SETUP_TOKEN"]
 
 
 @pytest.fixture(autouse=True)
-def _reset_db():
-    """Remove the test DB before each test so state is clean."""
-    if os.path.exists(DB_PATH):
-        os.remove(DB_PATH)
-    asyncio.run(init_auth_db())
+def _reset_db(tmp_path, monkeypatch):
+    """Use one fresh auth DB per test and dispose stale SQLite handles."""
+    async def reset() -> None:
+        if user_auth_mod._engine is not None:
+            await user_auth_mod._engine.dispose()
+        user_auth_mod._SessionLocal = None
+        monkeypatch.setattr(settings, "auth_db_path", str(tmp_path / "test_auth.sqlite3"))
+        await init_auth_db()
+
+    asyncio.run(reset())
     yield
+    if user_auth_mod._engine is not None:
+        asyncio.run(user_auth_mod._engine.dispose())
+        user_auth_mod._engine = None
+    user_auth_mod._SessionLocal = None
 
 
 client = TestClient(app)

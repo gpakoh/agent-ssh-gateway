@@ -86,7 +86,11 @@ def _base_client(live_server: Any) -> Any:
         api_key="test-key",
         session_id="seed-session",
         ssh_host="executor.invalid",
+        ssh_port=22,
         ssh_user="tester",
+        ssh_password="",
+        ssh_private_key="",
+        ssh_key_path="",
     )
 
 

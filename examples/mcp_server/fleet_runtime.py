@@ -72,8 +72,10 @@ _DSN_ENV: Final = "MCP_FLEET_DATABASE_URL"
 _POOL_ENV: Final = "MCP_AGENT_FLEET_POOL"
 _CAPACITY_ENV: Final = "MCP_AGENT_FLEET_CAPACITY"
 _COORDINATOR_ENV: Final = "MCP_AGENT_COORDINATOR_ID"
+_CAPACITY_RETRY_AFTER_ENV: Final = "MCP_AGENT_FLEET_CAPACITY_RETRY_AFTER_SECONDS"
 _DEFAULT_POOL: Final = "ssh-gateway/agent-sshd"
 _DEFAULT_GATEWAY_IO_CONCURRENCY: Final = 4
+_DEFAULT_CAPACITY_RETRY_AFTER_SECONDS: Final = 60
 _GATEWAY_TERMINAL: Final[frozenset[str]] = frozenset({"completed", "failed", "cancelled"})
 _PRE_SUBMIT_TERMINAL: Final[frozenset[str]] = frozenset(
     {"needs-review", "completed", "failed", "cancelled", "rate-limited", "startup-timeout", "run-timeout", "resource-exhausted", "blocked", "error"}
@@ -125,6 +127,22 @@ def _configured_capacity() -> int:
         raise FleetRuntimeError(f"{_CAPACITY_ENV} must be a positive integer") from exc
     if value <= 0:
         raise FleetRuntimeError(f"{_CAPACITY_ENV} must be a positive integer")
+    return value
+
+
+def _configured_capacity_retry_after_seconds() -> int:
+    raw = os.environ.get(
+        _CAPACITY_RETRY_AFTER_ENV,
+        str(_DEFAULT_CAPACITY_RETRY_AFTER_SECONDS),
+    ).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise FleetRuntimeError(
+            f"{_CAPACITY_RETRY_AFTER_ENV} must be a positive integer"
+        ) from exc
+    if value <= 0:
+        raise FleetRuntimeError(f"{_CAPACITY_RETRY_AFTER_ENV} must be a positive integer")
     return value
 
 
@@ -250,14 +268,26 @@ class FleetRuntime:
             raise
         if not admission.acquired or admission.lease is None:
             self._gateway_io_gate.release()
+            retry_after_seconds = _configured_capacity_retry_after_seconds()
             return {
                 "task_id": task_id,
                 "status": "blocked",
+                "error_code": "FLEET_CAPACITY_EXHAUSTED",
                 "error": "Fleet worker pool is at capacity",
+                "retryable": True,
+                "retry_after_seconds": retry_after_seconds,
+                "queued": False,
+                "fallback": {
+                    "safe_when": "a terminal supervised implementation diff already exists",
+                    "next_step": "inspect the task evidence and use the trusted materialization path instead of launching another worker",
+                },
                 "fleet": {
                     "pool": self.pool_name,
                     "capacity": admission.capacity,
                     "active": admission.active,
+                    "available": max(admission.capacity - admission.active, 0),
+                    "retry_after_seconds": retry_after_seconds,
+                    "queued": False,
                 },
             }
         lease = admission.lease

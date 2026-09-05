@@ -13,7 +13,13 @@ from typing import Any
 
 import yaml
 
-from app.workspace.registry import get_registry, reset_registry
+from app.workspace.registry import get_registry, reset_registry, resolve_runtime_registry_path
+from examples.mcp_server.agent_sources import (
+    ManagedSourceBundleError,
+    _resolve_trusted_remote,
+    ensure_managed_source_bundle,
+)
+from examples.mcp_server.managed_git import _minimal_git_env
 from examples.mcp_server.project_registry_control import (
     ProjectRegistrationError,
     register_project,
@@ -226,6 +232,79 @@ def _run_git(
     return result.stdout.strip()
 
 
+def _local_commit_or_none(source_root: Path, ref: str) -> str | None:
+    try:
+        resolved = _run_git(
+            source_root,
+            ["rev-parse", "--verify", f"{ref}^{{commit}}"],
+            operation="resolve base ref",
+        ).lower()
+    except CandidateCloneError as exc:
+        details = exc.details or {}
+        stderr = str(details.get("stderr_tail") or "").lower()
+        missing_markers = (
+            "needed a single revision",
+            "unknown revision",
+            "bad revision",
+            "bad object",
+            "not a valid object name",
+            "ambiguous argument",
+        )
+        if any(marker in stderr for marker in missing_markers):
+            return None
+        raise
+    return resolved if re.fullmatch(r"[0-9a-f]{40}", resolved) else None
+
+
+def _remote_ref_sha(source_root: Path, base_ref: str) -> str | None:
+    try:
+        clone_url, token = _resolve_trusted_remote(source_root)
+    except ManagedSourceBundleError:
+        return None
+    if re.fullmatch(r"[0-9a-f]{40}", base_ref):
+        return base_ref.lower()
+    if base_ref.startswith("refs/"):
+        patterns = [base_ref]
+        if base_ref.startswith("refs/tags/"):
+            patterns.append(base_ref + "^{}")
+    else:
+        patterns = [
+            f"refs/heads/{base_ref}",
+            f"refs/tags/{base_ref}",
+            f"refs/tags/{base_ref}^{{}}",
+        ]
+    env = _minimal_git_env("_", token)
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--exit-code", clone_url, *patterns],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=60,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    candidates: list[tuple[str, str]] = []
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        sha, refname = parts
+        sha = sha.lower()
+        if re.fullmatch(r"[0-9a-f]{40}", sha):
+            candidates.append((refname, sha))
+    peeled = [sha for refname, sha in candidates if refname.endswith("^{}")]
+    if peeled:
+        return peeled[0]
+    exact_heads = [sha for refname, sha in candidates if refname == f"refs/heads/{base_ref}"]
+    if exact_heads:
+        return exact_heads[0]
+    return candidates[0][1] if candidates else None
+
+
 def _status_state(repo: Path) -> tuple[bool, str, int]:
     try:
         result = subprocess.run(
@@ -312,6 +391,7 @@ def _register_candidate(
     source_project: str,
 ) -> tuple[bool, str | None]:
     try:
+        runtime_overlay = resolve_runtime_registry_path(config_dir / "projects.yaml")
         result = register_project(
             config_dir=config_dir,
             journal_root=journal_root,
@@ -321,6 +401,7 @@ def _register_candidate(
             description=f"Durable writeable candidate clone for {source_project}",
             tags=["candidate", "agent", "durable"],
             parent=None,
+            persist_to_source=runtime_overlay is None,
         )
         reset_registry()
         return True, result.registry_hash
@@ -354,14 +435,27 @@ def prepare_candidate_clone(
     except ValueError as exc:
         raise _fail("POLICY_DENIED", "source project root is outside workspace registry root") from exc
 
-    base_expr = f"{base_ref}^{{commit}}" if base_ref else "HEAD^{commit}"
-    base_sha = _run_git(
-        source_root,
-        ["rev-parse", "--verify", base_expr],
-        operation="resolve base ref",
-    ).lower()
+    requested_ref = base_ref or "HEAD"
+    local_sha = _local_commit_or_none(source_root, requested_ref)
+    remote_sha = _remote_ref_sha(source_root, requested_ref) if base_ref else None
+    if base_ref and remote_sha is None and local_sha is None:
+        raise _fail(
+            "SOURCE_REF_NOT_AVAILABLE",
+            "base ref is unavailable in both trusted remote and local source",
+            retryable=True,
+            details={"base_ref": requested_ref},
+        )
+    base_sha = remote_sha or local_sha
+    if base_sha is None:
+        raise _fail(
+            "SOURCE_REPO_STALE",
+            "source repository cannot resolve the requested base commit",
+            retryable=True,
+            details={"base_ref": requested_ref},
+        )
     if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
-        raise _fail("TOOL_EXECUTION_FAILED", "base ref did not resolve to a commit")
+        raise _fail("SOURCE_REF_NOT_AVAILABLE", "base ref did not resolve to a commit")
+    local_has_base = _local_commit_or_none(source_root, base_sha) == base_sha
     project_id = _project_id(project, branch, base_sha)
     candidate_root = workspace_root / ".mcp-candidate-clones" / project_id
     relative_root = candidate_root.relative_to(workspace_root).as_posix()
@@ -401,13 +495,37 @@ def prepare_candidate_clone(
         if tmp.exists():
             shutil.rmtree(tmp)
         try:
-            _run_git(
-                source_root,
-                ["clone", "--local", "--no-hardlinks", str(source_root), str(tmp)],
-                timeout=120,
-                operation="clone source repository",
-                extra_safe_directories=(source_root / ".git",),
-            )
+            if local_has_base:
+                _run_git(
+                    source_root,
+                    ["clone", "--local", "--no-hardlinks", str(source_root), str(tmp)],
+                    timeout=120,
+                    operation="clone source repository",
+                    extra_safe_directories=(source_root / ".git",),
+                )
+            else:
+                try:
+                    publication = ensure_managed_source_bundle(project, base_sha)
+                except (ManagedSourceBundleError, ValueError) as exc:
+                    raise _fail(
+                        "SOURCE_REPO_STALE",
+                        "trusted remote base exists but cannot be materialized",
+                        retryable=True,
+                        details={"base_ref": requested_ref, "base_sha": base_sha},
+                    ) from exc
+                if publication is None:
+                    raise _fail(
+                        "SOURCE_REPO_STALE",
+                        "trusted remote base exists but managed source storage is unavailable",
+                        retryable=True,
+                        details={"base_ref": requested_ref, "base_sha": base_sha},
+                    )
+                _run_git(
+                    candidate_root.parent,
+                    ["clone", "--no-checkout", publication.path, str(tmp)],
+                    timeout=120,
+                    operation="clone managed source bundle",
+                )
             _run_git(
                 tmp,
                 ["checkout", "-B", branch, base_sha],

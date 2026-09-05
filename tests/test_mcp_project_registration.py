@@ -7,6 +7,14 @@ from pathlib import Path
 import pytest
 import yaml
 
+from app.workspace import registry as registry_mod
+from app.workspace.policy import WorkspacePolicyError
+from app.workspace.registry import (
+    WorkspaceRegistry,
+    load_registry,
+    resolve_registry_root,
+    resolve_runtime_registry_path,
+)
 from examples.mcp_server import project_registry_control
 from examples.mcp_server.mcp_infra.adapters import supervisor
 from examples.mcp_server.supervisor_integration import HashMismatchError
@@ -45,8 +53,6 @@ def registry_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     class FreshRegistry:
         def project_info(self, project_id: str):
-            from app.workspace.registry import WorkspaceRegistry
-
             return WorkspaceRegistry.load(config_dir / "projects.yaml").project_info(
                 project_id
             )
@@ -55,7 +61,74 @@ def registry_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return config_dir, workspace_root, initial
 
 
-def test_register_uses_yaml_registry_root_and_preserves_existing_text(registry_layout):
+def test_registry_root_can_be_overridden_without_cwd_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WORKSPACE_REGISTRY_ROOT", str(tmp_path))
+    monkeypatch.setattr(registry_mod, "_registry_root", None)
+
+    assert resolve_registry_root() == tmp_path.resolve()
+
+    registry_mod.set_registry_root(tmp_path / "explicit")
+    assert registry_mod.get_registry_root() == (tmp_path / "explicit").resolve()
+
+
+def test_runtime_registry_path_prefers_explicit_absolute_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    explicit = tmp_path / "runtime-projects.yaml"
+    journal = tmp_path / "journals"
+    monkeypatch.setenv("MCP_RUNTIME_PROJECTS_PATH", str(explicit))
+    monkeypatch.setenv("MCP_SUPERVISOR_JOURNAL_ROOT", str(journal))
+
+    assert resolve_runtime_registry_path(tmp_path / "projects.yaml") == explicit.resolve()
+
+
+@pytest.mark.parametrize("env_name", ["MCP_RUNTIME_PROJECTS_PATH", "MCP_SUPERVISOR_JOURNAL_ROOT"])
+def test_runtime_registry_path_rejects_relative_overrides(
+    env_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(env_name, "relative/path.yaml")
+    if env_name == "MCP_SUPERVISOR_JOURNAL_ROOT":
+        monkeypatch.delenv("MCP_RUNTIME_PROJECTS_PATH", raising=False)
+
+    with pytest.raises(WorkspacePolicyError, match=f"{env_name} must be absolute"):
+        resolve_runtime_registry_path(Path("projects.yaml"))
+
+
+@pytest.mark.parametrize(
+    ("overlay_content", "message"),
+    [
+        ("[]\n", "Runtime registry overlay must be a YAML mapping"),
+        ("projects: []\n", "Runtime registry overlay must contain a 'projects' mapping"),
+    ],
+)
+def test_load_registry_rejects_invalid_runtime_overlay(
+    registry_layout,
+    overlay_content: str,
+    message: str,
+) -> None:
+    config_dir, _workspace_root, _initial = registry_layout
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    assert runtime_path is not None
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text(overlay_content, encoding="utf-8")
+
+    with pytest.raises(WorkspacePolicyError, match=message):
+        load_registry(config_dir / "projects.yaml")
+
+
+def test_load_registry_rejects_runtime_overlay_directory(registry_layout) -> None:
+    config_dir, _workspace_root, _initial = registry_layout
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    assert runtime_path is not None
+    runtime_path.mkdir(parents=True)
+
+    with pytest.raises(WorkspacePolicyError, match="Runtime registry overlay path is not a file"):
+        load_registry(config_dir / "projects.yaml")
+
+
+def test_register_uses_runtime_overlay_and_preserves_source_registry(registry_layout):
     config_dir, workspace_root, initial = registry_layout
     (workspace_root / "ECC").mkdir()
 
@@ -69,10 +142,42 @@ def test_register_uses_yaml_registry_root_and_preserves_existing_text(registry_l
 
     assert result["ok"] is True
     assert result["result"]["root"] == "ECC"
+    assert result["result"]["storage"] == "runtime_overlay"
+    assert result["result"]["source_registry_mutated"] is False
     assert result["result"]["cache_reset"] is True
     assert str(config_dir) not in repr(result)
     assert str(workspace_root) not in repr(result)
 
+    assert (config_dir / "projects.yaml").read_text(encoding="utf-8") == initial
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    assert runtime_path is not None
+    overlay = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
+    assert overlay["projects"]["ecc-reference"] == {
+        "root": "ECC",
+        "type": "reference",
+        "description": "Everything Claude Code reference",
+        "tags": ["reference", "agents"],
+    }
+    visible = WorkspaceRegistry.load(config_dir / "projects.yaml").project_info("ecc-reference")
+    assert visible["root"].endswith("ECC")
+
+
+def test_register_can_persist_to_source_when_explicitly_requested(registry_layout):
+    config_dir, workspace_root, initial = registry_layout
+    (workspace_root / "ECC").mkdir()
+
+    result = supervisor.supervisor_register_project(
+        "ecc-reference",
+        "ECC",
+        project_type="reference",
+        description="Everything Claude Code reference",
+        tags=["reference", "agents"],
+        persist_to_source=True,
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["storage"] == "source_registry"
+    assert result["result"]["source_registry_mutated"] is True
     text = (config_dir / "projects.yaml").read_text(encoding="utf-8")
     assert text.startswith(initial.rstrip("\n"))
     loaded = yaml.safe_load(text)
@@ -248,5 +353,8 @@ def test_cache_reset_failure_is_reported_without_hiding_persisted_write(
 
     assert result["ok"] is True
     assert result["result"]["cache_reset"] is False
-    loaded = yaml.safe_load((config_dir / "projects.yaml").read_text(encoding="utf-8"))
+    assert result["result"]["storage"] == "runtime_overlay"
+    runtime_path = resolve_runtime_registry_path(config_dir / "projects.yaml")
+    assert runtime_path is not None
+    loaded = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
     assert "ecc-reference" in loaded["projects"]

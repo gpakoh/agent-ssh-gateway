@@ -126,6 +126,11 @@ class TestDeepSshCheck:
             patch("app.routers.system.settings") as mock_settings,
             patch("app.routers.system.socket") as mock_socket,
             patch("app.routers.system._probe_deep_ssh") as mock_deep,
+            patch.dict(
+                os.environ,
+                {"GATEWAY_SSH_HOST": "sshd", "GATEWAY_SSH_PORT": "22"},
+                clear=False,
+            ),
         ):
             mock_settings.ssh_health_user = "health"
             mock_settings.ssh_health_password = "pass"

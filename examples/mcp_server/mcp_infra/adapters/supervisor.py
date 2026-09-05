@@ -240,6 +240,7 @@ def _register_project_impl(
     description: str,
     tags: list[str] | None,
     parent: str | None,
+    persist_to_source: bool,
 ) -> dict[str, Any]:
     tool = "supervisor_register_project"
     try:
@@ -254,6 +255,7 @@ def _register_project_impl(
             description=description,
             tags=tags,
             parent=parent,
+            persist_to_source=persist_to_source,
         )
     except ProjectRegistrationError as exc:
         return tool_error(
@@ -287,6 +289,8 @@ def _register_project_impl(
         "tags": result.tags,
         "parent": result.parent,
         "registry_hash": result.registry_hash,
+        "storage": result.storage,
+        "source_registry_mutated": result.storage == "source_registry",
         "cache_reset": cache_reset,
     }
     payload.update(_registration_visibility(result.project_id, result.root))
@@ -300,13 +304,20 @@ def supervisor_register_project(
     description: str = "",
     tags: list[str] | None = None,
     parent: str | None = None,
+    persist_to_source: bool = False,
 ) -> dict[str, Any]:
-    """Register one existing directory in the server-owned workspace registry."""
+    """Register one existing directory without dirtying source by default."""
     return run_tool(
         tool="supervisor_register_project",
         title="Supervisor register project",
         fn=lambda: _register_project_impl(
-            project_id, root, project_type, description, tags, parent
+            project_id,
+            root,
+            project_type,
+            description,
+            tags,
+            parent,
+            persist_to_source,
         ),
         success_text="Project registration completed.",
     )

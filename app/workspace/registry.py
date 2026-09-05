@@ -76,6 +76,33 @@ def get_registry_root() -> Path:
     return resolve_registry_root()
 
 
+def resolve_runtime_registry_path(registry_path: str | Path) -> Path | None:
+    """Return the optional runtime project-registry overlay path.
+
+    Supervisor-created temporary/candidate registrations must not dirty the
+    source-controlled ``projects.yaml`` by default.  When the supervisor journal
+    root is configured, keep those mutable registrations beside that durable
+    control-plane state and load them as an overlay on top of the checked-in
+    registry.  Operators that intentionally want source-controlled registry
+    edits can still use the explicit persist-to-source path.
+    """
+    del registry_path  # reserved for future per-registry overlays
+    explicit = os.environ.get("MCP_RUNTIME_PROJECTS_PATH", "").strip()
+    if explicit:
+        path = Path(explicit)
+        if not path.is_absolute():
+            raise WorkspacePolicyError("MCP_RUNTIME_PROJECTS_PATH must be absolute")
+        return path.resolve()
+
+    supervisor_root = os.environ.get("MCP_SUPERVISOR_JOURNAL_ROOT", "").strip()
+    if supervisor_root:
+        path = Path(supervisor_root)
+        if not path.is_absolute():
+            raise WorkspacePolicyError("MCP_SUPERVISOR_JOURNAL_ROOT must be absolute")
+        return path.resolve() / "runtime-projects.yaml"
+    return None
+
+
 # ── Default hidden / vendor / cache patterns ──────────────────────
 
 VENDOR_CACHE_PATTERNS: tuple[str, ...] = (
@@ -113,8 +140,41 @@ def _resolve(registry_root: Path, relative_root: str) -> Path:
     return resolved
 
 
+def _add_project_entries(
+    projects: dict[str, ProjectInfo],
+    projects_raw: dict[str, Any],
+    registry_root: Path,
+    *,
+    source: str,
+) -> None:
+    for pid, cfg in projects_raw.items():
+        if pid in projects:
+            logger.warning("Skipping project %s from %s: duplicate project id", pid, source)
+            continue
+        if not isinstance(cfg, dict):
+            logger.warning("Skipping project %s from %s: config must be a mapping", pid, source)
+            continue
+        relative_root = cfg.get("root", "")
+        if not relative_root:
+            logger.warning("Skipping project %s from %s: missing 'root'", pid, source)
+            continue
+        root = _resolve(registry_root, relative_root)
+        if not root.exists():
+            logger.warning("Skipping project %s from %s: root does not exist", pid, source)
+            continue
+
+        projects[pid] = ProjectInfo(
+            project_id=pid,
+            root=root,
+            type=str(cfg.get("type", "unknown")),
+            description=str(cfg.get("description", "")),
+            tags=list(cfg.get("tags", [])),
+            parent=cfg.get("parent"),
+        )
+
+
 def load_registry(path: str | Path) -> tuple[dict[str, ProjectInfo], Path]:
-    """Load project registry from a YAML file.
+    """Load project registry from a YAML file plus optional runtime overlay.
 
     Returns (projects dict, registry_root).
     Raises WorkspacePolicyError on invalid config.
@@ -141,27 +201,23 @@ def load_registry(path: str | Path) -> tuple[dict[str, ProjectInfo], Path]:
         raise WorkspacePolicyError("Registry file must contain a 'projects' mapping")
 
     projects: dict[str, ProjectInfo] = {}
-    for pid, cfg in projects_raw.items():
-        if not isinstance(cfg, dict):
-            logger.warning("Skipping project %s: config must be a mapping", pid)
-            continue
-        relative_root = cfg.get("root", "")
-        if not relative_root:
-            logger.warning("Skipping project %s: missing 'root'", pid)
-            continue
-        root = _resolve(registry_root, relative_root)
-        if not root.exists():
-            logger.warning("Skipping project %s: root does not exist: %s", pid, root)
-            continue
+    _add_project_entries(projects, projects_raw, registry_root, source="source registry")
 
-        projects[pid] = ProjectInfo(
-            project_id=pid,
-            root=root,
-            type=str(cfg.get("type", "unknown")),
-            description=str(cfg.get("description", "")),
-            tags=list(cfg.get("tags", [])),
-            parent=cfg.get("parent"),
-        )
+    runtime_path = resolve_runtime_registry_path(path)
+    if runtime_path is not None and runtime_path.exists():
+        if not runtime_path.is_file():
+            raise WorkspacePolicyError("Runtime registry overlay path is not a file")
+        overlay_raw = runtime_path.read_text(encoding="utf-8")
+        overlay_loaded = yaml.safe_load(overlay_raw)
+        overlay_data: dict[str, Any] = {} if overlay_loaded is None else overlay_loaded
+        if not isinstance(overlay_data, dict):
+            raise WorkspacePolicyError("Runtime registry overlay must be a YAML mapping")
+        overlay_projects = overlay_data.get("projects", {})
+        if overlay_projects is None:
+            overlay_projects = {}
+        if not isinstance(overlay_projects, dict):
+            raise WorkspacePolicyError("Runtime registry overlay must contain a 'projects' mapping")
+        _add_project_entries(projects, overlay_projects, registry_root, source="runtime overlay")
 
     return projects, registry_root
 

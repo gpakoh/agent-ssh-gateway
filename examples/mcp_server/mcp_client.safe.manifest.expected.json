@@ -3,7 +3,7 @@
   "safe_mode": true,
   "expected_safe_count": 78,
   "expected_blocked_count": 29,
-  "expected_mcp_client_full_count": 105,
+  "expected_mcp_client_full_count": 106,
   "must_include": [
     "health",
     "info",

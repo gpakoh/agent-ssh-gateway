@@ -329,6 +329,9 @@ def test_register_project_signature_does_not_expose_server_paths():
         "description",
         "tags",
         "parent",
+        "persist_to_source",
     ]
     assert "registry_path" not in signature.parameters
+    assert "config_dir" not in signature.parameters
     assert "journal_root" not in signature.parameters
+    assert "project_root" not in signature.parameters

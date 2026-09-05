@@ -51,6 +51,30 @@ async def test_client_create_pr_validates_and_posts_only_pr_payload(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_client_compare_commits_uses_allowlisted_compare_endpoint(monkeypatch):
+    client = GiteaClient("token")
+    get = AsyncMock(return_value={"total_commits": 2, "commits": [{"sha": "1"}, {"sha": "2"}]})
+    monkeypatch.setattr(client, "_get", get)
+    try:
+        result = await client.compare_commits(
+            "owner",
+            "repo",
+            base="master",
+            head="feature/staleness-guard",
+        )
+    finally:
+        await client.aclose()
+
+    assert result["total_commits"] == 2
+    get.assert_awaited_once_with(
+        "/repos/{owner}/{repo}/compare/{basehead}",
+        owner="owner",
+        repo="repo",
+        basehead="master...feature/staleness-guard",
+    )
+
+
+@pytest.mark.asyncio
 async def test_client_rejects_cross_repo_or_refspec_style_head():
     client = GiteaClient("token")
     try:
@@ -120,11 +144,24 @@ async def test_adapter_minimizes_created_pr(monkeypatch):
                 "title": kwargs["title"],
                 "state": "open",
                 "html_url": "https://git.example/pr/42",
-                "head": {"ref": kwargs["head"], "repo": {"owner": {"email": "secret@example"}}},
-                "base": {"ref": kwargs["base"]},
+                "head": {
+                    "ref": kwargs["head"],
+                    "sha": "a" * 40,
+                    "repo": {"owner": {"email": "secret@example"}},
+                },
+                "base": {"ref": kwargs["base"], "sha": "b" * 40},
                 "mergeable": True,
                 "user": {"email": "secret@example"},
             }
+
+        async def compare_commits(self, owner, repo, *, base, head):
+            head_sha = "a" * 40
+            base_sha = "b" * 40
+            if base == base_sha and head == head_sha:
+                return {"total_commits": 1, "commits": [{"sha": head_sha}]}
+            if base == head_sha and head == base_sha:
+                return {"total_commits": 0, "commits": []}
+            raise AssertionError(f"unexpected compare: {base!r}...{head!r}")
 
     monkeypatch.setattr(remote, "_server_gitea_client", lambda: FakeClient)
     result = await remote.gitea_create_pull_request(
@@ -155,6 +192,19 @@ async def test_adapter_minimizes_created_pr(monkeypatch):
         "head": "ai/fleet-hardening",
         "base": "master",
         "mergeable": True,
+        "branch_tracking": {
+            "base_ref": "master",
+            "base_sha": "b" * 40,
+            "head_ref": "ai/fleet-hardening",
+            "head_sha": "a" * 40,
+            "compare_by": "sha",
+            "branch_contains_base": True,
+            "branch_is_current": True,
+            "ahead_by": 1,
+            "behind_by": 0,
+            "warning": None,
+            "operator_choices": [],
+        },
     }
     assert "secret@example" not in repr(result)
 

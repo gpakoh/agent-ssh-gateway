@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pytest
 
+import examples.mcp_server.task_candidate as task_candidate_module
 from examples.mcp_server.agent_paths import task_dir
+from examples.mcp_server.agent_sources import (
+    ManagedSourceBundleError,
+    ManagedSourcePublication,
+)
 from examples.mcp_server.task_candidate import (
     CONTRACT_FILENAME,
     RECEIPT_FILENAME,
@@ -57,12 +62,13 @@ def _write_evidence(
     *,
     checks_rc: int = 0,
     fingerprint: str = "fingerprint-001",
+    base: str | None = None,
 ) -> tuple[str, Path]:
     state = root.parent / "state"
     candidate = root.parent / "candidate-store"
     monkeypatch.setenv("MCP_AGENT_STATE_ROOT", str(state))
     monkeypatch.setenv("MCP_TASK_CANDIDATE_ROOT", str(candidate))
-    base = _git(root, "rev-parse", "HEAD")
+    base = base if base is not None else _git(root, "rev-parse", "HEAD")
     td = Path(task_dir(PROJECT, TASK))
     td.mkdir(parents=True)
     patch = (
@@ -558,8 +564,85 @@ def test_nonterminal_trusted_job_is_denied(tmp_path: Path, monkeypatch: pytest.M
     root = tmp_path / "repo"
     _init_repo(root)
     _, td = _write_evidence(root, monkeypatch)
-    with pytest.raises(CandidateError, match="terminal"):
+    with pytest.raises(CandidateError, match="terminal") as excinfo:
         materialize_task_candidate(project_root=root, project=PROJECT, task_id=TASK, destination_owner=OWNER, destination_repo=REPO, destination_branch=BRANCH, expected_diff_sha256=_diff_sha(td), job_result=lambda _job: {"status": "running", "exit_code": None}, verify_candidate=_verify_success)
+    assert excinfo.value.code == "CANDIDATE_JOB_NOT_SUCCESSFUL"
+    assert excinfo.value.retryable is True
+    assert excinfo.value.details == {"job_id": "job-001", "job_status": "running"}
+
+
+def test_ambiguous_gateway_job_can_use_final_runner_verdict_for_terminality(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _, td = _write_evidence(root, monkeypatch)
+    (td / "agent-status.md").write_text("Status: needs-review\n", encoding="utf-8")
+    (td / "agent-heartbeat.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "state": "finished",
+                "phase": "final",
+                "updated_at": "2026-09-05T17:00:00Z",
+                "updated_epoch": 1_778_000_000,
+                "runner_pid": 123,
+                "exit_code": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    receipt = materialize_task_candidate(
+        project_root=root,
+        project=PROJECT,
+        task_id=TASK,
+        destination_owner=OWNER,
+        destination_repo=REPO,
+        destination_branch=BRANCH,
+        expected_diff_sha256=_diff_sha(td),
+        job_result=lambda _job: {"status": "ambiguous", "exit_code": None},
+        verify_candidate=_verify_success,
+    )
+
+    assert receipt["job_terminal_status"] == "needs-review"
+    assert receipt["job_exit_code"] == 0
+    assert receipt["terminal_evidence"] == {
+        "source": "runner_heartbeat",
+        "status": "needs-review",
+        "exit_code": 0,
+        "heartbeat_state": "finished",
+        "heartbeat_phase": "final",
+    }
+
+
+def test_running_gateway_job_overrides_forged_final_runner_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _, td = _write_evidence(root, monkeypatch)
+    (td / "agent-status.md").write_text("Status: needs-review\n", encoding="utf-8")
+    (td / "agent-heartbeat.json").write_text(
+        json.dumps({"state": "finished", "phase": "final", "exit_code": 0}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CandidateError) as excinfo:
+        materialize_task_candidate(
+            project_root=root,
+            project=PROJECT,
+            task_id=TASK,
+            destination_owner=OWNER,
+            destination_repo=REPO,
+            destination_branch=BRANCH,
+            expected_diff_sha256=_diff_sha(td),
+            job_result=lambda _job: {"status": "running", "exit_code": None},
+            verify_candidate=_verify_success,
+        )
+
+    assert excinfo.value.code == "CANDIDATE_JOB_NOT_SUCCESSFUL"
+    assert excinfo.value.details == {"job_id": "job-001", "job_status": "running"}
 
 
 def test_materialized_candidate_is_readable_by_distinct_verifier_uid(
@@ -806,7 +889,72 @@ def test_existing_receipt_idempotency_does_not_rerun_verifier(
         verifier_calls["n"] += 1
         _verify_success(repo, expected_sha, checks)
 
-    kwargs = dict(
+    def materialize_once() -> dict[str, object]:
+        return materialize_task_candidate(
+            project_root=root,
+            project=PROJECT,
+            task_id=TASK,
+            destination_owner=OWNER,
+            destination_repo=REPO,
+            destination_branch=BRANCH,
+            expected_diff_sha256=_diff_sha(td),
+            job_result=_job_success,
+            verify_candidate=verifier,
+        )
+
+    first = materialize_once()
+    second = materialize_once()
+    assert verifier_calls["n"] == 1
+    assert first == second
+    assert first["candidate_head_sha"] == second["candidate_head_sha"]
+
+
+def _build_bundle(tmp_path: Path, source: Path) -> tuple[Path, str]:
+    base = _git(source, "rev-parse", "HEAD")
+    bundle_path = tmp_path / "bundles" / f"{base}.bundle"
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    _git(source, "bundle", "create", str(bundle_path), "HEAD")
+    return bundle_path, base
+
+
+def _init_unrelated_root(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "config", "user.email", "test@example.invalid")
+    (root / "base.txt").write_text("base\n", encoding="utf-8")
+    (root / "root-marker.txt").write_text("distinct\n", encoding="utf-8")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "unrelated root")
+    return root
+
+
+def test_materialize_from_verified_bundle_when_local_checkout_lacks_base_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    materialize_globals = materialize_task_candidate.__globals__
+
+    bundle_source = tmp_path / "bundle-source"
+    _init_repo(bundle_source)
+    bundle_path, base = _build_bundle(tmp_path, bundle_source)
+    root = _init_unrelated_root(tmp_path)
+    missing = subprocess.run(
+        ["git", "cat-file", "-e", f"{base}^{{commit}}"],
+        cwd=root,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert missing.returncode != 0
+    _, td = _write_evidence(root, monkeypatch, base=base)
+
+    def fake_ensure(project: str, ref: str) -> ManagedSourcePublication:
+        assert (project, ref) == (PROJECT, base)
+        return ManagedSourcePublication(str(bundle_path), "a" * 64)
+
+    monkeypatch.setitem(materialize_globals, "ensure_managed_source_bundle", fake_ensure)
+    receipt = materialize_task_candidate(
         project_root=root,
         project=PROJECT,
         task_id=TASK,
@@ -815,10 +963,95 @@ def test_existing_receipt_idempotency_does_not_rerun_verifier(
         destination_branch=BRANCH,
         expected_diff_sha256=_diff_sha(td),
         job_result=_job_success,
-        verify_candidate=verifier,
+        verify_candidate=_verify_success,
     )
-    first = materialize_task_candidate(**kwargs)
-    second = materialize_task_candidate(**kwargs)
-    assert verifier_calls["n"] == 1
-    assert first == second
-    assert first["candidate_head_sha"] == second["candidate_head_sha"]
+    checked, staging = validate_task_candidate_for_push(
+        project_root=root,
+        project=PROJECT,
+        task_id=TASK,
+        destination_owner=OWNER,
+        destination_repo=REPO,
+        destination_branch=BRANCH,
+        expected_sha=receipt["candidate_head_sha"],
+    )
+    assert checked == receipt
+    assert _git(staging, "show", "HEAD:base.txt") == "candidate"
+
+
+def test_managed_source_publication_failure_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    materialize_globals = materialize_task_candidate.__globals__
+
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _, td = _write_evidence(root, monkeypatch)
+
+    def failing_ensure(project: str, ref: str) -> ManagedSourcePublication:
+        raise ManagedSourceBundleError("publication boom")
+
+    monkeypatch.setitem(materialize_globals, "ensure_managed_source_bundle", failing_ensure)
+    with pytest.raises(CandidateError) as excinfo:
+        materialize_task_candidate(
+            project_root=root,
+            project=PROJECT,
+            task_id=TASK,
+            destination_owner=OWNER,
+            destination_repo=REPO,
+            destination_branch=BRANCH,
+            expected_diff_sha256=_diff_sha(td),
+            job_result=_job_success,
+            verify_candidate=_verify_success,
+        )
+    assert excinfo.value.code == "SOURCE_UNAVAILABLE"
+    candidate_root = tmp_path / "candidate-store"
+    assert not any(p.name.startswith(".materialize-") for p in candidate_root.rglob("*"))
+
+
+def test_materialize_git_failure_has_typed_phase_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _, td = _write_evidence(root, monkeypatch)
+    (td / "implementation-diff.patch").write_text("not a git patch\n", encoding="utf-8")
+
+    with pytest.raises(CandidateError) as excinfo:
+        materialize_task_candidate(
+            project_root=root,
+            project=PROJECT,
+            task_id=TASK,
+            destination_owner=OWNER,
+            destination_repo=REPO,
+            destination_branch=BRANCH,
+            expected_diff_sha256=_diff_sha(td),
+            job_result=_job_success,
+            verify_candidate=_verify_success,
+        )
+
+    assert excinfo.value.code == "GIT_OPERATION_FAILED"
+    assert excinfo.value.retryable is False
+    assert excinfo.value.details is not None
+    assert excinfo.value.details["phase"] == "apply"
+    assert excinfo.value.details["command_class"] == "git apply"
+    assert excinfo.value.details["returncode"] != 0
+    stderr_tail = excinfo.value.details["stderr_tail"]
+    assert "error" in stderr_tail.lower()
+    assert str(tmp_path) not in stderr_tail
+
+
+def test_materialize_git_timeout_has_retry_guidance(tmp_path: Path) -> None:
+    err = task_candidate_module._candidate_git_error(
+        subcommand="clone",
+        cwd=tmp_path,
+        returncode=None,
+        stderr=f"fatal: stalled in {tmp_path}/repo",
+        did_timeout=True,
+    )
+
+    assert err.code == "GIT_OPERATION_FAILED"
+    assert err.retryable is True
+    assert err.details is not None
+    assert err.details["phase"] == "clone"
+    assert err.details["timeout_seconds"] == 60
+    assert str(tmp_path) not in err.details["stderr_tail"]

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.workspace.registry import reset_registry
+from examples.mcp_server.agent_sources import ManagedSourcePublication
 from examples.mcp_server.candidate_clone import (
     CandidateCloneError,
     prepare_candidate_clone,
@@ -301,3 +302,101 @@ def test_prepare_candidate_clone_resolves_symbolic_base_ref(registry_fixture) ->
     assert receipt.base_ref == "base-for-candidate"
     assert receipt.base_sha == base
     assert _git(clone_root, "rev-parse", "HEAD") == base
+
+
+def test_prepare_candidate_clone_uses_trusted_remote_base_when_local_checkout_is_stale(
+    registry_fixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    workspace, source, config_dir, journal_root, _base = registry_fixture
+    remote_source = tmp_path / "remote-source"
+    _git(tmp_path, "clone", "-q", str(source), str(remote_source))
+    _git(remote_source, "config", "user.name", "Test")
+    _git(remote_source, "config", "user.email", "test@example.invalid")
+    (remote_source / "README.md").write_text("remote-newer\n", encoding="utf-8")
+    _git(remote_source, "add", "README.md")
+    _git(remote_source, "commit", "-q", "-m", "remote newer")
+    remote_sha = _git(remote_source, "rev-parse", "HEAD")
+    assert subprocess.run(
+        ["git", "cat-file", "-e", f"{remote_sha}^{{commit}}"],
+        cwd=source,
+        capture_output=True,
+        check=False,
+    ).returncode != 0
+
+    bundle = tmp_path / "remote.bundle"
+    _git(remote_source, "bundle", "create", str(bundle), "HEAD")
+    monkeypatch.setattr(
+        candidate_clone_module,
+        "_remote_ref_sha",
+        lambda _source, ref: remote_sha if ref == "master" else None,
+    )
+    monkeypatch.setattr(
+        candidate_clone_module,
+        "ensure_managed_source_bundle",
+        lambda _project, sha: ManagedSourcePublication(str(bundle), "a" * 64)
+        if sha == remote_sha
+        else None,
+    )
+
+    receipt = candidate_clone_module.prepare_candidate_clone(
+        "source-project",
+        "candidate/remote-base",
+        "master",
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    assert receipt.base_sha == remote_sha
+    assert _git(clone_root, "rev-parse", "HEAD") == remote_sha
+    assert _git(clone_root, "show", "HEAD:README.md") == "remote-newer"
+
+
+def test_prepare_candidate_clone_missing_base_returns_typed_source_ref_error(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    _workspace, _source, config_dir, journal_root, _base = registry_fixture
+    monkeypatch.setattr(candidate_clone_module, "_remote_ref_sha", lambda _source, _ref: None)
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_clone_module.prepare_candidate_clone(
+            "source-project",
+            "candidate/missing-base",
+            "does-not-exist",
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    assert exc_info.value.code == "SOURCE_REF_NOT_AVAILABLE"
+    assert exc_info.value.retryable is True
+
+
+def test_prepare_candidate_clone_remote_base_without_managed_source_returns_stale_error(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    _workspace, _source, config_dir, journal_root, _base = registry_fixture
+    remote_sha = "a" * 40
+    monkeypatch.setattr(candidate_clone_module, "_remote_ref_sha", lambda _source, _ref: remote_sha)
+    monkeypatch.setattr(candidate_clone_module, "ensure_managed_source_bundle", lambda _project, _sha: None)
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_clone_module.prepare_candidate_clone(
+            "source-project",
+            "candidate/stale-source",
+            "master",
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    assert exc_info.value.code == "SOURCE_REPO_STALE"
+    assert exc_info.value.retryable is True
