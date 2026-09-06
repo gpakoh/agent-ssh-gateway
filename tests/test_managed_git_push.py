@@ -612,7 +612,7 @@ async def test_verified_workspace_adapter_rechecks_then_pushes_exact_sha(
     monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _Registry(tmp_path))
     monkeypatch.setattr(remote, "_server_gitea_client", lambda: _FakeGiteaClient)
     monkeypatch.setattr(remote, "verify_registered_delivery_workspace", verify_workspace)
-    monkeypatch.setattr(remote, "verify_candidate_via_docker", verify_checks)
+    monkeypatch.setattr(remote, "verify_workspace_via_docker", verify_checks)
     monkeypatch.setattr(remote, "push_exact_sha", push)
 
     result = await remote.gitea_push_verified_commit(
@@ -629,7 +629,7 @@ async def test_verified_workspace_adapter_rechecks_then_pushes_exact_sha(
     assert result["ok"] is True
     assert captured["proof_calls"] == 2
     assert captured["checks"] == {
-        "staging_root": tmp_path,
+        "workspace_root": tmp_path,
         "expected_sha": SHA,
         "required_checks": ["pytest -q", "ruff check ."],
     }
@@ -744,7 +744,7 @@ async def test_verified_commit_verifier_error_is_structured_no_push_no_traceback
     monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _Registry(tmp_path))
     monkeypatch.setattr(remote, "_server_gitea_client", lambda: _FakeGiteaClient)
     monkeypatch.setattr(remote, "verify_registered_delivery_workspace", verify_workspace)
-    monkeypatch.setattr(remote, "verify_candidate_via_docker", deny_checks)
+    monkeypatch.setattr(remote, "verify_workspace_via_docker", deny_checks)
     monkeypatch.setattr(remote, "push_exact_sha", must_not_push)
 
     result = await remote.gitea_push_verified_commit(
@@ -851,7 +851,7 @@ async def test_verified_commit_post_push_mismatch_marks_mutation(
     monkeypatch.setattr(remote, "_server_workspace_registry", lambda: _Registry(tmp_path))
     monkeypatch.setattr(remote, "_server_gitea_client", lambda: WrongHeadClient)
     monkeypatch.setattr(remote, "verify_registered_delivery_workspace", verify_workspace)
-    monkeypatch.setattr(remote, "verify_candidate_via_docker", verify_checks)
+    monkeypatch.setattr(remote, "verify_workspace_via_docker", verify_checks)
     monkeypatch.setattr(remote, "push_exact_sha", push)
 
     result = await remote.gitea_push_verified_commit(
