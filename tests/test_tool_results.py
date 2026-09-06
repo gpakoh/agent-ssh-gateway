@@ -136,6 +136,7 @@ class TestToolError:
             "CANDIDATE_SCOPE_VIOLATION",
             "CANDIDATE_STAGING_INVALID",
             "CANDIDATE_VERIFICATION_FAILED",
+            "REQUIRED_CHECK_FAILED",
         ):
             result = tool_error("gitea_materialize_task_candidate", code, "nope")
             assert result["error"]["code"] == code, code

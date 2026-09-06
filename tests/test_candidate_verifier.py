@@ -155,6 +155,85 @@ def test_verifier_nonzero_is_fail_closed(
         )
 
 
+def test_required_check_failure_exposes_check_name_and_sanitized_tail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = _configure(monkeypatch, tmp_path)
+
+    def runner(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        rc = 83 if len(argv) > 1 and argv[1] == "run" else 0
+        return subprocess.CompletedProcess(
+            argv,
+            rc,
+            stdout=(
+                "MCP_VERIFY_EXIT=1\n"
+                "MCP_VERIFY_CHECK=1\n"
+                "tests/test_a.py:12: in test_thing\n"
+                "E   assert 1 == 2\n"
+                "fatal: /tmp/secret-key.pem permission denied\n"
+            ),
+            stderr="",
+        )
+
+    with pytest.raises(CandidateVerificationError) as exc_info:
+        verify_candidate_via_docker(
+            staging_root=staging,
+            expected_sha="5" * 40,
+            required_checks=["pytest -q", "ruff check ."],
+            runner=runner,
+        )
+
+    err = exc_info.value
+    assert err.code == "REQUIRED_CHECK_FAILED"
+    assert err.phase == "required_checks"
+    assert err.retryable is False
+    assert err.details["failed_check"] == "ruff check ."
+    assert err.details["check_index"] == 1
+    assert err.details["exit_code"] == 83
+    assert err.details["check_exit_code"] == 1
+    assert err.details["mutation_occurred"] is False
+    tail = err.details["output_tail"]
+    assert "/tmp/secret-key.pem" not in tail
+    assert "[PATH]" in tail
+    assert "assert 1 == 2" in tail
+
+
+def test_verifier_output_tail_redacts_paths_and_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = _configure(monkeypatch, tmp_path)
+
+    def runner(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        rc = 83 if len(argv) > 1 and argv[1] == "run" else 0
+        return subprocess.CompletedProcess(
+            argv,
+            rc,
+            stdout=(
+                "MCP_VERIFY_EXIT=1\n"
+                "MCP_VERIFY_CHECK=0\n"
+                "Authorization: Basic dXNlcjpzZWNyZXQ=\n"
+                "Token: ghp_topsecretvalue\n"
+                "/media/1TB/Python/gpt-browser-bridge/app/main.py:42\n"
+            ),
+            stderr="",
+        )
+
+    with pytest.raises(CandidateVerificationError) as exc_info:
+        verify_candidate_via_docker(
+            staging_root=staging,
+            expected_sha="5" * 40,
+            required_checks=["pytest -q", "ruff check ."],
+            runner=runner,
+        )
+
+    tail = exc_info.value.details["output_tail"]
+    assert "dXNlcjpzZWNyZXQ=" not in tail
+    assert "ghp_topsecretvalue" not in tail
+    assert "[REDACTED]" in tail
+    assert "/media/1TB" not in tail
+    assert "[PATH]" in tail
+
+
 def test_verifier_source_must_stay_under_candidate_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
