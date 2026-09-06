@@ -44,6 +44,7 @@ _GATEWAY_ERROR_CODE_MAP: dict[str, str] = {
     # (504, "") entry), never the bare "TIMEOUT" this map already expected.
     "GATEWAY_TIMEOUT": "TIMEOUT",
     "WRITE_PERMISSION_DENIED": "PERMISSION_DENIED",
+    "JOB_NOT_CANCELLABLE": "JOB_NOT_CANCELLABLE",
     # Reachable on every write-tool call against the gateway's own default
     # (WORKSPACE_READONLY=true) — not an edge case. app/routers/workspace.py
     # raises this via the normal HTTPException(detail=...) path (nested

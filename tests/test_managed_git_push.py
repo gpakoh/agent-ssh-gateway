@@ -628,7 +628,7 @@ async def test_verified_workspace_adapter_rechecks_then_pushes_exact_sha(
     assert result["ok"] is True
     assert captured["proof_calls"] == 2
     assert captured["checks"] == {
-        "staging_root": str(tmp_path),
+        "staging_root": tmp_path,
         "expected_sha": SHA,
         "required_checks": ["pytest -q", "ruff check ."],
     }

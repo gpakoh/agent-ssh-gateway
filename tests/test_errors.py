@@ -202,6 +202,41 @@ async def test_session_limit_error_gets_specific_session_limit_code():
     assert data["retryable"] is True
 
 
+@pytest.mark.asyncio
+async def test_jobs_cancel_maps_not_cancellable_to_conflict(monkeypatch):
+    """Terminal/non-cancellable jobs are job-state conflicts, not 500s."""
+    from fastapi import HTTPException
+
+    from app.auth_middleware import AuthIdentity
+    from app.routers import jobs as jobs_router
+
+    owner_identity = AuthIdentity(
+        token_type="agent",
+        token="owner-token",
+        scopes=("jobs:run", "jobs:read"),
+    )
+
+    class JobManager:
+        async def get_job(self, job_id):
+            return {
+                "id": job_id,
+                "owner_id": owner_identity.fingerprint,
+                "status": "ambiguous",
+            }
+
+        async def cancel_job(self, job_id):
+            raise ExecutionError("Cannot cancel job with status: ambiguous")
+
+    monkeypatch.setattr(jobs_router._state, "job_manager", JobManager())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await jobs_router.jobs_cancel("job-ambiguous", owner_identity)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "JOB_NOT_CANCELLABLE"
+    assert exc_info.value.detail["retryable"] is False
+
+
 def test_auto_code_project_not_found_maps_to_project_not_found():
     """Regression: nine GET /api/workspace/projects/{project_id}/... routes
     all raise _err(404, f"Project not found: {project_id}") with no

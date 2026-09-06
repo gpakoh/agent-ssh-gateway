@@ -141,6 +141,7 @@ HINTS: dict[str, str] = {
     "RATE_LIMIT_EXCEEDED": "Reduce request frequency and retry after the indicated wait time",
     "WORKSPACE_READONLY": "Set WORKSPACE_READONLY=false to enable write operations",
     "FORBIDDEN": "You do not have permission to perform this operation",
+    "JOB_NOT_CANCELLABLE": "The job is already terminal or no longer accepts cancellation; read its final status/result instead",
 }
 
 
