@@ -229,6 +229,7 @@ class TestChatGPTSafeMode:
             "gitea_close_pull_request",
             "gitea_delete_branch",
             "gitea_push_local_ref",
+            "gitea_push_verified_commit",
         ):
             assert name in TOOL_NAMES_BY_MODE["mcp_client_write"]
             assert name not in TOOL_NAMES_BY_MODE["mcp_client"]

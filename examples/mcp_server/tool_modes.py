@@ -247,6 +247,21 @@ MCP_CLIENT_WRITE_BLOCKED_TOOLS: frozenset[str] = frozenset()
 # MCP_CLIENT_WRITE_BLOCKED_TOOLS, then adds the explicit git mutation tools
 # (git_add/git_commit/git_create_branch/git_update_branch_by_merge/git_push; never present in any other
 # mode's list).
+# Defense-in-depth: these write/admin repository operations must never be
+# reachable from plain mcp_client, even if a merge conflict accidentally adds
+# one of them to the broad mcp_client literal above. They are introduced below
+# only through the explicit mcp_client_write mode.
+MCP_CLIENT_WRITE_ONLY_GITEA_TOOLS: frozenset[str] = frozenset({
+    "gitea_create_pull_request",
+    "gitea_merge_pull_request",
+    "gitea_close_pull_request",
+    "gitea_delete_branch",
+    "gitea_materialize_task_candidate",
+    "gitea_push_local_ref",
+    "gitea_push_verified_commit",
+})
+TOOL_NAMES_BY_MODE["mcp_client"] -= MCP_CLIENT_WRITE_ONLY_GITEA_TOOLS
+
 TOOL_NAMES_BY_MODE["mcp_client_write"] = (
     TOOL_NAMES_BY_MODE["mcp_client"] - MCP_CLIENT_WRITE_BLOCKED_TOOLS
 ) | {
