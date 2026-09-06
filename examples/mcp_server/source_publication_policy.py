@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import re
-from enum import Enum
+from enum import StrEnum
 
 
-class LocalSourceState(str, Enum):
+class LocalSourceState(StrEnum):
     """Observed completeness of the registered local Git source."""
 
     FULL = "full"
@@ -14,14 +14,14 @@ class LocalSourceState(str, Enum):
     MISSING_COMMIT = "missing_commit"
 
 
-class PublicationRoute(str, Enum):
+class PublicationRoute(StrEnum):
     """Mechanism allowed to materialize the requested exact commit."""
 
     LOCAL = "local"
     TRUSTED_REMOTE = "trusted_remote"
 
 
-class SourceFailureCause(str, Enum):
+class SourceFailureCause(StrEnum):
     """Stable sanitized causes safe to expose to MCP clients."""
 
     SHALLOW = "shallow"

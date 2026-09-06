@@ -20,12 +20,12 @@ from examples.mcp_server.agent_sources import (
     _source_is_shallow,
     ensure_managed_source_bundle,
 )
-from examples.mcp_server.source_publication_policy import classify_source_failure_message
 from examples.mcp_server.managed_git import _minimal_git_env
 from examples.mcp_server.project_registry_control import (
     ProjectRegistrationError,
     register_project,
 )
+from examples.mcp_server.source_publication_policy import classify_source_failure_message
 
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,160}$")
 _REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,200}$")
