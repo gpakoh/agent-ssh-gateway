@@ -16,11 +16,17 @@ def _isolated_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep workspace-tool smoke tests independent of the live host registry."""
     workspace_root = tmp_path / "workspace-root"
     projects = {
+        "agent-ssh-gateway": {
+            "root": "agent-ssh-gateway",
+            "type": "service",
+            "description": "Agent SSH Gateway service",
+            "tags": ["ssh", "gateway"],
+        },
         "web-ssh-gateway": {
             "root": "web-ssh-gateway",
             "type": "service",
-            "description": "SSH gateway service",
-            "tags": ["ssh", "gateway"],
+            "description": "Legacy SSH Gateway service",
+            "tags": ["ssh", "gateway", "legacy"],
         },
         "quart-platform": {
             "root": "quart-platform",
@@ -58,11 +64,12 @@ def _isolated_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         project_root = workspace_root / cfg["root"]
         project_root.mkdir(parents=True, exist_ok=True)
         (project_root / "README.md").write_text("# fixture\n", encoding="utf-8")
-    (workspace_root / "web-ssh-gateway" / "app").mkdir()
-    (workspace_root / "web-ssh-gateway" / "app" / "main.py").write_text(
-        "print('fixture')\n",
-        encoding="utf-8",
-    )
+    for gateway_project in ("agent-ssh-gateway", "web-ssh-gateway"):
+        (workspace_root / gateway_project / "app").mkdir()
+        (workspace_root / gateway_project / "app" / "main.py").write_text(
+            "print('fixture')\n",
+            encoding="utf-8",
+        )
 
     registry_path = tmp_path / "projects.yaml"
     lines = ["version: 1", f"registry_root: {workspace_root}", "", "projects:"]
@@ -90,6 +97,7 @@ class TestWorkspaceListProjects:
         projects = workspace_list_projects()
         ids = [p["project_id"] for p in projects]
         assert "agent-ssh-gateway" in ids
+        assert "web-ssh-gateway" in ids
         assert "quart-platform" in ids
         assert "kojo-bot-service" in ids
         assert "pricetuner-scraper" in ids
