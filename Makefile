@@ -103,8 +103,14 @@ agent-handoff-smoke: wrapper-self-test
 # ── Live boundary smoke (requires real host environment) ──────────
 # Requires: /media/1TB/Python workspace, nginx/mTLS certs, Redis.
 # NOT run in GitHub CI — GitHub covers portable correctness only.
+# The OAuth black-box host smoke can legitimately take longer than the
+# script's 30s direct-invocation default under runner load. Keep the
+# canonical make target aligned with the post-deploy workflow budget so
+# `uv run make host-smoke` does not re-run the same test with a smaller
+# timeout after the dedicated OAuth smoke has already passed.
+MCP_SMOKE_TIMEOUT ?= 90
 host-smoke:
-	uv run pytest -m host_smoke -v
+	MCP_SMOKE_TIMEOUT=$(MCP_SMOKE_TIMEOUT) uv run pytest -m host_smoke -v
 
 clean:
 	find . -type d -name "__pycache__" -prune -exec rm -rf {} +
