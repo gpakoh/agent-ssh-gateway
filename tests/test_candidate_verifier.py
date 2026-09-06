@@ -12,6 +12,7 @@ from examples.mcp_server.candidate_verifier import (
     build_candidate_verifier_script,
     build_ephemeral_verifier_argv,
     verify_candidate_via_docker,
+    verify_workspace_via_docker,
 )
 
 
@@ -247,6 +248,49 @@ def test_verifier_source_must_stay_under_candidate_root(
             required_checks=[],
             runner=lambda *_args, **_kwargs: None,
         )
+
+
+def test_workspace_verifier_materializes_external_workspace_under_candidate_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = _configure(monkeypatch, tmp_path)
+    candidate_root = staging.parents[3]
+    repo = tmp_path / "outside-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    (repo / "file.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "file.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=repo, check=True)
+    expected_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def runner(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append((list(argv), dict(kwargs)))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    verify_workspace_via_docker(
+        workspace_root=repo,
+        expected_sha=expected_sha,
+        required_checks=["true"],
+        runner=runner,
+    )
+
+    run_calls = [call for call in calls if len(call[0]) > 1 and call[0][1] == "run"]
+    assert len(run_calls) == 1
+    argv, kwargs = run_calls[0]
+    joined = " ".join(argv)
+    assert "volume-subpath=verified-workspaces/verified-workspace-" in joined
+    assert str(repo) not in joined
+    assert str(repo) not in kwargs["input"]
+    assert list((candidate_root / "verified-workspaces").iterdir()) == []
 
 
 def test_empty_check_contract_skips_dependency_bootstrap() -> None:
