@@ -12,7 +12,9 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -269,12 +271,16 @@ def _validated_image() -> str:
     return value
 
 
-def _validated_staging_root(staging_root: Path) -> Path:
+def _candidate_store_root() -> Path:
     candidate_root_raw = _required_env("MCP_TASK_CANDIDATE_ROOT")
     candidate_root = Path(candidate_root_raw)
     if not candidate_root.is_absolute() or candidate_root == Path("/"):
         raise _cfg_failure("invalid candidate verifier root")
-    candidate_root = candidate_root.resolve()
+    return candidate_root.resolve()
+
+
+def _validated_staging_root(staging_root: Path) -> Path:
+    candidate_root = _candidate_store_root()
     staging = staging_root.resolve()
     try:
         staging.relative_to(candidate_root)
@@ -286,7 +292,7 @@ def _validated_staging_root(staging_root: Path) -> Path:
 
 
 def _validated_volume_subpath(staging_root: Path) -> str:
-    candidate_root = Path(_required_env("MCP_TASK_CANDIDATE_ROOT")).resolve()
+    candidate_root = _candidate_store_root()
     staging = _validated_staging_root(staging_root)
     relative = staging.relative_to(candidate_root)
     if relative == Path(".") or not relative.parts:
@@ -434,3 +440,154 @@ def verify_candidate_via_docker(
             stdout=getattr(result, "stdout", "") or "",
             stderr=getattr(result, "stderr", "") or "",
         )
+
+
+def _is_under_candidate_store(path: Path) -> bool:
+    candidate_root = _candidate_store_root()
+    try:
+        path.resolve().relative_to(candidate_root)
+    except ValueError:
+        return False
+    return True
+
+
+def _git_env(home: Path) -> dict[str, str]:
+    return {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(home),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
+def _run_materialize_git(argv: list[str], *, cwd: Path, home: Path, timeout: int = 120) -> str:
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+            env=_git_env(home),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CandidateVerificationError(
+            "candidate verifier could not materialize registered workspace source",
+            code="CANDIDATE_VERIFICATION_FAILED",
+            phase="source_resolution",
+            retryable=True,
+            details={"phase": "source_resolution", "mutation_occurred": False},
+        ) from exc
+    if result.returncode != 0:
+        tail = sanitize_verifier_output_tail(f"{result.stdout or ''}\n{result.stderr or ''}")
+        details: dict[str, Any] = {
+            "phase": "source_resolution",
+            "mutation_occurred": False,
+            "exit_code": result.returncode,
+        }
+        if tail:
+            details["output_tail"] = tail
+        raise CandidateVerificationError(
+            "candidate verifier could not materialize registered workspace source",
+            code="CANDIDATE_VERIFICATION_FAILED",
+            phase="source_resolution",
+            retryable=True,
+            details=details,
+        )
+    return result.stdout.strip()
+
+
+def _materialize_workspace_source(workspace_root: Path, expected_sha: str) -> Path:
+    """Copy one verified delivery workspace into the candidate volume for Docker.
+
+    Docker verification deliberately mounts only subpaths of
+    ``MCP_TASK_CANDIDATE_ROOT``. Prepared delivery workspaces can live in the
+    workspace registry instead, so materialize an exact, no-hardlinks Git clone
+    under the candidate volume and verify that disposable source. The caller is
+    responsible for removing the returned path.
+    """
+    workspace = workspace_root.resolve()
+    if not workspace.is_dir() or not (workspace / ".git").exists():
+        raise _cfg_failure("registered delivery workspace must be a Git worktree")
+    candidate_root = _candidate_store_root()
+    materialized_root = candidate_root / "verified-workspaces"
+    try:
+        materialized_root.mkdir(parents=True, exist_ok=True)
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=f"verified-workspace-{expected_sha[:12]}-",
+                dir=str(materialized_root),
+            )
+        )
+    except OSError as exc:
+        raise _cfg_failure("candidate verifier staging root is unavailable") from exc
+
+    try:
+        _run_materialize_git(
+            [
+                "git",
+                "-c",
+                f"safe.directory={workspace}",
+                "clone",
+                "--no-hardlinks",
+                "--no-checkout",
+                str(workspace),
+                str(staging),
+            ],
+            cwd=materialized_root,
+            home=staging,
+        )
+        _run_materialize_git(
+            ["git", "-C", str(staging), "checkout", "--detach", "--quiet", expected_sha],
+            cwd=staging,
+            home=staging,
+        )
+        actual = _run_materialize_git(
+            ["git", "-C", str(staging), "rev-parse", "HEAD"],
+            cwd=staging,
+            home=staging,
+        ).strip().lower()
+        if actual != expected_sha:
+            raise CandidateVerificationError(
+                "candidate verifier materialized the wrong registered workspace commit",
+                code="CANDIDATE_VERIFICATION_FAILED",
+                phase="source_resolution",
+                retryable=False,
+                details={"phase": "source_resolution", "mutation_occurred": False},
+            )
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return staging
+
+
+def verify_workspace_via_docker(
+    *,
+    workspace_root: Path,
+    expected_sha: str,
+    required_checks: list[str],
+    runner: Callable[..., Any] = subprocess.run,
+) -> None:
+    """Verify a registered delivery workspace in the isolated Docker verifier."""
+    workspace = workspace_root.resolve()
+    if _is_under_candidate_store(workspace):
+        verify_candidate_via_docker(
+            staging_root=workspace,
+            expected_sha=expected_sha,
+            required_checks=required_checks,
+            runner=runner,
+        )
+        return
+
+    staging = _materialize_workspace_source(workspace, expected_sha)
+    try:
+        verify_candidate_via_docker(
+            staging_root=staging,
+            expected_sha=expected_sha,
+            required_checks=required_checks,
+            runner=runner,
+        )
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
