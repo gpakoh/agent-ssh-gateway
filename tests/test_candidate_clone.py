@@ -214,6 +214,13 @@ def test_prepare_candidate_clone_local_clone_trusts_source_gitdir(
                 stdout=f"{base}\n",
                 stderr="",
             )
+        if "rev-parse" in command and "--is-shallow-repository" in command:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="false\n",
+                stderr="",
+            )
         if "clone" in command:
             return subprocess.CompletedProcess(
                 args=command,
