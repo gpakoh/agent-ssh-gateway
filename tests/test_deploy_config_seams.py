@@ -978,6 +978,10 @@ class TestHostSmokeRunsAfterSuccessfulDeploy:
             in makefile
         )
 
+    def test_direct_oauth_test_sets_the_same_timeout_budget_when_absent(self):
+        text = MCP_OAUTH_SMOKE_TEST.read_text(encoding="utf-8")
+        assert 'env.setdefault("MCP_SMOKE_TIMEOUT", "90")' in text
+
     def test_oauth_testcase_is_exactly_one_host_smoke_test(self):
         """The OAuth black-box flow must be exactly one runnable testcase —
         a commit adding a SECOND test would silently weaken the

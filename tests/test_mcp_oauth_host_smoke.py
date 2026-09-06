@@ -58,6 +58,7 @@ def test_mcp_oauth_black_box_smoke_full_flow():
 
     env = dict(os.environ)
     env["MCP_AUTHORIZE_PASSWORD"] = password
+    env.setdefault("MCP_SMOKE_TIMEOUT", "90")
     result = subprocess.run(
         [sys.executable, str(SCRIPT)],
         capture_output=True,
