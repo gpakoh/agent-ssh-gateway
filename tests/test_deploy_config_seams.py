@@ -970,6 +970,14 @@ class TestHostSmokeRunsAfterSuccessfulDeploy:
         run = "\n".join(s.get("run", "") for s in steps)
         assert "uv run make host-smoke" in run or "make host-smoke" in run
 
+    def test_make_host_smoke_sets_oauth_timeout_budget(self):
+        makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
+        assert "MCP_SMOKE_TIMEOUT ?= 90" in makefile
+        assert (
+            "MCP_SMOKE_TIMEOUT=$(MCP_SMOKE_TIMEOUT) uv run pytest -m host_smoke -v"
+            in makefile
+        )
+
     def test_oauth_testcase_is_exactly_one_host_smoke_test(self):
         """The OAuth black-box flow must be exactly one runnable testcase —
         a commit adding a SECOND test would silently weaken the
