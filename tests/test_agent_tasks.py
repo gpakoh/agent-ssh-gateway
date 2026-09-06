@@ -652,6 +652,63 @@ class TestAgentTaskStatus:
         assert result["next"]["read_agent_report"] == {"project": "my-proj", "task_id": task_id}
         assert result["next"]["read_agent_diff"] == {"project": "my-proj", "task_id": task_id}
 
+    def test_ambiguous_gateway_job_is_terminal_despite_fresh_heartbeat(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}
+            ),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "running",
+                    "phase": "loop",
+                    "updated_at": "2026-09-03T12:00:00Z",
+                    "updated_epoch": now - 5,
+                    "runner_pid": 123,
+                    "exit_code": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 700, now - 700))
+        os.utime(td / "agent-heartbeat.json", (now - 5, now - 5))
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "ambiguous"},
+        )
+
+        assert result["job"]["status"] == "ambiguous"
+        assert result["runner_heartbeat_fresh"] is True
+        assert result["terminal"] is True
+        assert result["likely_hung"] is False
+        assert result["verdict"] == "finished"
+        assert "job_status" not in result["next"]
+        assert result["next"]["read_agent_report"] == {
+            "project": "my-proj",
+            "task_id": task_id,
+        }
+        assert result["next"]["read_agent_diff"] == {
+            "project": "my-proj",
+            "task_id": task_id,
+        }
+
 
 class TestInspectAgentTask:
     @staticmethod
@@ -1366,6 +1423,58 @@ class TestInspectAgentHeartbeat:
         assert result["runner_heartbeat"]["state"] == "finished"
         assert result["runner_heartbeat"]["exit_code"] == 0
         assert result["runner_heartbeat_fresh"] is False
+
+    def test_ambiguous_gateway_job_is_finished_not_running(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text(
+            "still printing keepalive\n",
+            encoding="utf-8",
+        )
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}
+            ),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "running",
+                    "phase": "loop",
+                    "updated_at": "2026-09-03T12:00:00Z",
+                    "updated_epoch": now - 5,
+                    "runner_pid": 123,
+                    "exit_code": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 700, now - 700))
+        os.utime(td / "agent-heartbeat.json", (now - 5, now - 5))
+
+        result = inspect_agent_task(
+            TestInspectAgentTask._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "ambiguous"},
+        )
+
+        assert result["status"] == "running"
+        assert result["job"]["status"] == "ambiguous"
+        assert result["runner_heartbeat_fresh"] is True
+        assert result["terminal"] is True
+        assert result["likely_hung"] is False
+        assert result["verdict"] == "finished"
+        assert "recovery" not in result
 
 
 class TestCancelAgentTask:

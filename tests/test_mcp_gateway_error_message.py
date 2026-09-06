@@ -283,6 +283,35 @@ async def test_job_cancel_protocol_returns_cancel_status(monkeypatch):
     assert result["result"] == {"status": "cancelling", "job_id": "job-1"}
 
 
+@pytest.mark.asyncio
+async def test_job_cancel_protocol_preserves_not_cancellable_conflict(monkeypatch):
+    from gateway_client import GatewayClientError
+
+    from examples.mcp_server.mcp_infra.adapters import gateway as gateway_adapter
+
+    class Client:
+        def cancel_job(self, job_id: str) -> dict[str, str]:
+            raise GatewayClientError(
+                "POST /api/jobs/job-1/cancel failed: 409 {...}",
+                status_code=409,
+                body={
+                    "detail": {
+                        "code": "JOB_NOT_CANCELLABLE",
+                        "message": "Cannot cancel job with status: ambiguous",
+                        "retryable": False,
+                    }
+                },
+            )
+
+    monkeypatch.setattr(gateway_adapter, "_server_client", lambda: Client())
+
+    result = await gateway_adapter.gateway_job_cancel_protocol("job-1")
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "JOB_NOT_CANCELLABLE"
+    assert result["error"]["message"] == "Cannot cancel job with status: ambiguous"
+
+
 class TestJobStatusEndToEnd:
     """Feeds a realistic GatewayClientError through the real run_tool()
     path (via gateway_job_status) to prove the fix reaches an actual tool,

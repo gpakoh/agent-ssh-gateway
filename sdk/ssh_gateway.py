@@ -140,8 +140,8 @@ class SSHGatewayClient:
             params={
                 "session_id": self._ssh_session.session_id,
                 "path": path,
-                "offset": offset,
-                "limit": limit,
+                "offset": str(offset),
+                "limit": str(limit),
             },
         )
         r.raise_for_status()
@@ -356,7 +356,7 @@ class SSHGatewayClient:
         r.raise_for_status()
         return r.json()
 
-    def batch_edit(self, files: list[dict], commit_message: str = None) -> dict:
+    def batch_edit(self, files: list[dict], commit_message: str | None = None) -> dict:
         """Edit multiple files in a single request.
 
         files: [{"path": "...", "operations": [{"type": "...", ...}]}]
@@ -596,7 +596,7 @@ class BackgroundJob:
             f"{self.client.base_url}/api/jobs/{self.job_id}/stream", stream=True
         )
 
-        client = sseclient.SSEClient(r)
+        client = sseclient.SSEClient(r.iter_content())
         for event in client.events():
             yield event.data
 

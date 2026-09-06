@@ -32,6 +32,7 @@ from app.services.command_gate import (
     record_allowed,
     resolve_effective_profile,
 )
+from app.ssh_manager import ExecutionError
 from app.state import _err
 
 router = APIRouter(tags=["jobs"])
@@ -304,7 +305,19 @@ async def jobs_list(
 async def jobs_cancel(job_id: str, _identity: AuthIdentity = Depends(require_scope("jobs:run"))):
     """Cancel a running job."""
     await _get_owned_job(job_id, _identity)
-    status = await _state.job_manager.cancel_job(job_id)
+    try:
+        status = await _state.job_manager.cancel_job(job_id)
+    except ExecutionError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=_err(
+                409,
+                str(exc),
+                code="JOB_NOT_CANCELLABLE",
+                retryable=False,
+                hint="The job is already terminal or no longer accepts cancellation; read job_status/job_result for the final state.",
+            ),
+        ) from None
     return {"status": status, "job_id": job_id}
 
 

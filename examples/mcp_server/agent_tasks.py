@@ -722,6 +722,7 @@ _AGENT_TERMINAL_STATUSES = frozenset(
         "supervisor-failed",
         "failed",
         "completed",
+        "ambiguous",
         "cancelled",
     }
 )
