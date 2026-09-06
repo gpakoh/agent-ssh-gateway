@@ -33,6 +33,7 @@ from examples.mcp_server.candidate_verifier import (
     CandidateVerificationError,
     sanitize_verifier_output_tail,
     verify_candidate_via_docker,
+    verify_workspace_via_docker,
 )
 from examples.mcp_server.managed_git import (
     ManagedGitError,
@@ -1655,8 +1656,8 @@ async def gitea_push_verified_commit(
             allowed_files=allowed,
         )
         await asyncio.to_thread(
-            verify_candidate_via_docker,
-            staging_root=Path(project_root),
+            verify_workspace_via_docker,
+            workspace_root=Path(project_root),
             expected_sha=proof_before["head_sha"],
             required_checks=checks,
         )
