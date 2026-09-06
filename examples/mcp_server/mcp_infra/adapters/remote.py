@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -1562,7 +1563,7 @@ async def gitea_push_verified_commit(
         )
         await asyncio.to_thread(
             verify_candidate_via_docker,
-            staging_root=project_root,
+            staging_root=Path(project_root),
             expected_sha=proof_before["head_sha"],
             required_checks=checks,
         )
