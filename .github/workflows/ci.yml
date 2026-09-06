@@ -575,6 +575,8 @@ jobs:
           done
 
       - name: OAuth black-box smoke (must be exactly 1 PASS, never SKIP)
+        env:
+          MCP_SMOKE_TIMEOUT: "90"
         # The mcp-oauth DCR->authorize->consent->token->git_status chain is
         # the P1 #6 gap: the only smoke that actually drives an SSH-executing
         # tool through the Gateway. `make host-smoke` later re-runs this same
