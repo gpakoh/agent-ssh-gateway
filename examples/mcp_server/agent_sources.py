@@ -30,6 +30,11 @@ from pathlib import Path
 from app.workspace.registry import get_registry
 from examples.mcp_server.agent_paths import managed_source_bundle_path
 from examples.mcp_server.agent_tasks import validate_base_ref
+from examples.mcp_server.source_publication_policy import (
+    LocalSourceState,
+    PublicationRoute,
+    choose_publication_route,
+)
 
 _GIT_TIMEOUT_SECONDS = 120
 _BAD_OBJECT_RE = re.compile(
@@ -290,14 +295,12 @@ def _assert_bundle_usable(
         )
 
 
-def _assert_source_not_partial(project_root: Path) -> None:
-    """Refuse publication from shallow sources (incomplete history).
+def _source_is_shallow(project_root: Path) -> bool:
+    """Return whether the registered source has incomplete shallow history.
 
-    Traversal from such sources either fails deep inside bundle creation
-    with an opaque diagnostic.  Partial/promisor clones are not detected
-    here; the post-create scratch-clone proof is the completeness gate for
-    any artifact that passes this check.  Fail closed here with actionable
-    guidance instead.
+    Git execution failures still fail closed. A shallow result is routing
+    input: publication may use only the trusted remote materializer, never
+    the incomplete local object database.
     """
     is_shallow = (
         _run_git(
@@ -308,11 +311,7 @@ def _assert_source_not_partial(project_root: Path) -> None:
         .strip()
         .lower()
     )
-    if is_shallow == "true":
-        raise ManagedSourceBundleError(
-            f"source repository {project_root} is shallow; run "
-            "'git fetch --unshallow' before publishing managed source bundles"
-        )
+    return is_shallow == "true"
 
 
 def _is_missing_object_error(exc: ManagedSourceBundleError) -> bool:
@@ -592,9 +591,14 @@ def ensure_managed_source_bundle(
             pass
 
     project_root = Path(get_registry().project_info(project)["root"])
-    _assert_source_not_partial(project_root)
+    local_state = (
+        LocalSourceState.SHALLOW
+        if _source_is_shallow(project_root)
+        else LocalSourceState.FULL
+    )
+    if choose_publication_route(local_state) is PublicationRoute.TRUSTED_REMOTE:
+        return _materialize_from_remote(project, expected, bundle_path)
 
-    object_missing = False
     try:
         _run_git(
             ["cat-file", "-e", f"{base_ref}^{{commit}}"],
@@ -603,11 +607,11 @@ def ensure_managed_source_bundle(
         )
     except ManagedSourceBundleError as exc:
         if _is_missing_object_error(exc):
-            object_missing = True
+            local_state = LocalSourceState.MISSING_COMMIT
         else:
             raise
 
-    if object_missing:
+    if choose_publication_route(local_state) is PublicationRoute.TRUSTED_REMOTE:
         return _materialize_from_remote(project, expected, bundle_path)
 
     source_objects_raw = _run_git(

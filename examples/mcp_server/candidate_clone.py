@@ -17,6 +17,7 @@ from app.workspace.registry import get_registry, reset_registry, resolve_runtime
 from examples.mcp_server.agent_sources import (
     ManagedSourceBundleError,
     _resolve_trusted_remote,
+    _source_is_shallow,
     ensure_managed_source_bundle,
 )
 from examples.mcp_server.managed_git import _minimal_git_env
@@ -24,6 +25,7 @@ from examples.mcp_server.project_registry_control import (
     ProjectRegistrationError,
     register_project,
 )
+from examples.mcp_server.source_publication_policy import classify_source_failure_message
 
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,160}$")
 _REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,200}$")
@@ -455,7 +457,23 @@ def prepare_candidate_clone(
         )
     if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
         raise _fail("SOURCE_REF_NOT_AVAILABLE", "base ref did not resolve to a commit")
-    local_has_base = _local_commit_or_none(source_root, base_sha) == base_sha
+    try:
+        source_is_shallow = _source_is_shallow(source_root)
+    except ManagedSourceBundleError as exc:
+        raise _fail(
+            "SOURCE_REPO_STALE",
+            "source repository completeness could not be inspected",
+            retryable=True,
+            details={
+                "base_ref": requested_ref,
+                "base_sha": base_sha,
+                "source_cause": classify_source_failure_message(str(exc)).value,
+            },
+        ) from exc
+    local_has_base = (
+        _local_commit_or_none(source_root, base_sha) == base_sha
+        and not source_is_shallow
+    )
     project_id = _project_id(project, branch, base_sha)
     candidate_root = workspace_root / ".mcp-candidate-clones" / project_id
     relative_root = candidate_root.relative_to(workspace_root).as_posix()
@@ -506,12 +524,27 @@ def prepare_candidate_clone(
             else:
                 try:
                     publication = ensure_managed_source_bundle(project, base_sha)
-                except (ManagedSourceBundleError, ValueError) as exc:
+                except ManagedSourceBundleError as exc:
                     raise _fail(
                         "SOURCE_REPO_STALE",
                         "trusted remote base exists but cannot be materialized",
                         retryable=True,
-                        details={"base_ref": requested_ref, "base_sha": base_sha},
+                        details={
+                            "base_ref": requested_ref,
+                            "base_sha": base_sha,
+                            "source_cause": classify_source_failure_message(str(exc)).value,
+                        },
+                    ) from exc
+                except ValueError as exc:
+                    raise _fail(
+                        "SOURCE_REPO_STALE",
+                        "trusted remote base exists but cannot be materialized",
+                        retryable=False,
+                        details={
+                            "base_ref": requested_ref,
+                            "base_sha": base_sha,
+                            "source_cause": "invalid_source_metadata",
+                        },
                     ) from exc
                 if publication is None:
                     raise _fail(
