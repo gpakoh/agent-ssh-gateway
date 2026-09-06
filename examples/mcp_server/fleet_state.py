@@ -33,7 +33,19 @@ import asyncpg
 DEFAULT_POOL_CAPACITY: Final = 2
 MAX_NAME_LENGTH: Final = 200
 TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
-    {"needs-review", "completed", "failed", "cancelled", "rate-limited", "startup-timeout", "run-timeout", "resource-exhausted", "blocked", "error"}
+    {
+        "needs-review",
+        "completed",
+        "failed",
+        "cancelled",
+        "ambiguous",
+        "rate-limited",
+        "startup-timeout",
+        "run-timeout",
+        "resource-exhausted",
+        "blocked",
+        "error",
+    }
 )
 
 # Submission state discriminates a never-submitted acquire from a lease whose
