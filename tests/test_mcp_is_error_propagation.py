@@ -58,6 +58,44 @@ class TestEnvelopeToCallToolResult:
         assert result.isError is True
         assert result.structuredContent == envelope
 
+    def test_delivery_verification_error_is_error_true_with_structured_content(self) -> None:
+        """The structured candidate-delivery error envelope must reach the
+        MCP client as isError=True with machine-actionable structuredContent
+        (phase, contract SHAs, failed check, mutation flag) intact."""
+        from examples.mcp_server.server import _envelope_to_call_tool_result
+        from examples.mcp_server.tool_results import tool_error
+
+        envelope = tool_error(
+            "gitea_push_verified_commit",
+            "REQUIRED_CHECK_FAILED",
+            "a required verification check failed with exit code 83",
+            retryable=False,
+            hint="Fix the failing check and re-issue the candidate delivery.",
+            details={
+                "phase": "required_checks",
+                "branch": "hardening/runtime-deploy",
+                "expected_base_sha": "0" * 40,
+                "expected_head_sha": "5" * 40,
+                "failed_check": "ruff check .",
+                "check_index": 1,
+                "mutation_occurred": False,
+                "required_checks": ["pytest -q", "ruff check ."],
+            },
+        )
+
+        result = _envelope_to_call_tool_result(envelope)
+        assert result.isError is True
+        assert result.structuredContent["ok"] is False
+        error = result.structuredContent["error"]
+        assert error["code"] == "REQUIRED_CHECK_FAILED"
+        assert error["retryable"] is False
+        assert error["hint"] == "Fix the failing check and re-issue the candidate delivery."
+        details = error["details"]
+        assert details["phase"] == "required_checks"
+        assert details["failed_check"] == "ruff check ."
+        assert details["mutation_occurred"] is False
+        assert details["expected_head_sha"] == "5" * 40
+
 
 class TestRegisteredToolIsErrorViaRealFastMCP:
     """Integration-level: drive real tool functions through the actual

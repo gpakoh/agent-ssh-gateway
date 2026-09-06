@@ -29,7 +29,11 @@ from examples.mcp_client_remote.fleet.shared import (
     list_pagination_meta,
     minimize_issue_payload,
 )
-from examples.mcp_server.candidate_verifier import verify_candidate_via_docker
+from examples.mcp_server.candidate_verifier import (
+    CandidateVerificationError,
+    sanitize_verifier_output_tail,
+    verify_candidate_via_docker,
+)
 from examples.mcp_server.managed_git import (
     ManagedGitError,
     configured_gitea_git_base,
@@ -122,6 +126,95 @@ def _remote_api_error(tool: str, source: str, exc: Exception) -> dict[str, Any]:
             source=source,
         )
     return tool_error(tool=tool, code="INTERNAL_ERROR", message=str(exc), source=source)
+
+
+# ── trusted delivery verification diagnostics ──────────────────────
+
+
+_VERIFIED_PHASE_BY_CODE = {
+    "HEAD_MISMATCH": "candidate_checkout",
+    "BASE_MISMATCH": "source_resolution",
+    "SOURCE_REF_NOT_AVAILABLE": "source_resolution",
+    "WORKSPACE_DIRTY": "clean_tree_check",
+    "CANDIDATE_SCOPE_VIOLATION": "allowed_files_check",
+    "CHECK_FAILED": "push_preflight",
+    "INVALID_INPUT": "push_preflight",
+    "WORKSPACE_VERIFICATION_FAILED": "push_preflight",
+}
+
+
+def _delivery_verification_error(
+    *,
+    tool: str,
+    project: str,
+    owner: str,
+    repo: str,
+    destination_branch: str,
+    expected_base_sha: str,
+    expected_head_sha: str,
+    allowed: list[str],
+    checks: list[str],
+    exc: Exception,
+) -> dict[str, Any]:
+    """Convert a verified-delivery denial into a structured, redacted tool error.
+
+    Binds the delivery contract (base/head SHAs, destination branch, allowed
+    files, required checks) to the failing verification phase and, where safe,
+    the failed check name and a bounded, redacted output tail.  ``exc`` is
+    either a ``VerifiedWorkspaceError`` or a ``CandidateVerificationError`` --
+    both already carry a stable code, a sanitized message, a retryable flag
+    and sanitized details.  Nothing here is echoed verbatim from a candidate.
+    """
+    code = getattr(exc, "code", None) or "CANDIDATE_VERIFICATION_FAILED"
+    message = getattr(exc, "message", None) or str(exc)
+    retryable = bool(getattr(exc, "retryable", False))
+    exc_details = getattr(exc, "details", None) or {}
+    phase = (
+        getattr(exc, "phase", None)
+        or _VERIFIED_PHASE_BY_CODE.get(code, "")
+        or "push_preflight"
+    )
+    details: dict[str, Any] = {
+        "phase": phase,
+        "project": project,
+        "owner": owner,
+        "repo": repo,
+        "branch": destination_branch,
+        "expected_base_sha": expected_base_sha,
+        "expected_head_sha": expected_head_sha,
+        "allowed_files": allowed,
+        "required_checks": checks,
+        "mutation_occurred": False,
+    }
+    details.update(exc_details)
+    # Defensive re-sanitization: even if a caller built a structured error
+    # with a raw tail, nothing candidate-controlled is surfaced unredacted.
+    if "output_tail" in details:
+        details["output_tail"] = sanitize_verifier_output_tail(
+            str(details.get("output_tail") or "")
+        )
+        if not details["output_tail"]:
+            details.pop("output_tail", None)
+
+    hint = None
+    if phase == "clean_tree_check":
+        hint = "Rebuild the candidate from the expected base so the delivery workspace is clean before the trusted push."
+    elif phase == "allowed_files_check":
+        hint = "Restrict the delivery commit to paths named by allowed_files and retry."
+    elif phase == "required_checks":
+        hint = "Fix or revert the failing required check (see details.failed_check) and re-run trusted delivery."
+    elif retryable:
+        hint = "Verification environment was transiently unavailable; retry once the candidate store/docker is reachable."
+
+    return tool_error(
+        tool=tool,
+        code=code,
+        message=message,
+        retryable=retryable,
+        hint=hint,
+        details=details,
+        source="gitea",
+    )
 
 
 def _minimize_gitea_repo(data: dict[str, Any]) -> dict[str, Any]:
@@ -1581,23 +1674,45 @@ async def gitea_push_verified_commit(
                 message="delivery workspace changed during isolated verification",
                 retryable=True,
                 source="gitea",
+                details={
+                    "phase": "candidate_checkout",
+                    "mutation_occurred": False,
+                    "expected_base_sha": expected_base_sha,
+                    "expected_head_sha": expected_head_sha,
+                    "allowed_files": allowed,
+                    "required_checks": checks,
+                    "branch": destination_branch,
+                },
             )
-    except VerifiedWorkspaceError as exc:
-        return tool_error(
+    except (VerifiedWorkspaceError, CandidateVerificationError) as exc:
+        return _delivery_verification_error(
             tool="gitea_push_verified_commit",
-            code=exc.code,
-            message=exc.message,
-            retryable=exc.retryable,
-            details=exc.details,
-            source="gitea",
+            project=project,
+            owner=owner,
+            repo=repo,
+            destination_branch=destination_branch,
+            expected_base_sha=expected_base_sha,
+            expected_head_sha=expected_head_sha,
+            allowed=allowed,
+            checks=checks,
+            exc=exc,
         )
     except Exception as exc:
         return tool_error(
             tool="gitea_push_verified_commit",
-            code="CHECK_FAILED",
+            code="CANDIDATE_VERIFICATION_FAILED",
             message=f"isolated delivery verification failed: {type(exc).__name__}",
             retryable=False,
             source="gitea",
+            details={
+                "phase": "push_preflight",
+                "mutation_occurred": False,
+                "expected_base_sha": expected_base_sha,
+                "expected_head_sha": expected_head_sha,
+                "allowed_files": allowed,
+                "required_checks": checks,
+                "branch": destination_branch,
+            },
         )
 
     try:
@@ -1675,7 +1790,13 @@ async def gitea_push_verified_commit(
             code="CHECK_FAILED",
             message="Remote branch does not resolve to expected_head_sha after trusted push",
             retryable=True,
-            details={"expected_head_sha": expected_head, "observed_head_sha": observed_sha},
+            details={
+                "phase": "push_preflight",
+                "mutation_occurred": True,
+                "expected_head_sha": expected_head,
+                "observed_head_sha": observed_sha,
+                "branch": destination_branch,
+            },
             source="gitea",
         )
     return tool_success(
