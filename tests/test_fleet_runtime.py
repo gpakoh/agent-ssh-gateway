@@ -304,6 +304,43 @@ async def test_terminal_gateway_result_releases_exact_bound_lease():
 
 
 @pytest.mark.asyncio
+async def test_ambiguous_gateway_result_releases_exact_bound_lease():
+    lease = _lease(job_id="job-1")
+    state = _mk_state()
+    state.get_lease_by_job = AsyncMock(return_value=lease)
+    state.complete_task = AsyncMock()
+    runtime = _runtime(state)
+
+    await runtime.reconcile_gateway_result(
+        job_id="job-1",
+        result={
+            "job_id": "job-1",
+            "status": "ambiguous",
+            "exit_code": -1,
+            "progress": {
+                "locally_interrupted": True,
+                "cancellation_outcome": "ambiguous",
+            },
+        },
+    )
+
+    state.complete_task.assert_awaited_once_with(
+        task_id=lease.task_id,
+        lease_token=lease.lease_token,
+        status="ambiguous",
+        exit_code=-1,
+        result={
+            "status": "ambiguous",
+            "exit_code": -1,
+            "job_id": "job-1",
+            "locally_interrupted": True,
+            "cancellation_outcome": "ambiguous",
+        },
+        expected_job_id="job-1",
+    )
+
+
+@pytest.mark.asyncio
 async def test_terminal_gateway_without_bound_lease_is_noop():
     state = _mk_state()
     state.get_lease_by_job = AsyncMock(return_value=None)
@@ -580,10 +617,12 @@ async def test_watcher_keeps_lease_while_gateway_job_running():
 
 
 @pytest.mark.asyncio
-async def test_watcher_never_releases_on_job_not_found():
+async def test_watcher_releases_on_authoritative_job_not_found():
+    lease = _lease(job_id="job-42")
     state = _mk_state()
     state.acquire_slot = AsyncMock(return_value=AdmissionResult(True, False, 2, 1, _lease()))
-    state.bind_job = AsyncMock(return_value=_lease(job_id="job-42"))
+    state.bind_job = AsyncMock(return_value=lease)
+    state.get_lease_by_job = AsyncMock(return_value=lease)
     state.complete_task = AsyncMock()
     state.list_bound_leases = AsyncMock(return_value=[])
     state.close = AsyncMock()
@@ -598,10 +637,23 @@ async def test_watcher_never_releases_on_job_not_found():
         submit_sync=lambda: {"task_id": "task-1", "status": "running", "job_id": "job-42"},
         job_status_fn=status_fn,
     )
-    await asyncio.sleep(0.05)
 
-    assert state.complete_task.await_count == 0
-    assert "job-42" in runtime._watchers_by_job
+    assert await _wait_until(lambda: state.complete_task.await_count >= 1)
+    state.complete_task.assert_awaited_once_with(
+        task_id=lease.task_id,
+        lease_token=lease.lease_token,
+        status="ambiguous",
+        exit_code=None,
+        result={
+            "status": "ambiguous",
+            "job_id": "job-42",
+            "error": "Gateway job status is no longer available",
+            "error_code": "JOB_NOT_FOUND",
+            "liveness_reconciled": True,
+        },
+        expected_job_id="job-42",
+    )
+    assert "job-42" not in runtime._watchers_by_job
     await runtime.close()
 
 
@@ -686,6 +738,38 @@ async def test_sweep_releases_terminal_bound_lease_before_admission():
     assert state.complete_task.await_args.kwargs["expected_job_id"] == "job-stale"
     assert state.complete_task.await_args.kwargs["status"] == "completed"
     await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_sweep_releases_authoritative_missing_job_as_ambiguous():
+    lease = _lease(job_id="job-stale")
+    state = _mk_state()
+    state.list_bound_leases = AsyncMock(return_value=[lease])
+    state.get_lease_by_job = AsyncMock(return_value=lease)
+    state.complete_task = AsyncMock()
+    runtime = _watch_runtime(state)
+
+    def status_fn(job_id: str) -> dict:
+        raise RuntimeError(f"JOB_NOT_FOUND for {job_id}")
+
+    released = await runtime.sweep_bound_leases(status_fn)
+
+    assert released == 1
+    state.complete_task.assert_awaited_once_with(
+        task_id=lease.task_id,
+        lease_token=lease.lease_token,
+        status="ambiguous",
+        exit_code=None,
+        result={
+            "status": "ambiguous",
+            "job_id": "job-stale",
+            "error": "Gateway job status is no longer available",
+            "error_code": "JOB_NOT_FOUND",
+            "liveness_reconciled": True,
+        },
+        expected_job_id="job-stale",
+    )
+    assert "job-stale" not in runtime._watchers_by_job
 
 
 @pytest.mark.asyncio
@@ -774,7 +858,7 @@ async def test_sweep_restores_watcher_for_unreachable_bound_lease():
 
     def status_fn(job_id: str) -> dict:
         if job_id == "job-unreachable":
-            raise RuntimeError("JOB_NOT_FOUND")
+            raise RuntimeError("upstream timeout")
         return {"job_id": job_id, "status": "running"}
 
     await runtime.submit(
@@ -795,7 +879,7 @@ async def test_close_finishes_when_watcher_status_fn_keeps_raising():
     """close() must not hang when a watcher polls an unreachable job.
 
     Regression: #128 moved ``_closed = True`` after the watcher gather. A
-    watcher whose gateway status call raises (JOB_NOT_FOUND) has its
+    watcher whose gateway status call raises (upstream timeout) has its
     CancelledError converted into that RuntimeError by the gateway-io shield,
     so it keeps polling while ``_closed`` is still False and close() never
     leaves the gather.
@@ -810,7 +894,7 @@ async def test_close_finishes_when_watcher_status_fn_keeps_raising():
 
     def status_fn(job_id: str) -> dict:
         if job_id == "job-unreachable":
-            raise RuntimeError("JOB_NOT_FOUND")
+            raise RuntimeError("upstream timeout")
         return {"job_id": job_id, "status": "running"}
 
     await runtime.submit(
