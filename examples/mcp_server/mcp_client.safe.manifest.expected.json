@@ -1,7 +1,7 @@
 {
   "mode": "mcp_client",
   "safe_mode": true,
-  "expected_safe_count": 78,
+  "expected_safe_count": 79,
   "expected_blocked_count": 29,
   "expected_mcp_client_full_count": 106,
   "must_include": [
