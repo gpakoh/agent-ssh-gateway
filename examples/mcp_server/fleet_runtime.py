@@ -76,9 +76,24 @@ _CAPACITY_RETRY_AFTER_ENV: Final = "MCP_AGENT_FLEET_CAPACITY_RETRY_AFTER_SECONDS
 _DEFAULT_POOL: Final = "ssh-gateway/agent-sshd"
 _DEFAULT_GATEWAY_IO_CONCURRENCY: Final = 4
 _DEFAULT_CAPACITY_RETRY_AFTER_SECONDS: Final = 60
-_GATEWAY_TERMINAL: Final[frozenset[str]] = frozenset({"completed", "failed", "cancelled"})
+_GATEWAY_TERMINAL: Final[frozenset[str]] = frozenset(
+    {"completed", "failed", "cancelled", "ambiguous"}
+)
+_MISSING_JOB_ERROR_CODE: Final = "JOB_NOT_FOUND"
 _PRE_SUBMIT_TERMINAL: Final[frozenset[str]] = frozenset(
-    {"needs-review", "completed", "failed", "cancelled", "rate-limited", "startup-timeout", "run-timeout", "resource-exhausted", "blocked", "error"}
+    {
+        "needs-review",
+        "completed",
+        "failed",
+        "cancelled",
+        "ambiguous",
+        "rate-limited",
+        "startup-timeout",
+        "run-timeout",
+        "resource-exhausted",
+        "blocked",
+        "error",
+    }
 )
 
 
@@ -164,13 +179,61 @@ def fleet_task_id(project: str, task_id: str) -> str:
 def _small_result(result: dict[str, Any]) -> dict[str, Any]:
     """Keep durable outcomes useful without copying large worker output."""
     summary: dict[str, Any] = {}
-    for key in ("status", "exit_code", "job_id", "error", "finished_at"):
+    for key in (
+        "status",
+        "exit_code",
+        "job_id",
+        "error",
+        "error_code",
+        "finished_at",
+        "liveness_reconciled",
+    ):
         if key in result:
             value = result[key]
             if isinstance(value, str) and len(value) > 500:
                 value = value[:500]
             summary[key] = value
+    progress = result.get("progress")
+    if isinstance(progress, dict):
+        for key in ("locally_interrupted", "cancellation_outcome"):
+            if key in progress:
+                summary[key] = progress[key]
     return summary
+
+
+def _gateway_error_code(exc: Exception) -> str | None:
+    """Extract a gateway machine error code without importing the MCP error layer."""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        detail = body.get("detail")
+        if isinstance(detail, dict) and isinstance(detail.get("code"), str):
+            return detail["code"]
+        if isinstance(body.get("code"), str):
+            return body["code"]
+    text = str(exc)
+    if _MISSING_JOB_ERROR_CODE in text:
+        return _MISSING_JOB_ERROR_CODE
+    return None
+
+
+def _gateway_missing_job_result(job_id: str, exc: Exception) -> dict[str, Any] | None:
+    """Convert authoritative missing-job status into a terminal fleet outcome.
+
+    A gateway JOB_NOT_FOUND response means the worker job is no longer a live
+    execution candidate.  It does not prove remote command success/cancel/fail,
+    so fleet records it as terminal ``ambiguous`` and releases the capacity slot
+    through the same expected-job-id guarded path as normal terminal statuses.
+    Generic transport/timeouts still return ``None`` and keep the lease.
+    """
+    if _gateway_error_code(exc) != _MISSING_JOB_ERROR_CODE:
+        return None
+    return {
+        "job_id": job_id,
+        "status": "ambiguous",
+        "error_code": _MISSING_JOB_ERROR_CODE,
+        "error": "Gateway job status is no longer available",
+        "liveness_reconciled": True,
+    }
 
 
 class FleetRuntime:
@@ -371,15 +434,15 @@ class FleetRuntime:
             "Agent submit returned neither a job_id nor a terminal pre-submit status"
         )
 
-    async def reconcile_gateway_result(self, *, job_id: str, result: dict[str, Any]) -> None:
+    async def reconcile_gateway_result(self, *, job_id: str, result: dict[str, Any]) -> bool:
         """Release a bound lease only when gateway reports a terminal job."""
         status = str(result.get("status") or "")
         if status not in _GATEWAY_TERMINAL:
-            return
+            return False
         await self.ensure_ready()
         lease = await self.state.get_lease_by_job(job_id)
         if lease is None:
-            return
+            return False
         exit_code = result.get("exit_code")
         if not isinstance(exit_code, int) or isinstance(exit_code, bool):
             exit_code = None
@@ -391,6 +454,7 @@ class FleetRuntime:
             result=_small_result(result),
             expected_job_id=job_id,
         )
+        return True
 
     async def _run_gateway_io(
         self,
@@ -477,7 +541,15 @@ class FleetRuntime:
                 continue
             try:
                 result = await self._run_gateway_io(job_status_fn, job_id)
-            except Exception:
+            except Exception as exc:
+                missing_job = _gateway_missing_job_result(job_id, exc)
+                if missing_job is not None:
+                    try:
+                        if await self.reconcile_gateway_result(job_id=job_id, result=missing_job):
+                            released += 1
+                    except Exception:
+                        self._track_watcher(job_id=job_id, job_status_fn=job_status_fn)
+                    continue
                 self._track_watcher(job_id=job_id, job_status_fn=job_status_fn)
                 continue
             status = str(result.get("status") or "")
@@ -531,7 +603,17 @@ class FleetRuntime:
                 result = await self._run_gateway_io(job_status_fn, job_id)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                missing_job = _gateway_missing_job_result(job_id, exc)
+                if missing_job is not None:
+                    try:
+                        await self.reconcile_gateway_result(job_id=job_id, result=missing_job)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        await asyncio.sleep(self._watch_poll_interval)
+                        continue
+                    return
                 await asyncio.sleep(self._watch_poll_interval)
                 continue
             status = str(result.get("status") or "")
