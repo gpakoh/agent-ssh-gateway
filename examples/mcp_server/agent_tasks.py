@@ -823,16 +823,34 @@ def _safe_attempt_summary(record: dict[str, Any] | None) -> dict[str, Any] | Non
     return summary or None
 
 
+def _job_status_error_code(message: str) -> str | None:
+    """Return a stable gateway error code from a bounded job-status error."""
+    upper = message.upper()
+    if "JOB_NOT_FOUND" in upper:
+        return "JOB_NOT_FOUND"
+    return None
+
+
 def _safe_job_summary(job_status, job_id: str | None) -> dict[str, Any] | None:
     if not job_id or job_status is None:
         return None
     try:
         snapshot = job_status(job_id)
     except Exception as exc:
-        return {"job_id": job_id, "known": False, "error": str(exc)[:500]}
+        message = str(exc)[:500]
+        summary: dict[str, Any] = {"job_id": job_id, "known": False, "error": message}
+        error_code = _job_status_error_code(message)
+        if error_code is not None:
+            summary["error_code"] = error_code
+        if error_code == "JOB_NOT_FOUND":
+            # A vanished Gateway job record after a restart proves only control-plane
+            # absence. It must not be inflated into worker/process termination proof.
+            summary["gateway_job_absent"] = True
+            summary["worker_termination_proven"] = False
+        return summary
     if not isinstance(snapshot, dict):
         return {"job_id": job_id, "known": False, "error": "job_status returned non-object"}
-    summary: dict[str, Any] = {"job_id": job_id, "known": True}
+    summary = {"job_id": job_id, "known": True}
     for key in ("status", "exit_code", "created_at", "started_at", "finished_at"):
         value = snapshot.get(key)
         if isinstance(value, (str, int)) or value is None:
@@ -843,6 +861,56 @@ def _safe_job_summary(job_status, job_id: str | None) -> dict[str, Any] | None:
 def _job_status_token(job: dict[str, Any] | None) -> str | None:
     value = (job or {}).get("status")
     return value.lower() if isinstance(value, str) and value else None
+
+
+def _gateway_job_absent(job: dict[str, Any] | None) -> bool:
+    return bool(
+        job
+        and job.get("known") is False
+        and job.get("error_code") == "JOB_NOT_FOUND"
+        and job.get("gateway_job_absent") is True
+    )
+
+
+def _agent_reconciliation_diagnostics(
+    *,
+    attempt: dict[str, Any] | None,
+    job: dict[str, Any] | None,
+    status: str | None,
+    files: dict[str, dict[str, Any]],
+    active: bool,
+    terminal: bool,
+    last_activity: dict[str, Any],
+    semantic_activity: dict[str, Any],
+    runner_heartbeat_fresh: bool,
+) -> dict[str, Any]:
+    """Summarize restart/orphan evidence without inventing worker finality."""
+    attempt_job_id = (attempt or {}).get("job_id")
+    attempt_bound_job = isinstance(attempt_job_id, str) and bool(attempt_job_id)
+    gateway_job_absent = _gateway_job_absent(job)
+    report_exists = bool((files.get("report") or {}).get("exists"))
+    diff_exists = bool((files.get("diff") or {}).get("exists"))
+    artifact_incomplete = not (report_exists or diff_exists)
+    state = None
+    if gateway_job_absent and attempt_bound_job and not terminal:
+        if active and not runner_heartbeat_fresh:
+            state = "lost_after_restart"
+        elif active:
+            state = "orphaned_attempt"
+        elif artifact_incomplete:
+            state = "artifact_incomplete"
+    return {
+        "state": state,
+        "gateway_job_absent": gateway_job_absent,
+        "attempt_bound_job": attempt_bound_job,
+        "status": status,
+        "status_active": active,
+        "runner_heartbeat_fresh": runner_heartbeat_fresh,
+        "artifact_incomplete": artifact_incomplete,
+        "worker_termination_proven": False if gateway_job_absent else None,
+        "last_activity": last_activity,
+        "last_useful_activity": semantic_activity,
+    }
 
 
 def _latest_activity(files: dict[str, dict[str, Any]], now_epoch: int) -> dict[str, Any]:
@@ -1276,6 +1344,7 @@ def agent_task_status(
     activity = _latest_activity(
         {name: meta for name, meta in files.items() if name != "heartbeat"}, now
     )
+    semantic_activity = _progress_artifact_activity(files, now)
     age = activity.get("age_seconds")
     heartbeat = _read_agent_heartbeat(run_cmd, project=project, task_id=task_id, now_epoch=now)
     heartbeat_age = heartbeat.get("age_seconds")
@@ -1287,10 +1356,25 @@ def agent_task_status(
 
     terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
     active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
+    reconciliation = _agent_reconciliation_diagnostics(
+        attempt=attempt,
+        job=job,
+        status=status_token,
+        files=files,
+        active=active,
+        terminal=terminal,
+        last_activity=activity,
+        semantic_activity=semantic_activity,
+        runner_heartbeat_fresh=runner_heartbeat_fresh,
+    )
     likely_hung = bool(active and not terminal and isinstance(age, int) and age >= stale_after_seconds)
+    if reconciliation.get("state") is not None:
+        likely_hung = True
 
     if terminal:
         verdict = "finished"
+    elif reconciliation.get("state") is not None:
+        verdict = str(reconciliation["state"])
     elif likely_hung:
         verdict = "likely_hung"
     elif active:
@@ -1307,7 +1391,7 @@ def agent_task_status(
             "purpose": "cheap polling without log tail",
         },
     }
-    if verdict in {"likely_hung", "needs_attention", "unknown"}:
+    if verdict in {"lost_after_restart", "orphaned_attempt", "artifact_incomplete", "likely_hung", "needs_attention", "unknown"}:
         next_actions["inspect_agent_task"] = {
             "project": project,
             "task_id": task_id,
@@ -1329,6 +1413,8 @@ def agent_task_status(
         "attempt_state_error": attempt_error,
         "files": files,
         "last_activity": activity,
+        "last_useful_activity": semantic_activity,
+        "reconciliation": reconciliation,
         "runner_heartbeat": heartbeat,
         "runner_heartbeat_fresh": runner_heartbeat_fresh,
         "stale_after_seconds": stale_after_seconds,
@@ -1426,6 +1512,7 @@ def inspect_agent_task(
     activity = _latest_activity(
         {name: meta for name, meta in files.items() if name != "heartbeat"}, now
     )
+    semantic_activity = _progress_artifact_activity(files, now)
     age = activity.get("age_seconds")
     heartbeat = _read_agent_heartbeat(
         run_cmd, project=project, task_id=task_id, now_epoch=now
@@ -1439,7 +1526,20 @@ def inspect_agent_task(
 
     terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
     active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
+    reconciliation = _agent_reconciliation_diagnostics(
+        attempt=attempt,
+        job=job,
+        status=status_token,
+        files=files,
+        active=active,
+        terminal=terminal,
+        last_activity=activity,
+        semantic_activity=semantic_activity,
+        runner_heartbeat_fresh=runner_heartbeat_fresh,
+    )
     likely_hung = bool(active and not terminal and isinstance(age, int) and age >= stale_after_seconds)
+    if reconciliation.get("state") is not None:
+        likely_hung = True
 
     log = read_agent_log_tail(run_cmd, project=project, task_id=task_id, tail_lines=tail_lines)
     startup = _agent_startup_diagnostics(
@@ -1476,6 +1576,9 @@ def inspect_agent_task(
 
     if terminal:
         verdict = "finished"
+    elif reconciliation.get("state") is not None:
+        verdict = str(reconciliation["state"])
+        likely_hung = True
     elif startup.get("dead_time_kind") == "opencode_startup":
         verdict = "startup_stalled"
     elif reasoning_loop.get("detected"):
@@ -1506,6 +1609,8 @@ def inspect_agent_task(
         "attempt_state_error": attempt_error,
         "files": files,
         "last_activity": activity,
+        "last_useful_activity": semantic_activity,
+        "reconciliation": reconciliation,
         "runner_heartbeat": heartbeat,
         "runner_heartbeat_fresh": runner_heartbeat_fresh,
         "startup": startup,
@@ -1526,7 +1631,21 @@ def inspect_agent_task(
             "tail_lines": log.get("tail_lines", tail_lines),
         },
     }
-    if reasoning_loop.get("detected"):
+    if reconciliation.get("state") is not None:
+        result["recovery"] = {
+            "action": "inspect_artifacts_then_retry_with_new_task_id",
+            "worker_termination_proven": False,
+            "do_not_assume_worker_terminated": True,
+            "inspect_agent_task": {"project": project, "task_id": task_id},
+            "retry_agent_task": {
+                "project": project,
+                "source_task_id": task_id,
+                "retry_task_id": "<new-task-id>",
+                "requires_new_task_id": True,
+            },
+            "run_agent": {"project": project, "task_id": "<new-task-id>"},
+        }
+    elif reasoning_loop.get("detected"):
         result["recovery"] = {
             "action": "cancel_and_retry_with_continuation",
             "cancel_agent_task": {"project": project, "task_id": task_id},
