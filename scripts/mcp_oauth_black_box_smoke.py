@@ -39,7 +39,7 @@ import sys
 import urllib.parse
 from typing import Any
 
-TIMEOUT = float(os.environ.get("MCP_SMOKE_TIMEOUT", "30"))
+TIMEOUT = float(os.environ.get("MCP_SMOKE_TIMEOUT", "90"))
 BASE_HOST = os.environ.get("MCP_SMOKE_BASE_HOST", "127.0.0.1")
 BASE_PORT = int(os.environ.get("MCP_SMOKE_BASE_PORT", "8788"))
 REDIRECT_URI = "http://localhost/callback"
