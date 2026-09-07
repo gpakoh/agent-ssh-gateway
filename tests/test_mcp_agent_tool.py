@@ -53,6 +53,41 @@ def test_read_agent_log_redacts_obvious_secrets(monkeypatch):
     assert result["meta"]["redacted"] is True
 
 
+def test_read_agent_artifact_wraps_bounded_redacted_helper(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    captured: dict[str, object] = {}
+
+    def fake_read_artifact(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "artifact": "report",
+            "filename": "agent-report.md",
+            "available": True,
+            "stdout": "token=abc123\nreport\n",
+            "stderr": "",
+            "exit_code": 0,
+            "truncated": False,
+            "redacted": False,
+        }
+
+    monkeypatch.setattr(agent_adapter, "_read_agent_artifact_tail", fake_read_artifact)
+
+    result = agent_adapter.gateway_read_agent_artifact(
+        "test", TASK_ID, artifact="report", tail_lines=20, max_bytes=1024
+    )
+
+    assert result["ok"] is True
+    assert captured["project"] == "test"
+    assert captured["task_id"] == TASK_ID
+    assert captured["artifact"] == "report"
+    assert captured["tail_lines"] == 20
+    assert captured["max_bytes"] == 1024
+    assert "abc123" not in result["result"]["stdout"]
+    assert "[REDACTED]" in result["result"]["stdout"]
+    assert result["meta"]["redacted"] is True
+
+
 
 
 def test_inspect_agent_task_redacts_status_and_log(monkeypatch):
@@ -377,6 +412,12 @@ class TestProjectRunAgentAsyncSubmit:
         assert result["diagnostics"]["inspect_agent_task"]["purpose"] == (
             "deep diagnostics with bounded log tail and stall detectors"
         )
+        assert result["diagnostics"]["read_agent_artifact"] == {
+            "project": "test",
+            "task_id": TASK_ID,
+            "artifact": "report",
+            "purpose": "bounded redacted fixed-artifact tail",
+        }
         assert result["diagnostics"]["job_status"]["job_id"] == "job-42"
         run_script_async.assert_called_once()
         submission_key = run_script_async.call_args.args[2]
@@ -887,6 +928,7 @@ def test_agent_adapter_registers_run_agents_tool(monkeypatch):
 
     assert registered["run_agents"] is adapter.gateway_run_agents
     assert registered["agent_status"] is adapter.gateway_agent_status
+    assert registered["read_agent_artifact"] is adapter.gateway_read_agent_artifact
 
 
 def test_gateway_agent_status_wraps_lightweight_status(monkeypatch):

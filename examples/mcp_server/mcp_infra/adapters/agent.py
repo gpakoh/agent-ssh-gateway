@@ -37,6 +37,9 @@ from agent_tasks import (
     prepare_agent_task_retry as _prepare_agent_task_retry,
 )
 from agent_tasks import (
+    read_agent_artifact_tail as _read_agent_artifact_tail,
+)
+from agent_tasks import (
     read_agent_attempt_state as _read_agent_attempt_state,
 )
 from agent_tasks import (
@@ -274,6 +277,41 @@ def gateway_read_agent_log(
         title="Read agent live log",
         fn=_fn,
         success_text="Read agent live log.",
+    )
+
+
+def gateway_read_agent_artifact(
+    project: str,
+    task_id: str,
+    artifact: str,
+    tail_lines: int = 200,
+    max_bytes: int = 65536,
+) -> dict[str, Any]:
+    """Read a bounded, redacted tail of one fixed agent task artifact."""
+
+    def _fn() -> dict[str, Any]:
+        result = _read_agent_artifact_tail(
+            lambda p, c: run_project_command(_server_client(), p, c),
+            project=project,
+            task_id=task_id,
+            artifact=artifact,
+            tail_lines=tail_lines,
+            max_bytes=max_bytes,
+        )
+        stdout = str(result.get("stdout", ""))
+        stderr = str(result.get("stderr", ""))
+        redacted_stdout = str(redact_secrets(stdout))
+        redacted_stderr = str(redact_secrets(stderr))
+        result["stdout"] = redacted_stdout
+        result["stderr"] = redacted_stderr
+        result["redacted"] = bool(result.get("redacted")) or redacted_stdout != stdout or redacted_stderr != stderr
+        return result
+
+    return run_tool(
+        tool="read_agent_artifact",
+        title="Read agent artifact tail",
+        fn=_fn,
+        success_text="Read agent artifact tail.",
     )
 
 
@@ -639,6 +677,7 @@ def register_all() -> None:
     register_tool("read_agent_report")(gateway_read_agent_report)
     register_tool("read_agent_diff")(gateway_read_agent_diff)
     register_tool("read_agent_log")(gateway_read_agent_log)
+    register_tool("read_agent_artifact")(gateway_read_agent_artifact)
     register_tool("agent_status")(gateway_agent_status)
     register_tool("inspect_agent_task")(gateway_inspect_agent_task)
     register_tool("list_agent_tasks")(gateway_list_agent_tasks)
