@@ -9,35 +9,20 @@ separate changelog/audit archive if needed.
 PR #138 has merged; keep this list as the remaining close-out checklist until
 items are explicitly verified as implemented, documented and safe in production.
 
-1. ⬜ **OpenCode startup/proxy rotation close-out.** `inspect_agent_task` must
-   expose startup/proxy dead time as first-class structured status instead of
-   generic `running`: `phase=startup`, elapsed time, proxy attempt/max, last
-   startup message, `useful_agent_activity_seen=false`, and verdicts such as
-   `startup_stalled` / `startup_timeout`. Closure requires regression coverage
-   proving repeated proxy rotation is diagnosable without raw-log reading.
-
-2. ⬜ **Stable bounded log access for agent tasks.** Operator diagnostics must
-   not depend on arbitrary shell/log reads that can fail safety checks. Provide a
-   path-safe, redacted, bounded log/artifact surface for fixed task files such as
-   `opencode-output.log`, `agent-status.md`, `agent-report.md`,
-   `implementation-diff.patch`, `agent-heartbeat.json`, and proxy sidecars.
-   Closure requires a regression that returns sanitized tail or structured
-   `log_unavailable`, not a tool-level false-positive.
-
-3. ⬜ **Separate useful agent work from startup dead time.** Source-bundle and
+1. ⬜ **Separate useful agent work from startup dead time.** Source-bundle and
    checkout success are not proof that OpenCode read the plan, wrote a report,
    produced a diff, or ran checks. Count useful work only from semantic artifacts
    and meaningful status transitions. Heartbeat/proxy keepalive must not reset
    semantic staleness. Closure: fresh heartbeat plus stale semantic artifacts
    returns `likely_hung` / `startup_stalled`, not ordinary `running`.
 
-4. ⬜ **Proxy rotation feedback needs a durable sidecar.** Normalize a redacted
+2. ⬜ **Proxy rotation feedback needs a durable sidecar.** Normalize a redacted
    `proxy-status.json`-style artifact with attempt, max_attempts, provider kind,
    last_error_class, timestamps and final outcome. Never store proxy URLs or
    secrets. Closure requires tests asserting concise startup/proxy data is
    surfaced and the no-secret invariant is preserved.
 
-5. ⬜ **Residual tool exposure/catalog mismatch.** #140 added repo-side catalog
+3. ⬜ **Residual tool exposure/catalog mismatch.** #140 added repo-side catalog
    consistency reporting, but the end-to-end operator problem remains until the
    ChatGPT-visible resource catalog and MCP `tools/list` cannot diverge silently.
    Live symptoms included missing invokable schemas for advertised/expected tools
@@ -63,14 +48,14 @@ items are explicitly verified as implemented, documented and safe in production.
    either invokable with the exact implementation contract or explicitly marked
    unavailable with a reason at the same surface the operator uses.
 
-6. ⬜ **Git namespace mismatch between SSH tools and control-plane git tools.**
+4. ⬜ **Git namespace mismatch between SSH tools and control-plane git tools.**
    `execute_argv` / `repo_status` can observe one branch/ref/HEAD while trusted
    git tools act from another namespace or fail with `GIT_LOCAL_REF_MISSING`.
    Closure requires host-path-free metadata showing exact resolved project root,
    branch and head for trusted git operations, and fail-closed detection such as
    `WORKSPACE_NAMESPACE_MISMATCH` when namespaces diverge.
 
-7. ⬜ **Command-plane/session recovery gap after transient reconnect/cooldown.**
+5. ⬜ **Command-plane/session recovery gap after transient reconnect/cooldown.**
    After a transient 429 or reconnect cooldown, project-level tools such as
    `git_status` and `current_branch` can continue to work while `execute_argv`
    against the previously known session returns `SESSION_NOT_FOUND` or becomes
@@ -82,7 +67,7 @@ items are explicitly verified as implemented, documented and safe in production.
    deletion, with regression coverage proving operators do not need probe refs
    to recover.
 
-8. ⬜ **OpenCode worker `UnknownError` needs structured failure reason and
+6. ⬜ **OpenCode worker `UnknownError` needs structured failure reason and
    server-log correlation.** Managed delivery tasks can fail after source-bundle
    verification and clean clone setup but before useful work, with
    `Failure reason: none` and only opaque OpenCode `UnknownError` refs. Closure
@@ -90,7 +75,7 @@ items are explicitly verified as implemented, documented and safe in production.
    `opencode_server_error`, `provider_error` or `proxy_error`, preserving the
    upstream ref, and surfacing a redacted server-log correlation hint.
 
-9. ⬜ **Agent job state is not durable across Gateway restart/deploy.** An
+7. ⬜ **Agent job state is not durable across Gateway restart/deploy.** An
    OpenCode corrective task had useful work in `opencode-output.log` and had
    already run targeted tests, but the Gateway restart during CI deploy made the
    returned `job_id` disappear with `JOB_NOT_FOUND` while `agent-status.md`
@@ -104,7 +89,7 @@ items are explicitly verified as implemented, documented and safe in production.
    the returned job id reported `JOB_NOT_FOUND`, so reconciliation must also
    preserve or derive terminal state for still-visible task artifacts.
 
-10. ⬜ **Handoff/write tools must route around non-writeable production roots.**
+8. ⬜ **Handoff/write tools must route around non-writeable production roots.**
    GPT RAG orchestration on 2026-09-04 reported `Permission denied` when trying
    to create parallel `.ai-bridge` handoffs for `quart-core`, and `index.lock`
    permission failures when attempting writes/staging in root project checkouts.
@@ -121,7 +106,7 @@ items are explicitly verified as implemented, documented and safe in production.
    candidate clone, instead of allowing late `.ai-bridge` or `.git/index.lock`
    permission failures in production roots.
 
-11. ⬜ **OpenCode review clones must support dirty-worktree review targets.**
+9. ⬜ **OpenCode review clones must support dirty-worktree review targets.**
    During NOD verification on 2026-09-04, a read-only OpenCode review task
    materialized only repository `HEAD 40d026f8` instead of the current dirty
    worktree, so the review surface was not suitable for checking uncommitted NOD
