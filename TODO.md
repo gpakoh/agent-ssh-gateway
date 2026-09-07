@@ -219,26 +219,6 @@ items are explicitly verified as implemented, documented and safe in production.
     Gateway-created scratch workspaces, and verification helpers that distinguish
     environment/bootstrap failure from project test failure.
 
-9. ⬜ **`prepare_candidate_clone` must handle Git safe-directory ownership preflight.**
-    During Quart Chat Engine contract bootstrap on 2026-09-05, `quart-core`
-    correctly reported `filesystem_writeable=false` and recommended
-    `writeable_candidate_clone`, but `prepare_candidate_clone(quart-core,
-    feature/chat-engine-plugin-contract-20260905)` failed before creating the
-    clone with `fatal: detected dubious ownership in repository at '.'` and
-    Git's unsafe suggestion `git config --global --add safe.directory .`. This
-    blocks the intended safe path for read-only/root-owned production checkouts
-    and pushes operators back toward the very canonical-root mutations the
-    candidate-clone path is supposed to avoid. Closure requires clone preparation
-    to perform an explicit source-repo ownership/safe-directory preflight, use a
-    scoped/non-global Git configuration when it intentionally reads an approved
-    registered source repository, or fail closed with a typed
-    `GIT_SAFE_DIRECTORY_REQUIRED` / `SOURCE_REPO_OWNERSHIP_BLOCKED` diagnostic
-    and a safe recovery path. Regression coverage must include a readable but
-    cross-owned source repository whose canonical workspace is not writeable and
-    prove `prepare_candidate_clone` either succeeds without global config or
-    returns the typed diagnostic before any partial candidate workspace is
-    registered.
-
 ## 🧩 Frontend/Astro delivery findings — 2026-09-05
 
 1. ⬜ **Route frontend verification through the existing Astro delivery
