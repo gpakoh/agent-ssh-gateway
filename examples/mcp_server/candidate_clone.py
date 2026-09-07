@@ -188,6 +188,66 @@ def _git_command(
     return command
 
 
+def _git_ownership_error_code(operation: str) -> str:
+    """Return the typed diagnostic for Git dubious-ownership failures."""
+    source_operations = {
+        "resolve base ref",
+        "clone source repository",
+    }
+    if operation in source_operations:
+        return "SOURCE_REPO_OWNERSHIP_BLOCKED"
+    return "GIT_SAFE_DIRECTORY_REQUIRED"
+
+
+def _git_failure(
+    *,
+    cwd: Path,
+    operation: str,
+    exit_code: int,
+    stdout: str | None,
+    stderr: str | None,
+) -> CandidateCloneError:
+    stdout_tail = _git_diagnostic_tail(stdout, cwd)
+    stderr_tail = _git_diagnostic_tail(stderr, cwd)
+    details = {
+        "operation": operation,
+        "exit_code": exit_code,
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+    }
+    if "detected dubious ownership" in stderr_tail.lower():
+        code = _git_ownership_error_code(operation)
+        message = (
+            "source repository ownership is not trusted by Git"
+            if code == "SOURCE_REPO_OWNERSHIP_BLOCKED"
+            else "git safe.directory trust is required for this workspace"
+        )
+        return _fail(code, message, retryable=False, details=details)
+    return _fail(
+        "TOOL_EXECUTION_FAILED",
+        f"git {operation} failed",
+        retryable=False,
+        details=details,
+    )
+
+
+def _source_ownership_error(
+    *,
+    operation: str,
+    exc: BaseException,
+    source_root: Path,
+) -> CandidateCloneError | None:
+    diagnostic = _git_diagnostic_tail(str(exc), source_root)
+    if "detected dubious ownership" not in diagnostic.lower():
+        return None
+    return _fail(
+        "SOURCE_REPO_OWNERSHIP_BLOCKED",
+        "source repository ownership is not trusted by Git",
+        retryable=False,
+        details={"operation": operation, "stderr_tail": diagnostic},
+    )
+
+
 def _run_git(
     cwd: Path,
     args: list[str],
@@ -220,16 +280,12 @@ def _run_git(
             details={"operation": operation, "error": type(exc).__name__},
         ) from exc
     if result.returncode != 0:
-        raise _fail(
-            "TOOL_EXECUTION_FAILED",
-            f"git {operation} failed",
-            retryable=False,
-            details={
-                "operation": operation,
-                "exit_code": result.returncode,
-                "stdout_tail": _git_diagnostic_tail(result.stdout, cwd),
-                "stderr_tail": _git_diagnostic_tail(result.stderr, cwd),
-            },
+        raise _git_failure(
+            cwd=cwd,
+            operation=operation,
+            exit_code=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
         )
     return result.stdout.strip()
 
@@ -467,6 +523,13 @@ def prepare_candidate_clone(
     try:
         source_is_shallow = _source_is_shallow(source_root)
     except ManagedSourceBundleError as exc:
+        ownership_error = _source_ownership_error(
+            operation="inspect source repository completeness",
+            exc=exc,
+            source_root=source_root,
+        )
+        if ownership_error is not None:
+            raise ownership_error from exc
         raise _fail(
             "SOURCE_REPO_STALE",
             "source repository completeness could not be inspected",
