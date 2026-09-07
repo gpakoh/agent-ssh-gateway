@@ -43,6 +43,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "workspace_preview_edit",
         "workspace_preview_patch",
         "workspace_verify",
+        "todo_backlog_upsert",
     },
     "full": {
         "health",
@@ -69,6 +70,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "workspace_preview_edit",
         "workspace_preview_patch",
         "workspace_verify",
+        "todo_backlog_upsert",
     },
     "mcp_client": {
         "project_list",
@@ -185,6 +187,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "workspace_preview_edit",
         "workspace_preview_patch",
         "workspace_verify",
+        "todo_backlog_upsert",
     },
 }
 
@@ -209,6 +212,7 @@ MCP_CLIENT_BLOCKED_TOOLS: frozenset[str] = frozenset({
     "workspace_preview_edit",
     "workspace_preview_patch",
     "workspace_verify",
+    "todo_backlog_upsert",
     # Handoff write (mutates plan files)
     "write_handoff_plan",
     # Docker write/admin — dangerous

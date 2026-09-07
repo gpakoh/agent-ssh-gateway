@@ -470,6 +470,7 @@ gateway_workspace_preview_write = workspace.gateway_workspace_preview_write
 gateway_workspace_preview_edit = workspace.gateway_workspace_preview_edit
 gateway_workspace_preview_patch = workspace.gateway_workspace_preview_patch
 gateway_workspace_verify = workspace.gateway_workspace_verify
+gateway_todo_backlog_upsert = workspace.gateway_todo_backlog_upsert
 
 gitea_get_repo = remote.gitea_get_repo
 gitea_list_branches = remote.gitea_list_branches

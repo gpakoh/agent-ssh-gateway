@@ -421,6 +421,91 @@ def gateway_workspace_verify(
             message=str(exc),
         )
 
+def gateway_todo_backlog_upsert(
+    project_id: str,
+    title: str,
+    severity: str,
+    observed_behavior: str,
+    reproduction_steps: str,
+    expected_behavior: str,
+    impact: str,
+    acceptance_criteria: str,
+    related_evidence: str = "",
+    section_title: str = "Runtime/tooling intake",
+    failure_mode: str = "",
+    entry_date: str | None = None,
+    update_existing: bool = False,
+    safe: bool = False,
+) -> dict[str, Any]:
+    """Create/update one structured TODO.md backlog entry with dedupe.
+
+    Args:
+        project_id: Registered project/candidate identifier to mutate.
+        title: Human-readable finding title.
+        severity: One of P0, P1, P2, P3.
+        observed_behavior: What actually happened.
+        reproduction_steps: How to reproduce or observe it again.
+        expected_behavior: Desired behavior.
+        impact: Why the finding matters.
+        acceptance_criteria: Concrete closure checks.
+        related_evidence: Optional commits, runs, PRs, task ids or log refs.
+        section_title: Section prefix for newly-created entries.
+        failure_mode: Optional stable dedupe key; title is used when omitted.
+        entry_date: Optional YYYY-MM-DD; defaults to current date.
+        update_existing: Append dated evidence to a matched item instead of
+            refusing the duplicate.
+        safe: Include an edit receipt.
+
+    Returns:
+        Contract v1 dict describing created/updated action and post-write proof.
+    """
+    from app.config import settings as _settings
+
+    if _settings.workspace_readonly:
+        return tool_error(
+            tool="todo_backlog_upsert",
+            code="WORKSPACE_READONLY",
+            message="Workspace is in read-only mode",
+        )
+    try:
+        from app.workspace.todo_backlog import TodoBacklogError, upsert_todo_backlog_entry
+
+        registry = _server_workspace_registry()
+        candidate_required = _workspace_candidate_required(
+            "todo_backlog_upsert", project_id, registry
+        )
+        if candidate_required is not None:
+            return candidate_required
+        result = upsert_todo_backlog_entry(
+            project_id=project_id,
+            title=title,
+            severity=severity,
+            observed_behavior=observed_behavior,
+            reproduction_steps=reproduction_steps,
+            expected_behavior=expected_behavior,
+            impact=impact,
+            acceptance_criteria=acceptance_criteria,
+            related_evidence=related_evidence,
+            section_title=section_title,
+            failure_mode=failure_mode,
+            entry_date=entry_date,
+            update_existing=update_existing,
+            registry=registry,
+            safe=safe,
+        )
+        return tool_success(tool="todo_backlog_upsert", result=result)
+    except TodoBacklogError as exc:
+        return tool_error(
+            tool="todo_backlog_upsert",
+            code=exc.code,
+            message=str(exc),
+            details=exc.details or None,
+            source="gateway",
+        )
+    except Exception as exc:
+        return _workspace_mutation_error("todo_backlog_upsert", exc)
+
+
 def reset_workspace_registry_cache() -> None:
     """Drop the MCP workspace-registry cache after a registry mutation."""
     global _workspace_registry_cache
@@ -435,3 +520,6 @@ def register_all() -> None:
     register_tool("workspace_preview_edit")(instrumented("workspace_preview_edit")(gateway_workspace_preview_edit))
     register_tool("workspace_preview_patch")(instrumented("workspace_preview_patch")(gateway_workspace_preview_patch))
     register_tool("workspace_verify")(instrumented("workspace_verify")(gateway_workspace_verify))
+    register_tool("todo_backlog_upsert")(
+        instrumented("todo_backlog_upsert")(gateway_todo_backlog_upsert)
+    )
