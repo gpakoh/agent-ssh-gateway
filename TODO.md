@@ -53,7 +53,13 @@ items are explicitly verified as implemented, documented and safe in production.
    `task_id Field required`. During NOD delivery on 2026-09-04,
    `tools_manifest` advertised `gitea_materialize_task_candidate` /
    `prepare_candidate_clone`, but `list_resources(query="materialize" | "candidate")`
-   did not surface invokable schemas. Closure requires advertised tools to be
+   did not surface invokable schemas. During the #195 TODO-writer rollout on
+   2026-09-07, post-merge deploy/host-smoke proved live `tools_manifest` on
+   master `4f74014632ffbb1e89369932a53768eed6ef06e0` advertised
+   `todo_backlog_upsert` as enabled/available, while the ChatGPT-visible
+   `api_tool.list_resources(paths=["SSH_Gateway"])` catalog in the same
+   conversation still exposed only 127 schemas and omitted the new writer.
+   Closure requires advertised tools to be
    either invokable with the exact implementation contract or explicitly marked
    unavailable with a reason at the same surface the operator uses.
 
