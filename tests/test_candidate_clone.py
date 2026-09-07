@@ -92,6 +92,8 @@ def test_prepare_candidate_clone_creates_registered_clean_clone(registry_fixture
     assert _git(clone_root, "rev-parse", "--abbrev-ref", "HEAD") == "candidate/test-flow"
     assert _git(clone_root, "rev-parse", "HEAD") == base
     assert _git(clone_root, "status", "--short") == ""
+    assert _git(clone_root, "config", "--local", "user.name") == "MCP Control Plane"
+    assert _git(clone_root, "config", "--local", "user.email") == "control-plane@gateway.invalid"
     assert (clone_root / ".git" / "mcp-candidate-clone.json").is_file()
     registry = (config_dir / "projects.yaml").read_text(encoding="utf-8")
     assert data["project_id"] in registry
