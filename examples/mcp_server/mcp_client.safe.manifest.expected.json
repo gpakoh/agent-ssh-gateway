@@ -2,8 +2,8 @@
   "mode": "mcp_client",
   "safe_mode": true,
   "expected_safe_count": 79,
-  "expected_blocked_count": 29,
-  "expected_mcp_client_full_count": 106,
+  "expected_blocked_count": 30,
+  "expected_mcp_client_full_count": 107,
   "must_include": [
     "health",
     "info",
@@ -19,6 +19,7 @@
     "run_agents",
     "run_opencode",
     "workspace_apply_patch",
-    "workspace_file_write"
+    "workspace_file_write",
+    "todo_backlog_upsert"
   ]
 }
