@@ -25,6 +25,7 @@ ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 BASE_REF_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 AGENT_LOG_FILENAME = "opencode-output.log"
 AGENT_HEARTBEAT_FILENAME = "agent-heartbeat.json"
+AGENT_PROXY_STATUS_FILENAME = "proxy-status.json"
 AGENT_LOG_MAX_BYTES = 64 * 1024
 AGENT_LOG_MAX_TAIL_LINES = 1000
 AGENT_STALE_AFTER_SECONDS = 600
@@ -812,6 +813,112 @@ def _read_agent_heartbeat(
     return summary
 
 
+_DIAGNOSTIC_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s)\]}>\"']+")
+_DIAGNOSTIC_SECRET_RE = re.compile(
+    r"(?i)(\b(?:token|password|passwd|secret|api[_-]?key|proxy[_-]?url)\b\s*[:=]\s*)[^\s,;]+"
+)
+_AGENT_PROXY_STATUS_STRING_FIELDS = (
+    "provider_kind",
+    "last_error_class",
+    "started_at",
+    "updated_at",
+    "finished_at",
+    "final_outcome",
+)
+_AGENT_PROXY_STATUS_INT_FIELDS = (
+    "attempt",
+    "max_attempts",
+    "started_epoch",
+    "updated_epoch",
+    "finished_epoch",
+)
+
+
+def _sanitize_agent_diagnostic_text(value: str, *, max_chars: int = 240) -> str:
+    """Return a bounded diagnostic string without URLs, credentials, or tokens."""
+    text = _ANSI_ESCAPE_RE.sub("", value)
+    text = _DIAGNOSTIC_URL_RE.sub("<redacted-url>", text)
+    text = _DIAGNOSTIC_SECRET_RE.sub(r"\1<redacted>", text)
+    return text[:max_chars]
+
+
+def _last_startup_message(text: str) -> str | None:
+    """Return the latest bounded startup/proxy line from status/log text."""
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        lowered = stripped.lower()
+        if stripped and ("startup" in lowered or "proxy" in lowered):
+            return _sanitize_agent_diagnostic_text(stripped)
+    return None
+
+
+def _elapsed_since_earliest_artifact(
+    files: dict[str, dict[str, Any]],
+    now_epoch: int,
+    names: tuple[str, ...],
+) -> int | None:
+    mtimes: list[int] = []
+    for name, meta in files.items():
+        if name not in names:
+            continue
+        mtime = meta.get("mtime_epoch")
+        if isinstance(mtime, int):
+            mtimes.append(mtime)
+    if not mtimes:
+        return None
+    return max(0, now_epoch - min(mtimes))
+
+
+def _read_agent_proxy_status(
+    run_cmd,
+    *,
+    project: str,
+    task_id: str,
+    now_epoch: int,
+) -> dict[str, Any]:
+    """Read and sanitize the optional proxy rotation sidecar.
+
+    Only a strict allowlist of concise, non-secret fields is returned.  Any
+    secret-bearing or raw proxy URL fields in the JSON are reported by key name
+    only, never by value.
+    """
+    result = read_agent_task_file(
+        run_cmd, project=project, task_id=task_id, filename=AGENT_PROXY_STATUS_FILENAME
+    )
+    text = str(result.get("stdout", ""))
+    if text == "(not found)":
+        return {"exists": False}
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return {"exists": True, "valid": False, "error": "proxy status is not valid JSON"}
+    if not isinstance(data, dict):
+        return {"exists": True, "valid": False, "error": "proxy status is not a JSON object"}
+
+    summary: dict[str, Any] = {"exists": True, "valid": True}
+    for key in _AGENT_PROXY_STATUS_STRING_FIELDS:
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            summary[key] = _sanitize_agent_diagnostic_text(value, max_chars=120)
+    for key in _AGENT_PROXY_STATUS_INT_FIELDS:
+        value = data.get(key)
+        if isinstance(value, int) or value is None:
+            summary[key] = value
+    updated_epoch = summary.get("updated_epoch")
+    if isinstance(updated_epoch, int):
+        summary["age_seconds"] = max(0, now_epoch - updated_epoch)
+    else:
+        summary["age_seconds"] = None
+    redacted_fields = sorted(
+        key
+        for key in data
+        if re.search(r"(?i)(url|token|secret|password|passwd|credential|api[_-]?key)", str(key))
+    )
+    if redacted_fields:
+        summary["redacted_fields"] = redacted_fields
+    return summary
+
+
 def _safe_attempt_summary(record: dict[str, Any] | None) -> dict[str, Any] | None:
     if not record:
         return None
@@ -938,13 +1045,26 @@ def _agent_startup_diagnostics(
     log_stdout: str,
     files: dict[str, dict[str, Any]],
     active: bool,
+    now_epoch: int,
+    proxy_status: dict[str, Any],
 ) -> dict[str, Any]:
     """Classify OpenCode startup/proxy dead time separately from useful work."""
     combined = f"{status_text}\n{log_stdout}"
     matches = list(_STARTUP_STALLED_RE.finditer(combined))
     attempts = [int(match.group(1)) for match in matches]
     max_attempts = [int(match.group(2)) for match in matches]
-    opencode_startup_stalled = bool(matches or "OpenCode startup stalled" in combined)
+    proxy_attempt = proxy_status.get("attempt")
+    proxy_max_attempts = proxy_status.get("max_attempts")
+    proxy_sidecar_observed = bool(proxy_status.get("exists") and proxy_status.get("valid"))
+    opencode_startup_stalled = bool(
+        matches
+        or "OpenCode startup stalled" in combined
+        or (
+            active
+            and proxy_sidecar_observed
+            and proxy_status.get("final_outcome") not in {"succeeded", "complete", "completed"}
+        )
+    )
     startup_timeout = status == "startup-timeout" or "opencode-startup-timeout" in combined
     useful_agent_activity_seen = bool(
         (files.get("report") or {}).get("exists")
@@ -954,14 +1074,33 @@ def _agent_startup_diagnostics(
     dead_time_kind = None
     if active and opencode_startup_stalled and not useful_agent_activity_seen:
         dead_time_kind = "opencode_startup"
+    phase = "startup" if startup_timeout or dead_time_kind == "opencode_startup" else None
+    elapsed_seconds = _elapsed_since_earliest_artifact(
+        files,
+        now_epoch,
+        ("status", "log", "heartbeat", "attempt_state", "proxy_status"),
+    )
+    last_message = _last_startup_message(combined)
+    if last_message is None:
+        last_error = proxy_status.get("last_error_class")
+        if isinstance(last_error, str) and last_error:
+            last_message = f"proxy error class: {last_error}"
     return {
+        "phase": phase,
+        "elapsed_seconds": elapsed_seconds,
+        "last_startup_message": last_message,
         "startup_timeout": startup_timeout,
         "opencode_startup_stalled": opencode_startup_stalled,
         "proxy_rotation": {
-            "observed": bool(matches),
-            "attempt": max(attempts) if attempts else None,
-            "max_attempts": max(max_attempts) if max_attempts else None,
+            "observed": bool(matches or proxy_sidecar_observed),
+            "attempt": proxy_attempt if isinstance(proxy_attempt, int) else (max(attempts) if attempts else None),
+            "max_attempts": (
+                proxy_max_attempts
+                if isinstance(proxy_max_attempts, int)
+                else (max(max_attempts) if max_attempts else None)
+            ),
             "count": len(matches),
+            "sidecar": proxy_sidecar_observed,
         },
         "useful_agent_activity_seen": useful_agent_activity_seen,
         "dead_time_kind": dead_time_kind,
@@ -1092,7 +1231,7 @@ def _progress_artifact_activity(files: dict[str, dict[str, Any]], now_epoch: int
     # Log and heartbeat activity alone can hide a thinking loop. attempt-state
     # is job bookkeeping, not agent progress. Treat status/consensus/report/diff
     # as semantic progress signals.
-    ignored = {"log", "heartbeat", "attempt_state"}
+    ignored = {"log", "heartbeat", "proxy_status", "attempt_state"}
     return _latest_activity({name: meta for name, meta in files.items() if name not in ignored}, now_epoch)
 
 
@@ -1326,6 +1465,9 @@ def agent_task_status(
         "heartbeat": _task_file_stat(
             run_cmd, project=project, task_id=task_id, filename=AGENT_HEARTBEAT_FILENAME
         ),
+        "proxy_status": _task_file_stat(
+            run_cmd, project=project, task_id=task_id, filename=AGENT_PROXY_STATUS_FILENAME
+        ),
         "report": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="agent-report.md"),
         "diff": _task_file_stat(
             run_cmd, project=project, task_id=task_id, filename="implementation-diff.patch"
@@ -1342,7 +1484,7 @@ def agent_task_status(
         ),
     }
     activity = _latest_activity(
-        {name: meta for name, meta in files.items() if name != "heartbeat"}, now
+        {name: meta for name, meta in files.items() if name not in {"heartbeat", "proxy_status"}}, now
     )
     semantic_activity = _progress_artifact_activity(files, now)
     age = activity.get("age_seconds")
@@ -1352,6 +1494,9 @@ def agent_task_status(
         heartbeat.get("state") == "running"
         and isinstance(heartbeat_age, int)
         and heartbeat_age < stale_after_seconds
+    )
+    proxy_status = _read_agent_proxy_status(
+        run_cmd, project=project, task_id=task_id, now_epoch=now
     )
 
     terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
@@ -1417,6 +1562,7 @@ def agent_task_status(
         "reconciliation": reconciliation,
         "runner_heartbeat": heartbeat,
         "runner_heartbeat_fresh": runner_heartbeat_fresh,
+        "proxy_status": proxy_status,
         "stale_after_seconds": stale_after_seconds,
         "terminal": terminal,
         "likely_hung": likely_hung,
@@ -1499,6 +1645,7 @@ def inspect_agent_task(
         "status": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="agent-status.md"),
         "log": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_LOG_FILENAME),
         "heartbeat": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_HEARTBEAT_FILENAME),
+        "proxy_status": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_PROXY_STATUS_FILENAME),
         "report": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="agent-report.md"),
         "diff": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="implementation-diff.patch"),
         "consensus": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="consensus.md"),
@@ -1506,11 +1653,11 @@ def inspect_agent_task(
         "required_checks": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="required-checks.log"),
         "attempt_state": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=ATTEMPT_STATE_FILENAME),
     }
-    # Heartbeat proves the wrapper process is alive, but it is deliberately
-    # excluded from semantic activity so a stuck/silent agent is not hidden by
-    # the runner's periodic keepalive.
+    # Heartbeat/proxy sidecars prove wrapper/provider liveness, but they are
+    # deliberately excluded from semantic activity so keepalives do not hide a
+    # stuck/silent agent.
     activity = _latest_activity(
-        {name: meta for name, meta in files.items() if name != "heartbeat"}, now
+        {name: meta for name, meta in files.items() if name not in {"heartbeat", "proxy_status"}}, now
     )
     semantic_activity = _progress_artifact_activity(files, now)
     age = activity.get("age_seconds")
@@ -1522,6 +1669,9 @@ def inspect_agent_task(
         heartbeat.get("state") == "running"
         and isinstance(heartbeat_age, int)
         and heartbeat_age < stale_after_seconds
+    )
+    proxy_status = _read_agent_proxy_status(
+        run_cmd, project=project, task_id=task_id, now_epoch=now
     )
 
     terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
@@ -1548,6 +1698,8 @@ def inspect_agent_task(
         log_stdout=str(log.get("stdout", "")),
         files=files,
         active=active,
+        now_epoch=now,
+        proxy_status=proxy_status,
     )
     reasoning_loop = _detect_agent_reasoning_loop(
         log_stdout=str(log.get("stdout", "")),
@@ -1574,7 +1726,9 @@ def inspect_agent_task(
         emitted_invoke_after_seconds=emitted_invoke_after_seconds,
     )
 
-    if terminal:
+    if startup.get("startup_timeout"):
+        verdict = "startup_timeout"
+    elif terminal:
         verdict = "finished"
     elif reconciliation.get("state") is not None:
         verdict = str(reconciliation["state"])
@@ -1613,6 +1767,7 @@ def inspect_agent_task(
         "reconciliation": reconciliation,
         "runner_heartbeat": heartbeat,
         "runner_heartbeat_fresh": runner_heartbeat_fresh,
+        "proxy_status": proxy_status,
         "startup": startup,
         "reasoning_loop": reasoning_loop,
         "trailing_colon_stall": trailing_colon_stall,

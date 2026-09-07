@@ -941,9 +941,18 @@ class TestInspectAgentTask:
         assert result["verdict"] == "startup_stalled"
         assert result["likely_hung"] is False
         assert result["startup"] == {
+            "phase": "startup",
+            "elapsed_seconds": 90,
+            "last_startup_message": "OpenCode startup stalled; rotating proxy (attempt 3/4)",
             "startup_timeout": False,
             "opencode_startup_stalled": True,
-            "proxy_rotation": {"observed": True, "attempt": 3, "max_attempts": 4, "count": 3},
+            "proxy_rotation": {
+                "observed": True,
+                "attempt": 3,
+                "max_attempts": 4,
+                "count": 3,
+                "sidecar": False,
+            },
             "useful_agent_activity_seen": False,
             "dead_time_kind": "opencode_startup",
         }
@@ -993,6 +1002,79 @@ class TestInspectAgentTask:
         assert result["startup"]["opencode_startup_stalled"] is True
         assert result["startup"]["useful_agent_activity_seen"] is True
         assert result["startup"]["dead_time_kind"] is None
+
+    def test_proxy_status_sidecar_is_sanitized_and_keeps_startup_visible(self):
+        now = 2_000
+        raw_proxy_url = "http://user:pass@proxy.local:8080?token=raw-token"
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "agent-status.md" in command:
+                return {"stdout": "Status: running\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "attempt-state.json" in command:
+                return {
+                    "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat ") and "proxy-status.json" in command:
+                return {
+                    "stdout": json.dumps(
+                        {
+                            "attempt": 4,
+                            "max_attempts": 5,
+                            "provider_kind": "exclusive-live",
+                            "last_error_class": f"ProxyError via {raw_proxy_url}",
+                            "final_outcome": "rotating",
+                            "updated_epoch": now - 5,
+                            "proxy_url": raw_proxy_url,
+                            "access_token": "top-secret-token",
+                        }
+                    ),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat "):
+                return {"stdout": "(not found)", "stderr": "", "exit_code": 1}
+            if command.startswith("tail -c "):
+                return {"stdout": "Waiting for provider allocation\n", "stderr": "", "exit_code": 0}
+            if command.startswith("stat -c "):
+                if "agent-report.md" in command or "implementation-diff.patch" in command:
+                    return {"stdout": "", "stderr": "not found", "exit_code": 1}
+                if "proxy-status.json" in command:
+                    return {"stdout": f"400 {now - 5}\n", "stderr": "", "exit_code": 0}
+                return {"stdout": f"20 {now - 700}\n", "stderr": "", "exit_code": 0}
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = inspect_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda _job: {"status": "running"},
+        )
+
+        assert result["verdict"] == "startup_stalled"
+        assert result["startup"]["phase"] == "startup"
+        assert result["startup"]["elapsed_seconds"] == 700
+        assert result["startup"]["last_startup_message"] == "proxy error class: ProxyError via <redacted-url>"
+        assert result["startup"]["proxy_rotation"] == {
+            "observed": True,
+            "attempt": 4,
+            "max_attempts": 5,
+            "count": 0,
+            "sidecar": True,
+        }
+        assert result["proxy_status"]["redacted_fields"] == ["access_token", "proxy_url"]
+        serialized = json.dumps(result, ensure_ascii=False)
+        assert "user:pass" not in serialized
+        assert "proxy.local" not in serialized
+        assert "raw-token" not in serialized
+        assert "top-secret-token" not in serialized
+        assert result["last_activity"]["source"] != "proxy_status"
+        assert result["last_useful_activity"]["source"] == "status"
 
 
     def test_running_repetitive_reasoning_without_progress_is_reasoning_loop(self, tmp_path, monkeypatch):
@@ -1403,7 +1485,8 @@ class TestInspectAgentTask:
         )
 
         assert result["terminal"] is True
-        assert result["verdict"] == "finished"
+        assert result["verdict"] == "startup_timeout"
+        assert result["startup"]["phase"] == "startup"
         assert result["startup"]["startup_timeout"] is True
 
 
