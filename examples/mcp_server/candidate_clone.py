@@ -243,6 +243,13 @@ def _local_commit_or_none(source_root: Path, ref: str) -> str | None:
         ).lower()
     except CandidateCloneError as exc:
         details = exc.details or {}
+        if (
+            re.fullmatch(r"[0-9a-fA-F]{40}", ref)
+            and exc.code == "TOOL_EXECUTION_FAILED"
+            and exc.retryable
+            and details.get("operation") == "resolve base ref"
+        ):
+            return None
         stderr = str(details.get("stderr_tail") or "").lower()
         missing_markers = (
             "needed a single revision",

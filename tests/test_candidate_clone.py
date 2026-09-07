@@ -363,6 +363,72 @@ def test_prepare_candidate_clone_uses_trusted_remote_base_when_local_checkout_is
     assert _git(clone_root, "show", "HEAD:README.md") == "remote-newer"
 
 
+def test_prepare_candidate_clone_exact_base_timeout_uses_trusted_bundle(
+    registry_fixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    workspace, source, config_dir, journal_root, _base = registry_fixture
+    remote_source = tmp_path / "remote-exact-source"
+    _git(tmp_path, "clone", "-q", str(source), str(remote_source))
+    _git(remote_source, "config", "user.name", "Test")
+    _git(remote_source, "config", "user.email", "test@example.invalid")
+    (remote_source / "README.md").write_text("remote-exact\n", encoding="utf-8")
+    _git(remote_source, "add", "README.md")
+    _git(remote_source, "commit", "-q", "-m", "remote exact")
+    remote_sha = _git(remote_source, "rev-parse", "HEAD")
+    bundle = tmp_path / "remote-exact.bundle"
+    _git(remote_source, "bundle", "create", str(bundle), "HEAD")
+    original_run_git = candidate_clone_module._run_git
+
+    def timeout_exact_local_resolve(
+        cwd: Path,
+        args: list[str],
+        **kwargs,
+    ) -> str:
+        if (
+            cwd == source
+            and args == ["rev-parse", "--verify", f"{remote_sha}^{{commit}}"]
+            and kwargs.get("operation") == "resolve base ref"
+        ):
+            raise CandidateCloneError(
+                "TOOL_EXECUTION_FAILED",
+                "git resolve base ref did not complete",
+                retryable=True,
+                details={"operation": "resolve base ref", "timeout_s": 60},
+            )
+        return original_run_git(cwd, args, **kwargs)
+
+    monkeypatch.setattr(candidate_clone_module, "_run_git", timeout_exact_local_resolve)
+    monkeypatch.setattr(
+        candidate_clone_module,
+        "_remote_ref_sha",
+        lambda _source, ref: remote_sha if ref == remote_sha else None,
+    )
+    monkeypatch.setattr(
+        candidate_clone_module,
+        "ensure_managed_source_bundle",
+        lambda _project, sha: ManagedSourcePublication(str(bundle), "a" * 64)
+        if sha == remote_sha
+        else None,
+    )
+
+    receipt = candidate_clone_module.prepare_candidate_clone(
+        "source-project",
+        "candidate/exact-timeout-remote-base",
+        remote_sha,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    assert receipt.base_sha == remote_sha
+    assert _git(clone_root, "rev-parse", "HEAD") == remote_sha
+    assert _git(clone_root, "show", "HEAD:README.md") == "remote-exact"
+
+
 def test_prepare_candidate_clone_missing_base_returns_typed_source_ref_error(
     registry_fixture,
     monkeypatch: pytest.MonkeyPatch,

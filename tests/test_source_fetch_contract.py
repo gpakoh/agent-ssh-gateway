@@ -198,6 +198,35 @@ def test_shallow_source_publishes_from_trusted_full_remote(
     assert _git(shallow, "status", "--porcelain=v1") == before_status
 
 
+def test_exact_sha_cat_file_timeout_falls_back_to_trusted_remote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    origin = tmp_path / "origin-exact-timeout"
+    head = _init_history_repo(origin)
+    remote = _make_bare_remote(origin, tmp_path / "remote-exact-timeout.git")
+    _install_managed_env(
+        monkeypatch,
+        source_root=tmp_path / "source-root",
+        project_root=origin,
+        remote=remote,
+    )
+    original_run_git = agent_sources._run_git
+
+    def timeout_cat_file(args: list[str], **kwargs) -> str:
+        if args == ["cat-file", "-e", f"{head}^{{commit}}"]:
+            raise ManagedSourceBundleError(
+                "managed source publication timed out during git cat-file"
+            )
+        return original_run_git(args, **kwargs)
+
+    monkeypatch.setattr(agent_sources, "_run_git", timeout_cat_file)
+
+    publication = agent_sources.ensure_managed_source_bundle("proj-exact-timeout", head)
+
+    assert publication is not None
+    _assert_bundle_clones_to(Path(publication.path), head, tmp_path / "verify-exact-timeout")
+
+
 def test_full_local_source_publishes_without_trusted_remote(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

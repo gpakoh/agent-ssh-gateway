@@ -606,7 +606,10 @@ def ensure_managed_source_bundle(
             safe_directory=project_root,
         )
     except ManagedSourceBundleError as exc:
-        if _is_missing_object_error(exc):
+        if _is_missing_object_error(exc) or (
+            re.fullmatch(r"[0-9a-fA-F]{40}", base_ref)
+            and "timed out during git cat-file" in str(exc)
+        ):
             local_state = LocalSourceState.MISSING_COMMIT
         else:
             raise
