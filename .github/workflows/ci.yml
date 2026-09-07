@@ -42,6 +42,10 @@ jobs:
     # own default (360 minutes) or the self-hosted runner's own limits,
     # occupying a runner slot the whole time instead of failing fast.
     timeout-minutes: 20
+    env:
+      CI_PACKAGE_HTTP_PROXY: ${{ secrets.CI_PACKAGE_HTTP_PROXY }}
+      CI_PACKAGE_HTTPS_PROXY: ${{ secrets.CI_PACKAGE_HTTPS_PROXY }}
+      CI_PACKAGE_NO_PROXY: ${{ secrets.CI_PACKAGE_NO_PROXY }}
 
     strategy:
       fail-fast: false
@@ -50,6 +54,27 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      - name: Configure package proxy
+        run: |
+          package_proxy_enabled=false
+          if [ -n "${CI_PACKAGE_HTTP_PROXY:-}" ]; then
+            echo "HTTP_PROXY=$CI_PACKAGE_HTTP_PROXY" >> "$GITHUB_ENV"
+            echo "http_proxy=$CI_PACKAGE_HTTP_PROXY" >> "$GITHUB_ENV"
+            package_proxy_enabled=true
+          fi
+          package_https_proxy="${CI_PACKAGE_HTTPS_PROXY:-${CI_PACKAGE_HTTP_PROXY:-}}"
+          if [ -n "$package_https_proxy" ]; then
+            echo "HTTPS_PROXY=$package_https_proxy" >> "$GITHUB_ENV"
+            echo "https_proxy=$package_https_proxy" >> "$GITHUB_ENV"
+            package_proxy_enabled=true
+          fi
+          if [ "$package_proxy_enabled" = "true" ]; then
+            package_no_proxy="${CI_PACKAGE_NO_PROXY:-localhost,127.0.0.1,::1,.example.com,git.example.com,gitea}"
+            echo "NO_PROXY=$package_no_proxy" >> "$GITHUB_ENV"
+            echo "no_proxy=$package_no_proxy" >> "$GITHUB_ENV"
+            echo "::notice::CI package proxy enabled for dependency install and audit steps"
+          fi
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7
@@ -193,8 +218,33 @@ jobs:
     name: E2E (Selenium)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      CI_PACKAGE_HTTP_PROXY: ${{ secrets.CI_PACKAGE_HTTP_PROXY }}
+      CI_PACKAGE_HTTPS_PROXY: ${{ secrets.CI_PACKAGE_HTTPS_PROXY }}
+      CI_PACKAGE_NO_PROXY: ${{ secrets.CI_PACKAGE_NO_PROXY }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Configure package proxy
+        run: |
+          package_proxy_enabled=false
+          if [ -n "${CI_PACKAGE_HTTP_PROXY:-}" ]; then
+            echo "HTTP_PROXY=$CI_PACKAGE_HTTP_PROXY" >> "$GITHUB_ENV"
+            echo "http_proxy=$CI_PACKAGE_HTTP_PROXY" >> "$GITHUB_ENV"
+            package_proxy_enabled=true
+          fi
+          package_https_proxy="${CI_PACKAGE_HTTPS_PROXY:-${CI_PACKAGE_HTTP_PROXY:-}}"
+          if [ -n "$package_https_proxy" ]; then
+            echo "HTTPS_PROXY=$package_https_proxy" >> "$GITHUB_ENV"
+            echo "https_proxy=$package_https_proxy" >> "$GITHUB_ENV"
+            package_proxy_enabled=true
+          fi
+          if [ "$package_proxy_enabled" = "true" ]; then
+            package_no_proxy="${CI_PACKAGE_NO_PROXY:-localhost,127.0.0.1,::1,.example.com,git.example.com,gitea}"
+            echo "NO_PROXY=$package_no_proxy" >> "$GITHUB_ENV"
+            echo "no_proxy=$package_no_proxy" >> "$GITHUB_ENV"
+            echo "::notice::CI package proxy enabled for dependency install and audit steps"
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v7

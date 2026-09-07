@@ -1059,6 +1059,59 @@ class TestInstallPackageNetworkResilience:
             assert "uv sync attempt ${attempt}/5 failed" in run
             assert 'sleep "$delay"' in run
 
+    def test_python_jobs_wire_optional_package_proxy_secrets(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        expected_env = {
+            "CI_PACKAGE_HTTP_PROXY": "${{ secrets.CI_PACKAGE_HTTP_PROXY }}",
+            "CI_PACKAGE_HTTPS_PROXY": "${{ secrets.CI_PACKAGE_HTTPS_PROXY }}",
+            "CI_PACKAGE_NO_PROXY": "${{ secrets.CI_PACKAGE_NO_PROXY }}",
+        }
+        for job_name in ("test", "e2e"):
+            job = wf["jobs"][job_name]
+            for key, value in expected_env.items():
+                assert job["env"][key] == value
+
+    def test_package_proxy_is_exported_before_dependency_install_without_literal_ip(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        for job_name in ("test", "e2e"):
+            steps = wf["jobs"][job_name]["steps"]
+            names = [step.get("name", step.get("uses")) for step in steps]
+            configure_index = names.index("Configure package proxy")
+            install_index = names.index("Install package (frozen lockfile)")
+            assert configure_index < install_index
+
+            run = steps[configure_index]["run"]
+            assert "CI_PACKAGE_HTTP_PROXY" in run
+            assert "CI_PACKAGE_HTTPS_PROXY" in run
+            assert "CI_PACKAGE_NO_PROXY" in run
+            assert "HTTP_PROXY=$CI_PACKAGE_HTTP_PROXY" in run
+            assert "http_proxy=$CI_PACKAGE_HTTP_PROXY" in run
+            assert "HTTPS_PROXY=$package_https_proxy" in run
+            assert "https_proxy=$package_https_proxy" in run
+            assert "NO_PROXY=$package_no_proxy" in run
+            assert "no_proxy=$package_no_proxy" in run
+            assert "192.0.2.199" not in run
+            assert "CI package proxy enabled" in run
+
+    def test_package_proxy_does_not_turn_dependency_or_audit_failures_optional(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        for job_name in ("test", "e2e"):
+            configure_run = next(
+                s for s in wf["jobs"][job_name]["steps"] if s.get("name") == "Configure package proxy"
+            )["run"]
+            install_run = next(
+                s for s in wf["jobs"][job_name]["steps"] if s.get("name") == "Install package (frozen lockfile)"
+            )["run"]
+            assert "continue-on-error" not in configure_run
+            assert "|| true" not in configure_run
+            assert "continue-on-error" not in install_run
+            assert "|| true" not in install_run
+        pip_audit = next(
+            s for s in wf["jobs"]["test"]["steps"] if s.get("name") == "pip-audit"
+        )
+        assert "continue-on-error" not in pip_audit
+        assert "|| true" not in pip_audit["run"]
+
 
 class TestPipAuditNetworkResilience:
     """CI must distinguish a real vulnerability finding from transient
