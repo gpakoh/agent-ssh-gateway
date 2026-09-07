@@ -1041,6 +1041,25 @@ class TestPrBuildsAndSmokeTestsDockerArtifact:
         assert found == len(build_and_smoke_names)
 
 
+class TestInstallPackageNetworkResilience:
+    """CI dependency installation must tolerate the same runner egress
+    failures that later affected pip-audit; otherwise the audit step never
+    gets a chance to run.
+    """
+
+    def test_install_steps_retry_uv_install_and_uv_sync(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        for job_name in ("test", "e2e"):
+            steps = wf["jobs"][job_name]["steps"]
+            run = next(s for s in steps if s.get("name") == "Install package (frozen lockfile)")["run"]
+
+            assert "for attempt in 1 2 3 4 5" in run
+            assert "python -m pip install uv" in run
+            assert "UV_HTTP_TIMEOUT=60 uv sync --frozen --extra dev" in run
+            assert "uv sync attempt ${attempt}/5 failed" in run
+            assert 'sleep "$delay"' in run
+
+
 class TestPipAuditNetworkResilience:
     """CI must distinguish a real vulnerability finding from transient
     advisory-service network failures, and give OSV enough retry budget to
