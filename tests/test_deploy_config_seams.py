@@ -1041,6 +1041,50 @@ class TestPrBuildsAndSmokeTestsDockerArtifact:
         assert found == len(build_and_smoke_names)
 
 
+class TestPipAuditNetworkResilience:
+    """CI must distinguish a real vulnerability finding from transient
+    advisory-service network failures, and give OSV enough retry budget to
+    survive the runner pool's intermittent TLS/read-timeout path.
+    """
+
+    def test_pip_audit_uses_extended_osv_timeout_and_retry_budget(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["test"]["steps"]
+        step = next(s for s in steps if s.get("name") == "pip-audit")
+        run = step["run"]
+
+        assert "max_attempts=5" in run
+        assert "timeout_seconds=60" in run
+        assert '--timeout "$timeout_seconds"' in run
+        assert 'for attempt in $(seq 1 "$max_attempts")' in run
+        assert 'sleep "$delay"' in run
+
+    def test_pip_audit_retry_signature_covers_osv_tls_handshake_timeouts(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["test"]["steps"]
+        run = next(s for s in steps if s.get("name") == "pip-audit")["run"]
+
+        for signature in (
+            "ReadTimeout",
+            "ConnectTimeout",
+            "TimeoutError",
+            "SSLError",
+            "ProxyError",
+            "RemoteDisconnected",
+            "handshake operation timed out",
+        ):
+            assert signature in run
+
+    def test_pip_audit_real_findings_still_fail_without_retry(self):
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+        steps = wf["jobs"]["test"]["steps"]
+        run = next(s for s in steps if s.get("name") == "pip-audit")["run"]
+
+        assert "exit $status" in run
+        assert "continue" in run
+        assert run.index("grep -qE") < run.index("continue") < run.index("exit $status")
+
+
 class TestMakeCheckMirrorsCiExactly:
     """MAJOR audit finding (CI-04): `make check`'s pytest invocation and
     ci.yml's were two separately-maintained implementations of "run the

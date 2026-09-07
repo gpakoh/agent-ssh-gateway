@@ -125,21 +125,28 @@ jobs:
         # retry.
         run: |
           set +e
-          for attempt in 1 2 3; do
-            output=$(uv run pip-audit -l -s osv --strict --timeout 20 --progress-spinner=off 2>&1)
+          max_attempts=5
+          timeout_seconds=60
+          for attempt in $(seq 1 "$max_attempts"); do
+            output=$(uv run pip-audit -l -s osv --strict --timeout "$timeout_seconds" --progress-spinner=off 2>&1)
             status=$?
             echo "$output"
             if [ $status -eq 0 ]; then
               exit 0
             fi
-            if echo "$output" | grep -qE "ReadTimeout|ConnectTimeout|ConnectionError|Read timed out|Connection reset|Temporary failure in name resolution|Network is unreachable"; then
-              echo "::warning::pip-audit attempt ${attempt} failed with a network error, retrying..."
-              sleep 5
-              continue
+            if echo "$output" | grep -qE "ReadTimeout|ConnectTimeout|ConnectionError|Read timed out|Connection reset|Temporary failure in name resolution|Network is unreachable|TimeoutError|SSLError|ProxyError|RemoteDisconnected|handshake operation timed out"; then
+              if [ "$attempt" -lt "$max_attempts" ]; then
+                delay=$((attempt * 10))
+                echo "::warning::pip-audit attempt ${attempt}/${max_attempts} failed with a network error, retrying in ${delay}s..."
+                sleep "$delay"
+                continue
+              fi
+              echo "::error::pip-audit failed after ${max_attempts} attempts due to persistent network errors"
+              exit 1
             fi
             exit $status
           done
-          echo "::error::pip-audit failed after 3 attempts due to persistent network errors"
+          echo "::error::pip-audit exited retry loop unexpectedly"
           exit 1
 
   e2e:
