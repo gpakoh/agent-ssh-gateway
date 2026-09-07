@@ -125,17 +125,7 @@ items are explicitly verified as implemented, documented and safe in production.
    explicit host/port/path, timeout, max response bytes, no secrets/env exposure,
    provenance, and clear DNS/refused/timeout/non-2xx/healthy distinctions.
 
-2. ⬜ **Workspace-local git identity bootstrap for supervisor delivery clones.**
-   Fresh managed/supervisor workspaces can reach `git commit` and fail with
-   `Author identity unknown`. This repeated during manual Supervisor
-   GatewayAdapter commit on 2026-09-04: the staged candidate was valid, but
-   project-level `git_commit` failed until command-plane git was run with
-   per-command `user.name`/`user.email`. Managed Git workspaces should either
-   receive a safe local-only committer identity at creation time or expose a
-   bounded commit helper that sets per-command identity without touching global
-   config.
-
-3. ⬜ **Trusted delivery path for externally prepared/local-agent workspaces.**
+2. ⬜ **Trusted delivery path for externally prepared/local-agent workspaces.**
    A verified isolated forward-port workspace should be deliverable without
    mutating the canonical checkout. Desired path: `register_delivery_workspace`
    or `push_verified_commit` accepting an allowlisted workspace root, expected
@@ -149,7 +139,7 @@ items are explicitly verified as implemented, documented and safe in production.
    (`implementation-diff.patch`, `delivery-contract.json`/candidate receipt);
    the operator had no safe publication route from the verified workspace.
 
-4. ⬜ **Project-level branch creation must not depend on root-owned `.git` refs.**
+3. ⬜ **Project-level branch creation must not depend on root-owned `.git` refs.**
    A clean registered child repository can be readable and PR-verifiable while
    `git_create_branch` fails on `.git/refs/heads/<branch>.lock` permission
    errors. During Supervisor delivery on 2026-09-04, attempting to import a
@@ -161,7 +151,7 @@ items are explicitly verified as implemented, documented and safe in production.
    or branch creation must fail with a typed ownership diagnostic and recovery
    path such as `GIT_OWNERSHIP_BLOCKED`.
 
-5. ⬜ **Typed Gitea repo/PR cleanup tools for architect-controlled delivery.**
+4. ⬜ **Typed Gitea repo/PR cleanup tools for architect-controlled delivery.**
    Add first-class, ChatGPT-visible tools for safe repository cleanup operations
    that currently require manual UI/API fallback: close a Gitea PR without
    merge, update repository settings such as default branch, and verify
@@ -172,7 +162,7 @@ items are explicitly verified as implemented, documented and safe in production.
    coverage for PR close-without-merge, default-branch switch, already-closed
    idempotency, and catalog/resource visibility parity.
 
-6. ⬜ **Verification tools must not be pinned to an unreadable project `.venv`.**
+5. ⬜ **Verification tools must not be pinned to an unreadable project `.venv`.**
    During Supervisor RAG verification on 2026-09-04, project-level
    `run_pytest`, `run_ruff` and `run_mypy` all failed before collection because
    the registered checkout had `.venv/bin/python3` with permission denied, while
@@ -186,7 +176,7 @@ items are explicitly verified as implemented, documented and safe in production.
    `VERIFICATION_LOCKFILE_MISSING` diagnostic and a recovery path instead of
    treating environment bootstrap as code failure.
 
-7. ⬜ **Rate-limit responses need operator-safe retry metadata and coalescing.**
+6. ⬜ **Rate-limit responses need operator-safe retry metadata and coalescing.**
    During Supervisor/browser orchestration on 2026-09-04, repeated schema/tool
    reloads plus normal verification calls hit `RATE_LIMITED: 180 per 1 minute`,
    temporarily blocking `inspect_agent_task` while an agent's terminal report
@@ -196,7 +186,7 @@ items are explicitly verified as implemented, documented and safe in production.
    schema discovery/status reads so operators can recover without guessing the
    cooldown window or accidentally increasing contention.
 
-8. ⬜ **Command-plane policy and verification ergonomics need typed operator guidance.**
+7. ⬜ **Command-plane policy and verification ergonomics need typed operator guidance.**
     Several 2026-09-04 delivery sessions exposed rough edges that overlap with
     existing namespace/session/environment findings but are not yet captured as a
     single operator contract: raw SSH `git push` / `git clone` can time out while
