@@ -201,24 +201,7 @@ items are explicitly verified as implemented, documented and safe in production.
    `VERIFICATION_LOCKFILE_MISSING` diagnostic and a recovery path instead of
    treating environment bootstrap as code failure.
 
-7. ⬜ **Bounded Gitea Actions job/step log retrieval.** During Astra C.2.5-C5/C6
-   recovery on 2026-09-04, `gitea_list_action_run_jobs` exposed the failing
-   step name (`Release integrity checks`) but no ChatGPT-visible tool exposed a
-   bounded, redacted log tail for that job/step. The operator had to infer the
-   cause by reproducing scripts locally. Add a `gitea_get_action_job_log` or
-   `gitea_get_action_step_log` helper keyed by owner/repo/run/job/step with
-   max-bytes/tail limits, redaction, typed `LOG_UNAVAILABLE`, and regression
-   coverage that CI failures can be diagnosed without container/server log access.
-
-8. ⬜ **Minimize `gitea_get_action_run` response payload.** During Astra PR #71
-   polling on 2026-09-04, `gitea_get_action_run` returned raw nested
-   actor/trigger_actor/repository/user payloads including fields unrelated to
-   CI gating, while `gitea_list_action_runs` already exposes a compact shape.
-   Normalize the single-run endpoint to the same minimized contract or a strict
-   allowlist, redact unnecessary identity/contact fields, and add regression
-   coverage that single-run reads cannot reintroduce raw Gitea API payloads.
-
-9. ⬜ **Rate-limit responses need operator-safe retry metadata and coalescing.**
+7. ⬜ **Rate-limit responses need operator-safe retry metadata and coalescing.**
    During Supervisor/browser orchestration on 2026-09-04, repeated schema/tool
    reloads plus normal verification calls hit `RATE_LIMITED: 180 per 1 minute`,
    temporarily blocking `inspect_agent_task` while an agent's terminal report
@@ -228,7 +211,7 @@ items are explicitly verified as implemented, documented and safe in production.
    schema discovery/status reads so operators can recover without guessing the
    cooldown window or accidentally increasing contention.
 
-10. ⬜ **Command-plane policy and verification ergonomics need typed operator guidance.**
+8. ⬜ **Command-plane policy and verification ergonomics need typed operator guidance.**
     Several 2026-09-04 delivery sessions exposed rough edges that overlap with
     existing namespace/session/environment findings but are not yet captured as a
     single operator contract: raw SSH `git push` / `git clone` can time out while
@@ -251,7 +234,7 @@ items are explicitly verified as implemented, documented and safe in production.
     Gateway-created scratch workspaces, and verification helpers that distinguish
     environment/bootstrap failure from project test failure.
 
-11. ⬜ **`prepare_candidate_clone` must handle Git safe-directory ownership preflight.**
+9. ⬜ **`prepare_candidate_clone` must handle Git safe-directory ownership preflight.**
     During Quart Chat Engine contract bootstrap on 2026-09-05, `quart-core`
     correctly reported `filesystem_writeable=false` and recommended
     `writeable_candidate_clone`, but `prepare_candidate_clone(quart-core,
