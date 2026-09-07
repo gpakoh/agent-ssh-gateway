@@ -538,6 +538,40 @@ class TestAgentTaskStatus:
 
         return run_cmd
 
+    def test_lost_job_snapshot_escalates_without_claiming_worker_terminated(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 900, now - 900))
+
+        def lost_job_status(job_id):
+            raise RuntimeError(f"JOB_NOT_FOUND for {job_id}")
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lost_job_status,
+        )
+
+        assert result["verdict"] == "lost_after_restart"
+        assert result["log_included"] is False
+        assert result["job"]["worker_termination_proven"] is False
+        assert result["reconciliation"]["worker_termination_proven"] is False
+        assert result["next"]["inspect_agent_task"]["task_id"] == task_id
+
     def test_running_snapshot_omits_log_tail(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
         task_id = "a12345678901"
@@ -775,6 +809,52 @@ class TestInspectAgentTask:
         assert result["verdict"] == "likely_hung"
         assert result["likely_hung"] is True
         assert result["log"]["stdout"] == "line 2\n"
+
+    def test_job_not_found_for_stale_running_task_is_lost_after_restart_not_worker_terminated(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n\nStill working.\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text(
+            "Ran targeted tests before the Gateway restart.\n",
+            encoding="utf-8",
+        )
+        (td / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 900, now - 900))
+
+        def lost_job_status(job_id):
+            raise RuntimeError(f"JOB_NOT_FOUND for {job_id}")
+
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lost_job_status,
+        )
+
+        assert result["verdict"] == "lost_after_restart"
+        assert result["terminal"] is False
+        assert result["likely_hung"] is True
+        assert result["job"]["known"] is False
+        assert result["job"]["error_code"] == "JOB_NOT_FOUND"
+        assert result["job"]["gateway_job_absent"] is True
+        assert result["job"]["worker_termination_proven"] is False
+        assert result["reconciliation"]["state"] == "lost_after_restart"
+        assert result["reconciliation"]["attempt_bound_job"] is True
+        assert result["reconciliation"]["artifact_incomplete"] is True
+        assert result["reconciliation"]["worker_termination_proven"] is False
+        assert result["recovery"]["action"] == "inspect_artifacts_then_retry_with_new_task_id"
+        assert "cancel_agent_task" not in result["recovery"]
 
     def test_terminal_status_is_finished_even_with_old_logs(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
