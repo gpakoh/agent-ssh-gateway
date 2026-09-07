@@ -156,6 +156,47 @@ def test_verifier_nonzero_is_fail_closed(
         )
 
 
+def test_verifier_exit_codes_have_operator_actionable_codes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = _configure(monkeypatch, tmp_path)
+    expectations = {
+        80: ("VERIFIER_BOOTSTRAP_FAILED", "verifier_bootstrap", True),
+        81: ("CANDIDATE_SOURCE_UNAVAILABLE", "candidate_checkout", False),
+        82: ("VERIFIER_ENV_UNAVAILABLE", "verifier_env", True),
+        83: ("CANDIDATE_CHECK_FAILED", "candidate_check", False),
+    }
+
+    for exit_code, (expected_code, expected_phase, expected_retryable) in expectations.items():
+        def runner(
+            argv: list[str],
+            exit_code: int = exit_code,
+            **_kwargs: Any,
+        ) -> subprocess.CompletedProcess[str]:
+            rc = exit_code if len(argv) > 1 and argv[1] == "run" else 0
+            return subprocess.CompletedProcess(
+                argv,
+                rc,
+                stdout="MCP_VERIFY_EXIT=7\nMCP_VERIFY_CHECK=0\n",
+                stderr="",
+            )
+
+        with pytest.raises(CandidateVerificationError) as exc_info:
+            verify_candidate_via_docker(
+                staging_root=staging,
+                expected_sha="5" * 40,
+                required_checks=["pytest -q"],
+                runner=runner,
+            )
+
+        err = exc_info.value
+        assert err.code == expected_code
+        assert err.phase == expected_phase
+        assert err.retryable is expected_retryable
+        assert err.details["phase"] == expected_phase
+        assert err.details["mutation_occurred"] is False
+
+
 def test_required_check_failure_exposes_check_name_and_sanitized_tail(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -185,11 +226,12 @@ def test_required_check_failure_exposes_check_name_and_sanitized_tail(
         )
 
     err = exc_info.value
-    assert err.code == "REQUIRED_CHECK_FAILED"
-    assert err.phase == "required_checks"
+    assert err.code == "CANDIDATE_CHECK_FAILED"
+    assert err.phase == "candidate_check"
     assert err.retryable is False
     assert err.details["failed_check"] == "ruff check ."
     assert err.details["check_index"] == 1
+    assert err.details["phase"] == "candidate_check"
     assert err.details["exit_code"] == 83
     assert err.details["check_exit_code"] == 1
     assert err.details["mutation_occurred"] is False
@@ -241,13 +283,17 @@ def test_verifier_source_must_stay_under_candidate_root(
     _configure(monkeypatch, tmp_path)
     outside = tmp_path / "outside"
     outside.mkdir()
-    with pytest.raises(CandidateVerificationError, match="escapes candidate root"):
+    with pytest.raises(CandidateVerificationError, match="escapes candidate root") as exc_info:
         verify_candidate_via_docker(
             staging_root=outside,
             expected_sha="6" * 40,
             required_checks=[],
             runner=lambda *_args, **_kwargs: None,
         )
+    err = exc_info.value
+    assert err.code == "CANDIDATE_VOLUME_SUBPATH_INVALID"
+    assert err.phase == "source_resolution"
+    assert err.details["mutation_occurred"] is False
 
 
 def test_workspace_verifier_materializes_external_workspace_under_candidate_root(

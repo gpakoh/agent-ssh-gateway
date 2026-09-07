@@ -67,12 +67,12 @@ class TestEnvelopeToCallToolResult:
 
         envelope = tool_error(
             "gitea_push_verified_commit",
-            "REQUIRED_CHECK_FAILED",
+            "CANDIDATE_CHECK_FAILED",
             "a required verification check failed with exit code 83",
             retryable=False,
             hint="Fix the failing check and re-issue the candidate delivery.",
             details={
-                "phase": "required_checks",
+                "phase": "candidate_check",
                 "branch": "hardening/runtime-deploy",
                 "expected_base_sha": "0" * 40,
                 "expected_head_sha": "5" * 40,
@@ -87,11 +87,11 @@ class TestEnvelopeToCallToolResult:
         assert result.isError is True
         assert result.structuredContent["ok"] is False
         error = result.structuredContent["error"]
-        assert error["code"] == "REQUIRED_CHECK_FAILED"
+        assert error["code"] == "CANDIDATE_CHECK_FAILED"
         assert error["retryable"] is False
         assert error["hint"] == "Fix the failing check and re-issue the candidate delivery."
         details = error["details"]
-        assert details["phase"] == "required_checks"
+        assert details["phase"] == "candidate_check"
         assert details["failed_check"] == "ruff check ."
         assert details["mutation_occurred"] is False
         assert details["expected_head_sha"] == "5" * 40
