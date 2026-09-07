@@ -28,6 +28,21 @@ AGENT_HEARTBEAT_FILENAME = "agent-heartbeat.json"
 AGENT_PROXY_STATUS_FILENAME = "proxy-status.json"
 AGENT_LOG_MAX_BYTES = 64 * 1024
 AGENT_LOG_MAX_TAIL_LINES = 1000
+AGENT_ARTIFACT_MAX_BYTES = 64 * 1024
+AGENT_ARTIFACT_MAX_TAIL_LINES = 1000
+AGENT_ARTIFACT_FILENAMES: dict[str, str] = {
+    "status": "agent-status.md",
+    "report": "agent-report.md",
+    "diff": "implementation-diff.patch",
+    "log": AGENT_LOG_FILENAME,
+    "heartbeat": AGENT_HEARTBEAT_FILENAME,
+    "proxy_status": AGENT_PROXY_STATUS_FILENAME,
+    "worker_status": "worker-status.md",
+    "required_checks": "required-checks.log",
+    "consensus": "consensus.md",
+    "task": "task.json",
+}
+_AGENT_ARTIFACTS_BY_FILENAME = {filename: key for key, filename in AGENT_ARTIFACT_FILENAMES.items()}
 AGENT_STALE_AFTER_SECONDS = 600
 AGENT_REASONING_LOOP_AFTER_SECONDS = 120
 AGENT_REASONING_LOOP_MIN_LINES = 10
@@ -840,6 +855,140 @@ def _sanitize_agent_diagnostic_text(value: str, *, max_chars: int = 240) -> str:
     text = _DIAGNOSTIC_URL_RE.sub("<redacted-url>", text)
     text = _DIAGNOSTIC_SECRET_RE.sub(r"\1<redacted>", text)
     return text[:max_chars]
+
+
+def _resolve_agent_artifact(artifact: str) -> tuple[str, str]:
+    """Resolve a public artifact alias or filename to a fixed safe filename."""
+    if not isinstance(artifact, str):
+        raise TypeError("artifact must be a string")
+    value = artifact.strip()
+    if not value:
+        raise ValueError("artifact must be a non-empty fixed artifact name")
+    normalized = value.replace("-", "_")
+    filename = AGENT_ARTIFACT_FILENAMES.get(normalized)
+    key = normalized if filename is not None else ""
+    if filename is None:
+        validate_filename(value)
+        filename = value
+        key = _AGENT_ARTIFACTS_BY_FILENAME.get(filename, "")
+    if not key or filename not in _AGENT_ARTIFACTS_BY_FILENAME:
+        choices = sorted({*AGENT_ARTIFACT_FILENAMES, *AGENT_ARTIFACT_FILENAMES.values()})
+        raise ValueError(
+            f"unsupported agent artifact: {artifact!r}. Expected one of: {', '.join(choices)}"
+        )
+    return key, filename
+
+
+def _validate_agent_artifact_limits(*, tail_lines: int, max_bytes: int) -> None:
+    if isinstance(tail_lines, bool) or not isinstance(tail_lines, int):
+        raise TypeError("tail_lines must be an integer")
+    if not 1 <= tail_lines <= AGENT_ARTIFACT_MAX_TAIL_LINES:
+        raise ValueError(
+            f"tail_lines must be between 1 and {AGENT_ARTIFACT_MAX_TAIL_LINES}"
+        )
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int):
+        raise TypeError("max_bytes must be an integer")
+    if not 1 <= max_bytes <= AGENT_ARTIFACT_MAX_BYTES:
+        raise ValueError(f"max_bytes must be between 1 and {AGENT_ARTIFACT_MAX_BYTES}")
+
+
+def _sanitize_agent_surface_text(project: str, task_id: str, text: str) -> str:
+    """Normalize one task artifact without leaking control-plane paths or secrets."""
+    redacted = _normalize_agent_log_text(project, task_id, text)
+    redacted = _DIAGNOSTIC_URL_RE.sub("<redacted-url>", redacted)
+    return _DIAGNOSTIC_SECRET_RE.sub(r"\1<redacted>", redacted)
+
+
+def _agent_artifact_unavailable(
+    *,
+    artifact: str,
+    filename: str,
+    reason: str,
+    tail_lines: int,
+    max_bytes: int,
+) -> dict[str, Any]:
+    return {
+        "artifact": artifact,
+        "filename": filename,
+        "available": False,
+        "stdout": "",
+        "stderr": "",
+        "exit_code": 0,
+        "truncated": False,
+        "redacted": False,
+        "tail_lines": tail_lines,
+        "max_bytes": max_bytes,
+        "log_unavailable": {"reason": reason},
+        "artifact_unavailable": {"reason": reason},
+    }
+
+
+def read_agent_artifact_tail(
+    run_cmd,
+    *,
+    project: str,
+    task_id: str,
+    artifact: str,
+    tail_lines: int = 200,
+    max_bytes: int = AGENT_ARTIFACT_MAX_BYTES,
+) -> dict[str, Any]:
+    """Read a bounded, redacted tail from one fixed agent task artifact.
+
+    Callers choose only from a small allowlist of task-owned artifact aliases
+    or filenames. The remote path is derived from task_id + that allowlist;
+    unsupported names are rejected before any command executes. Missing or
+    symlink-unsafe files are returned as structured ``log_unavailable`` /
+    ``artifact_unavailable`` records, not transport/tool failures.
+    """
+    validate_task_id(task_id)
+    key, filename = _resolve_agent_artifact(artifact)
+    _validate_agent_artifact_limits(tail_lines=tail_lines, max_bytes=max_bytes)
+
+    path = f"{task_dir(project, task_id)}/{filename}"
+    if not _readonly_path_is_safe(run_cmd, project=project, path=path):
+        return _agent_artifact_unavailable(
+            artifact=key,
+            filename=filename,
+            reason="not_found_or_unsafe_path",
+            tail_lines=tail_lines,
+            max_bytes=max_bytes,
+        )
+    result = run_cmd(project, f"tail -c {max_bytes + 1} -- {shlex.quote(path)}")
+    if result.get("exit_code") != 0:
+        return _agent_artifact_unavailable(
+            artifact=key,
+            filename=filename,
+            reason="read_failed",
+            tail_lines=tail_lines,
+            max_bytes=max_bytes,
+        )
+
+    raw_stdout = str(result.get("stdout", ""))
+    encoded = raw_stdout.encode("utf-8", errors="replace")
+    byte_truncated = len(encoded) > max_bytes
+    if byte_truncated:
+        raw_stdout = encoded[-max_bytes:].decode("utf-8", errors="replace")
+    sanitized_stdout = _sanitize_agent_surface_text(project, task_id, raw_stdout)
+    raw_stderr = str(result.get("stderr", ""))
+    sanitized_stderr = _sanitize_agent_surface_text(project, task_id, raw_stderr)
+    redacted = sanitized_stdout != raw_stdout or sanitized_stderr != raw_stderr
+    lines = sanitized_stdout.splitlines(keepends=True)
+    line_truncated = len(lines) > tail_lines
+    if line_truncated:
+        sanitized_stdout = "".join(lines[-tail_lines:])
+    return {
+        "artifact": key,
+        "filename": filename,
+        "available": True,
+        "stdout": sanitized_stdout,
+        "stderr": sanitized_stderr,
+        "exit_code": 0,
+        "truncated": byte_truncated or line_truncated,
+        "redacted": redacted,
+        "tail_lines": tail_lines,
+        "max_bytes": max_bytes,
+        "bytes_returned": len(sanitized_stdout.encode("utf-8", errors="replace")),
+    }
 
 
 def _last_startup_message(text: str) -> str | None:

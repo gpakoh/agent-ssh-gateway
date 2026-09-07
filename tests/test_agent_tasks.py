@@ -20,6 +20,7 @@ from examples.mcp_server.agent_tasks import (
     inspect_agent_task,
     list_agent_tasks,
     prepare_agent_task_retry,
+    read_agent_artifact_tail,
     read_agent_log_tail,
     read_agent_task_file,
     validate_base_ref,
@@ -411,6 +412,119 @@ class TestReadAgentTaskFile:
     def test_accepts_safe_filenames(self):
         for name in ["agent-status.md", "agent-report.md", "implementation-diff.patch"]:
             validate_filename(name)
+
+
+class TestReadAgentArtifactTail:
+    def test_reads_allowlisted_artifact_with_bounds_redaction_and_metadata(self):
+        calls: list[str] = []
+        task_id = "a12345678901"
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            calls.append(command)
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("tail -c "):
+                return {
+                    "stdout": (
+                        "one\n"
+                        "two\n"
+                        "token=secret-value\n"
+                        "proxy=http://user:pass@proxy.local:8080?token=raw\n"
+                        f"path=.ai-bridge/tasks/{task_id}/agent-report.md\n"
+                    ),
+                    "stderr": "password=stderr-secret",
+                    "exit_code": 0,
+                }
+            raise AssertionError(f"unexpected command: {command}")
+
+        result = read_agent_artifact_tail(
+            fake_run_cmd,
+            project="my-proj",
+            task_id=task_id,
+            artifact="report",
+            tail_lines=3,
+            max_bytes=400,
+        )
+
+        assert result["artifact"] == "report"
+        assert result["filename"] == "agent-report.md"
+        assert result["available"] is True
+        assert result["truncated"] is True
+        assert result["redacted"] is True
+        assert "token=secret-value" not in result["stdout"]
+        assert "token=<redacted>" in result["stdout"]
+        assert "user:pass" not in result["stdout"]
+        assert "proxy.local" not in result["stdout"]
+        assert "proxy=<redacted-url>" in result["stdout"]
+        assert "<agent-task>/agent-report.md" in result["stdout"]
+        assert result["stderr"] == "password=<redacted>"
+        assert calls[-1] == "tail -c 401 -- .ai-bridge/tasks/a12345678901/agent-report.md"
+
+    def test_accepts_exact_allowlisted_filename_alias(self):
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            return {"stdout": "diff --git a/a b/a\n", "stderr": "", "exit_code": 0}
+
+        result = read_agent_artifact_tail(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            artifact="implementation-diff.patch",
+            tail_lines=10,
+            max_bytes=100,
+        )
+
+        assert result["artifact"] == "diff"
+        assert result["filename"] == "implementation-diff.patch"
+        assert result["stdout"] == "diff --git a/a b/a\n"
+
+    def test_missing_or_unsafe_artifact_returns_structured_unavailable_without_tail(self):
+        calls: list[str] = []
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            calls.append(command)
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "", "stderr": "No such file or directory", "exit_code": 1}
+            raise AssertionError("tail must not run when path safety failed")
+
+        result = read_agent_artifact_tail(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            artifact="required-checks",
+        )
+
+        assert result["available"] is False
+        assert result["exit_code"] == 0
+        assert result["stdout"] == ""
+        assert result["log_unavailable"] == {"reason": "not_found_or_unsafe_path"}
+        assert result["artifact_unavailable"] == {"reason": "not_found_or_unsafe_path"}
+        assert not any(command.startswith("tail -c ") for command in calls)
+
+    def test_rejects_unsupported_artifact_before_command(self):
+        calls: list[tuple[str, str]] = []
+        with pytest.raises(ValueError):
+            read_agent_artifact_tail(
+                lambda project, command: calls.append((project, command)),
+                project="my-proj",
+                task_id="a12345678901",
+                artifact="../../../etc/passwd",
+            )
+        assert calls == []
+
+    @pytest.mark.parametrize("tail_lines", [0, 1001, -1, True])
+    def test_rejects_invalid_tail_lines_before_command(self, tail_lines):
+        calls: list[tuple[str, str]] = []
+        with pytest.raises((TypeError, ValueError)):
+            read_agent_artifact_tail(
+                lambda project, command: calls.append((project, command)),
+                project="my-proj",
+                task_id="a12345678901",
+                artifact="log",
+                tail_lines=tail_lines,
+            )
+        assert calls == []
 
 
 class TestReadAgentLogTail:

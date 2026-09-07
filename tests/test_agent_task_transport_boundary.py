@@ -13,6 +13,7 @@ from examples.mcp_server.agent_paths import project_state_key
 from examples.mcp_server.agent_tasks import (
     archive_agent_task,
     list_agent_tasks,
+    read_agent_artifact_tail,
     read_agent_log_tail,
     read_agent_task_file,
     write_agent_task,
@@ -482,6 +483,7 @@ def test_adapter_transport_classification_matrix_is_explicit():
         "gateway_read_agent_report",
         "gateway_read_agent_diff",
         "gateway_read_agent_log",
+        "gateway_read_agent_artifact",
         "gateway_agent_status",
         "gateway_list_agent_tasks",
     ):
@@ -531,3 +533,27 @@ def test_read_agent_log_rejects_task_directory_symlink(tmp_path, monkeypatch):
 
     assert marker not in str(result.get("stdout", ""))
     assert result["stdout"] == "(not found)"
+
+
+def test_read_agent_artifact_rejects_task_directory_symlink(tmp_path, monkeypatch):
+    """The new artifact tail surface keeps the same symlink trust boundary."""
+    monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+    task_id = "a12345678901"
+    tasks = tmp_path / ".ai-bridge" / "tasks"
+    tasks.mkdir(parents=True)
+    outside = tmp_path / "outside-artifact"
+    outside.mkdir()
+    marker = "EXTERNAL-REPORT-MARKER"
+    (outside / "agent-report.md").write_text(marker + "\n", encoding="utf-8")
+    (tasks / task_id).symlink_to(outside, target_is_directory=True)
+
+    result = read_agent_artifact_tail(
+        _shell_runner(tmp_path),
+        project="p",
+        task_id=task_id,
+        artifact="report",
+    )
+
+    assert marker not in str(result.get("stdout", ""))
+    assert result["available"] is False
+    assert result["log_unavailable"] == {"reason": "not_found_or_unsafe_path"}

@@ -178,6 +178,12 @@ def _agent_diagnostics_hint(project: str, task_id: str, job_id: str | None = Non
             "purpose": "deep diagnostics with bounded log tail and stall detectors",
         },
         "read_agent_log": {"project": project, "task_id": task_id, "purpose": "raw bounded log tail"},
+        "read_agent_artifact": {
+            "project": project,
+            "task_id": task_id,
+            "artifact": "report",
+            "purpose": "bounded redacted fixed-artifact tail",
+        },
         "read_agent_status": {"project": project, "task_id": task_id, "purpose": "agent-status.md"},
     }
     if job_id:
