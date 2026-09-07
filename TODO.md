@@ -358,19 +358,7 @@ items are explicitly verified as implemented, documented and safe in production.
 
 These entries are deduplicated against the existing Gateway TODO backlog. They record concrete new failure modes from the #188/#189/#191 recovery and a cross-project JS_chat-engine report, so the evidence does not live only in chat.
 
-1. ⬜ **Host-smoke entrypoints must share one timeout budget.** #189 fixed the canonical `make host-smoke` path, but direct `pytest -m host_smoke` / direct script entrypoints still rely on `MCP_SMOKE_TIMEOUT` being provided or fall back to `scripts/mcp_oauth_black_box_smoke.py` default `30`.
-
-   **Severity:** P2 hardening after a P1 deploy-confidence failure.
-
-   **Observed behavior:** post-merge run `#9141` on `087f6ceaeb460fc744738b243c1c8b3fbac043e2` built/pushed images, deployed, and confirmed live containers were on that SHA. The dedicated OAuth smoke passed with `MCP_SMOKE_TIMEOUT=90`, then `make host-smoke` invoked `uv run pytest -m host_smoke -v` without propagating that timeout and `test_mcp_oauth_black_box_smoke_full_flow` failed with `mcp_oauth_black_box_smoke: timed out`.
-
-   **Reproduction:** on a checkout before #189, use a host-smoke runner where the OAuth black-box flow can take around/over 30 seconds and run `/media/1TB/Anaconda/bin/uv run make host-smoke`. The old command line shows `uv run pytest -m host_smoke -v` and may time out although the dedicated workflow OAuth step passed with `MCP_SMOKE_TIMEOUT=90`.
-
-   **Current evidence:** #189 changed Makefile to run `MCP_SMOKE_TIMEOUT=90 uv run pytest -m host_smoke -v`; master run `#9143` on `cdde38939b24908b953991f9172fccbe45e9c6cc` passed deploy and full host-smoke with `16 passed, 1 skipped`.
-
-   **Acceptance:** define one canonical host-smoke timeout contract. Either document `make host-smoke` as the only supported full-suite entrypoint or make direct host-smoke pytest/script entrypoints use the same safe default. Regression coverage must prove workflow and Makefile cannot diverge again.
-
-2. ⬜ **`gitea_push_verified_commit` / isolated verifier must preserve useful diagnostics and support the prepared-candidate happy path.** This extends, but does not duplicate, the existing `Trusted delivery path for externally prepared/local-agent workspaces` item. #188 fixed a `str` vs `Path` adapter bug and #191 added structured candidate-delivery verification diagnostics, but the prepared candidate clone + trivial-check happy path still needs an explicit close-out proof.
+1. ⬜ **`gitea_push_verified_commit` / isolated verifier must preserve useful diagnostics and support the prepared-candidate happy path.** This extends, but does not duplicate, the existing `Trusted delivery path for externally prepared/local-agent workspaces` item. #188 fixed a `str` vs `Path` adapter bug and #191 added structured candidate-delivery verification diagnostics, but the prepared candidate clone + trivial-check happy path still needs an explicit close-out proof.
 
    **Severity:** P1 for safe architect-controlled delivery.
 
@@ -382,7 +370,7 @@ These entries are deduplicated against the existing Gateway TODO backlog. They r
 
    **Acceptance:** regression for prepared candidate clone + `required_checks=["true"]`; invalid source-root cases fail before Docker with typed diagnostics; tool either supports prepared candidate clones or explicitly rejects them with a typed contract error.
 
-3. ⬜ **SSH_Gateway discovery and invocation permissions can diverge inside one conversation.** This extends, but does not duplicate, the existing residual catalog mismatch finding. The earlier NOD mode was advertised schemas followed by `Resource not found`; this JS_chat-engine report is advertised schemas followed by `FORBIDDEN: This conversation does not support developer MCPs`, then later discovery no longer exposing `SSH_Gateway` at all.
+2. ⬜ **SSH_Gateway discovery and invocation permissions can diverge inside one conversation.** This extends, but does not duplicate, the existing residual catalog mismatch finding. The earlier NOD mode was advertised schemas followed by `Resource not found`; this JS_chat-engine report is advertised schemas followed by `FORBIDDEN: This conversation does not support developer MCPs`, then later discovery no longer exposing `SSH_Gateway` at all.
 
    **Severity:** P1 for agent/supervisor workflows.
 
@@ -392,7 +380,7 @@ These entries are deduplicated against the existing Gateway TODO backlog. They r
 
    **Acceptance:** tests cover forbidden namespace not advertised; advertised namespace can invoke read-only health/tool-list probe or receives deterministic typed permission error; revoked-after-discovery does not alternate between stale schemas, `FORBIDDEN`, and missing namespace.
 
-4. ⬜ **First-class TODO/backlog writer with dedupe, repro template and safe delivery.**
+3. ⬜ **First-class TODO/backlog writer with dedupe, repro template and safe delivery.**
 
    **Severity:** P2 operator capability, P1 during multi-project recovery when defects otherwise remain only in chat history.
 

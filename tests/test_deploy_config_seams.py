@@ -25,6 +25,7 @@ DEPLOY_SCRIPT = ROOT / "scripts" / "deploy-from-registry.sh"
 CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 HOST_SMOKE_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "host-smoke.yml"
 MCP_OAUTH_SMOKE_TEST = ROOT / "tests" / "test_mcp_oauth_host_smoke.py"
+MCP_OAUTH_SMOKE_SCRIPT = ROOT / "scripts" / "mcp_oauth_black_box_smoke.py"
 MAKEFILE_PATH = ROOT / "Makefile"
 
 
@@ -981,6 +982,11 @@ class TestHostSmokeRunsAfterSuccessfulDeploy:
     def test_direct_oauth_test_sets_the_same_timeout_budget_when_absent(self):
         text = MCP_OAUTH_SMOKE_TEST.read_text(encoding="utf-8")
         assert 'env.setdefault("MCP_SMOKE_TIMEOUT", "90")' in text
+
+    def test_direct_oauth_script_uses_the_same_timeout_default(self):
+        text = MCP_OAUTH_SMOKE_SCRIPT.read_text(encoding="utf-8")
+        assert 'os.environ.get("MCP_SMOKE_TIMEOUT", "90")' in text
+        assert 'os.environ.get("MCP_SMOKE_TIMEOUT", "30")' not in text
 
     def test_oauth_testcase_is_exactly_one_host_smoke_test(self):
         """The OAuth black-box flow must be exactly one runnable testcase —
