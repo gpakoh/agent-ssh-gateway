@@ -138,6 +138,11 @@ _VERIFIED_PHASE_BY_CODE = {
     "SOURCE_REF_NOT_AVAILABLE": "source_resolution",
     "WORKSPACE_DIRTY": "clean_tree_check",
     "CANDIDATE_SCOPE_VIOLATION": "allowed_files_check",
+    "CANDIDATE_CHECK_FAILED": "candidate_check",
+    "CANDIDATE_SOURCE_UNAVAILABLE": "source_resolution",
+    "CANDIDATE_VOLUME_SUBPATH_INVALID": "source_resolution",
+    "VERIFIER_BOOTSTRAP_FAILED": "verifier_bootstrap",
+    "VERIFIER_ENV_UNAVAILABLE": "verifier_env",
     "CHECK_FAILED": "push_preflight",
     "INVALID_INPUT": "push_preflight",
     "WORKSPACE_VERIFICATION_FAILED": "push_preflight",
@@ -202,8 +207,10 @@ def _delivery_verification_error(
         hint = "Rebuild the candidate from the expected base so the delivery workspace is clean before the trusted push."
     elif phase == "allowed_files_check":
         hint = "Restrict the delivery commit to paths named by allowed_files and retry."
-    elif phase == "required_checks":
+    elif phase in {"required_checks", "candidate_check"}:
         hint = "Fix or revert the failing required check (see details.failed_check) and re-run trusted delivery."
+    elif phase == "source_resolution":
+        hint = "Rebuild or re-materialize the candidate source at the expected head before retrying trusted delivery."
     elif retryable:
         hint = "Verification environment was transiently unavailable; retry once the candidate store/docker is reachable."
 

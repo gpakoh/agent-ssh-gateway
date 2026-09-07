@@ -719,11 +719,11 @@ async def test_verified_commit_verifier_error_is_structured_no_push_no_traceback
     def deny_checks(**kwargs: Any) -> None:
         raise remote.CandidateVerificationError(
             "a required verification check failed with exit code 83",
-            code="REQUIRED_CHECK_FAILED",
-            phase="required_checks",
+            code="CANDIDATE_CHECK_FAILED",
+            phase="candidate_check",
             retryable=False,
             details={
-                "phase": "required_checks",
+                "phase": "candidate_check",
                 "exit_code": 83,
                 "check_index": 1,
                 "failed_check": "ruff check .",
@@ -760,11 +760,11 @@ async def test_verified_commit_verifier_error_is_structured_no_push_no_traceback
 
     assert result["ok"] is False
     error = result["error"]
-    assert error["code"] == "REQUIRED_CHECK_FAILED"
+    assert error["code"] == "CANDIDATE_CHECK_FAILED"
     assert error["retryable"] is False
     assert error["message"] == "a required verification check failed with exit code 83"
     details = error["details"]
-    assert details["phase"] == "required_checks"
+    assert details["phase"] == "candidate_check"
     assert details["failed_check"] == "ruff check ."
     assert details["check_index"] == 1
     assert details["mutation_occurred"] is False

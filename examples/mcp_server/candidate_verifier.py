@@ -128,10 +128,11 @@ def _structured_verifier_failure(
         details["output_tail"] = tail
 
     if exit_code == 83:
+        details["phase"] = "candidate_check"
         return CandidateVerificationError(
             f"a required verification check failed with exit code {exit_code}",
-            code="REQUIRED_CHECK_FAILED",
-            phase="required_checks",
+            code="CANDIDATE_CHECK_FAILED",
+            phase="candidate_check",
             retryable=False,
             details=details,
         )
@@ -140,35 +141,36 @@ def _structured_verifier_failure(
         return CandidateVerificationError(
             "candidate could not be checked out at the expected head "
             f"(exit code {exit_code})",
-            code="CANDIDATE_VERIFICATION_FAILED",
+            code="CANDIDATE_SOURCE_UNAVAILABLE",
             phase="candidate_checkout",
             retryable=False,
             details=details,
         )
     if exit_code == 82:
-        details["phase"] = "required_checks"
+        details["phase"] = "verifier_env"
         return CandidateVerificationError(
             f"candidate dependency bootstrap failed before required checks "
             f"(exit code {exit_code})",
-            code="CANDIDATE_VERIFICATION_FAILED",
-            phase="required_checks",
+            code="VERIFIER_ENV_UNAVAILABLE",
+            phase="verifier_env",
             retryable=True,
             details=details,
         )
     if exit_code == 80:
-        details["phase"] = "source_resolution"
+        details["phase"] = "verifier_bootstrap"
         return CandidateVerificationError(
             f"candidate verifier could not materialize its disposable environment "
             f"(exit code {exit_code})",
-            code="CANDIDATE_VERIFICATION_FAILED",
-            phase="source_resolution",
+            code="VERIFIER_BOOTSTRAP_FAILED",
+            phase="verifier_bootstrap",
             retryable=True,
             details=details,
         )
+    details["phase"] = "verifier_bootstrap"
     return CandidateVerificationError(
         f"isolated candidate verification failed with exit code {exit_code}",
-        code="CANDIDATE_VERIFICATION_FAILED",
-        phase="required_checks",
+        code="VERIFIER_BOOTSTRAP_FAILED",
+        phase="verifier_bootstrap",
         retryable=True,
         details=details,
     )
@@ -225,20 +227,32 @@ def build_candidate_verifier_script(
     return "\n".join(lines)
 
 
-def _cfg_failure(message: str) -> CandidateVerificationError:
+def _cfg_failure(
+    message: str,
+    *,
+    code: str = "CANDIDATE_VERIFICATION_FAILED",
+    phase: str = "push_preflight",
+    retryable: bool = False,
+) -> CandidateVerificationError:
     """A verifier preflight (config/boundary) denial, not retryable as-is."""
     return CandidateVerificationError(
         message,
-        code="CANDIDATE_VERIFICATION_FAILED",
-        phase="push_preflight",
-        retryable=False,
+        code=code,
+        phase=phase,
+        retryable=retryable,
+        details={"phase": phase, "mutation_occurred": False},
     )
 
 
 def _required_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
-        raise _cfg_failure(f"{name} is required for isolated verification")
+        raise _cfg_failure(
+            f"{name} is required for isolated verification",
+            code="VERIFIER_ENV_UNAVAILABLE",
+            phase="verifier_env",
+            retryable=False,
+        )
     return value
 
 
@@ -247,16 +261,28 @@ def _verification_timeout() -> int:
     try:
         value = int(raw)
     except ValueError as exc:
-        raise _cfg_failure("invalid candidate verifier timeout") from exc
+        raise _cfg_failure(
+            "invalid candidate verifier timeout",
+            code="VERIFIER_ENV_UNAVAILABLE",
+            phase="verifier_env",
+        ) from exc
     if value < 1 or value > 7200:
-        raise _cfg_failure("candidate verifier timeout is out of bounds")
+        raise _cfg_failure(
+            "candidate verifier timeout is out of bounds",
+            code="VERIFIER_ENV_UNAVAILABLE",
+            phase="verifier_env",
+        )
     return value
 
 
 def _validated_volume_name() -> str:
     value = _required_env("MCP_TASK_CANDIDATE_VOLUME_NAME")
     if not _VOLUME_RE.fullmatch(value):
-        raise _cfg_failure("invalid candidate verifier volume name")
+        raise _cfg_failure(
+            "invalid candidate verifier volume name",
+            code="VERIFIER_ENV_UNAVAILABLE",
+            phase="verifier_env",
+        )
     return value
 
 
@@ -267,7 +293,11 @@ def _validated_image() -> str:
         or value.startswith("-")
         or any(ch.isspace() or ord(ch) < 32 for ch in value)
     ):
-        raise _cfg_failure("invalid candidate verifier image reference")
+        raise _cfg_failure(
+            "invalid candidate verifier image reference",
+            code="VERIFIER_ENV_UNAVAILABLE",
+            phase="verifier_env",
+        )
     return value
 
 
@@ -275,7 +305,11 @@ def _candidate_store_root() -> Path:
     candidate_root_raw = _required_env("MCP_TASK_CANDIDATE_ROOT")
     candidate_root = Path(candidate_root_raw)
     if not candidate_root.is_absolute() or candidate_root == Path("/"):
-        raise _cfg_failure("invalid candidate verifier root")
+        raise _cfg_failure(
+            "invalid candidate verifier root",
+            code="VERIFIER_ENV_UNAVAILABLE",
+            phase="verifier_env",
+        )
     return candidate_root.resolve()
 
 
@@ -285,9 +319,17 @@ def _validated_staging_root(staging_root: Path) -> Path:
     try:
         staging.relative_to(candidate_root)
     except ValueError as exc:
-        raise _cfg_failure("candidate verifier source escapes candidate root") from exc
+        raise _cfg_failure(
+            "candidate verifier source escapes candidate root",
+            code="CANDIDATE_VOLUME_SUBPATH_INVALID",
+            phase="source_resolution",
+        ) from exc
     if not staging.is_dir():
-        raise _cfg_failure("candidate verifier source is unavailable")
+        raise _cfg_failure(
+            "candidate verifier source is unavailable",
+            code="CANDIDATE_SOURCE_UNAVAILABLE",
+            phase="source_resolution",
+        )
     return staging
 
 
@@ -296,14 +338,22 @@ def _validated_volume_subpath(staging_root: Path) -> str:
     staging = _validated_staging_root(staging_root)
     relative = staging.relative_to(candidate_root)
     if relative == Path(".") or not relative.parts:
-        raise _cfg_failure("candidate verifier must mount a task-scoped subpath")
+        raise _cfg_failure(
+            "candidate verifier must mount a task-scoped subpath",
+            code="CANDIDATE_VOLUME_SUBPATH_INVALID",
+            phase="source_resolution",
+        )
     for part in relative.parts:
         if (
             part in {"", ".", ".."}
             or "," in part
             or any(ord(ch) < 32 for ch in part)
         ):
-            raise _cfg_failure("invalid candidate verifier volume subpath")
+            raise _cfg_failure(
+                "invalid candidate verifier volume subpath",
+                code="CANDIDATE_VOLUME_SUBPATH_INVALID",
+                phase="source_resolution",
+            )
     return relative.as_posix()
 
 
@@ -406,11 +456,11 @@ def verify_candidate_via_docker(
     except subprocess.TimeoutExpired as exc:
         raise CandidateVerificationError(
             "isolated candidate verification timed out",
-            code="CANDIDATE_VERIFICATION_FAILED",
-            phase="required_checks",
+            code="VERIFIER_BOOTSTRAP_FAILED",
+            phase="verifier_bootstrap",
             retryable=True,
             details={
-                "phase": "required_checks",
+                "phase": "verifier_bootstrap",
                 "mutation_occurred": False,
                 "exit_code": 124,
             },
@@ -418,11 +468,11 @@ def verify_candidate_via_docker(
     except OSError as exc:
         raise CandidateVerificationError(
             "isolated candidate verifier is unavailable",
-            code="CANDIDATE_VERIFICATION_FAILED",
-            phase="push_preflight",
+            code="VERIFIER_ENV_UNAVAILABLE",
+            phase="verifier_env",
             retryable=True,
             details={
-                "phase": "push_preflight",
+                "phase": "verifier_env",
                 "mutation_occurred": False,
             },
         ) from exc
@@ -475,7 +525,7 @@ def _run_materialize_git(argv: list[str], *, cwd: Path, home: Path, timeout: int
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise CandidateVerificationError(
             "candidate verifier could not materialize registered workspace source",
-            code="CANDIDATE_VERIFICATION_FAILED",
+            code="CANDIDATE_SOURCE_UNAVAILABLE",
             phase="source_resolution",
             retryable=True,
             details={"phase": "source_resolution", "mutation_occurred": False},
@@ -491,7 +541,7 @@ def _run_materialize_git(argv: list[str], *, cwd: Path, home: Path, timeout: int
             details["output_tail"] = tail
         raise CandidateVerificationError(
             "candidate verifier could not materialize registered workspace source",
-            code="CANDIDATE_VERIFICATION_FAILED",
+            code="CANDIDATE_SOURCE_UNAVAILABLE",
             phase="source_resolution",
             retryable=True,
             details=details,
@@ -510,7 +560,11 @@ def _materialize_workspace_source(workspace_root: Path, expected_sha: str) -> Pa
     """
     workspace = workspace_root.resolve()
     if not workspace.is_dir() or not (workspace / ".git").exists():
-        raise _cfg_failure("registered delivery workspace must be a Git worktree")
+        raise _cfg_failure(
+            "registered delivery workspace must be a Git worktree",
+            code="CANDIDATE_SOURCE_UNAVAILABLE",
+            phase="source_resolution",
+        )
     candidate_root = _candidate_store_root()
     materialized_root = candidate_root / "verified-workspaces"
     try:
@@ -522,7 +576,12 @@ def _materialize_workspace_source(workspace_root: Path, expected_sha: str) -> Pa
             )
         )
     except OSError as exc:
-        raise _cfg_failure("candidate verifier staging root is unavailable") from exc
+        raise _cfg_failure(
+            "candidate verifier staging root is unavailable",
+            code="VERIFIER_ENV_UNAVAILABLE",
+            phase="verifier_env",
+            retryable=True,
+        ) from exc
 
     try:
         _run_materialize_git(
@@ -552,7 +611,7 @@ def _materialize_workspace_source(workspace_root: Path, expected_sha: str) -> Pa
         if actual != expected_sha:
             raise CandidateVerificationError(
                 "candidate verifier materialized the wrong registered workspace commit",
-                code="CANDIDATE_VERIFICATION_FAILED",
+                code="CANDIDATE_SOURCE_UNAVAILABLE",
                 phase="source_resolution",
                 retryable=False,
                 details={"phase": "source_resolution", "mutation_occurred": False},
