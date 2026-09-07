@@ -207,6 +207,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     "workspace_preview_edit": ["mcp:project"],
     "workspace_preview_patch": ["mcp:project"],
     "workspace_verify": ["mcp:project"],
+    "todo_backlog_upsert": ["mcp:project"],
 }
 
 FLEET_ROUTE_SCOPES: dict[str, list[str]] = {
