@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.workspace.registry import reset_registry
-from examples.mcp_server.agent_sources import ManagedSourcePublication
+from examples.mcp_server.agent_sources import ManagedSourceBundleError, ManagedSourcePublication
 from examples.mcp_server.candidate_clone import (
     CandidateCloneError,
     prepare_candidate_clone,
@@ -136,13 +136,13 @@ def test_prepare_candidate_clone_rejects_unsafe_branches(registry_fixture, branc
     assert exc_info.value.code == "INVALID_INPUT"
 
 
-def test_prepare_candidate_clone_git_failure_returns_redacted_diagnostics(
+def test_prepare_candidate_clone_source_ownership_failure_returns_typed_redacted_diagnostics(
     registry_fixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from examples.mcp_server import candidate_clone as candidate_clone_module
 
-    _workspace, source, config_dir, journal_root, base = registry_fixture
+    workspace, source, config_dir, journal_root, base = registry_fixture
     captured_commands: list[list[str]] = []
 
     def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
@@ -167,8 +167,8 @@ def test_prepare_candidate_clone_git_failure_returns_redacted_diagnostics(
         )
 
     err = exc_info.value
-    assert err.code == "TOOL_EXECUTION_FAILED"
-    assert err.message == "git resolve base ref failed"
+    assert err.code == "SOURCE_REPO_OWNERSHIP_BLOCKED"
+    assert err.message == "source repository ownership is not trusted by Git"
     assert err.retryable is False
     details = err.details
     assert details is not None
@@ -193,6 +193,69 @@ def test_prepare_candidate_clone_git_failure_returns_redacted_diagnostics(
     ]
     assert "safe.directory=*" not in " ".join(captured_commands[0])
     assert "--global" not in captured_commands[0]
+    assert not (workspace / ".mcp-candidate-clones").exists()
+    assert "candidate/diagnostic-flow" not in (config_dir / "projects.yaml").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_prepare_candidate_clone_shallow_probe_ownership_failure_stays_typed(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    workspace, source, config_dir, journal_root, base = registry_fixture
+
+    def fail_shallow_probe(_source_root: Path) -> bool:
+        raise ManagedSourceBundleError(
+            "managed source publication failed during git rev-parse: "
+            f"fatal: detected dubious ownership in repository at '{source}'"
+        )
+
+    monkeypatch.setattr(candidate_clone_module, "_source_is_shallow", fail_shallow_probe)
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_clone_module.prepare_candidate_clone(
+            "source-project",
+            "candidate/shallow-ownership-flow",
+            base,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    err = exc_info.value
+    assert err.code == "SOURCE_REPO_OWNERSHIP_BLOCKED"
+    assert err.message == "source repository ownership is not trusted by Git"
+    assert err.retryable is False
+    assert err.details is not None
+    assert err.details["operation"] == "inspect source repository completeness"
+    assert "dubious ownership" in err.details["stderr_tail"]
+    assert str(source) not in err.details["stderr_tail"]
+    assert not (workspace / ".mcp-candidate-clones").exists()
+    assert "candidate/shallow-ownership-flow" not in (config_dir / "projects.yaml").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_candidate_workspace_dubious_ownership_uses_safe_directory_code(tmp_path: Path) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    err = candidate_clone_module._git_failure(
+        cwd=tmp_path,
+        operation="read candidate head",
+        exit_code=128,
+        stdout="",
+        stderr=f"fatal: detected dubious ownership in repository at '{tmp_path / 'clone'}'\n",
+    )
+
+    assert err.code == "GIT_SAFE_DIRECTORY_REQUIRED"
+    assert err.message == "git safe.directory trust is required for this workspace"
+    assert err.retryable is False
+    assert err.details is not None
+    assert err.details["operation"] == "read candidate head"
+    assert "dubious ownership" in err.details["stderr_tail"]
+    assert str(tmp_path) not in err.details["stderr_tail"]
 
 
 def test_prepare_candidate_clone_local_clone_trusts_source_gitdir(
@@ -245,8 +308,8 @@ def test_prepare_candidate_clone_local_clone_trusts_source_gitdir(
         )
 
     err = exc_info.value
-    assert err.code == "TOOL_EXECUTION_FAILED"
-    assert err.message == "git clone source repository failed"
+    assert err.code == "SOURCE_REPO_OWNERSHIP_BLOCKED"
+    assert err.message == "source repository ownership is not trusted by Git"
     assert err.details is not None
     assert err.details["operation"] == "clone source repository"
 
