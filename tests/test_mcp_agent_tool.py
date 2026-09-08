@@ -722,6 +722,71 @@ class TestProjectRunAgentScriptCwd:
         assert "worktree_path" in result["error"].lower() or "managed" in result["error"].lower()
         run_script_async.assert_not_called()
 
+    def test_managed_dirty_snapshot_uses_snapshot_ref_as_checkout_baseline(self, monkeypatch):
+        base_ref = "1" * 40
+        snapshot_ref = "2" * 40
+        tree_sha = "3" * 40
+        digest = "4" * 64
+        monkeypatch.setenv("MCP_AGENT_WORKSPACE_ROOT", "/var/lib/mcp-agent/workspaces")
+        monkeypatch.setenv("MCP_AGENT_STATE_ROOT", "/var/lib/mcp-agent/state")
+        monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", "/var/lib/mcp-agent/sources")
+        monkeypatch.setattr(
+            "app.workspace.registry.get_registry",
+            lambda: type("R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}})(),
+        )
+        rc = _make_run_cmd(
+            task_json=_make_task_json(
+                agent="opencode",
+                worktree_path="",
+                base_ref=base_ref,
+                source_mode="dirty_worktree_snapshot",
+                source_ref=snapshot_ref,
+                source_tree_sha=tree_sha,
+                managed_source_sha256=digest,
+            )
+        )
+        run_script_async = _make_run_script_async("job-dirty-1")
+
+        result = project_run_agent(
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            async_submit=True,
+            run_script_async=run_script_async,
+        )
+
+        assert result["status"] == "running"
+        script = run_script_async.call_args.args[1]
+        assert f"/{snapshot_ref}.bundle" in script
+        assert f"TASK_BASE_REF='{snapshot_ref}'" in script
+        assert f"/{base_ref}.bundle" not in script
+
+    def test_dirty_snapshot_rejected_without_managed_workspace(self):
+        rc = _make_run_cmd(
+            task_json=_make_task_json(
+                agent="opencode",
+                worktree_path="",
+                base_ref="1" * 40,
+                source_mode="dirty_worktree_snapshot",
+                source_ref="2" * 40,
+                source_tree_sha="3" * 40,
+                managed_source_sha256="4" * 64,
+            )
+        )
+        run_script_async = _make_run_script_async("job-dirty-invalid")
+
+        result = project_run_agent(
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            async_submit=True,
+            run_script_async=run_script_async,
+        )
+
+        assert result["status"] == "error"
+        assert "requires managed OpenCode execution" in result["error"]
+        run_script_async.assert_not_called()
+
     def test_no_cd_when_project_root_unresolvable(self, monkeypatch):
         """Registry lookup failure must not crash the whole call -- just
         skip the cd (matching the pre-fix, still-correct-for-sync behavior)."""

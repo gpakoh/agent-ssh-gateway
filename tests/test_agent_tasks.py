@@ -244,6 +244,68 @@ class TestBuildTaskJson:
         data = json.loads(build_task_json(task_id="b23456789012", agent="opencode", base_ref=sha))
         assert data["base_ref"] == sha
 
+    def test_committed_head_defaults_source_ref_to_base_ref(self):
+        sha = "e" * 40
+        data = json.loads(
+            build_task_json(task_id="b23456789012", agent="opencode", base_ref=sha)
+        )
+        assert data["source_mode"] == "committed_head"
+        assert data["source_ref"] == sha
+        assert data["source_tree_sha"] == ""
+
+    def test_dirty_snapshot_persists_exact_provenance(self):
+        base_ref = "1" * 40
+        source_ref = "2" * 40
+        tree_sha = "3" * 40
+        digest = "4" * 64
+        data = json.loads(
+            build_task_json(
+                task_id="b23456789012",
+                agent="opencode",
+                base_ref=base_ref,
+                source_mode="dirty_worktree_snapshot",
+                source_ref=source_ref,
+                source_tree_sha=tree_sha,
+                managed_source_sha256=digest,
+            )
+        )
+        assert data["base_ref"] == base_ref
+        assert data["source_mode"] == "dirty_worktree_snapshot"
+        assert data["source_ref"] == source_ref
+        assert data["source_tree_sha"] == tree_sha
+        assert data["managed_source_sha256"] == digest
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"base_ref": "1" * 40},
+            {"base_ref": "1" * 40, "source_ref": "2" * 40},
+            {
+                "base_ref": "1" * 40,
+                "source_ref": "2" * 40,
+                "source_tree_sha": "3" * 40,
+            },
+        ],
+    )
+    def test_dirty_snapshot_rejects_incomplete_provenance(self, kwargs):
+        with pytest.raises(ValueError):
+            build_task_json(
+                task_id="b23456789012",
+                agent="opencode",
+                source_mode="dirty_worktree_snapshot",
+                **kwargs,
+            )
+
+    def test_committed_head_rejects_distinct_source_ref(self):
+        with pytest.raises(ValueError, match="source_ref must equal base_ref"):
+            build_task_json(
+                task_id="b23456789012",
+                agent="opencode",
+                base_ref="1" * 40,
+                source_mode="committed_head",
+                source_ref="2" * 40,
+            )
+
 
 class TestWriteAgentTask:
     def _fake_run_cmd(self):
@@ -2381,6 +2443,46 @@ class TestPrepareAgentTaskRetry:
         assert f"- Retry task ID: {retry}" in plan
         assert result["next"]["run_agent"] == {"project": "my-proj", "task_id": retry}
 
+
+    def test_retry_preserves_dirty_snapshot_identity_without_recapture(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        source = "source-task-011"
+        retry = "retry-task-011"
+        self._write_source_task(tmp_path, source, status="cancelled", job_id="job-cancelled")
+        source_task_path = tmp_path / ".ai-bridge" / "tasks" / source / "task.json"
+        contract = json.loads(source_task_path.read_text(encoding="utf-8"))
+        contract.update(
+            {
+                "source_mode": "dirty_worktree_snapshot",
+                "source_ref": "b" * 40,
+                "source_tree_sha": "c" * 40,
+                "managed_source_sha256": "d" * 64,
+            }
+        )
+        source_task_path.write_text(json.dumps(contract, indent=2), encoding="utf-8")
+
+        result = prepare_agent_task_retry(
+            self._shell_run_cmd(tmp_path),
+            self._shell_run_script(tmp_path),
+            project="my-proj",
+            source_task_id=source,
+            retry_task_id=retry,
+            job_status=lambda job_id: {"status": "cancelled", "job_id": job_id},
+        )
+
+        assert result["exit_code"] == 0
+        retry_contract = json.loads(
+            (tmp_path / ".ai-bridge" / "tasks" / retry / "task.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert retry_contract["base_ref"] == "a" * 40
+        assert retry_contract["source_mode"] == "dirty_worktree_snapshot"
+        assert retry_contract["source_ref"] == "b" * 40
+        assert retry_contract["source_tree_sha"] == "c" * 40
+        assert retry_contract["managed_source_sha256"] == "d" * 64
 
     def test_continuation_prompt_is_written_to_retry_plan(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
