@@ -26,6 +26,7 @@ BASE_REF_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 AGENT_LOG_FILENAME = "opencode-output.log"
 AGENT_HEARTBEAT_FILENAME = "agent-heartbeat.json"
 AGENT_PROXY_STATUS_FILENAME = "proxy-status.json"
+AGENT_FAILURE_STATUS_FILENAME = "failure-status.json"
 AGENT_LOG_MAX_BYTES = 64 * 1024
 AGENT_LOG_MAX_TAIL_LINES = 1000
 AGENT_ARTIFACT_MAX_BYTES = 64 * 1024
@@ -37,6 +38,7 @@ AGENT_ARTIFACT_FILENAMES: dict[str, str] = {
     "log": AGENT_LOG_FILENAME,
     "heartbeat": AGENT_HEARTBEAT_FILENAME,
     "proxy_status": AGENT_PROXY_STATUS_FILENAME,
+    "failure_status": AGENT_FAILURE_STATUS_FILENAME,
     "worker_status": "worker-status.md",
     "required_checks": "required-checks.log",
     "consensus": "consensus.md",
@@ -1068,6 +1070,62 @@ def _read_agent_proxy_status(
     return summary
 
 
+_AGENT_FAILURE_REASONS = frozenset({"opencode_server_error"})
+_AGENT_FAILURE_PHASES = frozenset({"pre_useful_work"})
+_AGENT_UPSTREAM_REF_RE = re.compile(r"^err_[A-Za-z0-9]{8,64}$")
+
+
+def _read_agent_failure_status(
+    run_cmd,
+    *,
+    project: str,
+    task_id: str,
+) -> dict[str, Any]:
+    """Read a fail-honest, redacted worker failure sidecar."""
+    result = read_agent_task_file(
+        run_cmd, project=project, task_id=task_id, filename=AGENT_FAILURE_STATUS_FILENAME
+    )
+    text = str(result.get("stdout", ""))
+    if text == "(not found)":
+        return {"exists": False}
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return {"exists": True, "valid": False, "error": "failure status is not valid JSON"}
+    if not isinstance(data, dict):
+        return {"exists": True, "valid": False, "error": "failure status is not a JSON object"}
+
+    reason = data.get("reason")
+    phase = data.get("phase")
+    upstream_ref = data.get("upstream_ref")
+    if reason not in _AGENT_FAILURE_REASONS:
+        return {"exists": True, "valid": False, "error": "failure status reason is not recognized"}
+    if phase not in _AGENT_FAILURE_PHASES:
+        return {"exists": True, "valid": False, "error": "failure status phase is not recognized"}
+    if reason == "opencode_server_error" and (
+        not isinstance(upstream_ref, str) or _AGENT_UPSTREAM_REF_RE.fullmatch(upstream_ref) is None
+    ):
+        return {"exists": True, "valid": False, "error": "failure status upstream ref is invalid"}
+
+    summary: dict[str, Any] = {
+        "exists": True,
+        "valid": True,
+        "reason": reason,
+        "phase": phase,
+    }
+    if isinstance(upstream_ref, str) and _AGENT_UPSTREAM_REF_RE.fullmatch(upstream_ref):
+        summary["upstream_ref"] = upstream_ref
+    observed_at = data.get("observed_at")
+    if isinstance(observed_at, str) and observed_at:
+        summary["observed_at"] = _sanitize_agent_diagnostic_text(observed_at, max_chars=80)
+    correlation_hint = data.get("correlation_hint")
+    if isinstance(correlation_hint, str) and correlation_hint:
+        summary["correlation_hint"] = _sanitize_agent_diagnostic_text(
+            correlation_hint, max_chars=240
+        )
+    return summary
+
+
 def _safe_attempt_summary(record: dict[str, Any] | None) -> dict[str, Any] | None:
     if not record:
         return None
@@ -1380,7 +1438,7 @@ def _progress_artifact_activity(files: dict[str, dict[str, Any]], now_epoch: int
     # Log and heartbeat activity alone can hide a thinking loop. attempt-state
     # is job bookkeeping, not agent progress. Treat status/consensus/report/diff
     # as semantic progress signals.
-    ignored = {"log", "heartbeat", "proxy_status", "attempt_state"}
+    ignored = {"log", "heartbeat", "proxy_status", "failure_status", "attempt_state"}
     return _latest_activity({name: meta for name, meta in files.items() if name not in ignored}, now_epoch)
 
 
@@ -1617,6 +1675,9 @@ def agent_task_status(
         "proxy_status": _task_file_stat(
             run_cmd, project=project, task_id=task_id, filename=AGENT_PROXY_STATUS_FILENAME
         ),
+        "failure_status": _task_file_stat(
+            run_cmd, project=project, task_id=task_id, filename=AGENT_FAILURE_STATUS_FILENAME
+        ),
         "report": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="agent-report.md"),
         "diff": _task_file_stat(
             run_cmd, project=project, task_id=task_id, filename="implementation-diff.patch"
@@ -1647,6 +1708,7 @@ def agent_task_status(
     proxy_status = _read_agent_proxy_status(
         run_cmd, project=project, task_id=task_id, now_epoch=now
     )
+    failure = _read_agent_failure_status(run_cmd, project=project, task_id=task_id)
 
     terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
     active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
@@ -1665,7 +1727,10 @@ def agent_task_status(
     if reconciliation.get("state") is not None:
         likely_hung = True
 
-    if terminal:
+    failure_reason = failure.get("reason") if failure.get("valid") is True else None
+    if terminal and isinstance(failure_reason, str):
+        verdict = failure_reason
+    elif terminal:
         verdict = "finished"
     elif reconciliation.get("state") is not None:
         verdict = str(reconciliation["state"])
@@ -1712,6 +1777,7 @@ def agent_task_status(
         "runner_heartbeat": heartbeat,
         "runner_heartbeat_fresh": runner_heartbeat_fresh,
         "proxy_status": proxy_status,
+        "failure": failure,
         "stale_after_seconds": stale_after_seconds,
         "terminal": terminal,
         "likely_hung": likely_hung,
@@ -1795,6 +1861,7 @@ def inspect_agent_task(
         "log": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_LOG_FILENAME),
         "heartbeat": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_HEARTBEAT_FILENAME),
         "proxy_status": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_PROXY_STATUS_FILENAME),
+        "failure_status": _task_file_stat(run_cmd, project=project, task_id=task_id, filename=AGENT_FAILURE_STATUS_FILENAME),
         "report": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="agent-report.md"),
         "diff": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="implementation-diff.patch"),
         "consensus": _task_file_stat(run_cmd, project=project, task_id=task_id, filename="consensus.md"),
@@ -1822,6 +1889,7 @@ def inspect_agent_task(
     proxy_status = _read_agent_proxy_status(
         run_cmd, project=project, task_id=task_id, now_epoch=now
     )
+    failure = _read_agent_failure_status(run_cmd, project=project, task_id=task_id)
 
     terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
     active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
@@ -1875,8 +1943,11 @@ def inspect_agent_task(
         emitted_invoke_after_seconds=emitted_invoke_after_seconds,
     )
 
+    failure_reason = failure.get("reason") if failure.get("valid") is True else None
     if startup.get("startup_timeout"):
         verdict = "startup_timeout"
+    elif terminal and isinstance(failure_reason, str):
+        verdict = failure_reason
     elif terminal:
         verdict = "finished"
     elif reconciliation.get("state") is not None:
@@ -1917,6 +1988,7 @@ def inspect_agent_task(
         "runner_heartbeat": heartbeat,
         "runner_heartbeat_fresh": runner_heartbeat_fresh,
         "proxy_status": proxy_status,
+        "failure": failure,
         "startup": startup,
         "reasoning_loop": reasoning_loop,
         "trailing_colon_stall": trailing_colon_stall,

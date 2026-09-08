@@ -1802,6 +1802,106 @@ class TestSupervisorRequiredCheckDevExtraBootstrap:
         assert "dev extra bootstrap FAILED" in status
 
 
+def _run_fake_opencode_failure(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    output: str,
+    preexisting_failure: dict[str, object] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    source = tmp_path / "server-error-source"
+    source.mkdir()
+    _init_git_repo(source)
+    artifacts = tmp_path / "server-error-artifacts"
+    artifacts.mkdir()
+    (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+    if preexisting_failure is not None:
+        (artifacts / "failure-status.json").write_text(
+            json.dumps(preexisting_failure), encoding="utf-8"
+        )
+    fake_bin = tmp_path / "server-error-bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "opencode"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "cat <<'OPENCODE_OUTPUT_EOF'\n"
+        + output
+        + "\nOPENCODE_OUTPUT_EOF\n"
+        + "exit 1\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+    monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+    monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+
+    script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    return result, artifacts
+
+
+def test_exact_unknown_error_envelope_writes_typed_failure_sidecar(tmp_path, monkeypatch):
+    output = """Error: {
+  "name": "UnknownError",
+  "data": {
+    "message": "Unexpected server error. Check server logs for details.",
+    "ref": "err_bf7ae62d"
+  }
+}"""
+    result, artifacts = _run_fake_opencode_failure(tmp_path, monkeypatch, output=output)
+
+    assert result.returncode == 1
+    failure = json.loads((artifacts / "failure-status.json").read_text(encoding="utf-8"))
+    assert failure["reason"] == "opencode_server_error"
+    assert failure["phase"] == "pre_useful_work"
+    assert failure["upstream_ref"] == "err_bf7ae62d"
+    assert failure["correlation_hint"] == (
+        "Correlate OpenCode server logs with upstream ref err_bf7ae62d"
+    )
+    report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
+    assert "Failure reason: opencode-server-error" in report
+    assert (artifacts / "agent-status.md").read_text(encoding="utf-8").strip() == "Status: failed"
+
+
+def test_unknown_error_like_log_does_not_guess_server_failure(tmp_path, monkeypatch):
+    output = "diagnostic review text mentions UnknownError, 429 and internal server error"
+    result, artifacts = _run_fake_opencode_failure(
+        tmp_path,
+        monkeypatch,
+        output=output,
+        preexisting_failure={
+            "reason": "provider_error",
+            "phase": "execution",
+            "upstream_ref": "err_spoofed1",
+        },
+    )
+
+    assert result.returncode == 1
+    assert not (artifacts / "failure-status.json").exists()
+    report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
+    assert "Failure reason: none" in report
+
+
+def test_large_failure_log_is_not_loaded_or_classified(tmp_path, monkeypatch):
+    result, artifacts = _run_fake_opencode_failure(
+        tmp_path,
+        monkeypatch,
+        output="x" * 9000,
+    )
+
+    assert result.returncode == 1
+    assert not (artifacts / "failure-status.json").exists()
+    report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
+    assert "Failure reason: none" in report
+
+
 class TestRuntimeTimeout:
     """TEST-09: A fake OpenCode that emits non-build progress and then
     hangs is killed by the runtime watchdog before the test timeout.
@@ -1820,6 +1920,16 @@ class TestRuntimeTimeout:
         artifacts = tmp_path / "runtime-artifacts"
         artifacts.mkdir()
         (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+        (artifacts / "failure-status.json").write_text(
+            json.dumps(
+                {
+                    "reason": "opencode_server_error",
+                    "phase": "pre_useful_work",
+                    "upstream_ref": "err_spoofed1",
+                }
+            ),
+            encoding="utf-8",
+        )
 
         fake_bin = tmp_path / "runtime-bin"
         fake_bin.mkdir()
@@ -1848,6 +1958,7 @@ class TestRuntimeTimeout:
         assert result.returncode == 79, result.stderr or result.stdout
         report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
         assert "Failure reason: opencode-run-timeout" in report
+        assert not (artifacts / "failure-status.json").exists()
         status = (artifacts / "agent-status.md").read_text(encoding="utf-8")
         assert status.strip() == "Status: run-timeout"
 
