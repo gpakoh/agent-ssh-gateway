@@ -142,15 +142,20 @@ def _gateway_error_details(exc: GatewayClientError) -> dict[str, Any] | None:
 
 
 def _gateway_error_hint(exc: GatewayClientError, code: str) -> str | None:
-    """Extract the gateway's own per-error hint, when present.
+    """Extract an operator-safe MCP hint for a gateway failure.
 
-    The gateway's per-error hints are written for the REST API surface
-    (e.g. JOB_NOT_FOUND says "Use GET /api/jobs to list active jobs").
-    There is no such MCP command, so job errors get an MCP-native hint
-    instead of leaking a REST endpoint the caller cannot use.
+    Gateway hints are written for the REST surface, so MCP-specific recovery
+    paths take precedence where the REST wording is not sufficient. Rate-limit
+    handlers use a flat error shape and receive an explicit MCP-native hint;
+    arbitrary flat REST hints are not propagated implicitly.
     """
     if code == "JOB_NOT_FOUND":
         return "The job no longer exists (it may have expired); re-run the tool to start a new job, or call job_status/job_result with the id of a job returned by this run"
+    if code in _RATE_LIMIT_GATEWAY_CODES:
+        return (
+            "Wait error.details.retry_after_seconds before retrying and batch/coalesce repeated polling. "
+            "For agent tasks prefer agent_status for compact polling and escalate to inspect_agent_task only when deeper diagnostics are needed; avoid repeated schema discovery during the cooldown."
+        )
     if isinstance(exc.body, dict):
         detail = exc.body.get("detail")
         if isinstance(detail, dict) and isinstance(detail.get("hint"), str) and detail["hint"]:

@@ -156,12 +156,14 @@ def _run_gateway(
             code, retryable = _classify_gateway_error(exc)
         message = _gateway_error_message(exc) if isinstance(exc, GatewayClientError) else str(exc)
         hint = _gateway_error_hint(exc, code) if isinstance(exc, GatewayClientError) else None
+        details = _gateway_error_details(exc) if isinstance(exc, GatewayClientError) else None
         return tool_error(
             tool=tool,
             code=code,
             message=message,
             retryable=retryable,
             hint=hint,
+            details=details,
             source="gateway",
             read_only=True,
         )

@@ -170,6 +170,102 @@ def test_gateway_error_details_preserves_rate_limit_retry_metadata():
     }
 
 
+def test_flat_non_rate_limit_rest_hint_is_not_propagated():
+    from examples.mcp_server.gateway_client import GatewayClientError
+    from examples.mcp_server.mcp_infra.gateway_errors import _gateway_error_hint
+
+    exc = GatewayClientError(
+        "POST /api/ssh/execute failed: 404 {...}",
+        status_code=404,
+        body={
+            "message": "Session not found",
+            "code": "SESSION_NOT_FOUND",
+            "retryable": False,
+            "hint": "Create a session first via POST /api/ssh/connect",
+        },
+    )
+
+    assert _gateway_error_hint(exc, "SESSION_NOT_FOUND") is None
+
+
+def test_flat_rate_limit_error_gets_mcp_native_retry_hint_and_details():
+    from examples.mcp_server.gateway_client import GatewayClientError
+    from examples.mcp_server.mcp_infra.gateway_errors import (
+        _gateway_error_details,
+        _gateway_error_hint,
+    )
+
+    exc = GatewayClientError(
+        "POST /api/ssh/execute failed: 429 {...}",
+        status_code=429,
+        body={
+            "message": "Rate limit exceeded: 600 per 1 minute",
+            "code": "RATE_LIMIT_EXCEEDED",
+            "retryable": True,
+            "hint": "Reduce request frequency or batch/coalesce polling before retrying.",
+            "details": {
+                "retry_after_seconds": 60,
+                "bucket_class": "master",
+                "operation_class": "execute",
+                "limit": "600 per 1 minute",
+            },
+        },
+    )
+
+    details = _gateway_error_details(exc)
+    hint = _gateway_error_hint(exc, "RATE_LIMIT_EXCEEDED")
+
+    assert details == {
+        "gateway_code": "RATE_LIMIT_EXCEEDED",
+        "retry_after_seconds": 60,
+        "bucket_class": "master",
+        "operation_class": "execute",
+        "limit": "600 per 1 minute",
+    }
+    assert hint is not None
+    assert "retry_after_seconds" in hint
+    assert "agent_status" in hint
+    assert "inspect_agent_task" in hint
+    assert "schema discovery" in hint
+
+
+def test_run_gateway_preserves_rate_limit_guidance(monkeypatch):
+    from examples.mcp_server.mcp_infra.adapters import gateway as gateway_adapter
+
+    def _raise():
+        raise gateway_adapter.GatewayClientError(
+            "GET /api/workspace/info failed: 429 {...}",
+            status_code=429,
+            body={
+                "message": "Rate limit exceeded: 600 per 1 minute",
+                "code": "RATE_LIMIT_EXCEEDED",
+                "retryable": True,
+                "hint": "Reduce request frequency before retrying.",
+                "details": {
+                    "retry_after_seconds": 60,
+                    "bucket_class": "master",
+                    "operation_class": "request",
+                    "limit": "600 per 1 minute",
+                },
+            },
+        )
+
+    result = gateway_adapter._run_gateway("info", _raise)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "RATE_LIMIT_EXCEEDED"
+    assert result["error"]["retryable"] is True
+    assert result["error"]["details"] == {
+        "gateway_code": "RATE_LIMIT_EXCEEDED",
+        "retry_after_seconds": 60,
+        "bucket_class": "master",
+        "operation_class": "request",
+        "limit": "600 per 1 minute",
+    }
+    assert "retry_after_seconds" in result["error"]["hint"]
+    assert "agent_status" in result["error"]["hint"]
+
+
 def test_gateway_transport_errors_get_recovery_hints():
     from examples.mcp_server.gateway_client import GatewayClientError
     from examples.mcp_server.mcp_infra.gateway_errors import (
