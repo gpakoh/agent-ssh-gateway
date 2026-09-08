@@ -33,6 +33,29 @@ def _agent_guidance() -> dict[str, Any]:
     }
 
 
+def _operator_surface_contract(active_mode: str, scope_enforcement: str) -> dict[str, Any]:
+    """Describe which discovery surface this manifest can and cannot verify.
+
+    ``tools_manifest`` is built inside the Gateway MCP server from FastMCP's live
+    tool manager plus repo-local mode/scope configuration.  It cannot observe an
+    external connector or ChatGPT resource catalog that may cache or filter the
+    same server's tools before the operator sees schemas.  Reporting that boundary
+    explicitly prevents a server-local ``available=true`` entry from being
+    mistaken for proof that another surface can invoke the tool.
+    """
+    return {
+        "server_tool_manager_verified": True,
+        "server_tool_manager_surface": "mcp.tools/list",
+        "active_mode": active_mode,
+        "scope_enforcement": scope_enforcement,
+        "external_resource_catalog": "api_tool.list_resources",
+        "external_resource_catalog_verified": False,
+        "authoritative_for_external_schema_visibility": False,
+        "diagnostic_code": "EXTERNAL_RESOURCE_CATALOG_UNVERIFIED",
+        "operator_guidance": "Use this manifest as the server-local MCP tool-manager view. Before assuming ChatGPT/api_tool invocation is possible, confirm the same tool name is present in the external resource catalog; if it is absent there, treat that as an external catalog mismatch, not proof that the MCP server failed to register the tool.",
+    }
+
+
 def build_manifest(
     registered_tools: list[Any],
     scope_enforcement: str = "audit",
@@ -196,5 +219,6 @@ def build_manifest(
         "modes": modes_dict,
         "access_profiles": profiles_dict,
         "agent_guidance": _agent_guidance(),
+        "operator_surface_contract": _operator_surface_contract(active_mode, scope_enforcement),
         "catalog_consistency": catalog_consistency,
     }

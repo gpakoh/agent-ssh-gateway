@@ -56,6 +56,7 @@ class TestBuildManifest:
             "modes",
             "access_profiles",
             "agent_guidance",
+            "operator_surface_contract",
         ):
             assert field in result, f"Missing field: {field}"
 
@@ -73,6 +74,28 @@ class TestBuildManifest:
         assert "inspect_agent_task" in guidance["agent_run_diagnostics"]
         assert "log-backed" in guidance["agent_run_diagnostics"]
         serialized = str(guidance)
+        assert "/home/" not in serialized
+        assert "/media/" not in serialized
+
+    def test_operator_surface_contract_marks_external_catalog_unverified(
+        self, sample_tools: list[FakeTool]
+    ) -> None:
+        result = build_manifest(
+            sample_tools, scope_enforcement="enforce", mode_override="mcp_client_write"
+        )
+
+        contract = result["operator_surface_contract"]
+        assert contract["server_tool_manager_verified"] is True
+        assert contract["server_tool_manager_surface"] == "mcp.tools/list"
+        assert contract["active_mode"] == "mcp_client_write"
+        assert contract["scope_enforcement"] == "enforce"
+        assert contract["external_resource_catalog"] == "api_tool.list_resources"
+        assert contract["external_resource_catalog_verified"] is False
+        assert contract["authoritative_for_external_schema_visibility"] is False
+        assert contract["diagnostic_code"] == "EXTERNAL_RESOURCE_CATALOG_UNVERIFIED"
+        assert "external resource catalog" in contract["operator_guidance"]
+        assert "MCP server failed to register" in contract["operator_guidance"]
+        serialized = str(contract)
         assert "/home/" not in serialized
         assert "/media/" not in serialized
 
