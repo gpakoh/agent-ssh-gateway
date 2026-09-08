@@ -22,7 +22,7 @@ from examples.mcp_server.agent_paths import (
 )
 from examples.mcp_server.agent_tasks import (
     AttemptConflictError,
-    validate_base_ref,
+    resolve_task_source_contract,
     validate_task_id,
 )
 from examples.mcp_server.agent_tools import (
@@ -145,20 +145,23 @@ def project_run_opencode(
             "finished_at": _now_iso(),
         }
     try:
-        raw_base_ref = (task_json or {}).get("base_ref")
-        validate_base_ref(raw_base_ref)
-        base_ref = raw_base_ref if isinstance(raw_base_ref, str) and raw_base_ref else None
+        source_contract = resolve_task_source_contract(task_json or {})
+        source_mode = str(source_contract["source_mode"])
+        source_ref = source_contract["source_ref"]
+        managed_source_sha256 = source_contract["managed_source_sha256"]
+        if source_mode == "dirty_worktree_snapshot" and not managed_clone:
+            raise ValueError(
+                "dirty_worktree_snapshot requires managed OpenCode execution"
+            )
         managed_source_path = None
-        managed_source_sha256 = None
         if managed_clone:
-            if not base_ref:
-                raise ValueError("managed OpenCode execution requires an exact base_ref")
-            managed_source_path = managed_source_bundle_path(project, base_ref)
+            if not source_ref:
+                if source_mode == "committed_head":
+                    raise ValueError("managed OpenCode execution requires an exact base_ref")
+                raise ValueError("managed OpenCode execution requires an exact source_ref")
+            managed_source_path = managed_source_bundle_path(project, source_ref)
             if not managed_source_path:
                 raise ValueError("MCP_AGENT_SOURCE_ROOT is required for managed OpenCode execution")
-            raw_sha256 = (task_json or {}).get("managed_source_sha256")
-            if isinstance(raw_sha256, str):
-                managed_source_sha256 = raw_sha256.strip() or None
         allowed_files = _task_string_list(task_json or {}, "allowed_files")
         forbidden_files = _task_string_list(task_json or {}, "forbidden_files")
         required_checks = _task_string_list(task_json or {}, "required_checks")
@@ -183,7 +186,7 @@ def project_run_opencode(
         forbidden_files=forbidden_files,
         required_checks=required_checks,
         managed_clone=managed_clone,
-        base_ref=base_ref,
+        base_ref=source_ref,
         managed_source_path=managed_source_path,
         managed_source_sha256=managed_source_sha256,
     )

@@ -49,6 +49,9 @@ from agent_tasks import (
     read_agent_task_file as _read_agent_task_file,
 )
 from agent_tasks import (
+    validate_source_mode as _validate_source_mode,
+)
+from agent_tasks import (
     write_agent_attempt_state as _write_agent_attempt_state,
 )
 from agent_tasks import (
@@ -60,7 +63,11 @@ from mcp_audit import redact_secrets
 from mcp_client_tools import run_project_command
 from opencode_tools import project_run_opencode as _project_run_opencode
 
-from examples.mcp_server.agent_sources import ensure_managed_source_bundle
+from examples.mcp_server.agent_paths import managed_workspace_path
+from examples.mcp_server.agent_sources import (
+    ensure_dirty_worktree_review_bundle,
+    ensure_managed_source_bundle,
+)
 from examples.mcp_server.fleet_runtime import get_fleet_runtime
 from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.adapters.gateway import _split_csv_or_lines, _split_lines
@@ -136,6 +143,7 @@ def gateway_write_agent_task(
     constraints: str | None = None,
     worktree_path: str | None = None,
     base_ref: str | None = None,
+    source_mode: str | None = None,
     workflow_phase: str | None = None,
 ) -> dict[str, Any]:
     """Write task.json + current-plan.md to .ai-bridge/tasks/<task_id>/."""
@@ -149,8 +157,30 @@ def gateway_write_agent_task(
         # proved (single head == base_ref, bundle verify, scratch clone).
         # Any failure here propagates: no runnable task without a bound
         # digest, and no supervisor-time recapture fallback exists.
-        publication = ensure_managed_source_bundle(project, base_ref)
-        managed_source_sha256 = publication.sha256 if publication else None
+        normalized_source_mode = _validate_source_mode(source_mode)
+        source_ref = base_ref.strip() if isinstance(base_ref, str) and base_ref.strip() else None
+        source_tree_sha = None
+        managed_source_sha256: str | None = None
+        if normalized_source_mode == "dirty_worktree_snapshot":
+            if worktree_path and worktree_path.strip():
+                raise ValueError(
+                    "dirty_worktree_snapshot uses a managed review clone and does not accept worktree_path"
+                )
+            if managed_workspace_path(project, task_id) is None:
+                raise ValueError(
+                    "dirty_worktree_snapshot requires MCP_AGENT_WORKSPACE_ROOT managed execution"
+                )
+            dirty_publication = ensure_dirty_worktree_review_bundle(project, base_ref)
+            if dirty_publication is None:
+                raise ValueError(
+                    "dirty_worktree_snapshot requires MCP_AGENT_SOURCE_ROOT managed source storage"
+                )
+            managed_source_sha256 = dirty_publication.sha256
+            source_ref = dirty_publication.snapshot_ref
+            source_tree_sha = dirty_publication.tree_sha
+        else:
+            publication = ensure_managed_source_bundle(project, base_ref)
+            managed_source_sha256 = publication.sha256 if publication else None
         parsed_allowed = _split_scope_patterns(allowed_files) or []
         parsed_forbidden = _split_scope_patterns(forbidden_files) or []
         parsed_checks = _split_lines(required_checks) or []
@@ -185,6 +215,9 @@ def gateway_write_agent_task(
             worktree_path=worktree_path,
             base_ref=base_ref,
             managed_source_sha256=managed_source_sha256,
+            source_mode=normalized_source_mode,
+            source_ref=source_ref,
+            source_tree_sha=source_tree_sha,
             workflow_phase=workflow_phase,
         )
 

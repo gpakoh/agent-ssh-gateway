@@ -76,6 +76,11 @@ KNOWN_CONCRETE_BACKENDS = frozenset({"opencode"})
 WORKFLOW_PHASES = frozenset(
     {"discovery", "validation", "implementation", "verification", "cleanup"}
 )
+SOURCE_MODE_COMMITTED_HEAD = "committed_head"
+SOURCE_MODE_DIRTY_WORKTREE_SNAPSHOT = "dirty_worktree_snapshot"
+SOURCE_MODES = frozenset(
+    {SOURCE_MODE_COMMITTED_HEAD, SOURCE_MODE_DIRTY_WORKTREE_SNAPSHOT}
+)
 WORKFLOW_PHASE_TRANSITIONS = {
     "discovery": "Move to validation with evidence, risks, and a GO/NO-GO recommendation.",
     "validation": "Move to implementation or terminal blocked; do not keep discussing.",
@@ -109,6 +114,75 @@ def validate_base_ref(base_ref: str | None) -> None:
         raise ValueError(
             f"Invalid base_ref: {base_ref!r}. Must be a full 40- or 64-character hex commit id"
         )
+
+
+def validate_source_mode(source_mode: str | None) -> str:
+    """Return the normalized immutable source mode, defaulting old tasks safely."""
+    if source_mode is None or source_mode == "":
+        return SOURCE_MODE_COMMITTED_HEAD
+    if not isinstance(source_mode, str):
+        raise TypeError(
+            f"source_mode must be a string or None, got {type(source_mode).__name__}"
+        )
+    mode = source_mode.strip().lower()
+    if mode not in SOURCE_MODES:
+        choices = ", ".join(sorted(SOURCE_MODES))
+        raise ValueError(f"Invalid source_mode: {source_mode!r}. Must be one of: {choices}")
+    return mode
+
+
+def resolve_task_source_contract(task_json: dict[str, Any]) -> dict[str, str | None]:
+    """Validate and normalize one task's immutable source provenance contract."""
+    raw_base_ref = task_json.get("base_ref")
+    validate_base_ref(raw_base_ref)
+    base_ref = raw_base_ref.strip() if isinstance(raw_base_ref, str) and raw_base_ref.strip() else None
+
+    mode = validate_source_mode(task_json.get("source_mode"))
+    raw_source_ref = task_json.get("source_ref")
+    if raw_source_ref is not None and not isinstance(raw_source_ref, str):
+        raise TypeError("source_ref must be a string or None")
+    source_ref = raw_source_ref.strip() if isinstance(raw_source_ref, str) and raw_source_ref.strip() else None
+    validate_base_ref(source_ref)
+
+    raw_tree_sha = task_json.get("source_tree_sha")
+    if raw_tree_sha is not None and not isinstance(raw_tree_sha, str):
+        raise TypeError("source_tree_sha must be a string or None")
+    source_tree_sha = raw_tree_sha.strip() if isinstance(raw_tree_sha, str) and raw_tree_sha.strip() else None
+    validate_base_ref(source_tree_sha)
+
+    raw_digest = task_json.get("managed_source_sha256")
+    if raw_digest is not None and not isinstance(raw_digest, str):
+        raise TypeError("managed_source_sha256 must be a string or None")
+    managed_source_sha256 = raw_digest.strip() if isinstance(raw_digest, str) and raw_digest.strip() else None
+    if managed_source_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", managed_source_sha256) is None:
+        raise ValueError(
+            "managed_source_sha256 must be a 64-character lowercase hex digest"
+        )
+
+    if mode == SOURCE_MODE_COMMITTED_HEAD:
+        resolved_ref = source_ref or base_ref
+        if source_ref and base_ref and source_ref.lower() != base_ref.lower():
+            raise ValueError("committed_head source_ref must equal base_ref")
+        if source_tree_sha:
+            raise ValueError("committed_head must not set source_tree_sha")
+    else:
+        if not base_ref:
+            raise ValueError("dirty_worktree_snapshot requires an exact base_ref")
+        if not source_ref:
+            raise ValueError("dirty_worktree_snapshot requires an exact source_ref")
+        if not source_tree_sha:
+            raise ValueError("dirty_worktree_snapshot requires an exact source_tree_sha")
+        if not managed_source_sha256:
+            raise ValueError("dirty_worktree_snapshot requires managed source digest metadata")
+        resolved_ref = source_ref
+
+    return {
+        "source_mode": mode,
+        "base_ref": base_ref,
+        "source_ref": resolved_ref,
+        "source_tree_sha": source_tree_sha,
+        "managed_source_sha256": managed_source_sha256,
+    }
 
 
 def validate_workflow_phase(workflow_phase: str | None) -> str:
@@ -433,21 +507,36 @@ def build_task_json(
     base_ref: str | None = None,
     allowed_backends: list[str] | None = None,
     managed_source_sha256: str | None = None,
+    source_mode: str | None = None,
+    source_ref: str | None = None,
+    source_tree_sha: str | None = None,
     workflow_phase: str | None = None,
 ) -> str:
     """Build machine-readable task.json content."""
     validate_task_id(task_id)
     validate_required_checks(required_checks)
     validate_scope_contract(allowed_files, forbidden_files)
-    validate_base_ref(base_ref)
     normalized_workflow_phase = validate_workflow_phase(workflow_phase)
+    # Preserve the public builder's pre-existing strict input contract: an
+    # explicitly supplied digest must be valid, including rejecting "". The
+    # runtime resolver remains tolerant of legacy task.json files that stored
+    # an empty string to mean "no managed digest".
     if managed_source_sha256 is not None and (
         not isinstance(managed_source_sha256, str)
-        or not re.fullmatch(r"[0-9a-f]{64}", managed_source_sha256)
+        or re.fullmatch(r"[0-9a-f]{64}", managed_source_sha256) is None
     ):
         raise ValueError(
             "managed_source_sha256 must be a 64-character lowercase hex digest"
         )
+    source_contract = resolve_task_source_contract(
+        {
+            "base_ref": base_ref or "",
+            "source_mode": source_mode or "",
+            "source_ref": source_ref or "",
+            "source_tree_sha": source_tree_sha or "",
+            "managed_source_sha256": managed_source_sha256 or "",
+        }
+    )
     normalized_backends = _validate_allowed_backends(agent, allowed_backends)
     data: dict[str, Any] = {
         "task_id": task_id,
@@ -457,8 +546,11 @@ def build_task_json(
         "forbidden_files": forbidden_files or [],
         "required_checks": required_checks or [],
         "worktree_path": worktree_path or "",
-        "base_ref": base_ref or "",
-        "managed_source_sha256": managed_source_sha256 or "",
+        "base_ref": source_contract["base_ref"] or "",
+        "source_mode": source_contract["source_mode"] or SOURCE_MODE_COMMITTED_HEAD,
+        "source_ref": source_contract["source_ref"] or "",
+        "source_tree_sha": source_contract["source_tree_sha"] or "",
+        "managed_source_sha256": source_contract["managed_source_sha256"] or "",
         "workflow_phase": normalized_workflow_phase,
         "commit_allowed": commit_allowed,
         "push_allowed": push_allowed,
@@ -2080,6 +2172,9 @@ def write_agent_task(
     base_ref: str | None = None,
     allowed_backends: list[str] | None = None,
     managed_source_sha256: str | None = None,
+    source_mode: str | None = None,
+    source_ref: str | None = None,
+    source_tree_sha: str | None = None,
     workflow_phase: str | None = None,
 ) -> dict[str, Any]:
     """Write task.json + current-plan.md + agent-status.md to .ai-bridge/tasks/<task_id>/."""
@@ -2095,6 +2190,9 @@ def write_agent_task(
         base_ref=base_ref,
         allowed_backends=allowed_backends,
         managed_source_sha256=managed_source_sha256,
+        source_mode=source_mode,
+        source_ref=source_ref,
+        source_tree_sha=source_tree_sha,
         workflow_phase=workflow_phase,
     )
     td = task_dir(project, task_id)
@@ -2346,6 +2444,7 @@ def prepare_agent_task_retry(
         retry_contract.get("forbidden_files") or [],
     )
     validate_base_ref(retry_contract.get("base_ref") or None)
+    resolve_task_source_contract(retry_contract)
 
     plan_result = read_agent_task_file(
         run_cmd,

@@ -210,6 +210,58 @@ class TestProjectRunOpencodeExecutes:
         assert 'git clone --no-hardlinks --no-checkout "$MANAGED_SOURCE_COPY" "$wt"' in script
         assert 'git clone --no-hardlinks --no-checkout "$PARENT_ROOT" "$wt"' not in script
 
+    def test_managed_dirty_snapshot_uses_snapshot_ref_as_checkout_baseline(self, monkeypatch):
+        base_ref = "1" * 40
+        snapshot_ref = "2" * 40
+        tree_sha = "3" * 40
+        digest = "4" * 64
+        monkeypatch.setenv("MCP_AGENT_WORKSPACE_ROOT", "/var/lib/mcp-agent/workspaces")
+        monkeypatch.setenv("MCP_AGENT_STATE_ROOT", "/var/lib/mcp-agent/state")
+        monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", "/var/lib/mcp-agent/sources")
+        monkeypatch.setattr(
+            "app.workspace.registry.get_registry",
+            lambda: type(
+                "R", (), {"project_info": lambda self, p: {"root": "/abs/project/root"}}
+            )(),
+        )
+        rc = _fake_run_cmd(
+            task_json={
+                "base_ref": base_ref,
+                "source_mode": "dirty_worktree_snapshot",
+                "source_ref": snapshot_ref,
+                "source_tree_sha": tree_sha,
+                "managed_source_sha256": digest,
+            }
+        )
+        captured: dict[str, str] = {}
+
+        def run_script(project, script):
+            captured["script"] = script
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert result["status"] == "needs-review"
+        script = captured["script"]
+        assert f"/{snapshot_ref}.bundle" in script
+        assert f"TASK_BASE_REF='{snapshot_ref}'" in script
+        assert f"/{base_ref}.bundle" not in script
+
+    def test_dirty_snapshot_rejected_without_managed_workspace(self):
+        rc = _fake_run_cmd(
+            task_json={
+                "base_ref": "1" * 40,
+                "source_mode": "dirty_worktree_snapshot",
+                "source_ref": "2" * 40,
+                "source_tree_sha": "3" * 40,
+                "managed_source_sha256": "4" * 64,
+            }
+        )
+        run_script = MagicMock(return_value={"exit_code": 0, "stdout": "", "stderr": ""})
+        result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
+        assert result["status"] == "error"
+        assert "requires managed OpenCode execution" in result["error"]
+        run_script.assert_not_called()
+
     def test_managed_mode_with_user_worktree_path_errors(self, monkeypatch):
         """Regression: managed mode silently replaced a valid user-supplied
         worktree_path with the executor-owned managed path, ignoring the
