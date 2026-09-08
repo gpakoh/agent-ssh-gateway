@@ -499,6 +499,7 @@ def _proxy_fetch_script_lines(
         "",
         "# Exclusive proxy + dynamic cgroup-headroom admission for OpenCode",
         "PROXY_BLOCKED=0",
+        "PROXY_LAST_ERROR_CLASS=",
         "PROXY_FETCH_RESULT=",
         "OPENCODE_PROXY_URL=",
         "OPENCODE_PROXY_LEASE_FILE=",
@@ -694,12 +695,22 @@ def _proxy_fetch_script_lines(
         '  export http_proxy="$OPENCODE_PROXY_URL" https_proxy="$OPENCODE_PROXY_URL" all_proxy="$OPENCODE_PROXY_URL"',
         '  export NO_PROXY="localhost,127.0.0.1" no_proxy="localhost,127.0.0.1"',
         '  echo "Using exclusive live proxy from configured provider" >> "$td/agent-status.md"',
+        '  write_proxy_status acquired "" 0',
         "else",
+        '  case "$PROXY_FETCH_RC" in',
+        '    3) PROXY_LAST_ERROR_CLASS="provider_unavailable" ;;',
+        '    5) PROXY_LAST_ERROR_CLASS="all_proxies_leased" ;;',
+        '    6) PROXY_LAST_ERROR_CLASS="cgroup_headroom_unavailable" ;;',
+        '    7) PROXY_LAST_ERROR_CLASS="no_alternative_proxy" ;;',
+        '    *) PROXY_LAST_ERROR_CLASS="admission_failed" ;;',
+        "  esac",
         '  printf "Proxy/memory admission failed (rc=%s)\\n" "$PROXY_FETCH_RC" > "$td/proxy-status.log"',
         '  if [ "$PROXY_REQUIRED" -eq 1 ]; then',
         "    PROXY_BLOCKED=1",
+        '    write_proxy_status blocked "$PROXY_LAST_ERROR_CLASS" 1',
         '    echo "Exclusive proxy required; OpenCode launch blocked" >> "$td/agent-status.md"',
         "  else",
+        '    write_proxy_status direct_fallback "$PROXY_LAST_ERROR_CLASS" 0',
         '    echo "Proxy unavailable; direct fallback explicitly allowed" >> "$td/agent-status.md"',
         "  fi",
         "fi",
@@ -832,6 +843,69 @@ def _proxy_startup_cooldown_script_lines(provider_url: str, timeout: str) -> lis
         "fi",
     ]
 
+
+
+def _proxy_status_sidecar_script_lines() -> list[str]:
+    """Runner-owned, redacted proxy lifecycle sidecar.
+
+    The worker shares the task directory, so this is not an OS-level trust
+    boundary.  The runner nevertheless owns the contract: it removes stale
+    bytes before launch, writes only fixed/validated metadata, uses atomic
+    replace, and rewrites the final state after the worker exits.  Proxy URLs,
+    digests, credentials, provider URLs and raw error text are never written.
+    """
+    return [
+        'PROXY_STATUS_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)',
+        'rm -f "$td/proxy-status.json"',
+        "PROXY_LAST_ERROR_CLASS=",
+        "write_proxy_status() {",
+        '  _proxy_outcome="$1"',
+        '  _proxy_error="${2:-}"',
+        '  _proxy_finished="${3:-0}"',
+        '  _proxy_updated=$(date -u +%Y-%m-%dT%H:%M:%SZ)',
+        '  _proxy_finished_at=""',
+        '  if [ "$_proxy_finished" = "1" ]; then _proxy_finished_at="$_proxy_updated"; fi',
+        '  python3 - "$td/proxy-status.json" "${OPENCODE_PROXY_ATTEMPT:-1}" "$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS" "$_proxy_outcome" "$_proxy_error" "$PROXY_STATUS_STARTED_AT" "$_proxy_updated" "$_proxy_finished_at" <<\'PROXYSTATUS_EOF\'',
+        "import json, os, re, sys, tempfile",
+        "",
+        "path, attempt_raw, max_raw, outcome, error_class, started_at, updated_at, finished_at = sys.argv[1:]",
+        "if not attempt_raw.isdigit() or not max_raw.isdigit():",
+        "    raise SystemExit(2)",
+        "attempt, max_attempts = int(attempt_raw), int(max_raw)",
+        "if attempt < 1 or max_attempts < 1 or attempt > max_attempts:",
+        "    raise SystemExit(2)",
+        "safe = re.compile(r'^[a-z][a-z0-9_-]{0,63}$')",
+        "if safe.fullmatch(outcome) is None or (error_class and safe.fullmatch(error_class) is None):",
+        "    raise SystemExit(2)",
+        "payload = {",
+        "    'version': 1,",
+        "    'attempt': attempt,",
+        "    'max_attempts': max_attempts,",
+        "    'provider_kind': 'configured_provider',",
+        "    'started_at': started_at,",
+        "    'updated_at': updated_at,",
+        "    'final_outcome': outcome,",
+        "}",
+        "if error_class:",
+        "    payload['last_error_class'] = error_class",
+        "if finished_at:",
+        "    payload['finished_at'] = finished_at",
+        "directory = os.path.dirname(path) or '.'",
+        "fd, tmp = tempfile.mkstemp(prefix='.proxy-status.', dir=directory)",
+        "try:",
+        "    os.fchmod(fd, 0o600)",
+        "    with os.fdopen(fd, 'w', encoding='utf-8') as fh:",
+        "        json.dump(payload, fh, sort_keys=True, separators=(',', ':'))",
+        "        fh.write('\\n')",
+        "        fh.flush()",
+        "        os.fsync(fh.fileno())",
+        "    os.replace(tmp, path)",
+        "finally:",
+        "    if os.path.exists(tmp):",
+        "        os.unlink(tmp)",
+        "PROXYSTATUS_EOF",
+        "}",
+    ]
 
 
 def _agent_heartbeat_script_lines(interval_seconds: int = 30) -> list[str]:
@@ -1719,6 +1793,7 @@ def _build_opencode_script(
         )
     )
     if proxy_provider_url:
+        parts.extend(_proxy_status_sidecar_script_lines())
         parts.append("acquire_opencode_proxy() {")
         parts.extend(
             _proxy_fetch_script_lines(
@@ -1750,20 +1825,27 @@ def _build_opencode_script(
             ]
         )
     if proxy_provider_url:
-        parts.append("acquire_opencode_proxy")
+        parts.extend(
+            [
+                f"OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS={startup_max_proxy_attempts}",
+                "OPENCODE_PROXY_ATTEMPT=1",
+                'write_proxy_status acquiring "" 0',
+                "acquire_opencode_proxy",
+            ]
+        )
     startup_retry_lines: list[str] = []
     if proxy_provider_url:
         startup_retry_lines = [
-            f"OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS={startup_max_proxy_attempts}",
-            "OPENCODE_PROXY_ATTEMPT=1",
             'while [ "${OPENCODE_STARTUP_STALLED:-0}" -eq 1 ] && [ "$PROXY_BLOCKED" -eq 0 ] && [ "$OPENCODE_PROXY_ATTEMPT" -lt "$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS" ]; do',
             '  echo "OpenCode startup stalled; rotating proxy (attempt $OPENCODE_PROXY_ATTEMPT/$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS)" >> "$td/agent-status.md"',
+            '  write_proxy_status rotating startup_stalled 0',
             "  cooldown_opencode_proxy",
             '  if [ -n "${OPENCODE_PROXY_DIGEST:-}" ]; then',
             '    OPENCODE_REJECTED_PROXY_DIGESTS="${OPENCODE_REJECTED_PROXY_DIGESTS:+$OPENCODE_REJECTED_PROXY_DIGESTS,}$OPENCODE_PROXY_DIGEST"',
             "  fi",
             "  release_opencode_proxy",
             "  OPENCODE_PROXY_ATTEMPT=$((OPENCODE_PROXY_ATTEMPT + 1))",
+            '  write_proxy_status acquiring "" 0',
             "  acquire_opencode_proxy",
             '  if [ "$PROXY_BLOCKED" -eq 0 ]; then',
             "    run_opencode_attempt",
@@ -1773,6 +1855,7 @@ def _build_opencode_script(
             "  fi",
             "done",
             'if [ "${OPENCODE_STARTUP_STALLED:-0}" -eq 1 ] && [ "$PROXY_BLOCKED" -eq 0 ] && [ "$OPENCODE_PROXY_ATTEMPT" -ge "$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS" ]; then',
+            '  write_proxy_status startup_exhausted startup_stalled 1',
             '  echo "OpenCode startup attempts exhausted ($OPENCODE_PROXY_ATTEMPT/$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS)" >> "$td/agent-status.md"',
             "fi",
         ]
@@ -1826,6 +1909,21 @@ def _build_opencode_script(
             parent_root=project_root if worktree_path and not managed_clone else None,
         )
     )
+    proxy_final_status_lines: list[str] = []
+    if proxy_provider_url:
+        proxy_final_status_lines = [
+            'if [ "$FINAL_RC" -eq 0 ]; then',
+            '  write_proxy_status completed "" 1',
+            'elif [ "$FINAL_RC" -eq 77 ]; then',
+            '  write_proxy_status rate_limited rate_limited 1',
+            'elif [ "$FINAL_RC" -eq 78 ]; then',
+            '  write_proxy_status startup_exhausted startup_stalled 1',
+            'elif [ "$FINAL_RC" -eq 76 ]; then',
+            '  write_proxy_status blocked "${PROXY_LAST_ERROR_CLASS:-proxy_unavailable}" 1',
+            "else",
+            '  write_proxy_status worker_failed "${PROXY_LAST_ERROR_CLASS:-}" 1',
+            "fi",
+        ]
     parts.extend(
         [
             # 76-79 are wrapper-owned terminal codes. Normalize a raw CLI
@@ -1835,6 +1933,7 @@ def _build_opencode_script(
             'if [ "$FINAL_RC" -eq 77 ] && [ "${RATE_LIMITED:-0}" != "1" ]; then FINAL_RC=1; fi',
             'if [ "$FINAL_RC" -eq 78 ] && [ "${FAILURE_REASON:-}" != "opencode-startup-timeout" ]; then FINAL_RC=1; fi',
             'if [ "$FINAL_RC" -eq 79 ] && [ "${FAILURE_REASON:-}" != "opencode-run-timeout" ]; then FINAL_RC=1; fi',
+            *proxy_final_status_lines,
             'if [ $FINAL_RC -eq 0 ] && [ "${CHECKS_WARNING:-0}" -eq 1 ]; then',
             '  echo "Status: needs-review-warning" > "$td/agent-status.md"',
             'elif [ $FINAL_RC -eq 0 ]; then',
