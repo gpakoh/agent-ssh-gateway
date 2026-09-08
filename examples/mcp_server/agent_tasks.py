@@ -1071,7 +1071,7 @@ def _read_agent_proxy_status(
 
 
 _AGENT_FAILURE_REASONS = frozenset({"opencode_server_error"})
-_AGENT_FAILURE_PHASES = frozenset({"pre_useful_work", "startup", "execution"})
+_AGENT_FAILURE_PHASES = frozenset({"pre_useful_work"})
 _AGENT_UPSTREAM_REF_RE = re.compile(r"^err_[A-Za-z0-9]{8,64}$")
 
 

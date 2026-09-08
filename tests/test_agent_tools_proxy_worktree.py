@@ -1889,6 +1889,19 @@ def test_unknown_error_like_log_does_not_guess_server_failure(tmp_path, monkeypa
     assert "Failure reason: none" in report
 
 
+def test_large_failure_log_is_not_loaded_or_classified(tmp_path, monkeypatch):
+    result, artifacts = _run_fake_opencode_failure(
+        tmp_path,
+        monkeypatch,
+        output="x" * 9000,
+    )
+
+    assert result.returncode == 1
+    assert not (artifacts / "failure-status.json").exists()
+    report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
+    assert "Failure reason: none" in report
+
+
 class TestRuntimeTimeout:
     """TEST-09: A fake OpenCode that emits non-build progress and then
     hangs is killed by the runtime watchdog before the test timeout.
