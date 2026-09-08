@@ -34,6 +34,15 @@ case "$FAKE_DOCKER_MODE" in
     echo 'failed to fetch anonymous token: TLS handshake timeout' >&2
     exit 1
     ;;
+  uv_connect_timeout_then_success)
+    if [ "$count" -eq 1 ]; then
+      echo 'Failed to download `redis==8.1.0`' >&2
+      echo 'client error (Connect)' >&2
+      echo 'operation timed out' >&2
+      exit 1
+    fi
+    exit 0
+    ;;
   deterministic_failure)
     echo 'Dockerfile:42: unknown instruction: BROKEN' >&2
     exit 1
@@ -78,6 +87,14 @@ def _run_wrapper(tmp_path: Path, mode: str) -> tuple[subprocess.CompletedProcess
 
 def test_transient_registry_failure_retries_and_recovers(tmp_path: Path) -> None:
     result, counter = _run_wrapper(tmp_path, "transient_then_success")
+
+    assert result.returncode == 0
+    assert counter.read_text(encoding="utf-8").strip() == "2"
+    assert "transient network/registry error; retrying" in result.stderr
+
+
+def test_uv_connect_timeout_is_classified_as_transient(tmp_path: Path) -> None:
+    result, counter = _run_wrapper(tmp_path, "uv_connect_timeout_then_success")
 
     assert result.returncode == 0
     assert counter.read_text(encoding="utf-8").strip() == "2"

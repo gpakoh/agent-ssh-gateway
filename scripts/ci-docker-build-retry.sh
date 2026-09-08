@@ -19,7 +19,7 @@ trap cleanup EXIT
 
 is_transient_network_failure() {
   grep -Eqi \
-    'TLS handshake timeout|i/o timeout|connection reset by peer|Temporary failure in name resolution|no such host|net/http: request canceled|context deadline exceeded' \
+    'TLS handshake timeout|i/o timeout|connection reset by peer|Temporary failure in name resolution|no such host|net/http: request canceled|context deadline exceeded|client error \(Connect\)|operation timed out' \
     "$log_file"
 }
 
