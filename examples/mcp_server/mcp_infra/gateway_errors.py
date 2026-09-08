@@ -145,9 +145,9 @@ def _gateway_error_hint(exc: GatewayClientError, code: str) -> str | None:
     """Extract an operator-safe MCP hint for a gateway failure.
 
     Gateway hints are written for the REST surface, so MCP-specific recovery
-    paths take precedence where the REST wording is not sufficient.  Both the
-    gateway's nested ``detail`` error shape and its flat error shape are
-    supported; rate-limit handlers currently use the flat shape.
+    paths take precedence where the REST wording is not sufficient. Rate-limit
+    handlers use a flat error shape and receive an explicit MCP-native hint;
+    arbitrary flat REST hints are not propagated implicitly.
     """
     if code == "JOB_NOT_FOUND":
         return "The job no longer exists (it may have expired); re-run the tool to start a new job, or call job_status/job_result with the id of a job returned by this run"
@@ -160,8 +160,6 @@ def _gateway_error_hint(exc: GatewayClientError, code: str) -> str | None:
         detail = exc.body.get("detail")
         if isinstance(detail, dict) and isinstance(detail.get("hint"), str) and detail["hint"]:
             return detail["hint"]
-        if isinstance(exc.body.get("hint"), str) and exc.body["hint"]:
-            return exc.body["hint"]
     if code == "FILE_NOT_FOUND":
         return "The requested file does not exist at the specified path"
     if code == "WAIT_TIMEOUT":

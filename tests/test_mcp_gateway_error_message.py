@@ -170,6 +170,24 @@ def test_gateway_error_details_preserves_rate_limit_retry_metadata():
     }
 
 
+def test_flat_non_rate_limit_rest_hint_is_not_propagated():
+    from examples.mcp_server.gateway_client import GatewayClientError
+    from examples.mcp_server.mcp_infra.gateway_errors import _gateway_error_hint
+
+    exc = GatewayClientError(
+        "POST /api/ssh/execute failed: 404 {...}",
+        status_code=404,
+        body={
+            "message": "Session not found",
+            "code": "SESSION_NOT_FOUND",
+            "retryable": False,
+            "hint": "Create a session first via POST /api/ssh/connect",
+        },
+    )
+
+    assert _gateway_error_hint(exc, "SESSION_NOT_FOUND") is None
+
+
 def test_flat_rate_limit_error_gets_mcp_native_retry_hint_and_details():
     from examples.mcp_server.gateway_client import GatewayClientError
     from examples.mcp_server.mcp_infra.gateway_errors import (
