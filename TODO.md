@@ -313,19 +313,7 @@ items are explicitly verified as implemented, documented and safe in production.
 
 These entries are deduplicated against the existing Gateway TODO backlog. They record concrete new failure modes from the #188/#189/#191 recovery and a cross-project JS_chat-engine report, so the evidence does not live only in chat.
 
-1. ⬜ **`gitea_push_verified_commit` / isolated verifier must preserve useful diagnostics and support the prepared-candidate happy path.** This extends, but does not duplicate, the existing `Trusted delivery path for externally prepared/local-agent workspaces` item. #188 fixed a `str` vs `Path` adapter bug and #191 added structured candidate-delivery verification diagnostics, but the prepared candidate clone + trivial-check happy path still needs an explicit close-out proof.
-
-   **Severity:** P1 for safe architect-controlled delivery.
-
-   **Observed behavior before #191:** clean candidate `candidate-agent-ssh-gateway-fix-host-smoke-timeout-master-20260906-087f6ceaeb46-1e9bbd054c61` had local checks passing and clean git status. `gitea_push_verified_commit` returned `CHECK_FAILED` with `isolated delivery verification failed: CandidateVerificationError`. The same failure occurred with real `uv` checks, simple `grep` checks, and `required_checks=true`, so the verifier failed before candidate-controlled checks could matter.
-
-   **Reproduction:** prepare a clean candidate clone under `.mcp-candidate-clones`, commit a small allowed-file change, then call `gitea_push_verified_commit` with exact base/head SHAs, allowed files, and `required_checks` containing only `true`. Expected: verifier passes or fails with a typed, bounded, phase-specific contract error. Pre-#191 observed: generic `CandidateVerificationError`.
-
-   **Expected behavior:** if staging root and mount are valid, `true` must pass. If root/mount/env validation fails, return a stable typed reason such as `CANDIDATE_VERIFIER_ROOT_MISMATCH`, `CANDIDATE_VERIFIER_SOURCE_UNAVAILABLE`, or `CANDIDATE_VERIFIER_VOLUME_SUBPATH_INVALID`, with redacted root/subpath diagnostics and recovery hint.
-
-   **Acceptance:** regression for prepared candidate clone + `required_checks=["true"]`; invalid source-root cases fail before Docker with typed diagnostics; tool either supports prepared candidate clones or explicitly rejects them with a typed contract error.
-
-2. ⬜ **SSH_Gateway discovery and invocation permissions can diverge inside one conversation.** This extends, but does not duplicate, the existing residual catalog mismatch finding. The earlier NOD mode was advertised schemas followed by `Resource not found`; this JS_chat-engine report is advertised schemas followed by `FORBIDDEN: This conversation does not support developer MCPs`, then later discovery no longer exposing `SSH_Gateway` at all.
+1. ⬜ **SSH_Gateway discovery and invocation permissions can diverge inside one conversation.** This extends, but does not duplicate, the existing residual catalog mismatch finding. The earlier NOD mode was advertised schemas followed by `Resource not found`; this JS_chat-engine report is advertised schemas followed by `FORBIDDEN: This conversation does not support developer MCPs`, then later discovery no longer exposing `SSH_Gateway` at all.
 
    **Severity:** P1 for agent/supervisor workflows.
 
@@ -335,7 +323,7 @@ These entries are deduplicated against the existing Gateway TODO backlog. They r
 
    **Acceptance:** tests cover forbidden namespace not advertised; advertised namespace can invoke read-only health/tool-list probe or receives deterministic typed permission error; revoked-after-discovery does not alternate between stale schemas, `FORBIDDEN`, and missing namespace.
 
-3. ⬜ **First-class TODO/backlog writer with dedupe, repro template and safe delivery.**
+2. ⬜ **First-class TODO/backlog writer with dedupe, repro template and safe delivery.**
 
    **Severity:** P2 operator capability, P1 during multi-project recovery when defects otherwise remain only in chat history.
 
