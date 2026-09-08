@@ -9,13 +9,7 @@ separate changelog/audit archive if needed.
 PR #138 has merged; keep this list as the remaining close-out checklist until
 items are explicitly verified as implemented, documented and safe in production.
 
-1. ⬜ **Proxy rotation feedback needs a durable sidecar.** Normalize a redacted
-   `proxy-status.json`-style artifact with attempt, max_attempts, provider kind,
-   last_error_class, timestamps and final outcome. Never store proxy URLs or
-   secrets. Closure requires tests asserting concise startup/proxy data is
-   surfaced and the no-secret invariant is preserved.
-
-2. ⬜ **Residual tool exposure/catalog mismatch.** #140 added repo-side catalog
+1. ⬜ **Residual tool exposure/catalog mismatch.** #140 added repo-side catalog
    consistency reporting, but the end-to-end operator problem remains until the
    ChatGPT-visible resource catalog and MCP `tools/list` cannot diverge silently.
    Live symptoms included missing invokable schemas for advertised/expected tools
@@ -41,14 +35,14 @@ items are explicitly verified as implemented, documented and safe in production.
    either invokable with the exact implementation contract or explicitly marked
    unavailable with a reason at the same surface the operator uses.
 
-3. ⬜ **Git namespace mismatch between SSH tools and control-plane git tools.**
+2. ⬜ **Git namespace mismatch between SSH tools and control-plane git tools.**
    `execute_argv` / `repo_status` can observe one branch/ref/HEAD while trusted
    git tools act from another namespace or fail with `GIT_LOCAL_REF_MISSING`.
    Closure requires host-path-free metadata showing exact resolved project root,
    branch and head for trusted git operations, and fail-closed detection such as
    `WORKSPACE_NAMESPACE_MISMATCH` when namespaces diverge.
 
-4. ⬜ **Handoff/write tools must route around non-writeable production roots.**
+3. ⬜ **Handoff/write tools must route around non-writeable production roots.**
    GPT RAG orchestration on 2026-09-04 reported `Permission denied` when trying
    to create parallel `.ai-bridge` handoffs for `quart-core`, and `index.lock`
    permission failures when attempting writes/staging in root project checkouts.
@@ -65,7 +59,7 @@ items are explicitly verified as implemented, documented and safe in production.
    candidate clone, instead of allowing late `.ai-bridge` or `.git/index.lock`
    permission failures in production roots.
 
-5. ⬜ **OpenCode review clones must support dirty-worktree review targets.**
+4. ⬜ **OpenCode review clones must support dirty-worktree review targets.**
    During NOD verification on 2026-09-04, a read-only OpenCode review task
    materialized only repository `HEAD 40d026f8` instead of the current dirty
    worktree, so the review surface was not suitable for checking uncommitted NOD
