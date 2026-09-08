@@ -833,6 +833,80 @@ class TestAgentTaskStatus:
         assert result["verdict"] == "likely_hung"
         assert result["next"]["inspect_agent_task"]["task_id"] == task_id
 
+    def test_terminal_server_error_sidecar_sets_typed_verdict_without_reading_log(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: failed\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text("must-not-be-read\n", encoding="utf-8")
+        (td / "failure-status.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "reason": "opencode_server_error",
+                    "phase": "pre_useful_work",
+                    "upstream_ref": "err_bf7ae62d",
+                    "correlation_hint": "Correlate OpenCode server logs with upstream ref err_bf7ae62d",
+                    "observed_at": "2026-09-08T06:32:33+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        os.utime(td / "agent-status.md", (now - 700, now - 700))
+        os.utime(td / "opencode-output.log", (now - 1, now - 1))
+        os.utime(td / "failure-status.json", (now - 1, now - 1))
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+        )
+
+        assert result["terminal"] is True
+        assert result["verdict"] == "opencode_server_error"
+        assert result["failure"]["reason"] == "opencode_server_error"
+        assert result["failure"]["phase"] == "pre_useful_work"
+        assert result["failure"]["upstream_ref"] == "err_bf7ae62d"
+        assert result["last_useful_activity"]["source"] == "status"
+        assert result["last_useful_activity"]["age_seconds"] == 700
+        assert result["log_included"] is False
+        assert "must-not-be-read" not in str(result)
+
+    def test_invalid_server_error_sidecar_is_fail_honest_and_does_not_leak(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: failed\n", encoding="utf-8")
+        (td / "failure-status.json").write_text(
+            json.dumps(
+                {
+                    "reason": "opencode_server_error",
+                    "phase": "pre_useful_work",
+                    "upstream_ref": "https://secret.invalid/?token=should-not-leak",
+                    "correlation_hint": "token=should-not-leak",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path), project="my-proj", task_id=task_id
+        )
+
+        assert result["terminal"] is True
+        assert result["verdict"] == "finished"
+        assert result["failure"]["valid"] is False
+        serialized = json.dumps(result, ensure_ascii=False)
+        assert "secret.invalid" not in serialized
+        assert "should-not-leak" not in serialized
+
     def test_terminal_snapshot_points_to_report_and_diff(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
         task_id = "a12345678901"
@@ -1124,6 +1198,54 @@ class TestInspectAgentTask:
         assert result["reconciliation"]["worker_termination_proven"] is False
         assert result["recovery"]["action"] == "inspect_artifacts_then_retry_with_new_task_id"
         assert "cancel_agent_task" not in result["recovery"]
+
+    def test_terminal_server_error_sidecar_is_returned_by_deep_inspection(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: failed\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text(
+            'Error: {"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_bf7ae62d"}}\n',
+            encoding="utf-8",
+        )
+        (td / "failure-status.json").write_text(
+            json.dumps(
+                {
+                    "reason": "opencode_server_error",
+                    "phase": "pre_useful_work",
+                    "upstream_ref": "err_bf7ae62d",
+                    "correlation_hint": "Correlate OpenCode server logs with upstream ref err_bf7ae62d",
+                }
+            ),
+            encoding="utf-8",
+        )
+        os.utime(td / "agent-status.md", (now - 700, now - 700))
+        os.utime(td / "opencode-output.log", (now - 1, now - 1))
+        os.utime(td / "failure-status.json", (now - 1, now - 1))
+
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+        )
+
+        assert result["terminal"] is True
+        assert result["verdict"] == "opencode_server_error"
+        assert result["failure"] == {
+            "exists": True,
+            "valid": True,
+            "reason": "opencode_server_error",
+            "phase": "pre_useful_work",
+            "upstream_ref": "err_bf7ae62d",
+            "correlation_hint": "Correlate OpenCode server logs with upstream ref err_bf7ae62d",
+        }
+        assert result["last_activity"]["age_seconds"] == 1
+        assert result["last_useful_activity"]["source"] == "status"
+        assert result["last_useful_activity"]["age_seconds"] == 700
 
     def test_terminal_status_is_finished_even_with_old_logs(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
