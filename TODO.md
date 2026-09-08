@@ -9,20 +9,13 @@ separate changelog/audit archive if needed.
 PR #138 has merged; keep this list as the remaining close-out checklist until
 items are explicitly verified as implemented, documented and safe in production.
 
-1. ⬜ **Separate useful agent work from startup dead time.** Source-bundle and
-   checkout success are not proof that OpenCode read the plan, wrote a report,
-   produced a diff, or ran checks. Count useful work only from semantic artifacts
-   and meaningful status transitions. Heartbeat/proxy keepalive must not reset
-   semantic staleness. Closure: fresh heartbeat plus stale semantic artifacts
-   returns `likely_hung` / `startup_stalled`, not ordinary `running`.
-
-2. ⬜ **Proxy rotation feedback needs a durable sidecar.** Normalize a redacted
+1. ⬜ **Proxy rotation feedback needs a durable sidecar.** Normalize a redacted
    `proxy-status.json`-style artifact with attempt, max_attempts, provider kind,
    last_error_class, timestamps and final outcome. Never store proxy URLs or
    secrets. Closure requires tests asserting concise startup/proxy data is
    surfaced and the no-secret invariant is preserved.
 
-3. ⬜ **Residual tool exposure/catalog mismatch.** #140 added repo-side catalog
+2. ⬜ **Residual tool exposure/catalog mismatch.** #140 added repo-side catalog
    consistency reporting, but the end-to-end operator problem remains until the
    ChatGPT-visible resource catalog and MCP `tools/list` cannot diverge silently.
    Live symptoms included missing invokable schemas for advertised/expected tools
@@ -48,48 +41,14 @@ items are explicitly verified as implemented, documented and safe in production.
    either invokable with the exact implementation contract or explicitly marked
    unavailable with a reason at the same surface the operator uses.
 
-4. ⬜ **Git namespace mismatch between SSH tools and control-plane git tools.**
+3. ⬜ **Git namespace mismatch between SSH tools and control-plane git tools.**
    `execute_argv` / `repo_status` can observe one branch/ref/HEAD while trusted
    git tools act from another namespace or fail with `GIT_LOCAL_REF_MISSING`.
    Closure requires host-path-free metadata showing exact resolved project root,
    branch and head for trusted git operations, and fail-closed detection such as
    `WORKSPACE_NAMESPACE_MISMATCH` when namespaces diverge.
 
-5. ⬜ **Command-plane/session recovery gap after transient reconnect/cooldown.**
-   After a transient 429 or reconnect cooldown, project-level tools such as
-   `git_status` and `current_branch` can continue to work while `execute_argv`
-   against the previously known session returns `SESSION_NOT_FOUND` or becomes
-   unavailable. During Supervisor delivery on 2026-09-04, `session_health`
-   reported a fresh connected session `56858908-245f-434b-bfbb-8fac04bec94b`,
-   but a subsequent `execute_argv` using the same id immediately returned
-   `SESSION_NOT_FOUND`. Closure requires restored command-plane session recovery
-   or safe project-level tools for existing-branch switch and local-branch
-   deletion, with regression coverage proving operators do not need probe refs
-   to recover.
-
-6. ⬜ **OpenCode worker `UnknownError` needs structured failure reason and
-   server-log correlation.** Managed delivery tasks can fail after source-bundle
-   verification and clean clone setup but before useful work, with
-   `Failure reason: none` and only opaque OpenCode `UnknownError` refs. Closure
-   requires mapping such failures to typed phase/verdict values such as
-   `opencode_server_error`, `provider_error` or `proxy_error`, preserving the
-   upstream ref, and surfacing a redacted server-log correlation hint.
-
-7. ⬜ **Agent job state is not durable across Gateway restart/deploy.** An
-   OpenCode corrective task had useful work in `opencode-output.log` and had
-   already run targeted tests, but the Gateway restart during CI deploy made the
-   returned `job_id` disappear with `JOB_NOT_FOUND` while `agent-status.md`
-   still reported stale `Status: running` and no `agent-report.md` or
-   `implementation-diff.patch` existed. Closure requires restart-safe task/job
-   reconciliation: after transport restart, an operator must get a typed
-   `lost_after_restart` / `orphaned_attempt` / `artifact_incomplete` state with
-   last useful activity and recovery instructions, not a vanished job plus stale
-   running status. During Supervisor GatewayAdapter R5 on 2026-09-04,
-   `agent-status.md` still showed startup/proxy rotation while `job_status` for
-   the returned job id reported `JOB_NOT_FOUND`, so reconciliation must also
-   preserve or derive terminal state for still-visible task artifacts.
-
-8. ⬜ **Handoff/write tools must route around non-writeable production roots.**
+4. ⬜ **Handoff/write tools must route around non-writeable production roots.**
    GPT RAG orchestration on 2026-09-04 reported `Permission denied` when trying
    to create parallel `.ai-bridge` handoffs for `quart-core`, and `index.lock`
    permission failures when attempting writes/staging in root project checkouts.
@@ -106,7 +65,7 @@ items are explicitly verified as implemented, documented and safe in production.
    candidate clone, instead of allowing late `.ai-bridge` or `.git/index.lock`
    permission failures in production roots.
 
-9. ⬜ **OpenCode review clones must support dirty-worktree review targets.**
+5. ⬜ **OpenCode review clones must support dirty-worktree review targets.**
    During NOD verification on 2026-09-04, a read-only OpenCode review task
    materialized only repository `HEAD 40d026f8` instead of the current dirty
    worktree, so the review surface was not suitable for checking uncommitted NOD
