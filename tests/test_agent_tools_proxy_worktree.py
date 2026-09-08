@@ -829,6 +829,13 @@ def test_malformed_proxy_blocks_before_opencode(tmp_path, monkeypatch):
     assert not marker.exists()
     assert (artifacts / "agent-status.md").read_text().strip() == "Status: blocked"
     assert "rc=3" in (artifacts / "proxy-status.log").read_text()
+    proxy_status = json.loads((artifacts / "proxy-status.json").read_text(encoding="utf-8"))
+    assert proxy_status["attempt"] == 1
+    assert proxy_status["max_attempts"] == 4
+    assert proxy_status["provider_kind"] == "configured_provider"
+    assert proxy_status["last_error_class"] == "provider_unavailable"
+    assert proxy_status["final_outcome"] == "blocked"
+    assert proxy_status["finished_at"]
 
 
 def test_valid_proxy_allows_opencode_and_is_not_logged(tmp_path, monkeypatch):
@@ -841,6 +848,104 @@ def test_valid_proxy_allows_opencode_and_is_not_logged(tmp_path, monkeypatch):
     worker_status = (artifacts / "worker-status.md").read_text()
     assert "Using exclusive live proxy from configured provider" in worker_status
     assert proxy not in worker_status
+    proxy_status_raw = (artifacts / "proxy-status.json").read_text(encoding="utf-8")
+    proxy_status = json.loads(proxy_status_raw)
+    assert proxy_status["attempt"] == 1
+    assert proxy_status["max_attempts"] == 4
+    assert proxy_status["provider_kind"] == "configured_provider"
+    assert proxy_status["final_outcome"] == "completed"
+    assert proxy_status["finished_at"]
+    assert "last_error_class" not in proxy_status
+    assert proxy not in proxy_status_raw
+
+
+def test_runner_final_proxy_status_overwrites_worker_authored_bytes(tmp_path, monkeypatch):
+    source = tmp_path / "proxy-sidecar-owner-source"
+    source.mkdir()
+    _init_git_repo(source)
+    artifacts = tmp_path / "proxy-sidecar-owner-artifacts"
+    artifacts.mkdir()
+    (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+    provider = tmp_path / "proxy-sidecar-provider.txt"
+    proxy = "http://127.0.0.1:19999"
+    provider.write_text(proxy + "\n", encoding="utf-8")
+    fake_bin = tmp_path / "proxy-sidecar-owner-bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "opencode"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' '{\"proxy_url\":\"http://worker-secret.invalid:9999\",\"final_outcome\":\"spoofed\"}' > \"$PROXY_STATUS_TARGET\"\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("PROXY_STATUS_TARGET", str(artifacts / "proxy-status.json"))
+    monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", provider.as_uri())
+    monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "true")
+    monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+    monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "0")
+
+    script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    raw = (artifacts / "proxy-status.json").read_text(encoding="utf-8")
+    proxy_status = json.loads(raw)
+    assert proxy_status["final_outcome"] == "completed"
+    assert proxy_status["attempt"] == 1
+    assert "proxy_url" not in proxy_status
+    assert "worker-secret" not in raw
+    assert proxy not in raw
+
+
+def test_rate_limited_run_persists_redacted_terminal_proxy_status(tmp_path, monkeypatch):
+    source = tmp_path / "proxy-sidecar-rate-limit-source"
+    source.mkdir()
+    _init_git_repo(source)
+    artifacts = tmp_path / "proxy-sidecar-rate-limit-artifacts"
+    artifacts.mkdir()
+    (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+    provider = tmp_path / "proxy-sidecar-rate-limit-provider.txt"
+    proxy = "http://127.0.0.1:19998"
+    provider.write_text(proxy + "\n", encoding="utf-8")
+    fake_bin = tmp_path / "proxy-sidecar-rate-limit-bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "opencode"
+    fake.write_text("#!/bin/sh\nprintf 'rate limit reached\\n'\nexit 1\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", provider.as_uri())
+    monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "true")
+    monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+    monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "0")
+
+    script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 77, result.stderr or result.stdout
+    raw = (artifacts / "proxy-status.json").read_text(encoding="utf-8")
+    proxy_status = json.loads(raw)
+    assert proxy_status["final_outcome"] == "rate_limited"
+    assert proxy_status["last_error_class"] == "rate_limited"
+    assert proxy_status["finished_at"]
+    assert proxy not in raw
 
 
 class _ProxyPoolHandler(BaseHTTPRequestHandler):
@@ -1212,6 +1317,14 @@ def test_startup_stall_can_reach_third_distinct_proxy(tmp_path, monkeypatch):
         assert "attempt 2/4" in worker_status
         for proxy in _ProxyPoolHandler.proxies:
             assert proxy not in worker_status
+        proxy_status_raw = (artifacts / "proxy-status.json").read_text(encoding="utf-8")
+        proxy_status = json.loads(proxy_status_raw)
+        assert proxy_status["attempt"] == 3
+        assert proxy_status["max_attempts"] == 4
+        assert proxy_status["final_outcome"] == "completed"
+        assert "last_error_class" not in proxy_status
+        for proxy in _ProxyPoolHandler.proxies:
+            assert proxy not in proxy_status_raw
     finally:
         _ProxyPoolHandler.proxies = original_proxies
         _ProxyPoolHandler.fail_get_after_first = False
@@ -1287,6 +1400,15 @@ def test_startup_retry_stops_at_configured_attempt_limit(tmp_path, monkeypatch):
         assert status.strip() == "Status: startup-timeout"
         for proxy in _ProxyPoolHandler.proxies:
             assert proxy not in worker_status
+        proxy_status_raw = (artifacts / "proxy-status.json").read_text(encoding="utf-8")
+        proxy_status = json.loads(proxy_status_raw)
+        assert proxy_status["attempt"] == 3
+        assert proxy_status["max_attempts"] == 3
+        assert proxy_status["last_error_class"] == "startup_stalled"
+        assert proxy_status["final_outcome"] == "startup_exhausted"
+        assert proxy_status["finished_at"]
+        for proxy in _ProxyPoolHandler.proxies:
+            assert proxy not in proxy_status_raw
     finally:
         _ProxyPoolHandler.proxies = original_proxies
         _ProxyPoolHandler.fail_get_after_first = False
