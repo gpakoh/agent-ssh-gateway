@@ -449,6 +449,24 @@ def gateway_archive_agent_task(project: str, task_id: str) -> dict[str, Any]:
     )
 
 
+_OPENCODE_HELP = {
+    "recommended_model": "big-pickle",
+    "profile": (
+        "Use for narrow engineering tasks with explicit boundaries; strong at concrete fixes, "
+        "reading existing code, regression tests, refactoring, and CI/staging feedback. "
+        "Do not delegate architecture, broad consequence discovery, security semantics, or readiness decisions."
+    ),
+    "prompt_contract": (
+        "State the exact finding/invariant, allowed and forbidden files, acceptance criteria, "
+        "required checks, and where the agent must stop."
+    ),
+    "supervisor_rule": (
+        "The agent may implement and test; the supervisor decides whether a finding is closed or the project is ready. "
+        "If the agent appears to exceed scope, reread the exact task prompt before blaming agent initiative."
+    ),
+}
+
+
 async def gateway_run_opencode(
     project: str,
     task_id: str,
@@ -502,12 +520,14 @@ async def gateway_run_opencode(
             submit_sync=_submit,
         )
 
-    return await run_tool_async(
+    response = await run_tool_async(
         tool="run_opencode",
         title="Run opencode task",
         fn=_fn,
         success_text="Submitted opencode task.",
     )
+    response["help"] = dict(_OPENCODE_HELP)
+    return response
 
 
 def _build_agent_submit(

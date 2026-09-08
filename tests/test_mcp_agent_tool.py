@@ -1166,6 +1166,28 @@ class TestGatewayRunAgents:
         assert fleet.submit.await_args.kwargs["project"] == "test"
         assert fleet.submit.await_args.kwargs["task_id"] == "single"
         assert callable(fleet.submit.await_args.kwargs["submit_sync"])
+        assert result["help"]["recommended_model"] == "big-pickle"
+        assert "finding is closed" in result["help"]["supervisor_rule"]
+        assert "glm" not in repr(result["help"]).lower()
+
+    @pytest.mark.asyncio
+    async def test_run_opencode_error_envelope_includes_help(self, monkeypatch):
+        import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+        async def fail_submission(**_kwargs):
+            raise ValueError("simulated invalid submission")
+
+        monkeypatch.setattr(agent_adapter, "_submit_agent_with_fleet", fail_submission)
+
+        result = await agent_adapter.gateway_run_opencode(
+            "test", "single", async_submit=False
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "INVALID_INPUT"
+        assert result["help"]["recommended_model"] == "big-pickle"
+        assert "explicit boundaries" in result["help"]["profile"]
+        assert "glm" not in repr(result["help"]).lower()
 
 
 class TestSplitCsvOrLines:
