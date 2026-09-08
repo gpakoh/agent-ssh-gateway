@@ -125,21 +125,7 @@ items are explicitly verified as implemented, documented and safe in production.
    explicit host/port/path, timeout, max response bytes, no secrets/env exposure,
    provenance, and clear DNS/refused/timeout/non-2xx/healthy distinctions.
 
-2. ⬜ **Trusted delivery path for externally prepared/local-agent workspaces.**
-   A verified isolated forward-port workspace should be deliverable without
-   mutating the canonical checkout. Desired path: `register_delivery_workspace`
-   or `push_verified_commit` accepting an allowlisted workspace root, expected
-   base/head SHA, clean-tree proof, allowed-files proof and gate evidence, then
-   pushing exactly that commit through the trusted credential boundary. During
-   Supervisor delivery on 2026-09-04, two clean registered verification projects
-   held main-based commits with passing focused/full checks, but `git_push`
-   returned `GIT_REMOTE_NOT_ALLOWED` even for the visible local-path `origin`,
-   raw SSH pushes to Gitea remotes failed with `Host key verification failed` in one path and with BatchMode/ConnectTimeout as `ssh: connect to host git.example.com port 2222: Operation timed out`,
-   and `gitea_push_local_ref` required unavailable task-bound artifacts
-   (`implementation-diff.patch`, `delivery-contract.json`/candidate receipt);
-   the operator had no safe publication route from the verified workspace.
-
-3. ⬜ **Project-level branch creation must not depend on root-owned `.git` refs.**
+2. ⬜ **Project-level branch creation must not depend on root-owned `.git` refs.**
    A clean registered child repository can be readable and PR-verifiable while
    `git_create_branch` fails on `.git/refs/heads/<branch>.lock` permission
    errors. During Supervisor delivery on 2026-09-04, attempting to import a
@@ -151,7 +137,7 @@ items are explicitly verified as implemented, documented and safe in production.
    or branch creation must fail with a typed ownership diagnostic and recovery
    path such as `GIT_OWNERSHIP_BLOCKED`.
 
-4. ⬜ **Typed Gitea repo/PR cleanup tools for architect-controlled delivery.**
+3. ⬜ **Typed Gitea repo/PR cleanup tools for architect-controlled delivery.**
    Add first-class, ChatGPT-visible tools for safe repository cleanup operations
    that currently require manual UI/API fallback: close a Gitea PR without
    merge, update repository settings such as default branch, and verify
@@ -162,7 +148,7 @@ items are explicitly verified as implemented, documented and safe in production.
    coverage for PR close-without-merge, default-branch switch, already-closed
    idempotency, and catalog/resource visibility parity.
 
-5. ⬜ **Verification tools must not be pinned to an unreadable project `.venv`.**
+4. ⬜ **Verification tools must not be pinned to an unreadable project `.venv`.**
    During Supervisor RAG verification on 2026-09-04, project-level
    `run_pytest`, `run_ruff` and `run_mypy` all failed before collection because
    the registered checkout had `.venv/bin/python3` with permission denied, while
@@ -176,7 +162,7 @@ items are explicitly verified as implemented, documented and safe in production.
    `VERIFICATION_LOCKFILE_MISSING` diagnostic and a recovery path instead of
    treating environment bootstrap as code failure.
 
-6. ⬜ **Rate-limit responses need operator-safe retry metadata and coalescing.**
+5. ⬜ **Rate-limit responses need operator-safe retry metadata and coalescing.**
    During Supervisor/browser orchestration on 2026-09-04, repeated schema/tool
    reloads plus normal verification calls hit `RATE_LIMITED: 180 per 1 minute`,
    temporarily blocking `inspect_agent_task` while an agent's terminal report
@@ -186,7 +172,7 @@ items are explicitly verified as implemented, documented and safe in production.
    schema discovery/status reads so operators can recover without guessing the
    cooldown window or accidentally increasing contention.
 
-7. ⬜ **Command-plane policy and verification ergonomics need typed operator guidance.**
+6. ⬜ **Command-plane policy and verification ergonomics need typed operator guidance.**
     Several 2026-09-04 delivery sessions exposed rough edges that overlap with
     existing namespace/session/environment findings but are not yet captured as a
     single operator contract: raw SSH `git push` / `git clone` can time out while
@@ -323,12 +309,4 @@ These entries are deduplicated against the existing Gateway TODO backlog. They r
 
    **Acceptance:** tests cover forbidden namespace not advertised; advertised namespace can invoke read-only health/tool-list probe or receives deterministic typed permission error; revoked-after-discovery does not alternate between stale schemas, `FORBIDDEN`, and missing namespace.
 
-2. ⬜ **First-class TODO/backlog writer with dedupe, repro template and safe delivery.**
 
-   **Severity:** P2 operator capability, P1 during multi-project recovery when defects otherwise remain only in chat history.
-
-   **Need:** operators/architects must be able to record bugs, safety misbehavior and missing capabilities in `TODO.md` without ad-hoc Docker-admin or manual Gitea Contents API calls. The writer should deduplicate by normalized title/failure mode and either append a new checkbox or update an existing item with a dated sub-finding.
-
-   **Required fields:** severity, observed behavior, reproduction steps, expected behavior, impact, acceptance criteria, related commits/runs/PRs, and whether the entry is new or an extension of an existing backlog item.
-
-   **Acceptance:** one safe tool call creates/updates a TODO entry, reports `created` vs `updated`, refuses duplicate checkbox creation for the same failure mode, and supports TODO-only delivery without Docker-admin or secret-bearing command construction.
