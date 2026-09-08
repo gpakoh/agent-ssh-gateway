@@ -2,10 +2,11 @@
 
 The worker/executor only receives ``MCP_AGENT_SOURCE_ROOT`` read-only. This
 module runs in the MCP control plane, resolves a registered project root, and
-materializes one content-addressed Git bundle for an exact commit id. A dirty
-working tree is deliberately irrelevant: only committed Git objects are
-fetched into a temporary bare repository before the final bundle is published
-atomically.
+materializes one content-addressed Git bundle for an exact commit id. Normal
+managed publication deliberately ignores a dirty working tree: only committed
+Git objects are fetched into a temporary bare repository. A separate dirty
+review primitive below snapshots only already-tracked worktree state into an
+immutable synthetic commit without mutating the registered checkout.
 
 When the local object database does not contain the requested commit (e.g.
 ``git cat-file -e`` returns *fatal: bad object*), a safe fallback fetches
@@ -21,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -73,6 +75,17 @@ class ManagedSourcePublication:
 
     path: str
     sha256: str
+
+
+@dataclass(frozen=True)
+class ManagedDirtyReviewPublication:
+    """Immutable managed bundle for one exact dirty-worktree review snapshot."""
+
+    path: str
+    sha256: str
+    base_ref: str
+    snapshot_ref: str
+    tree_sha: str
 
 
 def _open_artifact_fd(bundle_path: Path) -> int:
@@ -222,6 +235,7 @@ def _run_git(
     *,
     cwd: Path | None = None,
     safe_directory: Path | None = None,
+    env_overrides: dict[str, str] | None = None,
 ) -> str:
     command = ["git"]
     if safe_directory is not None:
@@ -229,6 +243,10 @@ def _run_git(
     command.extend(args)
     subcmd = _git_subcommand(args)
     try:
+        child_env = None
+        if env_overrides is not None:
+            child_env = os.environ.copy()
+            child_env.update(env_overrides)
         result = subprocess.run(
             command,
             cwd=str(cwd) if cwd is not None else None,
@@ -236,6 +254,7 @@ def _run_git(
             capture_output=True,
             check=False,
             timeout=_GIT_TIMEOUT_SECONDS,
+            env=child_env,
         )
     except subprocess.TimeoutExpired as exc:
         raise ManagedSourceBundleError(
@@ -252,6 +271,99 @@ def _run_git(
             msg = f"{msg}: {detail}"
         raise ManagedSourceBundleError(msg)
     return result.stdout
+
+
+def _dirty_review_source_state(project_root: Path, expected: str) -> tuple[str, str]:
+    """Return exact HEAD + porcelain state, rejecting any untracked content."""
+    head = _run_git(
+        ["rev-parse", "HEAD"],
+        cwd=project_root,
+        safe_directory=project_root,
+    ).strip().lower()
+    if head != expected:
+        raise ManagedSourceBundleError(
+            "dirty review snapshot base_ref does not match registered source HEAD"
+        )
+    status = _run_git(
+        ["--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=project_root,
+        safe_directory=project_root,
+    )
+    if any(line.startswith("?? ") for line in status.splitlines()):
+        raise ManagedSourceBundleError(
+            "dirty review snapshot rejects untracked files; add intended files to the Git index first"
+        )
+    return head, status
+
+
+def _copy_git_index(source_index: Path, destination: Path) -> None:
+    """Copy the registered index without following a symlink or mutating it."""
+    fd = -1
+    try:
+        st = os.lstat(source_index)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise ManagedSourceBundleError(
+                "registered source Git index is not a regular file"
+            )
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        fd = os.open(source_index, flags)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ManagedSourceBundleError(
+                "registered source Git index is not a regular file"
+            )
+        source = os.fdopen(fd, "rb", closefd=True)
+        fd = -1
+        with source, open(destination, "wb") as target:
+            shutil.copyfileobj(source, target)
+    except ManagedSourceBundleError:
+        raise
+    except OSError as exc:
+        raise ManagedSourceBundleError(
+            "registered source Git index is unavailable"
+        ) from exc
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _capture_dirty_review_tree(
+    *,
+    project_root: Path,
+    bare: Path,
+    source_objects: Path,
+    source_index: Path,
+    index_path: Path,
+) -> str:
+    """Capture current tracked worktree content into executor-private Git objects."""
+    _copy_git_index(source_index, index_path)
+    env = {
+        "GIT_INDEX_FILE": str(index_path),
+        "GIT_OBJECT_DIRECTORY": str(bare / "objects"),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(source_objects),
+        "GIT_OPTIONAL_LOCKS": "0",
+    }
+    _run_git(
+        ["add", "-u", "--", "."],
+        cwd=project_root,
+        safe_directory=project_root,
+        env_overrides=env,
+    )
+    tree = _run_git(
+        ["write-tree"],
+        cwd=project_root,
+        safe_directory=project_root,
+        env_overrides=env,
+    ).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", tree):
+        raise ManagedSourceBundleError("dirty review snapshot produced an invalid tree id")
+    return tree
 
 
 def _bundle_head(path: Path) -> str | None:
@@ -543,6 +655,192 @@ def _materialize_from_remote(
         return bind_publication_bytes(bundle_path, expected)
     finally:
         temp_bundle.unlink(missing_ok=True)
+
+
+def ensure_dirty_worktree_review_bundle(
+    project: str, base_ref: str | None
+) -> ManagedDirtyReviewPublication | None:
+    """Publish a deterministic immutable bundle for current tracked worktree state.
+
+    This is deliberately separate from :func:`ensure_managed_source_bundle`:
+    normal implementation tasks stay pinned to committed source.  Dirty review
+    publication is local-only, requires a full checkout whose HEAD is exactly
+    ``base_ref``, rejects non-ignored untracked files, and never writes the
+    registered checkout's index, refs, or object database.
+    """
+    validate_base_ref(base_ref)
+    if not base_ref:
+        if not os.environ.get("MCP_AGENT_SOURCE_ROOT", "").strip():
+            return None
+        raise ValueError("dirty review snapshots require an exact base_ref")
+    if managed_source_bundle_path(project, base_ref) is None:
+        return None
+
+    expected = base_ref.lower()
+    project_root = Path(get_registry().project_info(project)["root"])
+    if _source_is_shallow(project_root):
+        raise ManagedSourceBundleError(
+            "dirty review snapshot requires a full local checkout"
+        )
+
+    source_objects = Path(
+        _run_git(
+            ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+            cwd=project_root,
+            safe_directory=project_root,
+        ).strip()
+    )
+    source_index = Path(
+        _run_git(
+            ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+            cwd=project_root,
+            safe_directory=project_root,
+        ).strip()
+    )
+    if not source_objects.is_dir():
+        raise ManagedSourceBundleError(
+            "registered source object database is unavailable"
+        )
+    object_format = _run_git(
+        ["rev-parse", "--show-object-format"],
+        cwd=project_root,
+        safe_directory=project_root,
+    ).strip().lower()
+    if object_format not in {"sha1", "sha256"}:
+        raise ManagedSourceBundleError(
+            "registered source uses an unsupported Git object format"
+        )
+
+    state_before = _dirty_review_source_state(project_root, expected)
+    with tempfile.TemporaryDirectory(prefix="mcp-agent-dirty-review-") as scratch_raw:
+        scratch = Path(scratch_raw)
+        bare = scratch / "source.git"
+        _run_git(
+            ["init", "--bare", f"--object-format={object_format}", str(bare)]
+        )
+        alternates = bare / "objects" / "info" / "alternates"
+        alternates.parent.mkdir(parents=True, exist_ok=True)
+        alternates.write_text(f"{source_objects}\n", encoding="utf-8")
+
+        tree_one = _capture_dirty_review_tree(
+            project_root=project_root,
+            bare=bare,
+            source_objects=source_objects,
+            source_index=source_index,
+            index_path=scratch / "index-one",
+        )
+        state_middle = _dirty_review_source_state(project_root, expected)
+        tree_two = _capture_dirty_review_tree(
+            project_root=project_root,
+            bare=bare,
+            source_objects=source_objects,
+            source_index=source_index,
+            index_path=scratch / "index-two",
+        )
+        state_after = _dirty_review_source_state(project_root, expected)
+        if (
+            state_before != state_middle
+            or state_middle != state_after
+            or tree_one != tree_two
+        ):
+            raise ManagedSourceBundleError(
+                "registered source changed during dirty review snapshot capture"
+            )
+
+        commit_env = {
+            "GIT_OBJECT_DIRECTORY": str(bare / "objects"),
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(source_objects),
+            "GIT_AUTHOR_NAME": "MCP Dirty Review",
+            "GIT_AUTHOR_EMAIL": "dirty-review@gateway.invalid",
+            "GIT_COMMITTER_NAME": "MCP Dirty Review",
+            "GIT_COMMITTER_EMAIL": "dirty-review@gateway.invalid",
+            "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+00:00",
+            "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00",
+            "GIT_OPTIONAL_LOCKS": "0",
+        }
+        snapshot_ref = _run_git(
+            [
+                "commit-tree",
+                tree_two,
+                "-p",
+                expected,
+                "-m",
+                "MCP dirty worktree review snapshot",
+            ],
+            cwd=project_root,
+            safe_directory=project_root,
+            env_overrides=commit_env,
+        ).strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", snapshot_ref):
+            raise ManagedSourceBundleError(
+                "dirty review snapshot produced an invalid commit id"
+            )
+        _run_git(
+            [f"--git-dir={bare}", "update-ref", "refs/heads/source", snapshot_ref]
+        )
+        resolved = _run_git(
+            [f"--git-dir={bare}", "rev-parse", "refs/heads/source^{commit}"]
+        ).strip().lower()
+        if resolved != snapshot_ref:
+            raise ManagedSourceBundleError(
+                "dirty review snapshot ref resolved to an unexpected commit"
+            )
+
+        bundle_raw = managed_source_bundle_path(project, snapshot_ref)
+        if bundle_raw is None:
+            raise ManagedSourceBundleError(
+                "managed source storage disappeared during dirty review publication"
+            )
+        bundle_path = Path(bundle_raw)
+        bundle_path.parent.mkdir(parents=True, exist_ok=True)
+        if bundle_path.is_file():
+            try:
+                bound = bind_publication_bytes(bundle_path, snapshot_ref)
+                return ManagedDirtyReviewPublication(
+                    path=bound.path,
+                    sha256=bound.sha256,
+                    base_ref=expected,
+                    snapshot_ref=snapshot_ref,
+                    tree_sha=tree_two,
+                )
+            except ManagedSourceBundleError:
+                pass
+
+        temp_fd, temp_name = tempfile.mkstemp(
+            prefix=f".{snapshot_ref}.",
+            suffix=".bundle.tmp",
+            dir=bundle_path.parent,
+        )
+        os.close(temp_fd)
+        temp_bundle = Path(temp_name)
+        temp_bundle.unlink()
+        try:
+            _run_git(
+                [
+                    f"--git-dir={bare}",
+                    "bundle",
+                    "create",
+                    str(temp_bundle),
+                    "refs/heads/source",
+                ]
+            )
+            if _bundle_head(temp_bundle) != snapshot_ref:
+                raise ManagedSourceBundleError(
+                    "dirty review bundle verification failed"
+                )
+            _assert_bundle_usable(temp_bundle, snapshot_ref, full_proof=True)
+            os.replace(temp_bundle, bundle_path)
+        finally:
+            temp_bundle.unlink(missing_ok=True)
+
+        bound = bind_publication_bytes(bundle_path, snapshot_ref)
+        return ManagedDirtyReviewPublication(
+            path=bound.path,
+            sha256=bound.sha256,
+            base_ref=expected,
+            snapshot_ref=snapshot_ref,
+            tree_sha=tree_two,
+        )
 
 
 def ensure_managed_source_bundle(

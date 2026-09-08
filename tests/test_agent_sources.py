@@ -14,6 +14,7 @@ from examples.mcp_server.agent_sources import (
     ManagedSourceDigestError,
     _run_git,
     capture_bundle_digest,
+    ensure_dirty_worktree_review_bundle,
     ensure_managed_source_bundle,
     secure_copy_and_verify,
     validate_bundle_digest,
@@ -82,6 +83,166 @@ def test_publishes_exact_commit_for_arbitrary_project_ignoring_dirty_tree(tmp_pa
         check=True,
     )
     assert (clone / "payload.txt").read_text(encoding="utf-8") == "committed\n"
+
+
+def test_dirty_review_snapshot_captures_tracked_state_without_mutating_source(
+    tmp_path, monkeypatch
+):
+    repo, _ = _repo(tmp_path)
+    (repo / "remove.txt").write_text("remove-me\n", encoding="utf-8")
+    _git(repo, "add", "remove.txt")
+    _git(repo, "commit", "-m", "add removable fixture")
+    base = _git(repo, "rev-parse", "HEAD")
+
+    (repo / "payload.txt").write_text("dirty tracked\n", encoding="utf-8")
+    (repo / "staged.txt").write_text("staged addition\n", encoding="utf-8")
+    _git(repo, "add", "staged.txt")
+    (repo / "remove.txt").unlink()
+
+    source_root = tmp_path / "sources"
+    monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", str(source_root))
+    monkeypatch.setattr("examples.mcp_server.agent_sources.get_registry", lambda: _Registry(repo))
+
+    status_before = _git(repo, "status", "--porcelain=v1", "--untracked-files=all")
+    index_path = Path(
+        _git(repo, "rev-parse", "--path-format=absolute", "--git-path", "index")
+    )
+    index_before = index_path.read_bytes()
+    objects_path = Path(
+        _git(repo, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+    )
+
+    def object_snapshot() -> dict[str, bytes]:
+        return {
+            str(path.relative_to(objects_path)): path.read_bytes()
+            for path in objects_path.rglob("*")
+            if path.is_file()
+        }
+
+    objects_before = object_snapshot()
+    published = ensure_dirty_worktree_review_bundle("nod", base)
+    assert published is not None
+    assert published.base_ref == base
+    assert published.snapshot_ref != base
+    assert Path(published.path).is_file()
+    assert len(published.sha256) == 64
+
+    clone = tmp_path / "dirty-review-clone"
+    subprocess.run(
+        ["git", "clone", "-b", "source", published.path, str(clone)],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert (clone / "payload.txt").read_text(encoding="utf-8") == "dirty tracked\n"
+    assert (clone / "staged.txt").read_text(encoding="utf-8") == "staged addition\n"
+    assert not (clone / "remove.txt").exists()
+    assert _git(clone, "rev-parse", "HEAD^") == base
+    assert _git(clone, "rev-parse", "HEAD^{tree}") == published.tree_sha
+
+    assert _git(repo, "rev-parse", "HEAD") == base
+    assert _git(repo, "status", "--porcelain=v1", "--untracked-files=all") == status_before
+    assert index_path.read_bytes() == index_before
+    assert object_snapshot() == objects_before
+
+    repeated = ensure_dirty_worktree_review_bundle("nod", base)
+    assert repeated is not None
+    assert repeated.snapshot_ref == published.snapshot_ref
+    assert repeated.tree_sha == published.tree_sha
+    assert repeated.sha256 == published.sha256
+    assert repeated.path == published.path
+
+
+def test_dirty_review_snapshot_rejects_untracked_file_without_leaking_name(
+    tmp_path, monkeypatch
+):
+    repo, base = _repo(tmp_path)
+    secret_name = "local-secret.env"
+    (repo / secret_name).write_text("TOKEN=do-not-publish\n", encoding="utf-8")
+    source_root = tmp_path / "sources"
+    monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", str(source_root))
+    monkeypatch.setattr("examples.mcp_server.agent_sources.get_registry", lambda: _Registry(repo))
+
+    with pytest.raises(ManagedSourceBundleError) as exc_info:
+        ensure_dirty_worktree_review_bundle("nod", base)
+
+    assert "untracked files" in str(exc_info.value)
+    assert secret_name not in str(exc_info.value)
+    assert not list(source_root.rglob("*.bundle")) if source_root.exists() else True
+
+
+def test_dirty_review_snapshot_excludes_ignored_untracked_files(tmp_path, monkeypatch):
+    repo, _ = _repo(tmp_path)
+    (repo / ".gitignore").write_text("*.secret\n", encoding="utf-8")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-m", "ignore local secrets")
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "token.secret").write_text("never publish me\n", encoding="utf-8")
+
+    monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", str(tmp_path / "sources"))
+    monkeypatch.setattr("examples.mcp_server.agent_sources.get_registry", lambda: _Registry(repo))
+    published = ensure_dirty_worktree_review_bundle("nod", base)
+    assert published is not None
+
+    clone = tmp_path / "ignored-review-clone"
+    subprocess.run(
+        ["git", "clone", "-b", "source", published.path, str(clone)],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert (clone / ".gitignore").read_text(encoding="utf-8") == "*.secret\n"
+    assert not (clone / "token.secret").exists()
+
+
+def test_dirty_review_snapshot_fails_closed_on_concurrent_source_change(
+    tmp_path, monkeypatch
+):
+    repo, base = _repo(tmp_path)
+    source_root = tmp_path / "sources"
+    monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", str(source_root))
+    monkeypatch.setattr("examples.mcp_server.agent_sources.get_registry", lambda: _Registry(repo))
+
+    real_state = agent_sources._dirty_review_source_state
+    calls = 0
+
+    def racing_state(project_root: Path, expected: str) -> tuple[str, str]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            (repo / "payload.txt").write_text("concurrent mutation\n", encoding="utf-8")
+        return real_state(project_root, expected)
+
+    monkeypatch.setattr(agent_sources, "_dirty_review_source_state", racing_state)
+    with pytest.raises(ManagedSourceBundleError, match="changed during dirty review"):
+        ensure_dirty_worktree_review_bundle("nod", base)
+
+    assert calls >= 3
+    assert not list(source_root.rglob("*.bundle")) if source_root.exists() else True
+
+
+def test_dirty_review_snapshot_rejects_shallow_checkout(tmp_path, monkeypatch):
+    repo, base = _repo(tmp_path)
+    source_root = tmp_path / "sources"
+    monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", str(source_root))
+    monkeypatch.setattr("examples.mcp_server.agent_sources.get_registry", lambda: _Registry(repo))
+    monkeypatch.setattr(agent_sources, "_source_is_shallow", lambda _root: True)
+
+    with pytest.raises(ManagedSourceBundleError, match="full local checkout"):
+        ensure_dirty_worktree_review_bundle("nod", base)
+    assert not source_root.exists()
+
+
+def test_dirty_review_snapshot_requires_base_ref_to_match_head(tmp_path, monkeypatch):
+    repo, old_head = _repo(tmp_path)
+    (repo / "payload.txt").write_text("next commit\n", encoding="utf-8")
+    _git(repo, "add", "payload.txt")
+    _git(repo, "commit", "-m", "advance head")
+
+    monkeypatch.setenv("MCP_AGENT_SOURCE_ROOT", str(tmp_path / "sources"))
+    monkeypatch.setattr("examples.mcp_server.agent_sources.get_registry", lambda: _Registry(repo))
+    with pytest.raises(ManagedSourceBundleError, match="does not match registered source HEAD"):
+        ensure_dirty_worktree_review_bundle("nod", old_head)
 
 
 def test_missing_commit_fails_without_publishing(tmp_path, monkeypatch):
