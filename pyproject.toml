@@ -57,7 +57,7 @@ dev = [
   "pytest-cov",
   "pytest-rerunfailures",
   "httpx",
-  "httpx2",
+  "httpx2>=2.12.0",
   "ruff",
   "mypy",
   "types-PyYAML",
