@@ -780,6 +780,59 @@ class TestAgentTaskStatus:
         assert result["next"]["inspect_agent_task"]["task_id"] == "a12345678901"
         assert not any(command.startswith("tail -c ") for command in calls)
 
+    def test_fresh_log_and_heartbeat_cannot_mask_stale_semantic_progress(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n\nWorking\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text("keepalive\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}
+            ),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "running",
+                    "phase": "loop",
+                    "updated_at": "2026-09-03T12:00:00Z",
+                    "updated_epoch": now - 5,
+                    "runner_pid": 123,
+                    "exit_code": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 700, now - 700))
+        # Only log/heartbeat bookkeeping and attempt-state are fresh. Semantic
+        # progress is stale, so the lightweight surface must still flag hung.
+        os.utime(td / "opencode-output.log", (now - 1, now - 1))
+        os.utime(td / "agent-heartbeat.json", (now - 5, now - 5))
+        os.utime(td / "attempt-state.json", (now - 5, now - 5))
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["runner_heartbeat_fresh"] is True
+        assert result["last_useful_activity"]["age_seconds"] == 700
+        assert result["likely_hung"] is True
+        assert result["verdict"] == "likely_hung"
+        assert result["next"]["inspect_agent_task"]["task_id"] == task_id
+
     def test_terminal_snapshot_points_to_report_and_diff(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
         task_id = "a12345678901"
@@ -923,6 +976,108 @@ class TestInspectAgentTask:
         assert result["verdict"] == "likely_hung"
         assert result["likely_hung"] is True
         assert result["log"]["stdout"] == "line 2\n"
+
+    def test_fresh_log_cannot_mask_stale_semantic_progress(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n\nWorking\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text(
+            "\n".join(
+                [
+                    "allocator provisioned fresh provider tunnel",
+                    "router elected primary gateway control",
+                    "runner flushed periodic metric snapshot",
+                    "shell echoed diagnostic status block",
+                    "executor wrote compact audit digest",
+                    "bridge recorded bounded relay event",
+                    "session renewed short lifecycle credential",
+                    "transport recovered idle socket binding",
+                    "queue drained buffered forward message",
+                    "registry refreshed cached artifact references",
+                    "listener closed completed health probe",
+                    "proxy ratified stable upstream channel",
+                    "worker observed constant backpressure level",
+                    "wrapper verified container image signature",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}
+            ),
+            encoding="utf-8",
+        )
+        (td / "agent-heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "state": "running",
+                    "phase": "loop",
+                    "updated_at": "2026-09-03T12:00:00Z",
+                    "updated_epoch": now - 5,
+                    "runner_pid": 123,
+                    "exit_code": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 700, now - 700))
+        os.utime(td / "opencode-output.log", (now - 1, now - 1))
+        os.utime(td / "agent-heartbeat.json", (now - 5, now - 5))
+
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["runner_heartbeat_fresh"] is True
+        assert result["last_activity"]["age_seconds"] == 1
+        assert result["last_useful_activity"]["age_seconds"] == 700
+        assert result["likely_hung"] is True
+        assert result["verdict"] == "likely_hung"
+
+    def test_fresh_semantic_progress_stays_running(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n\nWorking\n", encoding="utf-8")
+        (td / "consensus.md").write_text("# Agent consensus\n\nChecks are running.\n", encoding="utf-8")
+        (td / "opencode-output.log").write_text("line 1\nline 2\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}
+            ),
+            encoding="utf-8",
+        )
+        for child in td.iterdir():
+            os.utime(child, (now - 700, now - 700))
+        os.utime(td / "agent-status.md", (now - 5, now - 5))
+        os.utime(td / "consensus.md", (now - 5, now - 5))
+
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda job_id: {"job_id": job_id, "status": "running"},
+        )
+
+        assert result["last_useful_activity"]["age_seconds"] == 5
+        assert result["likely_hung"] is False
+        assert result["verdict"] == "running"
 
     def test_job_not_found_for_stale_running_task_is_lost_after_restart_not_worker_terminated(
         self, tmp_path, monkeypatch
