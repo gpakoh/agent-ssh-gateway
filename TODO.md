@@ -115,17 +115,7 @@ items are explicitly verified as implemented, documented and safe in production.
    `VERIFICATION_LOCKFILE_MISSING` diagnostic and a recovery path instead of
    treating environment bootstrap as code failure.
 
-5. ⬜ **Rate-limit responses need operator-safe retry metadata and coalescing.**
-   During Supervisor/browser orchestration on 2026-09-04, repeated schema/tool
-   reloads plus normal verification calls hit `RATE_LIMITED: 180 per 1 minute`,
-   temporarily blocking `inspect_agent_task` while an agent's terminal report
-   was needed for review. The error was retryable but did not expose a bounded
-   `retry_after_seconds`, bucket identity, or suggested lower-cost alternate
-   read path. Add structured retry metadata and consider coalescing repeated
-   schema discovery/status reads so operators can recover without guessing the
-   cooldown window or accidentally increasing contention.
-
-6. ⬜ **Command-plane policy and verification ergonomics need typed operator guidance.**
+5. ⬜ **Command-plane policy and verification ergonomics need typed operator guidance.**
     Several 2026-09-04 delivery sessions exposed rough edges that overlap with
     existing namespace/session/environment findings but are not yet captured as a
     single operator contract: raw SSH `git push` / `git clone` can time out while
