@@ -1636,7 +1636,7 @@ def agent_task_status(
         {name: meta for name, meta in files.items() if name not in {"heartbeat", "proxy_status"}}, now
     )
     semantic_activity = _progress_artifact_activity(files, now)
-    age = activity.get("age_seconds")
+    semantic_age = semantic_activity.get("age_seconds")
     heartbeat = _read_agent_heartbeat(run_cmd, project=project, task_id=task_id, now_epoch=now)
     heartbeat_age = heartbeat.get("age_seconds")
     runner_heartbeat_fresh = bool(
@@ -1661,7 +1661,7 @@ def agent_task_status(
         semantic_activity=semantic_activity,
         runner_heartbeat_fresh=runner_heartbeat_fresh,
     )
-    likely_hung = bool(active and not terminal and isinstance(age, int) and age >= stale_after_seconds)
+    likely_hung = bool(active and not terminal and isinstance(semantic_age, int) and semantic_age >= stale_after_seconds)
     if reconciliation.get("state") is not None:
         likely_hung = True
 
@@ -1809,7 +1809,7 @@ def inspect_agent_task(
         {name: meta for name, meta in files.items() if name not in {"heartbeat", "proxy_status"}}, now
     )
     semantic_activity = _progress_artifact_activity(files, now)
-    age = activity.get("age_seconds")
+    semantic_age = semantic_activity.get("age_seconds")
     heartbeat = _read_agent_heartbeat(
         run_cmd, project=project, task_id=task_id, now_epoch=now
     )
@@ -1836,7 +1836,7 @@ def inspect_agent_task(
         semantic_activity=semantic_activity,
         runner_heartbeat_fresh=runner_heartbeat_fresh,
     )
-    likely_hung = bool(active and not terminal and isinstance(age, int) and age >= stale_after_seconds)
+    likely_hung = bool(active and not terminal and isinstance(semantic_age, int) and semantic_age >= stale_after_seconds)
     if reconciliation.get("state") is not None:
         likely_hung = True
 
