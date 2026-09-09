@@ -847,6 +847,7 @@ _USEFUL_AGENT_ACTIVITY_MARKERS = (
     "agent-report.md",
     "implementation-diff.patch",
 )
+_OPENCODE_TOOL_ACTIVITY_RE = re.compile(r"(?m)^\s*(?:→|←)\s+\S")
 
 
 def _parse_agent_status(text: str) -> str | None:
@@ -1368,6 +1369,7 @@ def _agent_startup_diagnostics(
     useful_agent_activity_seen = bool(
         (files.get("report") or {}).get("exists")
         or (files.get("diff") or {}).get("exists")
+        or _OPENCODE_TOOL_ACTIVITY_RE.search(combined) is not None
         or any(marker in combined for marker in _USEFUL_AGENT_ACTIVITY_MARKERS)
     )
     dead_time_kind = None

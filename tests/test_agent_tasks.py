@@ -1456,6 +1456,62 @@ class TestInspectAgentTask:
         assert result["startup"]["useful_agent_activity_seen"] is True
         assert result["startup"]["dead_time_kind"] is None
 
+    def test_startup_stall_with_real_tool_read_activity_remains_running(self):
+        """A model/tool turn proves startup completed even before artifacts change."""
+        now = 2_000
+
+        def fake_run_cmd(project: str, command: str) -> dict:
+            if command.startswith("ls -ld -- "):
+                return {"stdout": "drwxr-xr-x 1 user user 0 path\n", "stderr": "", "exit_code": 0}
+            if command.startswith("cat ") and "agent-status.md" in command:
+                return {
+                    "stdout": (
+                        "Status: running\n"
+                        "Using exclusive live proxy from configured provider\n"
+                    ),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat ") and "attempt-state.json" in command:
+                return {
+                    "stdout": json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("cat "):
+                return {"stdout": "(not found)", "stderr": "", "exit_code": 1}
+            if command.startswith("tail -c "):
+                return {
+                    "stdout": (
+                        "> build · big-pickle\n"
+                        "OpenCode startup stalled; rotating proxy (attempt 1/4)\n"
+                        "→ Read <agent-task>/current-plan.md\n"
+                        "→ Read examples/mcp_server/agent_tools.py\n"
+                    ),
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            if command.startswith("stat -c "):
+                if "agent-report.md" in command or "implementation-diff.patch" in command:
+                    return {"stdout": "", "stderr": "not found", "exit_code": 1}
+                return {"stdout": f"20 {now - 300}\n", "stderr": "", "exit_code": 0}
+            return {"stdout": "", "stderr": "", "exit_code": 1}
+
+        result = inspect_agent_task(
+            fake_run_cmd,
+            project="my-proj",
+            task_id="a12345678901",
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lambda _job: {"status": "running"},
+        )
+
+        assert result["verdict"] == "running"
+        assert result["startup"]["opencode_startup_stalled"] is True
+        assert result["startup"]["useful_agent_activity_seen"] is True
+        assert result["startup"]["dead_time_kind"] is None
+        assert result["startup"]["phase"] is None
+
     def test_proxy_status_sidecar_is_sanitized_and_keeps_startup_visible(self):
         now = 2_000
         raw_proxy_url = "http://user:pass@proxy.local:8080?token=raw-token"
