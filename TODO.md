@@ -152,31 +152,6 @@ items are explicitly verified as implemented, documented and safe in production.
    explicit host/port/path, timeout, max response bytes, no secrets/env exposure,
    provenance, and clear DNS/refused/timeout/non-2xx/healthy distinctions.
 
-2. ⬜ **[AO-004] Project-level branch creation must not depend on root-owned `.git` refs.**
-   A clean registered child repository can be readable and PR-verifiable while
-   `git_create_branch` fails on `.git/refs/heads/<branch>.lock` permission
-   errors. During Supervisor delivery on 2026-09-04, attempting to import a
-   verified local candidate branch into the canonical checkout via `git fetch
-   <temp-clone> branch:refs/heads/...` failed with `insufficient permission for
-   adding an object to repository database .git/objects`; no target branch ref
-   was created and the dirty working tree remained unchanged. Managed checkouts
-   must have coherent ownership for refs/index/objects,
-   or branch creation must fail with a typed ownership diagnostic and recovery
-   path such as `GIT_OWNERSHIP_BLOCKED`.
-
-   NOD re-verification, 2026-09-08: registered child `gateway_client` at detached
-   HEAD `a83e31b40d4fc464d71a369dda478ad636f7a009` rejected
-   `git_create_branch` because `.git/refs/heads/...lock` was not writable, while
-   the same workspace immediately accepted `git_add` and `git_commit`, producing
-   detached commit `607376528dc23cddfdac751646dd83a9506970e4`. This proves a
-   mixed-permission state where index/objects/HEAD writes succeed but refs/heads
-   does not. Parent `nod-gateway` showed the opposite severity: `info` described
-   the workspace as writable, but guarded `git_add` failed with insufficient
-   permission to add an object to `.git/objects`, and no partial staging occurred.
-   Acceptance therefore requires per-component Git write-capability preflight for
-   index, objects, refs and HEAD; a single filesystem writeability boolean is not
-   sufficient evidence.
-
 3. ⬜ **[AO-005] Typed Gitea repo/PR cleanup tools for architect-controlled delivery.**
    Add first-class, ChatGPT-visible tools for safe repository cleanup operations
    that currently require manual UI/API fallback: close a Gitea PR without
