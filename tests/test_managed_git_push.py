@@ -72,6 +72,13 @@ def test_push_exact_sha_keeps_token_out_of_argv_and_persistent_config(
     assert token not in " ".join(clone_argv)
     assert "Authorization" not in " ".join(clone_env.values())
     assert clone_env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    clone_config = {
+        (clone_env[f"GIT_CONFIG_KEY_{index}"], clone_env[f"GIT_CONFIG_VALUE_{index}"])
+        for index in range(int(clone_env["GIT_CONFIG_COUNT"]))
+    }
+    assert ("safe.directory", str(tmp_path.resolve())) in clone_config
+    assert ("safe.directory", str((tmp_path / ".git").resolve())) in clone_config
+    assert ("safe.directory", "*") not in clone_config
     push_argv, push_env, push_cwd = calls[2]
     assert push_cwd is not None and push_cwd != tmp_path
     assert push_cwd.name == "repo"
@@ -83,6 +90,34 @@ def test_push_exact_sha_keeps_token_out_of_argv_and_persistent_config(
     assert push_env["GIT_CONFIG_VALUE_1"] == "false"
     assert push_env["GIT_CONFIG_VALUE_2"] == ""
     assert "GITEA_TOKEN" not in push_env
+
+
+def test_push_exact_sha_invalid_git_trust_env_is_sanitized(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def reject_trust(*_args: object, **_kwargs: object) -> dict[str, str]:
+        raise ValueError("malformed inherited Git config")
+
+    def must_not_run(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("git must not run after trust configuration rejection")
+
+    monkeypatch.setattr(managed_git, "with_scoped_safe_directories", reject_trust)
+    monkeypatch.setattr(managed_git.subprocess, "run", must_not_run)
+
+    with pytest.raises(
+        managed_git.ManagedGitError,
+        match="managed Git staging trust configuration is invalid",
+    ):
+        managed_git.push_exact_sha(
+            project_root=tmp_path,
+            owner="gpakoh",
+            repo="gpt-browser-bridge",
+            destination_branch="hardening/runtime-deploy",
+            expected_sha=SHA,
+            username="gpakoh",
+            token="secret",
+            git_base="https://git.example.test",
+        )
 
 
 def test_push_exact_sha_rejects_protected_branch_before_git(

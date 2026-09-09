@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from examples.mcp_client_remote.fleet.shared import validate_repo_owner_or_name
+from examples.mcp_server.git_trust import with_scoped_safe_directories
 
 _SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
@@ -153,6 +154,15 @@ def push_exact_sha(
             "GIT_TERMINAL_PROMPT": "0",
         }
         try:
+            try:
+                clone_env = with_scoped_safe_directories(
+                    (root, root / ".git"),
+                    base_env=clean_env,
+                )
+            except ValueError as exc:
+                raise ManagedGitError(
+                    "managed Git staging trust configuration is invalid"
+                ) from exc
             cloned = subprocess.run(
                 [
                     "git",
@@ -167,7 +177,7 @@ def push_exact_sha(
                 capture_output=True,
                 timeout=30,
                 check=False,
-                env=clean_env,
+                env=clone_env,
             )
             if cloned.returncode != 0:
                 raise ManagedGitError("failed to stage registered Git repository")

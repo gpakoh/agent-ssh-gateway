@@ -268,10 +268,12 @@ def test_prepare_candidate_clone_local_clone_trusts_source_gitdir(
 
     _workspace, source, config_dir, journal_root, base = registry_fixture
     captured_commands: list[list[str]] = []
+    captured_envs: list[dict[str, str] | None] = []
 
     def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
         command = list(args[0])
         captured_commands.append(command)
+        captured_envs.append(kwargs.get("env"))
         if "rev-parse" in command and "--verify" in command:
             return subprocess.CompletedProcess(
                 args=command,
@@ -326,6 +328,18 @@ def test_prepare_candidate_clone_local_clone_trusts_source_gitdir(
     assert clone_command[5] == "clone"
     assert "safe.directory=*" not in " ".join(clone_command)
     assert "--global" not in clone_command
+    clone_index = captured_commands.index(clone_command)
+    clone_env = captured_envs[clone_index]
+    assert clone_env is not None
+    count = int(clone_env["GIT_CONFIG_COUNT"])
+    inherited = {
+        (clone_env[f"GIT_CONFIG_KEY_{index}"], clone_env[f"GIT_CONFIG_VALUE_{index}"])
+        for index in range(count)
+    }
+    assert ("safe.directory", str(source.resolve())) in inherited
+    assert ("safe.directory", str((source / ".git").resolve())) in inherited
+    assert ("safe.directory", "*") not in inherited
+    assert clone_env.get("GIT_CONFIG_GLOBAL") != str(Path.home() / ".gitconfig")
 
 
 def test_prepare_candidate_clone_refuses_dirty_existing_clone(registry_fixture) -> None:

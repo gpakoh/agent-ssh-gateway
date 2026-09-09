@@ -21,6 +21,8 @@ from typing import Any
 
 from tool_results import _redact_error_message
 
+from examples.mcp_server.git_trust import with_scoped_safe_directories
+
 
 class CandidateVerificationError(RuntimeError):
     """An isolated candidate verification failure safe to expose as denial.
@@ -511,8 +513,18 @@ def _git_env(home: Path) -> dict[str, str]:
     }
 
 
-def _run_materialize_git(argv: list[str], *, cwd: Path, home: Path, timeout: int = 120) -> str:
+def _run_materialize_git(
+    argv: list[str],
+    *,
+    cwd: Path,
+    home: Path,
+    timeout: int = 120,
+    safe_directories: tuple[Path, ...] = (),
+) -> str:
     try:
+        env = _git_env(home)
+        if safe_directories:
+            env = with_scoped_safe_directories(safe_directories, base_env=env)
         result = subprocess.run(
             argv,
             cwd=str(cwd),
@@ -520,8 +532,16 @@ def _run_materialize_git(argv: list[str], *, cwd: Path, home: Path, timeout: int
             capture_output=True,
             check=False,
             timeout=timeout,
-            env=_git_env(home),
+            env=env,
         )
+    except ValueError as exc:
+        raise CandidateVerificationError(
+            "candidate verifier Git trust configuration is invalid",
+            code="VERIFIER_ENV_UNAVAILABLE",
+            phase="verifier_env",
+            retryable=False,
+            details={"phase": "verifier_env", "mutation_occurred": False},
+        ) from exc
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise CandidateVerificationError(
             "candidate verifier could not materialize registered workspace source",
@@ -597,6 +617,7 @@ def _materialize_workspace_source(workspace_root: Path, expected_sha: str) -> Pa
             ],
             cwd=materialized_root,
             home=staging,
+            safe_directories=(workspace, workspace / ".git"),
         )
         _run_materialize_git(
             ["git", "-C", str(staging), "checkout", "--detach", "--quiet", expected_sha],
