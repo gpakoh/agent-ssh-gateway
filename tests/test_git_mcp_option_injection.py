@@ -11,6 +11,13 @@ class _LocalGitClient:
         self.root = root
         self.commands: list[str] = []
 
+    def execute_project_script(self, project: str, script: str, timeout_s: int = 30) -> dict:
+        return {
+            "exit_code": 0,
+            "stdout": "available=1\nindex=1\nobjects=1\nrefs=1\nhead=1\ndetached=0\n",
+            "stderr": "",
+        }
+
     def execute_project_command(self, project: str, command: str) -> dict:
         import subprocess
 
@@ -67,6 +74,13 @@ def _init_merge_repo(tmp_path):
 class _StubClient:
     def __init__(self):
         self.commands: list[str] = []
+
+    def execute_project_script(self, project: str, script: str, timeout_s: int = 30) -> dict:
+        return {
+            "exit_code": 0,
+            "stdout": "available=1\nindex=1\nobjects=1\nrefs=1\nhead=1\ndetached=0\n",
+            "stderr": "",
+        }
 
     def execute_project_command(self, project: str, command: str) -> dict:
         self.commands.append(command)

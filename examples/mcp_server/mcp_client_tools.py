@@ -18,6 +18,7 @@ from typing import Any
 
 from control_plane_git import git_push_control_plane
 from gateway_client import GatewayClient, GatewayClientError
+from git_write_capabilities import probe_git_write_capabilities
 from tool_results import build_command_result, tool_error, tool_success
 
 
@@ -1516,13 +1517,27 @@ def _project_workspace_hints(resolved: Path) -> dict[str, Any]:
         "root": ".",
         "configured_readonly": configured_readonly,
         "filesystem_writeable": filesystem_writeable,
+        "git_write_capabilities": {
+            "status": "not_probed",
+            "tool": "git_write_capabilities",
+            "note": (
+                "filesystem_writeable covers the worktree root only; it is not proof "
+                "that Git index, objects, refs, or HEAD metadata are writeable on the SSH execution plane."
+            ),
+        },
         "recommended_write_plane": (
             "writeable_candidate_clone" if needs_candidate_clone else "workspace"
+        ),
+        "git_mutation_write_plane": (
+            "writeable_candidate_clone" if needs_candidate_clone else "preflight_required"
         ),
         "note": (
             "Treat workspace writes as unavailable; create/use a writeable candidate clone before editing."
             if needs_candidate_clone
-            else "Workspace root appears writeable, but still verify post-write hashes before trusting delivery."
+            else (
+                "Workspace root appears writeable for ordinary file writes. Git mutations must still pass "
+                "git_write_capabilities; do not infer index/objects/refs/HEAD writeability from this boolean."
+            )
         ),
     }
 
@@ -1598,6 +1613,188 @@ def show_changes(client: GatewayClient, project: str) -> dict[str, Any]:
     return result
 
 
+def git_write_capabilities(
+    client: GatewayClient,
+    project: str,
+) -> dict[str, Any]:
+    """Probe index/objects/refs/HEAD writeability on the Git mutation plane."""
+    _validate_project(project)
+    return probe_git_write_capabilities(client, project)
+
+
+def _git_write_preflight_from_probe(
+    project: str,
+    *,
+    tool_name: str,
+    action: str,
+    required_components: tuple[str, ...],
+    probe: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Validate one already-collected non-mutating capability snapshot."""
+    if not probe.get("available"):
+        return tool_error(
+            tool=tool_name,
+            code="GIT_WRITE_PREFLIGHT_UNAVAILABLE",
+            message="Git write-capability preflight could not be completed; refusing mutation",
+            retryable=bool(probe.get("retryable", True)),
+            hint=(
+                "Retry after restoring the SSH project execution plane, or create/use a writeable "
+                "candidate clone instead of mutating the registered workspace."
+            ),
+            details={
+                "project": project,
+                "action": action,
+                "required_components": list(required_components),
+                "preflight": probe,
+                "mutation_occurred": False,
+            },
+            source="gateway",
+        )
+
+    components = probe.get("components", {})
+    blocked = [
+        name
+        for name in required_components
+        if not bool(components.get(name, {}).get("writeable"))
+    ]
+    if blocked:
+        return tool_error(
+            tool=tool_name,
+            code="GIT_WRITE_CAPABILITY_BLOCKED",
+            message="Registered workspace lacks required Git metadata write capability",
+            retryable=False,
+            hint=(
+                "Use prepare_candidate_clone or another managed writeable candidate; do not change "
+                "global Git safe.directory/ownership settings to bypass this guard."
+            ),
+            details={
+                "project": project,
+                "action": action,
+                "required_components": list(required_components),
+                "blocked_components": blocked,
+                "preflight": probe,
+                "mutation_occurred": False,
+            },
+            source="gateway",
+        )
+    return None
+
+
+def _git_write_preflight(
+    client: GatewayClient,
+    project: str,
+    *,
+    tool_name: str,
+    action: str,
+    required_components: tuple[str, ...],
+    branch: str | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Collect and validate one non-mutating capability snapshot."""
+    probe = probe_git_write_capabilities(client, project, branch=branch)
+    return (
+        _git_write_preflight_from_probe(
+            project,
+            tool_name=tool_name,
+            action=action,
+            required_components=required_components,
+            probe=probe,
+        ),
+        probe,
+    )
+
+
+def _git_runtime_permission_components(stderr: str) -> list[str]:
+    """Classify post-preflight permission failures without exposing host paths."""
+    text = (stderr or "").lower()
+    permission_markers = (
+        "permission denied",
+        "operation not permitted",
+        "read-only file system",
+        "insufficient permission",
+    )
+    if not any(marker in text for marker in permission_markers):
+        return []
+
+    components: list[str] = []
+    if "index.lock" in text:
+        components.append("index")
+    if "repository database" in text or "/objects" in text or ".git/objects" in text:
+        components.append("objects")
+    if "refs/heads" in text or "cannot lock ref" in text:
+        components.append("refs")
+    if "head.lock" in text or "ref 'head'" in text:
+        components.append("head")
+    return list(dict.fromkeys(components))
+
+
+def _git_mutation_result(
+    *,
+    tool_name: str,
+    project: str,
+    action: str,
+    required_components: tuple[str, ...],
+    preflight: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Preserve normal Git failures, but type permission drift after preflight."""
+    if result.get("exit_code", 1) == 0:
+        return result
+    components = _git_runtime_permission_components(str(result.get("stderr", "")))
+    if not components:
+        return result
+    return tool_error(
+        tool=tool_name,
+        code="GIT_WRITE_CAPABILITY_BLOCKED",
+        message="Git metadata permissions changed or were insufficient after preflight",
+        retryable=True,
+        hint=(
+            "Refresh git_write_capabilities and use a managed candidate clone. "
+            "Do not blindly retry the mutation because partial Git metadata/object writes may have occurred."
+        ),
+        details={
+            "project": project,
+            "action": action,
+            "required_components": list(required_components),
+            "blocked_components": components,
+            "preflight": preflight,
+            "mutation_occurred": "unknown",
+        },
+        result=result,
+        source="gateway",
+    )
+
+
+def _run_git_mutation_with_preflight(
+    client: GatewayClient,
+    project: str,
+    command: str,
+    *,
+    tool_name: str,
+    action: str,
+    required_components: tuple[str, ...],
+    branch: str | None = None,
+) -> dict[str, Any]:
+    preflight_error, probe = _git_write_preflight(
+        client,
+        project,
+        tool_name=tool_name,
+        action=action,
+        required_components=required_components,
+        branch=branch,
+    )
+    if preflight_error is not None:
+        return preflight_error
+    result = run_project_command(client, project, command)
+    return _git_mutation_result(
+        tool_name=tool_name,
+        project=project,
+        action=action,
+        required_components=required_components,
+        preflight=probe,
+        result=result,
+    )
+
+
 def git_add(
     client: GatewayClient,
     project: str,
@@ -1609,7 +1806,14 @@ def git_add(
         if p.startswith("-") or not p.strip():
             raise ValueError(f"INVALID_INPUT: path {p!r} must not start with '-'")
     quoted = " ".join(shlex.quote(p) for p in paths)
-    return run_project_command(client, project, f"git add -- {quoted}")
+    return _run_git_mutation_with_preflight(
+        client,
+        project,
+        f"git add -- {quoted}",
+        tool_name="git_add",
+        action="stage_paths",
+        required_components=("index", "objects"),
+    )
 
 
 def git_commit(
@@ -1641,13 +1845,36 @@ def git_commit(
         )
         if mismatches:
             return _guarded_git_commit_error(project, state, mismatches)
-    return run_project_command(
+    probe = probe_git_write_capabilities(client, project)
+    required_components = (
+        ("index", "objects", "head")
+        if probe.get("detached") is True
+        else ("index", "objects", "refs")
+    )
+    preflight_error = _git_write_preflight_from_probe(
+        project,
+        tool_name="git_commit",
+        action="commit_staged_changes",
+        required_components=required_components,
+        probe=probe,
+    )
+    if preflight_error is not None:
+        return preflight_error
+    result = run_project_command(
         client,
         project,
         "git "
         f"-c user.name={shlex.quote('MCP Gateway')} "
         f"-c user.email={shlex.quote('mcp-gateway@gateway.invalid')} "
         f"commit -m {shlex.quote(message)}",
+    )
+    return _git_mutation_result(
+        tool_name="git_commit",
+        project=project,
+        action="commit_staged_changes",
+        required_components=required_components,
+        preflight=probe,
+        result=result,
     )
 
 
@@ -1681,7 +1908,15 @@ def git_create_branch(
     branch = _validate_git_name(branch, "branch")
     if branch in {"main", "master"}:
         raise ValueError(f"POLICY_DENIED: creating protected branch {branch!r} is not allowed")
-    return run_project_command(client, project, f"git switch -c {shlex.quote(branch)}")
+    return _run_git_mutation_with_preflight(
+        client,
+        project,
+        f"git switch -c {shlex.quote(branch)}",
+        tool_name="git_create_branch",
+        action="create_and_switch_branch",
+        required_components=("index", "refs", "head"),
+        branch=branch,
+    )
 
 
 def _validate_expected_git_head(value: str | None) -> str | None:
@@ -1914,6 +2149,17 @@ def git_update_branch_by_merge(
         )
     source_head = source_head.strip().lower()
 
+    preflight_error, preflight = _git_write_preflight(
+        client,
+        project,
+        tool_name="git_update_branch_by_merge",
+        action="switch_and_merge_branch",
+        required_components=("index", "objects", "refs", "head"),
+        branch=branch,
+    )
+    if preflight_error is not None:
+        return preflight_error
+
     commands = [
         f"git switch {shlex.quote(branch)}",
         f"git merge --no-ff --no-edit {shlex.quote(source_branch)}",
@@ -1953,7 +2199,14 @@ def git_update_branch_by_merge(
             last["source_branch"] = source_branch
             last["previous_head"] = target_head
             last["source_head"] = source_head
-            return last
+            return _git_mutation_result(
+                tool_name="git_update_branch_by_merge",
+                project=project,
+                action="switch_and_merge_branch",
+                required_components=("index", "objects", "refs", "head"),
+                preflight=preflight,
+                result=last,
+            )
 
     new_head = str(last.get("stdout", "")).strip() if last else ""
     return {

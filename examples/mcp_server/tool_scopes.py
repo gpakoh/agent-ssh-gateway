@@ -79,6 +79,7 @@ TOOL_SCOPES: dict[str, list[str]] = {
     # project — mcp:project
     "info": ["mcp:read", "mcp:project"],
     "working_directory": ["mcp:project"],
+    "git_write_capabilities": ["mcp:read", "mcp:project"],
     "git_status": ["mcp:project"],
     "git_add": ["mcp:project"],
     "git_commit": ["mcp:project"],
