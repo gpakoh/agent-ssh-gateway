@@ -1254,6 +1254,95 @@ class TestGatewayRunAgents:
         assert "explicit boundaries" in result["help"]["profile"]
         assert "glm" not in repr(result["help"]).lower()
 
+    @pytest.mark.asyncio
+    async def test_single_run_agent_raw_error_is_outer_failure(self, monkeypatch):
+        import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+        raw = {
+            "task_id": "single",
+            "status": "error",
+            "error": "managed execution rejected the task before submission",
+            "job_id": None,
+            "attempt_id": None,
+        }
+
+        async def fail_submission(**_kwargs):
+            return dict(raw)
+
+        monkeypatch.setattr(agent_adapter, "_submit_agent_with_fleet", fail_submission)
+
+        result = await agent_adapter.gateway_run_agent(
+            "test", "single", async_submit=True
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "AGENT_SUBMISSION_FAILED"
+        assert result["error"]["message"] == raw["error"]
+        assert result["result"] == raw
+        assert result["result"]["job_id"] is None
+        assert result["result"]["attempt_id"] is None
+        assert result["meta"]["source"] == "agent"
+        assert "success_text" not in result["meta"]
+
+    @pytest.mark.asyncio
+    async def test_run_opencode_raw_error_is_outer_failure_and_keeps_help(self, monkeypatch):
+        import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+        raw = {
+            "task_id": "single",
+            "status": "error",
+            "kind": "durable-state-error",
+            "error": "durable attempt state is not trustworthy",
+            "job_id": None,
+        }
+
+        async def fail_submission(**_kwargs):
+            return dict(raw)
+
+        monkeypatch.setattr(agent_adapter, "_submit_agent_with_fleet", fail_submission)
+
+        result = await agent_adapter.gateway_run_opencode(
+            "test", "single", async_submit=False
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "AGENT_SUBMISSION_FAILED"
+        assert result["result"] == raw
+        assert result["result"]["kind"] == "durable-state-error"
+        assert result["meta"]["source"] == "agent"
+        assert result["help"]["recommended_model"] == "big-pickle"
+
+    @pytest.mark.parametrize(
+        "status",
+        ["blocked", "rate-limited", "startup-timeout", "run-timeout", "needs-review"],
+    )
+    def test_single_submission_normalizer_does_not_reclassify_non_error_receipts(
+        self, status
+    ):
+        import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+        raw = {"task_id": "single", "status": status, "job_id": "job-1"}
+        result = agent_adapter._normalize_single_agent_submission("run_agent", raw)
+
+        assert result is raw
+
+    def test_single_submission_normalizer_preserves_canonical_error_envelope(self):
+        import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+        canonical = {
+            "ok": False,
+            "tool": "run_agent",
+            "result": {"status": "error"},
+            "error": {"code": "INVALID_INPUT", "message": "already normalized"},
+            "meta": {},
+        }
+
+        result = agent_adapter._normalize_single_agent_submission(
+            "run_agent", canonical
+        )
+
+        assert result is canonical
+
 
 class TestSplitCsvOrLines:
     """Regression: task-id string surface accepts newline and CSV forms."""

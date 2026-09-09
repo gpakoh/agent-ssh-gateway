@@ -62,6 +62,7 @@ from gateway_client import GatewayClientError
 from mcp_audit import redact_secrets
 from mcp_client_tools import run_project_command
 from opencode_tools import project_run_opencode as _project_run_opencode
+from tool_results import tool_error
 
 from examples.mcp_server.agent_paths import managed_workspace_path
 from examples.mcp_server.agent_sources import (
@@ -107,6 +108,33 @@ def _wait_job_contract(job_id: str) -> dict[str, Any]:
 
 def _server_agent_router():
     return server_attr("_agent_router")
+
+
+def _normalize_single_agent_submission(tool: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Fail honestly when a single-agent pre-submit path returns status=error.
+
+    project_run_agent/project_run_opencode use raw result dicts for execution
+    receipts. A raw ``status=error`` means no successful submission contract
+    exists and must not be wrapped by run_tool_async as ``ok=true`` merely
+    because no Python exception was raised. Batch submission intentionally has
+    different semantics and does not use this helper: one failed item can
+    coexist with other successfully submitted items.
+    """
+    if "ok" in result or result.get("status") != "error":
+        return result
+    raw_message = result.get("error")
+    message = (
+        raw_message.strip()
+        if isinstance(raw_message, str) and raw_message.strip()
+        else "Agent submission failed before a runnable job was accepted."
+    )
+    return tool_error(
+        tool=tool,
+        code="AGENT_SUBMISSION_FAILED",
+        message=message,
+        result=result,
+        source="agent",
+    )
 
 
 def _split_scope_patterns(value: str | None) -> list[str] | None:
@@ -547,11 +575,12 @@ async def gateway_run_opencode(
         )
 
     async def _fn() -> dict[str, Any]:
-        return await _submit_agent_with_fleet(
+        result = await _submit_agent_with_fleet(
             project=project,
             task_id=task_id,
             submit_sync=_submit,
         )
+        return _normalize_single_agent_submission("run_opencode", result)
 
     response = await run_tool_async(
         tool="run_opencode",
@@ -644,11 +673,12 @@ async def gateway_run_agent(
     )
 
     async def _fn() -> dict[str, Any]:
-        return await _submit_agent_with_fleet(
+        result = await _submit_agent_with_fleet(
             project=project,
             task_id=task_id,
             submit_sync=submit_sync,
         )
+        return _normalize_single_agent_submission("run_agent", result)
 
     return await run_tool_async(
         tool="run_agent",
