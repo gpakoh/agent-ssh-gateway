@@ -236,28 +236,6 @@ items are explicitly verified as implemented, documented and safe in production.
     Gateway-created scratch workspaces, and verification helpers that distinguish
     environment/bootstrap failure from project test failure.
 
-6. ⬜ **[AO-011] Trusted candidate preparation/publication must handle Git safe-directory ownership preflight.**
-   `prepare_candidate_clone` is the intended escape hatch from read-only or
-   cross-owned canonical workspaces, so it must itself read an approved registered
-   source without requiring mutable global Git configuration. Every trusted
-   verifier/materializer that clones an approved registered source must use the
-   same scoped/non-global `safe.directory` policy or fail before partial
-   registration/mutation with typed `GIT_SAFE_DIRECTORY_REQUIRED` /
-   `SOURCE_REPO_OWNERSHIP_BLOCKED` guidance. Wildcard `safe.directory=*` is
-   forbidden.
-
-   NOD re-verification, 2026-09-08, on build
-   `00728408fc5ae1e8e89a076210846baaaf067a13`: `prepare_candidate_clone` for
-   `nod-gateway` at exact base `40d026f888ff2e373fc83410e4a358bafa95589e`
-   failed before candidate creation with `fatal: detected dubious ownership`.
-   After `gateway_client` was committed cleanly at exact HEAD
-   `607376528dc23cddfdac751646dd83a9506970e4`, `gitea_push_verified_commit`
-   passed exact-base/head and allowed-files checks, entered source resolution,
-   then failed cloning the approved registered source with the same ownership
-   class. It returned `CANDIDATE_SOURCE_UNAVAILABLE`, `retryable=true`,
-   `mutation_occurred=false`. Acceptance must cover both paths and all shared
-   source-cloning verifier/materializer call sites.
-
 7. ⬜ **[AO-012] Project catalog reads need filtering and pagination.**
    `project_list()` currently returns the entire registry, including historical
    candidate clones, when an architect often needs one project id. Add exact,
