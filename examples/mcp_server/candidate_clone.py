@@ -20,6 +20,7 @@ from examples.mcp_server.agent_sources import (
     _source_is_shallow,
     ensure_managed_source_bundle,
 )
+from examples.mcp_server.git_trust import with_scoped_safe_directories
 from examples.mcp_server.managed_git import _minimal_git_env
 from examples.mcp_server.project_registry_control import (
     ProjectRegistrationError,
@@ -257,6 +258,9 @@ def _run_git(
     extra_safe_directories: tuple[Path, ...] = (),
 ) -> str:
     try:
+        git_env = with_scoped_safe_directories(
+            (cwd, *extra_safe_directories),
+        )
         result = subprocess.run(
             _git_command(cwd, args, extra_safe_directories=extra_safe_directories),
             cwd=str(cwd),
@@ -264,7 +268,15 @@ def _run_git(
             capture_output=True,
             check=False,
             timeout=timeout,
+            env=git_env,
         )
+    except ValueError as exc:
+        raise _fail(
+            "POLICY_DENIED",
+            "scoped Git safe.directory configuration is invalid",
+            retryable=False,
+            details={"operation": operation},
+        ) from exc
     except subprocess.TimeoutExpired as exc:
         raise _fail(
             "TOOL_EXECUTION_FAILED",

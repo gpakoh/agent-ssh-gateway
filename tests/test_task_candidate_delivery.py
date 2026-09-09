@@ -206,6 +206,80 @@ def test_materialize_exposes_only_readable_source_to_isolated_verifier(
     assert observed["repo_mode"] & 0o005 == 0o005
 
 
+def test_materialize_local_clone_inherits_exact_safe_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _, td = _write_evidence(root, monkeypatch)
+    materialize_globals = materialize_task_candidate.__globals__
+    original_run_git = materialize_globals["_run_git"]
+    clone_envs: list[dict[str, str]] = []
+
+    def recording_run_git(
+        cwd: Path, args: list[str], *, env: dict[str, str] | None = None
+    ) -> str:
+        if args and args[0] == "clone" and "--local" in args:
+            assert env is not None
+            clone_envs.append(dict(env))
+        return original_run_git(cwd, args, env=env)
+
+    monkeypatch.setitem(materialize_globals, "_run_git", recording_run_git)
+    materialize_task_candidate(
+        project_root=root,
+        project=PROJECT,
+        task_id=TASK,
+        destination_owner=OWNER,
+        destination_repo=REPO,
+        destination_branch=BRANCH,
+        expected_diff_sha256=_diff_sha(td),
+        job_result=_job_success,
+        verify_candidate=_verify_success,
+    )
+
+    assert len(clone_envs) == 1
+    env = clone_envs[0]
+    assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    entries = {
+        (env[f"GIT_CONFIG_KEY_{index}"], env[f"GIT_CONFIG_VALUE_{index}"])
+        for index in range(int(env["GIT_CONFIG_COUNT"]))
+    }
+    assert ("safe.directory", str(root.resolve())) in entries
+    assert ("safe.directory", str((root / ".git").resolve())) in entries
+    assert ("safe.directory", "*") not in entries
+
+
+def test_materialize_invalid_git_trust_env_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _, td = _write_evidence(root, monkeypatch)
+    materialize_globals = materialize_task_candidate.__globals__
+
+    def reject_trust(*_args: object, **_kwargs: object) -> dict[str, str]:
+        raise ValueError("malformed inherited Git config")
+
+    monkeypatch.setitem(materialize_globals, "with_scoped_safe_directories", reject_trust)
+
+    with pytest.raises(CandidateError) as excinfo:
+        materialize_task_candidate(
+            project_root=root,
+            project=PROJECT,
+            task_id=TASK,
+            destination_owner=OWNER,
+            destination_repo=REPO,
+            destination_branch=BRANCH,
+            expected_diff_sha256=_diff_sha(td),
+            job_result=_job_success,
+            verify_candidate=_verify_success,
+        )
+
+    assert excinfo.value.code == "GIT_OPERATION_FAILED"
+    assert excinfo.value.retryable is False
+    assert excinfo.value.details == {"phase": "clone"}
+
+
 def test_materialize_records_minimum_receipt_and_persistent_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

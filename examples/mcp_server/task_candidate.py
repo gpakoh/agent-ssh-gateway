@@ -37,6 +37,7 @@ from examples.mcp_server.agent_tasks import (
     validate_scope_contract,
     validate_task_id,
 )
+from examples.mcp_server.git_trust import with_scoped_safe_directories
 
 RECEIPT_VERSION = 1
 CONTRACT_VERSION = 1
@@ -979,6 +980,18 @@ def _materialize_task_candidate_unlocked(
                 env=clean_env,
             )
         else:
+            try:
+                local_clone_env = with_scoped_safe_directories(
+                    (root, root / ".git"),
+                    base_env=clean_env,
+                )
+            except ValueError as exc:
+                raise CandidateError(
+                    "candidate Git trust configuration is invalid",
+                    code="GIT_OPERATION_FAILED",
+                    retryable=False,
+                    details={"phase": "clone"},
+                ) from exc
             _run_git(
                 root,
                 [
@@ -989,7 +1002,7 @@ def _materialize_task_candidate_unlocked(
                     str(root),
                     str(repo_tmp),
                 ],
-                env=clean_env,
+                env=local_clone_env,
             )
         _run_git(
             repo_tmp,

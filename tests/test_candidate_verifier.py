@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from examples.mcp_server import candidate_verifier as candidate_verifier_module
 from examples.mcp_server.candidate_verifier import (
     CandidateVerificationError,
     build_candidate_verifier_script,
@@ -294,6 +295,37 @@ def test_verifier_source_must_stay_under_candidate_root(
     assert err.code == "CANDIDATE_VOLUME_SUBPATH_INVALID"
     assert err.phase == "source_resolution"
     assert err.details["mutation_occurred"] is False
+
+
+def test_materialize_git_inherits_exact_safe_directory_to_child_git(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / ".git").mkdir()
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(dict(kwargs))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(candidate_verifier_module.subprocess, "run", fake_run)
+    candidate_verifier_module._run_materialize_git(
+        ["git", "clone", str(source), str(tmp_path / "clone")],
+        cwd=tmp_path,
+        home=tmp_path / "home",
+        safe_directories=(source, source / ".git"),
+    )
+
+    env = calls[0]["env"]
+    assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    entries = {
+        (env[f"GIT_CONFIG_KEY_{index}"], env[f"GIT_CONFIG_VALUE_{index}"])
+        for index in range(int(env["GIT_CONFIG_COUNT"]))
+    }
+    assert ("safe.directory", str(source.resolve())) in entries
+    assert ("safe.directory", str((source / ".git").resolve())) in entries
+    assert ("safe.directory", "*") not in entries
 
 
 def test_workspace_verifier_materializes_external_workspace_under_candidate_root(
