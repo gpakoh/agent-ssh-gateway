@@ -4,12 +4,18 @@ This file intentionally keeps only current open agent/operator wishes and live b
 Historical completed audit notes were pruned from TODO; they should live in a
 separate changelog/audit archive if needed.
 
+Stable finding IDs such as `AL-005` and `AO-011` are permanent cross-project
+references. Do not renumber or reuse them when an item is closed; ordinal list
+numbers are presentation only. All Gateway findings reported by sibling projects
+must be deduplicated into this authoritative `TODO.md` on `master` rather than
+kept only in a dirty canonical checkout, chat transcript, or stale feature branch.
+
 ## 🧭 Architect/OpenCode agent-loop findings — 2026-09-03
 
 PR #138 has merged; keep this list as the remaining close-out checklist until
 items are explicitly verified as implemented, documented and safe in production.
 
-1. ⬜ **Residual tool exposure/catalog mismatch.** #140 added repo-side catalog
+1. ⬜ **[AL-005] Residual tool exposure/catalog mismatch.** #140 added repo-side catalog
    consistency reporting, but the end-to-end operator problem remains until the
    ChatGPT-visible resource catalog and MCP `tools/list` cannot diverge silently.
    Live symptoms included missing invokable schemas for advertised/expected tools
@@ -35,14 +41,46 @@ items are explicitly verified as implemented, documented and safe in production.
    either invokable with the exact implementation contract or explicitly marked
    unavailable with a reason at the same surface the operator uses.
 
-2. ⬜ **Git namespace mismatch between SSH tools and control-plane git tools.**
+   JS Chat Engine audit, 2026-09-08 (P2; open; owner: Gateway; review before
+   the next operator-tooling release): the active `mcp_client_write` server
+   manifest at build `736d09d4279a3439998323b7fe25435e5141dcee` advertised
+   `todo_backlog_upsert` and `read_agent_artifact` as enabled/available, but
+   neither exact callable name was present in the ChatGPT tool registry
+   (`ALL_TOOLS`). This prevented use of the specialized deduplicating TODO
+   writer for this audit. Existing `read_file` plus hash-guarded
+   `supervisor_integrate_file` provide a permitted fallback for this existing
+   TODO only. Reproduce by comparing those two manifest entries with the actual
+   client-visible callable names; do not infer client availability from the
+   server-local manifest. Acceptance: expose matching callable schemas or mark
+   the client-side absence explicitly. Not a blocker for the JS engine audit
+   because a guarded existing-file update is available.
+
+   The same audit also exposed an opaque CAS-input diagnostic. An initial
+   `supervisor_integrate_file` call supplied a bare hexadecimal
+   `expected_sha256` (client input error) and returned only
+   `TOOL_EXECUTION_FAILED: Supervisor integration failed` (request
+   `9b85945e-d5af-47a0-9a9d-2a40c74850a9`). Reading the implementation showed
+   that the required format is `sha256:<64 hex>`, which the callable field
+   description did not state. Independently, full `read_file(TODO.md)` reported
+   size 26398 and `truncated=false`, but returned 26397 UTF-8 bytes without
+   the final LF: hashing returned content gave `7995ea6f...`, while
+   `workspace_verify` returned `sha256:d5911a11...`; adding exactly one LF
+   reproduced that raw-file hash. No new audit notes appeared after the failed
+   call. Desired contract: document the prefixed hash format, return an
+   authoritative raw-file SHA-256 with reads (or byte-exact content), and
+   distinguish invalid hash format from current-hash mismatch with safe typed
+   diagnostics. The recovery used the verified raw-file hash, preserved the
+   final LF and retained all existing TODO content; it did not drop the CAS
+   guard.
+
+2. ⬜ **[AL-006] Git namespace mismatch between SSH tools and control-plane git tools.**
    `execute_argv` / `repo_status` can observe one branch/ref/HEAD while trusted
    git tools act from another namespace or fail with `GIT_LOCAL_REF_MISSING`.
    Closure requires host-path-free metadata showing exact resolved project root,
    branch and head for trusted git operations, and fail-closed detection such as
    `WORKSPACE_NAMESPACE_MISMATCH` when namespaces diverge.
 
-3. ⬜ **Handoff/write tools must route around non-writeable production roots.**
+3. ⬜ **[AL-010] Handoff/write tools must route around non-writeable production roots.**
    GPT RAG orchestration on 2026-09-04 reported `Permission denied` when trying
    to create parallel `.ai-bridge` handoffs for `quart-core`, and `index.lock`
    permission failures when attempting writes/staging in root project checkouts.
@@ -59,7 +97,7 @@ items are explicitly verified as implemented, documented and safe in production.
    candidate clone, instead of allowing late `.ai-bridge` or `.git/index.lock`
    permission failures in production roots.
 
-4. ⬜ **OpenCode review clones must support dirty-worktree review targets.**
+4. ⬜ **[AL-011] OpenCode review clones must support dirty-worktree review targets.**
    During NOD verification on 2026-09-04, a read-only OpenCode review task
    materialized only repository `HEAD 40d026f8` instead of the current dirty
    worktree, so the review surface was not suitable for checking uncommitted NOD
@@ -70,15 +108,51 @@ items are explicitly verified as implemented, documented and safe in production.
    task metadata, and surface typed stall state plus recovery guidance instead
    of presenting the stale clone as a valid review target.
 
+5. ⬜ **[AL-007] Command-plane/session recovery gap after transient reconnect/cooldown.**
+   Project-level tools can remain usable while a previously known command session
+   becomes unavailable. Cross-project evidence also shows clean workspaces can be
+   stranded on deleted feature branches with no safe local switch/sync helper.
+   Closure requires restored command-plane recovery or bounded project-level tools
+   for existing-branch switch, default-branch checkout/sync and local-branch
+   cleanup, with exact current/head/target guards and structured before/after
+   evidence. During Zalesskiy SUP cleanup on 2026-09-08, remote branch
+   `seo-soften-about-claims-20260908` was already deleted while the registered
+   workspace remained locally checked out at `f09120737fa1e1e1930d4d6a70cc110cd018d387`;
+   `origin/main` had advanced to `7ca51cfaf9ab335ac1bd2eedb19381f805fea4f5`
+   and no exposed safe branch-switch helper existed. The desired helper must be
+   local-only, fail closed on dirty or stale expected state, and return typed
+   diagnostics such as `WORKTREE_DIRTY`, `TARGET_REF_MISSING`,
+   `EXPECTED_HEAD_MISMATCH` and `COMMAND_SESSION_UNAVAILABLE`.
+
+   JS Chat Engine audit on 2026-09-08 added transport evidence: native `info`,
+   `tree` and `read_file` stayed usable while `git_status` and `recent_commits`
+   returned inner `REMOTE_UNAVAILABLE` / retryable=true but outer
+   `INVALID_ARGUMENT`; after the Gateway build transition the unchanged reads
+   recovered. Acceptance includes bounded read-call completion during rollout,
+   consistent retryable transport classification at every envelope level and
+   explicit recovery guidance. Do not generalize read retries to blind retries of
+   timed-out mutations.
+
+6. ⬜ **[AL-012] `run_agent` outer success envelope must agree with pre-submit terminal failure.**
+   During Zalesskiy SUP Tailwind migration on 2026-09-08, a managed task was
+   rejected before submission because `task.json` supplied an explicit
+   `worktree_path`. The nested result correctly reported `status="error"`, no
+   job/attempt id and actionable recovery guidance, while the outer tool envelope
+   simultaneously returned `ok=true`, `error=null` and submission success text.
+   Closure requires pre-submit terminal validation failures to return a typed
+   outer non-success outcome, never emit submission success text, and regression
+   coverage binding outer status, nested status, job/attempt presence and actual
+   submission/mutation occurrence.
+
 ## 🧩 Architect/operator wanted capabilities — 2026-09-03
 
-1. ⬜ **First-class bounded internal service health probe.** Add a read-only
+1. ⬜ **[AO-001] First-class bounded internal service health probe.** Add a read-only
    `http_get_health` / `tcp_connect_check` capability for internal endpoints such
    as `http://agent-memory-service:8070/health`, with allowlisted method,
    explicit host/port/path, timeout, max response bytes, no secrets/env exposure,
    provenance, and clear DNS/refused/timeout/non-2xx/healthy distinctions.
 
-2. ⬜ **Project-level branch creation must not depend on root-owned `.git` refs.**
+2. ⬜ **[AO-004] Project-level branch creation must not depend on root-owned `.git` refs.**
    A clean registered child repository can be readable and PR-verifiable while
    `git_create_branch` fails on `.git/refs/heads/<branch>.lock` permission
    errors. During Supervisor delivery on 2026-09-04, attempting to import a
@@ -90,7 +164,20 @@ items are explicitly verified as implemented, documented and safe in production.
    or branch creation must fail with a typed ownership diagnostic and recovery
    path such as `GIT_OWNERSHIP_BLOCKED`.
 
-3. ⬜ **Typed Gitea repo/PR cleanup tools for architect-controlled delivery.**
+   NOD re-verification, 2026-09-08: registered child `gateway_client` at detached
+   HEAD `a83e31b40d4fc464d71a369dda478ad636f7a009` rejected
+   `git_create_branch` because `.git/refs/heads/...lock` was not writable, while
+   the same workspace immediately accepted `git_add` and `git_commit`, producing
+   detached commit `607376528dc23cddfdac751646dd83a9506970e4`. This proves a
+   mixed-permission state where index/objects/HEAD writes succeed but refs/heads
+   does not. Parent `nod-gateway` showed the opposite severity: `info` described
+   the workspace as writable, but guarded `git_add` failed with insufficient
+   permission to add an object to `.git/objects`, and no partial staging occurred.
+   Acceptance therefore requires per-component Git write-capability preflight for
+   index, objects, refs and HEAD; a single filesystem writeability boolean is not
+   sufficient evidence.
+
+3. ⬜ **[AO-005] Typed Gitea repo/PR cleanup tools for architect-controlled delivery.**
    Add first-class, ChatGPT-visible tools for safe repository cleanup operations
    that currently require manual UI/API fallback: close a Gitea PR without
    merge, update repository settings such as default branch, and verify
@@ -101,7 +188,7 @@ items are explicitly verified as implemented, documented and safe in production.
    coverage for PR close-without-merge, default-branch switch, already-closed
    idempotency, and catalog/resource visibility parity.
 
-4. ⬜ **Verification tools must not be pinned to an unreadable project `.venv`.**
+4. ⬜ **[AO-006] Verification tools must not be pinned to an unreadable project `.venv`.**
    During Supervisor RAG verification on 2026-09-04, project-level
    `run_pytest`, `run_ruff` and `run_mypy` all failed before collection because
    the registered checkout had `.venv/bin/python3` with permission denied, while
@@ -115,7 +202,18 @@ items are explicitly verified as implemented, documented and safe in production.
    `VERIFICATION_LOCKFILE_MISSING` diagnostic and a recovery path instead of
    treating environment bootstrap as code failure.
 
-5. ⬜ **Command-plane policy and verification ergonomics need typed operator guidance.**
+   NOD re-verification, 2026-09-08: after the child candidate was committed and
+   clean at exact HEAD `607376528dc23cddfdac751646dd83a9506970e4`, supervisor
+   `run_pytest` still failed before collection. `uv` found the existing
+   `.venv/bin/python3` pointed to a non-existent interpreter, selected CPython
+   3.12.14, then failed removing `./.venv/.lock` with permission denied. The same
+   focused behavior had passed through an alternate execution lane; a managed
+   OpenCode candidate also reported worker pytest `75 passed` and Ruff green while
+   Gateway required-check bootstrap failed. Acceptance must include this
+   broken-interpreter + unwritable-lock case and automatically select a safe
+   isolated verifier instead of reporting project-test failure.
+
+5. ⬜ **[AO-010] Command-plane policy and verification ergonomics need typed operator guidance.**
     Several 2026-09-04 delivery sessions exposed rough edges that overlap with
     existing namespace/session/environment findings but are not yet captured as a
     single operator contract: raw SSH `git push` / `git clone` can time out while
@@ -137,6 +235,97 @@ items are explicitly verified as implemented, documented and safe in production.
     recommended safe alternate tools, first-class bounded cleanup for
     Gateway-created scratch workspaces, and verification helpers that distinguish
     environment/bootstrap failure from project test failure.
+
+6. ⬜ **[AO-011] Trusted candidate preparation/publication must handle Git safe-directory ownership preflight.**
+   `prepare_candidate_clone` is the intended escape hatch from read-only or
+   cross-owned canonical workspaces, so it must itself read an approved registered
+   source without requiring mutable global Git configuration. Every trusted
+   verifier/materializer that clones an approved registered source must use the
+   same scoped/non-global `safe.directory` policy or fail before partial
+   registration/mutation with typed `GIT_SAFE_DIRECTORY_REQUIRED` /
+   `SOURCE_REPO_OWNERSHIP_BLOCKED` guidance. Wildcard `safe.directory=*` is
+   forbidden.
+
+   NOD re-verification, 2026-09-08, on build
+   `00728408fc5ae1e8e89a076210846baaaf067a13`: `prepare_candidate_clone` for
+   `nod-gateway` at exact base `40d026f888ff2e373fc83410e4a358bafa95589e`
+   failed before candidate creation with `fatal: detected dubious ownership`.
+   After `gateway_client` was committed cleanly at exact HEAD
+   `607376528dc23cddfdac751646dd83a9506970e4`, `gitea_push_verified_commit`
+   passed exact-base/head and allowed-files checks, entered source resolution,
+   then failed cloning the approved registered source with the same ownership
+   class. It returned `CANDIDATE_SOURCE_UNAVAILABLE`, `retryable=true`,
+   `mutation_occurred=false`. Acceptance must cover both paths and all shared
+   source-cloning verifier/materializer call sites.
+
+7. ⬜ **[AO-012] Project catalog reads need filtering and pagination.**
+   `project_list()` currently returns the entire registry, including historical
+   candidate clones, when an architect often needs one project id. Add exact,
+   prefix or text query plus project type/tag/parent filters, stable ordering,
+   `limit`/`offset`, total count and a compact projection. Exact-id lookup should
+   not require returning unrelated projects. Preserve a bounded backwards-
+   compatible unfiltered mode.
+
+8. ⬜ **[AO-013] Long-running candidate preparation needs async progress and cancellation.**
+   Fresh `prepare_candidate_clone` calls have taken roughly 63-116 seconds in
+   cross-project work while exposing no intermediate phase or cancellation.
+   Desired contract: optional async submission with durable job id; cheap status
+   phases such as fetch/checkout/register/verify; cancellation before final
+   registration; safe retry; and an optional bounded synchronous wait. Preserve
+   exact-base, clean-workspace and idempotent recovery guarantees.
+
+9. ⬜ **[AO-014] Secret-bearing dotenv files need a targeted atomic key-update primitive.**
+   A production `.env` key sometimes must be changed without reading, previewing,
+   diffing, returning or resubmitting unrelated secrets. Add a bounded
+   `dotenv_key_update` / `secret_file_key_update` capability for allowlisted
+   project-relative secret files. Inputs: exact project, relative file, key,
+   sensitive replacement value and an expected-current guard (prefer file/value
+   hash or opaque version). Update exactly one existing key atomically; preserve
+   unrelated bytes, mode and ownership; fail closed on stale state or ambiguous
+   duplicate/missing keys. No response, log, receipt, preview, audit metadata or
+   exception may contain old/new secret values, full lines, neighboring lines or
+   other file contents. Return only non-secret evidence such as key name,
+   before/after file hash, changed flag and atomic-write receipt id. Regression
+   coverage must include spaces, `#`, `=`, quotes and UTF-8 values, stale guards,
+   duplicate/missing keys, crash/interruption safety and proof that no output
+   surface leaks secrets.
+
+10. ⬜ **[AO-015] `gitea_push_verified_commit` needs auditable per-check execution evidence.**
+    Astra Builder C6 delivery on 2026-09-08 showed the helper can return
+    `checks_verified=true` and push an exact head even though independent CI on
+    the same SHA immediately disproves one of the declared required invariants.
+    Each required check must therefore return structured evidence bound to the
+    exact workspace/head: normalized command/argv identity, resolved cwd/project,
+    duration, exit code, bounded stdout/stderr evidence and whether the worktree
+    changed. `checks_verified=true` must be derivable from these per-check results.
+    If the selected verification lane cannot execute a check faithfully, fail
+    closed with a typed verification-capability error and do not push.
+
+11. ⬜ **[AO-016] Gitea Actions need first-class bounded generated-artifact retrieval.**
+    Job logs are diagnostic evidence, not a transport for generated files. During
+    the same Astra Builder recovery, CI generated the canonical ~52 KiB widget
+    runtime but Gateway could only expose log output; the operator had to rebuild
+    the artifact in another lane and compare hashes. Add read-only
+    `gitea_list_action_artifacts` / `gitea_get_action_artifact_file` or equivalent
+    bounded job-workspace snapshot APIs bound to repo, run, job and exact head
+    SHA. Return path, size, digest, provenance and truncation state; small text may
+    be returned bounded, larger artifacts should use a file reference. Fail closed
+    on run/job/head mismatch, path escape or missing artifact.
+
+12. ⬜ **[AO-017] Registered local projects need a typed Gitea repository bootstrap/publish primitive.**
+    During `site-audit-platform` bootstrap on 2026-09-09, Gateway had a registered
+    project and valid local Git baseline but no typed flow to create the matching
+    remote Gitea repository, bind it as the allowed origin, set/verify the default
+    branch and publish the exact guarded baseline. Add a bounded idempotent
+    `gitea_create_repository` / `bootstrap_gitea_repository` flow for an exact
+    registered project and allowlisted owner/namespace. Inputs must bind expected
+    local branch/head and desired repository identity/settings; incompatible
+    existing remotes must fail with zero writes. Return structured evidence for
+    local project/head, created-or-existing remote identity, default branch and
+    mutation occurrence, plus the exact guarded publish step when publication is
+    separate. Acceptance includes create-missing, compatible idempotency,
+    incompatible refusal, expected-head mismatch before mutation and a full
+    registered-project-to-remote bootstrap without manual UI/API fallback.
 
 ## 🧩 Frontend/Astro delivery findings — 2026-09-05
 
