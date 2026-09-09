@@ -1,12 +1,13 @@
 {
   "mode": "mcp_client",
   "safe_mode": true,
-  "expected_safe_count": 80,
+  "expected_safe_count": 81,
   "expected_blocked_count": 30,
-  "expected_mcp_client_full_count": 108,
+  "expected_mcp_client_full_count": 109,
   "must_include": [
     "health",
     "info",
+    "git_write_capabilities",
     "repo_status",
     "scan_command",
     "tools_manifest"
