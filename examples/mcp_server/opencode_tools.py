@@ -41,6 +41,7 @@ from examples.mcp_server.agent_tools import (
     _submit_same_key_retry,
     _task_string_list,
     _wait_same_job,
+    _workflow_execution_scope,
 )
 
 
@@ -162,7 +163,7 @@ def project_run_opencode(
             managed_source_path = managed_source_bundle_path(project, source_ref)
             if not managed_source_path:
                 raise ValueError("MCP_AGENT_SOURCE_ROOT is required for managed OpenCode execution")
-        allowed_files = _task_string_list(task_json or {}, "allowed_files")
+        _, allowed_files = _workflow_execution_scope(task_json or {})
         forbidden_files = _task_string_list(task_json or {}, "forbidden_files")
         required_checks = _task_string_list(task_json or {}, "required_checks")
     except (TypeError, ValueError) as exc:

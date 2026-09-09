@@ -74,7 +74,7 @@ ARCHIVE_REL_DIR = ".ai-bridge/archive"
 
 KNOWN_CONCRETE_BACKENDS = frozenset({"opencode"})
 WORKFLOW_PHASES = frozenset(
-    {"discovery", "validation", "implementation", "verification", "cleanup"}
+    {"discovery", "validation", "implementation", "verification", "review", "cleanup"}
 )
 SOURCE_MODE_COMMITTED_HEAD = "committed_head"
 SOURCE_MODE_DIRTY_WORKTREE_SNAPSHOT = "dirty_worktree_snapshot"
@@ -86,6 +86,7 @@ WORKFLOW_PHASE_TRANSITIONS = {
     "validation": "Move to implementation or terminal blocked; do not keep discussing.",
     "implementation": "Make the smallest scoped change, then move to verification.",
     "verification": "Run required checks, fix scoped failures, then move to cleanup/final report.",
+    "review": "Produce evidence and the final review report; do not implement, commit, or push changes in this task.",
     "cleanup": "Tighten the diff and write the final handoff; do not start new scope.",
 }
 
@@ -517,6 +518,8 @@ def build_task_json(
     validate_required_checks(required_checks)
     validate_scope_contract(allowed_files, forbidden_files)
     normalized_workflow_phase = validate_workflow_phase(workflow_phase)
+    if normalized_workflow_phase == "review" and (commit_allowed or push_allowed):
+        raise ValueError("review workflow tasks must not allow commit or push mutations")
     # Preserve the public builder's pre-existing strict input contract: an
     # explicitly supplied digest must be valid, including rejecting "". The
     # runtime resolver remains tolerant of legacy task.json files that stored
@@ -585,6 +588,20 @@ def build_task_consensus(
     phase = validate_workflow_phase(workflow_phase)
     artifacts = artifact_dir or f"{TASKS_REL_DIR}/{task_id}"
     next_action = WORKFLOW_PHASE_TRANSITIONS[phase]
+    if phase == "review":
+        convergence_rules = (
+            "- Review must produce evidence, findings, and a final review report.\n"
+            "- Review must not modify source files, commit, push, or transition to implementation.\n"
+            "- The final implementation-diff.patch must be empty as evidence that no source mutation occurred.\n"
+        )
+    else:
+        convergence_rules = (
+            "- Discovery must produce evidence and a validation question.\n"
+            "- Validation must produce GO/NO-GO and an implementation plan.\n"
+            "- Implementation must produce a scoped diff, not more discussion.\n"
+            "- Verification must run required checks or explain a hard blocker.\n"
+            "- Cleanup must finalize the handoff and avoid new scope.\n"
+        )
     return (
         "# Agent consensus\n\n"
         "This file is the durable baton state for long-running agent work. "
@@ -598,14 +615,10 @@ def build_task_consensus(
         "- Initial state: read current-plan.md, preserve scope, and record material decisions here.\n"
         "- Do not re-litigate settled decisions unless new evidence appears.\n\n"
         "## Convergence rule\n\n"
-        "- Discovery must produce evidence and a validation question.\n"
-        "- Validation must produce GO/NO-GO and an implementation plan.\n"
-        "- Implementation must produce a scoped diff, not more discussion.\n"
-        "- Verification must run required checks or explain a hard blocker.\n"
-        "- Cleanup must finalize the handoff and avoid new scope.\n\n"
-        "## Next action\n\n"
-        f"- {next_action}\n"
-        f"- Update `{artifacts}/agent-status.md` for progress and this file for decisions.\n"
+        + convergence_rules
+        + "\n## Next action\n\n"
+        + f"- {next_action}\n"
+        + f"- Update `{artifacts}/agent-status.md` for progress and this file for decisions.\n"
     )
 
 
@@ -628,12 +641,40 @@ def build_current_plan(
     validate_required_checks(required_checks)
     validate_scope_contract(allowed_files, forbidden_files)
     phase = validate_workflow_phase(workflow_phase)
+    if phase == "review" and commit_message:
+        raise ValueError("review workflow tasks must not define a commit message")
     allow = "\n".join(f"- {f}" for f in (allowed_files or []))
     forbid = "\n".join(f"- {f}" for f in (forbidden_files or []))
     checks = "\n".join(f"- `{c}`" for c in (required_checks or []))
     criteria = "\n".join(f"- {c}" for c in (acceptance_criteria or []))
     notes = f"\n## Constraints\n\n{constraints}\n" if constraints else ""
     artifacts = artifact_dir or f"{TASKS_REL_DIR}/{task_id}"
+    if phase == "review":
+        convergence = (
+            "This review phase is evidence-only and terminal for this task. "
+            "Do not transition to implementation or modify source files.\n\n"
+        )
+        agent_instructions = (
+            "Read this plan and inspect the existing code without modifying source files.\n"
+            f"Update `{artifacts}/agent-status.md` as evidence is collected.\n"
+            f"Keep durable decisions and handoff state in `{artifacts}/consensus.md`.\n"
+            f"Write the final findings to `{artifacts}/agent-report.md`.\n"
+            f"Leave `{artifacts}/implementation-diff.patch` empty as evidence that no source mutation occurred.\n"
+            "Do not implement, commit, push, or create branches in this task.\n"
+        )
+    else:
+        convergence = (
+            "Forced convergence: discovery → validation → implementation → "
+            "verification → cleanup. After validation, pure discussion is not "
+            "a sufficient deliverable.\n\n"
+        )
+        agent_instructions = (
+            "Read this plan and execute it in small, reviewable steps.\n"
+            f"After each meaningful change, update `{artifacts}/agent-status.md`.\n"
+            f"Keep durable decisions and handoff state in `{artifacts}/consensus.md`.\n"
+            f"Save final diff to `{artifacts}/implementation-diff.patch`.\n"
+            "Do not commit or push unless explicitly instructed.\n"
+        )
 
     return (
         f"# {task}\n\n"
@@ -643,22 +684,16 @@ def build_current_plan(
         f"- Workflow phase: {phase}\n\n"
         f"## Workflow phase\n\n"
         f"Current phase: `{phase}`. {WORKFLOW_PHASE_TRANSITIONS[phase]}\n\n"
-        f"Forced convergence: discovery → validation → implementation → "
-        f"verification → cleanup. After validation, pure discussion is not "
-        f"a sufficient deliverable.\n\n"
-        f"## Scope\n\n{scope}\n\n"
-        f"## Allowed files\n\n{allow}\n\n"
-        f"## Forbidden\n\n{forbid}\n\n"
-        f"## Required checks\n\n{checks}\n\n"
-        f"## Acceptance criteria\n\n{criteria}\n"
+        + convergence
+        + f"## Scope\n\n{scope}\n\n"
+        + f"## Allowed files\n\n{allow}\n\n"
+        + f"## Forbidden\n\n{forbid}\n\n"
+        + f"## Required checks\n\n{checks}\n\n"
+        + f"## Acceptance criteria\n\n{criteria}\n"
         + (f"\n## Commit message\n\n```\n{commit_message}\n```\n" if commit_message else "")
         + notes
         + "\n## Agent instructions\n\n"
-        + "Read this plan and execute it in small, reviewable steps.\n"
-        + f"After each meaningful change, update `{artifacts}/agent-status.md`.\n"
-        + f"Keep durable decisions and handoff state in `{artifacts}/consensus.md`.\n"
-        + f"Save final diff to `{artifacts}/implementation-diff.patch`.\n"
-        + "Do not commit or push unless explicitly instructed.\n"
+        + agent_instructions
     )
 
 
