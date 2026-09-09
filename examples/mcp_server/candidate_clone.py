@@ -26,6 +26,10 @@ from examples.mcp_server.project_registry_control import (
     ProjectRegistrationError,
     register_project,
 )
+from examples.mcp_server.registered_source_clone import (
+    RegisteredSourceCloneError,
+    clone_registered_commit_via_bundle,
+)
 from examples.mcp_server.source_publication_policy import classify_source_failure_message
 
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,160}$")
@@ -596,13 +600,26 @@ def prepare_candidate_clone(
             shutil.rmtree(tmp)
         try:
             if local_has_base:
-                _run_git(
-                    source_root,
-                    ["clone", "--local", "--no-hardlinks", str(source_root), str(tmp)],
-                    timeout=120,
-                    operation="clone source repository",
-                    extra_safe_directories=(source_root / ".git",),
-                )
+                try:
+                    clone_registered_commit_via_bundle(
+                        source_root=source_root,
+                        expected_sha=base_sha,
+                        destination=tmp,
+                        timeout=120,
+                    )
+                except RegisteredSourceCloneError as exc:
+                    raise _fail(
+                        "SOURCE_REPO_OWNERSHIP_BLOCKED"
+                        if exc.phase in {"source_trust", "resolve_source", "resolve_source_objects"}
+                        else "TOOL_EXECUTION_FAILED",
+                        "source repository could not be materialized through the trusted bundle bridge",
+                        retryable=exc.retryable,
+                        details={
+                            "operation": "clone source repository",
+                            "phase": exc.phase,
+                            "exit_code": exc.exit_code,
+                        },
+                    ) from exc
             else:
                 try:
                     publication = ensure_managed_source_bundle(project, base_sha)

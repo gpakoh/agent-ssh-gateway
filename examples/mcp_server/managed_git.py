@@ -19,7 +19,10 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from examples.mcp_client_remote.fleet.shared import validate_repo_owner_or_name
-from examples.mcp_server.git_trust import with_scoped_safe_directories
+from examples.mcp_server.registered_source_clone import (
+    RegisteredSourceCloneError,
+    clone_registered_commit_via_bundle,
+)
 
 _SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
@@ -155,32 +158,17 @@ def push_exact_sha(
         }
         try:
             try:
-                clone_env = with_scoped_safe_directories(
-                    (root, root / ".git"),
+                clone_registered_commit_via_bundle(
+                    source_root=root,
+                    expected_sha=expected_sha,
+                    destination=staging,
                     base_env=clean_env,
+                    timeout=30,
                 )
-            except ValueError as exc:
+            except RegisteredSourceCloneError as exc:
                 raise ManagedGitError(
-                    "managed Git staging trust configuration is invalid"
+                    f"failed to stage registered Git repository during {exc.phase}"
                 ) from exc
-            cloned = subprocess.run(
-                [
-                    "git",
-                    "clone",
-                    "--local",
-                    "--no-hardlinks",
-                    "--no-checkout",
-                    str(root),
-                    str(staging),
-                ],
-                text=True,
-                capture_output=True,
-                timeout=30,
-                check=False,
-                env=clone_env,
-            )
-            if cloned.returncode != 0:
-                raise ManagedGitError("failed to stage registered Git repository")
 
             resolved = subprocess.run(
                 ["git", "rev-parse", "--verify", f"{expected_sha}^{{commit}}"],

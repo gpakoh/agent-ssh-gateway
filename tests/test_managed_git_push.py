@@ -41,18 +41,21 @@ def test_push_exact_sha_keeps_token_out_of_argv_and_persistent_config(
 ) -> None:
     token = "top-secret-token"
     calls: list[tuple[list[str], dict[str, str], Path | None]] = []
+    source_clone: dict[str, Any] = {}
+
+    def fake_clone_registered_commit(**kwargs: Any) -> None:
+        source_clone.update(kwargs)
 
     def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         env = kwargs.get("env") or {}
         cwd = kwargs.get("cwd")
         calls.append((list(argv), dict(env), Path(cwd) if cwd else None))
-        if argv[1] == "clone":
-            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         if argv[1:3] == ["rev-parse", "--verify"]:
             return subprocess.CompletedProcess(argv, 0, stdout=f"{SHA}\n", stderr="")
         assert argv[1:3] == ["push", "--porcelain"]
         return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
 
+    monkeypatch.setattr(managed_git, "clone_registered_commit_via_bundle", fake_clone_registered_commit)
     monkeypatch.setattr(managed_git.subprocess, "run", fake_run)
 
     managed_git.push_exact_sha(
@@ -66,20 +69,14 @@ def test_push_exact_sha_keeps_token_out_of_argv_and_persistent_config(
         git_base="https://git.example.test",
     )
 
-    assert len(calls) == 3
-    clone_argv, clone_env, _clone_cwd = calls[0]
-    assert clone_argv[1:4] == ["clone", "--local", "--no-hardlinks"]
-    assert token not in " ".join(clone_argv)
+    assert source_clone["source_root"] == tmp_path.resolve()
+    assert source_clone["expected_sha"] == SHA
+    clone_env = source_clone["base_env"]
+    assert isinstance(clone_env, dict)
     assert "Authorization" not in " ".join(clone_env.values())
     assert clone_env["GIT_CONFIG_GLOBAL"] == "/dev/null"
-    clone_config = {
-        (clone_env[f"GIT_CONFIG_KEY_{index}"], clone_env[f"GIT_CONFIG_VALUE_{index}"])
-        for index in range(int(clone_env["GIT_CONFIG_COUNT"]))
-    }
-    assert ("safe.directory", str(tmp_path.resolve())) in clone_config
-    assert ("safe.directory", str((tmp_path / ".git").resolve())) in clone_config
-    assert ("safe.directory", "*") not in clone_config
-    push_argv, push_env, push_cwd = calls[2]
+    assert len(calls) == 2
+    push_argv, push_env, push_cwd = calls[1]
     assert push_cwd is not None and push_cwd != tmp_path
     assert push_cwd.name == "repo"
     assert token not in " ".join(push_argv)
@@ -92,21 +89,25 @@ def test_push_exact_sha_keeps_token_out_of_argv_and_persistent_config(
     assert "GITEA_TOKEN" not in push_env
 
 
-def test_push_exact_sha_invalid_git_trust_env_is_sanitized(
+def test_push_exact_sha_bundle_bridge_failure_is_sanitized(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    def reject_trust(*_args: object, **_kwargs: object) -> dict[str, str]:
-        raise ValueError("malformed inherited Git config")
+    def reject_materialization(**_kwargs: Any) -> None:
+        raise managed_git.RegisteredSourceCloneError(
+            "sensitive source failure",
+            phase="source_trust",
+            retryable=False,
+        )
 
     def must_not_run(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        raise AssertionError("git must not run after trust configuration rejection")
+        raise AssertionError("git must not run after source materialization rejection")
 
-    monkeypatch.setattr(managed_git, "with_scoped_safe_directories", reject_trust)
+    monkeypatch.setattr(managed_git, "clone_registered_commit_via_bundle", reject_materialization)
     monkeypatch.setattr(managed_git.subprocess, "run", must_not_run)
 
     with pytest.raises(
         managed_git.ManagedGitError,
-        match="managed Git staging trust configuration is invalid",
+        match="failed to stage registered Git repository during source_trust",
     ):
         managed_git.push_exact_sha(
             project_root=tmp_path,
@@ -150,9 +151,13 @@ def test_push_failure_does_not_surface_remote_or_secret(
 ) -> None:
     token = "never-leak-me"
 
+    monkeypatch.setattr(
+        managed_git,
+        "clone_registered_commit_via_bundle",
+        lambda **_kwargs: None,
+    )
+
     def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if argv[1] == "clone":
-            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         if argv[1:3] == ["rev-parse", "--verify"]:
             return subprocess.CompletedProcess(argv, 0, stdout=f"{SHA}\n", stderr="")
         return subprocess.CompletedProcess(

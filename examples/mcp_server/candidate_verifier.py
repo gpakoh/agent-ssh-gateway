@@ -22,6 +22,10 @@ from typing import Any
 from tool_results import _redact_error_message
 
 from examples.mcp_server.git_trust import with_scoped_safe_directories
+from examples.mcp_server.registered_source_clone import (
+    RegisteredSourceCloneError,
+    clone_registered_commit_via_bundle,
+)
 
 
 class CandidateVerificationError(RuntimeError):
@@ -604,21 +608,27 @@ def _materialize_workspace_source(workspace_root: Path, expected_sha: str) -> Pa
         ) from exc
 
     try:
-        _run_materialize_git(
-            [
-                "git",
-                "-c",
-                f"safe.directory={workspace}",
-                "clone",
-                "--no-hardlinks",
-                "--no-checkout",
-                str(workspace),
-                str(staging),
-            ],
-            cwd=materialized_root,
-            home=staging,
-            safe_directories=(workspace, workspace / ".git"),
-        )
+        try:
+            clone_registered_commit_via_bundle(
+                source_root=workspace,
+                expected_sha=expected_sha,
+                destination=staging,
+                base_env=_git_env(staging),
+                timeout=120,
+            )
+        except RegisteredSourceCloneError as exc:
+            raise CandidateVerificationError(
+                "candidate verifier could not materialize registered workspace source",
+                code="CANDIDATE_SOURCE_UNAVAILABLE",
+                phase="source_resolution",
+                retryable=exc.retryable,
+                details={
+                    "phase": "source_resolution",
+                    "materialization_phase": exc.phase,
+                    "exit_code": exc.exit_code,
+                    "mutation_occurred": False,
+                },
+            ) from exc
         _run_materialize_git(
             ["git", "-C", str(staging), "checkout", "--detach", "--quiet", expected_sha],
             cwd=staging,
