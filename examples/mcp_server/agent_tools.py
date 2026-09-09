@@ -40,6 +40,7 @@ from examples.mcp_server.agent_tasks import (
     AttemptConflictError,
     AttemptStateError,
     resolve_task_source_contract,
+    validate_workflow_phase,
 )
 
 TASKS_REL_DIR = ".ai-bridge/tasks"
@@ -438,6 +439,29 @@ def _task_string_list(task_json: dict[str, Any], key: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"task.json field {key!r} must be a list of strings")
     return [item.strip() for item in value if item.strip()]
+
+
+def _workflow_execution_scope(task_json: dict[str, Any]) -> tuple[str, list[str]]:
+    """Resolve workflow phase and the machine-enforced mutation allowlist.
+
+    ``allowed_files`` remains useful review context in task.json/current-plan,
+    but a review task is evidence-only: the executor must not mutate *any*
+    source path. Returning an empty mutation allowlist makes the existing
+    supervisor scope gate reject every changed file without adding a second
+    competing scope implementation.
+    """
+    phase = validate_workflow_phase(task_json.get("workflow_phase"))
+    configured_allowed_files = _task_string_list(task_json, "allowed_files")
+    if phase != "review":
+        return phase, configured_allowed_files
+
+    commit_allowed = task_json.get("commit_allowed", False)
+    push_allowed = task_json.get("push_allowed", False)
+    if not isinstance(commit_allowed, bool) or not isinstance(push_allowed, bool):
+        raise ValueError("review workflow commit_allowed/push_allowed must be booleans")
+    if commit_allowed or push_allowed:
+        raise ValueError("review workflow tasks must not allow commit or push mutations")
+    return phase, []
 
 
 def _read_current_plan(
@@ -908,6 +932,66 @@ def _proxy_status_sidecar_script_lines() -> list[str]:
         "    if os.path.exists(tmp):",
         "        os.unlink(tmp)",
         "PROXYSTATUS_EOF",
+        "}",
+    ]
+
+
+def _worker_artifact_snapshot_script_lines() -> list[str]:
+    """Define a bounded nofollow snapshot helper for worker-authored artifacts."""
+    return [
+        "snapshot_worker_artifact() {",
+        '  _snapshot_src="$1"',
+        '  _snapshot_dst="$2"',
+        '  _snapshot_limit="$3"',
+        '  python3 - "$_snapshot_src" "$_snapshot_dst" "$_snapshot_limit" <<\'WORKERSNAPSHOT_EOF\'',
+        "import os, stat, sys, tempfile",
+        "",
+        "src, dst, limit_raw = sys.argv[1:]",
+        "limit = int(limit_raw)",
+        "if limit <= 0:",
+        "    raise SystemExit(2)",
+        "def clear_destination():",
+        "    try:",
+        "        os.unlink(dst)",
+        "    except (FileNotFoundError, IsADirectoryError):",
+        "        pass",
+        "try:",
+        "    before = os.lstat(src)",
+        "except FileNotFoundError:",
+        "    clear_destination()",
+        "    raise SystemExit(0)",
+        "if not stat.S_ISREG(before.st_mode):",
+        "    clear_destination()",
+        "    raise SystemExit(0)",
+        "flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)",
+        "try:",
+        "    fd = os.open(src, flags)",
+        "except OSError:",
+        "    clear_destination()",
+        "    raise SystemExit(0)",
+        "with os.fdopen(fd, 'rb', closefd=True) as fh:",
+        "    opened = os.fstat(fh.fileno())",
+        "    if (not stat.S_ISREG(opened.st_mode) or",
+        "            (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):",
+        "        clear_destination()",
+        "        raise SystemExit(0)",
+        "    data = fh.read(limit + 1)[:limit]",
+        "directory = os.path.dirname(dst) or '.'",
+        "fd, tmp = tempfile.mkstemp(prefix='.worker-snapshot.', dir=directory)",
+        "try:",
+        "    os.fchmod(fd, 0o600)",
+        "    with os.fdopen(fd, 'wb') as out:",
+        "        out.write(data)",
+        "        out.flush()",
+        "        os.fsync(out.fileno())",
+        "    try:",
+        "        os.replace(tmp, dst)",
+        "    except IsADirectoryError:",
+        "        pass",
+        "finally:",
+        "    if os.path.exists(tmp):",
+        "        os.unlink(tmp)",
+        "WORKERSNAPSHOT_EOF",
         "}",
     ]
 
@@ -1678,6 +1762,7 @@ def _build_opencode_script(
         'echo "Status: running" > "$td/agent-status.md"',
         "OPCODE_BIN=$(command -v opencode 2>/dev/null || echo '/root/.opencode/bin/opencode')",
     ])
+    parts.extend(_worker_artifact_snapshot_script_lines())
     parts.extend(_agent_heartbeat_script_lines())
     if project_root and worktree_path and not managed_clone:
         parts.extend(_parent_prerun_snapshot_script_lines(project_root))
@@ -1895,7 +1980,7 @@ def _build_opencode_script(
         # post-processing replaces agent-status.md with its canonical final
         # one-line state. This survives MCP restarts and keeps the worker's
         # step log/deliverables available for later review.
-        'if [ -f "$td/agent-status.md" ]; then cp "$td/agent-status.md" "$td/worker-status.md"; fi',
+        'snapshot_worker_artifact "$td/agent-status.md" "$td/worker-status.md" 65536',
     ])
     if proxy_provider_url:
         parts.extend(
@@ -1957,6 +2042,12 @@ def _build_opencode_script(
             "fi",
         ]
     )
+    parts.extend(
+        [
+            '# Preserve a bounded agent-authored report before writing the trusted runner receipt.',
+            'snapshot_worker_artifact "$td/agent-report.md" "$td/worker-report.md" 65536',
+        ]
+    )
     parts.append(
         f'cat > "$td/agent-report.md" << REOF\n'
         f"# Agent Runner Result — {task_id}\n\n"
@@ -1974,9 +2065,14 @@ def _build_opencode_script(
         f"REOF"
     )
     parts.extend([
-        'if [ -s "$td/worker-status.md" ]; then',
+        'if [ -f "$td/worker-status.md" ] && [ ! -L "$td/worker-status.md" ] && [ -s "$td/worker-status.md" ]; then',
         '  printf "\\n## Worker status snapshot\\n\\n" >> "$td/agent-report.md"',
         '  cat "$td/worker-status.md" >> "$td/agent-report.md"',
+        '  printf "\\n" >> "$td/agent-report.md"',
+        "fi",
+        'if [ -f "$td/worker-report.md" ] && [ ! -L "$td/worker-report.md" ] && [ -s "$td/worker-report.md" ]; then',
+        '  printf "\\n## Agent-provided findings (untrusted narrative)\\n\\n" >> "$td/agent-report.md"',
+        '  cat "$td/worker-report.md" >> "$td/agent-report.md"',
         '  printf "\\n" >> "$td/agent-report.md"',
         "fi",
     ])
@@ -2189,6 +2285,7 @@ def project_run_agent(
             source_mode = str(source_contract["source_mode"])
             source_ref = source_contract["source_ref"]
             managed_source_sha256 = source_contract["managed_source_sha256"]
+            _, allowed_files = _workflow_execution_scope(task_json)
             if source_mode == "dirty_worktree_snapshot" and not managed_clone:
                 raise ValueError(
                     "dirty_worktree_snapshot requires managed OpenCode execution"
@@ -2202,7 +2299,6 @@ def project_run_agent(
                 managed_source_path = managed_source_bundle_path(project, source_ref)
                 if not managed_source_path:
                     raise ValueError("MCP_AGENT_SOURCE_ROOT is required for managed OpenCode execution")
-            allowed_files = _task_string_list(task_json, "allowed_files")
             forbidden_files = _task_string_list(task_json, "forbidden_files")
             required_checks = _task_string_list(task_json, "required_checks")
         except (TypeError, ValueError) as exc:

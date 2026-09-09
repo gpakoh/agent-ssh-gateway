@@ -168,9 +168,11 @@ class TestBuildOpencodeScriptProxy:
         monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
 
-        snapshot = 'cp "$td/agent-status.md" "$td/worker-status.md"'
+        snapshot = 'snapshot_worker_artifact "$td/agent-status.md" "$td/worker-status.md" 65536'
         canonical = 'echo "Status: needs-review" > "$td/agent-status.md"'
         assert snapshot in script
+        assert "O_NOFOLLOW" in script
+        assert "os.replace(tmp, dst)" in script
         assert script.index(snapshot) < script.index(canonical)
         assert "## Worker status snapshot" in script
         assert 'cat "$td/worker-status.md" >> "$td/agent-report.md"' in script

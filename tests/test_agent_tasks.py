@@ -193,6 +193,7 @@ class TestValidateWorkflowPhase:
         assert validate_workflow_phase(None) == "implementation"
         assert validate_workflow_phase("") == "implementation"
         assert validate_workflow_phase(" Validation ") == "validation"
+        assert validate_workflow_phase(" REVIEW ") == "review"
 
     def test_rejects_unknown_phase(self):
         with pytest.raises(ValueError):
@@ -233,6 +234,29 @@ class TestBuildTaskJson:
         assert "src/**" in data["allowed_files"]
         assert data["required_checks"] == ["pytest -q", "ruff check"]
         assert data["workflow_phase"] == "validation"
+
+    def test_review_phase_is_persisted_and_rejects_mutation_flags(self):
+        data = json.loads(
+            build_task_json(
+                task_id="b23456789012",
+                agent="opencode",
+                allowed_files=["src/**"],
+                workflow_phase="review",
+            )
+        )
+        assert data["workflow_phase"] == "review"
+        assert data["allowed_files"] == ["src/**"]
+        assert data["commit_allowed"] is False
+        assert data["push_allowed"] is False
+
+        for kwargs in ({"commit_allowed": True}, {"push_allowed": True}):
+            with pytest.raises(ValueError, match="review workflow"):
+                build_task_json(
+                    task_id="b23456789012",
+                    agent="opencode",
+                    workflow_phase="review",
+                    **kwargs,
+                )
 
     def test_accepts_base_ref(self):
         sha = "c" * 40
@@ -395,6 +419,18 @@ class TestBuildTaskConsensus:
         assert "GO/NO-GO" in result
         assert "Do not re-litigate settled decisions" in result
 
+    def test_review_consensus_is_terminal_and_evidence_only(self):
+        result = build_task_consensus(
+            task_id="c34567890123",
+            task="Audit lifecycle",
+            workflow_phase="review",
+        )
+        assert "Workflow phase: review" in result
+        assert "final review report" in result
+        assert "must not modify source files" in result
+        assert "must be empty" in result
+        assert "Move to implementation" not in result
+
 
 class TestBuildCurrentPlan:
     def test_minimal(self):
@@ -423,6 +459,33 @@ class TestBuildCurrentPlan:
         assert "app/**" in result
         assert "polish: improve RAG search" in result
         assert "No model changes" in result
+
+    def test_review_plan_is_read_only_terminal_contract(self):
+        result = build_current_plan(
+            task_id="d45678901234",
+            task="Audit lifecycle",
+            scope="Read lifecycle code and report findings",
+            allowed_files=["examples/mcp_server/agent_tasks.py"],
+            required_checks=["git status --short"],
+            workflow_phase="review",
+        )
+        assert "Current phase: `review`" in result
+        assert "evidence-only and terminal" in result
+        assert "without modifying source files" in result
+        assert "agent-report.md" in result
+        assert "implementation-diff.patch` empty" in result
+        assert "Do not implement, commit, push, or create branches" in result
+        assert "Forced convergence: discovery" not in result
+        assert "After each meaningful change" not in result
+
+    def test_review_plan_rejects_commit_message(self):
+        with pytest.raises(ValueError, match="review workflow"):
+            build_current_plan(
+                task_id="d45678901234",
+                task="Audit lifecycle",
+                workflow_phase="review",
+                commit_message="must-not-exist",
+            )
 
 
 class TestReadAgentTaskFile:
@@ -2499,6 +2562,46 @@ class TestPrepareAgentTaskRetry:
         assert f"- Retry task ID: {retry}" in plan
         assert result["next"]["run_agent"] == {"project": "my-proj", "task_id": retry}
 
+    def test_retry_preserves_review_phase_and_terminal_semantics(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        source = "source-task-012"
+        retry = "retry-task-012"
+        self._write_source_task(tmp_path, source, status="cancelled", job_id="job-cancelled")
+        source_dir = tmp_path / ".ai-bridge" / "tasks" / source
+        contract_path = source_dir / "task.json"
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        contract["workflow_phase"] = "review"
+        contract_path.write_text(json.dumps(contract, indent=2), encoding="utf-8")
+        (source_dir / "current-plan.md").write_text(
+            build_current_plan(
+                task_id=source,
+                task="Audit lifecycle",
+                workflow_phase="review",
+            ),
+            encoding="utf-8",
+        )
+
+        result = prepare_agent_task_retry(
+            self._shell_run_cmd(tmp_path),
+            self._shell_run_script(tmp_path),
+            project="my-proj",
+            source_task_id=source,
+            retry_task_id=retry,
+            job_status=lambda job_id: {"status": "cancelled", "job_id": job_id},
+        )
+
+        assert result["exit_code"] == 0
+        retry_dir = tmp_path / ".ai-bridge" / "tasks" / retry
+        retry_contract = json.loads((retry_dir / "task.json").read_text(encoding="utf-8"))
+        assert retry_contract["workflow_phase"] == "review"
+        consensus = (retry_dir / "consensus.md").read_text(encoding="utf-8")
+        plan = (retry_dir / "current-plan.md").read_text(encoding="utf-8")
+        assert "Workflow phase: review" in consensus
+        assert "must not modify source files" in consensus
+        assert "evidence-only and terminal" in plan
+        assert "Do not transition to implementation" in plan
 
     def test_retry_preserves_dirty_snapshot_identity_without_recapture(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
