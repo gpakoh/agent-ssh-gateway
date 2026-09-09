@@ -37,7 +37,10 @@ from examples.mcp_server.agent_tasks import (
     validate_scope_contract,
     validate_task_id,
 )
-from examples.mcp_server.git_trust import with_scoped_safe_directories
+from examples.mcp_server.registered_source_clone import (
+    RegisteredSourceCloneError,
+    clone_registered_commit_via_bundle,
+)
 
 RECEIPT_VERSION = 1
 CONTRACT_VERSION = 1
@@ -981,29 +984,24 @@ def _materialize_task_candidate_unlocked(
             )
         else:
             try:
-                local_clone_env = with_scoped_safe_directories(
-                    (root, root / ".git"),
+                clone_registered_commit_via_bundle(
+                    source_root=root,
+                    expected_sha=evidence["base_head"],
+                    destination=repo_tmp,
                     base_env=clean_env,
+                    timeout=60,
                 )
-            except ValueError as exc:
+            except RegisteredSourceCloneError as exc:
                 raise CandidateError(
-                    "candidate Git trust configuration is invalid",
+                    "candidate registered source could not be materialized through the trusted bundle bridge",
                     code="GIT_OPERATION_FAILED",
-                    retryable=False,
-                    details={"phase": "clone"},
+                    retryable=exc.retryable,
+                    details={
+                        "phase": "clone",
+                        "materialization_phase": exc.phase,
+                        "returncode": exc.exit_code,
+                    },
                 ) from exc
-            _run_git(
-                root,
-                [
-                    "clone",
-                    "--local",
-                    "--no-hardlinks",
-                    "--no-checkout",
-                    str(root),
-                    str(repo_tmp),
-                ],
-                env=local_clone_env,
-            )
         _run_git(
             repo_tmp,
             ["checkout", "--detach", "--quiet", evidence["base_head"]],

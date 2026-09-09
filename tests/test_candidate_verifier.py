@@ -297,35 +297,59 @@ def test_verifier_source_must_stay_under_candidate_root(
     assert err.details["mutation_occurred"] is False
 
 
-def test_materialize_git_inherits_exact_safe_directory_to_child_git(
+def test_workspace_materializer_routes_registered_source_through_bundle_bridge(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    _configure(monkeypatch, tmp_path)
     source = tmp_path / "source"
     source.mkdir()
-    (source / ".git").mkdir()
-    calls: list[dict[str, Any]] = []
+    subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=source, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=source, check=True)
+    (source / "file.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "file.txt"], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=source, check=True)
+    expected_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    original_clone = candidate_verifier_module.clone_registered_commit_via_bundle
+    captured: list[dict[str, Any]] = []
 
-    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append(dict(kwargs))
-        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+    def recording_clone(**kwargs: Any) -> None:
+        captured.append(dict(kwargs))
+        original_clone(**kwargs)
 
-    monkeypatch.setattr(candidate_verifier_module.subprocess, "run", fake_run)
-    candidate_verifier_module._run_materialize_git(
-        ["git", "clone", str(source), str(tmp_path / "clone")],
-        cwd=tmp_path,
-        home=tmp_path / "home",
-        safe_directories=(source, source / ".git"),
+    monkeypatch.setattr(
+        candidate_verifier_module,
+        "clone_registered_commit_via_bundle",
+        recording_clone,
     )
 
-    env = calls[0]["env"]
-    assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"
-    entries = {
-        (env[f"GIT_CONFIG_KEY_{index}"], env[f"GIT_CONFIG_VALUE_{index}"])
-        for index in range(int(env["GIT_CONFIG_COUNT"]))
-    }
-    assert ("safe.directory", str(source.resolve())) in entries
-    assert ("safe.directory", str((source / ".git").resolve())) in entries
-    assert ("safe.directory", "*") not in entries
+    staging = candidate_verifier_module._materialize_workspace_source(source, expected_sha)
+    try:
+        assert len(captured) == 1
+        call = captured[0]
+        assert call["source_root"] == source.resolve()
+        assert call["expected_sha"] == expected_sha
+        assert call["destination"] == staging
+        env = call["base_env"]
+        assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+        assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+        actual = subprocess.run(
+            ["git", "-C", str(staging), "rev-parse", "HEAD"],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        assert actual == expected_sha
+    finally:
+        import shutil
+
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def test_workspace_verifier_materializes_external_workspace_under_candidate_root(

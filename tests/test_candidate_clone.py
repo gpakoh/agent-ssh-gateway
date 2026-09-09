@@ -260,47 +260,29 @@ def test_candidate_workspace_dubious_ownership_uses_safe_directory_code(tmp_path
     assert str(tmp_path) not in err.details["stderr_tail"]
 
 
-def test_prepare_candidate_clone_local_clone_trusts_source_gitdir(
+def test_prepare_candidate_clone_routes_registered_source_through_bundle_bridge(
     registry_fixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from examples.mcp_server import candidate_clone as candidate_clone_module
+    from examples.mcp_server.registered_source_clone import RegisteredSourceCloneError
 
-    _workspace, source, config_dir, journal_root, base = registry_fixture
-    captured_commands: list[list[str]] = []
-    captured_envs: list[dict[str, str] | None] = []
+    workspace, source, config_dir, journal_root, base = registry_fixture
+    captured: dict[str, object] = {}
 
-    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
-        command = list(args[0])
-        captured_commands.append(command)
-        captured_envs.append(kwargs.get("env"))
-        if "rev-parse" in command and "--verify" in command:
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=0,
-                stdout=f"{base}\n",
-                stderr="",
-            )
-        if "rev-parse" in command and "--is-shallow-repository" in command:
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=0,
-                stdout="false\n",
-                stderr="",
-            )
-        if "clone" in command:
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=128,
-                stdout="",
-                stderr=(
-                    "fatal: detected dubious ownership in repository at "
-                    f"'{source / '.git'}'\n"
-                ),
-            )
-        raise AssertionError(f"unexpected git command: {command!r}")
+    def reject_after_capture(**kwargs: object) -> None:
+        captured.update(kwargs)
+        raise RegisteredSourceCloneError(
+            "simulated source materialization failure",
+            phase="source_trust",
+            retryable=False,
+        )
 
-    monkeypatch.setattr(candidate_clone_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        candidate_clone_module,
+        "clone_registered_commit_via_bundle",
+        reject_after_capture,
+    )
 
     with pytest.raises(CandidateCloneError) as exc_info:
         candidate_clone_module.prepare_candidate_clone(
@@ -313,33 +295,18 @@ def test_prepare_candidate_clone_local_clone_trusts_source_gitdir(
 
     err = exc_info.value
     assert err.code == "SOURCE_REPO_OWNERSHIP_BLOCKED"
-    assert err.message == "source repository ownership is not trusted by Git"
-    assert err.details is not None
-    assert err.details["operation"] == "clone source repository"
-
-    clone_command = next(command for command in captured_commands if "clone" in command)
-    assert clone_command[:5] == [
-        "git",
-        "-c",
-        f"safe.directory={source.resolve()}",
-        "-c",
-        f"safe.directory={(source / '.git').resolve()}",
-    ]
-    assert clone_command[5] == "clone"
-    assert "safe.directory=*" not in " ".join(clone_command)
-    assert "--global" not in clone_command
-    clone_index = captured_commands.index(clone_command)
-    clone_env = captured_envs[clone_index]
-    assert clone_env is not None
-    count = int(clone_env["GIT_CONFIG_COUNT"])
-    inherited = {
-        (clone_env[f"GIT_CONFIG_KEY_{index}"], clone_env[f"GIT_CONFIG_VALUE_{index}"])
-        for index in range(count)
+    assert err.retryable is False
+    assert err.details == {
+        "operation": "clone source repository",
+        "phase": "source_trust",
+        "exit_code": None,
     }
-    assert ("safe.directory", str(source.resolve())) in inherited
-    assert ("safe.directory", str((source / ".git").resolve())) in inherited
-    assert ("safe.directory", "*") not in inherited
-    assert clone_env.get("GIT_CONFIG_GLOBAL") != str(Path.home() / ".gitconfig")
+    assert captured["source_root"] == source.resolve()
+    assert captured["expected_sha"] == base
+    destination = captured["destination"]
+    assert isinstance(destination, Path)
+    assert destination.parent == workspace / ".mcp-candidate-clones"
+    assert not destination.exists()
 
 
 def test_prepare_candidate_clone_refuses_dirty_existing_clone(registry_fixture) -> None:
