@@ -986,6 +986,13 @@ class _ProxyPoolHandler(BaseHTTPRequestHandler):
 
 
 def test_parallel_runners_receive_distinct_proxy_leases(tmp_path, monkeypatch):
+    original_proxies = list(_ProxyPoolHandler.proxies)
+    lease_namespace = hashlib.sha256(str(tmp_path).encode()).hexdigest()[:12]
+    _ProxyPoolHandler.proxies = [
+        f"http://127.0.0.1:19001/{lease_namespace}",
+        f"http://127.0.0.1:19002/{lease_namespace}",
+    ]
+    processes: list[subprocess.Popen[str]] = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ProxyPoolHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -1013,7 +1020,6 @@ def test_parallel_runners_receive_distinct_proxy_leases(tmp_path, monkeypatch):
         monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "5")
         monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
 
-        processes = []
         for i in range(2):
             artifacts = tmp_path / f"parallel-artifacts-{i}"
             artifacts.mkdir()
@@ -1039,6 +1045,20 @@ def test_parallel_runners_receive_distinct_proxy_leases(tmp_path, monkeypatch):
         assert len(set(proxies)) == 2
         assert set(proxies) == set(_ProxyPoolHandler.proxies)
     finally:
+        for proc in processes:
+            if proc.poll() is None:
+                proc.terminate()
+        for proc in processes:
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
+        _ProxyPoolHandler.proxies = original_proxies
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
