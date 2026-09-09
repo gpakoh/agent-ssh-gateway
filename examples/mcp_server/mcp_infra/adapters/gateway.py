@@ -36,6 +36,7 @@ from mcp_client_tools import (
     git_push,
     git_status,
     git_update_branch_by_merge,
+    git_write_capabilities,
     info,
     list_files,
     list_tree,
@@ -851,6 +852,16 @@ def gateway_info(project: str) -> dict[str, Any]:
     )
 
 
+def gateway_git_write_capabilities(project: str) -> dict[str, Any]:
+    """Read-only per-component Git metadata write-capability preflight."""
+    return run_tool(
+        tool="git_write_capabilities",
+        title="Git write capabilities",
+        fn=lambda: git_write_capabilities(_server_client(), project),
+        success_text="Collected Git metadata write capabilities.",
+    )
+
+
 def gateway_git_status(project: str) -> dict[str, Any]:
     """Show git working tree status within a project directory."""
     return run_tool(
@@ -1268,6 +1279,7 @@ def register_all() -> None:
     register_tool("repo_status")(gateway_repo_status)
     register_tool("working_directory")(gateway_working_directory)
     register_tool("info")(gateway_info)
+    register_tool("git_write_capabilities")(gateway_git_write_capabilities)
     register_tool("git_status")(gateway_git_status)
     register_tool("recent_commits")(gateway_recent_commits)
     register_tool("git_diff_stat")(gateway_git_diff_stat)

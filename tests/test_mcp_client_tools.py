@@ -35,6 +35,9 @@ class TestChatgptModeVisibility:
     def test_includes_session_health(self):
         assert should_register_tool("session_health", "mcp_client")
 
+    def test_includes_git_write_capabilities(self):
+        assert should_register_tool("git_write_capabilities", "mcp_client")
+
     def test_includes_git_status(self):
         assert should_register_tool("git_status", "mcp_client")
 
@@ -588,6 +591,13 @@ class TestProjectGitStateGuards:
         class Client:
             def __init__(self) -> None:
                 self.commands: list[str] = []
+
+            def execute_project_script(self, project: str, script: str, timeout_s: int = 30) -> dict[str, object]:
+                return {
+                    "exit_code": 0,
+                    "stdout": "available=1\nindex=1\nobjects=1\nrefs=1\nhead=1\ndetached=0\n",
+                    "stderr": "",
+                }
 
             def execute_project_command(self, project: str, command: str) -> dict[str, object]:
                 self.commands.append(command)

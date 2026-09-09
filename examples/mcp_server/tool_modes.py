@@ -83,6 +83,7 @@ TOOL_NAMES_BY_MODE: dict[ToolMode, set[str]] = {
         "wait_job",
         "repo_status",
         "working_directory",
+        "git_write_capabilities",
         "git_status",
         "recent_commits",
         "git_diff_stat",
