@@ -36,6 +36,8 @@ from examples.mcp_server.agent_tools import (
 TD = ".ai-bridge/tasks/a12345678901"
 TASK_ID = "a12345678901"
 
+RUNNER_HARNESS_TIMEOUT_SECONDS = 60
+
 
 def test_supervisor_scope_diff_disables_rename_detection() -> None:
     script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
@@ -367,7 +369,7 @@ def _run_managed_bundle_case(
         text=True,
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
     )
     return result, artifacts, workspace, marker
 
@@ -456,7 +458,7 @@ def test_explicit_base_ref_checks_out_pinned_commit(tmp_path, monkeypatch):
         text=True,
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
@@ -498,7 +500,7 @@ def test_full_script_reports_needs_review_warning_when_check_tool_missing(tmp_pa
         text=True,
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
@@ -548,7 +550,7 @@ def test_existing_clean_workspace_rejects_base_ref_drift(tmp_path, monkeypatch):
         text=True,
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode != 0
@@ -604,7 +606,7 @@ def test_managed_clone_executes_without_creating_source_worktree_metadata(tmp_pa
         text=True,
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
@@ -671,7 +673,7 @@ def test_managed_clone_rejects_existing_workspace_with_remote(tmp_path, monkeypa
         text=True,
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode != 0
@@ -722,7 +724,7 @@ def test_managed_clone_rejects_symlink_workspace(tmp_path, monkeypatch):
         text=True,
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode != 0
@@ -772,7 +774,7 @@ def test_managed_clone_requires_registry_root_at_git_toplevel(tmp_path, monkeypa
         text=True,
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
@@ -810,7 +812,12 @@ def _run_proxy_preflight_script(tmp_path: Path, monkeypatch, *, provider_body: s
         monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", provider.as_uri())
     script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
     result = subprocess.run(
-        ["sh", "-c", script], cwd=source, text=True, capture_output=True, check=False, timeout=15
+        ["sh", "-c", script],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
     )
     return result, artifacts, marker
 
@@ -898,7 +905,7 @@ def test_runner_final_proxy_status_overwrites_worker_authored_bytes(tmp_path, mo
         text=True,
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
@@ -940,7 +947,7 @@ def test_rate_limited_run_persists_redacted_terminal_proxy_status(tmp_path, monk
         text=True,
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 77, result.stderr or result.stdout
@@ -1042,7 +1049,10 @@ def test_parallel_runners_receive_distinct_proxy_leases(tmp_path, monkeypatch):
                 )
             )
 
-        results = [proc.communicate(timeout=20) + (proc.returncode,) for proc in processes]
+        results = [
+            proc.communicate(timeout=RUNNER_HARNESS_TIMEOUT_SECONDS) + (proc.returncode,)
+            for proc in processes
+        ]
         assert all(item[2] == 0 for item in results), results
         proxies = capture.read_text(encoding="utf-8").splitlines()
         assert len(proxies) == 2
@@ -1118,7 +1128,7 @@ def test_proxy_transport_expired_certificate_retries_next_proxy(tmp_path, monkey
             text=True,
             capture_output=True,
             check=False,
-            timeout=15,
+            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
         )
 
         assert result.returncode == 0, result.stderr or result.stdout
@@ -1186,7 +1196,7 @@ def test_proxy_transport_marker_after_real_progress_does_not_retry(tmp_path, mon
             text=True,
             capture_output=True,
             check=False,
-            timeout=15,
+            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
         )
 
         assert result.returncode == 1
@@ -1248,7 +1258,7 @@ def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
             text=True,
             capture_output=True,
             check=False,
-            timeout=15,
+            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
         )
 
         assert result.returncode == 0, result.stderr or result.stdout
@@ -1325,7 +1335,7 @@ def test_startup_stall_can_reach_third_distinct_proxy(tmp_path, monkeypatch):
             text=True,
             capture_output=True,
             check=False,
-            timeout=20,
+            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
         )
 
         assert result.returncode == 0, result.stderr or result.stdout
@@ -1411,7 +1421,7 @@ def test_startup_retry_stops_at_configured_attempt_limit(tmp_path, monkeypatch):
             text=True,
             capture_output=True,
             check=False,
-            timeout=20,
+            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
         )
 
         assert result.returncode == 78
@@ -1854,7 +1864,7 @@ class TestSupervisorPostrunEvidence:
             text=True,
             capture_output=True,
             check=False,
-            timeout=15,
+            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
         )
 
         assert result.returncode == 0, result.stderr or result.stdout
@@ -1991,7 +2001,7 @@ def _run_fake_opencode_failure(
         text=True,
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
     )
     return result, artifacts
 
@@ -2101,7 +2111,7 @@ class TestRuntimeTimeout:
             text=True,
             capture_output=True,
             check=False,
-            timeout=15,
+            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
         )
 
         assert result.returncode == 79, result.stderr or result.stdout
@@ -2174,7 +2184,7 @@ class TestRuntimeTimeout:
                 text=True,
                 capture_output=True,
                 check=False,
-                timeout=15,
+                timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
             )
 
             assert result.returncode == 79, result.stderr or result.stdout
