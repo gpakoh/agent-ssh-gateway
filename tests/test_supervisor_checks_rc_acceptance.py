@@ -26,6 +26,7 @@ import pytest
 
 from examples.mcp_server.agent_tools import (
     _build_opencode_script,
+    _runner_artifact_io_script_lines,
     _supervisor_postrun_script_lines,
 )
 from examples.mcp_server.fleet_runtime import (
@@ -84,6 +85,7 @@ def _run_precedence_case(tmp_path: Path, **codes: int) -> tuple[int, str]:
             f"td={shlex.quote(str(td))}",
             *(f"{name}={value}" for name, value in codes.items()),
             "",
+            *_runner_artifact_io_script_lines(),
             _finalization_fragment(),
             "",
             _status_block(),
@@ -261,5 +263,5 @@ def test_warning_and_clean_statuses_remain_distinct_literals():
     warned = _build_opencode_script(
         ".ai-bridge/tasks/acceptance", TASK_ID, None, required_checks=["true"]
     )
-    assert 'echo "Status: needs-review" > "$td/agent-status.md"' in clean
-    assert 'echo "Status: needs-review-warning" > "$td/agent-status.md"' in warned
+    assert 'runner_artifact_write_line "$td/agent-status.md" "Status: needs-review"' in clean
+    assert 'runner_artifact_write_line "$td/agent-status.md" "Status: needs-review-warning"' in warned

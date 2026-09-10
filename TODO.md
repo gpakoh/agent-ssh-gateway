@@ -106,7 +106,13 @@ items are explicitly verified as implemented, documented and safe in production.
    review clone contract to explicitly distinguish committed-HEAD review from
    dirty-worktree snapshot review, include the exact snapshot/source evidence in
    task metadata, and surface typed stall state plus recovery guidance instead
-   of presenting the stale clone as a valid review target.
+   of presenting the stale clone as a valid review target. Reproduced again on
+   2026-09-10 while reviewing AL-013: the task was created from a registered
+   dirty candidate with exact `base_ref=55740db0d60cf5f6f29a71a309aa5919900019ea`,
+   but the managed review workspace log explicitly checked out only that clean
+   base HEAD (`HEAD is now at 55740db ...`) and therefore did not contain the
+   uncommitted AL-013 changes. The read-only audit was cancelled rather than
+   accepting stale review evidence.
 
 5. ⬜ **[AL-007] Command-plane/session recovery gap after transient reconnect/cooldown.**
    Project-level tools can remain usable while a previously known command session
@@ -143,6 +149,36 @@ items are explicitly verified as implemented, documented and safe in production.
    outer non-success outcome, never emit submission success text, and regression
    coverage binding outer status, nested status, job/attempt presence and actual
    submission/mutation occurrence.
+
+7. ⬜ **[AL-013] OpenCode runner must not trust worker-controlled artifact path/inode indirections.**
+   Supervisor review of the first-class `review` workflow on 2026-09-10 found
+   that the worker and runner share the task-state directory. Several runner /
+   supervisor writes use ordinary shell redirection or path-based copies for
+   artifacts such as `agent-status.md`, `agent-heartbeat.json`,
+   `opencode-output.log`, `implementation-diff.patch`, `changed-files.z`,
+   `required-checks.log` and the final `agent-report.md`. A stale or
+   worker-replaced path can therefore be a symlink when the runner later opens it,
+   causing the runner to write through the link instead of replacing the task
+   artifact itself. PR #242 already hardened the newly introduced worker-status /
+   worker-report snapshots with bounded `O_NOFOLLOW` reads plus atomic replace,
+   but the broader runner-owned artifact class remains.
+
+   The current worker and runner execute under the same OS user, so this finding
+   is specifically about eliminating runner-side symlink-follow / stale-path
+   write-through, hardlink write-through and blocking special-file opens while
+   preserving trustworthy artifact semantics; it must not be
+   misrepresented as a complete privilege boundary against a hostile same-UID
+   process. Closure requires classifying worker-owned, runner-owned-during-run and
+   supervisor-owned-post-run artifacts; replacing trusted final writes with
+   nofollow/atomic primitives or private temporary files; ensuring live runner
+   artifacts such as heartbeat cannot be redirected through a worker-created
+   symlink; and adversarial regression tests proving source and destination
+   symlinks never modify their targets, hardlinks are replaced copy-on-write,
+   FIFOs/special files cannot block the runner, bounded worker snapshots stay bounded,
+   final trusted receipt/verdict bytes are regular files, and post-run evidence
+   still represents the exact executed workspace. If stronger hostile-worker
+   isolation is required, track separate process/user isolation rather than
+   claiming file-level checks solve the same-UID trust boundary.
 
 ## 🧩 Architect/operator wanted capabilities — 2026-09-03
 
