@@ -37,6 +37,7 @@ from examples.mcp_server.fleet_state import TERMINAL_STATUSES
 from examples.mcp_server.opencode_tools import project_run_opencode
 
 TASK_ID = "b12345678901"
+RUNNER_HARNESS_TIMEOUT_SECONDS = 60
 FINALIZE_ANCHOR = "FINAL_RC=$RC"
 STATUS_ANCHOR = 'if [ $FINAL_RC -eq 0 ] && [ "${CHECKS_WARNING:-0}" -eq 1 ]; then'
 ACCEPT_SYNONYMS = frozenset({"success", "passed", "accepted", "approved", "completed"})
@@ -190,7 +191,7 @@ def _run_natural_flow(
         text=True,
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
     )
     return result, artifacts
 
