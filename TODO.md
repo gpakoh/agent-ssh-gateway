@@ -139,17 +139,6 @@ items are explicitly verified as implemented, documented and safe in production.
    explicit recovery guidance. Do not generalize read retries to blind retries of
    timed-out mutations.
 
-6. ⬜ **[AL-012] `run_agent` outer success envelope must agree with pre-submit terminal failure.**
-   During Zalesskiy SUP Tailwind migration on 2026-09-08, a managed task was
-   rejected before submission because `task.json` supplied an explicit
-   `worktree_path`. The nested result correctly reported `status="error"`, no
-   job/attempt id and actionable recovery guidance, while the outer tool envelope
-   simultaneously returned `ok=true`, `error=null` and submission success text.
-   Closure requires pre-submit terminal validation failures to return a typed
-   outer non-success outcome, never emit submission success text, and regression
-   coverage binding outer status, nested status, job/attempt presence and actual
-   submission/mutation occurrence.
-
 ## 🧩 Architect/operator wanted capabilities — 2026-09-03
 
 1. ⬜ **[AO-001] First-class bounded internal service health probe.** Add a read-only
