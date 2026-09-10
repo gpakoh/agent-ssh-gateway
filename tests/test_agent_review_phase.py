@@ -135,7 +135,7 @@ def test_runner_preserves_bounded_agent_findings_after_trusted_receipt() -> None
     append_findings = "## Agent-provided findings (untrusted narrative)"
     assert capture in script
     assert "O_NOFOLLOW" in script
-    assert "os.replace(tmp, dst)" in script
+    assert "os.rename(tmp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)" in script
     assert '[ ! -L "$td/worker-report.md" ]' in script
     assert append_findings in script
     assert script.index(capture) < script.index(trusted_receipt) < script.index(append_findings)
@@ -151,7 +151,7 @@ def test_worker_snapshot_is_nofollow_bounded_and_replaces_destination_symlink(tm
 
     script = "\n".join(
         [
-            *agent_tools._worker_artifact_snapshot_script_lines(),
+            *agent_tools._runner_artifact_io_script_lines(),
             f"snapshot_worker_artifact {shlex.quote(str(source))} {shlex.quote(str(destination))} 8",
         ]
     )

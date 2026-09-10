@@ -29,6 +29,7 @@ from examples.mcp_server.agent_tools import (
     _parent_prerun_snapshot_script_lines,
     _proxy_report_script_lines,
     _read_task_json,
+    _runner_artifact_io_script_lines,
     _supervisor_postrun_script_lines,
 )
 
@@ -122,7 +123,7 @@ class TestBuildOpencodeScriptProxy:
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
         assert "PROXY_BLOCKED=1" in script
         assert "Proxy provider is not configured" in script
-        assert 'echo "Status: blocked"' in script
+        assert 'runner_artifact_write_line "$td/agent-status.md" "Status: blocked"' in script
 
     def test_direct_fallback_requires_explicit_opt_out(self, monkeypatch):
         monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
@@ -133,16 +134,17 @@ class TestBuildOpencodeScriptProxy:
     def test_opencode_output_captured_for_detection(self, monkeypatch):
         monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", PROVIDER)
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
-        assert '> "$td/opencode-output.log" 2>&1' in script
-        assert 'cat "$td/opencode-output.log"' in script
+        assert '> "$RUNNER_OUTPUT_LOG" 2>&1' in script
+        assert 'cat "$RUNNER_OUTPUT_LOG"' in script
+        assert 'runner_artifact_publish "$RUNNER_OUTPUT_LOG" "$td/opencode-output.log"' in script
 
     def test_rate_limited_status_wins_over_failed(self, monkeypatch):
         monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", PROVIDER)
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
-        assert 'echo "Status: rate-limited" > "$td/agent-status.md"' in script
+        assert 'runner_artifact_write_line "$td/agent-status.md" "Status: rate-limited"' in script
         assert "FINAL_RC=77" in script
-        assert 'echo "Status: startup-timeout" > "$td/agent-status.md"' in script
-        assert 'echo "Status: run-timeout" > "$td/agent-status.md"' in script
+        assert 'runner_artifact_write_line "$td/agent-status.md" "Status: startup-timeout"' in script
+        assert 'runner_artifact_write_line "$td/agent-status.md" "Status: run-timeout"' in script
         assert '${FAILURE_REASON:-}' in script
 
     def test_proxy_startup_retry_default_is_bounded_to_four_attempts(self, monkeypatch):
@@ -169,10 +171,10 @@ class TestBuildOpencodeScriptProxy:
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
 
         snapshot = 'snapshot_worker_artifact "$td/agent-status.md" "$td/worker-status.md" 65536'
-        canonical = 'echo "Status: needs-review" > "$td/agent-status.md"'
+        canonical = 'runner_artifact_write_line "$td/agent-status.md" "Status: needs-review"'
         assert snapshot in script
         assert "O_NOFOLLOW" in script
-        assert "os.replace(tmp, dst)" in script
+        assert "os.rename(tmp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)" in script
         assert script.index(snapshot) < script.index(canonical)
         assert "## Worker status snapshot" in script
         assert 'cat "$td/worker-status.md" >> "$td/agent-report.md"' in script
@@ -1689,6 +1691,7 @@ class TestSupervisorPostrunEvidence:
             [
                 f"td={shlex.quote(str(td))}",
                 'mkdir -p "$td"',
+                *_runner_artifact_io_script_lines(),
                 *_parent_prerun_snapshot_script_lines(str(parent)),
                 f"cd {shlex.quote(str(worker))}",
                 f"BASE_HEAD={shlex.quote(base_head)}",
@@ -1731,6 +1734,7 @@ class TestSupervisorPostrunEvidence:
             [
                 f"td={shlex.quote(str(td))}",
                 'mkdir -p "$td"',
+                *_runner_artifact_io_script_lines(),
                 *_parent_prerun_snapshot_script_lines(str(parent)),
                 f"cd {shlex.quote(str(worker))}",
                 f"BASE_HEAD={shlex.quote(base_head)}",
@@ -1772,6 +1776,7 @@ class TestSupervisorPostrunEvidence:
             [
                 f"td={shlex.quote(str(td))}",
                 'mkdir -p "$td"',
+                *_runner_artifact_io_script_lines(),
                 *_parent_prerun_snapshot_script_lines(str(parent)),
                 f"cd {shlex.quote(str(worker))}",
                 f"BASE_HEAD={shlex.quote(base_head)}",
