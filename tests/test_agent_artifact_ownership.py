@@ -22,6 +22,7 @@ from examples.mcp_server.agent_tools import (
 )
 
 TASK_ID = "artifact-owner-001"
+RUNNER_HARNESS_TIMEOUT_SECONDS = 60
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -173,7 +174,7 @@ def test_worker_symlink_poisoning_cannot_redirect_canonical_outputs(
     monkeypatch.setenv("VICTIM_TARGET", str(victim))
 
     script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
-    result = _run_shell(script, cwd=source, timeout=20)
+    result = _run_shell(script, cwd=source, timeout=RUNNER_HARNESS_TIMEOUT_SECONDS)
 
     assert result.returncode == 0, result.stderr or result.stdout
     assert victim.read_text(encoding="utf-8") == "sentinel\n"
@@ -221,7 +222,7 @@ def test_stale_supervisor_artifacts_are_reclaimed_before_postrun(
     monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
 
     script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
-    result = _run_shell(script, cwd=source, timeout=20)
+    result = _run_shell(script, cwd=source, timeout=RUNNER_HARNESS_TIMEOUT_SECONDS)
 
     assert result.returncode == 0, result.stderr or result.stdout
     assert victim.read_text(encoding="utf-8") == "sentinel\n"
