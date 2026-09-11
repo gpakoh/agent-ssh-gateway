@@ -30,9 +30,12 @@ PYTEST_UNIT_ARGS ?=
 # Hard run-away guard: runner-level timeout enforcement has been inconsistent.
 # Keep this deterministic process-level guard inside the workflow's outer
 # budget so pytest terminates with evidence before the runner kills the job.
-# 25m is more than twice the typical 6-7m unit run.
+# The suite is normally much faster, but shared self-hosted runner contention
+# has repeatedly pushed healthy 6.5k-test runs beyond the old fixed 25m guard.
+# Keep the budget explicit/overridable and below ci.yml's outer test-job budget.
+PYTEST_UNIT_TIMEOUT ?= 35m
 test-unit:
-	timeout --signal=TERM --kill-after=30s 25m uv run pytest -m "not host_smoke and not e2e and not integration and not smoke" --reruns 2 --reruns-delay 2 --only-rerun 'WebSocketDisconnect' --cov=app --cov-report=term-missing --cov-fail-under=69 -q $(PYTEST_UNIT_ARGS)
+	timeout --signal=TERM --kill-after=30s $(PYTEST_UNIT_TIMEOUT) uv run pytest -m "not host_smoke and not e2e and not integration and not smoke" --reruns 2 --reruns-delay 2 --only-rerun 'WebSocketDisconnect' --cov=app --cov-report=term-missing --cov-fail-under=69 -q $(PYTEST_UNIT_ARGS)
 
 test: test-unit
 
