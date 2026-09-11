@@ -680,11 +680,11 @@ async def gitea_merge_pull_request(
                 message="expected_base_sha must be a 40-character SHA-1 when provided",
                 source="gitea",
             )
-    if method != "merge":
+    if method not in {"merge", "squash"}:
         return tool_error(
             tool="gitea_merge_pull_request",
             code="INVALID_INPUT",
-            message="only merge method 'merge' is allowed",
+            message="merge method must be one of: merge, squash",
             source="gitea",
         )
 

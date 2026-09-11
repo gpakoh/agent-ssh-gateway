@@ -40,19 +40,49 @@ async def test_client_merge_pr_uses_fixed_endpoint_and_optimistic_head_lock(monk
 
 
 @pytest.mark.asyncio
-async def test_client_merge_pr_rejects_invalid_sha_and_non_merge_methods():
+async def test_client_merge_pr_sends_squash_method_verbatim(monkeypatch):
     client = GiteaClient("token")
+    post = AsyncMock(return_value={})
+    monkeypatch.setattr(client, "_post", post)
+    try:
+        result = await client.merge_pull_request(
+            "owner",
+            "repo",
+            25,
+            expected_head_sha=SHA,
+            method="squash",
+        )
+    finally:
+        await client.aclose()
+
+    assert result == {}
+    post.assert_awaited_once_with(
+        "/repos/{owner}/{repo}/pulls/{number}/merge",
+        {"Do": "squash", "head_commit_id": SHA},
+        owner="owner",
+        repo="repo",
+        number=25,
+    )
+
+
+@pytest.mark.asyncio
+async def test_client_merge_pr_rejects_invalid_sha_and_unsupported_methods(monkeypatch):
+    client = GiteaClient("token")
+    post = AsyncMock(return_value={})
+    monkeypatch.setattr(client, "_post", post)
     try:
         with pytest.raises(ValueError, match="40-character SHA-1"):
             await client.merge_pull_request("owner", "repo", 1, expected_head_sha="abc")
-        with pytest.raises(ValueError, match="only merge method"):
+        with pytest.raises(ValueError, match="merge method must be one of"):
             await client.merge_pull_request(
-                "owner", "repo", 1, expected_head_sha=SHA, method="squash"
+                "owner", "repo", 1, expected_head_sha=SHA, method="rebase"
             )
         with pytest.raises(ValueError, match="pull_number"):
             await client.merge_pull_request("owner", "repo", 0, expected_head_sha=SHA)
     finally:
         await client.aclose()
+
+    post.assert_not_awaited()
 
 
 class FakeMergeClient:
@@ -190,6 +220,49 @@ async def test_adapter_merges_only_expected_green_head_and_confirms_result(monke
     ]
     assert client.pr_reads == 3
     assert "token" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_adapter_passes_squash_through_existing_merge_guards(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token")
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request(
+        "owner",
+        "repo",
+        25,
+        SHA,
+        expected_base_sha=BASE_SHA,
+        method="squash",
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["method"] == "squash"
+    assert client.merge_calls == [
+        {
+            "owner": "owner",
+            "repo": "repo",
+            "pull_number": 25,
+            "expected_head_sha": SHA,
+            "method": "squash",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_rejects_unsupported_merge_method_before_remote_reads(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient("token")
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA, method="rebase")
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_INPUT"
+    assert client.pr_reads == 0
+    assert client.compare_calls == []
+    assert client.merge_calls == []
 
 
 @pytest.mark.asyncio

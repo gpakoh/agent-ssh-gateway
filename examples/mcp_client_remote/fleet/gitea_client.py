@@ -537,8 +537,8 @@ class GiteaClient:
         expected_head_sha = expected_head_sha.strip().lower()
         if not _SHA1_RE.fullmatch(expected_head_sha):
             raise ValueError("expected_head_sha must be a 40-character SHA-1")
-        if method != "merge":
-            raise ValueError("only merge method 'merge' is allowed")
+        if method not in {"merge", "squash"}:
+            raise ValueError("merge method must be one of: merge, squash")
         return await self._post(
             "/repos/{owner}/{repo}/pulls/{number}/merge",
             {"Do": method, "head_commit_id": expected_head_sha},
