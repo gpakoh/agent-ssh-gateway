@@ -110,6 +110,49 @@ def _server_agent_router():
     return server_attr("_agent_router")
 
 
+def _agent_router_terminal_observer() -> Callable[[str, dict[str, Any]], None] | None:
+    """Build the eventual-result observer for durable async agent jobs.
+
+    ``project_run_agent`` currently executes only the OpenCode backend.  Keep
+    that backend identity explicit here until additional executable backends
+    are introduced; the observer is absent when router health tracking is not
+    enabled.  Gateway job results are already redacted before reaching this
+    callback.
+    """
+    router = _server_agent_router()
+    if router is None or not getattr(router, "enabled", False):
+        return None
+
+    def _observe(_job_id: str, result: dict[str, Any]) -> None:
+        terminal_status = str(result.get("status") or "")
+        if terminal_status in {"cancelled", "ambiguous"}:
+            # User cancellation and fleet liveness reconciliation are not
+            # evidence that the OpenCode backend itself failed. Feeding either
+            # into record_result would incorrectly cool/FAIL the backend.
+            return
+        raw_exit_code = result.get("exit_code")
+        exit_code = (
+            raw_exit_code
+            if isinstance(raw_exit_code, int) and not isinstance(raw_exit_code, bool)
+            else -1
+        )
+        stdout = str(result.get("stdout", ""))
+        if exit_code == 77:
+            # Exit 77 is wrapper-owned and normalized only after the runner
+            # positively detected rate limiting.  Preserve that semantic even
+            # when redacted/truncated gateway output no longer contains the
+            # original provider text that AgentBackendRouter pattern-matches.
+            stdout = f"{stdout}\nrate limit".strip()
+        router.record_result(
+            "opencode",
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=str(result.get("stderr", "")),
+        )
+
+    return _observe
+
+
 def _normalize_single_agent_submission(tool: str, result: dict[str, Any]) -> dict[str, Any]:
     """Fail honestly when a single-agent pre-submit path returns status=error.
 
@@ -640,17 +683,28 @@ async def _submit_agent_with_fleet(
     project: str,
     task_id: str,
     submit_sync: Callable[[], dict[str, Any]],
+    terminal_observer: Callable[[str, dict[str, Any]], None] | None = None,
+    observe_submitted_job: bool = True,
     sweep_before_submit: bool = True,
 ) -> dict[str, Any]:
     """Use durable fleet admission when enabled, otherwise submit directly."""
     fleet = await get_fleet_runtime()
     if fleet is None:
         return await asyncio.to_thread(submit_sync)
+    job_result_fn = (
+        (lambda jid: _server_client().job_result(jid))
+        if terminal_observer is not None
+        else None
+    )
     return await fleet.submit(
         project=project,
         task_id=task_id,
         submit_sync=submit_sync,
         job_status_fn=lambda jid: _server_client().job_status(jid),
+        job_result_fn=job_result_fn,
+        terminal_observer=terminal_observer,
+        observe_submitted_job=observe_submitted_job,
+        retry_attempted_unbound=True,
         sweep_before_submit=sweep_before_submit,
     )
 
@@ -671,12 +725,15 @@ async def gateway_run_agent(
         model=model,
         async_submit=async_submit,
     )
+    terminal_observer = _agent_router_terminal_observer()
 
     async def _fn() -> dict[str, Any]:
         result = await _submit_agent_with_fleet(
             project=project,
             task_id=task_id,
             submit_sync=submit_sync,
+            terminal_observer=terminal_observer,
+            observe_submitted_job=async_submit,
         )
         return _normalize_single_agent_submission("run_agent", result)
 
@@ -707,13 +764,22 @@ async def gateway_run_agents(project: str, task_ids: str) -> dict[str, Any]:
             raise ValueError("task_ids must not contain duplicates")
 
         fleet = await get_fleet_runtime()
+        terminal_observer = _agent_router_terminal_observer()
 
         def status_fn(job_id: str) -> dict[str, Any]:
             return _server_client().job_status(job_id)
 
+        def result_fn(job_id: str) -> dict[str, Any]:
+            return _server_client().job_result(job_id)
+
+        detailed_result_fn = result_fn if terminal_observer is not None else None
         if fleet is not None:
             try:
-                await fleet.reconcile(status_fn)
+                await fleet.reconcile(
+                    status_fn,
+                    job_result_fn=detailed_result_fn,
+                    terminal_observer=terminal_observer,
+                )
             except Exception:
                 pass
 
@@ -733,6 +799,10 @@ async def gateway_run_agents(project: str, task_ids: str) -> dict[str, Any]:
                         task_id=task_id,
                         submit_sync=submit_sync,
                         job_status_fn=status_fn,
+                        job_result_fn=detailed_result_fn,
+                        terminal_observer=terminal_observer,
+                        observe_submitted_job=True,
+                        retry_attempted_unbound=True,
                         sweep_before_submit=False,
                     )
                 return result

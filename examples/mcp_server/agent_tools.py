@@ -2313,11 +2313,12 @@ def project_run_agent(
             Fleet mode: call run_agent repeatedly with async_submit=True to
             launch several agents without blocking on each one, then poll
             each job_id independently via job_status/job_result/job_wait.
-            The router's cooldown tracking (record_result) is NOT fed by
-            async-submitted jobs -- there is no completion callback into
-            this process once a job is handed off, so an async run's
-            eventual failure/rate-limit never reaches the router. Only the
-            synchronous path (async_submit=False) updates cooldown state.
+            ``project_run_agent`` itself does not feed router cooldown state
+            for async-submitted jobs because it returns before completion.
+            Production FleetRuntime wiring owns the eventual completion
+            observer and feeds the terminal gateway result back into the
+            router; direct callers without that composition-layer observer
+            still receive submission-only semantics here.
         run_script_wait: callable(job_id) -> terminal job result dict, or a
             durable receipt {"job_id", "status": "running",
             "wait_timed_out": True} when the bounded wait expires while the
