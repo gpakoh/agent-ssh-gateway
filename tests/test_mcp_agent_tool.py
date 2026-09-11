@@ -1023,6 +1023,65 @@ def test_gateway_agent_status_wraps_lightweight_status(monkeypatch):
     assert callable(captured_kwargs["job_status"])
 
 
+def test_agent_router_terminal_observer_preserves_wrapper_rate_limit_semantics(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    router = AgentBackendRouter(fallback_order=["opencode"], enabled=True)
+    monkeypatch.setattr(agent_adapter, "_server_agent_router", lambda: router)
+
+    observer = agent_adapter._agent_router_terminal_observer()
+
+    assert observer is not None
+    observer(
+        "job-42",
+        {
+            "job_id": "job-42",
+            "status": "failed",
+            "exit_code": 77,
+            # The detailed gateway result may be redacted/truncated enough to
+            # lose the original provider marker; exit 77 remains authoritative.
+            "stdout": "",
+            "stderr": "",
+        },
+    )
+    entry = router._backends["opencode"]
+    assert entry.status.value == "cooldown"
+    assert entry.last_error == "rate_limit"
+    cooldowns = router.get_cooldowns()
+    assert len(cooldowns) == 1
+    assert cooldowns[0].reason == "rate_limit"
+
+
+@pytest.mark.parametrize("terminal_status", ["cancelled", "ambiguous"])
+def test_agent_router_terminal_observer_ignores_non_backend_terminal_states(
+    monkeypatch, terminal_status
+):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    router = AgentBackendRouter(fallback_order=["opencode"], enabled=True)
+    record_result = MagicMock(wraps=router.record_result)
+    router.record_result = record_result
+    monkeypatch.setattr(agent_adapter, "_server_agent_router", lambda: router)
+
+    observer = agent_adapter._agent_router_terminal_observer()
+
+    assert observer is not None
+    observer(
+        "job-42",
+        {
+            "job_id": "job-42",
+            "status": terminal_status,
+            "exit_code": -1,
+            "error_code": "JOB_NOT_FOUND" if terminal_status == "ambiguous" else None,
+        },
+    )
+
+    record_result.assert_not_called()
+    entry = router._backends["opencode"]
+    assert entry.status.value == "available"
+    assert router.get_cooldowns() == []
+
+
 class TestGatewayRunAgents:
     @pytest.fixture(autouse=True)
     def _handoff_write_mode(self, monkeypatch):
@@ -1065,6 +1124,10 @@ class TestGatewayRunAgents:
         assert fleet.submit.await_count == 2
         assert all(
             call.kwargs["sweep_before_submit"] is False
+            for call in fleet.submit.await_args_list
+        )
+        assert all(
+            call.kwargs["retry_attempted_unbound"] is True
             for call in fleet.submit.await_args_list
         )
 
@@ -1152,57 +1215,65 @@ class TestGatewayRunAgents:
 
     @pytest.mark.asyncio
     async def test_single_async_run_agent_keeps_normal_pre_submit_sweep(self, monkeypatch):
+        import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
         import examples.mcp_server.server as server_mod
-        from examples.mcp_server.mcp_infra.adapters.agent import gateway_run_agent
 
         fleet = MagicMock()
         fleet.submit = AsyncMock(
             return_value={"task_id": "single", "status": "running", "job_id": "job-single"}
         )
+        observer = MagicMock()
 
         async def get_fleet():
             return fleet
 
-        monkeypatch.setattr(
-            "examples.mcp_server.mcp_infra.adapters.agent.get_fleet_runtime",
-            get_fleet,
-        )
+        monkeypatch.setattr(agent_adapter, "get_fleet_runtime", get_fleet)
+        monkeypatch.setattr(agent_adapter, "_agent_router_terminal_observer", lambda: observer)
         monkeypatch.setattr(server_mod, "client", MagicMock())
 
-        result = await gateway_run_agent("test", "single", async_submit=True)
+        result = await agent_adapter.gateway_run_agent("test", "single", async_submit=True)
 
         assert result["ok"] is True
-        assert fleet.submit.await_args.kwargs["sweep_before_submit"] is True
+        kwargs = fleet.submit.await_args.kwargs
+        assert kwargs["sweep_before_submit"] is True
+        assert kwargs["terminal_observer"] is observer
+        assert kwargs["observe_submitted_job"] is True
+        assert kwargs["retry_attempted_unbound"] is True
+        assert callable(kwargs["job_result_fn"])
 
     @pytest.mark.asyncio
     async def test_sync_run_agent_routes_through_fleet_submit(self, monkeypatch):
         """BLOCKER A: durable sync admission parity -- async_submit=False
         must run through fleet.submit, not a silent bypass."""
+        import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
         import examples.mcp_server.server as server_mod
-        from examples.mcp_server.mcp_infra.adapters.agent import gateway_run_agent
 
         fleet = MagicMock()
         fleet.submit = AsyncMock(
             return_value={"task_id": "single", "status": "running", "job_id": "job-sync-single"}
         )
+        observer = MagicMock()
 
         async def get_fleet():
             return fleet
 
-        monkeypatch.setattr(
-            "examples.mcp_server.mcp_infra.adapters.agent.get_fleet_runtime",
-            get_fleet,
-        )
+        monkeypatch.setattr(agent_adapter, "get_fleet_runtime", get_fleet)
+        monkeypatch.setattr(agent_adapter, "_agent_router_terminal_observer", lambda: observer)
         monkeypatch.setattr(server_mod, "client", MagicMock())
 
-        result = await gateway_run_agent("test", "single", async_submit=False)
+        result = await agent_adapter.gateway_run_agent("test", "single", async_submit=False)
 
         assert result["ok"] is True
         assert fleet.submit.await_count == 1
-        assert fleet.submit.await_args.kwargs["project"] == "test"
-        assert fleet.submit.await_args.kwargs["task_id"] == "single"
-        assert fleet.submit.await_args.kwargs["sweep_before_submit"] is True
-        assert callable(fleet.submit.await_args.kwargs["submit_sync"])
+        kwargs = fleet.submit.await_args.kwargs
+        assert kwargs["project"] == "test"
+        assert kwargs["task_id"] == "single"
+        assert kwargs["sweep_before_submit"] is True
+        assert kwargs["terminal_observer"] is observer
+        assert kwargs["observe_submitted_job"] is False
+        assert kwargs["retry_attempted_unbound"] is True
+        assert callable(kwargs["job_result_fn"])
+        assert callable(kwargs["submit_sync"])
 
     @pytest.mark.asyncio
     async def test_sync_run_opencode_routes_through_fleet_submit(self, monkeypatch):

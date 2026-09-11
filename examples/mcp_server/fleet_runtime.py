@@ -32,6 +32,7 @@ from typing import Any, Final
 
 from examples.mcp_server.agent_paths import project_state_key
 from examples.mcp_server.fleet_state import (
+    ATTEMPTED,
     DEFAULT_POOL_CAPACITY,
     NEVER_ATTEMPTED,
     FleetState,
@@ -76,6 +77,7 @@ _CAPACITY_RETRY_AFTER_ENV: Final = "MCP_AGENT_FLEET_CAPACITY_RETRY_AFTER_SECONDS
 _DEFAULT_POOL: Final = "ssh-gateway/agent-sshd"
 _DEFAULT_GATEWAY_IO_CONCURRENCY: Final = 4
 _DEFAULT_CAPACITY_RETRY_AFTER_SECONDS: Final = 60
+_MAX_OBSERVED_TERMINAL_JOBS: Final = 4096
 _GATEWAY_TERMINAL: Final[frozenset[str]] = frozenset(
     {"completed", "failed", "cancelled", "ambiguous"}
 )
@@ -264,6 +266,10 @@ class FleetRuntime:
             thread_name_prefix="fleet-gateway",
         )
         self._watchers_by_job: dict[str, asyncio.Task] = {}
+        # Insertion-ordered bounded dedupe: concurrent sweep/watcher paths can
+        # both observe the same idempotently completed job, but old job ids do
+        # not accumulate for the whole process lifetime.
+        self._observed_terminal_jobs: dict[str, None] = {}
         self._close_lock = asyncio.Lock()
         self._closing = False
         self._closed = False
@@ -284,6 +290,10 @@ class FleetRuntime:
         task_id: str,
         submit_sync: Callable[[], dict[str, Any]],
         job_status_fn: Callable[[str], dict[str, Any]] | None = None,
+        job_result_fn: Callable[[str], dict[str, Any]] | None = None,
+        terminal_observer: Callable[[str, dict[str, Any]], None] | None = None,
+        observe_submitted_job: bool = True,
+        retry_attempted_unbound: bool = False,
         sweep_before_submit: bool = True,
     ) -> dict[str, Any]:
         """Admit then perform one idempotent gateway submission.
@@ -300,7 +310,11 @@ class FleetRuntime:
                 pass
         if job_status_fn is not None and sweep_before_submit:
             try:
-                await self.sweep_bound_leases(job_status_fn)
+                await self.sweep_bound_leases(
+                    job_status_fn,
+                    job_result_fn=job_result_fn,
+                    terminal_observer=terminal_observer,
+                )
             except Exception:
                 pass
         durable_task_id = fleet_task_id(project, task_id)
@@ -357,7 +371,16 @@ class FleetRuntime:
         if lease.job_id:
             self._gateway_io_gate.release()
             if job_status_fn is not None:
-                self._track_watcher(job_id=lease.job_id, job_status_fn=job_status_fn)
+                # This call did not execute submit_sync at all, so no direct
+                # synchronous router accounting can happen in the caller.
+                # Observe the already-bound job regardless of this request's
+                # async/sync mode.
+                self._track_watcher(
+                    job_id=lease.job_id,
+                    job_status_fn=job_status_fn,
+                    job_result_fn=job_result_fn,
+                    terminal_observer=terminal_observer,
+                )
             return {
                 "task_id": task_id,
                 "status": "running",
@@ -371,10 +394,16 @@ class FleetRuntime:
                     "capacity": admission.capacity,
                 },
             }
-        if lease.submit_state != NEVER_ATTEMPTED:
-            # A legacy or already-attempted unbound lease has no authoritative
-            # proof it was never dispatched. Re-dispatching could double-execute
-            # an in-flight gateway job, so we fail closed instead.
+        retrying_attempted = (
+            retry_attempted_unbound and lease.submit_state == ATTEMPTED
+        )
+        if lease.submit_state != NEVER_ATTEMPTED and not retrying_attempted:
+            # Generic callers stay fail-closed for an unbound lease whose
+            # dispatch state is ambiguous. Production agent adapters may opt
+            # into retry_attempted_unbound only because their lower layer binds
+            # one immutable task attempt to one stable gateway idempotency key;
+            # re-dispatch therefore asks for the SAME execution identity rather
+            # than creating a second worker.
             self._gateway_io_gate.release()
             return {
                 "task_id": task_id,
@@ -388,14 +417,15 @@ class FleetRuntime:
                     "capacity": admission.capacity,
                 },
             }
-        try:
-            await self.state.mark_submit_attempted(
-                task_id=durable_task_id,
-                lease_token=lease.lease_token,
-            )
-        except BaseException:
-            self._gateway_io_gate.release()
-            raise
+        if not retrying_attempted:
+            try:
+                await self.state.mark_submit_attempted(
+                    task_id=durable_task_id,
+                    lease_token=lease.lease_token,
+                )
+            except BaseException:
+                self._gateway_io_gate.release()
+                raise
         result = await self._run_gateway_io(submit_sync, permit_held=True)
         job_id = result.get("job_id") if isinstance(result, dict) else None
         if isinstance(job_id, str) and job_id:
@@ -412,9 +442,34 @@ class FleetRuntime:
                 "capacity": admission.capacity,
             }
             if job_status_fn is not None:
-                self._track_watcher(job_id=job_id, job_status_fn=job_status_fn)
+                result_status = str(result.get("status") or "")
+                should_observe_current_job = observe_submitted_job or result_status in {
+                    "running",
+                    "unknown",
+                    "error",
+                }
+                self._track_watcher(
+                    job_id=job_id,
+                    job_status_fn=job_status_fn,
+                    job_result_fn=job_result_fn,
+                    terminal_observer=terminal_observer if should_observe_current_job else None,
+                )
             return result
         status = str(result.get("status") or "") if isinstance(result, dict) else ""
+        if status == "not-accepted" and retry_attempted_unbound:
+            # The lower durable submitter could not prove acceptance, but it
+            # retained the immutable attempt + stable submission key. Keep the
+            # capacity lease active and return the retryable receipt unchanged;
+            # the next opted-in call safely re-dispatches that SAME key.
+            result = dict(result)
+            result["fleet"] = {
+                "pool": lease.pool,
+                "existing_lease": admission.existing,
+                "released": False,
+                "submit_state": ATTEMPTED,
+                "retry_same_execution": True,
+            }
+            return result
         if status in _PRE_SUBMIT_TERMINAL:
             await self.state.complete_task(
                 task_id=durable_task_id,
@@ -434,14 +489,33 @@ class FleetRuntime:
             "Agent submit returned neither a job_id nor a terminal pre-submit status"
         )
 
-    async def reconcile_gateway_result(self, *, job_id: str, result: dict[str, Any]) -> bool:
-        """Release a bound lease only when gateway reports a terminal job."""
+    async def reconcile_gateway_result(
+        self,
+        *,
+        job_id: str,
+        result: dict[str, Any],
+        owned_reconciliation: bool = False,
+    ) -> bool:
+        """Release a bound lease only from an observer-owning reconciliation path.
+
+        Generic ``job_status``/``job_result`` polling also sees terminal gateway
+        state, but it has no agent-router observer context. Letting that path
+        delete the lease can race the watcher and permanently lose eventual
+        backend feedback. Watchers opt in explicitly; after process restart the
+        next agent admission performs the observer-aware bound-lease sweep.
+        """
         status = str(result.get("status") or "")
-        if status not in _GATEWAY_TERMINAL:
+        if status not in _GATEWAY_TERMINAL or not owned_reconciliation:
             return False
         await self.ensure_ready()
         lease = await self.state.get_lease_by_job(job_id)
         if lease is None:
+            return False
+        result_job_id = result.get("job_id")
+        if result_job_id is not None and result_job_id != job_id:
+            # Never persist terminal metadata for a different gateway job under
+            # this lease. Watcher/sweep callers will keep the lease and retry
+            # authoritative reconciliation instead of corrupting its identity.
             return False
         exit_code = result.get("exit_code")
         if not isinstance(exit_code, int) or isinstance(exit_code, bool):
@@ -454,6 +528,59 @@ class FleetRuntime:
             result=_small_result(result),
             expected_job_id=job_id,
         )
+        return True
+
+    async def _resolve_terminal_result(
+        self,
+        *,
+        job_id: str,
+        status_result: dict[str, Any],
+        job_result_fn: Callable[[str], dict[str, Any]] | None,
+    ) -> dict[str, Any] | None:
+        """Return authoritative terminal detail for backend classification.
+
+        Cheap status polling is sufficient to prove liveness/terminal state,
+        but it may omit exit_code/stdout/stderr.  When a detailed result
+        callable is supplied, require a terminal result for the same job before
+        feeding any backend observer; transient result-fetch failures are left
+        retryable rather than guessed as generic failures.
+        """
+        status_job_id = status_result.get("job_id")
+        if status_job_id is not None and status_job_id != job_id:
+            return None
+        if job_result_fn is None:
+            return status_result
+        try:
+            detailed = await self._run_gateway_io(job_result_fn, job_id)
+        except Exception:
+            return None
+        if not isinstance(detailed, dict):
+            return None
+        if str(detailed.get("status") or "") not in _GATEWAY_TERMINAL:
+            return None
+        detailed_job_id = detailed.get("job_id")
+        if detailed_job_id is not None and detailed_job_id != job_id:
+            return None
+        return detailed
+
+    def _notify_terminal_observer(
+        self,
+        *,
+        job_id: str,
+        result: dict[str, Any],
+        terminal_observer: Callable[[str, dict[str, Any]], None] | None,
+    ) -> bool:
+        if terminal_observer is None or job_id in self._observed_terminal_jobs:
+            return True
+        try:
+            terminal_observer(job_id, result)
+        except Exception:
+            logger.exception("terminal agent observer failed for job %s", job_id)
+            return False
+        self._observed_terminal_jobs[job_id] = None
+        if len(self._observed_terminal_jobs) > _MAX_OBSERVED_TERMINAL_JOBS:
+            oldest_job_id = next(iter(self._observed_terminal_jobs))
+            self._observed_terminal_jobs.pop(oldest_job_id, None)
         return True
 
     async def _run_gateway_io(
@@ -513,7 +640,11 @@ class FleetRuntime:
         return released
 
     async def reconcile(
-        self, job_status_fn: Callable[[str], dict[str, Any]] | None = None
+        self,
+        job_status_fn: Callable[[str], dict[str, Any]] | None = None,
+        *,
+        job_result_fn: Callable[[str], dict[str, Any]] | None = None,
+        terminal_observer: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> int:
         """Reclaim abandoned never-dispatched leases and terminal bound leases.
 
@@ -523,13 +654,21 @@ class FleetRuntime:
         released = await self.sweep_unbound_leases()
         if job_status_fn is not None:
             try:
-                released += await self.sweep_bound_leases(job_status_fn)
+                released += await self.sweep_bound_leases(
+                    job_status_fn,
+                    job_result_fn=job_result_fn,
+                    terminal_observer=terminal_observer,
+                )
             except Exception:
                 pass
         return released
 
     async def sweep_bound_leases(
-        self, job_status_fn: Callable[[str], dict[str, Any]]
+        self,
+        job_status_fn: Callable[[str], dict[str, Any]],
+        *,
+        job_result_fn: Callable[[str], dict[str, Any]] | None = None,
+        terminal_observer: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> int:
         """Reconcile this pool and restore watchers for unresolved jobs."""
         await self.ensure_ready()
@@ -544,43 +683,115 @@ class FleetRuntime:
             except Exception as exc:
                 missing_job = _gateway_missing_job_result(job_id, exc)
                 if missing_job is not None:
+                    if not self._notify_terminal_observer(
+                        job_id=job_id,
+                        result=missing_job,
+                        terminal_observer=terminal_observer,
+                    ):
+                        self._track_watcher(
+                            job_id=job_id,
+                            job_status_fn=job_status_fn,
+                            job_result_fn=job_result_fn,
+                            terminal_observer=terminal_observer,
+                        )
+                        continue
                     try:
-                        if await self.reconcile_gateway_result(job_id=job_id, result=missing_job):
+                        if await self.reconcile_gateway_result(
+                            job_id=job_id,
+                            result=missing_job,
+                            owned_reconciliation=True,
+                        ):
                             released += 1
                     except Exception:
-                        self._track_watcher(job_id=job_id, job_status_fn=job_status_fn)
+                        self._track_watcher(
+                            job_id=job_id,
+                            job_status_fn=job_status_fn,
+                            job_result_fn=job_result_fn,
+                            terminal_observer=terminal_observer,
+                        )
                     continue
-                self._track_watcher(job_id=job_id, job_status_fn=job_status_fn)
+                self._track_watcher(
+                    job_id=job_id,
+                    job_status_fn=job_status_fn,
+                    job_result_fn=job_result_fn,
+                    terminal_observer=terminal_observer,
+                )
                 continue
             status = str(result.get("status") or "")
             if status not in _GATEWAY_TERMINAL:
-                self._track_watcher(job_id=job_id, job_status_fn=job_status_fn)
+                self._track_watcher(
+                    job_id=job_id,
+                    job_status_fn=job_status_fn,
+                    job_result_fn=job_result_fn,
+                    terminal_observer=terminal_observer,
+                )
                 continue
-            exit_code = result.get("exit_code")
+            terminal_result = await self._resolve_terminal_result(
+                job_id=job_id,
+                status_result=result,
+                job_result_fn=job_result_fn,
+            )
+            if terminal_result is None:
+                self._track_watcher(
+                    job_id=job_id,
+                    job_status_fn=job_status_fn,
+                    job_result_fn=job_result_fn,
+                    terminal_observer=terminal_observer,
+                )
+                continue
+            terminal_status = str(terminal_result.get("status") or status)
+            exit_code = terminal_result.get("exit_code")
             if not isinstance(exit_code, int) or isinstance(exit_code, bool):
                 exit_code = None
+            if not self._notify_terminal_observer(
+                job_id=job_id,
+                result=terminal_result,
+                terminal_observer=terminal_observer,
+            ):
+                self._track_watcher(
+                    job_id=job_id,
+                    job_status_fn=job_status_fn,
+                    job_result_fn=job_result_fn,
+                    terminal_observer=terminal_observer,
+                )
+                continue
             try:
                 await self.state.complete_task(
                     task_id=lease.task_id,
                     lease_token=lease.lease_token,
-                    status=status,
+                    status=terminal_status,
                     exit_code=exit_code,
-                    result=_small_result(result),
+                    result=_small_result(terminal_result),
                     expected_job_id=job_id,
                 )
                 released += 1
             except Exception:
-                self._track_watcher(job_id=job_id, job_status_fn=job_status_fn)
+                self._track_watcher(
+                    job_id=job_id,
+                    job_status_fn=job_status_fn,
+                    job_result_fn=job_result_fn,
+                    terminal_observer=terminal_observer,
+                )
         return released
 
     def _track_watcher(
-        self, *, job_id: str, job_status_fn: Callable[[str], dict[str, Any]]
+        self,
+        *,
+        job_id: str,
+        job_status_fn: Callable[[str], dict[str, Any]],
+        job_result_fn: Callable[[str], dict[str, Any]] | None = None,
+        terminal_observer: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         """Start exactly one persistent reconciliation watcher per job_id."""
         if self._closing or self._closed or job_id in self._watchers_by_job:
             return
         task = asyncio.create_task(
-            self._watch_gateway_job(job_id=job_id, job_status_fn=job_status_fn)
+            self._watch_gateway_job(
+                job_id=job_id,
+                job_status_fn=job_status_fn,
+                job_result_fn=job_result_fn,
+                terminal_observer=terminal_observer,
+            )
         )
         self._watchers_by_job[job_id] = task
 
@@ -591,7 +802,12 @@ class FleetRuntime:
         task.add_done_callback(_forget)
 
     async def _watch_gateway_job(
-        self, *, job_id: str, job_status_fn: Callable[[str], dict[str, Any]]
+        self,
+        *,
+        job_id: str,
+        job_status_fn: Callable[[str], dict[str, Any]],
+        job_result_fn: Callable[[str], dict[str, Any]] | None = None,
+        terminal_observer: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         """Poll until terminal reconciliation succeeds or runtime closes."""
         # Exit as soon as shutdown begins, not only after it has completed.
@@ -606,8 +822,19 @@ class FleetRuntime:
             except Exception as exc:
                 missing_job = _gateway_missing_job_result(job_id, exc)
                 if missing_job is not None:
+                    if not self._notify_terminal_observer(
+                        job_id=job_id,
+                        result=missing_job,
+                        terminal_observer=terminal_observer,
+                    ):
+                        await asyncio.sleep(self._watch_poll_interval)
+                        continue
                     try:
-                        await self.reconcile_gateway_result(job_id=job_id, result=missing_job)
+                        await self.reconcile_gateway_result(
+                            job_id=job_id,
+                            result=missing_job,
+                            owned_reconciliation=True,
+                        )
                     except asyncio.CancelledError:
                         raise
                     except Exception:
@@ -618,8 +845,27 @@ class FleetRuntime:
                 continue
             status = str(result.get("status") or "")
             if status in _GATEWAY_TERMINAL:
+                terminal_result = await self._resolve_terminal_result(
+                    job_id=job_id,
+                    status_result=result,
+                    job_result_fn=job_result_fn,
+                )
+                if terminal_result is None:
+                    await asyncio.sleep(self._watch_poll_interval)
+                    continue
+                if not self._notify_terminal_observer(
+                    job_id=job_id,
+                    result=terminal_result,
+                    terminal_observer=terminal_observer,
+                ):
+                    await asyncio.sleep(self._watch_poll_interval)
+                    continue
                 try:
-                    await self.reconcile_gateway_result(job_id=job_id, result=result)
+                    await self.reconcile_gateway_result(
+                        job_id=job_id,
+                        result=terminal_result,
+                        owned_reconciliation=True,
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception:
