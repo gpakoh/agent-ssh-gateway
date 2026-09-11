@@ -998,8 +998,11 @@ class TestAgentTaskStatus:
         assert result["failure"]["reason"] == "opencode_server_error"
         assert result["failure"]["phase"] == "pre_useful_work"
         assert result["failure"]["upstream_ref"] == "err_bf7ae62d"
-        assert result["last_useful_activity"]["source"] == "status"
-        assert result["last_useful_activity"]["age_seconds"] == 700
+        assert result["last_useful_activity"] == {
+            "source": None,
+            "mtime_epoch": None,
+            "age_seconds": None,
+        }
         assert result["log_included"] is False
         assert "must-not-be-read" not in str(result)
 
@@ -1346,6 +1349,11 @@ class TestInspectAgentTask:
             ),
             encoding="utf-8",
         )
+        # The runner always emits these terminal artifacts, even when OpenCode
+        # failed before doing any useful work. Their mere existence must not
+        # be treated as evidence that model/tool activity happened.
+        (td / "agent-report.md").write_text("# Agent Runner Result\n", encoding="utf-8")
+        (td / "implementation-diff.patch").write_text("", encoding="utf-8")
         os.utime(td / "agent-status.md", (now - 700, now - 700))
         os.utime(td / "opencode-output.log", (now - 1, now - 1))
         os.utime(td / "failure-status.json", (now - 1, now - 1))
@@ -1368,9 +1376,23 @@ class TestInspectAgentTask:
             "upstream_ref": "err_bf7ae62d",
             "correlation_hint": "Correlate OpenCode server logs with upstream ref err_bf7ae62d",
         }
-        assert result["last_activity"]["age_seconds"] == 1
-        assert result["last_useful_activity"]["source"] == "status"
-        assert result["last_useful_activity"]["age_seconds"] == 700
+        assert result["last_activity"]["age_seconds"] <= 1
+        assert result["last_useful_activity"] == {
+            "source": None,
+            "mtime_epoch": None,
+            "age_seconds": None,
+        }
+        assert result["startup"]["useful_agent_activity_seen"] is False
+        assert result["recovery"] == {
+            "action": "retry_with_new_task_id",
+            "retry_agent_task": {
+                "project": "my-proj",
+                "source_task_id": task_id,
+                "retry_task_id": "<new-task-id>",
+                "requires_new_task_id": True,
+            },
+            "run_agent": {"project": "my-proj", "task_id": "<new-task-id>"},
+        }
 
     def test_terminal_status_is_finished_even_with_old_logs(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)

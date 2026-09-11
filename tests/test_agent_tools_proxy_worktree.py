@@ -1451,6 +1451,165 @@ def test_startup_retry_stops_at_configured_attempt_limit(tmp_path, monkeypatch):
         thread.join(timeout=5)
 
 
+def test_pre_useful_server_error_retries_with_different_proxy(tmp_path, monkeypatch):
+    """A classified upstream server error before useful work is retryable.
+
+    This reproduces the live failure envelope emitted by OpenCode: the first
+    proxy gets an UnknownError with an opaque err_* reference, while the next
+    proxy succeeds. Gateway must rotate instead of terminally failing attempt 1.
+    """
+    _ProxyPoolHandler.reports = []
+    _ProxyPoolHandler.get_count = 0
+    _ProxyPoolHandler.fail_get_after_first = True
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ProxyPoolHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        source = tmp_path / "server-retry-source"
+        source.mkdir()
+        _init_git_repo(source)
+        artifacts = tmp_path / "server-retry-artifacts"
+        artifacts.mkdir()
+        (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+        fake_bin = tmp_path / "server-retry-bin"
+        fake_bin.mkdir()
+        capture = tmp_path / "server-retry-proxies.txt"
+        fake = fake_bin / "opencode"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$HTTP_PROXY" >> "$PROXY_CAPTURE"\n'
+            'case "$HTTP_PROXY" in\n'
+            '  *:19001) cat <<\'EOF\'\n'
+            'Error: {"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_deadbeef"}}\n'
+            'EOF\n'
+            '    exit 1 ;;\n'
+            '  *) printf "→ Read current-plan.md\\nserver-retry-ok\\n"; exit 0 ;;\n'
+            "esac\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("PROXY_CAPTURE", str(capture))
+        monkeypatch.setenv(
+            "OPENCODE_PROXY_PROVIDER_URL",
+            f"http://127.0.0.1:{server.server_port}/proxy?format=provider",
+        )
+        monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "true")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+        monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "5")
+
+        script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
+        result = subprocess.run(
+            ["sh", "-c", script],
+            cwd=source,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        )
+
+        assert result.returncode == 0, result.stderr or result.stdout
+        assert capture.read_text(encoding="utf-8").splitlines() == _ProxyPoolHandler.proxies
+        assert "server-retry-ok" in (artifacts / "opencode-output.log").read_text(
+            encoding="utf-8"
+        )
+        assert not (artifacts / "failure-status.json").exists()
+        worker_status = (artifacts / "worker-status.md").read_text(encoding="utf-8")
+        assert "upstream server error before useful work; rotating proxy" in worker_status
+        proxy_status = json.loads((artifacts / "proxy-status.json").read_text(encoding="utf-8"))
+        assert proxy_status["attempt"] == 2
+        assert proxy_status["final_outcome"] == "completed"
+    finally:
+        _ProxyPoolHandler.fail_get_after_first = False
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_pre_useful_server_error_exhausts_configured_proxy_attempts(tmp_path, monkeypatch):
+    original_proxies = list(_ProxyPoolHandler.proxies)
+    _ProxyPoolHandler.proxies = [
+        "http://127.0.0.1:19001",
+        "http://127.0.0.1:19002",
+        "http://127.0.0.1:19003",
+    ]
+    _ProxyPoolHandler.reports = []
+    _ProxyPoolHandler.get_count = 0
+    _ProxyPoolHandler.fail_get_after_first = True
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ProxyPoolHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        source = tmp_path / "server-exhaust-source"
+        source.mkdir()
+        _init_git_repo(source)
+        artifacts = tmp_path / "server-exhaust-artifacts"
+        artifacts.mkdir()
+        (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+        fake_bin = tmp_path / "server-exhaust-bin"
+        fake_bin.mkdir()
+        capture = tmp_path / "server-exhaust-proxies.txt"
+        fake = fake_bin / "opencode"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$HTTP_PROXY" >> "$PROXY_CAPTURE"\n'
+            "cat <<'EOF'\n"
+            'Error: {"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_deadbeef"}}\n'
+            "EOF\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("PROXY_CAPTURE", str(capture))
+        monkeypatch.setenv(
+            "OPENCODE_PROXY_PROVIDER_URL",
+            f"http://127.0.0.1:{server.server_port}/proxy?format=provider",
+        )
+        monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "true")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+        monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_ADMISSION_POLL_SECONDS", "1")
+        monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "5")
+        monkeypatch.setenv("OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS", "3")
+
+        script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
+        result = subprocess.run(
+            ["sh", "-c", script],
+            cwd=source,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+        )
+
+        assert result.returncode == 1
+        used_proxies = capture.read_text(encoding="utf-8").splitlines()
+        assert used_proxies == _ProxyPoolHandler.proxies
+        assert len(set(used_proxies)) == 3
+        failure = json.loads((artifacts / "failure-status.json").read_text(encoding="utf-8"))
+        assert failure["reason"] == "opencode_server_error"
+        assert failure["phase"] == "pre_useful_work"
+        worker_status = (artifacts / "worker-status.md").read_text(encoding="utf-8")
+        assert "upstream server errors exhausted proxy attempts (3/3)" in worker_status
+        proxy_status = json.loads((artifacts / "proxy-status.json").read_text(encoding="utf-8"))
+        assert proxy_status["attempt"] == 3
+        assert proxy_status["max_attempts"] == 3
+        assert proxy_status["last_error_class"] == "opencode_server_error"
+        assert proxy_status["final_outcome"] == "upstream_error_exhausted"
+        assert proxy_status["finished_at"]
+    finally:
+        _ProxyPoolHandler.proxies = original_proxies
+        _ProxyPoolHandler.fail_get_after_first = False
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def _run_supervisor_postrun(
     root: Path,
     *,
