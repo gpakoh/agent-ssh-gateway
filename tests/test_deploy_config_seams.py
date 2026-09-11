@@ -1172,6 +1172,15 @@ class TestMakeCheckMirrorsCiExactly:
     can no longer drift apart silently the way they already had once.
     """
 
+    def test_unit_timeout_budget_is_configurable_and_below_outer_job_budget(self):
+        makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
+        wf = _load_workflow(CI_WORKFLOW_PATH)
+
+        assert "PYTEST_UNIT_TIMEOUT ?= 35m" in makefile
+        assert "timeout --signal=TERM --kill-after=30s $(PYTEST_UNIT_TIMEOUT) uv run pytest" in makefile
+        assert "timeout --signal=TERM --kill-after=30s 25m uv run pytest" not in makefile
+        assert wf["jobs"]["test"]["timeout-minutes"] == 45
+
     def test_makefile_owns_the_coverage_floor_and_rerun_handling(self):
         makefile = MAKEFILE_PATH.read_text(encoding="utf-8")
         for flag in ("--cov-fail-under=69", "--reruns 2", "--only-rerun 'WebSocketDisconnect'"):

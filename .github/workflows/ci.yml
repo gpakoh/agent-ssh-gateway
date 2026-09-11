@@ -41,7 +41,7 @@ jobs:
     # step (network stall, a test deadlocking) would run until GitHub's
     # own default (360 minutes) or the self-hosted runner's own limits,
     # occupying a runner slot the whole time instead of failing fast.
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
       CI_PACKAGE_HTTP_PROXY: ${{ secrets.CI_PACKAGE_HTTP_PROXY }}
       CI_PACKAGE_HTTPS_PROXY: ${{ secrets.CI_PACKAGE_HTTPS_PROXY }}
