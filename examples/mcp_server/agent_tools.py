@@ -1219,6 +1219,7 @@ def _opencode_startup_watchdog_script_lines(
         f"OPENCODE_STARTUP_KILL_GRACE_SECONDS={kill_grace_seconds}",
         f"OPENCODE_RUNTIME_TIMEOUT_SECONDS={runtime_timeout_seconds}",
         "OPENCODE_STARTUP_STALLED=0",
+        "OPENCODE_PRE_USEFUL_RETRY=0",
         "_kill_opencode_process() {",
         '  if [ "$OPENCODE_PROCESS_GROUP" -eq 1 ]; then kill "$1" "-$OPENCODE_PID" 2>/dev/null || true; else kill "$1" "$OPENCODE_PID" 2>/dev/null || true; fi',
         "}",
@@ -1267,11 +1268,13 @@ def _opencode_startup_watchdog_script_lines(
         "  ); then",
         '    runner_artifact_write_line "$td/failure-status.json" "$_failure_payload"',
         '    FAILURE_REASON="opencode-server-error"',
+        "    OPENCODE_PRE_USEFUL_RETRY=1",
         "  fi",
         "}",
         "run_opencode_attempt() {",
         '  : > "$RUNNER_OUTPUT_LOG"',
         "  OPENCODE_STARTUP_STALLED=0",
+        "  OPENCODE_PRE_USEFUL_RETRY=0",
         "  FAILURE_REASON=",
         '  if command -v setsid >/dev/null 2>&1; then',
         f'    setsid "$OPCODE_BIN" run {opencode_flags} < /dev/null "{prompt}" > "$RUNNER_OUTPUT_LOG" 2>&1 &',
@@ -2087,9 +2090,14 @@ def _build_opencode_script(
     startup_retry_lines: list[str] = []
     if proxy_provider_url:
         startup_retry_lines = [
-            'while [ "${OPENCODE_STARTUP_STALLED:-0}" -eq 1 ] && [ "$PROXY_BLOCKED" -eq 0 ] && [ "$OPENCODE_PROXY_ATTEMPT" -lt "$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS" ]; do',
-            '  runner_artifact_append_line "$td/agent-status.md" "OpenCode startup stalled; rotating proxy (attempt $OPENCODE_PROXY_ATTEMPT/$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS)"',
-            '  write_proxy_status rotating startup_stalled 0',
+            'while { [ "${OPENCODE_STARTUP_STALLED:-0}" -eq 1 ] || [ "${OPENCODE_PRE_USEFUL_RETRY:-0}" -eq 1 ]; } && [ "$PROXY_BLOCKED" -eq 0 ] && [ "$OPENCODE_PROXY_ATTEMPT" -lt "$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS" ]; do',
+            '  if [ "${OPENCODE_PRE_USEFUL_RETRY:-0}" -eq 1 ]; then',
+            '    runner_artifact_append_line "$td/agent-status.md" "OpenCode upstream server error before useful work; rotating proxy (attempt $OPENCODE_PROXY_ATTEMPT/$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS)"',
+            '    write_proxy_status rotating opencode_server_error 0',
+            "  else",
+            '    runner_artifact_append_line "$td/agent-status.md" "OpenCode startup stalled; rotating proxy (attempt $OPENCODE_PROXY_ATTEMPT/$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS)"',
+            '    write_proxy_status rotating startup_stalled 0',
+            "  fi",
             "  cooldown_opencode_proxy",
             '  if [ -n "${OPENCODE_PROXY_DIGEST:-}" ]; then',
             '    OPENCODE_REJECTED_PROXY_DIGESTS="${OPENCODE_REJECTED_PROXY_DIGESTS:+$OPENCODE_REJECTED_PROXY_DIGESTS,}$OPENCODE_PROXY_DIGEST"',
@@ -2109,6 +2117,10 @@ def _build_opencode_script(
             'if [ "${OPENCODE_STARTUP_STALLED:-0}" -eq 1 ] && [ "$PROXY_BLOCKED" -eq 0 ] && [ "$OPENCODE_PROXY_ATTEMPT" -ge "$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS" ]; then',
             '  write_proxy_status startup_exhausted startup_stalled 1',
             '  runner_artifact_append_line "$td/agent-status.md" "OpenCode startup attempts exhausted ($OPENCODE_PROXY_ATTEMPT/$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS)"',
+            "fi",
+            'if [ "${OPENCODE_PRE_USEFUL_RETRY:-0}" -eq 1 ] && [ "$PROXY_BLOCKED" -eq 0 ] && [ "$OPENCODE_PROXY_ATTEMPT" -ge "$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS" ]; then',
+            '  write_proxy_status upstream_error_exhausted opencode_server_error 1',
+            '  runner_artifact_append_line "$td/agent-status.md" "OpenCode upstream server errors exhausted proxy attempts ($OPENCODE_PROXY_ATTEMPT/$OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS)"',
             "fi",
         ]
     parts.extend([
@@ -2166,7 +2178,7 @@ def _build_opencode_script(
     if proxy_provider_url:
         parts.extend(
             [
-                'if [ "${OPENCODE_STARTUP_STALLED:-0}" -eq 1 ]; then cooldown_opencode_proxy; fi',
+                'if [ "${OPENCODE_STARTUP_STALLED:-0}" -eq 1 ] || [ "${OPENCODE_PRE_USEFUL_RETRY:-0}" -eq 1 ]; then cooldown_opencode_proxy; fi',
                 "report_rate_limited_proxy",
                 "release_opencode_proxy",
             ]
@@ -2190,6 +2202,8 @@ def _build_opencode_script(
             '  write_proxy_status startup_exhausted startup_stalled 1',
             'elif [ "$FINAL_RC" -eq 76 ]; then',
             '  write_proxy_status blocked "${PROXY_LAST_ERROR_CLASS:-proxy_unavailable}" 1',
+            'elif [ "${OPENCODE_PRE_USEFUL_RETRY:-0}" -eq 1 ]; then',
+            '  write_proxy_status upstream_error_exhausted opencode_server_error 1',
             "else",
             '  write_proxy_status worker_failed "${PROXY_LAST_ERROR_CLASS:-}" 1',
             "fi",

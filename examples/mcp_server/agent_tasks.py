@@ -873,6 +873,9 @@ _AGENT_TERMINAL_STATUSES = frozenset(
 )
 _AGENT_ACTIVE_STATUSES = frozenset({"created", "pending", "processing", "running", "cancelling"})
 _STARTUP_STALLED_RE = re.compile(r"OpenCode startup stalled; rotating proxy \(attempt (\d+)/(\d+)\)")
+_PRE_USEFUL_SERVER_RETRY_RE = re.compile(
+    r"OpenCode upstream server error before useful work; rotating proxy \(attempt (\d+)/(\d+)\)"
+)
 _USEFUL_AGENT_ACTIVITY_MARKERS = (
     "← Write ",
     "Wrote file successfully",
@@ -1382,17 +1385,20 @@ def _agent_startup_diagnostics(
     active: bool,
     now_epoch: int,
     proxy_status: dict[str, Any],
+    failure: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Classify OpenCode startup/proxy dead time separately from useful work."""
     combined = f"{status_text}\n{log_stdout}"
-    matches = list(_STARTUP_STALLED_RE.finditer(combined))
-    attempts = [int(match.group(1)) for match in matches]
-    max_attempts = [int(match.group(2)) for match in matches]
+    stalled_matches = list(_STARTUP_STALLED_RE.finditer(combined))
+    server_retry_matches = list(_PRE_USEFUL_SERVER_RETRY_RE.finditer(combined))
+    rotation_matches = [*stalled_matches, *server_retry_matches]
+    attempts = [int(match.group(1)) for match in rotation_matches]
+    max_attempts = [int(match.group(2)) for match in rotation_matches]
     proxy_attempt = proxy_status.get("attempt")
     proxy_max_attempts = proxy_status.get("max_attempts")
     proxy_sidecar_observed = bool(proxy_status.get("exists") and proxy_status.get("valid"))
     opencode_startup_stalled = bool(
-        matches
+        rotation_matches
         or "OpenCode startup stalled" in combined
         or (
             active
@@ -1407,6 +1413,15 @@ def _agent_startup_diagnostics(
         or _OPENCODE_TOOL_ACTIVITY_RE.search(combined) is not None
         or any(marker in combined for marker in _USEFUL_AGENT_ACTIVITY_MARKERS)
     )
+    # A typed pre-useful-work failure is authoritative. The runner itself
+    # emits final report/diff artifacts on every terminal path, so their mere
+    # existence cannot retroactively prove that the model or a tool did work.
+    if (
+        failure
+        and failure.get("valid") is True
+        and failure.get("phase") == "pre_useful_work"
+    ):
+        useful_agent_activity_seen = False
     dead_time_kind = None
     if active and opencode_startup_stalled and not useful_agent_activity_seen:
         dead_time_kind = "opencode_startup"
@@ -1428,14 +1443,14 @@ def _agent_startup_diagnostics(
         "startup_timeout": startup_timeout,
         "opencode_startup_stalled": opencode_startup_stalled,
         "proxy_rotation": {
-            "observed": bool(matches or proxy_sidecar_observed),
+            "observed": bool(rotation_matches or proxy_sidecar_observed),
             "attempt": proxy_attempt if isinstance(proxy_attempt, int) else (max(attempts) if attempts else None),
             "max_attempts": (
                 proxy_max_attempts
                 if isinstance(proxy_max_attempts, int)
                 else (max(max_attempts) if max_attempts else None)
             ),
-            "count": len(matches),
+            "count": len(rotation_matches),
             "sidecar": proxy_sidecar_observed,
         },
         "useful_agent_activity_seen": useful_agent_activity_seen,
@@ -1838,6 +1853,16 @@ def agent_task_status(
         run_cmd, project=project, task_id=task_id, now_epoch=now
     )
     failure = _read_agent_failure_status(run_cmd, project=project, task_id=task_id)
+    if (
+        failure.get("valid") is True
+        and failure.get("phase") == "pre_useful_work"
+    ):
+        semantic_activity = {
+            "source": None,
+            "mtime_epoch": None,
+            "age_seconds": None,
+        }
+        semantic_age = None
 
     terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
     active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
@@ -2019,6 +2044,16 @@ def inspect_agent_task(
         run_cmd, project=project, task_id=task_id, now_epoch=now
     )
     failure = _read_agent_failure_status(run_cmd, project=project, task_id=task_id)
+    if (
+        failure.get("valid") is True
+        and failure.get("phase") == "pre_useful_work"
+    ):
+        semantic_activity = {
+            "source": None,
+            "mtime_epoch": None,
+            "age_seconds": None,
+        }
+        semantic_age = None
 
     terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
     active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
@@ -2046,6 +2081,7 @@ def inspect_agent_task(
         active=active,
         now_epoch=now,
         proxy_status=proxy_status,
+        failure=failure,
     )
     reasoning_loop = _detect_agent_reasoning_loop(
         log_stdout=str(log.get("stdout", "")),
@@ -2142,6 +2178,21 @@ def inspect_agent_task(
             "worker_termination_proven": False,
             "do_not_assume_worker_terminated": True,
             "inspect_agent_task": {"project": project, "task_id": task_id},
+            "retry_agent_task": {
+                "project": project,
+                "source_task_id": task_id,
+                "retry_task_id": "<new-task-id>",
+                "requires_new_task_id": True,
+            },
+            "run_agent": {"project": project, "task_id": "<new-task-id>"},
+        }
+    elif (
+        terminal
+        and failure_reason == "opencode_server_error"
+        and failure.get("phase") == "pre_useful_work"
+    ):
+        result["recovery"] = {
+            "action": "retry_with_new_task_id",
             "retry_agent_task": {
                 "project": project,
                 "source_task_id": task_id,
