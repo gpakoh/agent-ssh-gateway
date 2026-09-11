@@ -120,7 +120,7 @@ jobs:
       - name: Tests + coverage
         # --only-rerun WebSocketDisconnect: Starlette's in-process WebSocket
         # TestClient occasionally drops a pending response under CI resource
-        # contention (not reproducible locally, see TODO.md T80.5) — retry
+        # contention (not reproducible locally, see TODO.md [CI-005]) — retry
         # ONLY that specific failure signature so a real regression in any
         # other test still fails the build on the first try.
         #

@@ -1,392 +1,356 @@
-# Agent SSH Gateway — TODO
+# Agent SSH Gateway — authoritative open backlog
 
-This file intentionally keeps only current open agent/operator wishes and live bugs.
-Historical completed audit notes were pruned from TODO; they should live in a
-separate changelog/audit archive if needed.
+This file is the single authoritative backlog for open Gateway engineering work.
+It is intentionally ordered by severity, not by discovery date or implementation
+area. `docs/roadmap.md` points here and must not carry a second independent
+backlog.
 
-Stable finding IDs such as `AL-005` and `AO-011` are permanent cross-project
-references. Do not renumber or reuse them when an item is closed; ordinal list
-numbers are presentation only. All Gateway findings reported by sibling projects
-must be deduplicated into this authoritative `TODO.md` on `master` rather than
-kept only in a dirty canonical checkout, chat transcript, or stale feature branch.
+Stable IDs are permanent cross-project references. Never renumber or reuse an ID
+when a finding is closed. Completed findings are removed from this file after
+implementation, independent verification, current-base CI/delivery evidence where
+applicable, and production evidence when the finding is runtime-facing.
 
-## 🧭 Architect/OpenCode agent-loop findings — 2026-09-03
+Reconciliation sources used on 2026-09-11: current `master` TODO, the dirty
+canonical TODO intake (43 historical/open entries), `docs/roadmap.md`, current
+repository TODO/FIXME/HACK/TBD and unchecked-plan scans, CI comments, open Gitea
+PRs/branches, and live runtime evidence. Historical implementation-plan checkboxes
+and runbook operator checklists are not backlog items by themselves: they are
+included only when the current tree or live system still demonstrates the gap.
 
-PR #138 has merged; keep this list as the remaining close-out checklist until
-items are explicitly verified as implemented, documented and safe in production.
+Severity policy:
+- **P0** — verified active security/data-loss or production-outage condition.
+- **P1** — correctness, safety, delivery-integrity, or near-term availability risk.
+- **P2** — important reliability/capability gap that is currently fail-closed or has a safe workaround.
+- **P3** — efficiency, ergonomics, cost, documentation, or productization debt.
 
-1. ⬜ **[AL-005] Residual tool exposure/catalog mismatch.** #140 added repo-side catalog
-   consistency reporting, but the end-to-end operator problem remains until the
-   ChatGPT-visible resource catalog and MCP `tools/list` cannot diverge silently.
-   Live symptoms included missing invokable schemas for advertised/expected tools
-   such as branch/PR cleanup helpers. During Supervisor RAG delivery on
-   2026-09-04 against build `5f78241d6c50ea3b52fc0ea74544e21700205b90`, the
-   visible `gitea_push_local_ref` schema omitted implementation-required
-   `task_id`; after supplying the hidden field, delivery still failed on
-   undocumented required artifacts such as `delivery-contract.json` /
-   `candidate-receipt.json`. During Browser delivery on 2026-09-04,
-   `list_resources(query="gitea_push_local_ref")` again exposed a schema without
-   `task_id`, but invoking it for verified commit
-   `c6df59ee894d3376c7c025c9ca9c53a1292797b8` failed validation with
-   `task_id Field required`. During NOD delivery on 2026-09-04,
-   `tools_manifest` advertised `gitea_materialize_task_candidate` /
-   `prepare_candidate_clone`, but `list_resources(query="materialize" | "candidate")`
-   did not surface invokable schemas. During the #195 TODO-writer rollout on
-   2026-09-07, post-merge deploy/host-smoke proved live `tools_manifest` on
-   master `4f74014632ffbb1e89369932a53768eed6ef06e0` advertised
-   `todo_backlog_upsert` as enabled/available, while the ChatGPT-visible
-   `api_tool.list_resources(paths=["SSH_Gateway"])` catalog in the same
-   conversation still exposed only 127 schemas and omitted the new writer.
-   Closure requires advertised tools to be
-   either invokable with the exact implementation contract or explicitly marked
-   unavailable with a reason at the same surface the operator uses.
+There are currently **no verified P0 findings**.
 
-   JS Chat Engine audit, 2026-09-08 (P2; open; owner: Gateway; review before
-   the next operator-tooling release): the active `mcp_client_write` server
-   manifest at build `736d09d4279a3439998323b7fe25435e5141dcee` advertised
-   `todo_backlog_upsert` and `read_agent_artifact` as enabled/available, but
-   neither exact callable name was present in the ChatGPT tool registry
-   (`ALL_TOOLS`). This prevented use of the specialized deduplicating TODO
-   writer for this audit. Existing `read_file` plus hash-guarded
-   `supervisor_integrate_file` provide a permitted fallback for this existing
-   TODO only. Reproduce by comparing those two manifest entries with the actual
-   client-visible callable names; do not infer client availability from the
-   server-local manifest. Acceptance: expose matching callable schemas or mark
-   the client-side absence explicitly. Not a blocker for the JS engine audit
-   because a guarded existing-file update is available.
+## P1 — correctness, safety, delivery integrity, availability
 
-   The same audit also exposed an opaque CAS-input diagnostic. An initial
-   `supervisor_integrate_file` call supplied a bare hexadecimal
-   `expected_sha256` (client input error) and returned only
-   `TOOL_EXECUTION_FAILED: Supervisor integration failed` (request
-   `9b85945e-d5af-47a0-9a9d-2a40c74850a9`). Reading the implementation showed
-   that the required format is `sha256:<64 hex>`, which the callable field
-   description did not state. Independently, full `read_file(TODO.md)` reported
-   size 26398 and `truncated=false`, but returned 26397 UTF-8 bytes without
-   the final LF: hashing returned content gave `7995ea6f...`, while
-   `workspace_verify` returned `sha256:d5911a11...`; adding exactly one LF
-   reproduced that raw-file hash. No new audit notes appeared after the failed
-   call. Desired contract: document the prefixed hash format, return an
-   authoritative raw-file SHA-256 with reads (or byte-exact content), and
-   distinguish invalid hash format from current-hash mismatch with safe typed
-   diagnostics. The recovery used the verified raw-file hash, preserved the
-   final LF and retained all existing TODO content; it did not drop the CAS
-   guard.
+1. ⬜ **[AL-023] Bound OAuth token retention in memory and durable storage.**
+   `GatewayOAuthProvider._tokens` retains expired access tokens: both
+   `verify_access_token()` and `load_access_token()` return `None` on expiry but
+   do not evict the entry. Refresh rotation removes the old refresh token but
+   leaves the old access token and adds another access/refresh pair. `TokenStore`
+   appends/marks revoked records but never compacts expired/revoked history, and
+   startup `load_tokens()` registers non-revoked entries without excluding
+   already-expired records. Live evidence on 2026-09-11: `mcp-oauth` was about
+   501.5 MiB / 512 MiB before recreate and about 103.6 MiB immediately after
+   recreate. This proves restart-reclaimable accumulation, but does not by itself
+   prove token retention is the only contributor. Closure: bounded in-memory
+   eviction, locked/atomic durable compaction policy, startup expiry filtering,
+   repeated-refresh regression tests, no raw-token leakage, and a live soak/metric
+   showing memory remains bounded under representative OAuth traffic.
 
-2. ⬜ **[AL-006] Git namespace mismatch between SSH tools and control-plane git tools.**
-   `execute_argv` / `repo_status` can observe one branch/ref/HEAD while trusted
-   git tools act from another namespace or fail with `GIT_LOCAL_REF_MISSING`.
-   Closure requires host-path-free metadata showing exact resolved project root,
-   branch and head for trusted git operations, and fail-closed detection such as
-   `WORKSPACE_NAMESPACE_MISMATCH` when namespaces diverge.
+2. ⬜ **[CI-004] Browser E2E CI must fail closed when Selenium cannot execute.**
+   Current Gitea runs report the `E2E (Selenium)` job as `success` while the
+   actual `E2E tests` step is `skipped` when Chrome/Chromedriver is unavailable.
+   A green aggregate workflow therefore does not prove browser coverage. Closure:
+   reproducible browser-capable runner/provisioning plus an assertion that the
+   Selenium tests actually ran; missing browser tooling must not aggregate as a
+   passing E2E gate.
 
-3. ⬜ **[AL-010] Handoff/write tools must route around non-writeable production roots.**
-   GPT RAG orchestration on 2026-09-04 reported `Permission denied` when trying
-   to create parallel `.ai-bridge` handoffs for `quart-core`, and `index.lock`
-   permission failures when attempting writes/staging in root project checkouts.
-   Read-only Gateway metadata confirms the same class for `quart-core` and
-   `rag-router-service`: both are Git worktrees but `filesystem_writeable=false`
-   and recommend `writeable_candidate_clone`, while `marx-mind` is writeable.
-   Browser delivery on 2026-09-04 reproduced the same class in
-   `gpt-browser-bridge`: `info` reported `filesystem_writeable=false`, focused
-   verification had to run in a writable candidate, and canonical `git add
-   app/loops.py tests/unit/test_loops.py` failed with `.git/index.lock` permission
-   denied even though `git diff --check` passed. Closure requires
-   handoff/task/write/git tools to fail fast with a typed `WORKSPACE_NOT_WRITEABLE`
-   / `CANDIDATE_REQUIRED` diagnostic or automatically create/use a writable
-   candidate clone, instead of allowing late `.ai-bridge` or `.git/index.lock`
-   permission failures in production roots.
+3. ⬜ **[AO-015] `gitea_push_verified_commit` needs auditable per-check execution evidence.**
+   Cross-project delivery has shown `checks_verified=true` can disagree with
+   canonical CI on the same SHA because verifier toolchain/execution differs.
+   Each required check must return evidence bound to the exact workspace/head:
+   normalized command identity, cwd/project, duration, exit code, bounded output,
+   resolved tool/version provenance, and worktree mutation state. A verifier that
+   cannot faithfully execute the requested invariant must fail closed and must
+   not push.
 
-4. ⬜ **[AL-011] OpenCode review clones must support dirty-worktree review targets.**
-   During NOD verification on 2026-09-04, a read-only OpenCode review task
-   materialized only repository `HEAD 40d026f8` instead of the current dirty
-   worktree, so the review surface was not suitable for checking uncommitted NOD
-   changes. A related task also stalled with `trailing_colon_stall`, leaving the
-   operator without a usable agent review result. Closure requires the handoff /
-   review clone contract to explicitly distinguish committed-HEAD review from
-   dirty-worktree snapshot review, include the exact snapshot/source evidence in
-   task metadata, and surface typed stall state plus recovery guidance instead
-   of presenting the stale clone as a valid review target. Reproduced again on
-   2026-09-10 while reviewing AL-013: the task was created from a registered
-   dirty candidate with exact `base_ref=55740db0d60cf5f6f29a71a309aa5919900019ea`,
-   but the managed review workspace log explicitly checked out only that clean
-   base HEAD (`HEAD is now at 55740db ...`) and therefore did not contain the
-   uncommitted AL-013 changes. The read-only audit was cancelled rather than
-   accepting stale review evidence.
+4. ⬜ **[AL-020] Reconcile ambiguous Gitea merge mutation outcomes before allowing retry.**
+   A merge can succeed server-side while timeout/HTTP 5xx is returned to the
+   operator. Blind retry risks duplicate/contradictory mutation semantics.
+   Closure: bounded fresh postcondition reads after timeout/5xx; return
+   `completed_after_ambiguous_response` with exact merge SHA when proven, or a
+   distinct `MUTATION_OUTCOME_UNKNOWN` verdict that forbids blind retry. PR reads
+   should expose first-class `merged`/`merge_commit_sha` evidence. Cover lost
+   responses and write-succeeded/HTTP-500 cases.
 
-5. ⬜ **[AL-007] Command-plane/session recovery gap after transient reconnect/cooldown.**
-   Project-level tools can remain usable while a previously known command session
-   becomes unavailable. Cross-project evidence also shows clean workspaces can be
-   stranded on deleted feature branches with no safe local switch/sync helper.
-   Closure requires restored command-plane recovery or bounded project-level tools
-   for existing-branch switch, default-branch checkout/sync and local-branch
-   cleanup, with exact current/head/target guards and structured before/after
-   evidence. During Zalesskiy SUP cleanup on 2026-09-08, remote branch
-   `seo-soften-about-claims-20260908` was already deleted while the registered
-   workspace remained locally checked out at `f09120737fa1e1e1930d4d6a70cc110cd018d387`;
-   `origin/main` had advanced to `7ca51cfaf9ab335ac1bd2eedb19381f805fea4f5`
-   and no exposed safe branch-switch helper existed. The desired helper must be
-   local-only, fail closed on dirty or stale expected state, and return typed
-   diagnostics such as `WORKTREE_DIRTY`, `TARGET_REF_MISSING`,
-   `EXPECTED_HEAD_MISMATCH` and `COMMAND_SESSION_UNAVAILABLE`.
+5. ⬜ **[AL-021] `gitea_get_file` must bind content to the requested ref and expose the resolved commit.**
+   Cross-project evidence showed symbolic `branch="main"` reads returning bytes
+   from a stale feature head while exact-SHA/candidate reads returned the correct
+   base content. Closure: resolve branch/tag/SHA first, fetch by exact resolved
+   commit, return `requested_ref` + `resolved_commit_sha`, key caches by exact
+   commit+path, and fail closed on ref/content mismatch. Regress with alternating
+   branches containing different blobs at the same path.
 
-   JS Chat Engine audit on 2026-09-08 added transport evidence: native `info`,
-   `tree` and `read_file` stayed usable while `git_status` and `recent_commits`
-   returned inner `REMOTE_UNAVAILABLE` / retryable=true but outer
-   `INVALID_ARGUMENT`; after the Gateway build transition the unchanged reads
-   recovered. Acceptance includes bounded read-call completion during rollout,
-   consistent retryable transport classification at every envelope level and
-   explicit recovery guidance. Do not generalize read retries to blind retries of
-   timed-out mutations.
+6. ⬜ **[AL-022] `git_commit` lease must bind staged bytes, not only porcelain status shape.**
+   `expected_status_sha256` can remain unchanged when already-staged file bytes
+   change but path/status letters do not. It is therefore not proof that the
+   reviewed staged tree is the tree being committed. Closure: expose/enforce a
+   content-bound index lease (for example Git tree object id or canonical cached
+   diff/index digest) covering blob bytes, mode and rename target; stale lease
+   must reject with zero commit mutation.
 
-## 🧩 Architect/operator wanted capabilities — 2026-09-03
+7. ⬜ **[AL-005] Eliminate operator tool exposure/catalog/authorization divergence.**
+   The server-local `tools_manifest` and the ChatGPT-visible invokable schema
+   catalog have repeatedly diverged: advertised tools/required parameters can be
+   absent externally, prerequisite tools can be referenced by another tool but
+   not invokable, and discovery/invocation permission can change from advertised
+   schema to `FORBIDDEN`/missing namespace in one conversation. Closure: one
+   permission/schema decision across discovery and invocation, exact contract
+   parity, explicit `REQUIRED_PREFLIGHT_UNAVAILABLE`/namespace-revoked diagnostics,
+   and byte-exact/hash-safe file-read/CAS contracts. Never infer external
+   invokability solely from the server-local manifest.
 
-1. ⬜ **[AO-001] First-class bounded internal service health probe.** Add a read-only
-   `http_get_health` / `tcp_connect_check` capability for internal endpoints such
-   as `http://agent-memory-service:8070/health`, with allowlisted method,
-   explicit host/port/path, timeout, max response bytes, no secrets/env exposure,
-   provenance, and clear DNS/refused/timeout/non-2xx/healthy distinctions.
+8. ⬜ **[AL-006] Unify Git namespace identity across SSH/project/control-plane tools.**
+   `repo_status(project=...)` can read a registered candidate while command-plane
+   `execute_argv git ...` remains outside that repository; trusted Git helpers can
+   also operate in a different ref/object namespace and fail with
+   `GIT_LOCAL_REF_MISSING`. This directly blocked refreshing stale PR #252 on
+   2026-09-11. Closure: host-path-free resolved workspace/ref/object metadata,
+   typed `WORKSPACE_NAMESPACE_MISMATCH`, and safe bounded fetch/sync semantics
+   that operate on the same registered workspace as trusted mutations.
 
-3. ⬜ **[AO-005] Typed Gitea repo/PR cleanup tools for architect-controlled delivery.**
-   Add first-class, ChatGPT-visible tools for safe repository cleanup operations
-   that currently require manual UI/API fallback: close a Gitea PR without
-   merge, update repository settings such as default branch, and verify
-   `merged=false` / exact head/base state after cleanup. These tools must be
-   surfaced as invokable schemas wherever `tools_manifest` advertises them,
-   fail closed on ambiguous repo/PR identity, require explicit expected state
-   inputs, and return structured audit evidence. Closure requires regression
-   coverage for PR close-without-merge, default-branch switch, already-closed
-   idempotency, and catalog/resource visibility parity.
+9. ⬜ **[AL-007] Provide restart-safe command-session recovery and guarded local branch refresh.**
+   Gateway deploy/reconnect can invalidate a known session while project tools
+   remain usable. Clean workspaces can also be stranded on deleted/stale feature
+   branches with no safe local switch/fetch/sync helper. Closure: bounded
+   project-level existing-branch switch/default-branch checkout/fetch-prune/local
+   cleanup with exact current/head/target guards, plus consistent retryable
+   transport classification and recovery guidance. Do not generalize read retries
+   to timed-out mutations.
 
-4. ⬜ **[AO-006] Verification tools must not be pinned to an unreadable project `.venv`.**
-   During Supervisor RAG verification on 2026-09-04, project-level
-   `run_pytest`, `run_ruff` and `run_mypy` all failed before collection because
-   the registered checkout had `.venv/bin/python3` with permission denied, while
-   the same diff passed in a clean verification clone. During Browser recovery
-   on 2026-09-04, a registered writable candidate workspace was clean at
-   `b7b78df1888f207c5a79af7e5c8cd6a1d163e6ef`, but project-level `run_pytest`
-   failed before collection because the runner used `uv --frozen` and the
-   workspace had no `uv.lock`. Verification tools should detect unreadable,
-   broken, or layout-incomplete environments, create or select a safe isolated
-   environment, or fail with a typed `VERIFICATION_ENV_UNREADABLE` /
-   `VERIFICATION_LOCKFILE_MISSING` diagnostic and a recovery path instead of
-   treating environment bootstrap as code failure.
+10. ⬜ **[AL-010] Route writes around non-writeable or falsely-writeable production roots.**
+    Registered projects have produced both false-negative and false-positive
+    `filesystem_writeable` observations relative to the actual workspace/Git
+    write plane. Handoff/task/file/Git mutation paths must either use a writable
+    candidate automatically or fail early with typed
+    `WORKSPACE_NOT_WRITEABLE`/`CANDIDATE_REQUIRED`; metadata must describe the
+    exact write plane rather than a coarse directory boolean.
 
-   NOD re-verification, 2026-09-08: after the child candidate was committed and
-   clean at exact HEAD `607376528dc23cddfdac751646dd83a9506970e4`, supervisor
-   `run_pytest` still failed before collection. `uv` found the existing
-   `.venv/bin/python3` pointed to a non-existent interpreter, selected CPython
-   3.12.14, then failed removing `./.venv/.lock` with permission denied. The same
-   focused behavior had passed through an alternate execution lane; a managed
-   OpenCode candidate also reported worker pytest `75 passed` and Ruff green while
-   Gateway required-check bootstrap failed. Acceptance must include this
-   broken-interpreter + unwritable-lock case and automatically select a safe
-   isolated verifier instead of reporting project-test failure.
+11. ⬜ **[AL-014] Cooldown admission must use the real `CooldownEntry` schema without crashing.**
+    The active cooldown path formats diagnostics through non-existent
+    `c.backend` while the typed entry exposes `provider`; a real cooldown can
+    raise `AttributeError` before any worker starts. Closure: use the typed field,
+    tolerate persisted/legacy entries safely, return sanitized provider/until and
+    retry guidance, and regression-test an actual cooldown through
+    `project_run_agent` without a backend field.
 
-5. ⬜ **[AO-010] Command-plane policy and verification ergonomics need typed operator guidance.**
-    Several 2026-09-04 delivery sessions exposed rough edges that overlap with
-    existing namespace/session/environment findings but are not yet captured as a
-    single operator contract: raw SSH `git push` / `git clone` can time out while
-    the specialized `git_push` path succeeds; common diagnostic wrappers such as
-    `sh -lc` and `python3 -c` are blocked by policy; destructive cleanup such as
-    `rm` is correctly denied but leaves operators without a safe cleanup helper
-    for failed temporary clones; and registered temporary workspaces can fail
-    `run_pytest` / `run_compileall` before useful verification because the runner
-    is pinned to `uv --frozen` / missing or incompatible `uv.lock` state. During
-    Supervisor launch on 2026-09-04, `docker_compose_build` and build-enabled
-    `docker_compose_up` failed before image build with `mkdir [PATH] read-only
-    file system` for both a verified `.supervisor-workspaces` checkout and a
-    separate `/media/1TB/Python/...` deploy context, while no-build compose could
-    create networks/containers from an existing image. Closure requires typed
-    Docker build-context diagnostics that identify whether the read-only path is
-    the compose project dir, Docker builder state, HOME/cache, or daemon-side
-    mount namespace, plus a safe recovery path such as read-only build context
-    with writable builder cache. Also requires typed policy denials with
-    recommended safe alternate tools, first-class bounded cleanup for
-    Gateway-created scratch workspaces, and verification helpers that distinguish
-    environment/bootstrap failure from project test failure.
+12. ⬜ **[AL-015] Finish live OpenCode output/startup semantic observability.**
+    This consolidates the old startup/proxy-rotation, bounded-log, useful-work,
+    and proxy-sidecar TODOs into one delivery finding. Private runner output must
+    remain the authoritative raw classifier source while a bounded atomic,
+    redacted attempt-local tail is published live; previous proxy attempts must
+    not contaminate current diagnostics; zero-byte placeholders/heartbeats must
+    not count as semantic progress; `running` should be emitted only after real
+    model/tool activity. Implementation is in-flight in PR #252 but is not closed
+    until rebuilt on current master, independently reviewed, CI-gated, deployed,
+    and exercised live.
 
-7. ⬜ **[AO-012] Project catalog reads need filtering and pagination.**
-   `project_list()` currently returns the entire registry, including historical
-   candidate clones, when an architect often needs one project id. Add exact,
-   prefix or text query plus project type/tag/parent filters, stable ordering,
-   `limit`/`offset`, total count and a compact projection. Exact-id lookup should
-   not require returning unrelated projects. Preserve a bounded backwards-
-   compatible unfiltered mode.
+13. ⬜ **[AL-016] Single-agent outer envelopes must not advertise submission success for blocked/non-submitted results.**
+    Current normalization converts raw `status="error"` to an outer failure, but
+    `status="blocked"` can still pass through `run_tool_async` and inherit
+    `success_text="Submitted agent task via router."` even when no new attempt is
+    created. Closure: every pre-submit/terminal replay outcome binds outer status,
+    nested status, job/attempt presence and actual submission occurrence; blocked
+    or terminal non-submission is never `ok=true` submission success.
 
-8. ⬜ **[AO-013] Long-running candidate preparation needs async progress and cancellation.**
-   Fresh `prepare_candidate_clone` calls have taken roughly 63-116 seconds in
-   cross-project work while exposing no intermediate phase or cancellation.
-   Desired contract: optional async submission with durable job id; cheap status
-   phases such as fetch/checkout/register/verify; cancellation before final
-   registration; safe retry; and an optional bounded synchronous wait. Preserve
-   exact-base, clean-workspace and idempotent recovery guarantees.
+14. ⬜ **[AL-024] Do not replay ambiguous CodeIntelligence adapter generation requests.**
+    Current `CodeIntelligence.generate_code()` retries the same POST up to three
+    times after timeout, transport failure, non-200, adapter error and short
+    response. Once `/api/generate` begins, execution is ambiguous and replay can
+    duplicate work. PR #251 contains a candidate single-dispatch fix and targeted
+    tests but is stale. Closure: current-base implementation, exactly one POST for
+    ambiguous outcomes, safe local fallback, full call-site review and CI.
 
-9. ⬜ **[AO-014] Secret-bearing dotenv files need a targeted atomic key-update primitive.**
-   A production `.env` key sometimes must be changed without reading, previewing,
-   diffing, returning or resubmitting unrelated secrets. Add a bounded
-   `dotenv_key_update` / `secret_file_key_update` capability for allowlisted
-   project-relative secret files. Inputs: exact project, relative file, key,
-   sensitive replacement value and an expected-current guard (prefer file/value
-   hash or opaque version). Update exactly one existing key atomically; preserve
-   unrelated bytes, mode and ownership; fail closed on stale state or ambiguous
-   duplicate/missing keys. No response, log, receipt, preview, audit metadata or
-   exception may contain old/new secret values, full lines, neighboring lines or
-   other file contents. Return only non-secret evidence such as key name,
-   before/after file hash, changed flag and atomic-write receipt id. Regression
-   coverage must include spaces, `#`, `=`, quotes and UTF-8 values, stale guards,
-   duplicate/missing keys, crash/interruption safety and proof that no output
-   surface leaks secrets.
+15. ⬜ **[AO-006] Verification must use a trustworthy isolated project/CI-equivalent environment.**
+    Verification helpers have failed on unreadable/broken `.venv`, unwritable
+    caches, missing lockfiles, monorepo collection semantics, and toolchain drift;
+    in one case trusted verification passed while canonical CI failed the same
+    formatter invariant on the same SHA. Closure: typed bootstrap/capability
+    errors, isolated writable caches/env, repository-declared test profiles,
+    pinned toolchain provenance, and no claim of CI-equivalence when execution
+    differs. Fresh OpenCode-adapter evidence from PR #257 belongs here, not in a
+    duplicate item.
 
-10. ⬜ **[AO-015] `gitea_push_verified_commit` needs auditable per-check execution evidence.**
-    Astra Builder C6 delivery on 2026-09-08 showed the helper can return
-    `checks_verified=true` and push an exact head even though independent CI on
-    the same SHA immediately disproves one of the declared required invariants.
-    Each required check must therefore return structured evidence bound to the
-    exact workspace/head: normalized command/argv identity, resolved cwd/project,
-    duration, exit code, bounded stdout/stderr evidence and whether the worktree
-    changed. `checks_verified=true` must be derivable from these per-check results.
-    If the selected verification lane cannot execute a check faithfully, fail
-    closed with a typed verification-capability error and do not push.
+16. ⬜ **[AL-018] Make the candidate verifier concurrency-safe.**
+    `candidate_verifier.py` still defines one global container name
+    `mcp-candidate-verifier`; parallel deliveries can collide and fail with Docker
+    exit 125. Closure: unique request/job-scoped verifier identity (or equivalent
+    isolated primitive), deterministic cleanup, cancellation safety, and a
+    concurrent regression proving two independent verified deliveries cannot
+    reuse/collide with the same verifier container.
 
-11. ⬜ **[AO-016] Gitea Actions need first-class bounded generated-artifact retrieval.**
-    Job logs are diagnostic evidence, not a transport for generated files. During
-    the same Astra Builder recovery, CI generated the canonical ~52 KiB widget
-    runtime but Gateway could only expose log output; the operator had to rebuild
-    the artifact in another lane and compare hashes. Add read-only
-    `gitea_list_action_artifacts` / `gitea_get_action_artifact_file` or equivalent
-    bounded job-workspace snapshot APIs bound to repo, run, job and exact head
-    SHA. Return path, size, digest, provenance and truncation state; small text may
-    be returned bounded, larger artifacts should use a file reference. Fail closed
-    on run/job/head mismatch, path escape or missing artifact.
+## P2 — important reliability and capability gaps
 
-12. ⬜ **[AO-017] Registered local projects need a typed Gitea repository bootstrap/publish primitive.**
-    During `site-audit-platform` bootstrap on 2026-09-09, Gateway had a registered
-    project and valid local Git baseline but no typed flow to create the matching
-    remote Gitea repository, bind it as the allowed origin, set/verify the default
-    branch and publish the exact guarded baseline. Add a bounded idempotent
-    `gitea_create_repository` / `bootstrap_gitea_repository` flow for an exact
-    registered project and allowlisted owner/namespace. Inputs must bind expected
-    local branch/head and desired repository identity/settings; incompatible
-    existing remotes must fail with zero writes. Return structured evidence for
-    local project/head, created-or-existing remote identity, default branch and
-    mutation occurrence, plus the exact guarded publish step when publication is
-    separate. Acceptance includes create-missing, compatible idempotency,
-    incompatible refusal, expected-head mismatch before mutation and a full
-    registered-project-to-remote bootstrap without manual UI/API fallback.
+17. ⬜ **[AL-011] Dirty-worktree review must be explicit, reproducible and hard to misuse.**
+    A dirty snapshot source mode exists, but real reviews have still checked out
+    only clean `base_ref` when the operator intended to review uncommitted
+    changes. Closure: source contract clearly distinguishes committed ref vs
+    dirty snapshot, records immutable snapshot/tree evidence, and returns typed
+    mismatch/recovery guidance rather than allowing stale clean-source review to
+    masquerade as the requested target.
 
-## 🧩 Frontend/Astro delivery findings — 2026-09-05
+18. ⬜ **[AL-017] Workspace path tools must accept safe framework dynamic-route brackets.**
+    Current path validation still rejects literal `[`/`]`, blocking valid files
+    such as Astro `[slug].astro` or Next/Svelte `[id].tsx` even inside the
+    registered root. Closure: permit brackets while preserving absolute path,
+    traversal and root-escape defenses; regress read and relevant write surfaces.
 
-1. ⬜ **Route frontend verification through the existing Astro delivery
-   capability, not ad-hoc SSH `npm`.** During Zalesskiy SUP homepage SEO delivery
-   on 2026-09-05, the repository clearly declared an Astro frontend
-   (`package.json`, `npm run build`, Dockerfile based on `node:20-alpine`), but
-   the command-plane verification environment had no `npm` binary. A later host
-   container audit showed the platform already has an Astro/frontend execution
-   lane: `astro-builder-runtime-1`, `astro-builder-control-plane-1`,
-   `astro-builder-studio-1`, `astro-builder-cache-1`, and live
-   `astro-sites-astro` running `npm run build && npm run preview -- --host` on
-   port `4321` with Astro v5.18.2 and generated sitemap output. Therefore the
-   missing capability is not simply "install Node in SSH"; it is Gateway routing
-   from a registered frontend project to the existing Astro Builder / astro-sites
-   delivery path. Closure requires a typed `frontend_build` / `astro_build`
-   helper that detects project metadata and builder affiliation, selects an
-   approved existing builder/runtime or bounded Node container, binds exact
-   project id, working directory, lockfile/package manager and allowlisted script,
-   and returns structured build evidence: toolchain versions, command identity,
-   artifact path, stdout/stderr tail, exit code and typed
-   `FRONTEND_BUILD_CAPABILITY_UNAVAILABLE` / `FRONTEND_BUILD_FAILED` outcomes.
+19. ⬜ **[AL-019] Task schema validation and tiny task writes must not enter a slow unrelated control-plane path.**
+    Invalid local enum input has taken minutes to return despite being detectable
+    at the API boundary, while the underlying task write itself is milliseconds.
+    Closure: synchronous local validation, bounded small-write latency, and tests
+    for both invalid enum and valid small task creation without weakening
+    diagnostics.
 
-2. ⬜ **Bounded live HTTP smoke via a managed fetch capability, preferably backed
-   by `relay-curl-worker`.** The Zalesskiy SUP delivery needed to verify
-   `robots.txt`, `sitemap-index.xml` and public landing-page headers live, but
-   raw `curl` through `execute_argv` was denied by command policy. This is a
-   sibling of the internal service health probe, but it must support public-site
-   verification and should share bounded fetch primitives rather than duplicate
-   network policy. A later host audit found a long-running `relay-curl-worker`
-   container (`alpine`, `sleep 86400`, `restart: unless-stopped`), which looks
-   like an existing
-   substrate for safe smoke checks but is not exposed as a typed Gateway tool.
-   Do not weaken the raw shell/curl denylist. Implement a bounded `http_smoke` /
-   `public_http_smoke` capability with allowlisted `GET`/`HEAD`, explicit
-   host/path, redirect-chain capture, status, content-type, bounded body sample,
-   timeout, optional XML validation for sitemap files, no cookies/secrets/env
-   exposure, and typed DNS/refused/timeout/non-2xx/invalid-XML outcomes. Closure
-   requires provenance showing the execution substrate used (`relay-curl-worker`
-   or another approved fetch runner), plus regression coverage that operators can
-   verify public `robots.txt`, sitemap and landing-page headers without shelling
-   out.
+20. ⬜ **[AO-001] First-class bounded internal service health probe.**
+    Add an allowlisted read-only HTTP/TCP health capability for internal services
+    with explicit host/port/path, finite timeout/body limits, provenance and typed
+    DNS/refused/timeout/non-2xx/healthy outcomes; never expose env/secrets.
 
-3. ⬜ **Deploy-contract bridge for Astro/Compose frontend projects.** The
-   Zalesskiy SUP repository has a `deploy.sh` that runs `docker compose up -d
-   --build astro`, but `execute_argv` cannot run it because the SSH session has
-   no `docker` binary, while Docker mutations are intentionally available only
-   through Gateway Docker tools. Treat this as an orchestration gap between repo
-   deploy intent and Gateway capabilities, not as a reason to run arbitrary
-   scripts. Operators need a typed deployment adapter that reads an allowlisted
-   deploy contract, resolves the registered frontend project to the existing
-   Astro Builder / astro-sites / Compose service path, confirms exact compose
-   project/service/image/build sequence, executes through Gateway Docker tools,
-   and reports build/up/restart/smoke evidence. Closure requires avoiding both
-   bad choices: raw deploy scripts that cannot run in SSH and ad-hoc Docker tool
-   calls that bypass the repo's documented deploy path. This item deliberately
-   does not duplicate the existing Docker `read-only file system` build-context
-   finding; it is about the missing bridge between frontend delivery contracts
-   and Gateway Docker actions.
+21. ⬜ **[AO-005] Finish typed Gitea repository/PR cleanup/settings operations.**
+    Close-without-merge and branch deletion now exist, but repository settings
+    such as guarded default-branch change still lack the same first-class exact-
+    state mutation contract. Closure: exact expected-state guards, post-read
+    verification, idempotency and catalog parity for the remaining cleanup/
+    settings operations.
 
-4. ⬜ **CI-gated merge tools need an explicit no-workflow/no-run state.** During
-   the same PR flow, `gitea_list_workflows` and `gitea_list_action_runs` returned
-   no workflows/runs for `gpakoh/zalesskiy-sup`, while the protected merge helper
-   refused with `CI_NOT_GREEN`. That is fail-closed, but the diagnostic should be
-   more precise and actionable: `CI_NOT_CONFIGURED` / `NO_REQUIRED_RUN_FOUND`,
-   including whether manual verification artifacts can satisfy a configured
-   override policy. Closure requires tests for repos with zero workflows, repos
-   with workflows but no run for the exact head SHA, and repos with stale runs
-   from another head.
+22. ⬜ **[AO-010] Improve command/Docker policy recovery ergonomics without weakening policy.**
+    Operators still encounter denied shell wrappers/destructive cleanup, missing
+    safe scratch cleanup, and Docker builds that fail before Dockerfile execution
+    because the builder/control-plane path is read-only. Closure: typed denial
+    with recommended safe alternate tool, bounded cleanup for Gateway-created
+    scratch workspaces, and Docker diagnostics identifying context vs HOME/buildx
+    cache vs daemon namespace with a sanctioned writable-cache recovery path.
 
-## 🆕 Runtime/CI findings — 2026-08-19
+23. ⬜ **[AO-014] Atomic secret-file key update without reading/resubmitting unrelated secrets.**
+    Add a guarded `dotenv_key_update`/equivalent for allowlisted secret files:
+    exact file/key, expected-current guard, atomic single-key update preserving
+    unrelated bytes/mode/ownership, duplicate/missing-key refusal, and responses
+    containing only non-secret hashes/receipt metadata. Tests must prove old/new
+    values and neighboring secret lines never leak.
 
-1. ⬜ **Correlated ~18-minute CI failures across Docker runners/phases.** Prior
-   runs showed different Docker runners failing around the same wall-clock
-   boundary while building/deploying images. A port-collision fix was merged, but
-   the broader shared timeout/resource/registry/network/storage/supervisor
-   question remains open. Closure requires distinguishing runner-specific
-   degradation from a shared infrastructure limit and demonstrating a controlled
-   build+deploy path that does not hit the hidden deadline.
+24. ⬜ **[AO-016] First-class bounded Gitea Actions artifact retrieval.**
+    Job logs are not a transport for generated files. Add artifact listing and
+    bounded/file-scoped retrieval bound to repo/run/job/head SHA with path-safe
+    extraction, size/digest/provenance/truncation metadata, expiry handling and no
+    log-based serialization workaround.
 
-2. ⬜ **Superseded Gitea Action task containers can keep consuming runner capacity.**
-   During Astra C.2.5-C5/C6 recovery on 2026-09-04, newer PR heads existed and
-   newer runs were authoritative, but older superseded `nod-ci-node22` action
-   task containers still appeared as running with no useful CPU and their Gitea
-   runs still reported `in_progress`. Operators need a safe read-only
-   reconciliation surface showing whether an Action container belongs to the
-   current PR head, a superseded head, or an orphaned run, plus a guarded cleanup
-   path that fails closed unless run id, job id, container id, and head SHA all
-   match the stale/superseded state.
+25. ⬜ **[AO-017] Typed registered-project → Gitea repository bootstrap/publish.**
+    Add idempotent guarded repository creation/binding/default-branch setup and
+    exact-head initial publication for an allowlisted owner/project. Incompatible
+    existing remotes/settings or expected-head mismatch must fail before mutation.
 
-3. ⬜ **Avoid duplicate heavy CI after already-green PR heads.** Direct default-
-   branch pushes are now allowed, but the workflow still repeats the full heavy
-   Python matrix on `master` after a PR has already passed the same code gate.
-   Add a safe CI/CD fast path: PRs keep the full matrix; the post-merge
-   `master` push should run only quick sanity checks plus build, deploy, and
-   host-smoke when the merge commit is a clean merge of an exact green PR head
-   with no additional code changes. Closure requires explicit evidence binding
-   the green PR run to the merged head, a fallback to full CI for direct pushes
-   or ambiguous histories, and tests/docs proving fail-closed behavior rather
-   than silently weakening the deployment gate.
+26. ⬜ **[AO-018] First-class guarded Gitea Actions rerun.**
+    Gitea supports run/failed-job rerun APIs but Gateway exposes only reads.
+    Operators currently need an admin Docker/API fallback for transient CI
+    infrastructure failures. Add exact run/head/attempt guards, terminal-failed
+    precondition, ambiguity reconciliation, idempotency and post-read evidence;
+    never require a fake no-op commit just to retrigger CI.
 
-## Runtime/tooling intake — 2026-09-07
+27. ⬜ **[AO-019] One-shot Docker/Compose execution with secret-safe env/network binding and read-only service SQL preflight.**
+    `docker_run` cannot safely inherit selected Compose secrets/networks and there
+    is no `docker_compose_run`. Add exact project/service/image binding, selected
+    environment names inherited only inside the execution boundary, `--rm`, no
+    ports by default, timeout and structured logs. Also provide a read-only
+    Compose-service DB inventory mode restricted to one bounded parsed
+    `SELECT`/`WITH`, so operators can inspect an application Postgres without
+    accidentally querying Gateway control-plane Postgres or exposing a DSN.
 
-These entries are deduplicated against the existing Gateway TODO backlog. They record concrete new failure modes from the #188/#189/#191 recovery and a cross-project JS_chat-engine report, so the evidence does not live only in chat.
+28. ⬜ **[AO-020] Managed read-only agent review for non-Git workspaces.**
+    Script/config/data workspaces that intentionally are not Git repos cannot be
+    bound to the current immutable `base_ref` task contract. Support an immutable
+    `source_kind=workspace_snapshot` digest + allowlist for analysis/review, keep
+    mutation/delivery disabled without a separate trusted write contract, and
+    return `NON_GIT_WRITE_DELIVERY_UNSUPPORTED` instead of demanding a fake SHA.
 
-1. ⬜ **SSH_Gateway discovery and invocation permissions can diverge inside one conversation.** This extends, but does not duplicate, the existing residual catalog mismatch finding. The earlier NOD mode was advertised schemas followed by `Resource not found`; this JS_chat-engine report is advertised schemas followed by `FORBIDDEN: This conversation does not support developer MCPs`, then later discovery no longer exposing `SSH_Gateway` at all.
+29. ⬜ **[AO-021] Make bounded-agent roles and supervisor-only closure first-class.**
+    The API/task contract should model agents as implementer/reviewer/call-site
+    auditor/adversarial tester/CI repair lanes with exact scope/source/check
+    receipts. Agent reports may declare their own work complete but must not
+    authoritatively close a finding/project or declare readiness. Make isolated
+    parallel role-separated agents, evidence comparison, cancellation/retry and
+    failed-review preservation cheap for the architect. The 2026-09-11 inventory
+    agent losing its already-read task context is further evidence that prompt
+    wording alone is not a reliable orchestration contract.
 
-   **Severity:** P1 for agent/supervisor workflows.
+30. ⬜ **[FD-001] Route frontend verification through an approved Astro/frontend build capability.**
+    Registered frontend projects should not depend on ad-hoc SSH `npm`. Add a
+    typed frontend/Astro build helper that binds exact project/ref, package
+    manager/lockfile and allowlisted script to an approved builder/runtime and
+    returns toolchain/artifact/output evidence plus typed unavailable/failed
+    outcomes.
 
-   **Reproduction:** start a project conversation where `SSH_Gateway` is expected; call `api_tool.list_resources(paths=["SSH_Gateway"], query="workspace_file_edit")` and observe Gateway schemas / dynamic namespace exposure. Invoke `SSH_Gateway.workspace_file_edit(...)` or read-only `SSH_Gateway.health()` and observe `FORBIDDEN: This conversation does not support developer MCPs`. Repeat `api_tool.list_resources(paths=["SSH_Gateway"])` and observe `SSH_Gateway` missing while unrelated namespaces remain.
+31. ⬜ **[FD-002] Bounded managed HTTP smoke for public sites and internal services.**
+    Expose safe `GET`/`HEAD` smoke (prefer the existing relay-curl substrate where
+    appropriate) with explicit target/path, redirect/status/content-type, bounded
+    body, timeout, optional XML validation and typed network/HTTP/XML failures.
+    Do not weaken raw shell/curl policy.
 
-   **Expected behavior:** discovery and invocation authorization must use the same permission decision. If developer MCPs are forbidden, discovery must not advertise `SSH_Gateway`; if advertised, invocation must either reach Gateway or return one stable typed permission error such as `TOOL_NAMESPACE_PERMISSION_REVOKED` with namespace, toolset/permission version, and recovery hint.
+32. ⬜ **[FD-003] Deploy-contract bridge for Astro/Compose frontend projects.**
+    Bind a registered immutable source/candidate to the repo's approved deploy
+    contract and exact Compose project/service/image sequence. Support read-only
+    Compose render/preflight, exact namespace verification, dependency-only
+    rollout and backup/snapshot prerequisites for DB-major migrations, then
+    return build/recreate/log/health evidence without arbitrary deploy scripts.
 
-   **Acceptance:** tests cover forbidden namespace not advertised; advertised namespace can invoke read-only health/tool-list probe or receives deterministic typed permission error; revoked-after-discovery does not alternate between stale schemas, `FORBIDDEN`, and missing namespace.
+33. ⬜ **[FD-004] CI-gated merges need typed no-workflow/no-run/trigger-incompatible states.**
+    `CI_NOT_GREEN` conflates zero workflows, no run for the exact head, stale runs
+    and repositories whose canonical workflow is push-only while merge policy
+    accepts only `pull_request`. Add `CI_NOT_CONFIGURED`,
+    `NO_REQUIRED_RUN_FOUND`/`CI_TRIGGER_INCOMPATIBLE` and an explicit repository
+    policy for acceptable exact-head evidence without weakening fail-closed
+    defaults.
 
+34. ⬜ **[CI-001] Explain and eliminate correlated Docker-runner wall-clock failures.**
+    Historical build/deploy phases failed near a shared ~18-minute boundary.
+    Network retries and the Python-suite timeout fix improved adjacent symptoms,
+    but the shared runner/resource/registry/storage/supervisor question is not
+    proven closed. Closure requires controlled repeated build+deploy evidence and
+    diagnostics that distinguish runner-specific degradation from shared limits.
 
+35. ⬜ **[CI-002] Reconcile and safely clean superseded/orphaned Gitea Actions task containers.**
+    Old Action containers/runs can remain active after newer PR heads become
+    authoritative and continue consuming runner capacity. Add read-only mapping
+    of run/job/container/head state plus cleanup guarded by exact run id, job id,
+    container id and head SHA; ambiguous ownership must fail closed.
+
+36. ⬜ **[CI-005] Remove the WebSocket TestClient contention quarantine or make it observable.**
+    Unit CI currently reruns only `WebSocketDisconnect` because Starlette's
+    in-process WebSocket TestClient can drop a pending response under CI resource
+    contention. Before this consolidation the workflow still referenced obsolete
+    `TODO.md T80.5`; that stale reference showed the underlying debt had fallen out
+    of the authoritative backlog. Closure: reproduce
+    or instrument the contention sufficiently to fix it, or establish a bounded
+    deterministic test harness; until then the narrow retry must remain limited
+    to that exact failure signature and expose retry occurrence in CI evidence.
+
+## P3 — efficiency, ergonomics, productization and cosmetic debt
+
+37. ⬜ **[AO-012] Filter and paginate the registered project catalog.**
+    A one-project lookup has returned hundreds of historical candidates (679 in
+    2026-09-11 evidence). Add exact/prefix/text and project-type/tag/parent filters,
+    stable ordering, total count, `limit`/`offset`, and compact projection. Keep a
+    bounded backwards-compatible unfiltered mode.
+
+38. ⬜ **[AO-013] Async progress/cancellation for long candidate preparation.**
+    Fresh candidate preparation has taken roughly 63–116 seconds in prior work
+    and tens of seconds in current work while remaining synchronous/opaque. Add a
+    durable job id, fetch/checkout/register/verify phases, cancellation before
+    final registration, safe retry/idempotent recovery and optional bounded sync
+    wait.
+
+39. ⬜ **[AO-023] Define a supported public API/versioning/deprecation contract.**
+    This is the still-relevant residue of the old `docs/roadmap.md` “stabilize the
+    public API” item. Document which HTTP/WebSocket/MCP surfaces are stable,
+    versioning/deprecation guarantees, compatibility window and migration path;
+    bind breaking-change CI/release checks to that policy.
+
+40. ⬜ **[AO-024] Produce versioned release artifacts in addition to continuously published container images.**
+    Container images are already built, smoke-tested and pushed by CI, so that
+    half of the old roadmap item is closed. No release workflow currently
+    produces a formal versioned release artifact/changelog/provenance bundle.
+    Define whether such releases are a supported product contract; if yes, add a
+    reproducible tagged-release path with checksums/provenance, otherwise close
+    this item explicitly as out of scope.
+
+41. ⬜ **[CI-003] Avoid duplicate heavy post-merge CI when an exact PR head is already green.**
+    Current master pushes rerun the full Python matrix after an exact PR has
+    already passed it. Add a fail-closed fast path only when the merge commit is
+    proven to be a clean merge of the exact green PR head with no extra code;
+    direct pushes/ambiguous ancestry retain full CI. Build, deploy and host-smoke
+    still run for the delivered master SHA.

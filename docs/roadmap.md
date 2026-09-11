@@ -1,20 +1,15 @@
 # Roadmap
 
-This roadmap is intentionally small and may change.
+The authoritative open engineering backlog is [`../TODO.md`](../TODO.md).
 
-## Short term
+This file intentionally does not maintain a second checklist. The previous
+June roadmap was reconciled into `TODO.md` on 2026-09-11: already-delivered
+items (structured audit logging, command-policy profiles, granular scopes,
+WebSocket integration coverage, host-key workflows, example clients, and
+container-image publication) were not resurrected; the remaining public-API and
+versioned-release work is tracked there as stable open findings.
 
-- Stabilize the public API.
-- Improve Docker and deployment examples.
-- Add more integration tests for WebSocket flows.
-- Add structured audit logging.
-- Improve documentation for agent-token workflows.
-- Add example clients and recipes.
-
-## Later
-
-- Policy profiles for command execution.
-- Better host key management workflows.
-- Optional dashboard.
-- More granular scopes.
-- Release artifacts and container images.
+Implementation plans under `docs/superpowers/` are historical design/delivery
+evidence, not independent authoritative backlog sources. An unchecked box in an
+old plan becomes a backlog item only when current code or live evidence still
+proves the gap.
