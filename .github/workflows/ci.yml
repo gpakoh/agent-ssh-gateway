@@ -282,32 +282,48 @@ jobs:
         run: echo "$CHROMEWEBDRIVER" >> "$GITHUB_PATH"
 
       - name: Check for browser toolchain
-        # P1 MAJOR audit finding: this workflow also runs on a self-hosted
-        # Gitea runner pool (see github.server_url checks elsewhere in this
-        # file), where the `ubuntu-latest` label is mapped to a
-        # Python-focused custom image (nod-ci-python311) with no
-        # Chrome/Chromium/chromedriver at all -- unlike genuine
-        # GitHub-hosted ubuntu-latest runners, which ship all three
-        # preinstalled. The old approach ran pytest regardless, let it
-        # collect zero tests (exit 5), and rewrote that into `exit 0` --
-        # a real pass and "nothing could run here" were indistinguishable
-        # in the job's own status, exactly what audit rule TEST-15 flags.
-        # Detecting toolchain presence *before* running anything lets the
-        # next step's `if:` skip it outright -- GitHub Actions marks a
-        # skipped step/job distinctly (grey, not green) in its own UI, so
-        # "no browser here" now reads as neutral, not as a passing check.
-        id: browser_check
+        # CI-004: browser coverage is a required gate, not an optional
+        # capability probe. A runner without Selenium, Chrome/Chromium or
+        # ChromeDriver must make this job RED before pytest rather than
+        # turning the actual E2E step into a green aggregate with a skipped
+        # child step.
         run: |
-          if command -v chromedriver >/dev/null 2>&1 && command -v google-chrome >/dev/null 2>&1; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::No Chrome/Chromium/chromedriver on this runner -- E2E step will be skipped (not treated as passed)."
+          set -euo pipefail
+          driver="$(command -v chromedriver || true)"
+          browser=""
+          for candidate in chromium chromium-browser google-chrome; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+              browser="$(command -v "$candidate")"
+              break
+            fi
+          done
+          if [ -z "$driver" ] || [ -z "$browser" ]; then
+            echo "::error::Required Selenium browser toolchain is unavailable (chromedriver=${driver:-missing}, browser=${browser:-missing})"
+            exit 1
           fi
+          uv run python -c "import selenium"
+          echo "Browser E2E preflight OK: driver=$driver browser=$browser"
 
       - name: E2E tests
-        if: steps.browser_check.outputs.available == 'true'
-        run: uv run pytest -m e2e -q
+        run: |
+          set -euo pipefail
+          uv run pytest -m e2e -q --junitxml=e2e-results.xml
+          uv run python - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("e2e-results.xml").getroot()
+          suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+          tests = sum(int(suite.attrib.get("tests", "0")) for suite in suites)
+          skipped = sum(int(suite.attrib.get("skipped", "0")) for suite in suites)
+          if tests <= 0 or skipped != 0:
+              print(
+                  f"E2E execution proof failed: tests={tests}, skipped={skipped}",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+          print(f"E2E execution proof: tests={tests}, skipped={skipped}")
+          PY
 
   build-and-push:
     # Runs the build+smoke-test steps on BOTH a real push to master AND a

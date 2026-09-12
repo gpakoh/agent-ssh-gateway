@@ -847,50 +847,42 @@ class TestDeploymentConcurrencySerialization:
         assert concurrency.get("cancel-in-progress") is False
 
 
-class TestE2eSkipsHonestlyWithoutBrowserToolchain:
-    """P1 MAJOR audit finding: this workflow also runs on a self-hosted
-    Gitea runner pool where the `ubuntu-latest` label maps to a
-    Python-focused custom image with no Chrome/Chromium/chromedriver at
-    all -- confirmed live: every runner in the pool (python311/node22/
-    docker-e2e/security) lacks a browser toolchain. The old mechanism ran
-    pytest anyway, let it collect zero items (exit 5), and rewrote that
-    into `exit 0` -- a real pass and "nothing could run here" were
-    indistinguishable in the job's own status (TEST-15: zero collected
-    tests must not read as a passing check). Detecting the toolchain
-    first and gating the actual test step behind `if:` means GitHub
-    Actions marks it skipped (grey), not passed (green). build-and-push
-    now depends on e2e (`needs: [test, e2e]`) -- on runners with a
-    browser the e2e job really gates the artifact; on the no-browser
-    pool it completes as a skipped step and does not stall deploy.
-    """
+class TestE2eFailsClosedWithoutBrowserToolchain:
+    """CI-004: browser coverage is required evidence, never a soft skip."""
 
-    def test_browser_presence_is_detected_before_running_tests(self):
+    def test_browser_preflight_fails_when_required_toolchain_is_missing(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
-        steps_text = json.dumps(wf["jobs"]["e2e"])
-        assert "chromedriver" in steps_text
-        assert "google-chrome" in steps_text
-        assert "browser_check" in steps_text
+        steps = wf["jobs"]["e2e"]["steps"]
+        check = next(s for s in steps if s.get("name") == "Check for browser toolchain")
+        run = check["run"]
+        assert "chromedriver" in run
+        assert "chromium" in run
+        assert "google-chrome" in run
+        assert "uv run python -c \"import selenium\"" in run
+        assert "exit 1" in run
+        assert "GITHUB_OUTPUT" not in run
+        assert "available=false" not in run
 
-    def test_e2e_test_step_is_gated_on_browser_availability(self):
+    def test_e2e_step_is_unconditional_and_proves_non_skipped_execution(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
         steps = wf["jobs"]["e2e"]["steps"]
         e2e_step = next(s for s in steps if s.get("name") == "E2E tests")
-        assert e2e_step.get("if") == "steps.browser_check.outputs.available == 'true'"
+        assert "if" not in e2e_step
+        run = e2e_step["run"]
+        assert "pytest -m e2e -q --junitxml=e2e-results.xml" in run
+        assert 'tests <= 0 or skipped != 0' in run
+        assert "raise SystemExit(1)" in run
 
     def test_a_real_test_failure_still_fails_the_job(self):
-        """No more exit-code rewriting at all -- once the step only runs
-        with a confirmed browser present, any nonzero pytest exit
-        (failures, errors) propagates as the step's own exit status."""
         wf = _load_workflow(CI_WORKFLOW_PATH)
         steps = wf["jobs"]["e2e"]["steps"]
         e2e_step = next(s for s in steps if s.get("name") == "E2E tests")
-        assert e2e_step["run"].strip() == "uv run pytest -m e2e -q"
+        run = e2e_step["run"]
+        assert "set -euo pipefail" in run
+        assert "|| true" not in run
+        assert "continue-on-error" not in e2e_step
 
     def test_build_and_push_depends_on_e2e(self):
-        """P1 MAJOR audit finding (CI-06): build/deploy did not depend on
-        the e2e job -- unit/static could pass while the e2e gate was
-        skipped or failed and the artifact would still advance. Now the
-        artifact cannot build before the e2e job has resolved."""
         wf = _load_workflow(CI_WORKFLOW_PATH)
         needs = wf["jobs"]["build-and-push"].get("needs", [])
         assert "e2e" in needs
