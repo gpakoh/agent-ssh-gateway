@@ -81,6 +81,10 @@ MAX_PR_TITLE = 200
 MAX_PR_BODY = 20_000
 
 
+class GiteaMutationOutcomeUnknown(RuntimeError):
+    """The HTTP mutation boundary was crossed but its response was unusable."""
+
+
 def _validate_branch_name(value: str, label: str) -> str:
     value = value.strip()
     if (
@@ -281,7 +285,15 @@ class GiteaClient:
             ) from None
         if not resp.content:
             return {}
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError as exc:
+            # A successful HTTP status means the write may already be durable.
+            # Decoding its body is observational only and must never turn that
+            # irreversible boundary into an apparent input error/retry signal.
+            raise GiteaMutationOutcomeUnknown(
+                "gitea mutation returned an undecodable success response"
+            ) from exc
 
     async def _patch(
         self,

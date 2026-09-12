@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 from tool_results import tool_error, tool_success, validate_pagination
 
+from examples.mcp_client_remote.fleet.gitea_client import GiteaMutationOutcomeUnknown
 from examples.mcp_client_remote.fleet.github_client import (
     normalize_list_response,
 )
@@ -388,9 +389,12 @@ def _valid_commit_sha(value: Any) -> str | None:
     return text
 
 
-def _merge_exception_is_ambiguous(exc: Exception) -> bool:
+def _merge_exception_is_ambiguous(exc: BaseException) -> bool:
     """Return whether a failed merge request may still have mutated Gitea."""
-    if isinstance(exc, (httpx.TransportError, TimeoutError)):
+    if isinstance(
+        exc,
+        (GiteaMutationOutcomeUnknown, asyncio.CancelledError, httpx.TransportError, TimeoutError),
+    ):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         response = exc.response
@@ -935,7 +939,7 @@ async def gitea_merge_pull_request(
                     source="gitea",
                 )
 
-            mutation_error: Exception | None = None
+            mutation_error: BaseException | None = None
             try:
                 await client.merge_pull_request(
                     owner,
@@ -944,6 +948,16 @@ async def gitea_merge_pull_request(
                     expected_head_sha=expected_head_sha,
                     method=method,
                 )
+            except asyncio.CancelledError as exc:
+                # Cancellation after entering the POST await is an ambiguous
+                # mutation outcome, not evidence that the write did not happen.
+                # Consume this delivered cancellation so bounded postcondition
+                # reconciliation can run; a later cancellation request may still
+                # interrupt normally.
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    current_task.uncancel()
+                mutation_error = exc
             except Exception as exc:
                 if not _merge_exception_is_ambiguous(exc):
                     raise

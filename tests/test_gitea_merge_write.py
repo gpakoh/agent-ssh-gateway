@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
-from examples.mcp_client_remote.fleet.gitea_client import GiteaClient
+from examples.mcp_client_remote.fleet.gitea_client import (
+    GiteaClient,
+    GiteaMutationOutcomeUnknown,
+)
 from examples.mcp_server.mcp_infra.adapters import remote
 
 SHA = "a" * 40
@@ -84,6 +88,22 @@ async def test_client_merge_pr_rejects_invalid_sha_and_unsupported_methods(monke
         await client.aclose()
 
     post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_client_merge_pr_marks_malformed_success_body_as_ambiguous(monkeypatch):
+    client = GiteaClient("token")
+    request = httpx.Request("POST", "https://git.example/api/v1/repos/owner/repo/pulls/25/merge")
+    response = httpx.Response(200, request=request, content=b"{not-json")
+    post = AsyncMock(return_value=response)
+    monkeypatch.setattr(client._client, "post", post)
+    try:
+        with pytest.raises(GiteaMutationOutcomeUnknown, match="undecodable success response"):
+            await client.merge_pull_request("owner", "repo", 25, expected_head_sha=SHA)
+    finally:
+        await client.aclose()
+
+    assert post.await_count == 1
 
 
 class FakeMergeClient:
@@ -462,6 +482,24 @@ async def test_adapter_reconciles_http_500_after_server_applied_merge(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_adapter_reconciles_malformed_2xx_body_after_server_applied_merge(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    client = FakeMergeClient(
+        "token",
+        merge_exception=GiteaMutationOutcomeUnknown("undecodable success response"),
+        apply_merge=True,
+    )
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    result = await remote.gitea_merge_pull_request("owner", "repo", 25, SHA)
+
+    assert result["ok"] is True
+    assert result["result"]["outcome"] == "completed_after_ambiguous_response"
+    assert result["result"]["merge_commit_sha"] == "b" * 40
+    assert len(client.merge_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_adapter_unresolved_lost_merge_response_forbids_blind_retry(monkeypatch):
     monkeypatch.setenv("GITEA_TOKEN", "token")
     timeout = httpx.ReadTimeout(
@@ -483,6 +521,36 @@ async def test_adapter_unresolved_lost_merge_response_forbids_blind_retry(monkey
     assert details["reconciliation_attempts"] == 3
     assert details["observed"]["merged"] is False
     assert len(client.merge_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_adapter_cancellation_after_merge_boundary_reconciles_without_replay(monkeypatch):
+    monkeypatch.setenv("GITEA_TOKEN", "token")
+    started = asyncio.Event()
+
+    class CancelAfterApplyClient(FakeMergeClient):
+        async def merge_pull_request(self, owner: str, repo: str, pull_number: int, **kwargs):
+            self.merge_calls.append(
+                {"owner": owner, "repo": repo, "pull_number": pull_number, **kwargs}
+            )
+            self.merged = True
+            started.set()
+            await asyncio.sleep(3600)
+
+    client = CancelAfterApplyClient("token")
+    monkeypatch.setattr(remote, "_server_gitea_client", lambda: lambda token: client)
+
+    task = asyncio.create_task(remote.gitea_merge_pull_request("owner", "repo", 25, SHA))
+    await started.wait()
+    task.cancel()
+    result = await task
+
+    assert result["ok"] is True
+    assert result["result"]["outcome"] == "completed_after_ambiguous_response"
+    assert result["result"]["merge_commit_sha"] == "b" * 40
+    assert len(client.merge_calls) == 1
+    assert task.cancelled() is False
+    assert task.cancelling() == 0
 
 
 @pytest.mark.asyncio
@@ -513,6 +581,59 @@ async def test_adapter_postcondition_read_retries_without_replaying_mutation(mon
     assert result["result"]["outcome"] == "completed"
     assert result["result"]["reconciliation_attempts"] == 3
     assert len(client.merge_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_requires_merge_commit_sha_even_when_merged_true():
+    client = AsyncMock()
+    client.get_pull_request.return_value = {
+        "state": "closed",
+        "merged": True,
+        "merge_commit_sha": None,
+        "head": {"sha": SHA, "ref": "feat/x"},
+        "base": {"sha": BASE_SHA, "ref": "master"},
+    }
+
+    merged_pr, details = await remote._reconcile_merge_postcondition(
+        client,
+        "owner",
+        "repo",
+        25,
+        expected_head_sha=SHA,
+    )
+
+    assert merged_pr is None
+    assert details["reconciliation_attempts"] == 3
+    assert details["observed"]["merged"] is True
+    assert details["observed"]["merge_commit_sha"] is None
+    assert client.get_pull_request.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_rejects_merged_state_for_different_head():
+    other_head = "c" * 40
+    client = AsyncMock()
+    client.get_pull_request.return_value = {
+        "state": "closed",
+        "merged": True,
+        "merge_commit_sha": "b" * 40,
+        "head": {"sha": other_head, "ref": "feat/x"},
+        "base": {"sha": BASE_SHA, "ref": "master"},
+    }
+
+    merged_pr, details = await remote._reconcile_merge_postcondition(
+        client,
+        "owner",
+        "repo",
+        25,
+        expected_head_sha=SHA,
+    )
+
+    assert merged_pr is None
+    assert details["reconciliation_attempts"] == 3
+    assert details["observed"]["head_sha"] == other_head
+    assert details["observed"]["merge_commit_sha"] == "b" * 40
+    assert client.get_pull_request.await_count == 3
 
 
 @pytest.mark.asyncio
