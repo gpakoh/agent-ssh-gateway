@@ -1418,6 +1418,25 @@ def _local_git_output(resolved: Path, args: list[str]) -> str | None:
             ["git", "-c", f"safe.directory={resolved}", *args],
             cwd=str(resolved),
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout
+
+
+def _local_git_bytes(resolved: Path, args: list[str]) -> bytes | None:
+    """Run a fixed read-only Git query and preserve stdout byte-for-byte."""
+    try:
+        completed = subprocess.run(
+            ["git", "-c", f"safe.directory={resolved}", *args],
+            cwd=str(resolved),
             capture_output=True,
             timeout=10,
             check=False,
@@ -1430,19 +1449,29 @@ def _local_git_output(resolved: Path, args: list[str]) -> str | None:
 
 
 def _project_git_state(resolved: Path) -> dict[str, Any]:
-    """Return host-path-free branch/HEAD/dirty metadata for lease-style guards."""
+    """Return host-path-free Git state plus a content-bound index lease digest.
+
+    ``status_sha256`` intentionally remains the porcelain-shape digest for
+    backwards-compatible diagnostics. ``index_sha256`` hashes Git's canonical
+    index listing (mode, blob object id, stage and exact path), so staged byte,
+    mode or rename-target changes alter the lease even when porcelain status
+    letters remain unchanged. ``git ls-files`` is read-only and creates no Git
+    objects, unlike ``git write-tree``.
+    """
     if not _is_real_git_repo(resolved):
         return {"available": False, "reason": "not_git_repo"}
 
     branch_raw = _local_git_output(resolved, ["rev-parse", "--abbrev-ref", "HEAD"])
     head_raw = _local_git_output(resolved, ["rev-parse", "HEAD"])
     status = _local_git_output(resolved, ["status", "--porcelain=v1"])
-    if branch_raw is None or head_raw is None or status is None:
+    index = _local_git_bytes(resolved, ["ls-files", "--stage", "-z"])
+    if branch_raw is None or head_raw is None or status is None or index is None:
         return {"available": False, "reason": "git_state_unavailable"}
 
     branch = branch_raw.strip()
     head = head_raw.strip().lower()
-    status_sha256 = hashlib.sha256(status.encode("utf-8")).hexdigest()
+    status_sha256 = hashlib.sha256(status.encode("utf-8", "surrogateescape")).hexdigest()
+    index_sha256 = hashlib.sha256(index).hexdigest()
     return {
         "available": True,
         "branch": branch,
@@ -1450,6 +1479,7 @@ def _project_git_state(resolved: Path) -> dict[str, Any]:
         "head": head,
         "dirty": bool(status.strip()),
         "status_sha256": status_sha256,
+        "index_sha256": index_sha256,
         "status_entries": len([line for line in status.splitlines() if line.strip()]),
     }
 
@@ -1460,6 +1490,7 @@ def _workspace_guard_mismatches(
     expected_branch: str | None,
     expected_head: str | None,
     expected_status_sha256: str | None,
+    expected_index_sha256: str | None,
 ) -> list[dict[str, Any]]:
     mismatches: list[dict[str, Any]] = []
     checks = (
@@ -1469,6 +1500,11 @@ def _workspace_guard_mismatches(
             "status_sha256",
             expected_status_sha256.lower() if expected_status_sha256 else None,
             state.get("status_sha256"),
+        ),
+        (
+            "index_sha256",
+            expected_index_sha256.lower() if expected_index_sha256 else None,
+            state.get("index_sha256"),
         ),
     )
     for field, expected, actual in checks:
@@ -1487,7 +1523,7 @@ def _guarded_git_commit_error(
         code="WORKSPACE_CONTENDED",
         message="Project workspace changed since the caller's expected git state snapshot",
         retryable=True,
-        hint="Refresh info(project), review git_status/show_changes, then retry with the new expected_branch, expected_head, and expected_status_sha256.",
+        hint="Refresh info(project), review git_status/git_diff_cached, then retry with the new expected_branch, expected_head, expected_status_sha256, and expected_index_sha256.",
         details={
             "project": project,
             "mismatches": mismatches,
@@ -1496,6 +1532,7 @@ def _guarded_git_commit_error(
                 "head": state.get("head"),
                 "dirty": state.get("dirty"),
                 "status_sha256": state.get("status_sha256"),
+                "index_sha256": state.get("index_sha256"),
                 "status_entries": state.get("status_entries"),
             },
         },
@@ -1823,10 +1860,38 @@ def git_commit(
     expected_branch: str | None = None,
     expected_head: str | None = None,
     expected_status_sha256: str | None = None,
+    expected_index_sha256: str | None = None,
 ) -> dict[str, Any]:
-    """Commit staged changes, optionally guarded by an info(project) git snapshot."""
-    if expected_branch or expected_head or expected_status_sha256:
-        project = _validate_project(project)
+    """Commit staged changes, optionally guarded by an info(project) Git snapshot.
+
+    Any guarded commit requires ``expected_index_sha256`` so a reviewed lease is
+    bound to staged blob bytes/modes/paths, not only porcelain status shape.
+    """
+    project = _validate_project(project)
+    lease_requested = any(
+        value is not None
+        for value in (
+            expected_branch,
+            expected_head,
+            expected_status_sha256,
+            expected_index_sha256,
+        )
+    )
+    if lease_requested and expected_index_sha256 is None:
+        return tool_error(
+            tool="git_commit",
+            code="INVALID_INPUT",
+            message="Guarded git_commit requires expected_index_sha256 from info(project)",
+            retryable=True,
+            hint="Refresh info(project), review git_diff_cached, and retry with the current index_sha256.",
+            details={"project": project, "mutation_occurred": False},
+        )
+    if expected_index_sha256 is not None and not re.fullmatch(
+        r"[0-9a-fA-F]{64}", expected_index_sha256
+    ):
+        raise ValueError("INVALID_INPUT: expected_index_sha256 must be a 64-character hex SHA-256")
+
+    if lease_requested:
         state = _project_git_state(_resolve_project(project))
         if not state.get("available"):
             return tool_error(
@@ -1842,6 +1907,7 @@ def git_commit(
             expected_branch=expected_branch,
             expected_head=expected_head,
             expected_status_sha256=expected_status_sha256,
+            expected_index_sha256=expected_index_sha256,
         )
         if mismatches:
             return _guarded_git_commit_error(project, state, mismatches)

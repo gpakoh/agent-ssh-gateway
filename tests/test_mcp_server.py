@@ -139,6 +139,7 @@ def test_git_commit_schema_exposes_optional_workspace_guards():
     assert "expected_branch" in properties
     assert "expected_head" in properties
     assert "expected_status_sha256" in properties
+    assert "expected_index_sha256" in properties
 
 
 @patch.dict(os.environ, {"MCP_GATEWAY_TOOL_MODE": "mcp_client_write"}, clear=False)

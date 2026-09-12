@@ -521,7 +521,35 @@ class TestProjectGitStateGuards:
         assert state["head"] == head
         assert state["dirty"] is False
         assert state["status_sha256"] == mod.hashlib.sha256(b"").hexdigest()
+        index_bytes = subprocess.run(
+            ["git", "ls-files", "--stage", "-z"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        ).stdout
+        assert state["index_sha256"] == mod.hashlib.sha256(index_bytes).hexdigest()
         assert str(tmp_path) not in str(state)
+
+    def test_index_lease_hashes_raw_nul_delimited_path_bytes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        _init_git_repo(tmp_path)
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+        unusual_name = "odd\r\nname.txt"
+        (tmp_path / unusual_name).write_text("path bytes matter\n", encoding="utf-8")
+        _git(tmp_path, "add", "--", unusual_name)
+
+        raw_index = subprocess.run(
+            ["git", "ls-files", "--stage", "-z"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        ).stdout
+        state = mod._project_git_state(tmp_path)
+
+        assert b"odd\r\nname.txt\0" in raw_index
+        assert state["index_sha256"] == mod.hashlib.sha256(raw_index).hexdigest()
 
     def test_info_git_state_uses_scoped_safe_directory(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -542,6 +570,13 @@ class TestProjectGitStateGuards:
                 return subprocess.CompletedProcess(argv, 0, stdout=f"{'a' * 40}\n", stderr="")
             if args == ["status", "--porcelain=v1"]:
                 return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+            if args == ["ls-files", "--stage", "-z"]:
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    stdout=f"100644 {'b' * 40} 0\tREADME.md\0".encode(),
+                    stderr=b"",
+                )
             raise AssertionError(f"unexpected git argv: {argv!r}")
 
         monkeypatch.setattr(mod.subprocess, "run", fake_run)
@@ -573,12 +608,13 @@ class TestProjectGitStateGuards:
             expected_branch="other",
             expected_head="0" * 40,
             expected_status_sha256="f" * 64,
+            expected_index_sha256="e" * 64,
         )
 
         assert result["ok"] is False
         assert result["error"]["code"] == "WORKSPACE_CONTENDED"
         fields = {item["field"] for item in result["error"]["details"]["mismatches"]}
-        assert fields == {"branch", "head", "status_sha256"}
+        assert fields == {"branch", "head", "status_sha256", "index_sha256"}
 
     def test_guarded_git_commit_runs_when_snapshot_matches(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -587,6 +623,7 @@ class TestProjectGitStateGuards:
         head = _init_git_repo(tmp_path)
         monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
         status_sha = mod.hashlib.sha256(b"").hexdigest()
+        index_sha = mod._project_git_state(tmp_path)["index_sha256"]
 
         class Client:
             def __init__(self) -> None:
@@ -611,6 +648,7 @@ class TestProjectGitStateGuards:
             expected_branch="main",
             expected_head=head,
             expected_status_sha256=status_sha,
+            expected_index_sha256=index_sha,
         )
 
         assert result["exit_code"] == 0
@@ -620,6 +658,94 @@ class TestProjectGitStateGuards:
             "commit -m 'commit after guard'"
         ]
         assert "config --global" not in client.commands[0]
+
+    def test_guarded_git_commit_requires_content_bound_index_lease(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        head = _init_git_repo(tmp_path)
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+        state = mod._project_git_state(tmp_path)
+
+        class Client:
+            def execute_project_command(self, project: str, command: str) -> dict[str, object]:
+                raise AssertionError("commit must not run without an index lease")
+
+        result = mod.git_commit(
+            Client(),
+            "demo",
+            "missing content lease",
+            expected_branch="main",
+            expected_head=head,
+            expected_status_sha256=state["status_sha256"],
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "INVALID_INPUT"
+        assert result["error"]["details"]["mutation_occurred"] is False
+        assert _git(tmp_path, "rev-parse", "HEAD") == head
+
+    def test_staged_blob_drift_with_same_porcelain_status_is_rejected_without_mutation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        head = _init_git_repo(tmp_path)
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        readme = tmp_path / "README.md"
+        readme.write_text("reviewed staged bytes\n", encoding="utf-8")
+        _git(tmp_path, "add", "README.md")
+        reviewed = mod._project_git_state(tmp_path)
+
+        readme.write_text("different staged bytes\n", encoding="utf-8")
+        _git(tmp_path, "add", "README.md")
+        current = mod._project_git_state(tmp_path)
+
+        assert reviewed["status_sha256"] == current["status_sha256"]
+        assert reviewed["index_sha256"] != current["index_sha256"]
+
+        class Client:
+            def execute_project_command(self, project: str, command: str) -> dict[str, object]:
+                raise AssertionError("commit must not run after staged-byte lease drift")
+
+        result = mod.git_commit(
+            Client(),
+            "demo",
+            "must reject stale staged bytes",
+            expected_branch="main",
+            expected_head=head,
+            expected_status_sha256=reviewed["status_sha256"],
+            expected_index_sha256=reviewed["index_sha256"],
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+        assert [item["field"] for item in result["error"]["details"]["mismatches"]] == [
+            "index_sha256"
+        ]
+        assert _git(tmp_path, "rev-parse", "HEAD") == head
+        assert "different staged bytes" in _git(tmp_path, "diff", "--cached")
+
+    def test_index_lease_changes_when_only_staged_mode_changes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        _init_git_repo(tmp_path)
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        readme = tmp_path / "README.md"
+        readme.write_text("same content, first index mode\n", encoding="utf-8")
+        _git(tmp_path, "add", "README.md")
+        before_mode = mod._project_git_state(tmp_path)
+
+        before_entry = _git(tmp_path, "ls-files", "--stage", "README.md")
+        _git(tmp_path, "update-index", "--chmod=+x", "README.md")
+        after_mode = mod._project_git_state(tmp_path)
+        after_entry = _git(tmp_path, "ls-files", "--stage", "README.md")
+
+        assert before_entry.startswith("100644 ")
+        assert after_entry.startswith("100755 ")
+        assert before_mode["index_sha256"] != after_mode["index_sha256"]
 
 
 class TestProjectInfoVerificationHints:
