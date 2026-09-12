@@ -831,8 +831,12 @@ def read_agent_log_tail(
     byte_truncated = len(encoded) > AGENT_LOG_MAX_BYTES
     if byte_truncated:
         stdout = encoded[-AGENT_LOG_MAX_BYTES:].decode("utf-8", errors="replace")
-    stdout = _normalize_agent_log_text(project, task_id, stdout)
-    stderr = _normalize_agent_log_text(
+    # The public log is runner-owned, but worker output is still untrusted and
+    # can contain proxy URLs, credentials, or tokens.  Use the same strict
+    # surface sanitizer as read_agent_artifact_tail so the dedicated live-log
+    # API never becomes a weaker disclosure path.
+    stdout = _sanitize_agent_surface_text(project, task_id, stdout)
+    stderr = _sanitize_agent_surface_text(
         project,
         task_id,
         str(result.get("stderr", "")),
@@ -1333,9 +1337,11 @@ def _agent_reconciliation_diagnostics(
     attempt_job_id = (attempt or {}).get("job_id")
     attempt_bound_job = isinstance(attempt_job_id, str) and bool(attempt_job_id)
     gateway_job_absent = _gateway_job_absent(job)
-    report_exists = bool((files.get("report") or {}).get("exists"))
-    diff_exists = bool((files.get("diff") or {}).get("exists"))
-    artifact_incomplete = not (report_exists or diff_exists)
+    report_size = (files.get("report") or {}).get("size_bytes")
+    diff_size = (files.get("diff") or {}).get("size_bytes")
+    report_has_content = isinstance(report_size, int) and report_size > 0
+    diff_has_content = isinstance(diff_size, int) and diff_size > 0
+    artifact_incomplete = not (report_has_content or diff_has_content)
     state = None
     if gateway_job_absent and attempt_bound_job and not terminal:
         if active and not runner_heartbeat_fresh:
@@ -1396,20 +1402,26 @@ def _agent_startup_diagnostics(
     max_attempts = [int(match.group(2)) for match in rotation_matches]
     proxy_attempt = proxy_status.get("attempt")
     proxy_max_attempts = proxy_status.get("max_attempts")
-    proxy_sidecar_observed = bool(proxy_status.get("exists") and proxy_status.get("valid"))
+    proxy_sidecar_observed = bool(
+        proxy_status.get("exists") and proxy_status.get("valid")
+    )
+    proxy_outcome = proxy_status.get("final_outcome")
+    # Merely acquiring a proxy is normal startup, not evidence of a stall.
+    # Treat only explicit runner-owned rotation/exhaustion evidence as stalled;
+    # live runtime activity is reported separately via final_outcome=running.
     opencode_startup_stalled = bool(
         rotation_matches
         or "OpenCode startup stalled" in combined
-        or (
-            active
-            and proxy_sidecar_observed
-            and proxy_status.get("final_outcome") not in {"succeeded", "complete", "completed"}
-        )
+        or proxy_status.get("last_error_class") == "startup_stalled"
+        or proxy_outcome in {"rotating", "startup_exhausted", "upstream_error_exhausted"}
     )
     startup_timeout = status == "startup-timeout" or "opencode-startup-timeout" in combined
+    report_size = (files.get("report") or {}).get("size_bytes")
+    diff_size = (files.get("diff") or {}).get("size_bytes")
     useful_agent_activity_seen = bool(
-        (files.get("report") or {}).get("exists")
-        or (files.get("diff") or {}).get("exists")
+        (isinstance(report_size, int) and report_size > 0)
+        or (isinstance(diff_size, int) and diff_size > 0)
+        or proxy_outcome == "running"
         or _OPENCODE_TOOL_ACTIVITY_RE.search(combined) is not None
         or any(marker in combined for marker in _USEFUL_AGENT_ACTIVITY_MARKERS)
     )
@@ -1580,10 +1592,21 @@ def _jaccard(left: frozenset[str], right: frozenset[str]) -> float:
 
 def _progress_artifact_activity(files: dict[str, dict[str, Any]], now_epoch: int) -> dict[str, Any]:
     # Log and heartbeat activity alone can hide a thinking loop. attempt-state
-    # is job bookkeeping, not agent progress. Treat status/consensus/report/diff
-    # as semantic progress signals.
+    # is job bookkeeping, not agent progress. Runner-created evidence files can
+    # also exist as zero-byte placeholders before the worker does useful work,
+    # so their mtime alone must not reset semantic-stall timers.
     ignored = {"log", "heartbeat", "proxy_status", "failure_status", "attempt_state"}
-    return _latest_activity({name: meta for name, meta in files.items() if name not in ignored}, now_epoch)
+    content_required = {"report", "diff", "worker_status", "required_checks"}
+    useful: dict[str, dict[str, Any]] = {}
+    for name, meta in files.items():
+        if name in ignored:
+            continue
+        if name in content_required:
+            size = meta.get("size_bytes")
+            if not isinstance(size, int) or size <= 0:
+                continue
+        useful[name] = meta
+    return _latest_activity(useful, now_epoch)
 
 
 def _detect_agent_reasoning_loop(

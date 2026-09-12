@@ -735,6 +735,35 @@ class TestReadAgentLogTail:
         assert "/var/lib/mcp-agent" not in result["stderr"]
         assert "<agent-task>/opencode-output.log" in result["stderr"]
 
+    def test_redacts_urls_and_secrets_from_live_log_surface(self):
+        def fake_run(_project, command):
+            if command.startswith("ls -ld -- "):
+                return {
+                    "stdout": "-rw------- 1 user user 1 path\n",
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            return {
+                "stdout": (
+                    "proxy=https://user:pass@proxy.local:8080/v1?token=raw\n"
+                    "token=secret-value\n"
+                ),
+                "stderr": "password=stderr-secret",
+                "exit_code": 0,
+            }
+
+        result = read_agent_log_tail(
+            fake_run,
+            project="my-proj",
+            task_id="a12345678901",
+        )
+
+        assert "user:pass" not in result["stdout"]
+        assert "proxy.local" not in result["stdout"]
+        assert "secret-value" not in result["stdout"]
+        assert result["stdout"] == "proxy=<redacted-url>\ntoken=<redacted>\n"
+        assert result["stderr"] == "password=<redacted>"
+
     @pytest.mark.parametrize("tail_lines", [0, 1001, -1, True])
     def test_rejects_invalid_line_count_before_command(self, tail_lines):
         calls = []
@@ -958,6 +987,45 @@ class TestAgentTaskStatus:
         assert result["verdict"] == "likely_hung"
         assert result["next"]["inspect_agent_task"]["task_id"] == task_id
 
+    def test_fresh_zero_byte_evidence_does_not_mask_stale_semantic_progress_or_completion(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        now = 2_000
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: running\n", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps({"attempt_id": "attempt-1", "fingerprint": "fp", "job_id": "job-1"}),
+            encoding="utf-8",
+        )
+        (td / "agent-report.md").write_text("", encoding="utf-8")
+        (td / "implementation-diff.patch").write_text("", encoding="utf-8")
+        for child in td.iterdir():
+            os.utime(child, (now - 700, now - 700))
+        os.utime(td / "agent-report.md", (now - 1, now - 1))
+        os.utime(td / "implementation-diff.patch", (now - 1, now - 1))
+
+        def lost_job_status(job_id):
+            raise RuntimeError(f"JOB_NOT_FOUND for {job_id}")
+
+        result = agent_task_status(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            stale_after_seconds=600,
+            now_epoch=now,
+            job_status=lost_job_status,
+        )
+
+        assert result["last_activity"]["age_seconds"] <= 1
+        assert result["last_useful_activity"]["source"] == "status"
+        assert result["last_useful_activity"]["age_seconds"] == 700
+        assert result["reconciliation"]["artifact_incomplete"] is True
+        assert result["verdict"] == "lost_after_restart"
+        assert result["likely_hung"] is True
+
     def test_terminal_server_error_sidecar_sets_typed_verdict_without_reading_log(
         self, tmp_path, monkeypatch
     ):
@@ -1111,6 +1179,82 @@ class TestAgentTaskStatus:
             "project": "my-proj",
             "task_id": task_id,
         }
+
+
+class TestAgentStartupDiagnostics:
+    @staticmethod
+    def _diagnose(*, proxy_status=None, report_size=0, diff_size=0):
+        from examples.mcp_server.agent_tasks import _agent_startup_diagnostics
+
+        return _agent_startup_diagnostics(
+            status="running",
+            status_text="Status: running\n",
+            log_stdout="",
+            files={
+                "status": {"exists": True, "size_bytes": 16, "mtime_epoch": 1_900},
+                "log": {"exists": True, "size_bytes": 0, "mtime_epoch": 1_900},
+                "report": {"exists": True, "size_bytes": report_size, "mtime_epoch": 1_900},
+                "diff": {"exists": True, "size_bytes": diff_size, "mtime_epoch": 1_900},
+                "proxy_status": {"exists": bool(proxy_status), "size_bytes": 100, "mtime_epoch": 1_995},
+            },
+            active=True,
+            now_epoch=2_000,
+            proxy_status=proxy_status or {"exists": False},
+        )
+
+    def test_acquired_proxy_is_not_itself_a_startup_stall(self):
+        result = self._diagnose(
+            proxy_status={
+                "exists": True,
+                "valid": True,
+                "attempt": 1,
+                "max_attempts": 4,
+                "final_outcome": "acquired",
+            }
+        )
+
+        assert result["opencode_startup_stalled"] is False
+        assert result["useful_agent_activity_seen"] is False
+        assert result["dead_time_kind"] is None
+        assert result["proxy_rotation"]["observed"] is True
+        assert result["proxy_rotation"]["sidecar"] is True
+
+    def test_running_proxy_outcome_is_explicit_useful_runtime_evidence(self):
+        result = self._diagnose(
+            proxy_status={
+                "exists": True,
+                "valid": True,
+                "attempt": 2,
+                "max_attempts": 4,
+                "final_outcome": "running",
+            }
+        )
+
+        assert result["opencode_startup_stalled"] is False
+        assert result["useful_agent_activity_seen"] is True
+        assert result["dead_time_kind"] is None
+
+    def test_single_attempt_upstream_error_exhaustion_remains_startup_dead_time(self):
+        result = self._diagnose(
+            proxy_status={
+                "exists": True,
+                "valid": True,
+                "attempt": 1,
+                "max_attempts": 1,
+                "last_error_class": "opencode_server_error",
+                "final_outcome": "upstream_error_exhausted",
+            }
+        )
+
+        assert result["opencode_startup_stalled"] is True
+        assert result["useful_agent_activity_seen"] is False
+        assert result["dead_time_kind"] == "opencode_startup"
+        assert result["phase"] == "startup"
+
+    def test_zero_byte_terminal_artifacts_do_not_prove_useful_work(self):
+        result = self._diagnose(report_size=0, diff_size=0)
+
+        assert result["useful_agent_activity_seen"] is False
 
 
 class TestInspectAgentTask:

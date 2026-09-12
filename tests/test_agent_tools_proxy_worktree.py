@@ -138,7 +138,14 @@ class TestBuildOpencodeScriptProxy:
         script = _build_opencode_script(TD, TASK_ID, None, project_root="/srv/proj")
         assert '> "$RUNNER_OUTPUT_LOG" 2>&1' in script
         assert 'cat "$RUNNER_OUTPUT_LOG"' in script
-        assert 'runner_artifact_publish "$RUNNER_OUTPUT_LOG" "$td/opencode-output.log"' in script
+        assert 'runner_artifact_write "$td/opencode-output.log" ""' in script
+        live_snapshot = (
+            'snapshot_runner_log_tail "$RUNNER_OUTPUT_LOG" '
+            '"$td/opencode-output.log" 65536'
+        )
+        assert script.count(live_snapshot) == 3
+        assert 'runner_artifact_publish "$RUNNER_OUTPUT_LOG" "$td/opencode-output.log"' not in script
+        assert 'write_proxy_status running "" 0' in script
 
     def test_rate_limited_status_wins_over_failed(self, monkeypatch):
         monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", PROVIDER)
@@ -1103,7 +1110,7 @@ def test_proxy_transport_expired_certificate_retries_next_proxy(tmp_path, monkey
             'printf "%s\\n" "$HTTP_PROXY" >> "$PROXY_CAPTURE"\n'
             'case "$HTTP_PROXY" in\n'
             '  *:19001) printf "\\033[91mError: \\033[0mcertificate has expired\\n"; exit 1 ;;\n'
-            '  *) printf "\\033[0m\\n> build · big-pickle\\n\\033[0m\\nstartup-ok\\n"; exit 0 ;;\n'
+            '  *) printf "\\033[0m\\n> build · big-pickle\\n\\033[0m\\n→ Read current-plan.md\\n"; exit 0 ;;\n'
             "esac\n",
             encoding="utf-8",
         )
@@ -1137,7 +1144,7 @@ def test_proxy_transport_expired_certificate_retries_next_proxy(tmp_path, monkey
             report.get("proxy") == _ProxyPoolHandler.proxies[0]
             for report in _ProxyPoolHandler.reports
         )
-        assert "startup-ok" in (artifacts / "opencode-output.log").read_text(encoding="utf-8")
+        assert "→ Read current-plan.md" in (artifacts / "opencode-output.log").read_text(encoding="utf-8")
         worker_status = (artifacts / "worker-status.md").read_text(encoding="utf-8")
         assert "rotating proxy (attempt 1/4)" in worker_status
         for proxy in _ProxyPoolHandler.proxies:
@@ -1233,7 +1240,7 @@ def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
             'printf "%s\\n" "$HTTP_PROXY" >> "$PROXY_CAPTURE"\n'
             'case "$HTTP_PROXY" in\n'
             '  *:19001) printf "\\033[0m\\n> build · big-pickle\\n\\033[0m"; sleep 10 ;;\n'
-            '  *) printf "\\033[0m\\n> build · big-pickle\\n\\033[0m\\nstartup-ok\\n"; exit 0 ;;\n'
+            '  *) printf "\\033[0m\\n> build · big-pickle\\n\\033[0m\\n→ Read current-plan.md\\n"; exit 0 ;;\n'
             "esac\n",
             encoding="utf-8",
         )
@@ -1270,7 +1277,7 @@ def test_startup_stall_retries_with_different_proxy(tmp_path, monkeypatch):
         )
         worker_status = (artifacts / "worker-status.md").read_text(encoding="utf-8")
         assert "OpenCode startup stalled; rotating proxy" in worker_status
-        assert "startup-ok" in (artifacts / "opencode-output.log").read_text(encoding="utf-8")
+        assert "→ Read current-plan.md" in (artifacts / "opencode-output.log").read_text(encoding="utf-8")
         report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
         assert "Failure reason: none" in report
     finally:
@@ -1310,7 +1317,7 @@ def test_startup_stall_can_reach_third_distinct_proxy(tmp_path, monkeypatch):
             'printf "%s\\n" "$HTTP_PROXY" >> "$PROXY_CAPTURE"\n'
             'case "$HTTP_PROXY" in\n'
             '  *:19001|*:19002) printf "\\033[0m\\n> build · big-pickle\\n\\033[0m"; sleep 10 ;;\n'
-            '  *) printf "\\033[0m\\n> build · big-pickle\\n\\033[0m\\nthird-proxy-ok\\n"; exit 0 ;;\n'
+            '  *) printf "\\033[0m\\n> build · big-pickle\\n\\033[0m\\n→ Read current-plan.md\\n"; exit 0 ;;\n'
             "esac\n",
             encoding="utf-8",
         )
@@ -1345,7 +1352,7 @@ def test_startup_stall_can_reach_third_distinct_proxy(tmp_path, monkeypatch):
         reported = {report.get("proxy") for report in _ProxyPoolHandler.reports}
         assert _ProxyPoolHandler.proxies[0] in reported
         assert _ProxyPoolHandler.proxies[1] in reported
-        assert "third-proxy-ok" in (artifacts / "opencode-output.log").read_text(encoding="utf-8")
+        assert "→ Read current-plan.md" in (artifacts / "opencode-output.log").read_text(encoding="utf-8")
         worker_status = (artifacts / "worker-status.md").read_text(encoding="utf-8")
         assert "attempt 1/4" in worker_status
         assert "attempt 2/4" in worker_status

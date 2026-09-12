@@ -9,9 +9,11 @@ artifacts after the worker exits.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -96,6 +98,25 @@ def test_worker_fifo_snapshot_is_nonblocking_and_rejected(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr or result.stdout
     assert not destination.exists()
     assert fifo.exists()
+
+
+def test_runner_log_tail_snapshot_is_bounded_to_latest_bytes(tmp_path: Path) -> None:
+    source = tmp_path / "private-output.log"
+    source.write_text("0123456789abcdef", encoding="utf-8")
+    destination = tmp_path / "opencode-output.log"
+
+    script = "\n".join(
+        [
+            *_runner_artifact_io_script_lines(),
+            f"snapshot_runner_log_tail {shlex.quote(str(source))} {shlex.quote(str(destination))} 6",
+        ]
+    )
+    result = _run_shell(script, cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert destination.read_text(encoding="utf-8") == "abcdef"
+    assert destination.is_file()
+    assert not destination.is_symlink()
 
 
 def test_symlinked_artifact_parent_fails_closed_without_touching_target(tmp_path: Path) -> None:
@@ -189,6 +210,234 @@ def test_worker_symlink_poisoning_cannot_redirect_canonical_outputs(
     report = (artifacts / "agent-report.md").read_text(encoding="utf-8")
     assert "# Agent Runner Result" in report
     assert "sentinel" not in report
+
+
+def test_runner_publishes_attempt_local_log_before_opencode_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = tmp_path / "provider.txt"
+    proxy_namespace = tmp_path.name.replace("_", "-")
+    provider.write_text(
+        f"http://127.0.0.1:19999/{proxy_namespace}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", provider.as_uri())
+    monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "true")
+    monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+    monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "0")
+    source = tmp_path / "source"
+    _init_repo(source)
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+    public_log = artifacts / "opencode-output.log"
+    public_log.write_text("previous-attempt\n", encoding="utf-8")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    release = tmp_path / "release-opencode"
+    fake = fake_bin / "opencode"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "printf '> build · big-pickle\\n'\n"
+        "sleep 1\n"
+        "printf '→ Read examples/mcp_server/agent_tools.py\\n'\n"
+        f"while [ ! -e {shlex.quote(str(release))} ]; do sleep 0.1; done\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
+    proc = subprocess.Popen(
+        ["sh", "-c", script],
+        cwd=source,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    live_text = ""
+    seen_while_running = False
+    deadline = time.monotonic() + RUNNER_HARNESS_TIMEOUT_SECONDS
+    try:
+        while time.monotonic() < deadline and proc.poll() is None:
+            if public_log.is_file():
+                live_text = public_log.read_text(encoding="utf-8", errors="replace")
+                proxy_status_path = artifacts / "proxy-status.json"
+                if proxy_status_path.is_file():
+                    proxy_status = json.loads(proxy_status_path.read_text(encoding="utf-8"))
+                else:
+                    proxy_status = {}
+                if (
+                    "→ Read examples/mcp_server/agent_tools.py" in live_text
+                    and proxy_status.get("final_outcome") == "running"
+                ):
+                    seen_while_running = True
+                    break
+            time.sleep(0.1)
+        release.touch()
+        stdout, stderr = proc.communicate(timeout=RUNNER_HARNESS_TIMEOUT_SECONDS)
+    finally:
+        release.touch(exist_ok=True)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    assert seen_while_running, live_text
+    assert "previous-attempt" not in live_text
+    assert proc.returncode == 0, stderr or stdout
+
+
+def test_final_public_log_remains_bounded_after_opencode_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+    monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+    source = tmp_path / "bounded-final-source"
+    _init_repo(source)
+    artifacts = tmp_path / "bounded-final-artifacts"
+    artifacts.mkdir()
+    (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+    fake_bin = tmp_path / "bounded-final-bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "opencode"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "printf '> build · big-pickle\\n'\n"
+        "printf '→ Read current-plan.md\\n'\n"
+        "python3 - <<'PY'\n"
+        "print('A' * 70000)\n"
+        "print('TAIL-MARKER')\n"
+        "PY\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
+    result = _run_shell(script, cwd=source, timeout=RUNNER_HARNESS_TIMEOUT_SECONDS)
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    public_log = (artifacts / "opencode-output.log").read_bytes()
+    assert len(public_log) <= 65536
+    assert public_log.endswith(b"TAIL-MARKER\n")
+    assert b"> build" not in public_log
+
+
+def test_bootstrap_notices_do_not_transition_proxy_to_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = tmp_path / "provider.txt"
+    proxy_namespace = tmp_path.name.replace("_", "-")
+    provider.write_text(
+        f"http://127.0.0.1:19999/{proxy_namespace}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", provider.as_uri())
+    monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "true")
+    monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+    monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "0")
+    monkeypatch.setenv("OPENCODE_STARTUP_RESPONSE_TIMEOUT_SECONDS", "2")
+    monkeypatch.setenv("OPENCODE_STARTUP_KILL_GRACE_SECONDS", "1")
+    monkeypatch.setenv("OPENCODE_STARTUP_MAX_PROXY_ATTEMPTS", "1")
+    source = tmp_path / "source"
+    _init_repo(source)
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "opencode"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "printf '> build · big-pickle\\n'\n"
+        "printf 'OpenCode 1.2.3\\n'\n"
+        "printf 'Working directory: /tmp/example\\n'\n"
+        "sleep 10\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
+    result = _run_shell(script, cwd=source, timeout=RUNNER_HARNESS_TIMEOUT_SECONDS)
+
+    assert result.returncode == 78, result.stderr or result.stdout
+    proxy_status = json.loads((artifacts / "proxy-status.json").read_text(encoding="utf-8"))
+    assert proxy_status["final_outcome"] == "startup_exhausted"
+    assert proxy_status["last_error_class"] == "startup_stalled"
+    live_text = (artifacts / "opencode-output.log").read_text(encoding="utf-8")
+    assert "OpenCode 1.2.3" in live_text
+    assert "Working directory: /tmp/example" in live_text
+
+
+def test_sentence_like_model_prose_transitions_proxy_to_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = tmp_path / "provider.txt"
+    proxy_namespace = tmp_path.name.replace("_", "-")
+    provider.write_text(
+        f"http://127.0.0.1:19999/{proxy_namespace}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENCODE_PROXY_PROVIDER_URL", provider.as_uri())
+    monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "true")
+    monkeypatch.setenv("OPENCODE_STARTUP_RESERVE_BYTES", "0")
+    monkeypatch.setenv("OPENCODE_ADMISSION_WAIT_SECONDS", "0")
+    source = tmp_path / "source"
+    _init_repo(source)
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    release = tmp_path / "release-opencode-prose"
+    fake = fake_bin / "opencode"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "printf '> build · big-pickle\\n'\n"
+        "printf 'Let me inspect the current plan before changing anything.\\n'\n"
+        f"while [ ! -e {shlex.quote(str(release))} ]; do sleep 0.1; done\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    script = _build_opencode_script(str(artifacts), TASK_ID, None, project_root=str(source))
+    proc = subprocess.Popen(
+        ["sh", "-c", script],
+        cwd=source,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    seen_running = False
+    deadline = time.monotonic() + 12
+    try:
+        while time.monotonic() < deadline and proc.poll() is None:
+            proxy_status_path = artifacts / "proxy-status.json"
+            if proxy_status_path.is_file():
+                proxy_status = json.loads(proxy_status_path.read_text(encoding="utf-8"))
+                if proxy_status.get("final_outcome") == "running":
+                    seen_running = True
+                    break
+            time.sleep(0.1)
+        release.touch()
+        stdout, stderr = proc.communicate(timeout=RUNNER_HARNESS_TIMEOUT_SECONDS)
+    finally:
+        release.touch(exist_ok=True)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    assert seen_running is True
+    assert proc.returncode == 0, stderr or stdout
 
 
 def test_stale_supervisor_artifacts_are_reclaimed_before_postrun(
