@@ -622,23 +622,44 @@ class TestProjectGitStateGuards:
         mod = import_example_module(monkeypatch, "mcp_client_tools")
         head = _init_git_repo(tmp_path)
         monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
-        status_sha = mod.hashlib.sha256(b"").hexdigest()
-        index_sha = mod._project_git_state(tmp_path)["index_sha256"]
+        readme = tmp_path / "README.md"
+        readme.write_text("reviewed staged bytes\n", encoding="utf-8")
+        _git(tmp_path, "add", "README.md")
+        reviewed = mod._project_git_state(tmp_path)
 
         class Client:
             def __init__(self) -> None:
                 self.commands: list[str] = []
 
-            def execute_project_script(self, project: str, script: str, timeout_s: int = 30) -> dict[str, object]:
+            def execute_project_script(
+                self, project: str, script: str, timeout_s: int = 30
+            ) -> dict[str, object]:
+                if "MCP_GIT_GUARD" not in script:
+                    return {
+                        "exit_code": 0,
+                        "stdout": "available=1\nindex=1\nobjects=1\nrefs=1\nhead=1\ndetached=0\n",
+                        "stderr": "",
+                    }
+                completed = subprocess.run(
+                    ["sh"],
+                    cwd=tmp_path,
+                    input=script,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=timeout_s,
+                )
                 return {
-                    "exit_code": 0,
-                    "stdout": "available=1\nindex=1\nobjects=1\nrefs=1\nhead=1\ndetached=0\n",
-                    "stderr": "",
+                    "exit_code": completed.returncode,
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
                 }
 
-            def execute_project_command(self, project: str, command: str) -> dict[str, object]:
+            def execute_project_command(
+                self, project: str, command: str
+            ) -> dict[str, object]:
                 self.commands.append(command)
-                return {"exit_code": 0, "stdout": "[main abc] ok\n", "stderr": ""}
+                raise AssertionError("guarded commit must stay inside the critical-section script")
 
         client = Client()
         result = mod.git_commit(
@@ -647,17 +668,15 @@ class TestProjectGitStateGuards:
             "commit after guard",
             expected_branch="main",
             expected_head=head,
-            expected_status_sha256=status_sha,
-            expected_index_sha256=index_sha,
+            expected_status_sha256=reviewed["status_sha256"],
+            expected_index_sha256=reviewed["index_sha256"],
         )
 
         assert result["exit_code"] == 0
-        assert client.commands == [
-            "git -c user.name='MCP Gateway' "
-            "-c user.email=mcp-gateway@gateway.invalid "
-            "commit -m 'commit after guard'"
-        ]
-        assert "config --global" not in client.commands[0]
+        assert _git(tmp_path, "rev-parse", "HEAD") != head
+        assert _git(tmp_path, "show", "HEAD:README.md") == "reviewed staged bytes"
+        assert _git(tmp_path, "diff", "--cached") == ""
+        assert client.commands == []
 
     def test_guarded_git_commit_requires_content_bound_index_lease(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -725,6 +744,148 @@ class TestProjectGitStateGuards:
         ]
         assert _git(tmp_path, "rev-parse", "HEAD") == head
         assert "different staged bytes" in _git(tmp_path, "diff", "--cached")
+
+    def test_guarded_git_commit_rejects_index_drift_during_preflight_without_commit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        head = _init_git_repo(tmp_path)
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+
+        readme = tmp_path / "README.md"
+        readme.write_text("reviewed staged bytes\n", encoding="utf-8")
+        _git(tmp_path, "add", "README.md")
+        reviewed = mod._project_git_state(tmp_path)
+
+        class Client:
+            def __init__(self) -> None:
+                self.preflight_mutated = False
+                self.commit_commands: list[str] = []
+
+            def execute_project_script(
+                self, project: str, script: str, timeout_s: int = 30
+            ) -> dict[str, object]:
+                if "MCP_GIT_GUARD" not in script:
+                    assert not self.preflight_mutated
+                    readme.write_text("raced staged bytes\n", encoding="utf-8")
+                    _git(tmp_path, "add", "README.md")
+                    self.preflight_mutated = True
+                    return {
+                        "exit_code": 0,
+                        "stdout": "available=1\nindex=1\nobjects=1\nrefs=1\nhead=1\ndetached=0\n",
+                        "stderr": "",
+                    }
+                completed = subprocess.run(
+                    ["sh"],
+                    cwd=tmp_path,
+                    input=script,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=timeout_s,
+                )
+                return {
+                    "exit_code": completed.returncode,
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                }
+
+            def execute_project_command(
+                self, project: str, command: str
+            ) -> dict[str, object]:
+                self.commit_commands.append(command)
+                completed = subprocess.run(
+                    command,
+                    shell=True,
+                    cwd=tmp_path,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                return {
+                    "exit_code": completed.returncode,
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                }
+
+        client = Client()
+        result = mod.git_commit(
+            client,
+            "demo",
+            "must reject preflight race",
+            expected_branch="main",
+            expected_head=head,
+            expected_status_sha256=reviewed["status_sha256"],
+            expected_index_sha256=reviewed["index_sha256"],
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+        assert _git(tmp_path, "rev-parse", "HEAD") == head
+        assert "raced staged bytes" in _git(tmp_path, "diff", "--cached")
+        assert client.commit_commands == []
+
+    def test_guarded_git_commit_preserves_foreign_index_lock(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mod = import_example_module(monkeypatch, "mcp_client_tools")
+        head = _init_git_repo(tmp_path)
+        monkeypatch.setattr(mod, "_resolve_project", lambda project: tmp_path)
+        readme = tmp_path / "README.md"
+        readme.write_text("reviewed staged bytes\n", encoding="utf-8")
+        _git(tmp_path, "add", "README.md")
+        reviewed = mod._project_git_state(tmp_path)
+        index_path = Path(_git(tmp_path, "rev-parse", "--git-path", "index"))
+        if not index_path.is_absolute():
+            index_path = tmp_path / index_path
+        lock_path = Path(f"{index_path}.lock")
+        lock_path.write_text("foreign-owner\n", encoding="utf-8")
+
+        class Client:
+            def execute_project_script(
+                self, project: str, script: str, timeout_s: int = 30
+            ) -> dict[str, object]:
+                if "MCP_GIT_GUARD" not in script:
+                    return {
+                        "exit_code": 0,
+                        "stdout": "available=1\nindex=1\nobjects=1\nrefs=1\nhead=1\ndetached=0\n",
+                        "stderr": "",
+                    }
+                completed = subprocess.run(
+                    ["sh"],
+                    cwd=tmp_path,
+                    input=script,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=timeout_s,
+                )
+                return {
+                    "exit_code": completed.returncode,
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                }
+
+            def execute_project_command(
+                self, project: str, command: str
+            ) -> dict[str, object]:
+                raise AssertionError("guarded commit must not use unguarded command path")
+
+        result = mod.git_commit(
+            Client(),
+            "demo",
+            "must preserve foreign lock",
+            expected_branch="main",
+            expected_head=head,
+            expected_status_sha256=reviewed["status_sha256"],
+            expected_index_sha256=reviewed["index_sha256"],
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["code"] == "WORKSPACE_CONTENDED"
+        assert result["error"]["details"]["mutation_occurred"] is False
+        assert lock_path.read_text(encoding="utf-8") == "foreign-owner\n"
+        assert _git(tmp_path, "rev-parse", "HEAD") == head
 
     def test_index_lease_changes_when_only_staged_mode_changes(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

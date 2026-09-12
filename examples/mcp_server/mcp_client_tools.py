@@ -1853,6 +1853,165 @@ def git_add(
     )
 
 
+def _guarded_git_commit_script(
+    *,
+    message: str,
+    expected_branch: str | None,
+    expected_head: str | None,
+    expected_status_sha256: str | None,
+    expected_index_sha256: str,
+) -> str:
+    """Build one target-plane critical section for a content-bound commit.
+
+    The reviewed index digest is checked against a private snapshot while the
+    real index lock is held. The commit then reads that exact snapshot through
+    ``GIT_INDEX_FILE``. This closes the check/commit TOCTOU where another
+    ``git add`` could previously replace staged bytes after lease validation.
+
+    Repository hooks are disabled for this trusted automated commit: a hook
+    that stages files would otherwise mutate the private index after its digest
+    was verified and defeat the content lease.
+    """
+    expected_branch_q = shlex.quote(expected_branch) if expected_branch is not None else ""
+    expected_head_q = shlex.quote(expected_head.lower()) if expected_head is not None else ""
+    expected_status_q = (
+        shlex.quote(expected_status_sha256.lower())
+        if expected_status_sha256 is not None
+        else ""
+    )
+    expected_index_q = shlex.quote(expected_index_sha256.lower())
+    message_q = shlex.quote(message)
+    return "\n".join(
+        [
+            "set -eu",
+            "MCP_GIT_GUARD=1",
+            'INDEX_PATH="$(git rev-parse --git-path index)" || exit 98',
+            'INDEX_LOCK="${INDEX_PATH}.lock"',
+            'SNAPSHOT="$(mktemp \"${TMPDIR:-/tmp}/mcp-git-index.XXXXXX\")" || exit 98',
+            'INDEX_LISTING="$(mktemp \"${TMPDIR:-/tmp}/mcp-git-index-listing.XXXXXX\")" || { rm -f "$SNAPSHOT"; exit 98; }',
+            'STATUS_FILE="$(mktemp \"${TMPDIR:-/tmp}/mcp-git-status.XXXXXX\")" || { rm -f "$SNAPSHOT" "$INDEX_LISTING"; exit 98; }',
+            "LOCK_OWNED=0",
+            'cleanup() { rm -f "$SNAPSHOT" "$INDEX_LISTING" "$STATUS_FILE"; if [ "$LOCK_OWNED" = "1" ]; then LOCK_OWNED=0; rm -f "$INDEX_LOCK"; fi; }',
+            "trap cleanup EXIT",
+            "trap 'cleanup; exit 99' HUP INT TERM",
+            'if ( set -C; : > "$INDEX_LOCK" ) 2>/dev/null; then LOCK_OWNED=1; else printf "MCP_GIT_GUARD_BUSY=index\\n"; exit 96; fi',
+            'cp "$INDEX_PATH" "$SNAPSHOT" || { printf "MCP_GIT_GUARD_ERROR=index_snapshot\\n"; exit 98; }',
+            'BRANCH="$(git rev-parse --abbrev-ref HEAD)" || { printf "MCP_GIT_GUARD_ERROR=branch\\n"; exit 98; }',
+            'HEAD_SHA="$(git rev-parse HEAD)" || { printf "MCP_GIT_GUARD_ERROR=head\\n"; exit 98; }',
+            'GIT_OPTIONAL_LOCKS=0 git status --porcelain=v1 > "$STATUS_FILE" || { printf "MCP_GIT_GUARD_ERROR=status\\n"; exit 98; }',
+            'GIT_INDEX_FILE="$SNAPSHOT" git ls-files --stage -z > "$INDEX_LISTING" || { printf "MCP_GIT_GUARD_ERROR=index_listing\\n"; exit 98; }',
+            'STATUS_SHA="$(sha256sum "$STATUS_FILE" | awk \'{print $1}\')" || { printf "MCP_GIT_GUARD_ERROR=status_digest\\n"; exit 98; }',
+            'INDEX_SHA="$(sha256sum "$INDEX_LISTING" | awk \'{print $1}\')" || { printf "MCP_GIT_GUARD_ERROR=index_digest\\n"; exit 98; }',
+            f"EXPECTED_BRANCH={expected_branch_q}" if expected_branch is not None else "EXPECTED_BRANCH=",
+            f"EXPECTED_HEAD={expected_head_q}" if expected_head is not None else "EXPECTED_HEAD=",
+            f"EXPECTED_STATUS={expected_status_q}" if expected_status_sha256 is not None else "EXPECTED_STATUS=",
+            f"EXPECTED_INDEX={expected_index_q}",
+            'if [ -n "$EXPECTED_BRANCH" ] && [ "$BRANCH" != "$EXPECTED_BRANCH" ]; then printf "MCP_GIT_GUARD_MISMATCH=branch\\nMCP_GIT_GUARD_ACTUAL=%s\\n" "$BRANCH"; exit 97; fi',
+            'if [ -n "$EXPECTED_HEAD" ] && [ "$HEAD_SHA" != "$EXPECTED_HEAD" ]; then printf "MCP_GIT_GUARD_MISMATCH=head\\nMCP_GIT_GUARD_ACTUAL=%s\\n" "$HEAD_SHA"; exit 97; fi',
+            'if [ -n "$EXPECTED_STATUS" ] && [ "$STATUS_SHA" != "$EXPECTED_STATUS" ]; then printf "MCP_GIT_GUARD_MISMATCH=status_sha256\\nMCP_GIT_GUARD_ACTUAL=%s\\n" "$STATUS_SHA"; exit 97; fi',
+            'if [ "$INDEX_SHA" != "$EXPECTED_INDEX" ]; then printf "MCP_GIT_GUARD_MISMATCH=index_sha256\\nMCP_GIT_GUARD_ACTUAL=%s\\n" "$INDEX_SHA"; exit 97; fi',
+            (
+                'GIT_INDEX_FILE="$SNAPSHOT" git '
+                "-c core.hooksPath=/dev/null "
+                f"-c user.name={shlex.quote('MCP Gateway')} "
+                f"-c user.email={shlex.quote('mcp-gateway@gateway.invalid')} "
+                f"commit --no-verify -m {message_q}"
+            ),
+        ]
+    )
+
+
+def _guarded_git_commit_result(
+    client: GatewayClient,
+    project: str,
+    *,
+    message: str,
+    expected_branch: str | None,
+    expected_head: str | None,
+    expected_status_sha256: str | None,
+    expected_index_sha256: str,
+) -> dict[str, Any]:
+    script = _guarded_git_commit_script(
+        message=message,
+        expected_branch=expected_branch,
+        expected_head=expected_head,
+        expected_status_sha256=expected_status_sha256,
+        expected_index_sha256=expected_index_sha256,
+    )
+    raw = client.execute_project_script(project, script, timeout_s=60)
+    project_root = str(_resolve_project(project))
+    stdout = _redact_project_root(
+        str(raw.get("stdout") or raw.get("output", "")), project_root
+    )
+    stderr = _redact_project_root(str(raw.get("stderr", "")), project_root)
+    exit_code = int(raw.get("exit_code", -1))
+
+    if exit_code == 97:
+        field = None
+        actual = None
+        for line in stdout.splitlines():
+            if line.startswith("MCP_GIT_GUARD_MISMATCH="):
+                field = line.split("=", 1)[1].strip()
+            elif line.startswith("MCP_GIT_GUARD_ACTUAL="):
+                actual = line.split("=", 1)[1].strip()
+        expected_by_field = {
+            "branch": expected_branch,
+            "head": expected_head.lower() if expected_head else None,
+            "status_sha256": (
+                expected_status_sha256.lower() if expected_status_sha256 else None
+            ),
+            "index_sha256": expected_index_sha256.lower(),
+        }
+        mismatch = {
+            "field": field or "unknown",
+            "expected": expected_by_field.get(field or ""),
+            "actual": actual,
+        }
+        return tool_error(
+            tool="git_commit",
+            code="WORKSPACE_CONTENDED",
+            message="Project workspace changed after review; refusing guarded commit",
+            retryable=True,
+            hint="Refresh info(project), review git_status/git_diff_cached, then retry with fresh lease values.",
+            details={
+                "project": project,
+                "mismatches": [mismatch],
+                "mutation_occurred": False,
+            },
+            source="gateway",
+        )
+    if exit_code == 96:
+        return tool_error(
+            tool="git_commit",
+            code="WORKSPACE_CONTENDED",
+            message="Git index is already locked by another operation; refusing guarded commit",
+            retryable=True,
+            hint="Wait for the current Git mutation to finish, refresh info(project), and review the staged diff again before retrying.",
+            details={"project": project, "mutation_occurred": False},
+            source="gateway",
+        )
+    if exit_code in {98, 99}:
+        return tool_error(
+            tool="git_commit",
+            code="CHECK_FAILED",
+            message="Could not establish the guarded Git commit critical section",
+            retryable=True,
+            hint="Refresh info(project) and git_write_capabilities before retrying; no commit was attempted.",
+            details={"project": project, "mutation_occurred": False},
+            source="gateway",
+        )
+
+    return build_command_result(
+        outcome="passed" if exit_code == 0 else "failed",
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+        execution_duration_ms=_execution_duration_ms(raw),
+        job_id=raw.get("job_id"),
+        cwd=".",
+    )
+
+
 def git_commit(
     client: GatewayClient,
     project: str,
@@ -1926,14 +2085,33 @@ def git_commit(
     )
     if preflight_error is not None:
         return preflight_error
-    result = run_project_command(
-        client,
-        project,
-        "git "
-        f"-c user.name={shlex.quote('MCP Gateway')} "
-        f"-c user.email={shlex.quote('mcp-gateway@gateway.invalid')} "
-        f"commit -m {shlex.quote(message)}",
-    )
+    if lease_requested:
+        # The guarded-input validation above fails closed unless this lease is
+        # present; keep that runtime invariant explicit for type checking too.
+        assert expected_index_sha256 is not None
+        # Re-check and commit on the same execution plane while the real index
+        # is locked. The Python-side snapshot above remains a cheap early
+        # rejection; this target-side critical section is authoritative.
+        result = _guarded_git_commit_result(
+            client,
+            project,
+            message=message,
+            expected_branch=expected_branch,
+            expected_head=expected_head,
+            expected_status_sha256=expected_status_sha256,
+            expected_index_sha256=expected_index_sha256,
+        )
+        if result.get("ok") is False:
+            return result
+    else:
+        result = run_project_command(
+            client,
+            project,
+            "git "
+            f"-c user.name={shlex.quote('MCP Gateway')} "
+            f"-c user.email={shlex.quote('mcp-gateway@gateway.invalid')} "
+            f"commit -m {shlex.quote(message)}",
+        )
     return _git_mutation_result(
         tool_name="git_commit",
         project=project,
