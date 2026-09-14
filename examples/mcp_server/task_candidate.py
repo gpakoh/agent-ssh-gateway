@@ -27,7 +27,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from examples.mcp_client_remote.fleet.shared import validate_repo_owner_or_name
-from examples.mcp_server.agent_paths import task_dir
+from examples.mcp_server.agent_paths import project_state_key, task_dir
 from examples.mcp_server.agent_sources import (
     ManagedSourceBundleError,
     ensure_managed_source_bundle,
@@ -640,6 +640,111 @@ def bind_task_attempt_job(
         updated["job_bound_at"] = datetime.now(UTC).isoformat()
         _atomic_write_json(path, updated)
         return updated
+
+
+def _read_task_attempt_job_id_unlocked(*, project: str, task_id: str) -> str | None:
+    path = _candidate_task_dir(project, task_id) / ATTEMPT_BINDING_FILENAME
+    if not path.exists() and not path.is_symlink():
+        return None
+    binding = _read_json(path)
+    if (
+        binding.get("version") != ATTEMPT_BINDING_VERSION
+        or binding.get("project") != project
+        or binding.get("task_id") != task_id
+    ):
+        raise CandidateError("trusted attempt binding is invalid")
+    for key in ("attempt_id", "fingerprint"):
+        value = binding.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise CandidateError(f"trusted attempt binding is missing {key}")
+    job_id = binding.get("job_id")
+    if job_id is None:
+        return None
+    if not isinstance(job_id, str) or not job_id.strip():
+        raise CandidateError("trusted attempt binding has invalid job_id")
+    return job_id.strip()
+
+
+def read_task_attempt_job_id(*, project: str, task_id: str) -> str | None:
+    """Return the trusted gateway job bound to one task, if any.
+
+    This is a recovery-only read of control-plane-owned attempt identity.  A
+    missing binding or a binding that has not yet accepted a gateway job is
+    unresolved and returns ``None``.  Malformed/mismatched trusted state fails
+    closed via :class:`CandidateError`; callers deciding fleet capacity must
+    never infer liveness from file age or worker-authored task artifacts.
+    """
+    validate_task_id(task_id)
+    with _candidate_root_lock():
+        return _read_task_attempt_job_id_unlocked(project=project, task_id=task_id)
+
+
+def read_task_attempt_job_id_by_state_key(*, project_key: str, task_id: str) -> str | None:
+    """Resolve a trusted bound job without requiring a live workspace registry entry.
+
+    Durable fleet leases store ``project_state_key(project)`` instead of the raw
+    project id. Candidate workspace registrations are intentionally ephemeral,
+    but accepted-job bindings live in the separate control-plane candidate
+    store. Recover the raw project only from those trusted binding records,
+    verify their hashed storage location, and fail closed if one state key maps
+    to more than one raw project.
+    """
+    validate_task_id(task_id)
+    if not isinstance(project_key, str) or not project_key.strip():
+        return None
+    normalized_key = project_key.strip()
+    task_dir_name = f"task-{hashlib.sha256(task_id.encode('utf-8')).hexdigest()[:24]}"
+
+    with _candidate_root_lock():
+        root = _candidate_root()
+        try:
+            entries = list(os.scandir(root))
+        except OSError as exc:
+            raise CandidateError("trusted attempt binding index is unavailable") from exc
+
+        matched_projects: set[str] = set()
+        for entry in entries:
+            if re.fullmatch(r"project-[0-9a-f]{24}", entry.name) is None:
+                continue
+            try:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError as exc:
+                raise CandidateError("trusted attempt binding project root is unavailable") from exc
+
+            task_root = Path(entry.path) / task_dir_name
+            try:
+                task_mode = os.lstat(task_root).st_mode
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise CandidateError("trusted attempt binding task root is unavailable") from exc
+            if not stat.S_ISDIR(task_mode):
+                raise CandidateError("trusted attempt binding task root is invalid")
+
+            binding_path = task_root / ATTEMPT_BINDING_FILENAME
+            if not binding_path.exists() and not binding_path.is_symlink():
+                continue
+            binding = _read_json(binding_path)
+            raw_project = binding.get("project")
+            if not isinstance(raw_project, str) or not raw_project.strip():
+                raise CandidateError("trusted attempt binding is missing project")
+            raw_project = raw_project.strip()
+            expected_project_dir = (
+                f"project-{hashlib.sha256(raw_project.encode('utf-8')).hexdigest()[:24]}"
+            )
+            if entry.name != expected_project_dir:
+                raise CandidateError("trusted attempt binding project directory mismatch")
+            if project_state_key(raw_project) != normalized_key:
+                continue
+            matched_projects.add(raw_project)
+
+        if not matched_projects:
+            return None
+        if len(matched_projects) != 1:
+            raise CandidateError("trusted attempt binding project key is ambiguous")
+        project = next(iter(matched_projects))
+        return _read_task_attempt_job_id_unlocked(project=project, task_id=task_id)
 
 
 def _load_trusted_task_state(project: str, task_id: str) -> tuple[dict[str, Any], dict[str, Any]]:

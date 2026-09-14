@@ -75,6 +75,7 @@ from examples.mcp_server.mcp_infra.adapters.gateway import _split_csv_or_lines, 
 from examples.mcp_server.mcp_infra.tool_registry import register_tool, run_tool, run_tool_async
 from examples.mcp_server.task_candidate import (
     bind_task_attempt_job,
+    read_task_attempt_job_id_by_state_key,
     record_task_delivery_contract,
     resolve_task_attempt_identity,
 )
@@ -108,6 +109,31 @@ def _wait_job_contract(job_id: str) -> dict[str, Any]:
 
 def _server_agent_router():
     return server_attr("_agent_router")
+
+
+def _trusted_fleet_job_resolver() -> Callable[[str], str | None]:
+    """Resolve fleet task ids only through control-plane attempt bindings.
+
+    Fleet task ids deliberately store ``project_state_key(project)`` rather than
+    raw project names. Candidate workspace registry entries can disappear after
+    their workspaces are cleaned up, so recovery must not depend on that mutable
+    registry. The task-candidate control plane instead resolves the key from its
+    own immutable accepted-job binding and fails closed on collisions, malformed
+    task ids, missing bindings, or malformed trusted state.
+    """
+
+    def _resolve(durable_task_id: str) -> str | None:
+        if not isinstance(durable_task_id, str):
+            return None
+        project_key, separator, task_id = durable_task_id.partition(":")
+        if not separator or not project_key or not task_id:
+            return None
+        return read_task_attempt_job_id_by_state_key(
+            project_key=project_key,
+            task_id=task_id,
+        )
+
+    return _resolve
 
 
 def _agent_router_terminal_observer() -> Callable[[str, dict[str, Any]], None] | None:
@@ -691,6 +717,7 @@ async def _submit_agent_with_fleet(
     fleet = await get_fleet_runtime()
     if fleet is None:
         return await asyncio.to_thread(submit_sync)
+    trusted_job_resolver = _trusted_fleet_job_resolver()
     job_result_fn = (
         (lambda jid: _server_client().job_result(jid))
         if terminal_observer is not None
@@ -705,6 +732,7 @@ async def _submit_agent_with_fleet(
         terminal_observer=terminal_observer,
         observe_submitted_job=observe_submitted_job,
         retry_attempted_unbound=True,
+        trusted_job_resolver=trusted_job_resolver,
         sweep_before_submit=sweep_before_submit,
     )
 
@@ -765,6 +793,7 @@ async def gateway_run_agents(project: str, task_ids: str) -> dict[str, Any]:
 
         fleet = await get_fleet_runtime()
         terminal_observer = _agent_router_terminal_observer()
+        trusted_job_resolver = _trusted_fleet_job_resolver() if fleet is not None else None
 
         def status_fn(job_id: str) -> dict[str, Any]:
             return _server_client().job_status(job_id)
@@ -779,6 +808,7 @@ async def gateway_run_agents(project: str, task_ids: str) -> dict[str, Any]:
                     status_fn,
                     job_result_fn=detailed_result_fn,
                     terminal_observer=terminal_observer,
+                    trusted_job_resolver=trusted_job_resolver,
                 )
             except Exception:
                 pass
@@ -803,6 +833,7 @@ async def gateway_run_agents(project: str, task_ids: str) -> dict[str, Any]:
                         terminal_observer=terminal_observer,
                         observe_submitted_job=True,
                         retry_attempted_unbound=True,
+                        trusted_job_resolver=trusted_job_resolver,
                         sweep_before_submit=False,
                     )
                 return result
