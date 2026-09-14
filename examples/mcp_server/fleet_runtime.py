@@ -34,6 +34,7 @@ from examples.mcp_server.agent_paths import project_state_key
 from examples.mcp_server.fleet_state import (
     ATTEMPTED,
     DEFAULT_POOL_CAPACITY,
+    LEGACY_UNKNOWN,
     NEVER_ATTEMPTED,
     FleetState,
     TaskAlreadyTerminalError,
@@ -294,6 +295,7 @@ class FleetRuntime:
         terminal_observer: Callable[[str, dict[str, Any]], None] | None = None,
         observe_submitted_job: bool = True,
         retry_attempted_unbound: bool = False,
+        trusted_job_resolver: Callable[[str], str | None] | None = None,
         sweep_before_submit: bool = True,
     ) -> dict[str, Any]:
         """Admit then perform one idempotent gateway submission.
@@ -305,7 +307,7 @@ class FleetRuntime:
         await self.ensure_ready()
         if sweep_before_submit:
             try:
-                await self.sweep_unbound_leases()
+                await self.sweep_unbound_leases(trusted_job_resolver)
             except Exception:
                 pass
         if job_status_fn is not None and sweep_before_submit:
@@ -615,28 +617,59 @@ class FleetRuntime:
         finally:
             self._gateway_io_gate.release()
 
-    async def sweep_unbound_leases(self) -> int:
-        """Reclaim only unbound leases that were never dispatched.
+    async def sweep_unbound_leases(
+        self,
+        trusted_job_resolver: Callable[[str], str | None] | None = None,
+    ) -> int:
+        """Reconcile unbound leases without inferring safety from lease age.
 
-        The submission-state guard is applied here: ``never_attempted`` rows
-        (acquired but never sent to the gateway) are reclaimed, while
-        ``legacy_unknown`` and ``attempted`` unbound rows are never touched.
+        ``never_attempted`` rows are proven pre-dispatch and can be released.
+        ``attempted``/legacy rows stay fail-closed unless a caller can recover
+        the exact accepted gateway ``job_id`` from control-plane-owned trusted
+        state.  In that case we only bind the existing lease; terminal/running
+        classification remains the responsibility of the normal authoritative
+        gateway-status reconciliation path.
+
+        The resolver receives the durable fleet task id and must return one
+        exact trusted gateway job id or ``None``.  Resolver failures are treated
+        as unresolved state and never release capacity.
         """
         await self.ensure_ready()
         leases = await self.state.list_unbound_leases(pool_name=self.pool_name)
         released = 0
         for lease in leases:
-            if lease.submit_state != NEVER_ATTEMPTED:
+            if lease.submit_state == NEVER_ATTEMPTED:
+                try:
+                    ok = await self.state.release_never_dispatched(
+                        task_id=lease.task_id,
+                        lease_token=lease.lease_token,
+                    )
+                except Exception:
+                    continue
+                if ok:
+                    released += 1
+                continue
+            if lease.submit_state not in {ATTEMPTED, LEGACY_UNKNOWN}:
+                # Unknown/corrupt/future submission states remain fail-closed.
+                # Trusted job binding is intentionally limited to the two
+                # historical states whose dispatch ambiguity is understood.
+                continue
+            if trusted_job_resolver is None:
                 continue
             try:
-                ok = await self.state.release_never_dispatched(
+                job_id = trusted_job_resolver(lease.task_id)
+            except Exception:
+                continue
+            if not isinstance(job_id, str) or not job_id.strip():
+                continue
+            try:
+                await self.state.bind_job(
                     task_id=lease.task_id,
                     lease_token=lease.lease_token,
+                    job_id=job_id.strip(),
                 )
             except Exception:
                 continue
-            if ok:
-                released += 1
         return released
 
     async def reconcile(
@@ -645,13 +678,14 @@ class FleetRuntime:
         *,
         job_result_fn: Callable[[str], dict[str, Any]] | None = None,
         terminal_observer: Callable[[str, dict[str, Any]], None] | None = None,
+        trusted_job_resolver: Callable[[str], str | None] | None = None,
     ) -> int:
         """Reclaim abandoned never-dispatched leases and terminal bound leases.
 
         The unbound sweep always runs; the bound sweep runs only when a
         gateway status function is supplied (it cannot run without one).
         """
-        released = await self.sweep_unbound_leases()
+        released = await self.sweep_unbound_leases(trusted_job_resolver)
         if job_status_fn is not None:
             try:
                 released += await self.sweep_bound_leases(

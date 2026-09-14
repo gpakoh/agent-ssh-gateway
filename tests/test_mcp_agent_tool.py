@@ -1082,6 +1082,43 @@ def test_agent_router_terminal_observer_ignores_non_backend_terminal_states(
     assert router.get_cooldowns() == []
 
 
+def test_trusted_fleet_job_resolver_uses_control_plane_binding_without_registry(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    trusted_lookup = MagicMock(return_value="job-trusted")
+    monkeypatch.setattr(
+        agent_adapter,
+        "read_task_attempt_job_id_by_state_key",
+        trusted_lookup,
+    )
+
+    resolver = agent_adapter._trusted_fleet_job_resolver()
+
+    assert resolver("orphaned-candidate-key:trusted-task-001") == "job-trusted"
+    trusted_lookup.assert_called_once_with(
+        project_key="orphaned-candidate-key",
+        task_id="trusted-task-001",
+    )
+
+
+def test_trusted_fleet_job_resolver_rejects_malformed_durable_identity(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    trusted_lookup = MagicMock(return_value="job-must-not-be-used")
+    monkeypatch.setattr(
+        agent_adapter,
+        "read_task_attempt_job_id_by_state_key",
+        trusted_lookup,
+    )
+    resolver = agent_adapter._trusted_fleet_job_resolver()
+
+    assert resolver("malformed-without-separator") is None
+    assert resolver("") is None
+    assert resolver(":trusted-task-001") is None
+    assert resolver("project-key:") is None
+    trusted_lookup.assert_not_called()
+
+
 class TestGatewayRunAgents:
     @pytest.fixture(autouse=True)
     def _handoff_write_mode(self, monkeypatch):

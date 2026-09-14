@@ -1534,6 +1534,127 @@ async def test_sweep_unbound_releases_only_never_attempted():
 
 
 @pytest.mark.asyncio
+async def test_sweep_unbound_binds_attempted_from_trusted_identity_without_release():
+    attempted = _lease_state(submit_state="attempted")
+    state = _mk_state()
+    state.list_unbound_leases = AsyncMock(return_value=[attempted])
+    state.bind_job = AsyncMock(
+        return_value=_lease_state(submit_state="attempted", job_id="job-recovered")
+    )
+    state.complete_task = AsyncMock()
+    resolver = MagicMock(return_value="job-recovered")
+    runtime = _runtime(state)
+
+    released = await runtime.sweep_unbound_leases(resolver)
+
+    assert released == 0
+    resolver.assert_called_once_with(attempted.task_id)
+    state.bind_job.assert_awaited_once_with(
+        task_id=attempted.task_id,
+        lease_token=attempted.lease_token,
+        job_id="job-recovered",
+    )
+    state.release_never_dispatched.assert_not_awaited()
+    state.complete_task.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_unbound_binds_legacy_unknown_from_trusted_identity_without_release():
+    legacy = _lease_state(submit_state="legacy_unknown")
+    state = _mk_state()
+    state.list_unbound_leases = AsyncMock(return_value=[legacy])
+    state.bind_job = AsyncMock(
+        return_value=_lease_state(submit_state="legacy_unknown", job_id="job-legacy")
+    )
+    resolver = MagicMock(return_value="job-legacy")
+    runtime = _runtime(state)
+
+    released = await runtime.sweep_unbound_leases(resolver)
+
+    assert released == 0
+    resolver.assert_called_once_with(legacy.task_id)
+    state.bind_job.assert_awaited_once_with(
+        task_id=legacy.task_id,
+        lease_token=legacy.lease_token,
+        job_id="job-legacy",
+    )
+    state.release_never_dispatched.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_unbound_keeps_indeterminate_rows_when_trusted_identity_unresolved():
+    attempted = _lease_state(submit_state="attempted")
+    legacy = _lease_state(submit_state="legacy_unknown")
+    state = _mk_state()
+    state.list_unbound_leases = AsyncMock(return_value=[attempted, legacy])
+    state.bind_job = AsyncMock()
+    state.complete_task = AsyncMock()
+    resolver = MagicMock(side_effect=[None, RuntimeError("malformed trusted binding")])
+    runtime = _runtime(state)
+
+    released = await runtime.sweep_unbound_leases(resolver)
+
+    assert released == 0
+    assert resolver.call_count == 2
+    state.bind_job.assert_not_awaited()
+    state.release_never_dispatched.assert_not_awaited()
+    state.complete_task.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_unbound_unknown_submit_state_is_fail_closed_before_resolver():
+    corrupt = _lease_state(submit_state="future_or_corrupt_state")
+    state = _mk_state()
+    state.list_unbound_leases = AsyncMock(return_value=[corrupt])
+    state.bind_job = AsyncMock()
+    state.complete_task = AsyncMock()
+    resolver = MagicMock(return_value="job-must-not-bind")
+    runtime = _runtime(state)
+
+    released = await runtime.sweep_unbound_leases(resolver)
+
+    assert released == 0
+    resolver.assert_not_called()
+    state.bind_job.assert_not_awaited()
+    state.release_never_dispatched.assert_not_awaited()
+    state.complete_task.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_binds_trusted_unbound_then_releases_only_from_gateway_terminal():
+    attempted = _lease_state(submit_state="attempted")
+    bound = _lease_state(submit_state="attempted", job_id="job-recovered")
+    state = _mk_state()
+    state.list_unbound_leases = AsyncMock(return_value=[attempted])
+    state.bind_job = AsyncMock(return_value=bound)
+    state.list_bound_leases = AsyncMock(return_value=[bound])
+    state.complete_task = AsyncMock()
+    resolver = MagicMock(return_value="job-recovered")
+    runtime = _runtime(state)
+
+    released = await runtime.reconcile(
+        lambda jid: {"job_id": jid, "status": "completed", "exit_code": 0},
+        trusted_job_resolver=resolver,
+    )
+
+    assert released == 1
+    state.bind_job.assert_awaited_once_with(
+        task_id=attempted.task_id,
+        lease_token=attempted.lease_token,
+        job_id="job-recovered",
+    )
+    state.complete_task.assert_awaited_once_with(
+        task_id=bound.task_id,
+        lease_token=bound.lease_token,
+        status="completed",
+        exit_code=0,
+        result={"status": "completed", "exit_code": 0, "job_id": "job-recovered"},
+        expected_job_id="job-recovered",
+    )
+    state.release_never_dispatched.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_sweep_unbound_skips_rows_without_never_attempted():
     state = _mk_state()
     state.list_unbound_leases = AsyncMock(return_value=[])

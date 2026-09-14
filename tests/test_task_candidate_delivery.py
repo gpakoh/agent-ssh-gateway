@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 import examples.mcp_server.task_candidate as task_candidate_module
-from examples.mcp_server.agent_paths import task_dir
+from examples.mcp_server.agent_paths import project_state_key, task_dir
 from examples.mcp_server.agent_sources import (
     ManagedSourceBundleError,
     ManagedSourcePublication,
@@ -25,6 +25,7 @@ from examples.mcp_server.task_candidate import (
     _staging_repo,
     bind_task_attempt_job,
     materialize_task_candidate,
+    read_task_attempt_job_id_by_state_key,
     record_task_delivery_contract,
     resolve_task_attempt_identity,
     validate_task_candidate_for_push,
@@ -145,6 +146,96 @@ def _write_evidence(
         encoding="utf-8",
     )
     return base, td
+
+
+def test_read_task_attempt_job_id_by_state_key_recovers_orphaned_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCP_TASK_CANDIDATE_ROOT", str(tmp_path / "candidate-store"))
+    task_id = "orphaned-project-task-001"
+    attempt_id, job_id = resolve_task_attempt_identity(
+        project=PROJECT,
+        task_id=task_id,
+        fingerprint="fingerprint-orphaned",
+    )
+    assert job_id is None
+    bind_task_attempt_job(
+        project=PROJECT,
+        task_id=task_id,
+        attempt_id=attempt_id,
+        fingerprint="fingerprint-orphaned",
+        job_id="job-orphaned-001",
+    )
+
+    assert read_task_attempt_job_id_by_state_key(
+        project_key=project_state_key(PROJECT), task_id=task_id
+    ) == "job-orphaned-001"
+    assert read_task_attempt_job_id_by_state_key(
+        project_key=project_state_key("unrelated-project"), task_id=task_id
+    ) is None
+
+
+def test_read_task_attempt_job_id_by_state_key_rejects_state_key_collision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCP_TASK_CANDIDATE_ROOT", str(tmp_path / "candidate-store"))
+    task_id = "collision-binding-task-001"
+    for project, job in (("collision-alpha", "job-alpha"), ("collision-beta", "job-beta")):
+        attempt_id, _ = resolve_task_attempt_identity(
+            project=project,
+            task_id=task_id,
+            fingerprint=f"fingerprint-{project}",
+        )
+        bind_task_attempt_job(
+            project=project,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            fingerprint=f"fingerprint-{project}",
+            job_id=job,
+        )
+
+    monkeypatch.setattr(task_candidate_module, "project_state_key", lambda _project: "same-key")
+    with pytest.raises(CandidateError, match="ambiguous"):
+        read_task_attempt_job_id_by_state_key(project_key="same-key", task_id=task_id)
+
+
+def test_read_task_attempt_job_id_by_state_key_rejects_legacy_batch_task_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCP_TASK_CANDIDATE_ROOT", str(tmp_path / "candidate-store"))
+    with pytest.raises(ValueError, match="Invalid task_id"):
+        read_task_attempt_job_id_by_state_key(
+            project_key=project_state_key(PROJECT),
+            task_id="old-task-001,old-task-002",
+        )
+
+
+def test_read_task_attempt_job_id_by_state_key_rejects_misplaced_project_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCP_TASK_CANDIDATE_ROOT", str(tmp_path / "candidate-store"))
+    task_id = "misplaced-binding-task-001"
+    attempt_id, _ = resolve_task_attempt_identity(
+        project=PROJECT,
+        task_id=task_id,
+        fingerprint="fingerprint-misplaced",
+    )
+    bind_task_attempt_job(
+        project=PROJECT,
+        task_id=task_id,
+        attempt_id=attempt_id,
+        fingerprint="fingerprint-misplaced",
+        job_id="job-misplaced-001",
+    )
+    project_dir = task_candidate_module._candidate_task_dir(PROJECT, task_id).parent
+    forged_dir = project_dir.parent / f"project-{'f' * 24}"
+    project_dir.rename(forged_dir)
+
+    with pytest.raises(CandidateError, match="project directory mismatch"):
+        read_task_attempt_job_id_by_state_key(
+            project_key=project_state_key(PROJECT),
+            task_id=task_id,
+        )
 
 
 def _diff_sha(td: Path) -> str:
