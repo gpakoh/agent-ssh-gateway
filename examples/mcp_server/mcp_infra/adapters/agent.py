@@ -112,14 +112,15 @@ def _server_agent_router():
 
 
 def _trusted_fleet_job_resolver() -> Callable[[str], str | None]:
-    """Resolve fleet task ids only through control-plane attempt bindings.
+    """Resolve a fleet task id from trusted durable execution identities.
 
-    Fleet task ids deliberately store ``project_state_key(project)`` rather than
-    raw project names. Candidate workspace registry entries can disappear after
-    their workspaces are cleaned up, so recovery must not depend on that mutable
-    registry. The task-candidate control plane instead resolves the key from its
-    own immutable accepted-job binding and fails closed on collisions, malformed
-    task ids, missing bindings, or malformed trusted state.
+    Current submissions bind an immutable attempt in the MCP control plane and
+    that binding always wins. Historical leases predate those attempt-binding
+    files; for them only, fall back to the exact pre-attempt Gateway submission
+    key ``task:<project_state_key>:<task_id>``. The Gateway owns that durable
+    idempotency ledger and enforces job ownership before returning a job id.
+    No registry lookup, age heuristic, attempt-id guessing, or fuzzy matching is
+    permitted.
     """
 
     def _resolve(durable_task_id: str) -> str | None:
@@ -128,10 +129,13 @@ def _trusted_fleet_job_resolver() -> Callable[[str], str | None]:
         project_key, separator, task_id = durable_task_id.partition(":")
         if not separator or not project_key or not task_id:
             return None
-        return read_task_attempt_job_id_by_state_key(
+        current = read_task_attempt_job_id_by_state_key(
             project_key=project_key,
             task_id=task_id,
         )
+        if current:
+            return current
+        return _server_agent_client().resolve_submission_job(f"task:{durable_task_id}")
 
     return _resolve
 

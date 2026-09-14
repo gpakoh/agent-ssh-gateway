@@ -224,6 +224,57 @@ async def test_submission_key_reuse_by_different_owner_is_rejected():
 
 
 @pytest.mark.asyncio
+async def test_resolve_submission_claim_recovers_exact_historical_identity_without_envelope():
+    queue = _queue()
+    payload_hash = "a" * 64
+    await queue.claim_submission(
+        "task:historical-project:historical-task",
+        job_id="job-historical",
+        owner_id="owner-a",
+        payload_hash=payload_hash,
+    )
+
+    claim = await queue.resolve_submission_claim(
+        "task:historical-project:historical-task"
+    )
+
+    assert claim == {
+        "job_id": "job-historical",
+        "owner_id": "owner-a",
+        "payload_hash": payload_hash,
+    }
+
+
+@pytest.mark.asyncio
+async def test_resolve_submission_claim_rejects_corrupt_claim():
+    queue = _queue()
+    key = queue._submission_storage_key("task:historical-project:corrupt")
+    queue._redis.values[key] = '{"version":1,"job_id":"job-x","owner_id":"owner-a","payload_hash":"short"}'
+
+    with pytest.raises(SubmissionUnavailableError, match="record is invalid"):
+        await queue.resolve_submission_claim("task:historical-project:corrupt")
+
+
+@pytest.mark.asyncio
+async def test_resolve_submission_claim_rejects_inconsistent_retained_envelope():
+    queue = _queue()
+    payload_hash = "b" * 64
+    submission_key = "task:historical-project:mismatch"
+    await queue.claim_submission(
+        submission_key,
+        job_id="job-historical",
+        owner_id="owner-a",
+        payload_hash=payload_hash,
+    )
+    queue._redis.values["ssh_gateway:job:job-historical"] = (
+        '{"job_id":"job-other","owner_id":"owner-a"}'
+    )
+
+    with pytest.raises(SubmissionUnavailableError, match="binding is inconsistent"):
+        await queue.resolve_submission_claim(submission_key)
+
+
+@pytest.mark.asyncio
 async def test_identical_retry_returns_same_job_and_executes_once():
     queue = _queue()
     calls = [0]

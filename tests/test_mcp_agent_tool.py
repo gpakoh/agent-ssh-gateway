@@ -1101,6 +1101,26 @@ def test_trusted_fleet_job_resolver_uses_control_plane_binding_without_registry(
     )
 
 
+def test_trusted_fleet_job_resolver_falls_back_to_exact_historical_submission(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setattr(
+        agent_adapter,
+        "read_task_attempt_job_id_by_state_key",
+        MagicMock(return_value=None),
+    )
+    client = MagicMock()
+    client.resolve_submission_job.return_value = "job-historical"
+    monkeypatch.setattr(agent_adapter, "_server_agent_client", lambda: client)
+
+    resolver = agent_adapter._trusted_fleet_job_resolver()
+
+    assert resolver("orphaned-candidate-key:trusted-task-001") == "job-historical"
+    client.resolve_submission_job.assert_called_once_with(
+        "task:orphaned-candidate-key:trusted-task-001"
+    )
+
+
 def test_trusted_fleet_job_resolver_rejects_malformed_durable_identity(monkeypatch):
     import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
 
