@@ -4,8 +4,9 @@ These tests boot a real uvicorn server on a temp port with an isolated
 AUTH_DB_PATH and drive the browser through the auth flow, session list,
 file browser and terminal panels.
 
-Marked ``e2e`` — excluded from the default CI run (``-m "not host_smoke
-and not e2e"``) because the CI container may not ship Selenium/Chromium.
+Marked ``e2e`` — excluded from the default unit-test run (``-m "not host_smoke
+and not e2e"``). The dedicated E2E CI job provisions an explicit browser
+runtime; local runs may use either SELENIUM_REMOTE_URL or local Chrome/Chromium.
 """
 
 import os
@@ -32,10 +33,11 @@ except ImportError:  # pragma: no cover
 
 _DRIVER = shutil.which("chromedriver")
 _CHROMIUM = shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome")
+_REMOTE_URL = os.environ.get("SELENIUM_REMOTE_URL", "").strip()
 
-if not (webdriver and _DRIVER and _CHROMIUM):
+if not webdriver or (not _REMOTE_URL and not (_DRIVER and _CHROMIUM)):
     pytest.skip(
-        "Selenium/chromedriver/Chromium not available — skipping Web UI E2E",
+        "Selenium runtime not available — configure SELENIUM_REMOTE_URL or install local Chrome/Chromium + chromedriver",
         allow_module_level=True,
     )
 
@@ -115,8 +117,11 @@ def driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
-    opts.binary_location = _CHROMIUM
-    drv = webdriver.Chrome(options=opts)
+    if _REMOTE_URL:
+        drv = webdriver.Remote(command_executor=_REMOTE_URL, options=opts)
+    else:
+        opts.binary_location = _CHROMIUM
+        drv = webdriver.Chrome(options=opts)
     drv.set_window_size(1400, 1000)
     yield drv
     drv.quit()

@@ -847,50 +847,45 @@ class TestDeploymentConcurrencySerialization:
         assert concurrency.get("cancel-in-progress") is False
 
 
-class TestE2eSkipsHonestlyWithoutBrowserToolchain:
-    """P1 MAJOR audit finding: this workflow also runs on a self-hosted
-    Gitea runner pool where the `ubuntu-latest` label maps to a
-    Python-focused custom image with no Chrome/Chromium/chromedriver at
-    all -- confirmed live: every runner in the pool (python311/node22/
-    docker-e2e/security) lacks a browser toolchain. The old mechanism ran
-    pytest anyway, let it collect zero items (exit 5), and rewrote that
-    into `exit 0` -- a real pass and "nothing could run here" were
-    indistinguishable in the job's own status (TEST-15: zero collected
-    tests must not read as a passing check). Detecting the toolchain
-    first and gating the actual test step behind `if:` means GitHub
-    Actions marks it skipped (grey), not passed (green). build-and-push
-    now depends on e2e (`needs: [test, e2e]`) -- on runners with a
-    browser the e2e job really gates the artifact; on the no-browser
-    pool it completes as a skipped step and does not stall deploy.
-    """
+class TestE2eFailsClosedWithoutBrowserToolchain:
+    """CI-004: browser coverage is required evidence, never a soft skip."""
 
-    def test_browser_presence_is_detected_before_running_tests(self):
+    def test_browser_preflight_requires_remote_grid_or_local_toolchain(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
-        steps_text = json.dumps(wf["jobs"]["e2e"])
-        assert "chromedriver" in steps_text
-        assert "google-chrome" in steps_text
-        assert "browser_check" in steps_text
+        steps = wf["jobs"]["e2e"]["steps"]
+        check = next(s for s in steps if s.get("name") == "Check browser runtime")
+        run = check["run"]
+        assert "SELENIUM_REMOTE_URL" in run
+        assert "Selenium service did not become ready" in run
+        assert "chromedriver" in run
+        assert "chromium" in run
+        assert "google-chrome" in run
+        assert "uv run python -c \"import selenium\"" in run
+        assert "exit 1" in run
+        assert "GITHUB_OUTPUT" not in run
+        assert "available=false" not in run
 
-    def test_e2e_test_step_is_gated_on_browser_availability(self):
+    def test_e2e_step_is_unconditional_and_proves_non_skipped_execution(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
         steps = wf["jobs"]["e2e"]["steps"]
         e2e_step = next(s for s in steps if s.get("name") == "E2E tests")
-        assert e2e_step.get("if") == "steps.browser_check.outputs.available == 'true'"
+        assert "if" not in e2e_step
+        run = e2e_step["run"]
+        assert "pytest tests/test_webui_e2e.py -m e2e -q --junitxml=e2e-results.xml" in run
+        assert "pytest -m e2e -q --junitxml=e2e-results.xml" not in run
+        assert 'tests <= 0 or skipped != 0' in run
+        assert "raise SystemExit(1)" in run
 
     def test_a_real_test_failure_still_fails_the_job(self):
-        """No more exit-code rewriting at all -- once the step only runs
-        with a confirmed browser present, any nonzero pytest exit
-        (failures, errors) propagates as the step's own exit status."""
         wf = _load_workflow(CI_WORKFLOW_PATH)
         steps = wf["jobs"]["e2e"]["steps"]
         e2e_step = next(s for s in steps if s.get("name") == "E2E tests")
-        assert e2e_step["run"].strip() == "uv run pytest -m e2e -q"
+        run = e2e_step["run"]
+        assert "set -euo pipefail" in run
+        assert "|| true" not in run
+        assert "continue-on-error" not in e2e_step
 
     def test_build_and_push_depends_on_e2e(self):
-        """P1 MAJOR audit finding (CI-06): build/deploy did not depend on
-        the e2e job -- unit/static could pass while the e2e gate was
-        skipped or failed and the artifact would still advance. Now the
-        artifact cannot build before the e2e job has resolved."""
         wf = _load_workflow(CI_WORKFLOW_PATH)
         needs = wf["jobs"]["build-and-push"].get("needs", [])
         assert "e2e" in needs
@@ -907,15 +902,31 @@ class TestE2eActuallyRunsSomewhere:
         e2e_job = wf["jobs"].get("e2e")
         assert e2e_job is not None, "ci.yml must have a job that runs -m e2e"
         steps_text = json.dumps(e2e_job)
-        assert "pytest -m e2e" in steps_text
+        assert "pytest tests/test_webui_e2e.py" in steps_text
+        assert "-m e2e" in steps_text
 
-    def test_e2e_job_puts_chromedriver_on_path(self):
-        """The test file does a plain shutil.which("chromedriver") before
-        ever touching Selenium -- ubuntu-latest ships ChromeDriver but
-        only exposes it via $CHROMEWEBDRIVER, not necessarily PATH."""
+    def test_e2e_job_provisions_remote_chromium_on_gitea_and_keeps_github_local_fallback(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
-        steps_text = json.dumps(wf["jobs"]["e2e"])
-        assert "CHROMEWEBDRIVER" in steps_text
+        e2e_job = wf["jobs"]["e2e"]
+        steps = e2e_job["steps"]
+        assert "services" not in e2e_job, "act services replace the job network; keep existing runner connectivity"
+
+        github_local = next(s for s in steps if s.get("name") == "Put preinstalled ChromeDriver on PATH")
+        assert github_local["if"] == "github.server_url == 'https://github.com'"
+        assert "CHROMEWEBDRIVER" in github_local["run"]
+
+        start = next(s for s in steps if s.get("name") == "Start pinned Selenium Chromium sidecar")
+        assert start["if"] == "github.server_url != 'https://github.com'"
+        run = start["run"]
+        assert 'docker inspect "$job_container"' in run
+        assert '--network "container:${job_container}"' in run
+        assert "ghcr.io/seleniumhq/standalone-chromium:" in run
+        assert "@sha256:3400b92f1cddb2dfaaf358654e8f7d83d7be45192fb73c5f28c25faa28d36504" in run
+        assert 'SELENIUM_REMOTE_URL=http://127.0.0.1:4444/wd/hub' in run
+
+        cleanup = next(s for s in steps if s.get("name") == "Stop Selenium Chromium sidecar")
+        assert "always()" in cleanup["if"]
+        assert 'docker rm -f "$E2E_SELENIUM_CONTAINER"' in cleanup["run"]
 
 
 class TestHostSmokeRunsAfterSuccessfulDeploy:
