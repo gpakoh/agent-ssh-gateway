@@ -203,21 +203,19 @@ jobs:
     # simply never executed by any CI path. Separate job (not a step
     # added to `test`) so a browser/driver hiccup here can't block the
     # fast unit-test signal, and its own pass/fail is clearly attributed.
-    # Runs on GitHub's own ubuntu-latest (not the self-hosted pool) --
-    # these tests boot their own uvicorn server and need no host-specific
-    # infra (nginx, real SSH host, /media paths) unlike host-smoke.yml's
-    # tests, only a browser. ubuntu-latest already ships Google Chrome,
-    # Chromium, and ChromeDriver preinstalled (no apt-get / third-party
-    # Action needed -- avoided guessing apt package names, which differ
-    # across Ubuntu releases and would make this step a silent CI
-    # breakage risk on the next runner-image bump). ChromeDriver's own
-    # location is only exposed via the $CHROMEWEBDRIVER env var, not
-    # necessarily PATH -- the test file does a plain shutil.which(
-    # "chromedriver") before ever touching Selenium, so it's added to
-    # PATH explicitly below.
+    # The browser runtime is platform-specific but explicit. GitHub-hosted
+    # ubuntu-latest uses its preinstalled Chrome/ChromeDriver. Gitea maps the
+    # same label to nod-ci-python311, which has no browser, so that path starts
+    # a digest-pinned Selenium Chromium sidecar sharing only this job's network
+    # namespace. The tests boot their own loopback uvicorn server and need no
+    # host-specific nginx/SSH/media infrastructure.
     name: E2E (Selenium)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Gitea maps ubuntu-latest to nod-ci-python311, which intentionally has
+    # Python tooling but no browser. The Gitea path starts a digest-pinned
+    # Selenium sidecar in the existing job container's network namespace;
+    # GitHub-hosted runners keep their preinstalled local Chrome path.
     env:
       CI_PACKAGE_HTTP_PROXY: ${{ secrets.CI_PACKAGE_HTTP_PROXY }}
       CI_PACKAGE_HTTPS_PROXY: ${{ secrets.CI_PACKAGE_HTTPS_PROXY }}
@@ -279,30 +277,75 @@ jobs:
           done
 
       - name: Put preinstalled ChromeDriver on PATH
+        if: github.server_url == 'https://github.com'
         run: echo "$CHROMEWEBDRIVER" >> "$GITHUB_PATH"
 
-      - name: Check for browser toolchain
-        # CI-004: browser coverage is a required gate, not an optional
-        # capability probe. A runner without Selenium, Chrome/Chromium or
-        # ChromeDriver must make this job RED before pytest rather than
-        # turning the actual E2E step into a green aggregate with a skipped
-        # child step.
+      - name: Start pinned Selenium Chromium sidecar
+        if: github.server_url != 'https://github.com'
         run: |
           set -euo pipefail
-          driver="$(command -v chromedriver || true)"
-          browser=""
-          for candidate in chromium chromium-browser google-chrome; do
-            if command -v "$candidate" >/dev/null 2>&1; then
-              browser="$(command -v "$candidate")"
-              break
+          job_container="$(hostname)"
+          docker inspect "$job_container" >/dev/null
+          selenium_id="$(docker run -d --rm \
+            --network "container:${job_container}" \
+            --shm-size=2g \
+            ghcr.io/seleniumhq/standalone-chromium:150.0.7871.114-chromedriver-150.0.7871.114-grid-4.46.0-20260707@sha256:3400b92f1cddb2dfaaf358654e8f7d83d7be45192fb73c5f28c25faa28d36504)"
+          echo "E2E_SELENIUM_CONTAINER=$selenium_id" >> "$GITHUB_ENV"
+          echo "SELENIUM_REMOTE_URL=http://127.0.0.1:4444/wd/hub" >> "$GITHUB_ENV"
+
+      - name: Keep local browser traffic off package proxy
+        run: |
+          set -euo pipefail
+          no_proxy_value="${NO_PROXY:-}"
+          no_proxy_value="${no_proxy_value:+${no_proxy_value},}localhost,127.0.0.1,::1"
+          echo "NO_PROXY=$no_proxy_value" >> "$GITHUB_ENV"
+          echo "no_proxy=$no_proxy_value" >> "$GITHUB_ENV"
+
+      - name: Check browser runtime
+        # CI-004: browser coverage is a required gate, not an optional
+        # capability probe. Gitea uses the pinned Selenium service; GitHub-hosted
+        # runners keep their preinstalled local Chrome/ChromeDriver path.
+        run: |
+          set -euo pipefail
+          if [ -n "${SELENIUM_REMOTE_URL:-}" ]; then
+            uv run python - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.request
+
+          remote = os.environ["SELENIUM_REMOTE_URL"]
+          status_url = remote.removesuffix("/wd/hub") + "/status"
+          last_error = None
+          for _ in range(60):
+              try:
+                  with urllib.request.urlopen(status_url, timeout=2) as response:
+                      payload = json.load(response)
+                  if payload.get("value", {}).get("ready") is True:
+                      print(f"Selenium service ready: {status_url}")
+                      break
+              except Exception as exc:  # noqa: BLE001 - bounded CI readiness probe
+                  last_error = exc
+              time.sleep(1)
+          else:
+              raise SystemExit(f"Selenium service did not become ready: {last_error}")
+          PY
+          else
+            driver="$(command -v chromedriver || true)"
+            browser=""
+            for candidate in chromium chromium-browser google-chrome; do
+              if command -v "$candidate" >/dev/null 2>&1; then
+                browser="$(command -v "$candidate")"
+                break
+              fi
+            done
+            if [ -z "$driver" ] || [ -z "$browser" ]; then
+              echo "::error::Required local Selenium browser toolchain is unavailable (chromedriver=${driver:-missing}, browser=${browser:-missing})"
+              exit 1
             fi
-          done
-          if [ -z "$driver" ] || [ -z "$browser" ]; then
-            echo "::error::Required Selenium browser toolchain is unavailable (chromedriver=${driver:-missing}, browser=${browser:-missing})"
-            exit 1
+            uv run python -c "import selenium"
+            echo "Local browser E2E preflight OK: driver=$driver browser=$browser"
           fi
-          uv run python -c "import selenium"
-          echo "Browser E2E preflight OK: driver=$driver browser=$browser"
 
       - name: E2E tests
         run: |
@@ -324,6 +367,14 @@ jobs:
               raise SystemExit(1)
           print(f"E2E execution proof: tests={tests}, skipped={skipped}")
           PY
+
+      - name: Stop Selenium Chromium sidecar
+        if: always() && github.server_url != 'https://github.com'
+        run: |
+          set -euo pipefail
+          if [ -n "${E2E_SELENIUM_CONTAINER:-}" ]; then
+            docker rm -f "$E2E_SELENIUM_CONTAINER" >/dev/null
+          fi
 
   build-and-push:
     # Runs the build+smoke-test steps on BOTH a real push to master AND a

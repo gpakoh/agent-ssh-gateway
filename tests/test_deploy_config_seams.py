@@ -850,11 +850,13 @@ class TestDeploymentConcurrencySerialization:
 class TestE2eFailsClosedWithoutBrowserToolchain:
     """CI-004: browser coverage is required evidence, never a soft skip."""
 
-    def test_browser_preflight_fails_when_required_toolchain_is_missing(self):
+    def test_browser_preflight_requires_remote_grid_or_local_toolchain(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
         steps = wf["jobs"]["e2e"]["steps"]
-        check = next(s for s in steps if s.get("name") == "Check for browser toolchain")
+        check = next(s for s in steps if s.get("name") == "Check browser runtime")
         run = check["run"]
+        assert "SELENIUM_REMOTE_URL" in run
+        assert "Selenium service did not become ready" in run
         assert "chromedriver" in run
         assert "chromium" in run
         assert "google-chrome" in run
@@ -901,13 +903,28 @@ class TestE2eActuallyRunsSomewhere:
         steps_text = json.dumps(e2e_job)
         assert "pytest -m e2e" in steps_text
 
-    def test_e2e_job_puts_chromedriver_on_path(self):
-        """The test file does a plain shutil.which("chromedriver") before
-        ever touching Selenium -- ubuntu-latest ships ChromeDriver but
-        only exposes it via $CHROMEWEBDRIVER, not necessarily PATH."""
+    def test_e2e_job_provisions_remote_chromium_on_gitea_and_keeps_github_local_fallback(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
-        steps_text = json.dumps(wf["jobs"]["e2e"])
-        assert "CHROMEWEBDRIVER" in steps_text
+        e2e_job = wf["jobs"]["e2e"]
+        steps = e2e_job["steps"]
+        assert "services" not in e2e_job, "act services replace the job network; keep existing runner connectivity"
+
+        github_local = next(s for s in steps if s.get("name") == "Put preinstalled ChromeDriver on PATH")
+        assert github_local["if"] == "github.server_url == 'https://github.com'"
+        assert "CHROMEWEBDRIVER" in github_local["run"]
+
+        start = next(s for s in steps if s.get("name") == "Start pinned Selenium Chromium sidecar")
+        assert start["if"] == "github.server_url != 'https://github.com'"
+        run = start["run"]
+        assert 'docker inspect "$job_container"' in run
+        assert '--network "container:${job_container}"' in run
+        assert "ghcr.io/seleniumhq/standalone-chromium:" in run
+        assert "@sha256:3400b92f1cddb2dfaaf358654e8f7d83d7be45192fb73c5f28c25faa28d36504" in run
+        assert 'SELENIUM_REMOTE_URL=http://127.0.0.1:4444/wd/hub' in run
+
+        cleanup = next(s for s in steps if s.get("name") == "Stop Selenium Chromium sidecar")
+        assert "always()" in cleanup["if"]
+        assert 'docker rm -f "$E2E_SELENIUM_CONTAINER"' in cleanup["run"]
 
 
 class TestHostSmokeRunsAfterSuccessfulDeploy:
