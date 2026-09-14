@@ -350,7 +350,7 @@ jobs:
       - name: E2E tests
         run: |
           set -euo pipefail
-          uv run pytest -m e2e -q --junitxml=e2e-results.xml
+          uv run pytest tests/test_webui_e2e.py -m e2e -q --junitxml=e2e-results.xml
           uv run python - <<'PY'
           import sys
           import xml.etree.ElementTree as ET

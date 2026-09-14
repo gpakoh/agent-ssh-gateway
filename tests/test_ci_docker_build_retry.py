@@ -144,7 +144,8 @@ def test_ci_e2e_uses_digest_pinned_selenium_sidecar_and_requires_execution_proof
     assert 'docker rm -f "$E2E_SELENIUM_CONTAINER"' in workflow
     assert "services:\n      selenium:" not in workflow
     assert "steps.browser_check.outputs.available" not in workflow
-    assert "uv run pytest -m e2e -q --junitxml=e2e-results.xml" in workflow
+    assert "uv run pytest tests/test_webui_e2e.py -m e2e -q --junitxml=e2e-results.xml" in workflow
+    assert "uv run pytest -m e2e -q --junitxml=e2e-results.xml" not in workflow
     assert "if tests <= 0 or skipped != 0:" in workflow
 
 

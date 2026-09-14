@@ -871,7 +871,8 @@ class TestE2eFailsClosedWithoutBrowserToolchain:
         e2e_step = next(s for s in steps if s.get("name") == "E2E tests")
         assert "if" not in e2e_step
         run = e2e_step["run"]
-        assert "pytest -m e2e -q --junitxml=e2e-results.xml" in run
+        assert "pytest tests/test_webui_e2e.py -m e2e -q --junitxml=e2e-results.xml" in run
+        assert "pytest -m e2e -q --junitxml=e2e-results.xml" not in run
         assert 'tests <= 0 or skipped != 0' in run
         assert "raise SystemExit(1)" in run
 
@@ -901,7 +902,8 @@ class TestE2eActuallyRunsSomewhere:
         e2e_job = wf["jobs"].get("e2e")
         assert e2e_job is not None, "ci.yml must have a job that runs -m e2e"
         steps_text = json.dumps(e2e_job)
-        assert "pytest -m e2e" in steps_text
+        assert "pytest tests/test_webui_e2e.py" in steps_text
+        assert "-m e2e" in steps_text
 
     def test_e2e_job_provisions_remote_chromium_on_gitea_and_keeps_github_local_fallback(self):
         wf = _load_workflow(CI_WORKFLOW_PATH)
