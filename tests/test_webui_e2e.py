@@ -13,6 +13,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -42,16 +43,48 @@ if not webdriver or (not _REMOTE_URL and not (_DRIVER and _CHROMIUM)):
     )
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+def _reserved_loopback_socket() -> socket.socket:
+    """Reserve the exact TCP listener uvicorn will inherit.
+
+    Binding an ephemeral port and closing it before ``Popen`` creates a TOCTOU
+    window on shared CI runners: another process may claim the port before
+    uvicorn binds it. Keep the listener open and pass its fd to the child.
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(128)
+    listener.set_inheritable(True)
+    return listener
 
 
-def _wait_http(url: str, timeout: float = 30.0) -> None:
-    deadline = time.time() + timeout
+def _startup_log_tail(path: str, limit: int = 8192) -> str:
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - limit), os.SEEK_SET)
+            return fh.read(limit).decode("utf-8", "replace")
+    except OSError as exc:
+        return f"<startup log unavailable: {type(exc).__name__}>"
+
+
+def _wait_http(
+    url: str,
+    *,
+    proc: subprocess.Popen,
+    startup_log_path: str,
+    timeout: float = 30.0,
+) -> None:
+    deadline = time.monotonic() + timeout
     last_err = None
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
+        return_code = proc.poll()
+        if return_code is not None:
+            tail = _startup_log_tail(startup_log_path)
+            raise AssertionError(
+                f"Server process exited before readiness (rc={return_code}); "
+                f"startup log tail:\n{tail}"
+            )
         try:
             req = urllib.request.Request(url, method="GET")
             req.add_header("X-API-Key", "e2e-master-key")
@@ -62,52 +95,75 @@ def _wait_http(url: str, timeout: float = 30.0) -> None:
         except urllib.error.URLError as err:
             last_err = err
             time.sleep(0.5)
-    raise AssertionError(f"Server at {url} did not become ready: {last_err}")
+    tail = _startup_log_tail(startup_log_path)
+    raise AssertionError(
+        f"Server at {url} did not become ready: {last_err}; "
+        f"process_rc={proc.poll()}; startup log tail:\n{tail}"
+    )
 
 
 @pytest.fixture(scope="module")
 def server():
-    port = _free_port()
     tmpdir = tempfile.mkdtemp(prefix="webui-e2e-")
     auth_db = os.path.join(tmpdir, "auth.sqlite3")
-    env = dict(os.environ)
-    env.update(
-        {
-            "AUTH_DB_PATH": auth_db,
-            "API_KEY": "e2e-master-key",
-            "JWT_SECRET": "e2e-jwt-secret-not-for-prod",
-            "API_AUTH_ENABLED": "true",
-            "SETUP_TOKEN": "e2e-setup-token-123",
-        }
-    )
-    proc = subprocess.Popen(
-        [
-            "python",
-            "-m",
-            "uvicorn",
-            "app.main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--log-level",
-            "warning",
-        ],
-        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    base = f"http://127.0.0.1:{port}"
+    startup_log_path = os.path.join(tmpdir, "uvicorn-startup.log")
+    listener = _reserved_loopback_socket()
+    port = listener.getsockname()[1]
+    # Keep the child hermetic: a push workflow may expose additional runner
+    # secrets/configuration that a pull-request workflow does not. The Web UI
+    # fixture must exercise the same local app profile in both cases.
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": tmpdir,
+        "AUTH_DB_PATH": auth_db,
+        "API_KEY": "e2e-master-key",
+        "JWT_SECRET": "e2e-jwt-secret-not-for-prod",
+        "API_AUTH_ENABLED": "true",
+        "SETUP_TOKEN": "e2e-setup-token-123",
+        "REDIS_JOB_QUEUE_ENABLED": "false",
+        "PERSISTENT_SESSIONS_ENABLED": "false",
+        "EVENT_HOOKS_ENABLED": "false",
+        "AUDIT_LOG_PERSIST_ENABLED": "false",
+    }
+    startup_log = open(startup_log_path, "wb")
+    proc = None
     try:
-        _wait_http(f"{base}/api/health")
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                "app.main:app",
+                "--fd",
+                str(listener.fileno()),
+                "--log-level",
+                "warning",
+            ],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            env=env,
+            stdout=startup_log,
+            stderr=subprocess.STDOUT,
+            pass_fds=(listener.fileno(),),
+        )
+        listener.close()
+        base = f"http://127.0.0.1:{port}"
+        _wait_http(
+            f"{base}/api/health",
+            proc=proc,
+            startup_log_path=startup_log_path,
+        )
         yield base, auth_db
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        listener.close()
+        if proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
+        startup_log.close()
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 @pytest.fixture(scope="module")
