@@ -134,14 +134,29 @@ async def _get_owned_job_or_redis(job_id: str, identity: AuthIdentity):
 async def jobs_resolve_submission(
     submission_key: str = Query(min_length=1, max_length=512),
     _identity: AuthIdentity = Depends(require_scope("jobs:read")),
+    family: bool = Query(default=False),
 ):
-    """Resolve one exact durable submission claim for trusted recovery.
+    """Resolve durable submission identity for trusted fleet recovery.
 
-    This endpoint intentionally exposes no Redis namespace and performs no
-    mutation. It is used by the MCP control plane to migrate historical fleet
-    leases whose pre-attempt submission key is still durably retained. Normal
-    ownership rules apply before a job id is disclosed.
+    Exact mode resolves one opaque idempotent submission key. Master-key callers
+    may additionally request family mode for the strict historical
+    ``task:...:attempt:<32-lowercase-hex>`` family when neither the control-plane
+    binding nor persistent worker attempt hint survived. Family mode performs no
+    mutation, accepts exactly one retained member, and fails closed on malformed
+    or ambiguous state. Normal ownership and authoritative job-state checks still
+    apply before a job id is disclosed.
     """
+    family_mode = family is True
+    if family_mode and _identity.token_type != "master":
+        raise HTTPException(
+            status_code=403,
+            detail=_err(
+                403,
+                "Attempt-family recovery requires the master API key",
+                code="MASTER_KEY_REQUIRED",
+                retryable=False,
+            ),
+        )
     if _state.redis_queue is None or _state.redis_queue._redis is None:
         raise HTTPException(
             status_code=503,
@@ -153,7 +168,12 @@ async def jobs_resolve_submission(
             ),
         )
     try:
-        claim = await _state.redis_queue.resolve_submission_claim(submission_key)
+        if family_mode:
+            claim = await _state.redis_queue.resolve_submission_family_claim(
+                submission_key
+            )
+        else:
+            claim = await _state.redis_queue.resolve_submission_claim(submission_key)
     except SubmissionUnavailableError:
         raise HTTPException(
             status_code=503,

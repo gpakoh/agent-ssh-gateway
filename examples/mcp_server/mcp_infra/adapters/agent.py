@@ -160,7 +160,21 @@ def _trusted_fleet_job_resolver() -> Callable[[str], str | None]:
             return _server_agent_client().resolve_submission_job(
                 f"task:{durable_task_id}:attempt:{attempt_hint}"
             )
-        return _server_agent_client().resolve_submission_job(f"task:{durable_task_id}")
+
+        # The crash window between mark_submit_attempted() and submit_sync()
+        # creates neither a control-plane binding nor attempt-state.json.  In
+        # that narrow case, let Gateway recover only a UNIQUE retained member
+        # of the strict attempt family. Gateway validates ownership and
+        # authoritative job state; ambiguity/backend inconsistency propagates
+        # fail-closed. Only a positive family miss may fall back to the older
+        # pre-attempt exact task-scoped key.
+        client = _server_agent_client()
+        family_job_id = client.resolve_submission_job_family(
+            f"task:{durable_task_id}:attempt:"
+        )
+        if family_job_id:
+            return family_job_id
+        return client.resolve_submission_job(f"task:{durable_task_id}")
 
     return _resolve
 

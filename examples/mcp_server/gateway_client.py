@@ -909,6 +909,32 @@ class GatewayClient:
             raise GatewayClientError("Gateway returned an invalid durable submission binding")
         return job_id.strip()
 
+    def resolve_submission_job_family(self, submission_prefix: str) -> str | None:
+        """Resolve one unique retained attempt-family job for recovery.
+
+        Gateway restricts family lookup to the master API key and validates the
+        retained durable envelope plus authoritative job state. A typed 404 is
+        a normal family miss; authorization, ambiguity, or backend inconsistency
+        remains a hard error so the caller cannot silently fall through.
+        """
+        if not submission_prefix:
+            raise GatewayClientError("submission_prefix is required")
+        try:
+            result = self._get(
+                "/api/jobs/submissions/resolve",
+                {"submission_key": submission_prefix, "family": "true"},
+            )
+        except GatewayClientError as exc:
+            detail = (exc.body or {}).get("detail")
+            code = detail.get("code") if isinstance(detail, dict) else None
+            if exc.status_code == 404 and code == "SUBMISSION_NOT_FOUND":
+                return None
+            raise
+        job_id = result.get("job_id")
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise GatewayClientError("Gateway returned an invalid durable submission binding")
+        return job_id.strip()
+
     def job_status(self, job_id: str) -> dict[str, Any]:
         return self._get(f"/api/jobs/{job_id}/status")
 

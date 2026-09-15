@@ -211,6 +211,16 @@ class RedisJobQueue:
         if not submission_key.startswith("task:"):
             return None
 
+        index = await self._get_submission_envelope_index()
+        match = index.get(submission_key)
+        if match is None:
+            return None
+        if isinstance(match, str):
+            raise SubmissionUnavailableError(match)
+        return dict(match)
+
+    async def _get_submission_envelope_index(self) -> dict[str, dict[str, str] | str]:
+        """Return the short-lived process-local durable envelope index."""
         now = time.monotonic()
         index = self._submission_envelope_index
         if (
@@ -229,13 +239,48 @@ class RedisJobQueue:
                     index = await self._build_submission_envelope_index()
                     self._submission_envelope_index = index
                     self._submission_envelope_index_loaded_at = time.monotonic()
+        return index
 
-        match = index.get(submission_key)
-        if match is None:
+    async def resolve_submission_family_claim(
+        self, submission_prefix: str
+    ) -> dict[str, str] | None:
+        """Resolve exactly one retained attempt-scoped task submission.
+
+        Historical fleet leases can prove dispatch while lacking both the
+        control-plane attempt binding and worker attempt-state file when the
+        coordinator died immediately after marking submission attempted.  This
+        recovery path never guesses an attempt id: exactly one retained durable
+        envelope must prove a key of the form
+        ``task:<durable-task-id>:attempt:<32-lowercase-hex>``.
+        """
+        if not self._redis:
+            raise SubmissionUnavailableError("Durable submission requires Redis")
+        if not submission_prefix.startswith("task:") or not submission_prefix.endswith(
+            ":attempt:"
+        ):
             return None
-        if isinstance(match, str):
-            raise SubmissionUnavailableError(match)
-        return dict(match)
+
+        index = await self._get_submission_envelope_index()
+        match: dict[str, str] | None = None
+        for submission_key, candidate in index.items():
+            if not submission_key.startswith(submission_prefix):
+                continue
+            attempt_id = submission_key[len(submission_prefix) :]
+            if (
+                len(attempt_id) != 32
+                or any(ch not in "0123456789abcdef" for ch in attempt_id)
+            ):
+                raise SubmissionUnavailableError(
+                    "Durable submission attempt family is invalid"
+                )
+            if isinstance(candidate, str):
+                raise SubmissionUnavailableError(candidate)
+            if match is not None:
+                raise SubmissionUnavailableError(
+                    "Durable submission attempt family is ambiguous"
+                )
+            match = dict(candidate)
+        return match
 
     async def _build_submission_envelope_index(
         self,

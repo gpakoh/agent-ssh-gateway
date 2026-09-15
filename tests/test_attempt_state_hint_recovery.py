@@ -107,19 +107,36 @@ def test_attempt_hint_ignores_noncanonical_project_state_key(tmp_path, monkeypat
 
 
 class _ResolveClient:
-    def __init__(self, answers: dict[str, str | None]):
+    def __init__(
+        self,
+        answers: dict[str, str | None],
+        family_answers: dict[str, str | None] | None = None,
+    ):
         self.answers = answers
+        self.family_answers = family_answers or {}
         self.calls: list[str] = []
+        self.family_calls: list[str] = []
 
     def resolve_submission_job(self, submission_key: str) -> str | None:
         self.calls.append(submission_key)
         return self.answers.get(submission_key)
 
+    def resolve_submission_job_family(self, submission_prefix: str) -> str | None:
+        self.family_calls.append(submission_prefix)
+        return self.family_answers.get(submission_prefix)
 
-def _resolver_with(monkeypatch, *, trusted_identity=None, attempt_hint=None, answers=None):
+
+def _resolver_with(
+    monkeypatch,
+    *,
+    trusted_identity=None,
+    attempt_hint=None,
+    answers=None,
+    family_answers=None,
+):
     import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
 
-    client = _ResolveClient(answers or {})
+    client = _ResolveClient(answers or {}, family_answers)
     monkeypatch.setattr(
         agent_adapter,
         "read_task_attempt_identity_by_state_key",
@@ -160,17 +177,71 @@ def test_fleet_resolver_does_not_legacy_fallback_after_hint_miss(monkeypatch):
     assert client.calls == [exact_key]
 
 
-def test_fleet_resolver_legacy_fallback_requires_no_attempt_evidence(monkeypatch):
+def test_fleet_resolver_unique_family_precedes_legacy_without_attempt_evidence(monkeypatch):
     durable = f"{PROJECT_KEY}:{TASK_ID}"
+    family_prefix = f"task:{durable}:attempt:"
+    legacy_key = f"task:{durable}"
+    resolver, client = _resolver_with(
+        monkeypatch,
+        attempt_hint=None,
+        answers={legacy_key: "wrong-legacy-job"},
+        family_answers={family_prefix: "job-family"},
+    )
+
+    assert resolver(durable) == "job-family"
+    assert client.family_calls == [family_prefix]
+    assert client.calls == []
+
+
+def test_fleet_resolver_legacy_fallback_requires_family_miss(monkeypatch):
+    durable = f"{PROJECT_KEY}:{TASK_ID}"
+    family_prefix = f"task:{durable}:attempt:"
     legacy_key = f"task:{durable}"
     resolver, client = _resolver_with(
         monkeypatch,
         attempt_hint=None,
         answers={legacy_key: "job-legacy"},
+        family_answers={family_prefix: None},
     )
 
     assert resolver(durable) == "job-legacy"
+    assert client.family_calls == [family_prefix]
     assert client.calls == [legacy_key]
+
+
+def test_fleet_resolver_family_error_fails_closed_without_legacy_fallback(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    durable = f"{PROJECT_KEY}:{TASK_ID}"
+    legacy_calls: list[str] = []
+
+    class _FailingFamilyClient:
+        def resolve_submission_job_family(self, submission_prefix: str) -> str | None:
+            raise RuntimeError(f"ambiguous family: {submission_prefix}")
+
+        def resolve_submission_job(self, submission_key: str) -> str | None:
+            legacy_calls.append(submission_key)
+            return "must-not-be-used"
+
+    monkeypatch.setattr(
+        agent_adapter,
+        "read_task_attempt_identity_by_state_key",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        agent_adapter,
+        "_read_agent_attempt_hint_by_state_key",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        agent_adapter,
+        "_server_agent_client",
+        lambda: _FailingFamilyClient(),
+    )
+
+    with pytest.raises(RuntimeError, match="ambiguous family"):
+        agent_adapter._trusted_fleet_job_resolver()(durable)
+    assert legacy_calls == []
 
 
 def test_fleet_resolver_candidate_binding_wins_before_worker_hint(monkeypatch):

@@ -1146,7 +1146,7 @@ def test_trusted_fleet_job_resolver_does_not_fallback_after_attempt_key_miss(mon
     )
 
 
-def test_trusted_fleet_job_resolver_falls_back_only_without_attempt_identity(monkeypatch):
+def test_trusted_fleet_job_resolver_uses_attempt_family_before_legacy_key(monkeypatch):
     import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
 
     monkeypatch.setattr(
@@ -1154,13 +1154,48 @@ def test_trusted_fleet_job_resolver_falls_back_only_without_attempt_identity(mon
         "read_task_attempt_identity_by_state_key",
         MagicMock(return_value=None),
     )
+    monkeypatch.setattr(
+        agent_adapter,
+        "_read_agent_attempt_hint_by_state_key",
+        MagicMock(return_value=None),
+    )
     client = MagicMock()
+    client.resolve_submission_job_family.return_value = "job-family"
+    monkeypatch.setattr(agent_adapter, "_server_agent_client", lambda: client)
+
+    resolver = agent_adapter._trusted_fleet_job_resolver()
+
+    assert resolver("orphaned-candidate-key:trusted-task-001") == "job-family"
+    client.resolve_submission_job_family.assert_called_once_with(
+        "task:orphaned-candidate-key:trusted-task-001:attempt:"
+    )
+    client.resolve_submission_job.assert_not_called()
+
+
+def test_trusted_fleet_job_resolver_falls_back_to_legacy_after_family_miss(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setattr(
+        agent_adapter,
+        "read_task_attempt_identity_by_state_key",
+        MagicMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        agent_adapter,
+        "_read_agent_attempt_hint_by_state_key",
+        MagicMock(return_value=None),
+    )
+    client = MagicMock()
+    client.resolve_submission_job_family.return_value = None
     client.resolve_submission_job.return_value = "job-legacy"
     monkeypatch.setattr(agent_adapter, "_server_agent_client", lambda: client)
 
     resolver = agent_adapter._trusted_fleet_job_resolver()
 
     assert resolver("orphaned-candidate-key:trusted-task-001") == "job-legacy"
+    client.resolve_submission_job_family.assert_called_once_with(
+        "task:orphaned-candidate-key:trusted-task-001:attempt:"
+    )
     client.resolve_submission_job.assert_called_once_with(
         "task:orphaned-candidate-key:trusted-task-001"
     )
