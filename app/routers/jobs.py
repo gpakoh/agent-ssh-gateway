@@ -179,7 +179,47 @@ async def jobs_resolve_submission(
             status_code=403,
             detail=_err(403, "Job belongs to a different owner"),
         )
-    return {"job_id": claim["job_id"]}
+
+    # Binding an unbound fleet lease to a job_id is safety-critical: the fleet
+    # immediately starts authoritative status reconciliation and treats a typed
+    # JOB_NOT_FOUND as terminal ambiguous.  A retained submission claim alone
+    # is therefore insufficient because its envelope may already have expired
+    # or been evicted.  Expose the id only while the job is queryable from the
+    # current manager, or from a retained terminal Redis snapshot that the
+    # normal job-status path can also serve.
+    job_id = claim["job_id"]
+    live_job = await _state.job_manager.get_job(job_id)
+    if live_job is not None:
+        if str(getattr(live_job, "owner_id", "")) != claim["owner_id"]:
+            raise HTTPException(
+                status_code=503,
+                detail=_err(
+                    503,
+                    "Durable submission/job binding is inconsistent",
+                    code="SUBMISSION_BACKEND_UNAVAILABLE",
+                    retryable=True,
+                ),
+            )
+    else:
+        try:
+            snapshot = await _state.redis_queue.get_job(job_id)
+        except Exception:
+            snapshot = None
+        if (
+            not isinstance(snapshot, dict)
+            or str(snapshot.get("status", "")) not in TERMINAL_STATES
+            or str(snapshot.get("owner_id", "")) != claim["owner_id"]
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail=_err(
+                    503,
+                    "Durable submission job is not currently authoritative",
+                    code="SUBMISSION_JOB_UNVERIFIED",
+                    retryable=True,
+                ),
+            )
+    return {"job_id": job_id}
 
 
 @router.get("/api/jobs/{job_id}/status", response_model=JobStatusResponse)

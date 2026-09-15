@@ -250,16 +250,20 @@ class TestJobsSubmissionResolutionOwnership:
         queue = MagicMock()
         queue._redis = MagicMock()
         queue.resolve_submission_claim = AsyncMock()
+        queue.get_job = AsyncMock(return_value=None)
         monkeypatch.setattr(_state, "redis_queue", queue)
         return queue
 
     @pytest.mark.asyncio
-    async def test_owner_can_resolve_exact_submission(self, _mock_redis_queue):
+    async def test_owner_can_resolve_exact_submission(
+        self, _mock_redis_queue, _mock_job_manager
+    ):
         _mock_redis_queue.resolve_submission_claim.return_value = {
             "job_id": "job-historical",
             "owner_id": token_fingerprint(OWNER_TOKEN),
             "payload_hash": "a" * 64,
         }
+        _mock_job_manager.get_job.return_value = _owned_job("job-historical")
 
         result = await jobs_router.jobs_resolve_submission(
             "task:project-key:task-1", _identity(OWNER_TOKEN)
@@ -269,6 +273,74 @@ class TestJobsSubmissionResolutionOwnership:
         _mock_redis_queue.resolve_submission_claim.assert_awaited_once_with(
             "task:project-key:task-1"
         )
+
+    @pytest.mark.asyncio
+    async def test_terminal_snapshot_can_prove_resolved_submission(
+        self, _mock_redis_queue, _mock_job_manager
+    ):
+        owner_id = token_fingerprint(OWNER_TOKEN)
+        _mock_redis_queue.resolve_submission_claim.return_value = {
+            "job_id": "job-terminal",
+            "owner_id": owner_id,
+            "payload_hash": "a" * 64,
+        }
+        _mock_job_manager.get_job.return_value = None
+        _mock_redis_queue.get_job.return_value = {
+            "job_id": "job-terminal",
+            "owner_id": owner_id,
+            "status": "completed",
+        }
+
+        result = await jobs_router.jobs_resolve_submission(
+            "task:project-key:task-terminal", _identity(OWNER_TOKEN)
+        )
+
+        assert result == {"job_id": "job-terminal"}
+
+    @pytest.mark.asyncio
+    async def test_unloaded_active_snapshot_does_not_prove_resolved_submission(
+        self, _mock_redis_queue, _mock_job_manager
+    ):
+        owner_id = token_fingerprint(OWNER_TOKEN)
+        _mock_redis_queue.resolve_submission_claim.return_value = {
+            "job_id": "job-processing",
+            "owner_id": owner_id,
+            "payload_hash": "a" * 64,
+        }
+        _mock_job_manager.get_job.return_value = None
+        _mock_redis_queue.get_job.return_value = {
+            "job_id": "job-processing",
+            "owner_id": owner_id,
+            "status": "processing",
+        }
+
+        with pytest.raises(HTTPException) as exc:
+            await jobs_router.jobs_resolve_submission(
+                "task:project-key:task-processing", _identity(OWNER_TOKEN)
+            )
+
+        assert exc.value.status_code == 503
+        assert exc.value.detail["code"] == "SUBMISSION_JOB_UNVERIFIED"
+
+    @pytest.mark.asyncio
+    async def test_claim_without_queryable_job_does_not_bind_fleet(
+        self, _mock_redis_queue, _mock_job_manager
+    ):
+        _mock_redis_queue.resolve_submission_claim.return_value = {
+            "job_id": "job-claim-only",
+            "owner_id": token_fingerprint(OWNER_TOKEN),
+            "payload_hash": "a" * 64,
+        }
+        _mock_job_manager.get_job.return_value = None
+        _mock_redis_queue.get_job.return_value = None
+
+        with pytest.raises(HTTPException) as exc:
+            await jobs_router.jobs_resolve_submission(
+                "task:project-key:task-claim-only", _identity(OWNER_TOKEN)
+            )
+
+        assert exc.value.status_code == 503
+        assert exc.value.detail["code"] == "SUBMISSION_JOB_UNVERIFIED"
 
     @pytest.mark.asyncio
     async def test_non_owner_cannot_resolve_submission(self, _mock_redis_queue):

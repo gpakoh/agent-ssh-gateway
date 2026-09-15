@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -16,6 +17,7 @@ from app.redis_queue import RedisJobQueue
 class _FakeRedis:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
+        self.scan_calls = 0
 
     async def get(self, key: str):
         return self.values.get(key)
@@ -31,6 +33,15 @@ class _FakeRedis:
 
     async def zcard(self, key: str):
         return 0
+
+    async def scan(self, cursor=0, *, match: str | None = None, count: int | None = None):
+        import fnmatch
+
+        self.scan_calls += 1
+        keys = list(self.values)
+        if match is not None:
+            keys = [key for key in keys if fnmatch.fnmatch(key, match)]
+        return 0, keys
 
     async def eval(self, script: str, numkeys: int, *args):
         import json as _json
@@ -243,6 +254,81 @@ async def test_resolve_submission_claim_recovers_exact_historical_identity_witho
         "owner_id": "owner-a",
         "payload_hash": payload_hash,
     }
+
+
+@pytest.mark.asyncio
+async def test_resolve_submission_claim_recovers_exact_identity_from_retained_envelope():
+    queue = _queue()
+    submission_key = "task:historical-project:attempted:attempt:abc123"
+    payload_hash = "c" * 64
+    queue._redis.values["ssh_gateway:job:job-envelope"] = json.dumps(
+        {
+            "version": 1,
+            "job_id": "job-envelope",
+            "submission_key": submission_key,
+            "owner_id": "owner-a",
+            "payload_hash": payload_hash,
+            "status": "completed",
+        }
+    )
+
+    claim = await queue.resolve_submission_claim(submission_key)
+
+    assert claim == {
+        "job_id": "job-envelope",
+        "owner_id": "owner-a",
+        "payload_hash": payload_hash,
+    }
+
+
+@pytest.mark.asyncio
+async def test_resolve_submission_claim_rejects_duplicate_exact_envelopes():
+    queue = _queue()
+    submission_key = "task:historical-project:ambiguous:attempt:abc123"
+    payload_hash = "d" * 64
+    envelope = {
+        "version": 1,
+        "submission_key": submission_key,
+        "owner_id": "owner-a",
+        "payload_hash": payload_hash,
+        "status": "completed",
+    }
+    queue._redis.values["ssh_gateway:job:job-envelope-a"] = json.dumps(
+        {**envelope, "job_id": "job-envelope-a"}
+    )
+    queue._redis.values["ssh_gateway:job:job-envelope-b"] = json.dumps(
+        {**envelope, "job_id": "job-envelope-b"}
+    )
+
+    with pytest.raises(SubmissionUnavailableError, match="identity is ambiguous"):
+        await queue.resolve_submission_claim(submission_key)
+
+
+@pytest.mark.asyncio
+async def test_resolve_submission_claim_rejects_mismatched_envelope_storage_identity():
+    queue = _queue()
+    submission_key = "task:historical-project:storage-mismatch:attempt:abc123"
+    queue._redis.values["ssh_gateway:job:job-storage-a"] = json.dumps(
+        {
+            "version": 1,
+            "job_id": "job-storage-b",
+            "submission_key": submission_key,
+            "owner_id": "owner-a",
+            "payload_hash": "e" * 64,
+            "status": "completed",
+        }
+    )
+
+    with pytest.raises(SubmissionUnavailableError, match="storage identity is inconsistent"):
+        await queue.resolve_submission_claim(submission_key)
+
+
+@pytest.mark.asyncio
+async def test_resolve_submission_claim_does_not_scan_non_task_keyspace():
+    queue = _queue()
+
+    assert await queue.resolve_submission_claim("external-submission-key") is None
+    assert queue._redis.scan_calls == 0
 
 
 @pytest.mark.asyncio

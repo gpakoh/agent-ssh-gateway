@@ -118,12 +118,11 @@ class RedisJobQueue:
         """Resolve one exact durable submission identity for trusted recovery.
 
         This is deliberately narrower than arbitrary Redis access. The caller
-        supplies the original opaque submission key; only its SHA-256 storage
-        slot is read. The returned claim is structurally validated and, when a
-        durable job envelope is still retained, cross-checked against that
-        envelope. A terminal envelope may legitimately expire before the
-        seven-day submission claim, so an absent envelope does not erase the
-        accepted submission identity.
+        supplies the original opaque submission key; its SHA-256 claim slot is
+        preferred. If that claim was independently evicted, a retained durable
+        job envelope may still recover the same exact raw submission identity.
+        Returned state is structurally validated; the HTTP route separately
+        proves that the resolved job is still authoritative before disclosure.
         """
         if not self._redis:
             raise SubmissionUnavailableError("Durable submission requires Redis")
@@ -134,7 +133,7 @@ class RedisJobQueue:
                 "Durable submission backend is unavailable"
             ) from exc
         if raw is None:
-            return None
+            return await self._resolve_submission_envelope_claim(submission_key)
         try:
             claim = json.loads(raw)
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
@@ -186,6 +185,89 @@ class RedisJobQueue:
             "owner_id": owner_id,
             "payload_hash": payload_hash,
         }
+
+    async def _resolve_submission_envelope_claim(
+        self, submission_key: str
+    ) -> dict[str, str] | None:
+        """Recover one exact submission identity from retained job envelopes.
+
+        Submission claims and durable envelopes are separate Redis keys with
+        independent TTL/eviction lifecycles. A missing hashed claim is therefore
+        not proof that an accepted execution never existed. The raw submission
+        key is retained in each durable
+        envelope, so accept only one exact structural match and fail closed on
+        duplicates or malformed matching state.
+
+        This slower fallback is reserved for internal task submissions. It
+        never infers liveness or terminality; the HTTP route separately proves
+        that the resolved job is currently authoritative before disclosure.
+        """
+        if not self._redis:
+            raise SubmissionUnavailableError("Durable submission requires Redis")
+        if not submission_key.startswith("task:"):
+            return None
+
+        cursor = 0
+        matches: list[dict[str, str]] = []
+        try:
+            while True:
+                cursor, keys = await self._redis.scan(
+                    cursor=cursor,
+                    match=f"{self._job_prefix}*",
+                    count=200,
+                )
+                for key in keys:
+                    envelope_raw = await self._redis.get(key)
+                    if envelope_raw is None:
+                        continue
+                    try:
+                        envelope = json.loads(envelope_raw)
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        continue
+                    if not isinstance(envelope, dict):
+                        continue
+                    if envelope.get("submission_key") != submission_key:
+                        continue
+                    if envelope.get("version") != 1:
+                        raise SubmissionUnavailableError("Durable job envelope is invalid")
+                    job_id = envelope.get("job_id")
+                    owner_id = envelope.get("owner_id")
+                    payload_hash = envelope.get("payload_hash")
+                    if (
+                        not isinstance(job_id, str)
+                        or not job_id.strip()
+                        or not isinstance(owner_id, str)
+                        or not isinstance(payload_hash, str)
+                        or len(payload_hash) != 64
+                        or any(ch not in "0123456789abcdef" for ch in payload_hash.lower())
+                    ):
+                        raise SubmissionUnavailableError("Durable job envelope is invalid")
+                    normalized_job_id = job_id.strip()
+                    if _decode_id(key) != f"{self._job_prefix}{normalized_job_id}":
+                        raise SubmissionUnavailableError(
+                            "Durable job envelope storage identity is inconsistent"
+                        )
+                    matches.append(
+                        {
+                            "job_id": normalized_job_id,
+                            "owner_id": owner_id,
+                            "payload_hash": payload_hash,
+                        }
+                    )
+                    if len(matches) > 1:
+                        raise SubmissionUnavailableError(
+                            "Durable submission envelope identity is ambiguous"
+                        )
+                if cursor == 0:
+                    break
+        except RedisError as exc:
+            raise SubmissionUnavailableError(
+                "Durable submission backend is unavailable"
+            ) from exc
+
+        if not matches:
+            return None
+        return matches[0]
 
     async def claim_submission(
         self,
