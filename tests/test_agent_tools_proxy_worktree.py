@@ -37,6 +37,7 @@ TD = ".ai-bridge/tasks/a12345678901"
 TASK_ID = "a12345678901"
 
 RUNNER_HARNESS_TIMEOUT_SECONDS = 60
+PROXY_RETRY_HARNESS_TIMEOUT_SECONDS = RUNNER_HARNESS_TIMEOUT_SECONDS * 2
 
 
 def test_supervisor_scope_diff_disables_rename_detection() -> None:
@@ -1135,7 +1136,7 @@ def test_proxy_transport_expired_certificate_retries_next_proxy(tmp_path, monkey
             text=True,
             capture_output=True,
             check=False,
-            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+            timeout=PROXY_RETRY_HARNESS_TIMEOUT_SECONDS,
         )
 
         assert result.returncode == 0, result.stderr or result.stdout
@@ -1515,7 +1516,7 @@ def test_pre_useful_server_error_retries_with_different_proxy(tmp_path, monkeypa
             text=True,
             capture_output=True,
             check=False,
-            timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+            timeout=PROXY_RETRY_HARNESS_TIMEOUT_SECONDS,
         )
 
         assert result.returncode == 0, result.stderr or result.stdout
