@@ -1082,15 +1082,17 @@ def test_agent_router_terminal_observer_ignores_non_backend_terminal_states(
     assert router.get_cooldowns() == []
 
 
-def test_trusted_fleet_job_resolver_uses_control_plane_binding_without_registry(monkeypatch):
+def test_trusted_fleet_job_resolver_uses_bound_control_plane_job_without_gateway(monkeypatch):
     import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
 
-    trusted_lookup = MagicMock(return_value="job-trusted")
+    trusted_lookup = MagicMock(return_value=("a" * 32, "job-trusted"))
+    gateway_lookup = MagicMock(side_effect=AssertionError("Gateway lookup must not run"))
     monkeypatch.setattr(
         agent_adapter,
-        "read_task_attempt_job_id_by_state_key",
+        "read_task_attempt_identity_by_state_key",
         trusted_lookup,
     )
+    monkeypatch.setattr(agent_adapter, "_server_agent_client", gateway_lookup)
 
     resolver = agent_adapter._trusted_fleet_job_resolver()
 
@@ -1099,15 +1101,17 @@ def test_trusted_fleet_job_resolver_uses_control_plane_binding_without_registry(
         project_key="orphaned-candidate-key",
         task_id="trusted-task-001",
     )
+    gateway_lookup.assert_not_called()
 
 
-def test_trusted_fleet_job_resolver_falls_back_to_exact_historical_submission(monkeypatch):
+def test_trusted_fleet_job_resolver_recovers_unbound_attempt_from_exact_attempt_key(monkeypatch):
     import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
 
+    attempt_id = "b" * 32
     monkeypatch.setattr(
         agent_adapter,
-        "read_task_attempt_job_id_by_state_key",
-        MagicMock(return_value=None),
+        "read_task_attempt_identity_by_state_key",
+        MagicMock(return_value=(attempt_id, None)),
     )
     client = MagicMock()
     client.resolve_submission_job.return_value = "job-historical"
@@ -1117,6 +1121,47 @@ def test_trusted_fleet_job_resolver_falls_back_to_exact_historical_submission(mo
 
     assert resolver("orphaned-candidate-key:trusted-task-001") == "job-historical"
     client.resolve_submission_job.assert_called_once_with(
+        f"task:orphaned-candidate-key:trusted-task-001:attempt:{attempt_id}"
+    )
+
+
+def test_trusted_fleet_job_resolver_does_not_fallback_after_attempt_key_miss(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    attempt_id = "c" * 32
+    monkeypatch.setattr(
+        agent_adapter,
+        "read_task_attempt_identity_by_state_key",
+        MagicMock(return_value=(attempt_id, None)),
+    )
+    client = MagicMock()
+    client.resolve_submission_job.return_value = None
+    monkeypatch.setattr(agent_adapter, "_server_agent_client", lambda: client)
+
+    resolver = agent_adapter._trusted_fleet_job_resolver()
+
+    assert resolver("orphaned-candidate-key:trusted-task-001") is None
+    client.resolve_submission_job.assert_called_once_with(
+        f"task:orphaned-candidate-key:trusted-task-001:attempt:{attempt_id}"
+    )
+
+
+def test_trusted_fleet_job_resolver_falls_back_only_without_attempt_identity(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setattr(
+        agent_adapter,
+        "read_task_attempt_identity_by_state_key",
+        MagicMock(return_value=None),
+    )
+    client = MagicMock()
+    client.resolve_submission_job.return_value = "job-legacy"
+    monkeypatch.setattr(agent_adapter, "_server_agent_client", lambda: client)
+
+    resolver = agent_adapter._trusted_fleet_job_resolver()
+
+    assert resolver("orphaned-candidate-key:trusted-task-001") == "job-legacy"
+    client.resolve_submission_job.assert_called_once_with(
         "task:orphaned-candidate-key:trusted-task-001"
     )
 
@@ -1124,10 +1169,10 @@ def test_trusted_fleet_job_resolver_falls_back_to_exact_historical_submission(mo
 def test_trusted_fleet_job_resolver_rejects_malformed_durable_identity(monkeypatch):
     import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
 
-    trusted_lookup = MagicMock(return_value="job-must-not-be-used")
+    trusted_lookup = MagicMock(return_value=("d" * 32, "job-must-not-be-used"))
     monkeypatch.setattr(
         agent_adapter,
-        "read_task_attempt_job_id_by_state_key",
+        "read_task_attempt_identity_by_state_key",
         trusted_lookup,
     )
     resolver = agent_adapter._trusted_fleet_job_resolver()

@@ -53,6 +53,7 @@ _CANDIDATE_ROOT_ENV = "MCP_TASK_CANDIDATE_ROOT"
 
 _SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_ATTEMPT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 _PROTECTED_BRANCHES = frozenset({"main", "master"})
 _GATEWAY_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
@@ -642,7 +643,10 @@ def bind_task_attempt_job(
         return updated
 
 
-def _read_task_attempt_job_id_unlocked(*, project: str, task_id: str) -> str | None:
+def _read_task_attempt_identity_unlocked(
+    *, project: str, task_id: str
+) -> tuple[str, str | None] | None:
+    """Return the immutable pre-submit attempt identity and optional bound job."""
     path = _candidate_task_dir(project, task_id) / ATTEMPT_BINDING_FILENAME
     if not path.exists() and not path.is_symlink():
         return None
@@ -653,16 +657,21 @@ def _read_task_attempt_job_id_unlocked(*, project: str, task_id: str) -> str | N
         or binding.get("task_id") != task_id
     ):
         raise CandidateError("trusted attempt binding is invalid")
-    for key in ("attempt_id", "fingerprint"):
-        value = binding.get(key)
-        if not isinstance(value, str) or not value.strip():
-            raise CandidateError(f"trusted attempt binding is missing {key}")
+    attempt_id = binding.get("attempt_id")
+    fingerprint = binding.get("fingerprint")
+    if not isinstance(attempt_id, str) or not _ATTEMPT_ID_RE.fullmatch(attempt_id.strip()):
+        raise CandidateError("trusted attempt binding has invalid attempt_id")
+    if not isinstance(fingerprint, str) or not fingerprint.strip():
+        raise CandidateError("trusted attempt binding is missing fingerprint")
     job_id = binding.get("job_id")
-    if job_id is None:
-        return None
-    if not isinstance(job_id, str) or not job_id.strip():
+    if job_id is not None and (not isinstance(job_id, str) or not job_id.strip()):
         raise CandidateError("trusted attempt binding has invalid job_id")
-    return job_id.strip()
+    return attempt_id.strip(), job_id.strip() if isinstance(job_id, str) else None
+
+
+def _read_task_attempt_job_id_unlocked(*, project: str, task_id: str) -> str | None:
+    identity = _read_task_attempt_identity_unlocked(project=project, task_id=task_id)
+    return identity[1] if identity is not None else None
 
 
 def read_task_attempt_job_id(*, project: str, task_id: str) -> str | None:
@@ -679,15 +688,15 @@ def read_task_attempt_job_id(*, project: str, task_id: str) -> str | None:
         return _read_task_attempt_job_id_unlocked(project=project, task_id=task_id)
 
 
-def read_task_attempt_job_id_by_state_key(*, project_key: str, task_id: str) -> str | None:
-    """Resolve a trusted bound job without requiring a live workspace registry entry.
+def read_task_attempt_identity_by_state_key(
+    *, project_key: str, task_id: str
+) -> tuple[str, str | None] | None:
+    """Resolve the trusted pre-submit attempt identity from a fleet state key.
 
-    Durable fleet leases store ``project_state_key(project)`` instead of the raw
-    project id. Candidate workspace registrations are intentionally ephemeral,
-    but accepted-job bindings live in the separate control-plane candidate
-    store. Recover the raw project only from those trusted binding records,
-    verify their hashed storage location, and fail closed if one state key maps
-    to more than one raw project.
+    The attempt id is persisted before Gateway dispatch, while ``job_id`` is
+    filled only after the submit ACK. Returning both values lets crash recovery
+    reconstruct the exact attempt-scoped Gateway idempotency key without
+    guessing UUIDs, scanning Redis namespaces, or relying on lease age.
     """
     validate_task_id(task_id)
     if not isinstance(project_key, str) or not project_key.strip():
@@ -744,7 +753,16 @@ def read_task_attempt_job_id_by_state_key(*, project_key: str, task_id: str) -> 
         if len(matched_projects) != 1:
             raise CandidateError("trusted attempt binding project key is ambiguous")
         project = next(iter(matched_projects))
-        return _read_task_attempt_job_id_unlocked(project=project, task_id=task_id)
+        return _read_task_attempt_identity_unlocked(project=project, task_id=task_id)
+
+
+def read_task_attempt_job_id_by_state_key(*, project_key: str, task_id: str) -> str | None:
+    """Resolve a trusted bound job without requiring a live workspace registry entry."""
+    identity = read_task_attempt_identity_by_state_key(
+        project_key=project_key,
+        task_id=task_id,
+    )
+    return identity[1] if identity is not None else None
 
 
 def _load_trusted_task_state(project: str, task_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
