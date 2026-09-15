@@ -92,7 +92,7 @@ def _wait_http(
             return
         except urllib.error.HTTPError:
             return  # server is up (any HTTP status proves it)
-        except urllib.error.URLError as err:
+        except (urllib.error.URLError, TimeoutError) as err:
             last_err = err
             time.sleep(0.5)
     tail = _startup_log_tail(startup_log_path)
