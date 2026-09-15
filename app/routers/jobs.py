@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import state as _state
 from app.auth_middleware import AuthIdentity, ensure_session_owner, require_scope
-from app.exceptions import JobNotFoundError, PermissionDeniedError
+from app.exceptions import JobNotFoundError, PermissionDeniedError, SubmissionUnavailableError
 from app.job_manager import SSE_LISTENER_QUEUE_SIZE, TERMINAL_STATES
 from app.job_serializer import serialize_job
 from app.metrics import metrics
@@ -128,6 +128,58 @@ async def _get_owned_job_or_redis(job_id: str, identity: AuthIdentity):
     if not job_visible_to(job, identity):
         raise HTTPException(status_code=403, detail=_err(403, "Job belongs to a different owner"))
     return job
+
+
+@router.get("/api/jobs/submissions/resolve")
+async def jobs_resolve_submission(
+    submission_key: str = Query(min_length=1, max_length=512),
+    _identity: AuthIdentity = Depends(require_scope("jobs:read")),
+):
+    """Resolve one exact durable submission claim for trusted recovery.
+
+    This endpoint intentionally exposes no Redis namespace and performs no
+    mutation. It is used by the MCP control plane to migrate historical fleet
+    leases whose pre-attempt submission key is still durably retained. Normal
+    ownership rules apply before a job id is disclosed.
+    """
+    if _state.redis_queue is None or _state.redis_queue._redis is None:
+        raise HTTPException(
+            status_code=503,
+            detail=_err(
+                503,
+                "Durable submission backend is unavailable",
+                code="SUBMISSION_BACKEND_UNAVAILABLE",
+                retryable=True,
+            ),
+        )
+    try:
+        claim = await _state.redis_queue.resolve_submission_claim(submission_key)
+    except SubmissionUnavailableError:
+        raise HTTPException(
+            status_code=503,
+            detail=_err(
+                503,
+                "Durable submission backend is unavailable or inconsistent",
+                code="SUBMISSION_BACKEND_UNAVAILABLE",
+                retryable=True,
+            ),
+        ) from None
+    if claim is None:
+        raise HTTPException(
+            status_code=404,
+            detail=_err(
+                404,
+                "Durable submission not found",
+                code="SUBMISSION_NOT_FOUND",
+                retryable=False,
+            ),
+        )
+    if not job_visible_to(claim, _identity):
+        raise HTTPException(
+            status_code=403,
+            detail=_err(403, "Job belongs to a different owner"),
+        )
+    return {"job_id": claim["job_id"]}
 
 
 @router.get("/api/jobs/{job_id}/status", response_model=JobStatusResponse)

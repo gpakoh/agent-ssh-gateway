@@ -884,6 +884,31 @@ class GatewayClient:
             },
         )
 
+    def resolve_submission_job(self, submission_key: str) -> str | None:
+        """Resolve one exact durable submission key to its accepted job id.
+
+        The Gateway enforces jobs:read ownership and exposes no Redis details.
+        A missing claim is a normal historical-migration miss; transport,
+        authorization, or backend inconsistency remain hard errors.
+        """
+        if not submission_key:
+            raise GatewayClientError("submission_key is required")
+        try:
+            result = self._get(
+                "/api/jobs/submissions/resolve",
+                {"submission_key": submission_key},
+            )
+        except GatewayClientError as exc:
+            detail = (exc.body or {}).get("detail")
+            code = detail.get("code") if isinstance(detail, dict) else None
+            if exc.status_code == 404 and code == "SUBMISSION_NOT_FOUND":
+                return None
+            raise
+        job_id = result.get("job_id")
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise GatewayClientError("Gateway returned an invalid durable submission binding")
+        return job_id.strip()
+
     def job_status(self, job_id: str) -> dict[str, Any]:
         return self._get(f"/api/jobs/{job_id}/status")
 

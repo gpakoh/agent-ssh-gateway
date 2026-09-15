@@ -418,7 +418,7 @@ def test_sentence_like_model_prose_transitions_proxy_to_runtime(
         stderr=subprocess.PIPE,
     )
     seen_running = False
-    deadline = time.monotonic() + 12
+    deadline = time.monotonic() + RUNNER_HARNESS_TIMEOUT_SECONDS
     try:
         while time.monotonic() < deadline and proc.poll() is None:
             proxy_status_path = artifacts / "proxy-status.json"

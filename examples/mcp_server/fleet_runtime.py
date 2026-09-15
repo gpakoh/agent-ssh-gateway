@@ -28,7 +28,7 @@ import os
 import socket
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Final
+from typing import Any, Final, TypeVar
 
 from examples.mcp_server.agent_paths import project_state_key
 from examples.mcp_server.fleet_state import (
@@ -39,6 +39,8 @@ from examples.mcp_server.fleet_state import (
     FleetState,
     TaskAlreadyTerminalError,
 )
+
+_T = TypeVar("_T")
 
 _ENABLED_ENV: Final = "MCP_AGENT_FLEET_ENABLED"
 
@@ -587,10 +589,10 @@ class FleetRuntime:
 
     async def _run_gateway_io(
         self,
-        fn: Callable[..., dict[str, Any]],
+        fn: Callable[..., _T],
         *args: Any,
         permit_held: bool = False,
-    ) -> dict[str, Any]:
+    ) -> _T:
         """Bound blocking control-plane I/O without reducing worker capacity.
 
         Cancellation must not release capacity while the underlying sync call
@@ -599,7 +601,7 @@ class FleetRuntime:
         if not permit_held:
             await self._gateway_io_gate.acquire()
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[dict[str, Any]] | None = None
+        future: asyncio.Future[_T] | None = None
         try:
             future = loop.run_in_executor(self._gateway_executor, fn, *args)
             return await asyncio.shield(future)
@@ -657,7 +659,10 @@ class FleetRuntime:
             if trusted_job_resolver is None:
                 continue
             try:
-                job_id = trusted_job_resolver(lease.task_id)
+                # The current control-plane resolver is local, but historical
+                # recovery may need one bounded Gateway lookup. Never run that
+                # synchronous HTTP path on the FastMCP event loop.
+                job_id = await self._run_gateway_io(trusted_job_resolver, lease.task_id)
             except Exception:
                 continue
             if not isinstance(job_id, str) or not job_id.strip():

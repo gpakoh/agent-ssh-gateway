@@ -244,6 +244,60 @@ class TestJobsRunAndBulkExecuteSessionOwnership:
         assert exc.value.status_code == 403
 
 
+class TestJobsSubmissionResolutionOwnership:
+    @pytest.fixture(autouse=True)
+    def _mock_redis_queue(self, monkeypatch):
+        queue = MagicMock()
+        queue._redis = MagicMock()
+        queue.resolve_submission_claim = AsyncMock()
+        monkeypatch.setattr(_state, "redis_queue", queue)
+        return queue
+
+    @pytest.mark.asyncio
+    async def test_owner_can_resolve_exact_submission(self, _mock_redis_queue):
+        _mock_redis_queue.resolve_submission_claim.return_value = {
+            "job_id": "job-historical",
+            "owner_id": token_fingerprint(OWNER_TOKEN),
+            "payload_hash": "a" * 64,
+        }
+
+        result = await jobs_router.jobs_resolve_submission(
+            "task:project-key:task-1", _identity(OWNER_TOKEN)
+        )
+
+        assert result == {"job_id": "job-historical"}
+        _mock_redis_queue.resolve_submission_claim.assert_awaited_once_with(
+            "task:project-key:task-1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_owner_cannot_resolve_submission(self, _mock_redis_queue):
+        _mock_redis_queue.resolve_submission_claim.return_value = {
+            "job_id": "job-foreign",
+            "owner_id": token_fingerprint(OTHER_TOKEN),
+            "payload_hash": "b" * 64,
+        }
+
+        with pytest.raises(HTTPException) as exc:
+            await jobs_router.jobs_resolve_submission(
+                "task:project-key:task-1", _identity(OWNER_TOKEN)
+            )
+
+        assert exc.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_missing_submission_is_404(self, _mock_redis_queue):
+        _mock_redis_queue.resolve_submission_claim.return_value = None
+
+        with pytest.raises(HTTPException) as exc:
+            await jobs_router.jobs_resolve_submission(
+                "task:project-key:missing", _identity(OWNER_TOKEN)
+            )
+
+        assert exc.value.status_code == 404
+        assert exc.value.detail["code"] == "SUBMISSION_NOT_FOUND"
+
+
 class TestJobsDeadLetterOwnership:
     """T81.4: GET /api/jobs/queue/dead must filter Redis dead-letter
     entries by owner, same as the in-memory JobManager (T80.2)."""
