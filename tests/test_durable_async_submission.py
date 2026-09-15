@@ -282,6 +282,34 @@ async def test_resolve_submission_claim_recovers_exact_identity_from_retained_en
 
 
 @pytest.mark.asyncio
+async def test_resolve_submission_claim_amortizes_envelope_scan_across_exact_keys():
+    queue = _queue()
+    for suffix, payload_hex in (("one", "a"), ("two", "b")):
+        submission_key = f"task:historical-project:{suffix}:attempt:abc123"
+        queue._redis.values[f"ssh_gateway:job:job-{suffix}"] = json.dumps(
+            {
+                "version": 1,
+                "job_id": f"job-{suffix}",
+                "submission_key": submission_key,
+                "owner_id": "owner-a",
+                "payload_hash": payload_hex * 64,
+                "status": "completed",
+            }
+        )
+
+    first = await queue.resolve_submission_claim(
+        "task:historical-project:one:attempt:abc123"
+    )
+    second = await queue.resolve_submission_claim(
+        "task:historical-project:two:attempt:abc123"
+    )
+
+    assert first is not None and first["job_id"] == "job-one"
+    assert second is not None and second["job_id"] == "job-two"
+    assert queue._redis.scan_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_resolve_submission_claim_rejects_duplicate_exact_envelopes():
     queue = _queue()
     submission_key = "task:historical-project:ambiguous:attempt:abc123"

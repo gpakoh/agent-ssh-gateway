@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 FINISH_TERMINAL_MAX_ATTEMPTS = 3
 FINISH_RETRY_DELAY_SECONDS = 0.1
+SUBMISSION_ENVELOPE_INDEX_TTL_SECONDS = 30.0
 
 
 def _decode_id(value: object) -> str:
@@ -50,6 +51,9 @@ class RedisJobQueue:
         self._lease_prefix = "ssh_gateway:lease:"
         self._submission_prefix = "ssh_gateway:submission:"
         self._submission_ttl_seconds = 7 * 86400
+        self._submission_envelope_index: dict[str, dict[str, str] | str] | None = None
+        self._submission_envelope_index_loaded_at = 0.0
+        self._submission_envelope_index_lock = asyncio.Lock()
 
     async def _update_queue_depth_metrics(self):
         """Update Prometheus queue depth gauge from current Redis state."""
@@ -189,14 +193,14 @@ class RedisJobQueue:
     async def _resolve_submission_envelope_claim(
         self, submission_key: str
     ) -> dict[str, str] | None:
-        """Recover one exact submission identity from retained job envelopes.
+        """Recover one exact submission identity from a bounded envelope index.
 
         Submission claims and durable envelopes are separate Redis keys with
         independent TTL/eviction lifecycles. A missing hashed claim is therefore
-        not proof that an accepted execution never existed. The raw submission
-        key is retained in each durable
-        envelope, so accept only one exact structural match and fail closed on
-        duplicates or malformed matching state.
+        not proof that an accepted execution never existed. Historical recovery
+        may scan retained envelopes, but never once per requested lease: one
+        short-lived process-local index amortizes a full Redis SCAN across the
+        whole fleet sweep and bounds authenticated amplification.
 
         This slower fallback is reserved for internal task submissions. It
         never infers liveness or terminality; the HTTP route separately proves
@@ -207,8 +211,42 @@ class RedisJobQueue:
         if not submission_key.startswith("task:"):
             return None
 
+        now = time.monotonic()
+        index = self._submission_envelope_index
+        if (
+            index is None
+            or now - self._submission_envelope_index_loaded_at
+            >= SUBMISSION_ENVELOPE_INDEX_TTL_SECONDS
+        ):
+            async with self._submission_envelope_index_lock:
+                now = time.monotonic()
+                index = self._submission_envelope_index
+                if (
+                    index is None
+                    or now - self._submission_envelope_index_loaded_at
+                    >= SUBMISSION_ENVELOPE_INDEX_TTL_SECONDS
+                ):
+                    index = await self._build_submission_envelope_index()
+                    self._submission_envelope_index = index
+                    self._submission_envelope_index_loaded_at = time.monotonic()
+
+        match = index.get(submission_key)
+        if match is None:
+            return None
+        if isinstance(match, str):
+            raise SubmissionUnavailableError(match)
+        return dict(match)
+
+    async def _build_submission_envelope_index(
+        self,
+    ) -> dict[str, dict[str, str] | str]:
+        """Scan durable envelopes once and index exact internal task identities."""
+        if not self._redis:
+            raise SubmissionUnavailableError("Durable submission requires Redis")
+
+        index: dict[str, dict[str, str] | str] = {}
+        seen_storage_keys: set[str] = set()
         cursor = 0
-        matches: list[dict[str, str]] = []
         try:
             while True:
                 cursor, keys = await self._redis.scan(
@@ -217,6 +255,11 @@ class RedisJobQueue:
                     count=200,
                 )
                 for key in keys:
+                    storage_key = _decode_id(key)
+                    if storage_key in seen_storage_keys:
+                        continue
+                    seen_storage_keys.add(storage_key)
+
                     envelope_raw = await self._redis.get(key)
                     if envelope_raw is None:
                         continue
@@ -226,14 +269,17 @@ class RedisJobQueue:
                         continue
                     if not isinstance(envelope, dict):
                         continue
-                    if envelope.get("submission_key") != submission_key:
+                    submission_key = envelope.get("submission_key")
+                    if not isinstance(submission_key, str) or not submission_key.startswith("task:"):
                         continue
+
+                    error: str | None = None
                     if envelope.get("version") != 1:
-                        raise SubmissionUnavailableError("Durable job envelope is invalid")
+                        error = "Durable job envelope is invalid"
                     job_id = envelope.get("job_id")
                     owner_id = envelope.get("owner_id")
                     payload_hash = envelope.get("payload_hash")
-                    if (
+                    if error is None and (
                         not isinstance(job_id, str)
                         or not job_id.strip()
                         or not isinstance(owner_id, str)
@@ -241,33 +287,38 @@ class RedisJobQueue:
                         or len(payload_hash) != 64
                         or any(ch not in "0123456789abcdef" for ch in payload_hash.lower())
                     ):
-                        raise SubmissionUnavailableError("Durable job envelope is invalid")
+                        error = "Durable job envelope is invalid"
+
+                    if error is not None:
+                        index[submission_key] = error
+                        continue
+
+                    assert isinstance(job_id, str)
+                    assert isinstance(owner_id, str)
+                    assert isinstance(payload_hash, str)
                     normalized_job_id = job_id.strip()
-                    if _decode_id(key) != f"{self._job_prefix}{normalized_job_id}":
-                        raise SubmissionUnavailableError(
+                    if storage_key != f"{self._job_prefix}{normalized_job_id}":
+                        index[submission_key] = (
                             "Durable job envelope storage identity is inconsistent"
                         )
-                    matches.append(
-                        {
-                            "job_id": normalized_job_id,
-                            "owner_id": owner_id,
-                            "payload_hash": payload_hash,
-                        }
-                    )
-                    if len(matches) > 1:
-                        raise SubmissionUnavailableError(
+                        continue
+                    if submission_key in index:
+                        index[submission_key] = (
                             "Durable submission envelope identity is ambiguous"
                         )
+                        continue
+                    index[submission_key] = {
+                        "job_id": normalized_job_id,
+                        "owner_id": owner_id,
+                        "payload_hash": payload_hash,
+                    }
                 if cursor == 0:
                     break
         except RedisError as exc:
             raise SubmissionUnavailableError(
                 "Durable submission backend is unavailable"
             ) from exc
-
-        if not matches:
-            return None
-        return matches[0]
+        return index
 
     async def claim_submission(
         self,
