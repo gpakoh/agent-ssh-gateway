@@ -25,6 +25,7 @@ from examples.mcp_server.task_candidate import (
     _staging_repo,
     bind_task_attempt_job,
     materialize_task_candidate,
+    read_task_attempt_identity_by_state_key,
     read_task_attempt_job_id_by_state_key,
     record_task_delivery_contract,
     resolve_task_attempt_identity,
@@ -159,6 +160,9 @@ def test_read_task_attempt_job_id_by_state_key_recovers_orphaned_project(
         fingerprint="fingerprint-orphaned",
     )
     assert job_id is None
+    assert read_task_attempt_identity_by_state_key(
+        project_key=project_state_key(PROJECT), task_id=task_id
+    ) == (attempt_id, None)
     bind_task_attempt_job(
         project=PROJECT,
         task_id=task_id,
@@ -173,6 +177,31 @@ def test_read_task_attempt_job_id_by_state_key_recovers_orphaned_project(
     assert read_task_attempt_job_id_by_state_key(
         project_key=project_state_key("unrelated-project"), task_id=task_id
     ) is None
+
+
+def test_read_task_attempt_identity_by_state_key_rejects_malformed_attempt_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCP_TASK_CANDIDATE_ROOT", str(tmp_path / "candidate-store"))
+    task_id = "malformed-attempt-task-001"
+    resolve_task_attempt_identity(
+        project=PROJECT,
+        task_id=task_id,
+        fingerprint="fingerprint-malformed",
+    )
+    binding_path = (
+        task_candidate_module._candidate_task_dir(PROJECT, task_id)
+        / task_candidate_module.ATTEMPT_BINDING_FILENAME
+    )
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    binding["attempt_id"] = "../../not-a-trusted-attempt"
+    binding_path.write_text(json.dumps(binding), encoding="utf-8")
+
+    with pytest.raises(CandidateError, match="invalid attempt_id"):
+        read_task_attempt_identity_by_state_key(
+            project_key=project_state_key(PROJECT),
+            task_id=task_id,
+        )
 
 
 def test_read_task_attempt_job_id_by_state_key_rejects_state_key_collision(

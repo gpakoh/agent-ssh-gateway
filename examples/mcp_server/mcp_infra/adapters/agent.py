@@ -75,7 +75,7 @@ from examples.mcp_server.mcp_infra.adapters.gateway import _split_csv_or_lines, 
 from examples.mcp_server.mcp_infra.tool_registry import register_tool, run_tool, run_tool_async
 from examples.mcp_server.task_candidate import (
     bind_task_attempt_job,
-    read_task_attempt_job_id_by_state_key,
+    read_task_attempt_identity_by_state_key,
     record_task_delivery_contract,
     resolve_task_attempt_identity,
 )
@@ -114,13 +114,16 @@ def _server_agent_router():
 def _trusted_fleet_job_resolver() -> Callable[[str], str | None]:
     """Resolve a fleet task id from trusted durable execution identities.
 
-    Current submissions bind an immutable attempt in the MCP control plane and
-    that binding always wins. Historical leases predate those attempt-binding
-    files; for them only, fall back to the exact pre-attempt Gateway submission
-    key ``task:<project_state_key>:<task_id>``. The Gateway owns that durable
-    idempotency ledger and enforces job ownership before returning a job id.
-    No registry lookup, age heuristic, attempt-id guessing, or fuzzy matching is
-    permitted.
+    Current submissions persist an immutable attempt id in the MCP control
+    plane *before* Gateway dispatch, then bind ``job_id`` only after the ACK.
+    If the coordinator dies in that window, reconstruct the exact durable
+    Gateway key ``task:<project_state_key>:<task_id>:attempt:<attempt_id>``
+    from that trusted pre-submit identity. Never guess/scan attempt ids.
+
+    Only when no trusted attempt identity exists at all may historical
+    pre-attempt leases fall back to the older exact task-scoped submission key.
+    Missing exact claims stay unresolved; age or timestamps never release a
+    lease.
     """
 
     def _resolve(durable_task_id: str) -> str | None:
@@ -129,12 +132,17 @@ def _trusted_fleet_job_resolver() -> Callable[[str], str | None]:
         project_key, separator, task_id = durable_task_id.partition(":")
         if not separator or not project_key or not task_id:
             return None
-        current = read_task_attempt_job_id_by_state_key(
+        identity = read_task_attempt_identity_by_state_key(
             project_key=project_key,
             task_id=task_id,
         )
-        if current:
-            return current
+        if identity is not None:
+            attempt_id, current_job_id = identity
+            if current_job_id:
+                return current_job_id
+            return _server_agent_client().resolve_submission_job(
+                f"task:{durable_task_id}:attempt:{attempt_id}"
+            )
         return _server_agent_client().resolve_submission_job(f"task:{durable_task_id}")
 
     return _resolve
