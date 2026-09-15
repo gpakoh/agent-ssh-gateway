@@ -40,6 +40,9 @@ from agent_tasks import (
     read_agent_artifact_tail as _read_agent_artifact_tail,
 )
 from agent_tasks import (
+    read_agent_attempt_hint_by_state_key as _read_agent_attempt_hint_by_state_key,
+)
+from agent_tasks import (
     read_agent_attempt_state as _read_agent_attempt_state,
 )
 from agent_tasks import (
@@ -142,6 +145,20 @@ def _trusted_fleet_job_resolver() -> Callable[[str], str | None]:
                 return current_job_id
             return _server_agent_client().resolve_submission_job(
                 f"task:{durable_task_id}:attempt:{attempt_id}"
+            )
+
+        # The executor coordination record is worker-writable evidence, not a
+        # trust anchor. Use only its attempt_id as a lookup hint; Gateway's
+        # exact submission key remains authoritative because it embeds this
+        # durable fleet task identity. A present hint never falls back to the
+        # legacy base key after an exact miss.
+        attempt_hint = _read_agent_attempt_hint_by_state_key(
+            project_key=project_key,
+            task_id=task_id,
+        )
+        if attempt_hint is not None:
+            return _server_agent_client().resolve_submission_job(
+                f"task:{durable_task_id}:attempt:{attempt_hint}"
             )
         return _server_agent_client().resolve_submission_job(f"task:{durable_task_id}")
 

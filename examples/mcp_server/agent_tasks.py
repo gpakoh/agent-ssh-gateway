@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import shlex
+import stat
 import time
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
@@ -319,6 +321,123 @@ class AttemptConflictError(AttemptStateError):
             f"match the requested fingerprint {requested_fingerprint}; "
             "create a NEW task_id for this different execution"
         )
+
+
+_PROJECT_STATE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,47}-[0-9a-f]{12}$")
+_ATTEMPT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_ATTEMPT_HINT_MAX_BYTES = 8192
+
+
+def _read_local_state_file_nofollow(
+    root: str,
+    *relative_parts: str,
+) -> bytes | None:
+    """Read one state-volume file without following any path-component symlink."""
+    parsed_root = PurePosixPath(root)
+    if not parsed_root.is_absolute() or str(parsed_root) == "/":
+        raise AttemptStateError("MCP_AGENT_STATE_ROOT must be an absolute non-root path")
+    if not relative_parts or any(
+        not part or part in {".", ".."} or "/" in part or "\x00" in part
+        for part in relative_parts
+    ):
+        raise AttemptStateError("attempt hint path components are invalid")
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open("/", directory_flags)
+    file_fd: int | None = None
+    try:
+        components = [part for part in parsed_root.parts[1:] if part] + list(relative_parts)
+        for component in components[:-1]:
+            try:
+                next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                raise AttemptStateError("attempt hint path is not safely readable") from exc
+            os.close(directory_fd)
+            directory_fd = next_fd
+        try:
+            file_fd = os.open(components[-1], file_flags, dir_fd=directory_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise AttemptStateError("attempt hint file is not safely readable") from exc
+        metadata = os.fstat(file_fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise AttemptStateError("attempt hint must be a regular file")
+        if metadata.st_size > _ATTEMPT_HINT_MAX_BYTES:
+            raise AttemptStateError("attempt hint exceeds the bounded size limit")
+        payload = os.read(file_fd, _ATTEMPT_HINT_MAX_BYTES + 1)
+        if len(payload) > _ATTEMPT_HINT_MAX_BYTES:
+            raise AttemptStateError("attempt hint exceeds the bounded size limit")
+        return payload
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(directory_fd)
+
+
+def read_agent_attempt_hint_by_state_key(
+    *,
+    project_key: str,
+    task_id: str,
+) -> str | None:
+    """Return a worker-state attempt id only as an exact Gateway lookup hint.
+
+    ``attempt-state.json`` lives on the shared executor coordination volume and
+    is therefore evidence, not an authenticity boundary.  This helper never
+    returns ``job_id`` and must not be used to release or bind fleet capacity by
+    itself.  Its only safe consumer resolves the resulting attempt id through
+    Gateway's authoritative exact submission key, which also embeds the durable
+    fleet task identity.
+
+    Active and archived copies are mutually exclusive under the normal atomic
+    archive transition. Seeing both is ambiguous and fails closed. Every path
+    component is opened with ``O_NOFOLLOW`` so a worker-controlled symlink
+    cannot redirect the control-plane reader outside the state volume.
+    """
+    if not isinstance(project_key, str) or _PROJECT_STATE_KEY_RE.fullmatch(project_key) is None:
+        # Historical fleet rows may predate project_state_key's current
+        # slug+digest format. They cannot address this filesystem fallback at
+        # all, so report no hint and let the caller use only its pre-existing
+        # authoritative legacy Gateway lookup.
+        return None
+    validate_task_id(task_id)
+    root = os.environ.get("MCP_AGENT_STATE_ROOT", "").strip()
+    if not root:
+        return None
+
+    active = _read_local_state_file_nofollow(
+        root,
+        project_key,
+        "tasks",
+        task_id,
+        ATTEMPT_STATE_FILENAME,
+    )
+    archived = _read_local_state_file_nofollow(
+        root,
+        project_key,
+        "archive",
+        task_id,
+        ATTEMPT_STATE_FILENAME,
+    )
+    if active is not None and archived is not None:
+        raise AttemptStateError("attempt hint exists in both active and archive state")
+    payload = active if active is not None else archived
+    if payload is None:
+        return None
+    try:
+        record = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, TypeError) as exc:
+        raise AttemptStateError("attempt hint is not valid UTF-8 JSON") from exc
+    reason = _attempt_state_record_errors(record)
+    if reason:
+        raise AttemptStateError(f"invalid attempt hint: record {reason}")
+    attempt_id = record["attempt_id"]
+    if _ATTEMPT_ID_RE.fullmatch(attempt_id) is None:
+        raise AttemptStateError("attempt hint has an invalid attempt_id")
+    return attempt_id
 
 
 def _attempt_state_record_errors(record: Any) -> str | None:
