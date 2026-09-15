@@ -120,10 +120,12 @@ def server():
         "JWT_SECRET": "e2e-jwt-secret-not-for-prod",
         "API_AUTH_ENABLED": "true",
         "SETUP_TOKEN": "e2e-setup-token-123",
+        "REDIS_URL": "redis://127.0.0.1:1/0",
         "REDIS_JOB_QUEUE_ENABLED": "false",
         "PERSISTENT_SESSIONS_ENABLED": "false",
         "EVENT_HOOKS_ENABLED": "false",
         "AUDIT_LOG_PERSIST_ENABLED": "false",
+        "ACCESS_CONTROL_ENABLED": "false",
     }
     startup_log = open(startup_log_path, "wb")
     proc = None
