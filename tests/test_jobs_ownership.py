@@ -250,6 +250,7 @@ class TestJobsSubmissionResolutionOwnership:
         queue = MagicMock()
         queue._redis = MagicMock()
         queue.resolve_submission_claim = AsyncMock()
+        queue.resolve_submission_family_claim = AsyncMock()
         queue.get_job = AsyncMock(return_value=None)
         monkeypatch.setattr(_state, "redis_queue", queue)
         return queue
@@ -273,6 +274,47 @@ class TestJobsSubmissionResolutionOwnership:
         _mock_redis_queue.resolve_submission_claim.assert_awaited_once_with(
             "task:project-key:task-1"
         )
+        _mock_redis_queue.resolve_submission_family_claim.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_master_can_resolve_unique_attempt_family(
+        self, _mock_redis_queue, _mock_job_manager
+    ):
+        prefix = "task:project-key:task-1:attempt:"
+        _mock_redis_queue.resolve_submission_family_claim.return_value = {
+            "job_id": "job-family",
+            "owner_id": token_fingerprint(OWNER_TOKEN),
+            "payload_hash": "a" * 64,
+        }
+        _mock_job_manager.get_job.return_value = _owned_job("job-family")
+
+        result = await jobs_router.jobs_resolve_submission(
+            prefix,
+            _identity(OWNER_TOKEN, token_type="master"),
+            True,
+        )
+
+        assert result == {"job_id": "job-family"}
+        _mock_redis_queue.resolve_submission_family_claim.assert_awaited_once_with(
+            prefix
+        )
+        _mock_redis_queue.resolve_submission_claim.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_agent_jobs_read_identity_cannot_use_attempt_family(
+        self, _mock_redis_queue
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await jobs_router.jobs_resolve_submission(
+                "task:project-key:task-1:attempt:",
+                _identity(OWNER_TOKEN),
+                True,
+            )
+
+        assert exc.value.status_code == 403
+        assert exc.value.detail["code"] == "MASTER_KEY_REQUIRED"
+        _mock_redis_queue.resolve_submission_family_claim.assert_not_awaited()
+        _mock_redis_queue.resolve_submission_claim.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_terminal_snapshot_can_prove_resolved_submission(

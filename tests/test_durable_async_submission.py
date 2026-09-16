@@ -310,6 +310,86 @@ async def test_resolve_submission_claim_amortizes_envelope_scan_across_exact_key
 
 
 @pytest.mark.asyncio
+async def test_resolve_submission_family_claim_recovers_one_strict_attempt_member():
+    queue = _queue()
+    prefix = "task:historical-project:task-1:attempt:"
+    submission_key = prefix + ("a" * 32)
+    queue._redis.values["ssh_gateway:job:job-family"] = json.dumps(
+        {
+            "version": 1,
+            "job_id": "job-family",
+            "submission_key": submission_key,
+            "owner_id": "owner-a",
+            "payload_hash": "c" * 64,
+            "status": "completed",
+        }
+    )
+
+    claim = await queue.resolve_submission_family_claim(prefix)
+
+    assert claim == {
+        "job_id": "job-family",
+        "owner_id": "owner-a",
+        "payload_hash": "c" * 64,
+    }
+    assert queue._redis.scan_calls == 1
+    assert await queue.resolve_submission_family_claim(prefix) == claim
+    assert queue._redis.scan_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_submission_family_claim_returns_none_for_zero_members():
+    queue = _queue()
+
+    assert (
+        await queue.resolve_submission_family_claim(
+            "task:historical-project:missing:attempt:"
+        )
+        is None
+    )
+    assert queue._redis.scan_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_submission_family_claim_rejects_malformed_attempt_suffix():
+    queue = _queue()
+    prefix = "task:historical-project:malformed:attempt:"
+    queue._redis.values["ssh_gateway:job:job-malformed"] = json.dumps(
+        {
+            "version": 1,
+            "job_id": "job-malformed",
+            "submission_key": prefix + ("A" * 32),
+            "owner_id": "owner-a",
+            "payload_hash": "d" * 64,
+            "status": "completed",
+        }
+    )
+
+    with pytest.raises(SubmissionUnavailableError, match="attempt family is invalid"):
+        await queue.resolve_submission_family_claim(prefix)
+
+
+@pytest.mark.asyncio
+async def test_resolve_submission_family_claim_rejects_multiple_members():
+    queue = _queue()
+    prefix = "task:historical-project:ambiguous-family:attempt:"
+    for index, attempt_id in enumerate(("a" * 32, "b" * 32), start=1):
+        queue._redis.values[f"ssh_gateway:job:job-family-{index}"] = json.dumps(
+            {
+                "version": 1,
+                "job_id": f"job-family-{index}",
+                "submission_key": prefix + attempt_id,
+                "owner_id": "owner-a",
+                "payload_hash": f"{index}" * 64,
+                "status": "completed",
+            }
+        )
+
+    with pytest.raises(SubmissionUnavailableError, match="attempt family is ambiguous"):
+        await queue.resolve_submission_family_claim(prefix)
+
+
+@pytest.mark.asyncio
 async def test_resolve_submission_claim_rejects_duplicate_exact_envelopes():
     queue = _queue()
     submission_key = "task:historical-project:ambiguous:attempt:abc123"

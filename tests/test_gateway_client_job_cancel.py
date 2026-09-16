@@ -41,6 +41,46 @@ def test_gateway_client_resolve_submission_uses_exact_key(monkeypatch):
     ]
 
 
+def test_gateway_client_resolve_submission_family_uses_explicit_family_mode(monkeypatch):
+    calls = []
+
+    def fake_get(self, path, params=None, timeout=30):
+        calls.append((path, params, timeout))
+        return {"job_id": "job-family"}
+
+    monkeypatch.setattr(GatewayClient, "_get", fake_get)
+    client = GatewayClient(base_url="https://gateway.example.test", api_key="key")
+
+    assert (
+        client.resolve_submission_job_family("task:project-key:task-1:attempt:")
+        == "job-family"
+    )
+    assert calls == [
+        (
+            "/api/jobs/submissions/resolve",
+            {
+                "submission_key": "task:project-key:task-1:attempt:",
+                "family": "true",
+            },
+            30,
+        )
+    ]
+
+
+def test_gateway_client_resolve_submission_family_treats_typed_404_as_missing(monkeypatch):
+    def fake_get(self, path, params=None, timeout=30):
+        raise GatewayClientError(
+            "missing",
+            status_code=404,
+            body={"detail": {"code": "SUBMISSION_NOT_FOUND"}},
+        )
+
+    monkeypatch.setattr(GatewayClient, "_get", fake_get)
+    client = GatewayClient(base_url="https://gateway.example.test", api_key="key")
+
+    assert client.resolve_submission_job_family("task:project-key:missing:attempt:") is None
+
+
 def test_gateway_client_resolve_submission_treats_only_typed_404_as_missing(monkeypatch):
     def fake_get(self, path, params=None, timeout=30):
         raise GatewayClientError(
