@@ -1425,8 +1425,17 @@ class TestOpenCodeProductionAdmission:
         env = _load_compose()["services"]["mcp-oauth"]["environment"]
         values = {item.split("=", 1)[0]: item.split("=", 1)[1] for item in env}
         assert values["MCP_AGENT_FLEET_ENABLED"] == "${MCP_AGENT_FLEET_ENABLED:-true}"
+        assert values["MCP_AGENT_FLEET_GENERATION_RECOVERY"] == (
+            "${MCP_AGENT_FLEET_GENERATION_RECOVERY:-true}"
+        )
         assert values["MCP_AGENT_FLEET_CAPACITY"] == "${MCP_AGENT_FLEET_CAPACITY:-64}"
         assert values["MCP_AGENT_FLEET_POOL"] == "${MCP_AGENT_FLEET_POOL:-ssh-gateway/agent-sshd}"
+
+    def test_generation_recovery_requires_healthy_gateway_and_dedicated_executor_startup(self):
+        oauth = _load_compose()["services"]["mcp-oauth"]
+        dependencies = oauth["depends_on"]
+        assert dependencies["web-ssh-gateway"]["condition"] == "service_healthy"
+        assert dependencies["agent-sshd"]["condition"] == "service_healthy"
 
     def test_proxy_is_fail_closed_for_builder_and_executor(self):
         services = _load_compose()["services"]

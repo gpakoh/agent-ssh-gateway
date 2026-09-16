@@ -220,6 +220,21 @@ async def _run_health_probes(
     return results
 
 
+def _gateway_worker_count() -> int:
+    """Expose worker cardinality without letting a malformed env break health.
+
+    Generation-based fleet recovery is safe only when the caller can prove one
+    Gateway process owns every active in-memory JobRecord.  Returning 0 for an
+    invalid/zero/negative value fails that recovery gate closed while keeping
+    the health endpoint available for diagnosis.
+    """
+    try:
+        workers = int(os.environ.get("GATEWAY_WORKERS", "1"))
+    except (TypeError, ValueError):
+        return 0
+    return workers if workers > 0 else 0
+
+
 @router.get("/health", tags=["system"], response_model=HealthResponse)
 async def health_check():
     """Return bounded aggregate health while preserving per-component truth."""
@@ -314,6 +329,7 @@ async def health_check():
         build_time=meta["build_time"],
         started_at=meta["started_at"],
         version=APP_VERSION,
+        gateway_workers=_gateway_worker_count(),
         components=components,
     )
 

@@ -179,6 +179,34 @@ def _manager(queue: RedisJobQueue | None, counter: list[int]) -> JobManager:
 
 
 @pytest.mark.asyncio
+async def test_job_manager_retains_submission_identity_for_in_memory_recovery():
+    queue = _queue()
+    manager = _manager(queue, [0])
+    prefix = "task:project-1:agent-memory:attempt:"
+    submission_key = prefix + ("a" * 32)
+    job_id = await manager.create_job(
+        "session-a",
+        "sh",
+        owner_id="owner-a",
+        stdin=b"echo hi\n",
+        timeout=300,
+        submission_key=submission_key,
+    )
+
+    exact = await manager.resolve_submission_claim_in_memory(submission_key)
+    family = await manager.resolve_submission_claim_in_memory(prefix, family=True)
+    job = await manager.get_job(job_id)
+    assert job is not None
+
+    assert exact is not None and exact["job_id"] == job_id
+    assert exact["owner_id"] == "owner-a"
+    assert len(exact["payload_hash"]) == 64
+    assert family == exact
+    assert "submission_key" not in job.to_dict()
+    await asyncio.wait_for(job.completed_event.wait(), timeout=2)
+
+
+@pytest.mark.asyncio
 async def test_redis_claim_is_atomic_and_raw_key_is_not_stored():
     queue = _queue()
     job_id, created = await queue.claim_submission(

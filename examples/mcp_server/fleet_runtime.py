@@ -26,8 +26,11 @@ import asyncio
 import logging
 import os
 import socket
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Final, TypeVar
 
 from examples.mcp_server.agent_paths import project_state_key
@@ -35,6 +38,7 @@ from examples.mcp_server.fleet_state import (
     ATTEMPTED,
     DEFAULT_POOL_CAPACITY,
     LEGACY_UNKNOWN,
+    MIN_GENERATION_RECONCILIATION_QUIESCENCE_SECONDS,
     NEVER_ATTEMPTED,
     FleetState,
     TaskAlreadyTerminalError,
@@ -104,6 +108,20 @@ _PRE_SUBMIT_TERMINAL: Final[frozenset[str]] = frozenset(
 
 class FleetRuntimeError(RuntimeError):
     """Fleet runtime configuration or coordination failure."""
+
+
+@dataclass(frozen=True)
+class ExecutionPlaneRecoveryBoundary:
+    """Trusted replacement-generation evidence for historical unbound leases."""
+
+    gateway_started_at: datetime
+    executor_started_at: datetime
+    mcp_started_at: datetime
+    observed_at: datetime
+    gateway_generation: str
+    executor_generation: str
+    mcp_generation: str
+    quiescence_seconds: int = MIN_GENERATION_RECONCILIATION_QUIESCENCE_SECONDS
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -292,12 +310,14 @@ class FleetRuntime:
         project: str,
         task_id: str,
         submit_sync: Callable[[], dict[str, Any]],
+        submit_with_dispatch_guard: Callable[[Callable[[], None]], dict[str, Any]] | None = None,
         job_status_fn: Callable[[str], dict[str, Any]] | None = None,
         job_result_fn: Callable[[str], dict[str, Any]] | None = None,
         terminal_observer: Callable[[str, dict[str, Any]], None] | None = None,
         observe_submitted_job: bool = True,
         retry_attempted_unbound: bool = False,
         trusted_job_resolver: Callable[[str], str | None] | None = None,
+        recovery_boundary: ExecutionPlaneRecoveryBoundary | None = None,
         sweep_before_submit: bool = True,
     ) -> dict[str, Any]:
         """Admit then perform one idempotent gateway submission.
@@ -309,7 +329,10 @@ class FleetRuntime:
         await self.ensure_ready()
         if sweep_before_submit:
             try:
-                await self.sweep_unbound_leases(trusted_job_resolver)
+                await self.sweep_unbound_leases(
+                    trusted_job_resolver,
+                    recovery_boundary=recovery_boundary,
+                )
             except Exception:
                 pass
         if job_status_fn is not None and sweep_before_submit:
@@ -421,16 +444,60 @@ class FleetRuntime:
                     "capacity": admission.capacity,
                 },
             }
-        if not retrying_attempted:
-            try:
-                await self.state.mark_submit_attempted(
-                    task_id=durable_task_id,
-                    lease_token=lease.lease_token,
+        dispatch_marked = threading.Event()
+        owner_loop = asyncio.get_running_loop()
+
+        if submit_with_dispatch_guard is None:
+            # Compatibility path for non-agent callers: without a dispatch-aware
+            # submitter the narrowest safe boundary remains immediately before
+            # entering the opaque submit callable.
+            if not retrying_attempted:
+                try:
+                    await self.state.mark_submit_attempted(
+                        task_id=durable_task_id,
+                        lease_token=lease.lease_token,
+                    )
+                except BaseException:
+                    self._gateway_io_gate.release()
+                    raise
+            submit_call = submit_sync
+        else:
+            def _before_gateway_dispatch() -> None:
+                if retrying_attempted or dispatch_marked.is_set():
+                    return
+                transition = asyncio.run_coroutine_threadsafe(
+                    self.state.mark_submit_attempted(
+                        task_id=durable_task_id,
+                        lease_token=lease.lease_token,
+                    ),
+                    owner_loop,
                 )
-            except BaseException:
-                self._gateway_io_gate.release()
-                raise
-        result = await self._run_gateway_io(submit_sync, permit_held=True)
+                transition.result()
+                dispatch_marked.set()
+
+            def submit_call() -> dict[str, Any]:
+                return submit_with_dispatch_guard(_before_gateway_dispatch)
+
+        try:
+            result = await self._run_gateway_io(submit_call, permit_held=True)
+        except BaseException:
+            if (
+                submit_with_dispatch_guard is not None
+                and not retrying_attempted
+                and not dispatch_marked.is_set()
+            ):
+                # The dispatch-aware submitter failed before its exact Gateway
+                # boundary.  Reclaim only if the token-fenced row still proves
+                # it was never attempted; an uncertain/succeeded marker cannot
+                # be deleted by this statement.
+                try:
+                    await self.state.release_never_dispatched(
+                        task_id=durable_task_id,
+                        lease_token=lease.lease_token,
+                    )
+                except Exception:
+                    pass
+            raise
         job_id = result.get("job_id") if isinstance(result, dict) else None
         if isinstance(job_id, str) and job_id:
             bound = await self.state.bind_job(
@@ -489,6 +556,23 @@ class FleetRuntime:
                 "reason": "definite pre-submit terminal result",
             }
             return result
+        if (
+            submit_with_dispatch_guard is not None
+            and not retrying_attempted
+            and not dispatch_marked.is_set()
+        ):
+            # A dispatch-aware internal submitter that returns an invalid local
+            # result without invoking its hook has proven that no Gateway I/O
+            # occurred. Do not turn that local contract bug into permanent
+            # capacity debt; the token/state-fenced DELETE still refuses any
+            # row that was concurrently marked or rebound.
+            try:
+                await self.state.release_never_dispatched(
+                    task_id=durable_task_id,
+                    lease_token=lease.lease_token,
+                )
+            except Exception:
+                pass
         raise FleetRuntimeError(
             "Agent submit returned neither a job_id nor a terminal pre-submit status"
         )
@@ -622,6 +706,8 @@ class FleetRuntime:
     async def sweep_unbound_leases(
         self,
         trusted_job_resolver: Callable[[str], str | None] | None = None,
+        *,
+        recovery_boundary: ExecutionPlaneRecoveryBoundary | None = None,
     ) -> int:
         """Reconcile unbound leases without inferring safety from lease age.
 
@@ -665,16 +751,45 @@ class FleetRuntime:
                 job_id = await self._run_gateway_io(trusted_job_resolver, lease.task_id)
             except Exception:
                 continue
-            if not isinstance(job_id, str) or not job_id.strip():
+            if isinstance(job_id, str) and job_id.strip():
+                try:
+                    await self.state.bind_job(
+                        task_id=lease.task_id,
+                        lease_token=lease.lease_token,
+                        job_id=job_id.strip(),
+                    )
+                except Exception:
+                    continue
+                continue
+
+            # A clean authoritative resolver miss is necessary but not enough:
+            # retained submission metadata can be evicted independently from a
+            # remote process. Generation reconciliation is allowed only when a
+            # separately attested replacement boundary proves that both the
+            # Gateway recovery plane and dedicated executor have been replaced.
+            # The resolver itself is authoritative across retained Redis state
+            # and current single-worker Gateway memory; optional quiescence is
+            # an additional operator barrier rather than the primary proof.
+            if recovery_boundary is None:
                 continue
             try:
-                await self.state.bind_job(
+                outcome = await self.state.reconcile_unbound_after_execution_plane_replacement(
                     task_id=lease.task_id,
                     lease_token=lease.lease_token,
-                    job_id=job_id.strip(),
+                    expected_submit_state=lease.submit_state,
+                    gateway_started_at=recovery_boundary.gateway_started_at,
+                    executor_started_at=recovery_boundary.executor_started_at,
+                    mcp_started_at=recovery_boundary.mcp_started_at,
+                    observed_at=recovery_boundary.observed_at,
+                    gateway_generation=recovery_boundary.gateway_generation,
+                    executor_generation=recovery_boundary.executor_generation,
+                    mcp_generation=recovery_boundary.mcp_generation,
+                    quiescence_seconds=recovery_boundary.quiescence_seconds,
                 )
             except Exception:
                 continue
+            if outcome is not None:
+                released += 1
         return released
 
     async def reconcile(
@@ -684,13 +799,17 @@ class FleetRuntime:
         job_result_fn: Callable[[str], dict[str, Any]] | None = None,
         terminal_observer: Callable[[str, dict[str, Any]], None] | None = None,
         trusted_job_resolver: Callable[[str], str | None] | None = None,
+        recovery_boundary: ExecutionPlaneRecoveryBoundary | None = None,
     ) -> int:
         """Reclaim abandoned never-dispatched leases and terminal bound leases.
 
         The unbound sweep always runs; the bound sweep runs only when a
         gateway status function is supplied (it cannot run without one).
         """
-        released = await self.sweep_unbound_leases(trusted_job_resolver)
+        released = await self.sweep_unbound_leases(
+            trusted_job_resolver,
+            recovery_boundary=recovery_boundary,
+        )
         if job_status_fn is not None:
             try:
                 released += await self.sweep_bound_leases(
@@ -1039,6 +1158,7 @@ async def close_fleet_runtime() -> None:
 
 
 __all__ = [
+    "ExecutionPlaneRecoveryBoundary",
     "FleetRuntime",
     "FleetRuntimeError",
     "close_fleet_runtime",

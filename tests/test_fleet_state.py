@@ -7,7 +7,7 @@ import inspect
 import os
 import uuid
 from collections import deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -410,6 +410,174 @@ async def test_heartbeat_wrong_token_never_creates_or_releases_slot():
             coordinator_id="gpt-b",
         )
     assert all("DELETE" not in sql.upper() for _, sql, _ in conn.calls)
+
+
+@pytest.mark.asyncio
+async def test_generation_reconciliation_persists_ambiguous_outcome_before_release():
+    lease = _lease_row()
+    lease["submit_state"] = "attempted"
+    lease["submit_attempted_at"] = NOW
+    gateway_started = NOW + timedelta(days=1)
+    executor_started = gateway_started + timedelta(seconds=5)
+    mcp_started = executor_started + timedelta(seconds=10)
+    observed = mcp_started
+    outcome = {
+        "task_id": "task-1",
+        "pool": "ssh-gateway/sshd",
+        "job_id": None,
+        "status": "ambiguous",
+        "exit_code": None,
+        "result_json": {
+            "liveness_reconciled": True,
+            "reason": "execution_plane_replaced_and_submission_unresolved",
+        },
+        "reported_at": observed,
+    }
+    conn = _FakeConn(
+        fetchrows=[lease, None, outcome],
+        execute_results=["INSERT 0 1", "DELETE 1"],
+    )
+
+    result = await _state(conn).reconcile_unbound_after_execution_plane_replacement(
+        task_id="task-1",
+        lease_token=lease["lease_token"],
+        expected_submit_state="attempted",
+        gateway_started_at=gateway_started,
+        executor_started_at=executor_started,
+        mcp_started_at=mcp_started,
+        observed_at=observed,
+        gateway_generation="gateway-sha",
+        executor_generation="executor-id",
+        mcp_generation="mcp-generation",
+    )
+
+    assert result is not None and result.status == "ambiguous"
+    writes = [(sql, args) for kind, sql, args in conn.calls if kind == "execute"]
+    assert [sql for sql, _ in writes] == [
+        fleet_state_module._UPSERT_OUTCOME_SQL,
+        fleet_state_module._DELETE_LEASE_SQL,
+    ]
+    assert writes[0][1][3] == "ambiguous"
+    assert writes[1][1] == ("task-1", lease["lease_token"])
+
+
+@pytest.mark.asyncio
+async def test_generation_reconciliation_never_overwrites_existing_terminal_outcome():
+    lease = _lease_row()
+    lease["submit_state"] = "attempted"
+    lease["submit_attempted_at"] = NOW
+    boundary = NOW + timedelta(days=1)
+    existing = {
+        "task_id": "task-1",
+        "pool": "ssh-gateway/sshd",
+        "job_id": "job-terminal",
+        "status": "failed",
+        "exit_code": 17,
+        "result_json": {"reason": "authoritative-terminal"},
+        "reported_at": NOW,
+    }
+    conn = _FakeConn(fetchrows=[lease, existing])
+
+    result = await _state(conn).reconcile_unbound_after_execution_plane_replacement(
+        task_id="task-1",
+        lease_token=lease["lease_token"],
+        expected_submit_state="attempted",
+        gateway_started_at=boundary,
+        executor_started_at=boundary,
+        mcp_started_at=boundary,
+        observed_at=boundary,
+        gateway_generation="gateway-sha",
+        executor_generation="executor-id",
+        mcp_generation="mcp-generation",
+    )
+
+    assert result is None
+    assert not any(kind == "execute" for kind, _, _ in conn.calls)
+    assert any(
+        kind == "fetchrow" and sql == fleet_state_module._GET_OUTCOME_SQL
+        for kind, sql, _ in conn.calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_generation_reconciliation_refuses_activity_from_current_generation():
+    gateway_started = NOW + timedelta(days=1)
+    executor_started = gateway_started + timedelta(seconds=5)
+    mcp_started = executor_started + timedelta(seconds=10)
+    lease = _lease_row()
+    lease["submit_state"] = "legacy_unknown"
+    lease["submit_attempted_at"] = None
+    lease["heartbeat_at"] = gateway_started + timedelta(seconds=1)
+    conn = _FakeConn(fetchrows=[lease])
+
+    result = await _state(conn).reconcile_unbound_after_execution_plane_replacement(
+        task_id="task-1",
+        lease_token=lease["lease_token"],
+        expected_submit_state="legacy_unknown",
+        gateway_started_at=gateway_started,
+        executor_started_at=executor_started,
+        mcp_started_at=mcp_started,
+        observed_at=mcp_started + timedelta(hours=2),
+        gateway_generation="gateway-sha",
+        executor_generation="executor-id",
+        mcp_generation="mcp-generation",
+    )
+
+    assert result is None
+    assert not any(kind == "execute" for kind, _, _ in conn.calls)
+
+
+@pytest.mark.asyncio
+async def test_generation_reconciliation_honors_configured_quiescence_window():
+    lease = _lease_row()
+    lease["submit_state"] = "attempted"
+    lease["submit_attempted_at"] = NOW
+    gateway_started = NOW + timedelta(days=1)
+    executor_started = gateway_started + timedelta(seconds=5)
+    mcp_started = executor_started + timedelta(seconds=10)
+    conn = _FakeConn(fetchrows=[lease])
+
+    result = await _state(conn).reconcile_unbound_after_execution_plane_replacement(
+        task_id="task-1",
+        lease_token=lease["lease_token"],
+        expected_submit_state="attempted",
+        gateway_started_at=gateway_started,
+        executor_started_at=executor_started,
+        mcp_started_at=mcp_started,
+        observed_at=mcp_started + timedelta(seconds=3599),
+        gateway_generation="gateway-sha",
+        executor_generation="executor-id",
+        mcp_generation="mcp-generation",
+        quiescence_seconds=3600,
+    )
+
+    assert result is None
+    assert not any(kind == "execute" for kind, _, _ in conn.calls)
+
+
+@pytest.mark.asyncio
+async def test_generation_reconciliation_revalidates_unbound_state_and_token():
+    lease = _lease_row(job_id="job-now-live")
+    lease["submit_state"] = "attempted"
+    lease["submit_attempted_at"] = NOW
+    boundary = NOW + timedelta(days=1)
+    conn = _FakeConn(fetchrows=[lease])
+
+    with pytest.raises(LeaseConflictError, match="unbound"):
+        await _state(conn).reconcile_unbound_after_execution_plane_replacement(
+            task_id="task-1",
+            lease_token=lease["lease_token"],
+            expected_submit_state="attempted",
+            gateway_started_at=boundary,
+            executor_started_at=boundary,
+            mcp_started_at=boundary,
+            observed_at=boundary + timedelta(hours=2),
+            gateway_generation="gateway-sha",
+            executor_generation="executor-id",
+            mcp_generation="mcp-generation",
+        )
+
+    assert not any(kind == "execute" for kind, _, _ in conn.calls)
 
 
 @pytest.mark.asyncio

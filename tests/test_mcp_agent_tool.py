@@ -1219,6 +1219,146 @@ def test_trusted_fleet_job_resolver_rejects_malformed_durable_identity(monkeypat
     trusted_lookup.assert_not_called()
 
 
+def test_trusted_fleet_job_resolver_legacy_batch_skips_single_task_readers(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    trusted_lookup = MagicMock(side_effect=AssertionError("single-task control plane must not run"))
+    attempt_hint = MagicMock(side_effect=AssertionError("single-task attempt hint must not run"))
+    monkeypatch.setattr(
+        agent_adapter,
+        "read_task_attempt_identity_by_state_key",
+        trusted_lookup,
+    )
+    monkeypatch.setattr(
+        agent_adapter,
+        "_read_agent_attempt_hint_by_state_key",
+        attempt_hint,
+    )
+    client = MagicMock()
+    client.resolve_submission_job_family.return_value = None
+    client.resolve_submission_job.return_value = "job-legacy-batch"
+    monkeypatch.setattr(agent_adapter, "_server_agent_client", lambda: client)
+
+    resolver = agent_adapter._trusted_fleet_job_resolver()
+
+    assert resolver("project-key:task-a,task-b") == "job-legacy-batch"
+    trusted_lookup.assert_not_called()
+    attempt_hint.assert_not_called()
+    client.resolve_submission_job_family.assert_called_once_with(
+        "task:project-key:task-a,task-b:attempt:"
+    )
+    client.resolve_submission_job.assert_called_once_with(
+        "task:project-key:task-a,task-b"
+    )
+
+
+@pytest.mark.asyncio
+async def test_execution_plane_recovery_boundary_uses_direct_gateway_health_contract(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setenv("MCP_AGENT_FLEET_GENERATION_RECOVERY", "true")
+
+    class Client:
+        def health(self):
+            return {
+                "status": "ok",
+                "ready": True,
+                "build_sha": "gateway-sha",
+                "started_at": "2026-09-16T13:20:24Z",
+                "gateway_workers": 1,
+            }
+
+    class DockerClient:
+        async def inspect(self, name, max_lines=500):
+            assert name == "ssh-gateway-agent-sshd"
+            assert max_lines == 2
+            return [
+                {
+                    "Id": "executor-id",
+                    "State": {
+                        "Running": True,
+                        "StartedAt": "2026-09-16T13:20:30Z",
+                        "Health": {"Status": "healthy"},
+                    },
+                    "Config": {
+                        "Labels": {"com.docker.compose.service": "agent-sshd"},
+                    },
+                }
+            ]
+
+    mcp_started_at = agent_adapter.datetime.fromisoformat(
+        "2026-09-16T13:21:02+00:00"
+    ).timestamp()
+
+    def fake_server_attr(name):
+        values = {
+            "_agent_executor_host": "agent-sshd",
+            "DockerClient": DockerClient,
+            "_mcp_started_at": mcp_started_at,
+        }
+        return values[name]
+
+    monkeypatch.setattr(agent_adapter, "_server_client", lambda: Client())
+    monkeypatch.setattr(agent_adapter, "server_attr", fake_server_attr)
+
+    boundary = await agent_adapter._execution_plane_recovery_boundary()
+
+    assert boundary is not None
+    assert boundary.gateway_generation == "gateway-sha"
+    assert boundary.executor_generation == "executor-id"
+    assert boundary.gateway_started_at.isoformat() == "2026-09-16T13:20:24+00:00"
+    assert boundary.executor_started_at.isoformat() == "2026-09-16T13:20:30+00:00"
+    assert boundary.mcp_started_at.isoformat() == "2026-09-16T13:21:02+00:00"
+
+
+@pytest.mark.asyncio
+async def test_execution_plane_recovery_boundary_fails_closed_for_multiworker_gateway(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setenv("MCP_AGENT_FLEET_GENERATION_RECOVERY", "true")
+
+    class Client:
+        def health(self):
+            return {
+                "ready": True,
+                "build_sha": "gateway-sha",
+                "started_at": "2026-09-16T13:20:24Z",
+                "gateway_workers": 2,
+            }
+
+    docker_factory = MagicMock()
+
+    def fake_server_attr(name):
+        values = {
+            "_agent_executor_host": "agent-sshd",
+            "DockerClient": docker_factory,
+        }
+        return values[name]
+
+    monkeypatch.setattr(agent_adapter, "_server_client", lambda: Client())
+    monkeypatch.setattr(agent_adapter, "server_attr", fake_server_attr)
+
+    assert await agent_adapter._execution_plane_recovery_boundary() is None
+    docker_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_execution_plane_recovery_boundary_fails_closed_for_custom_executor(monkeypatch):
+    import examples.mcp_server.mcp_infra.adapters.agent as agent_adapter
+
+    monkeypatch.setenv("MCP_AGENT_FLEET_GENERATION_RECOVERY", "true")
+    monkeypatch.setattr(
+        agent_adapter,
+        "server_attr",
+        lambda name: "custom-agent-host" if name == "_agent_executor_host" else None,
+    )
+    gateway = MagicMock()
+    monkeypatch.setattr(agent_adapter, "_server_client", lambda: gateway)
+
+    assert await agent_adapter._execution_plane_recovery_boundary() is None
+    gateway.health.assert_not_called()
+
+
 class TestGatewayRunAgents:
     @pytest.fixture(autouse=True)
     def _handoff_write_mode(self, monkeypatch):

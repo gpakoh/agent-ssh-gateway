@@ -287,6 +287,10 @@ services:
       # a catastrophe ceiling. Normal concurrency is governed dynamically by
       # executor memory headroom and the number of distinct proxy leases.
       - MCP_AGENT_FLEET_ENABLED=${MCP_AGENT_FLEET_ENABLED:-true}
+      # This profile starts mcp-oauth only after Gateway + dedicated agent-sshd
+      # health, so replacement-generation fleet recovery has an attested
+      # startup ordering. Other deployment topologies must opt in separately.
+      - MCP_AGENT_FLEET_GENERATION_RECOVERY=${MCP_AGENT_FLEET_GENERATION_RECOVERY:-true}
       - MCP_AGENT_FLEET_POOL=${MCP_AGENT_FLEET_POOL:-ssh-gateway/agent-sshd}
       - MCP_AGENT_FLEET_CAPACITY=${MCP_AGENT_FLEET_CAPACITY:-64}
       - MCP_AGENT_STATE_ROOT=${MCP_AGENT_STATE_ROOT:-/var/lib/mcp-agent/state}

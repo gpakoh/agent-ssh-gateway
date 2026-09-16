@@ -206,6 +206,8 @@ def _submit_same_key_retry(
     project: str,
     cmd: str,
     submission_key: str,
+    *,
+    before_gateway_dispatch: Callable[[], None] | None = None,
 ) -> tuple[str | None, Exception | None]:
     """Submit under one stable idempotency key with bounded retries.
 
@@ -216,6 +218,9 @@ def _submit_same_key_retry(
     (job_id, last_error); job_id is None only when nothing could be proven
     accepted -- never a duplicate, never an ambiguous timeout.
     """
+    if before_gateway_dispatch is not None:
+        before_gateway_dispatch()
+
     last_error: Exception | None = None
     for _attempt in range(_SUBMIT_RETRY_ATTEMPTS):
         try:
@@ -2339,6 +2344,7 @@ def project_run_agent(
     resolve_trusted_attempt: Callable[[str, str, str], tuple[str, str | None]] | None = None,
     record_trusted_attempt: Callable[[str, str, str, str, str], None] | None = None,
     async_submit: bool = False,
+    before_gateway_dispatch: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Execute a handoff task via the agent backend router.
 
@@ -2642,7 +2648,11 @@ def project_run_agent(
         submission_key = _agent_attempt_key(project, task_id, attempt_id)
         if job_id is None:
             job_id, submit_error = _submit_same_key_retry(
-                run_script_async, project, cmd, submission_key
+                run_script_async,
+                project,
+                cmd,
+                submission_key,
+                before_gateway_dispatch=before_gateway_dispatch,
             )
         else:
             submit_error = None
@@ -2828,7 +2838,11 @@ def project_run_agent(
     submitted_now = job_id is None
     if submitted_now:
         job_id, submit_error = _submit_same_key_retry(
-            run_script_async, project, cmd, submission_key
+            run_script_async,
+            project,
+            cmd,
+            submission_key,
+            before_gateway_dispatch=before_gateway_dispatch,
         )
         if job_id is None:
             return {

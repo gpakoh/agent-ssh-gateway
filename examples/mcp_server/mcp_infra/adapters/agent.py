@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from agent_tasks import (
@@ -54,6 +56,7 @@ from agent_tasks import (
 from agent_tasks import (
     validate_source_mode as _validate_source_mode,
 )
+from agent_tasks import validate_task_id as _validate_task_id
 from agent_tasks import (
     write_agent_attempt_state as _write_agent_attempt_state,
 )
@@ -72,7 +75,10 @@ from examples.mcp_server.agent_sources import (
     ensure_dirty_worktree_review_bundle,
     ensure_managed_source_bundle,
 )
-from examples.mcp_server.fleet_runtime import get_fleet_runtime
+from examples.mcp_server.fleet_runtime import (
+    ExecutionPlaneRecoveryBoundary,
+    get_fleet_runtime,
+)
 from examples.mcp_server.mcp_infra._server_ref import server_attr
 from examples.mcp_server.mcp_infra.adapters.gateway import _split_csv_or_lines, _split_lines
 from examples.mcp_server.mcp_infra.tool_registry import register_tool, run_tool, run_tool_async
@@ -135,31 +141,44 @@ def _trusted_fleet_job_resolver() -> Callable[[str], str | None]:
         project_key, separator, task_id = durable_task_id.partition(":")
         if not separator or not project_key or not task_id:
             return None
-        identity = read_task_attempt_identity_by_state_key(
-            project_key=project_key,
-            task_id=task_id,
-        )
-        if identity is not None:
-            attempt_id, current_job_id = identity
-            if current_job_id:
-                return current_job_id
-            return _server_agent_client().resolve_submission_job(
-                f"task:{durable_task_id}:attempt:{attempt_id}"
-            )
+        single_task_id = True
+        try:
+            _validate_task_id(task_id)
+        except ValueError:
+            # Historical run_agents releases used one comma-joined fleet key
+            # for a batch before per-task durable identities existed. That
+            # aggregate is not a valid single task_id and therefore must not be
+            # passed into single-task artifact/control-plane readers. Do not
+            # split or guess children: only the authoritative Gateway family /
+            # exact durable submission keys below may recover such a row.
+            single_task_id = False
 
-        # The executor coordination record is worker-writable evidence, not a
-        # trust anchor. Use only its attempt_id as a lookup hint; Gateway's
-        # exact submission key remains authoritative because it embeds this
-        # durable fleet task identity. A present hint never falls back to the
-        # legacy base key after an exact miss.
-        attempt_hint = _read_agent_attempt_hint_by_state_key(
-            project_key=project_key,
-            task_id=task_id,
-        )
-        if attempt_hint is not None:
-            return _server_agent_client().resolve_submission_job(
-                f"task:{durable_task_id}:attempt:{attempt_hint}"
+        if single_task_id:
+            identity = read_task_attempt_identity_by_state_key(
+                project_key=project_key,
+                task_id=task_id,
             )
+            if identity is not None:
+                attempt_id, current_job_id = identity
+                if current_job_id:
+                    return current_job_id
+                return _server_agent_client().resolve_submission_job(
+                    f"task:{durable_task_id}:attempt:{attempt_id}"
+                )
+
+            # The executor coordination record is worker-writable evidence, not a
+            # trust anchor. Use only its attempt_id as a lookup hint; Gateway's
+            # exact submission key remains authoritative because it embeds this
+            # durable fleet task identity. A present hint never falls back to the
+            # legacy base key after an exact miss.
+            attempt_hint = _read_agent_attempt_hint_by_state_key(
+                project_key=project_key,
+                task_id=task_id,
+            )
+            if attempt_hint is not None:
+                return _server_agent_client().resolve_submission_job(
+                    f"task:{durable_task_id}:attempt:{attempt_hint}"
+                )
 
         # The crash window between mark_submit_attempted() and submit_sync()
         # creates neither a control-plane binding nor attempt-state.json.  In
@@ -177,6 +196,106 @@ def _trusted_fleet_job_resolver() -> Callable[[str], str | None]:
         return client.resolve_submission_job(f"task:{durable_task_id}")
 
     return _resolve
+
+
+def _parse_generation_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+async def _execution_plane_recovery_boundary() -> ExecutionPlaneRecoveryBoundary | None:
+    """Attest the current replacement generation for historical fleet recovery.
+
+    This path is disabled unless the deployment explicitly opts in. The live
+    Compose profile enables it only for the MCP service that starts after the
+    Gateway and dedicated ``agent-sshd`` dependencies are healthy. Any missing,
+    malformed, custom, or unhealthy evidence fails closed and leaves ambiguous
+    leases consuming capacity rather than guessing liveness.
+    """
+    enabled = os.environ.get("MCP_AGENT_FLEET_GENERATION_RECOVERY", "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return None
+    try:
+        executor_host = str(server_attr("_agent_executor_host") or "").strip()
+        if executor_host != "agent-sshd":
+            return None
+
+        gateway = await asyncio.to_thread(_server_client().health)
+        if not isinstance(gateway, dict) or gateway.get("ready") is not True:
+            return None
+        # In-memory submission identity is authoritative only when every live
+        # JobRecord belongs to this one process. Multi-worker deployments keep
+        # generation recovery disabled until they provide a shared active-job
+        # registry rather than risking a cross-worker false miss.
+        if gateway.get("gateway_workers") != 1:
+            return None
+        gateway_started_at = _parse_generation_datetime(gateway.get("started_at"))
+        gateway_generation = str(gateway.get("build_sha") or "").strip()
+        if gateway_started_at is None or not gateway_generation:
+            return None
+
+        container_name = os.environ.get(
+            "MCP_AGENT_EXECUTOR_CONTAINER_NAME", "ssh-gateway-agent-sshd"
+        ).strip()
+        if not container_name:
+            return None
+        docker_client = server_attr("DockerClient")()
+        inspected = await docker_client.inspect(container_name, max_lines=2)
+        entries = inspected if isinstance(inspected, list) else [inspected]
+        if len(entries) != 1 or not isinstance(entries[0], dict):
+            return None
+        executor = entries[0]
+        state = executor.get("State")
+        config = executor.get("Config")
+        if not isinstance(state, dict) or not isinstance(config, dict):
+            return None
+        labels = config.get("Labels")
+        health_state = state.get("Health")
+        if (
+            state.get("Running") is not True
+            or not isinstance(health_state, dict)
+            or health_state.get("Status") != "healthy"
+            or not isinstance(labels, dict)
+            or labels.get("com.docker.compose.service") != "agent-sshd"
+        ):
+            return None
+        executor_started_at = _parse_generation_datetime(state.get("StartedAt"))
+        executor_generation = str(executor.get("Id") or "").strip()
+        if executor_started_at is None or not executor_generation:
+            return None
+
+        raw_mcp_started_at = float(server_attr("_mcp_started_at"))
+        mcp_started_at = datetime.fromtimestamp(raw_mcp_started_at, tz=UTC)
+        # The opt-in contract is specifically for the deployment topology where
+        # this coordinator starts only after both upstream dependencies are
+        # healthy. Refuse evidence that contradicts that ordering.
+        if mcp_started_at < gateway_started_at or mcp_started_at < executor_started_at:
+            return None
+        observed_at = datetime.now(UTC)
+        return ExecutionPlaneRecoveryBoundary(
+            gateway_started_at=gateway_started_at,
+            executor_started_at=executor_started_at,
+            mcp_started_at=mcp_started_at,
+            observed_at=observed_at,
+            gateway_generation=gateway_generation,
+            executor_generation=executor_generation,
+            mcp_generation=f"mcp-start:{raw_mcp_started_at:.6f}",
+        )
+    except Exception:
+        # Recovery evidence is optional and must be fail-closed: an unexpected
+        # inspection/health/runtime failure may suppress historical reclaim,
+        # but must never block a normal durable agent submission.
+        return None
 
 
 def _agent_router_terminal_observer() -> Callable[[str, dict[str, Any]], None] | None:
@@ -656,7 +775,9 @@ async def gateway_run_opencode(
 
     assert_handoff_write_allowed()
 
-    def _submit() -> dict[str, Any]:
+    def _submit(
+        before_gateway_dispatch: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         return _project_run_opencode(
             lambda p, c: run_project_command(_server_client(), p, c),
             project=project,
@@ -683,6 +804,7 @@ async def gateway_run_opencode(
             record_trusted_attempt=lambda p, t, a, f, j: bind_task_attempt_job(
                 project=p, task_id=t, attempt_id=a, fingerprint=f, job_id=j
             ),
+            before_gateway_dispatch=before_gateway_dispatch,
             async_submit=async_submit,
         )
 
@@ -710,10 +832,12 @@ def _build_agent_submit(
     task_id: str,
     model: str | None,
     async_submit: bool,
-) -> Callable[[], dict[str, Any]]:
+) -> Callable[[Callable[[], None] | None], dict[str, Any]]:
     """Build the synchronous gateway submit used by single and batch paths."""
 
-    def _submit() -> dict[str, Any]:
+    def _submit(
+        before_gateway_dispatch: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         return _project_run_agent(
             lambda p, c: run_project_command(_server_client(), p, c),
             project=project,
@@ -741,6 +865,7 @@ def _build_agent_submit(
             record_trusted_attempt=lambda p, t, a, f, j: bind_task_attempt_job(
                 project=p, task_id=t, attempt_id=a, fingerprint=f, job_id=j
             ),
+            before_gateway_dispatch=before_gateway_dispatch,
             async_submit=async_submit,
         )
 
@@ -751,7 +876,7 @@ async def _submit_agent_with_fleet(
     *,
     project: str,
     task_id: str,
-    submit_sync: Callable[[], dict[str, Any]],
+    submit_sync: Callable[[Callable[[], None] | None], dict[str, Any]],
     terminal_observer: Callable[[str, dict[str, Any]], None] | None = None,
     observe_submitted_job: bool = True,
     sweep_before_submit: bool = True,
@@ -759,8 +884,9 @@ async def _submit_agent_with_fleet(
     """Use durable fleet admission when enabled, otherwise submit directly."""
     fleet = await get_fleet_runtime()
     if fleet is None:
-        return await asyncio.to_thread(submit_sync)
+        return await asyncio.to_thread(submit_sync, None)
     trusted_job_resolver = _trusted_fleet_job_resolver()
+    recovery_boundary = await _execution_plane_recovery_boundary()
     job_result_fn = (
         (lambda jid: _server_client().job_result(jid))
         if terminal_observer is not None
@@ -769,13 +895,15 @@ async def _submit_agent_with_fleet(
     return await fleet.submit(
         project=project,
         task_id=task_id,
-        submit_sync=submit_sync,
+        submit_sync=lambda: submit_sync(None),
+        submit_with_dispatch_guard=submit_sync,
         job_status_fn=lambda jid: _server_client().job_status(jid),
         job_result_fn=job_result_fn,
         terminal_observer=terminal_observer,
         observe_submitted_job=observe_submitted_job,
         retry_attempted_unbound=True,
         trusted_job_resolver=trusted_job_resolver,
+        recovery_boundary=recovery_boundary,
         sweep_before_submit=sweep_before_submit,
     )
 
@@ -837,6 +965,9 @@ async def gateway_run_agents(project: str, task_ids: str) -> dict[str, Any]:
         fleet = await get_fleet_runtime()
         terminal_observer = _agent_router_terminal_observer()
         trusted_job_resolver = _trusted_fleet_job_resolver() if fleet is not None else None
+        recovery_boundary = (
+            await _execution_plane_recovery_boundary() if fleet is not None else None
+        )
 
         def status_fn(job_id: str) -> dict[str, Any]:
             return _server_client().job_status(job_id)
@@ -852,6 +983,7 @@ async def gateway_run_agents(project: str, task_ids: str) -> dict[str, Any]:
                     job_result_fn=detailed_result_fn,
                     terminal_observer=terminal_observer,
                     trusted_job_resolver=trusted_job_resolver,
+                    recovery_boundary=recovery_boundary,
                 )
             except Exception:
                 pass
@@ -865,18 +997,20 @@ async def gateway_run_agents(project: str, task_ids: str) -> dict[str, Any]:
             )
             try:
                 if fleet is None:
-                    result = await asyncio.to_thread(submit_sync)
+                    result = await asyncio.to_thread(submit_sync, None)
                 else:
                     result = await fleet.submit(
                         project=project,
                         task_id=task_id,
-                        submit_sync=submit_sync,
+                        submit_sync=lambda: submit_sync(None),
+                        submit_with_dispatch_guard=submit_sync,
                         job_status_fn=status_fn,
                         job_result_fn=detailed_result_fn,
                         terminal_observer=terminal_observer,
                         observe_submitted_job=True,
                         retry_attempted_unbound=True,
                         trusted_job_resolver=trusted_job_resolver,
+                        recovery_boundary=recovery_boundary,
                         sweep_before_submit=False,
                     )
                 return result

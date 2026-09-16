@@ -159,6 +159,10 @@ class JobRecord:
     # ``_run_job`` to decide whether to claim/heartbeat/finish via Redis
     # instead of the legacy in-process path.
     is_durable: bool = False
+    # Internal durable idempotency identity. Never serialized to API callers;
+    # retained in memory so trusted recovery can still resolve an active job if
+    # Redis evicts both its hashed claim and envelope under allkeys-lru.
+    submission_key: str | None = None
 
     # Supervisor/observability identity (agent events v2). attempt_id is
     # assigned per execution attempt at the running transition, never at
@@ -607,6 +611,7 @@ class JobManager:
                 stdin=stdin,
                 timeout=resolved_timeout,
                 is_durable=bool(submission_key),
+                submission_key=submission_key,
             )
             job.queued_at_mono = time.monotonic()
             if job.is_durable:
@@ -667,6 +672,7 @@ class JobManager:
             session_id = str(envelope["session_id"])
             command = str(envelope["command"])
             owner_id = str(envelope.get("owner_id", ""))
+            submission_key = str(envelope.get("submission_key", "")).strip() or None
             redact_path_prefix = envelope.get("redact_path_prefix")
             timeout = int(envelope.get("timeout", 3600))
             try:
@@ -717,6 +723,7 @@ class JobManager:
                 stdin=stdin,
                 timeout=timeout,
                 is_durable=True,
+                submission_key=submission_key,
             )
             job.queued_at_mono = time.monotonic()
             job.progress["durable_persisted"] = False
@@ -1188,6 +1195,67 @@ class JobManager:
         """Get a job by ID."""
         async with self._lock:
             return self._jobs.get(job_id)
+
+    async def resolve_submission_claim_in_memory(
+        self,
+        submission_key: str,
+        *,
+        family: bool = False,
+    ) -> dict[str, str] | None:
+        """Resolve a durable submission from the current process memory.
+
+        Redis is normally authoritative, but its allkeys-lru policy can evict
+        both a submission claim and durable envelope while the already-accepted
+        JobRecord still exists in this single Gateway worker. Keeping the opaque
+        submission key only in memory closes that recovery blind spot without
+        exposing it through normal job serialization.
+        """
+        if not isinstance(submission_key, str) or not submission_key:
+            return None
+        if family and (
+            not submission_key.startswith("task:")
+            or not submission_key.endswith(":attempt:")
+        ):
+            return None
+
+        async with self._lock:
+            jobs = list(self._jobs.values())
+
+        match: dict[str, str] | None = None
+        for job in jobs:
+            candidate_key = job.submission_key
+            if not candidate_key:
+                continue
+            if family:
+                if not candidate_key.startswith(submission_key):
+                    continue
+                attempt_id = candidate_key[len(submission_key) :]
+                if (
+                    len(attempt_id) != 32
+                    or any(ch not in "0123456789abcdef" for ch in attempt_id)
+                ):
+                    raise SubmissionUnavailableError(
+                        "In-memory durable submission attempt family is invalid"
+                    )
+            elif candidate_key != submission_key:
+                continue
+
+            candidate = {
+                "job_id": job.job_id,
+                "owner_id": job.owner_id,
+                "payload_hash": _submission_payload_hash(
+                    job.session_id,
+                    job.command,
+                    job.stdin,
+                    job.timeout,
+                ),
+            }
+            if match is not None and match != candidate:
+                raise SubmissionUnavailableError(
+                    "In-memory durable submission identity is ambiguous"
+                )
+            match = candidate
+        return match
 
     async def get_job_status(self, job_id: str) -> dict:
         """Get job status (lightweight)."""
