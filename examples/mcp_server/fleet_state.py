@@ -25,13 +25,14 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Final
 
 import asyncpg
 
 DEFAULT_POOL_CAPACITY: Final = 2
 MAX_NAME_LENGTH: Final = 200
+MIN_GENERATION_RECONCILIATION_QUIESCENCE_SECONDS: Final = 0
 TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
     {
         "needs-review",
@@ -297,6 +298,12 @@ def _require_name(value: str, label: str) -> str:
 def _require_capacity(value: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError("capacity must be a positive integer")
+    return value
+
+
+def _require_aware_datetime(value: datetime, label: str) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{label} must be a timezone-aware datetime")
     return value
 
 
@@ -652,6 +659,153 @@ class FleetState:
             return result.startswith("DELETE 1")
         return bool(result)
 
+    async def reconcile_unbound_after_execution_plane_replacement(
+        self,
+        *,
+        task_id: str,
+        lease_token: str,
+        expected_submit_state: str,
+        gateway_started_at: datetime,
+        executor_started_at: datetime,
+        mcp_started_at: datetime,
+        observed_at: datetime,
+        gateway_generation: str,
+        executor_generation: str,
+        mcp_generation: str,
+        quiescence_seconds: int = MIN_GENERATION_RECONCILIATION_QUIESCENCE_SECONDS,
+    ) -> TaskOutcome | None:
+        """Terminalize an unresolved historical lease from generation evidence.
+
+        This is deliberately NOT an age-based stale reaper. The caller must have
+        already failed to resolve an exact durable Gateway submission. We then
+        require the lease's last activity to predate replacement of both the
+        Gateway and dedicated executor, plus the current MCP coordinator
+        generation. The caller is responsible for proving an authoritative
+        submission resolver clean miss across both durable storage and current
+        Gateway process memory before invoking this path. ``quiescence_seconds``
+        remains available as an optional additional operator barrier.
+
+        The exact lease token and submission state are revalidated while the row
+        is locked. Successful reconciliation atomically records an ``ambiguous``
+        tombstone before deleting the capacity lease; a bound/live/changed row is
+        never released.
+        """
+        task_id = _require_name(task_id, "task_id")
+        lease_token = _require_name(lease_token, "lease_token")
+        expected_submit_state = _require_name(expected_submit_state, "expected_submit_state")
+        if expected_submit_state not in {ATTEMPTED, LEGACY_UNKNOWN}:
+            raise ValueError("expected_submit_state must be attempted or legacy_unknown")
+        gateway_started_at = _require_aware_datetime(gateway_started_at, "gateway_started_at")
+        executor_started_at = _require_aware_datetime(executor_started_at, "executor_started_at")
+        mcp_started_at = _require_aware_datetime(mcp_started_at, "mcp_started_at")
+        observed_at = _require_aware_datetime(observed_at, "observed_at")
+        gateway_generation = _require_name(gateway_generation, "gateway_generation")
+        executor_generation = _require_name(executor_generation, "executor_generation")
+        mcp_generation = _require_name(mcp_generation, "mcp_generation")
+        if (
+            isinstance(quiescence_seconds, bool)
+            or not isinstance(quiescence_seconds, int)
+            or quiescence_seconds < MIN_GENERATION_RECONCILIATION_QUIESCENCE_SECONDS
+        ):
+            raise ValueError(
+                "quiescence_seconds must be at least "
+                f"{MIN_GENERATION_RECONCILIATION_QUIESCENCE_SECONDS}"
+            )
+
+        pg_pool = await self._ensure_pool()
+        async with pg_pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(_GET_LEASE_FOR_UPDATE_SQL, task_id)
+            if row is None:
+                return None
+            lease = _lease_from_row(row)
+            if lease.lease_token != lease_token:
+                raise LeaseConflictError("lease token mismatch")
+            if lease.job_id is not None:
+                raise LeaseConflictError("generation reconciliation requires an unbound lease")
+            if lease.submit_state != expected_submit_state:
+                raise LeaseConflictError(
+                    f"submit state changed: expected {expected_submit_state!r}, "
+                    f"lease has {lease.submit_state!r}"
+                )
+
+            activity = [
+                value
+                for value in (
+                    lease.claimed_at,
+                    lease.heartbeat_at,
+                    lease.submit_attempted_at,
+                )
+                if value is not None
+            ]
+            if not activity:
+                return None
+            latest_activity = max(activity)
+            first_replacement = min(
+                gateway_started_at,
+                executor_started_at,
+                mcp_started_at,
+            )
+            latest_generation_start = max(
+                gateway_started_at,
+                executor_started_at,
+                mcp_started_at,
+            )
+            if latest_activity >= first_replacement:
+                return None
+            if observed_at < latest_generation_start + timedelta(seconds=quiescence_seconds):
+                return None
+
+            # A pre-existing terminal outcome is stronger evidence than this
+            # historical liveness reconciliation. Never overwrite it with an
+            # inferred ambiguous tombstone; leave the anomalous lease in place
+            # for explicit supervisor handling instead of destroying evidence.
+            existing_outcome = await conn.fetchrow(_GET_OUTCOME_SQL, task_id)
+            if existing_outcome is not None:
+                return None
+
+            evidence = {
+                "liveness_reconciled": True,
+                "reason": "execution_plane_replaced_and_submission_unresolved",
+                "previous_submit_state": lease.submit_state,
+                "lease_claimed_at": lease.claimed_at.isoformat() if lease.claimed_at else None,
+                "lease_heartbeat_at": lease.heartbeat_at.isoformat() if lease.heartbeat_at else None,
+                "submit_attempted_at": (
+                    lease.submit_attempted_at.isoformat() if lease.submit_attempted_at else None
+                ),
+                "gateway_started_at": gateway_started_at.isoformat(),
+                "executor_started_at": executor_started_at.isoformat(),
+                "mcp_started_at": mcp_started_at.isoformat(),
+                "observed_at": observed_at.isoformat(),
+                "quiescence_seconds": quiescence_seconds,
+                "gateway_generation": gateway_generation,
+                "executor_generation": executor_generation,
+                "mcp_generation": mcp_generation,
+            }
+            await conn.execute(
+                _UPSERT_OUTCOME_SQL,
+                task_id,
+                lease.pool,
+                None,
+                "ambiguous",
+                None,
+                json.dumps(evidence, separators=(",", ":")),
+            )
+            deleted = await conn.execute(_DELETE_LEASE_SQL, task_id, lease_token)
+            if deleted != "DELETE 1":
+                raise LeaseConflictError("lease changed before generation reconciliation")
+            outcome_row = await conn.fetchrow(_GET_OUTCOME_SQL, task_id)
+            if outcome_row is None:  # pragma: no cover - impossible after upsert
+                raise FleetStateError("generation reconciliation outcome disappeared")
+            return TaskOutcome(
+                task_id=outcome_row["task_id"],
+                pool=outcome_row["pool"],
+                job_id=outcome_row["job_id"],
+                status=outcome_row["status"],
+                exit_code=outcome_row["exit_code"],
+                result=outcome_row["result_json"],
+                reported_at=outcome_row.get("reported_at"),
+            )
+
     async def get_outcome(self, task_id: str) -> TaskOutcome | None:
         """Return a durable terminal outcome without mutating fleet state."""
         task_id = _require_name(task_id, "task_id")
@@ -744,6 +898,7 @@ __all__ = [
     "LEGACY_UNKNOWN",
     "LeaseConflictError",
     "LeaseNotFoundError",
+    "MIN_GENERATION_RECONCILIATION_QUIESCENCE_SECONDS",
     "NEVER_ATTEMPTED",
     "PoolCapacityMismatchError",
     "PoolSnapshot",

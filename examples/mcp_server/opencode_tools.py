@@ -61,6 +61,7 @@ def project_run_opencode(
     resolve_trusted_attempt: Callable[[str, str, str], tuple[str, str | None]] | None = None,
     record_trusted_attempt: Callable[[str, str, str, str, str], None] | None = None,
     async_submit: bool = False,
+    before_gateway_dispatch: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Execute an existing handoff task via OpenCode CLI on the SSH target.
 
@@ -260,7 +261,11 @@ def project_run_opencode(
         submission_key = _agent_attempt_key(project, task_id, attempt_id)
         if job_id is None:
             job_id, submit_error = _submit_same_key_retry(
-                run_script_async, project, cmd, submission_key
+                run_script_async,
+                project,
+                cmd,
+                submission_key,
+                before_gateway_dispatch=before_gateway_dispatch,
             )
         else:
             submit_error = None
@@ -437,7 +442,11 @@ def project_run_opencode(
     submitted_now = job_id is None
     if submitted_now:
         job_id, submit_error = _submit_same_key_retry(
-            run_script_async, project, cmd, submission_key
+            run_script_async,
+            project,
+            cmd,
+            submission_key,
+            before_gateway_dispatch=before_gateway_dispatch,
         )
         if job_id is None:
             return {

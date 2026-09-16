@@ -28,3 +28,12 @@ def test_health_existing_fields_unchanged():
     assert data["status"] in ("ok", "degraded")
     assert isinstance(data["redis"], bool)
     assert isinstance(data["ready"], bool)
+    assert isinstance(data["gateway_workers"], int)
+
+
+def test_health_malformed_gateway_workers_fails_recovery_signal_closed(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "not-an-int")
+    with TestClient(app) as client:
+        resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json()["gateway_workers"] == 0

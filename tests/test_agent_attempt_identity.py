@@ -493,6 +493,42 @@ class TestBlocker2LostResponseAfterAcceptance:
         assert seen[0] == seen[1], "the retry must reuse the identical idempotency key"
         assert len(set(seen)) == 1
 
+    def test_dispatch_guard_runs_once_before_bounded_same_key_retries(self):
+        rc = _run_cmd(task_json=_task_json())
+        store, read, claim, write = _attempt_store()
+        seen: list[str] = []
+        order: list[str] = []
+        attempts = {"n": 0}
+
+        def before_gateway_dispatch() -> None:
+            order.append("guard")
+
+        def flaky(project: str, script: str, submission_key: str) -> dict:
+            order.append("gateway")
+            seen.append(submission_key)
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise RuntimeError("retry same durable submit")
+            return {"job_id": "job-guarded"}
+
+        result = project_run_agent(
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            run_script_async=flaky,
+            run_script_wait=MagicMock(return_value=_completed(stdout="guarded")),
+            read_attempt_state=read,
+            claim_attempt_state=claim,
+            write_attempt_state=write,
+            job_status=MagicMock(return_value={"status": "running"}),
+            before_gateway_dispatch=before_gateway_dispatch,
+        )
+
+        assert result["job_id"] == "job-guarded"
+        assert order == ["guard", "gateway", "gateway", "gateway"]
+        assert len(seen) == 3
+        assert len(set(seen)) == 1
+
     def test_persistent_submit_failure_returns_not_accepted_receipt(self):
         rc = _run_cmd(task_json=_task_json())
         store, read, claim, write = _attempt_store()

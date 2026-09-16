@@ -61,6 +61,7 @@ def _owned_job(job_id: str = "j-1") -> JobRecord:
 def _mock_job_manager(monkeypatch):
     manager = AsyncMock()
     manager.cancel_job.return_value = "cancelled"
+    manager.resolve_submission_claim_in_memory.return_value = None
     monkeypatch.setattr(_state, "job_manager", manager)
     return manager
 
@@ -398,6 +399,58 @@ class TestJobsSubmissionResolutionOwnership:
             )
 
         assert exc.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_in_memory_active_job_recovers_evicted_exact_submission(
+        self, _mock_redis_queue, _mock_job_manager
+    ):
+        owner_id = token_fingerprint(OWNER_TOKEN)
+        claim = {
+            "job_id": "job-memory-only",
+            "owner_id": owner_id,
+            "payload_hash": "a" * 64,
+        }
+        _mock_redis_queue.resolve_submission_claim.return_value = None
+        _mock_job_manager.resolve_submission_claim_in_memory.return_value = claim
+        job = _owned_job("job-memory-only")
+        job.owner_id = owner_id
+        job.status = "running"
+        _mock_job_manager.get_job.return_value = job
+
+        result = await jobs_router.jobs_resolve_submission(
+            "task:project-key:task-memory", _identity(OWNER_TOKEN)
+        )
+
+        assert result == {"job_id": "job-memory-only"}
+        _mock_job_manager.resolve_submission_claim_in_memory.assert_awaited_once_with(
+            "task:project-key:task-memory",
+            family=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_redis_and_memory_submission_disagreement_fails_closed(
+        self, _mock_redis_queue, _mock_job_manager
+    ):
+        owner_id = token_fingerprint(OWNER_TOKEN)
+        _mock_redis_queue.resolve_submission_claim.return_value = {
+            "job_id": "job-redis",
+            "owner_id": owner_id,
+            "payload_hash": "a" * 64,
+        }
+        _mock_job_manager.resolve_submission_claim_in_memory.return_value = {
+            "job_id": "job-memory",
+            "owner_id": owner_id,
+            "payload_hash": "a" * 64,
+        }
+
+        with pytest.raises(HTTPException) as exc:
+            await jobs_router.jobs_resolve_submission(
+                "task:project-key:task-conflict", _identity(OWNER_TOKEN)
+            )
+
+        assert exc.value.status_code == 503
+        assert exc.value.detail["code"] == "SUBMISSION_BACKEND_UNAVAILABLE"
+        _mock_job_manager.get_job.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_missing_submission_is_404(self, _mock_redis_queue):

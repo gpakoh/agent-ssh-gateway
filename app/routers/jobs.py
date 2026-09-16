@@ -169,11 +169,15 @@ async def jobs_resolve_submission(
         )
     try:
         if family_mode:
-            claim = await _state.redis_queue.resolve_submission_family_claim(
+            redis_claim = await _state.redis_queue.resolve_submission_family_claim(
                 submission_key
             )
         else:
-            claim = await _state.redis_queue.resolve_submission_claim(submission_key)
+            redis_claim = await _state.redis_queue.resolve_submission_claim(submission_key)
+        memory_claim = await _state.job_manager.resolve_submission_claim_in_memory(
+            submission_key,
+            family=family_mode,
+        )
     except SubmissionUnavailableError:
         raise HTTPException(
             status_code=503,
@@ -184,6 +188,17 @@ async def jobs_resolve_submission(
                 retryable=True,
             ),
         ) from None
+    if redis_claim is not None and memory_claim is not None and redis_claim != memory_claim:
+        raise HTTPException(
+            status_code=503,
+            detail=_err(
+                503,
+                "Durable submission identity disagrees between Redis and active Gateway memory",
+                code="SUBMISSION_BACKEND_UNAVAILABLE",
+                retryable=True,
+            ),
+        )
+    claim = redis_claim or memory_claim
     if claim is None:
         raise HTTPException(
             status_code=404,

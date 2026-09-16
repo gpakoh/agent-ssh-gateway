@@ -348,6 +348,7 @@ class HealthResponse(BaseModel):
     build_time: str = ""
     started_at: str = ""
     version: str = ""
+    gateway_workers: int = 1
     components: dict[str, HealthComponentStatus] = Field(default_factory=dict)
 
 
