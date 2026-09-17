@@ -2454,7 +2454,7 @@ def project_run_agent(
 
     if not selected:
         cooldowns = router.get_cooldowns() if router else []
-        cooldown_info = "; ".join(f"{c.backend}: blocked until {c.until}" for c in cooldowns)
+        cooldown_info = "; ".join(f"{c.provider}: blocked until {c.until}" for c in cooldowns)
         return {
             "task_id": task_id,
             "status": "blocked",

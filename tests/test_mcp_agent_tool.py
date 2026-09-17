@@ -363,6 +363,21 @@ class TestProjectRunAgentEnabled:
         result = project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
         assert result["status"] == "blocked"
 
+    def test_blocked_cooldown_diagnostic_uses_provider_identity(self):
+        rc = _make_run_cmd(task_json=_make_task_json())
+        r = self._router()
+        cooldown = r.record_result(
+            "opencode",
+            exit_code=77,
+            stdout="rate limit: retry in 60 seconds",
+        )
+        assert cooldown is not None
+
+        result = project_run_agent(rc, project="test", task_id=TASK_ID, router=r)
+
+        assert result["status"] == "blocked"
+        assert "opencode: blocked until" in result["error"]
+
     def test_router_disabled_uses_direct_agent(self):
         rc = _make_run_cmd(task_json=_make_task_json(), exit_code=0)
         r = self._router(enabled=False)
