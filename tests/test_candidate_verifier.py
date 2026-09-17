@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import shlex
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Lock
 from typing import Any
 
 import pytest
@@ -89,7 +92,7 @@ def test_ephemeral_docker_argv_has_narrow_security_boundary(
     assert "verifier_net" not in joined
 
 
-def test_each_verification_force_cleans_fixed_container_before_and_after(
+def test_each_verification_cleans_only_its_execution_container(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     staging = _configure(monkeypatch, tmp_path)
@@ -107,14 +110,79 @@ def test_each_verification_force_cleans_fixed_container_before_and_after(
             runner=runner,
         )
 
-    commands = [call[0][1:3] for call in calls]
-    assert commands == [
-        ["rm", "-f"], ["run", "--rm"], ["rm", "-f"],
-        ["rm", "-f"], ["run", "--rm"], ["rm", "-f"],
-    ]
+    assert [call[0][1] for call in calls] == ["run", "rm", "run", "rm"]
     run_calls = [call for call in calls if call[0][1] == "run"]
+    cleanup_calls = [call for call in calls if call[0][1] == "rm"]
     assert len(run_calls) == 2
+    run_names = [call[0][call[0].index("--name") + 1] for call in run_calls]
+    cleanup_names = [call[0][-1] for call in cleanup_calls]
+    assert len(set(run_names)) == 2
+    assert cleanup_names == run_names
+    assert all(name.startswith("mcp-candidate-verifier-") for name in run_names)
     assert all(call[1]["input"].endswith("exit 0") for call in run_calls)
+
+
+def test_concurrent_verifications_do_not_reuse_or_cross_clean_container_names(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = _configure(monkeypatch, tmp_path)
+    overlap = Barrier(2)
+    lock = Lock()
+    run_names: list[str] = []
+    cleanup_names: list[str] = []
+
+    def runner(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[1] == "run":
+            name = argv[argv.index("--name") + 1]
+            with lock:
+                run_names.append(name)
+            overlap.wait(timeout=5)
+        elif argv[1] == "rm":
+            with lock:
+                cleanup_names.append(argv[-1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def verify_once(expected_sha: str) -> None:
+        verify_candidate_via_docker(
+            staging_root=staging,
+            expected_sha=expected_sha,
+            required_checks=["pytest -q"],
+            runner=runner,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(verify_once, "a" * 40), pool.submit(verify_once, "b" * 40)]
+        for future in futures:
+            future.result(timeout=10)
+
+    assert len(run_names) == 2
+    assert len(set(run_names)) == 2
+    assert sorted(cleanup_names) == sorted(run_names)
+
+
+def test_cancellation_cleans_only_started_execution_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = _configure(monkeypatch, tmp_path)
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        if argv[1] == "run":
+            raise asyncio.CancelledError
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    with pytest.raises(asyncio.CancelledError):
+        verify_candidate_via_docker(
+            staging_root=staging,
+            expected_sha="c" * 40,
+            required_checks=["pytest -q"],
+            runner=runner,
+        )
+
+    assert [argv[1] for argv in calls] == ["run", "rm"]
+    run_name = calls[0][calls[0].index("--name") + 1]
+    assert calls[1][-1] == run_name
 
 
 def test_timeout_forces_container_cleanup(
@@ -136,7 +204,9 @@ def test_timeout_forces_container_cleanup(
             required_checks=["pytest -q"],
             runner=runner,
         )
-    assert [argv[1] for argv in calls] == ["rm", "run", "rm"]
+    assert [argv[1] for argv in calls] == ["run", "rm"]
+    run_name = calls[0][calls[0].index("--name") + 1]
+    assert calls[1][-1] == run_name
 
 
 def test_verifier_nonzero_is_fail_closed(
