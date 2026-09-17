@@ -268,27 +268,66 @@ There are currently **no verified P0 findings**.
     agent losing its already-read task context is further evidence that prompt
     wording alone is not a reliable orchestration contract.
 
-30. ⬜ **[FD-001] Route frontend verification through an approved Astro/frontend build capability.**
+30. ⬜ **[AO-022] Candidate clones need first-class lifecycle cleanup / unregister.**
+    Live operator evidence on 2026-09-17 found dozens of historical
+    `candidate-agent-ssh-gateway-*` workspaces still present under the
+    server-owned `.mcp-candidate-clones` area after merged/closed deliveries,
+    superseded bases, probes and review passes. `project_list()` simultaneously
+    still exposes historical candidates as registered `candidate-clone` projects
+    in the runtime overlay. Creation is therefore durable in both filesystem and
+    registry state, but the supervisor surface exposes `prepare_candidate_clone`
+    / `supervisor_register_project` with no matching `candidate_cleanup` /
+    `supervisor_unregister_project`. Raw deletion is intentionally unavailable,
+    and deleting only the directory would leave registry/cache state pointing at
+    a missing root while unregistering only the project would leak disk state.
+
+    Closure: add an admin-only typed candidate lifecycle primitive restricted to
+    server-owned candidate roots. Require exact project id, expected HEAD SHA and
+    expected branch/source identity; fail closed for dirty worktrees, active
+    task/job/delivery references, open-PR candidates, metadata mismatch,
+    symlink/root escape, pending supervisor integration journals or registered
+    descendants. Cleanup must CAS/journal the runtime-registry removal, reset both
+    REST and MCP registry caches, and remove the exact candidate directory as one
+    reconciled lifecycle operation. Partial failure between unregister and
+    filesystem removal must be observable and idempotently recoverable, with a
+    bounded audit tombstone containing candidate/source/base/head/branch identity
+    and cleanup reason but no host paths or secrets.
+
+    Also provide bounded `plan -> apply` GC for accumulated candidates. Planning
+    classifies each candidate with explicit keep/delete evidence; apply revalidates
+    exact HEAD, clean status and active-reference state immediately before
+    mutation. Age alone never authorizes deletion, and open PRs, active tasks /
+    deliveries and current supervisor review workspaces are kept by default.
+    Acceptance covers stale-clean, dirty, open-PR, active-task,
+    missing-directory registry entries, orphan directories without registry
+    entries, registered descendants and a crash between unregister/delete. Only
+    provably stale clean candidates disappear; `project_list()` drops successfully
+    cleaned entries after cache reset; repeated cleanup is idempotent; canonical
+    and source projects cannot be deleted through this primitive. This is
+    lifecycle correctness, distinct from AO-010 generic command-policy cleanup
+    ergonomics and AO-012 project-catalog pagination.
+
+31. ⬜ **[FD-001] Route frontend verification through an approved Astro/frontend build capability.**
     Registered frontend projects should not depend on ad-hoc SSH `npm`. Add a
     typed frontend/Astro build helper that binds exact project/ref, package
     manager/lockfile and allowlisted script to an approved builder/runtime and
     returns toolchain/artifact/output evidence plus typed unavailable/failed
     outcomes.
 
-31. ⬜ **[FD-002] Bounded managed HTTP smoke for public sites and internal services.**
+32. ⬜ **[FD-002] Bounded managed HTTP smoke for public sites and internal services.**
     Expose safe `GET`/`HEAD` smoke (prefer the existing relay-curl substrate where
     appropriate) with explicit target/path, redirect/status/content-type, bounded
     body, timeout, optional XML validation and typed network/HTTP/XML failures.
     Do not weaken raw shell/curl policy.
 
-32. ⬜ **[FD-003] Deploy-contract bridge for Astro/Compose frontend projects.**
+33. ⬜ **[FD-003] Deploy-contract bridge for Astro/Compose frontend projects.**
     Bind a registered immutable source/candidate to the repo's approved deploy
     contract and exact Compose project/service/image sequence. Support read-only
     Compose render/preflight, exact namespace verification, dependency-only
     rollout and backup/snapshot prerequisites for DB-major migrations, then
     return build/recreate/log/health evidence without arbitrary deploy scripts.
 
-33. ⬜ **[FD-004] CI-gated merges need typed no-workflow/no-run/trigger-incompatible states.**
+34. ⬜ **[FD-004] CI-gated merges need typed no-workflow/no-run/trigger-incompatible states.**
     `CI_NOT_GREEN` conflates zero workflows, no run for the exact head, stale runs
     and repositories whose canonical workflow is push-only while merge policy
     accepts only `pull_request`. Add `CI_NOT_CONFIGURED`,
@@ -296,20 +335,20 @@ There are currently **no verified P0 findings**.
     policy for acceptable exact-head evidence without weakening fail-closed
     defaults.
 
-34. ⬜ **[CI-001] Explain and eliminate correlated Docker-runner wall-clock failures.**
+35. ⬜ **[CI-001] Explain and eliminate correlated Docker-runner wall-clock failures.**
     Historical build/deploy phases failed near a shared ~18-minute boundary.
     Network retries and the Python-suite timeout fix improved adjacent symptoms,
     but the shared runner/resource/registry/storage/supervisor question is not
     proven closed. Closure requires controlled repeated build+deploy evidence and
     diagnostics that distinguish runner-specific degradation from shared limits.
 
-35. ⬜ **[CI-002] Reconcile and safely clean superseded/orphaned Gitea Actions task containers.**
+36. ⬜ **[CI-002] Reconcile and safely clean superseded/orphaned Gitea Actions task containers.**
     Old Action containers/runs can remain active after newer PR heads become
     authoritative and continue consuming runner capacity. Add read-only mapping
     of run/job/container/head state plus cleanup guarded by exact run id, job id,
     container id and head SHA; ambiguous ownership must fail closed.
 
-36. ⬜ **[CI-005] Remove the WebSocket TestClient contention quarantine or make it observable.**
+37. ⬜ **[CI-005] Remove the WebSocket TestClient contention quarantine or make it observable.**
     Unit CI currently reruns only `WebSocketDisconnect` because Starlette's
     in-process WebSocket TestClient can drop a pending response under CI resource
     contention. Before this consolidation the workflow still referenced obsolete
@@ -321,26 +360,26 @@ There are currently **no verified P0 findings**.
 
 ## P3 — efficiency, ergonomics, productization and cosmetic debt
 
-37. ⬜ **[AO-012] Filter and paginate the registered project catalog.**
+38. ⬜ **[AO-012] Filter and paginate the registered project catalog.**
     A one-project lookup has returned hundreds of historical candidates (679 in
     2026-09-11 evidence). Add exact/prefix/text and project-type/tag/parent filters,
     stable ordering, total count, `limit`/`offset`, and compact projection. Keep a
     bounded backwards-compatible unfiltered mode.
 
-38. ⬜ **[AO-013] Async progress/cancellation for long candidate preparation.**
+39. ⬜ **[AO-013] Async progress/cancellation for long candidate preparation.**
     Fresh candidate preparation has taken roughly 63–116 seconds in prior work
     and tens of seconds in current work while remaining synchronous/opaque. Add a
     durable job id, fetch/checkout/register/verify phases, cancellation before
     final registration, safe retry/idempotent recovery and optional bounded sync
     wait.
 
-39. ⬜ **[AO-023] Define a supported public API/versioning/deprecation contract.**
+40. ⬜ **[AO-023] Define a supported public API/versioning/deprecation contract.**
     This is the still-relevant residue of the old `docs/roadmap.md` “stabilize the
     public API” item. Document which HTTP/WebSocket/MCP surfaces are stable,
     versioning/deprecation guarantees, compatibility window and migration path;
     bind breaking-change CI/release checks to that policy.
 
-40. ⬜ **[AO-024] Produce versioned release artifacts in addition to continuously published container images.**
+41. ⬜ **[AO-024] Produce versioned release artifacts in addition to continuously published container images.**
     Container images are already built, smoke-tested and pushed by CI, so that
     half of the old roadmap item is closed. No release workflow currently
     produces a formal versioned release artifact/changelog/provenance bundle.
@@ -348,7 +387,7 @@ There are currently **no verified P0 findings**.
     reproducible tagged-release path with checksums/provenance, otherwise close
     this item explicitly as out of scope.
 
-41. ⬜ **[CI-003] Avoid duplicate heavy post-merge CI when an exact PR head is already green.**
+42. ⬜ **[CI-003] Avoid duplicate heavy post-merge CI when an exact PR head is already green.**
     Current master pushes rerun the full Python matrix after an exact PR has
     already passed it. Add a fail-closed fast path only when the merge commit is
     proven to be a clean merge of the exact green PR head with no extra code;
