@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -54,7 +55,7 @@ class CandidateVerificationError(RuntimeError):
 
 
 _VOLUME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-_CONTAINER_NAME = "mcp-candidate-verifier"
+_CONTAINER_NAME_PREFIX = "mcp-candidate-verifier"
 _CONTAINER_SOURCE = "/candidate-src"
 
 # Cap on the failed-check output tail a verifier returns.  The verifier only
@@ -76,6 +77,11 @@ _CREDENTIAL_VALUE_RE = re.compile(
 
 def _q(value: str) -> str:
     return shlex.quote(value)
+
+
+def _new_verifier_container_name() -> str:
+    """Return a process-independent identity for one verifier execution."""
+    return f"{_CONTAINER_NAME_PREFIX}-{secrets.token_hex(12)}"
 
 
 def sanitize_verifier_output_tail(text: str) -> str:
@@ -364,16 +370,22 @@ def _validated_volume_subpath(staging_root: Path) -> str:
 
 
 def build_ephemeral_verifier_argv(
-    *, staging_root: Path, volume_name: str, image: str, timeout_seconds: int
+    *,
+    staging_root: Path,
+    volume_name: str,
+    image: str,
+    timeout_seconds: int,
+    container_name: str | None = None,
 ) -> list[str]:
     """Build the fixed-security docker argv for one disposable verifier."""
     volume_subpath = _validated_volume_subpath(staging_root)
+    execution_container_name = container_name or _new_verifier_container_name()
     return [
         "docker",
         "run",
         "--rm",
         "--name",
-        _CONTAINER_NAME,
+        execution_container_name,
         "--init",
         "--network",
         "bridge",
@@ -422,9 +434,9 @@ def _run(
     )
 
 
-def _force_remove(runner: Callable[..., Any]) -> None:
+def _force_remove(runner: Callable[..., Any], container_name: str) -> None:
     try:
-        _run(runner, ["docker", "rm", "-f", _CONTAINER_NAME], timeout=30)
+        _run(runner, ["docker", "rm", "-f", container_name], timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         pass
 
@@ -441,6 +453,7 @@ def verify_candidate_via_docker(
     volume_name = _validated_volume_name()
     image = _validated_image()
     timeout = _verification_timeout()
+    container_name = _new_verifier_container_name()
     script = build_candidate_verifier_script(
         staging_root=staging,
         expected_sha=expected_sha,
@@ -451,12 +464,9 @@ def verify_candidate_via_docker(
         volume_name=volume_name,
         image=image,
         timeout_seconds=timeout,
+        container_name=container_name,
     )
 
-    # Materialization is serialized by the candidate-store flock.  A fixed
-    # name therefore doubles as crash recovery: any container left by a dead
-    # control-plane process is stale and is removed before the next run.
-    _force_remove(runner)
     try:
         result = _run(runner, argv, input_text=script, timeout=timeout + 60)
     except subprocess.TimeoutExpired as exc:
@@ -485,7 +495,10 @@ def verify_candidate_via_docker(
     finally:
         # `--rm` handles the normal path; force removal covers timeout, client
         # transport failure, or a verifier whose descendants kept PID 1 alive.
-        _force_remove(runner)
+        # The execution-scoped name guarantees cleanup cannot target another
+        # concurrent verifier. If the control-plane process itself dies, the
+        # in-container hard timeout bounds the orphan and `--rm` removes it.
+        _force_remove(runner, container_name)
 
     returncode = getattr(result, "returncode", None)
     exit_code = int(returncode) if returncode is not None else 1
