@@ -2611,6 +2611,25 @@ def agent_task_status(
 
 
 
+def _supervisor_recreate_hint(
+    project: str,
+    task_id: str,
+    *,
+    continuation_prompt: str | None = None,
+) -> dict[str, Any]:
+    """Describe a safe replacement task without treating workspace files as authority."""
+    hint: dict[str, Any] = {
+        "project": project,
+        "source_task_id": task_id,
+        "new_task_id": "<new-task-id>",
+        "requires_supervisor_owned_contract": True,
+        "do_not_copy_source_task_json": True,
+    }
+    if continuation_prompt is not None:
+        hint["continuation_prompt"] = continuation_prompt
+    return hint
+
+
 def inspect_agent_task(
     run_cmd,
     *,
@@ -2854,17 +2873,16 @@ def inspect_agent_task(
     }
     if reconciliation.get("state") is not None:
         result["recovery"] = {
-            "action": "inspect_artifacts_then_retry_with_new_task_id",
+            "action": "inspect_artifacts_preserve_execution_identity",
             "worker_termination_proven": False,
+            "replacement_allowed_now": False,
             "do_not_assume_worker_terminated": True,
+            "do_not_create_new_task_id": True,
             "inspect_agent_task": {"project": project, "task_id": task_id},
-            "retry_agent_task": {
-                "project": project,
-                "source_task_id": task_id,
-                "retry_task_id": "<new-task-id>",
-                "requires_new_task_id": True,
-            },
-            "run_agent": {"project": project, "task_id": "<new-task-id>"},
+            "supervisor_recreate_after_termination": _supervisor_recreate_hint(
+                project,
+                task_id,
+            ),
         }
     elif (
         terminal
@@ -2872,50 +2890,50 @@ def inspect_agent_task(
         and failure.get("phase") == "pre_useful_work"
     ):
         result["recovery"] = {
-            "action": "retry_with_new_task_id",
-            "retry_agent_task": {
+            "action": "recreate_from_supervisor_contract",
+            "worker_termination_proven": True,
+            "replacement_allowed_now": True,
+            "supervisor_recreate": _supervisor_recreate_hint(project, task_id),
+            "run_agent_after_recreate": {
                 "project": project,
-                "source_task_id": task_id,
-                "retry_task_id": "<new-task-id>",
-                "requires_new_task_id": True,
+                "task_id": "<new-task-id>",
             },
-            "run_agent": {"project": project, "task_id": "<new-task-id>"},
         }
     elif reasoning_loop.get("detected"):
         result["recovery"] = {
-            "action": "cancel_and_retry_with_continuation",
+            "action": "cancel_then_recreate_from_supervisor_contract",
+            "worker_termination_proven": False,
+            "replacement_allowed_now": False,
             "cancel_agent_task": {"project": project, "task_id": task_id},
-            "retry_agent_task": {
-                "project": project,
-                "source_task_id": task_id,
-                "retry_task_id": "<new-task-id>",
-                "continuation_prompt": AGENT_REASONING_LOOP_CONTINUATION_PROMPT,
-            },
-            "run_agent": {"project": project, "task_id": "<new-task-id>"},
+            "supervisor_recreate_after_termination": _supervisor_recreate_hint(
+                project,
+                task_id,
+                continuation_prompt=AGENT_REASONING_LOOP_CONTINUATION_PROMPT,
+            ),
         }
     elif trailing_colon_stall.get("detected"):
         result["recovery"] = {
-            "action": "cancel_and_retry_with_continuation",
+            "action": "cancel_then_recreate_from_supervisor_contract",
+            "worker_termination_proven": False,
+            "replacement_allowed_now": False,
             "cancel_agent_task": {"project": project, "task_id": task_id},
-            "retry_agent_task": {
-                "project": project,
-                "source_task_id": task_id,
-                "retry_task_id": "<new-task-id>",
-                "continuation_prompt": trailing_colon_stall["continuation_prompt"],
-            },
-            "run_agent": {"project": project, "task_id": "<new-task-id>"},
+            "supervisor_recreate_after_termination": _supervisor_recreate_hint(
+                project,
+                task_id,
+                continuation_prompt=trailing_colon_stall["continuation_prompt"],
+            ),
         }
     elif emitted_invoke_stall.get("detected"):
         result["recovery"] = {
-            "action": "cancel_and_retry_with_continuation",
+            "action": "cancel_then_recreate_from_supervisor_contract",
+            "worker_termination_proven": False,
+            "replacement_allowed_now": False,
             "cancel_agent_task": {"project": project, "task_id": task_id},
-            "retry_agent_task": {
-                "project": project,
-                "source_task_id": task_id,
-                "retry_task_id": "<new-task-id>",
-                "continuation_prompt": emitted_invoke_stall["continuation_prompt"],
-            },
-            "run_agent": {"project": project, "task_id": "<new-task-id>"},
+            "supervisor_recreate_after_termination": _supervisor_recreate_hint(
+                project,
+                task_id,
+                continuation_prompt=emitted_invoke_stall["continuation_prompt"],
+            ),
         }
     if status_text != "(not found)":
         result["status_text"] = status_text

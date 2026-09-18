@@ -1766,8 +1766,20 @@ class TestInspectAgentTask:
         assert result["reconciliation"]["attempt_bound_job"] is True
         assert result["reconciliation"]["artifact_incomplete"] is True
         assert result["reconciliation"]["worker_termination_proven"] is False
-        assert result["recovery"]["action"] == "inspect_artifacts_then_retry_with_new_task_id"
+        assert result["recovery"]["action"] == "inspect_artifacts_preserve_execution_identity"
+        assert result["recovery"]["worker_termination_proven"] is False
+        assert result["recovery"]["replacement_allowed_now"] is False
+        assert result["recovery"]["do_not_create_new_task_id"] is True
         assert "cancel_agent_task" not in result["recovery"]
+        assert "retry_agent_task" not in result["recovery"]
+        assert "run_agent" not in result["recovery"]
+        assert result["recovery"]["supervisor_recreate_after_termination"] == {
+            "project": "my-proj",
+            "source_task_id": task_id,
+            "new_task_id": "<new-task-id>",
+            "requires_supervisor_owned_contract": True,
+            "do_not_copy_source_task_json": True,
+        }
 
     def test_terminal_server_error_sidecar_is_returned_by_deep_inspection(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
@@ -1826,14 +1838,20 @@ class TestInspectAgentTask:
         }
         assert result["startup"]["useful_agent_activity_seen"] is False
         assert result["recovery"] == {
-            "action": "retry_with_new_task_id",
-            "retry_agent_task": {
+            "action": "recreate_from_supervisor_contract",
+            "worker_termination_proven": True,
+            "replacement_allowed_now": True,
+            "supervisor_recreate": {
                 "project": "my-proj",
                 "source_task_id": task_id,
-                "retry_task_id": "<new-task-id>",
-                "requires_new_task_id": True,
+                "new_task_id": "<new-task-id>",
+                "requires_supervisor_owned_contract": True,
+                "do_not_copy_source_task_json": True,
             },
-            "run_agent": {"project": "my-proj", "task_id": "<new-task-id>"},
+            "run_agent_after_recreate": {
+                "project": "my-proj",
+                "task_id": "<new-task-id>",
+            },
         }
 
     def test_terminal_status_is_finished_even_with_old_logs(self, tmp_path, monkeypatch):
@@ -2178,8 +2196,21 @@ class TestInspectAgentTask:
         assert result["runner_heartbeat_fresh"] is True
         assert result["reasoning_loop"]["detected"] is True
         assert result["reasoning_loop"]["continuation_prompt"] == "Продолжай"
-        assert result["recovery"]["action"] == "cancel_and_retry_with_continuation"
-        assert result["recovery"]["retry_agent_task"]["continuation_prompt"] == "Продолжай"
+        assert result["recovery"]["action"] == "cancel_then_recreate_from_supervisor_contract"
+        assert result["recovery"]["worker_termination_proven"] is False
+        assert result["recovery"]["replacement_allowed_now"] is False
+        assert "retry_agent_task" not in result["recovery"]
+        assert "run_agent" not in result["recovery"]
+        assert (
+            result["recovery"]["supervisor_recreate_after_termination"]["continuation_prompt"]
+            == "Продолжай"
+        )
+        assert (
+            result["recovery"]["supervisor_recreate_after_termination"][
+                "requires_supervisor_owned_contract"
+            ]
+            is True
+        )
 
     def test_recent_progress_artifact_suppresses_reasoning_loop(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
@@ -2280,8 +2311,21 @@ class TestInspectAgentTask:
         )
         assert result["trailing_colon_stall"]["progress_age_seconds"] == 500
         assert result["trailing_colon_stall"]["continuation_prompt"] == "Продолжай"
-        assert result["recovery"]["action"] == "cancel_and_retry_with_continuation"
-        assert result["recovery"]["retry_agent_task"]["continuation_prompt"] == "Продолжай"
+        assert result["recovery"]["action"] == "cancel_then_recreate_from_supervisor_contract"
+        assert result["recovery"]["worker_termination_proven"] is False
+        assert result["recovery"]["replacement_allowed_now"] is False
+        assert "retry_agent_task" not in result["recovery"]
+        assert "run_agent" not in result["recovery"]
+        assert (
+            result["recovery"]["supervisor_recreate_after_termination"]["continuation_prompt"]
+            == "Продолжай"
+        )
+        assert (
+            result["recovery"]["supervisor_recreate_after_termination"][
+                "requires_supervisor_owned_contract"
+            ]
+            is True
+        )
 
     def test_fresh_progress_artifact_suppresses_trailing_colon_stall(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
@@ -2393,8 +2437,21 @@ class TestInspectAgentTask:
         assert result["emitted_invoke_stall"]["last_invoke_line"] == '<invoke name="bash">'
         assert result["emitted_invoke_stall"]["progress_age_seconds"] == 500
         assert result["emitted_invoke_stall"]["continuation_prompt"] == "Продолжай"
-        assert result["recovery"]["action"] == "cancel_and_retry_with_continuation"
-        assert result["recovery"]["retry_agent_task"]["continuation_prompt"] == "Продолжай"
+        assert result["recovery"]["action"] == "cancel_then_recreate_from_supervisor_contract"
+        assert result["recovery"]["worker_termination_proven"] is False
+        assert result["recovery"]["replacement_allowed_now"] is False
+        assert "retry_agent_task" not in result["recovery"]
+        assert "run_agent" not in result["recovery"]
+        assert (
+            result["recovery"]["supervisor_recreate_after_termination"]["continuation_prompt"]
+            == "Продолжай"
+        )
+        assert (
+            result["recovery"]["supervisor_recreate_after_termination"][
+                "requires_supervisor_owned_contract"
+            ]
+            is True
+        )
 
     def test_fresh_artifact_suppresses_emitted_invoke_stall(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
