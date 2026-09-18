@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -13,8 +14,10 @@ from examples.mcp_server.agent_sources import ManagedSourceBundleError, ManagedS
 from examples.mcp_server.candidate_clone import (
     CandidateCloneError,
     CandidateCloneReceipt,
+    candidate_cleanup,
     prepare_candidate_clone,
 )
+from examples.mcp_server.project_registry_control import register_project
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -904,3 +907,1656 @@ def test_prepare_candidate_clone_symlink_lock_file_fails_closed(registry_fixture
         if p.name != ".locks" and p.name.startswith("candidate-")
     }
     assert candidate_dirs == set()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Candidate cleanup core (AO-022 internal)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _mock_cleanup_remote_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    module,
+    *,
+    preserved_ref: str,
+    head: str,
+    delivery_branch: str,
+    delivery: str = "absent",
+    preserved: str = "found",
+) -> None:
+    probe_type = module.RemoteRefProbe
+    status_type = module.RemoteRefStatus
+
+    def _probe(_source: Path, ref: str):
+        if ref == preserved_ref:
+            if preserved == "unknown":
+                return probe_type(status_type.UNKNOWN)
+            if preserved == "absent":
+                return probe_type(status_type.ABSENT)
+            return probe_type(status_type.FOUND, head)
+        if ref == delivery_branch:
+            if delivery == "published":
+                return probe_type(status_type.FOUND, head)
+            if delivery == "unknown":
+                return probe_type(status_type.UNKNOWN)
+            return probe_type(status_type.ABSENT)
+        return probe_type(status_type.ABSENT)
+
+    monkeypatch.setattr(module, "_probe_remote_ref", _probe)
+
+
+def _idle_guard() -> None:
+    return None
+
+
+def test_candidate_cleanup_removes_preserved_candidate_and_is_idempotent(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-success"
+    preserved_ref = "archive/candidate-cleanup-success"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    cleaned = candidate_cleanup(
+        receipt.project_id,
+        base,
+        branch,
+        "source-project",
+        preserved_ref,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+
+    assert cleaned.registry_removed is True
+    assert cleaned.directory_removed is True
+    assert cleaned.already_cleaned is False
+    assert not clone_root.exists()
+    assert receipt.project_id not in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+    repeated = candidate_cleanup(
+        receipt.project_id,
+        base,
+        branch,
+        "source-project",
+        preserved_ref,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+    assert repeated.already_cleaned is True
+    assert repeated.registry_removed is False
+    assert repeated.directory_removed is False
+
+
+def test_candidate_cleanup_requires_reference_guard(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-guard-required"
+    preserved_ref = "archive/candidate-cleanup-guard-required"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    with pytest.raises(TypeError):
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+    assert clone_root.exists()
+    assert receipt.project_id in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard="not-callable",
+        )
+    assert exc_info.value.code == "INVALID_INPUT"
+
+
+def test_candidate_cleanup_guard_denial_leaves_everything_intact(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-guard-blocked"
+    preserved_ref = "archive/candidate-cleanup-guard-blocked"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    def deny_guard() -> None:
+        raise CandidateCloneError("WORKSPACE_CONTENDED", "open PR still references the clone")
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=deny_guard,
+        )
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert clone_root.exists()
+    assert receipt.project_id in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+    tombstone_path, _tombstone_id = module._cleanup_tombstone_path(journal_root, receipt.project_id)
+    assert not tombstone_path.exists()
+
+
+def test_candidate_cleanup_rejects_symlinked_tombstone_directory(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-journal-dir-symlink"
+    preserved_ref = "archive/candidate-cleanup-journal-dir-symlink"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    journal_root.mkdir(parents=True, exist_ok=True)
+    victim_dir = tmp_path / "cleanup-journal-victim"
+    victim_dir.mkdir()
+    (journal_root / "candidate-cleanup").symlink_to(victim_dir, target_is_directory=True)
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert clone_root.exists()
+    assert receipt.project_id in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+    assert list(victim_dir.iterdir()) == []
+
+
+def test_candidate_cleanup_rejects_symlinked_final_tombstone(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-final-tombstone-symlink"
+    preserved_ref = "archive/candidate-cleanup-final-tombstone-symlink"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    tombstone_path, _ = module._cleanup_tombstone_path(journal_root, receipt.project_id)
+    tombstone_path.parent.mkdir(parents=True)
+    victim = tmp_path / "cleanup-tombstone-victim.json"
+    victim.write_text("sentinel\n", encoding="utf-8")
+    tombstone_path.symlink_to(victim)
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert victim.read_text(encoding="utf-8") == "sentinel\n"
+    assert clone_root.exists()
+    assert receipt.project_id in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+
+def test_candidate_cleanup_rejects_hardlinked_final_tombstone(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-final-tombstone-hardlink"
+    preserved_ref = "archive/candidate-cleanup-final-tombstone-hardlink"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    tombstone_path, _ = module._cleanup_tombstone_path(journal_root, receipt.project_id)
+    tombstone_path.parent.mkdir(parents=True)
+    victim = tmp_path / "cleanup-tombstone-hardlink-victim.json"
+    victim.write_text("sentinel\n", encoding="utf-8")
+    os.link(victim, tombstone_path)
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert victim.read_text(encoding="utf-8") == "sentinel\n"
+    assert clone_root.exists()
+    assert receipt.project_id in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+
+def test_candidate_cleanup_ignores_poisoned_legacy_predictable_tmp_symlink(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-random-temp"
+    preserved_ref = "archive/candidate-cleanup-random-temp"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    tombstone_path, _ = module._cleanup_tombstone_path(journal_root, receipt.project_id)
+    tombstone_path.parent.mkdir(parents=True)
+    victim = tmp_path / "cleanup-legacy-temp-victim.txt"
+    victim.write_text("sentinel\n", encoding="utf-8")
+    legacy_tmp = tombstone_path.with_name(tombstone_path.name + ".tmp")
+    legacy_tmp.symlink_to(victim)
+
+    cleaned = candidate_cleanup(
+        receipt.project_id,
+        base,
+        branch,
+        "source-project",
+        preserved_ref,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+
+    assert cleaned.directory_removed is True
+    assert not clone_root.exists()
+    assert victim.read_text(encoding="utf-8") == "sentinel\n"
+    assert legacy_tmp.is_symlink()
+    assert tombstone_path.is_file()
+
+
+def test_candidate_cleanup_calls_guard_before_unregister_and_before_rmtree(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-guard-order"
+    preserved_ref = "archive/candidate-cleanup-guard-order"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    events: list[str] = []
+    guard_calls: list[int] = []
+    original_unregister = module._unregister_candidate
+    original_rmtree = module.shutil.rmtree
+
+    def tracked_unregister(**kwargs):
+        events.append("unregister")
+        return original_unregister(**kwargs)
+
+    def tracked_rmtree(path: Path) -> None:
+        events.append("rmtree")
+        return original_rmtree(path)
+
+    def guard() -> None:
+        guard_calls.append(len(events))
+        events.append("guard")
+
+    monkeypatch.setattr(module, "_unregister_candidate", tracked_unregister)
+    monkeypatch.setattr(module.shutil, "rmtree", tracked_rmtree)
+
+    candidate_cleanup(
+        receipt.project_id,
+        base,
+        branch,
+        "source-project",
+        preserved_ref,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=guard,
+    )
+
+    assert guard_calls == [0, 2]
+    assert events == ["guard", "unregister", "guard", "rmtree"]
+
+
+def test_candidate_cleanup_guard_recheck_blocks_rmtree_then_recovers(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-guard-recheck"
+    preserved_ref = "archive/candidate-cleanup-guard-recheck"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    guard_calls: list[str] = []
+
+    def deny_recheck() -> None:
+        guard_calls.append("call")
+        if len(guard_calls) == 2:
+            raise CandidateCloneError("WORKSPACE_CONTENDED", "PR opened during cleanup")
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=deny_recheck,
+        )
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert guard_calls == ["call", "call"]
+    assert clone_root.exists()
+    assert receipt.project_id not in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+    recovered = candidate_cleanup(
+        receipt.project_id,
+        base,
+        branch,
+        "source-project",
+        preserved_ref,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+    assert recovered.directory_removed is True
+    assert recovered.registry_removed is False
+    assert not clone_root.exists()
+
+
+def test_candidate_cleanup_refuses_dirty_candidate(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-dirty"
+    preserved_ref = "archive/candidate-cleanup-dirty"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    (clone_root / "dirty.txt").write_text("keep me\n", encoding="utf-8")
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert clone_root.exists()
+    assert receipt.project_id in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+
+def test_candidate_cleanup_refuses_identity_mismatch(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    _workspace, source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-identity"
+    preserved_ref = "archive/candidate-cleanup-identity"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+    monkeypatch.setattr(
+        module,
+        "_source_root",
+        lambda _config, _project, *, workspace_root: source.resolve(),
+    )
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "different-source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+
+
+def test_candidate_cleanup_requires_exact_remote_preservation(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-unpreserved"
+    preserved_ref = "archive/candidate-cleanup-unpreserved"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+        preserved="absent",
+    )
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert exc_info.value.code == "CHECK_FAILED"
+    assert exc_info.value.retryable is True
+    assert clone_root.exists()
+    assert receipt.project_id in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+
+def test_candidate_cleanup_fails_closed_on_unknown_preservation_remote(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-preserve-unknown"
+    preserved_ref = "archive/candidate-cleanup-preserve-unknown"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+        preserved="unknown",
+    )
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert exc_info.value.code == "CHECK_FAILED"
+    assert exc_info.value.retryable is True
+
+
+def test_candidate_cleanup_fails_closed_on_unknown_delivery_remote(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-delivery-unknown"
+    preserved_ref = "archive/candidate-cleanup-delivery-unknown"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="unknown",
+    )
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert exc_info.value.code == "CHECK_FAILED"
+    assert exc_info.value.retryable is True
+    assert clone_root.exists()
+    assert receipt.project_id in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+
+def test_candidate_cleanup_refuses_published_delivery_branch(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-published"
+    preserved_ref = "archive/candidate-cleanup-published"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="published",
+    )
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert exc_info.value.retryable is False
+    assert clone_root.exists()
+    assert receipt.project_id in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+
+def test_candidate_cleanup_refuses_symlinked_candidate_root(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-symlink-root"
+    preserved_ref = "archive/candidate-cleanup-symlink-root"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    moved = workspace / "moved-candidate"
+    clone_root.rename(moved)
+    clone_root.symlink_to(moved, target_is_directory=True)
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert exc_info.value.code == "POLICY_DENIED"
+    assert moved.exists()
+
+
+def test_candidate_cleanup_rejects_symlinked_git_before_metadata(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-git-symlink"
+    preserved_ref = "archive/candidate-cleanup-git-symlink"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    git_dir = clone_root / ".git"
+    target = workspace / "cleanup-git-symlink-target"
+    git_dir.rename(target)
+    git_dir.symlink_to(target, target_is_directory=True)
+    sentinel = target / "sentinel.txt"
+    sentinel.write_text("untouched\n", encoding="utf-8")
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    def unexpected_metadata(_root: Path) -> dict:
+        raise AssertionError("candidate metadata must not be read behind a .git symlink")
+
+    def unexpected_status(_repo: Path) -> tuple[bool, str, int]:
+        raise AssertionError("candidate status must not run behind a .git symlink")
+
+    monkeypatch.setattr(module, "_read_metadata", unexpected_metadata)
+    monkeypatch.setattr(module, "_status_state", unexpected_status)
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert git_dir.is_symlink()
+    assert sentinel.read_text(encoding="utf-8") == "untouched\n"
+    assert receipt.project_id in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+
+def test_candidate_cleanup_refuses_active_task_evidence(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-active"
+    preserved_ref = "archive/candidate-cleanup-active"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    (clone_root / ".ai-bridge" / "tasks" / "live-task").mkdir(parents=True)
+    monkeypatch.setattr(module, "_status_state", lambda _root: (False, "0" * 64, 0))
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert clone_root.exists()
+
+
+def test_candidate_cleanup_refuses_registered_descendant(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-descendant"
+    preserved_ref = "archive/candidate-cleanup-descendant"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    (clone_root / "child").mkdir()
+    register_project(
+        config_dir=config_dir,
+        journal_root=journal_root,
+        project_id="candidate-child",
+        root=f".mcp-candidate-clones/{receipt.project_id}/child",
+        project_type="candidate-child",
+        parent=receipt.project_id,
+        persist_to_source=True,
+    )
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert clone_root.exists()
+
+
+def test_candidate_cleanup_reconciles_missing_dir_still_registered(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-missing-dir"
+    preserved_ref = "archive/candidate-cleanup-missing-dir"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    shutil.rmtree(clone_root)
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    cleaned = candidate_cleanup(
+        receipt.project_id,
+        base,
+        branch,
+        "source-project",
+        preserved_ref,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+    assert cleaned.registry_removed is True
+    assert cleaned.directory_removed is False
+    assert cleaned.already_cleaned is False
+    assert receipt.project_id not in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+    repeated = candidate_cleanup(
+        receipt.project_id,
+        base,
+        branch,
+        "source-project",
+        preserved_ref,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+    assert repeated.already_cleaned is True
+    assert repeated.registry_removed is False
+    assert repeated.directory_removed is False
+
+
+def test_candidate_cleanup_complete_tombstone_reconciles_reappeared_registry_entry(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-complete-registry-replay"
+    preserved_ref = "archive/candidate-cleanup-complete-registry-replay"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    shutil.rmtree(clone_root)
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    first = candidate_cleanup(
+        receipt.project_id,
+        base,
+        branch,
+        "source-project",
+        preserved_ref,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+    assert first.registry_removed is True
+    assert first.directory_removed is False
+
+    registry_path = config_dir / "projects.yaml"
+    registry_path.write_text(
+        registry_path.read_text(encoding="utf-8")
+        + (
+            f"  {receipt.project_id}:\n"
+            f"    root: .mcp-candidate-clones/{receipt.project_id}\n"
+            "    type: candidate-clone\n"
+            "    description: simulated stale replay\n"
+            "    tags: [candidate]\n"
+        ),
+        encoding="utf-8",
+    )
+    reset_registry()
+    assert receipt.project_id in registry_path.read_text(encoding="utf-8")
+
+    reconciled = candidate_cleanup(
+        receipt.project_id,
+        base,
+        branch,
+        "source-project",
+        preserved_ref,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+
+    assert reconciled.registry_removed is True
+    assert reconciled.directory_removed is False
+    assert reconciled.already_cleaned is False
+    assert receipt.project_id not in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+
+def test_candidate_cleanup_recovers_missing_dir_after_unregister_before_complete_tombstone(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-missing-dir-post-unregister"
+    preserved_ref = "archive/candidate-cleanup-missing-dir-post-unregister"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    shutil.rmtree(clone_root)
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    real_write = module._write_cleanup_tombstone
+    failed_complete = False
+
+    def fail_first_complete(path: Path, data: dict[str, object]) -> None:
+        nonlocal failed_complete
+        if data.get("phase") == "complete" and not failed_complete:
+            failed_complete = True
+            raise CandidateCloneError(
+                "TOOL_EXECUTION_FAILED",
+                "simulated complete tombstone interruption",
+                retryable=True,
+            )
+        real_write(path, data)
+
+    monkeypatch.setattr(module, "_write_cleanup_tombstone", fail_first_complete)
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+
+    assert exc_info.value.code == "TOOL_EXECUTION_FAILED"
+    assert receipt.project_id not in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+    tombstone_path, _ = module._cleanup_tombstone_path(journal_root, receipt.project_id)
+    assert module._read_cleanup_tombstone(tombstone_path)["phase"] == "prepared"
+
+    monkeypatch.setattr(module, "_write_cleanup_tombstone", real_write)
+    recovered = candidate_cleanup(
+        receipt.project_id,
+        base,
+        branch,
+        "source-project",
+        preserved_ref,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+
+    assert recovered.registry_removed is False
+    assert recovered.directory_removed is False
+    assert recovered.already_cleaned is True
+    assert module._read_cleanup_tombstone(tombstone_path)["phase"] == "complete"
+
+
+def test_candidate_cleanup_recovers_missing_dir_with_prepared_tombstone(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-prepared-tombstone"
+    preserved_ref = "archive/candidate-cleanup-prepared-tombstone"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+    real_unregister = module._unregister_candidate
+
+    def fail_unregister(**kwargs):
+        raise CandidateCloneError("TOOL_EXECUTION_FAILED", "simulated unregister interruption", retryable=True)
+
+    monkeypatch.setattr(module, "_unregister_candidate", fail_unregister)
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert exc_info.value.code == "TOOL_EXECUTION_FAILED"
+    assert clone_root.exists()
+    assert receipt.project_id in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+    monkeypatch.setattr(module, "_unregister_candidate", real_unregister)
+    shutil.rmtree(clone_root)
+    cleaned = candidate_cleanup(
+        receipt.project_id,
+        base,
+        branch,
+        "source-project",
+        preserved_ref,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+    assert cleaned.registry_removed is True
+    assert cleaned.directory_removed is False
+    assert not clone_root.exists()
+    assert receipt.project_id not in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+
+def test_candidate_cleanup_recovers_after_unregister_before_delete(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-recovery"
+    preserved_ref = "archive/candidate-cleanup-recovery"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+    original_rmtree = module.shutil.rmtree
+
+    def _interrupt(_path: Path) -> None:
+        raise OSError("simulated interruption")
+
+    monkeypatch.setattr(module.shutil, "rmtree", _interrupt)
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert exc_info.value.code == "TOOL_EXECUTION_FAILED"
+    assert exc_info.value.retryable is True
+    assert clone_root.exists()
+    assert receipt.project_id not in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+    monkeypatch.setattr(module.shutil, "rmtree", original_rmtree)
+    recovered = candidate_cleanup(
+        receipt.project_id,
+        base,
+        branch,
+        "source-project",
+        preserved_ref,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+    assert recovered.directory_removed is True
+    assert recovered.registry_removed is False
+    assert not clone_root.exists()
+
+
+def test_candidate_cleanup_recovers_registry_removed_then_stops_new_dirty(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-recovery-dirty"
+    preserved_ref = "archive/candidate-cleanup-recovery-dirty"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    def _interrupt(_path: Path) -> None:
+        raise OSError("simulated interruption")
+
+    monkeypatch.setattr(module.shutil, "rmtree", _interrupt)
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert exc_info.value.code == "TOOL_EXECUTION_FAILED"
+    assert receipt.project_id not in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+    (clone_root / "newly-dirty.txt").write_text("dirties after registry removal\n", encoding="utf-8")
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert clone_root.exists()
+    assert (clone_root / "newly-dirty.txt").read_text(encoding="utf-8") == (
+        "dirties after registry removal\n"
+    )
+
+
+def test_candidate_cleanup_recovers_registry_removed_then_stops_new_active_evidence(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-recovery-active"
+    preserved_ref = "archive/candidate-cleanup-recovery-active"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    def _interrupt(_path: Path) -> None:
+        raise OSError("simulated interruption")
+
+    monkeypatch.setattr(module.shutil, "rmtree", _interrupt)
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert exc_info.value.code == "TOOL_EXECUTION_FAILED"
+    assert receipt.project_id not in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+    (clone_root / ".ai-bridge" / "tasks" / "live-task").mkdir(parents=True)
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert clone_root.exists()
+    assert (clone_root / ".ai-bridge" / "tasks" / "live-task").is_dir()
+
+
+def test_candidate_cleanup_holds_lineage_lock_across_registry_and_delete(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-lock"
+    preserved_ref = "archive/candidate-cleanup-lock"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    lock_events: list[object] = []
+    real_lock = module._lineage_lock
+
+    class _Recorder:
+        def __init__(self, cm):
+            self._cm = cm
+
+        def __enter__(self):
+            lock_events.append("enter")
+            return self._cm.__enter__()
+
+        def __exit__(self, *args):
+            lock_events.append("exit")
+            return self._cm.__exit__(*args)
+
+    def rec_lock(workspace_root: Path, project: str, branch: str):
+        lock_events.append(("lock", project, branch))
+        return _Recorder(real_lock(workspace_root, project, branch))
+
+    monkeypatch.setattr(module, "_lineage_lock", rec_lock)
+
+    original_rmtree = module.shutil.rmtree
+
+    def guarded_rmtree(path: Path) -> None:
+        assert lock_events[-1] == "enter"
+        lock_events.append("rmtree")
+        return original_rmtree(path)
+
+    monkeypatch.setattr(module.shutil, "rmtree", guarded_rmtree)
+
+    candidate_cleanup(
+        receipt.project_id,
+        base,
+        branch,
+        "source-project",
+        preserved_ref,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+
+    assert ("lock", "source-project", branch) in lock_events
+    assert lock_events.index("enter") < lock_events.index("rmtree")
+    assert lock_events.index("rmtree") < lock_events.index("exit")
+
+
+def test_candidate_cleanup_serializes_concurrent_callers(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-concurrent"
+    preserved_ref = "archive/candidate-cleanup-concurrent"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    rmtree_calls: list[Path] = []
+    original_rmtree = module.shutil.rmtree
+
+    def counting_rmtree(path: Path) -> None:
+        rmtree_calls.append(path)
+        return original_rmtree(path)
+
+    monkeypatch.setattr(module.shutil, "rmtree", counting_rmtree)
+
+    def call(_: int):
+        return candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(call, range(2)))
+
+    assert len(rmtree_calls) == 1
+    assert len({result.tombstone_id for result in results}) == 1
+    assert sum(result.directory_removed for result in results) == 1
+    assert sum(result.already_cleaned for result in results) == 1
+    assert not (workspace / ".mcp-candidate-clones" / receipt.project_id).exists()
+
+
+def test_candidate_cleanup_releases_lineage_for_prepare(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-relock"
+    preserved_ref = "archive/candidate-cleanup-relock"
+    first = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / first.project_id
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+    candidate_cleanup(
+        first.project_id,
+        base,
+        branch,
+        "source-project",
+        preserved_ref,
+        config_dir=config_dir,
+        journal_root=journal_root,
+        reference_guard=_idle_guard,
+    )
+    assert not clone_root.exists()
+
+    second = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    second_root = workspace / ".mcp-candidate-clones" / second.project_id
+    assert second_root.is_dir()
+    assert _git(second_root, "rev-parse", "--abbrev-ref", "HEAD") == branch
+
+
+def test_candidate_cleanup_never_registered_fails_closed_without_guard(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-never-registered"
+    preserved_ref = "archive/candidate-cleanup-never-registered"
+    never_project_id = "candidate-never-created"
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+    guard_calls: list[int] = []
+
+    def guard() -> None:
+        guard_calls.append(1)
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            never_project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=guard,
+        )
+    assert exc_info.value.code == "PROJECT_NOT_FOUND"
+    assert guard_calls == []
+    assert never_project_id not in (config_dir / "projects.yaml").read_text(encoding="utf-8")
+    assert not (workspace / ".mcp-candidate-clones" / never_project_id).exists()
