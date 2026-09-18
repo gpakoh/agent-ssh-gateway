@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -39,6 +40,9 @@ from examples.mcp_server.agent_sources import (
 from examples.mcp_server.agent_tasks import (
     AttemptConflictError,
     AttemptStateError,
+    build_gate_specs,
+    build_gates_markdown,
+    resolve_gate_specs,
     resolve_task_source_contract,
     validate_workflow_phase,
 )
@@ -1243,7 +1247,10 @@ def _opencode_startup_watchdog_script_lines(
     runtime_timeout_seconds: int,
 ) -> list[str]:
     prompt = (
-        "Read the plan at $td/current-plan.md and execute it fully. "
+        "Read the plan at $td/current-plan.md and the acceptance gates at "
+        "$td/GATES.md, then execute the scoped work fully. "
+        "Use the gates to organize evidence, but do not edit or weaken "
+        "task.json/GATES.md and do not declare the finding or project closed/ready. "
         "Save the implementation diff to $td/implementation-diff.patch. "
         "Update $td/agent-status.md as you complete each step. "
         "Do not commit, do not push, do not create branches."
@@ -1508,6 +1515,8 @@ def _supervisor_postrun_script_lines(
     allowed_files: list[str],
     forbidden_files: list[str],
     required_checks: list[str],
+    gates: list[dict[str, Any]] | None = None,
+    task_contract_sha256: str | None = None,
     parent_root: str | None = None,
 ) -> list[str]:
     """Build fail-closed post-run evidence, scope and check enforcement.
@@ -1522,6 +1531,27 @@ def _supervisor_postrun_script_lines(
     before the worker starts, so an illicit worker commit cannot make its
     changes disappear from the supervisor diff.
     """
+    gate_contract = [
+        dict(gate)
+        for gate in (
+            gates
+            if gates is not None
+            else build_gate_specs(
+                required_checks=required_checks,
+                acceptance_criteria=[],
+            )
+        )
+    ]
+    gates_json = json.dumps(
+        gate_contract, sort_keys=True, separators=(",", ":")
+    )
+    if task_contract_sha256 is not None and (
+        re.fullmatch(r"[0-9a-f]{64}", task_contract_sha256) is None
+    ):
+        raise ValueError(
+            "task_contract_sha256 must be a lowercase SHA-256 hex digest"
+        )
+    task_contract_digest = task_contract_sha256 or ""
     allowed_json = json.dumps(allowed_files, separators=(",", ":"))
     forbidden_json = json.dumps(forbidden_files, separators=(",", ":"))
     parent_post_lines: list[str] = []
@@ -1567,6 +1597,7 @@ def _supervisor_postrun_script_lines(
         "CHECKS_RC=0",
         "SCOPE_RAN=0",
         "CHECKS_RAN=0",
+        "GATE_CHECK_RESULTS=",
         'SUPERVISOR_INDEX="$td/.supervisor-index"',
         'rm -f "$SUPERVISOR_INDEX" "$td/changed-files.z" "$td/scope-violations.json"',
         'POST_HEAD=$(git rev-parse HEAD 2>/dev/null || true)',
@@ -1711,15 +1742,17 @@ def _supervisor_postrun_script_lines(
         "  fi",
     ]
 
-    for check in required_checks:
+    for check_index, check in enumerate(required_checks):
         lines.extend(
             [
                 '  if [ "$CHECKS_RC" -eq 0 ]; then',
                 f'    echo {_shell_escape("$ " + check)} >> "$td/required-checks.log"',
                 f'    if ( cd "$CHECK_ROOT" && env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV sh -c {_shell_escape(check)} ) >> "$td/required-checks.log" 2>&1; then',
                 '      echo "PASS" >> "$td/required-checks.log"',
+                f'      GATE_CHECK_RESULTS="${{GATE_CHECK_RESULTS}}{check_index}=0;"',
                 "    else",
                 "      CHECKS_RC=$?",
+                f'      GATE_CHECK_RESULTS="${{GATE_CHECK_RESULTS}}{check_index}=$CHECKS_RC;"',
                 '      echo "FAIL exit=$CHECKS_RC" >> "$td/required-checks.log"',
                 "    fi",
                 "  fi",
@@ -1744,6 +1777,88 @@ def _supervisor_postrun_script_lines(
             # and escape detection. PARENT_RC is intentionally not reset: an
             # earlier worker-side contamination remains sticky.
             *parent_post_lines,
+            f'TASK_CONTRACT_DIGEST={_shell_escape(task_contract_digest)}',
+            'if [ -n "$TASK_CONTRACT_DIGEST" ]; then',
+            f'  GATE_LEDGER_PAYLOAD=$(python3 - {_shell_escape(gates_json)} "$TASK_CONTRACT_DIGEST" "$RC" "$EVIDENCE_RC" "$SCOPE_RAN" "$SCOPE_RC" "$CHECKS_RAN" "$CHECKS_RC" "$PARENT_RC" "$GATE_CHECK_RESULTS" <<\'GATE_LEDGER_EOF\'',
+            "import hashlib, json, sys",
+            "",
+            "gates_raw, task_digest, worker_rc_raw, evidence_rc_raw, scope_ran_raw, scope_rc_raw, checks_ran_raw, checks_rc_raw, parent_rc_raw, check_results_raw = sys.argv[1:]",
+            "gates = json.loads(gates_raw)",
+            "worker_rc = int(worker_rc_raw)",
+            "evidence_rc = int(evidence_rc_raw)",
+            "scope_ran = int(scope_ran_raw)",
+            "scope_rc = int(scope_rc_raw)",
+            "checks_ran = int(checks_ran_raw)",
+            "checks_rc = int(checks_rc_raw)",
+            "parent_rc = int(parent_rc_raw)",
+            "check_results = {}",
+            "for item in check_results_raw.split(';'):",
+            "    if not item:",
+            "        continue",
+            "    index_raw, rc_raw = item.split('=', 1)",
+            "    check_results[int(index_raw)] = int(rc_raw)",
+            "entries = []",
+            "machine_met = True",
+            "for gate in gates:",
+            "    entry = {",
+            "        'id': gate['id'],",
+            "        'kind': gate['kind'],",
+            "        'owner': gate['owner'],",
+            "        'outcome': gate['outcome'],",
+            "    }",
+            "    kind = gate['kind']",
+            "    if kind == 'scope':",
+            "        if not scope_ran:",
+            "            status = 'skipped'",
+            "            rc = None",
+            "        else:",
+            "            status = 'passed' if evidence_rc == 0 and scope_rc == 0 and parent_rc == 0 else 'failed'",
+            "            rc = evidence_rc or scope_rc or parent_rc",
+            "        entry['status'] = status",
+            "        entry['exit_code'] = rc",
+            "        machine_met = machine_met and status == 'passed'",
+            "    elif kind == 'execution':",
+            "        status = 'passed' if worker_rc == 0 else 'failed'",
+            "        entry['status'] = status",
+            "        entry['exit_code'] = worker_rc",
+            "        machine_met = machine_met and status == 'passed'",
+            "    elif kind == 'required_check':",
+            "        index = int(gate['check_index'])",
+            "        entry['check_index'] = index",
+            "        entry['check_sha256'] = gate['check_sha256']",
+            "        if not checks_ran or index not in check_results:",
+            "            status = 'skipped'",
+            "            rc = None",
+            "        else:",
+            "            rc = check_results[index]",
+            "            status = 'passed' if rc == 0 else ('warning' if rc == 127 else 'failed')",
+            "        entry['status'] = status",
+            "        entry['exit_code'] = rc",
+            "        machine_met = machine_met and status == 'passed'",
+            "    else:",
+            "        entry['status'] = 'pending_supervisor'",
+            "    entries.append(entry)",
+            "canonical = json.dumps(gates, sort_keys=True, separators=(',', ':')).encode('utf-8')",
+            "payload = {",
+            "    'version': 1,",
+            "    'generated_by': 'gateway-runner',",
+            "    'gate_contract_sha256': hashlib.sha256(canonical).hexdigest(),",
+            "    'task_contract_sha256': task_digest,",
+            "    'machine_gates_met': machine_met,",
+            "    'acceptance_state': 'needs_supervisor' if machine_met else 'machine_unmet',",
+            "    'gates': entries,",
+            "}",
+            "print(json.dumps(payload, sort_keys=True, separators=(',', ':')))",
+            "GATE_LEDGER_EOF",
+            "  )",
+            "  GATE_LEDGER_RC=$?",
+            '  if [ "$GATE_LEDGER_RC" -eq 0 ] && [ -n "$GATE_LEDGER_PAYLOAD" ]; then',
+            '    runner_artifact_write_line "$td/gate-ledger.json" "$GATE_LEDGER_PAYLOAD"',
+            "  else",
+            "    EVIDENCE_RC=1",
+            '    runner_artifact_append_line "$td/agent-status.md" "Supervisor gate-ledger generation FAILED"',
+            "  fi",
+            "fi",
             "FINAL_RC=$RC",
             'if [ "$EVIDENCE_RC" -ne 0 ]; then FINAL_RC=70; fi',
             'if [ "$SCOPE_RC" -ne 0 ]; then FINAL_RC=71; fi',
@@ -1860,6 +1975,17 @@ def _managed_secure_copy_lines() -> list[str]:
     ]
 
 
+def _task_gate_binding(
+    task_json: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str]:
+    """Return validated gates plus the canonical full task-contract digest."""
+    gates = resolve_gate_specs(task_json)
+    canonical = json.dumps(
+        task_json, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return gates, hashlib.sha256(canonical).hexdigest()
+
+
 def _build_opencode_script(
     td: str,
     task_id: str,
@@ -1869,6 +1995,8 @@ def _build_opencode_script(
     allowed_files: list[str] | None = None,
     forbidden_files: list[str] | None = None,
     required_checks: list[str] | None = None,
+    gates: list[dict[str, Any]] | None = None,
+    task_contract_sha256: str | None = None,
     managed_clone: bool = False,
     base_ref: str | None = None,
     managed_source_path: str | None = None,
@@ -1907,6 +2035,28 @@ def _build_opencode_script(
     allowed_files = list(allowed_files or [])
     forbidden_files = list(forbidden_files or [])
     required_checks = list(required_checks or [])
+    gate_contract = [
+        dict(gate)
+        for gate in (
+            gates
+            if gates is not None
+            else build_gate_specs(
+                required_checks=required_checks,
+                acceptance_criteria=[],
+            )
+        )
+    ]
+    canonical_gates_markdown = build_gates_markdown(
+        task_id,
+        gate_contract,
+        required_checks=required_checks,
+    )
+    if task_contract_sha256 is not None and (
+        re.fullmatch(r"[0-9a-f]{64}", task_contract_sha256) is None
+    ):
+        raise ValueError(
+            "task_contract_sha256 must be a lowercase SHA-256 hex digest"
+        )
     if managed_clone and not worktree_path:
         raise ValueError("managed_clone requires worktree_path")
     if managed_clone and not os.path.isabs(td):
@@ -2214,11 +2364,13 @@ def _build_opencode_script(
         '# later supervisor logic writes or trusts before any post-run processing.',
         'runner_artifact_write_line "$td/agent-status.md" "Status: supervisor-postrun"',
         'runner_artifact_write "$td/agent-report.md" ""',
+        f'runner_artifact_write "$td/GATES.md" {_shell_escape(canonical_gates_markdown)}',
         'runner_artifact_write_line "$td/base-head.txt" "$BASE_HEAD"',
         'runner_artifact_remove "$td/implementation-diff.patch"',
         'runner_artifact_remove "$td/changed-files.z"',
         'runner_artifact_remove "$td/scope-violations.json"',
         'runner_artifact_remove "$td/required-checks.log"',
+        'runner_artifact_remove "$td/gate-ledger.json"',
         'runner_artifact_remove "$td/supervisor-verdict.json"',
         'runner_artifact_remove "$td/parent-head-after.txt"',
         'runner_artifact_remove "$td/parent-index-tree-after.txt"',
@@ -2238,6 +2390,8 @@ def _build_opencode_script(
             allowed_files,
             forbidden_files,
             required_checks,
+            gate_contract,
+            task_contract_sha256=task_contract_sha256,
             parent_root=project_root if worktree_path and not managed_clone else None,
         )
     )
@@ -2543,6 +2697,7 @@ def project_run_agent(
                     raise ValueError("MCP_AGENT_SOURCE_ROOT is required for managed OpenCode execution")
             forbidden_files = _task_string_list(task_json, "forbidden_files")
             required_checks = _task_string_list(task_json, "required_checks")
+            gates, task_contract_digest = _task_gate_binding(task_json)
         except (TypeError, ValueError) as exc:
             return {
                 "task_id": task_id,
@@ -2563,6 +2718,8 @@ def project_run_agent(
             allowed_files=allowed_files,
             forbidden_files=forbidden_files,
             required_checks=required_checks,
+            gates=gates,
+            task_contract_sha256=task_contract_digest,
             managed_clone=managed_clone,
             base_ref=source_ref,
             managed_source_path=managed_source_path,
