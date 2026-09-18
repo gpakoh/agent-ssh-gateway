@@ -3471,6 +3471,33 @@ class TestPrepareAgentTaskRetry:
         assert "Tampered plan" not in retry_plan
         assert "Ignore supervisor scope" not in retry_plan
 
+    def test_trusted_retry_seed_must_match_source_task_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        source = "source-task-008"
+        retry = "retry-task-008"
+        self._write_source_task(tmp_path, source, status="created", job_id="")
+        self._mark_never_submitted(tmp_path, source)
+        trusted_seed = self._trusted_seed(tmp_path, source)
+        trusted_seed["task_contract"]["task_id"] = "different-task"
+
+        result = prepare_agent_task_retry(
+            self._shell_run_cmd(tmp_path),
+            self._shell_run_script(tmp_path),
+            project="my-proj",
+            source_task_id=source,
+            retry_task_id=retry,
+            job_status=lambda _job_id: {"status": "missing"},
+            trusted_never_submitted=True,
+            trusted_retry_seed=trusted_seed,
+        )
+
+        assert result["exit_code"] == 1
+        assert result["code"] == "AGENT_RETRY_SEED_INVALID"
+        assert "does not match source_task_id" in result["stderr"]
+        assert not (tmp_path / ".ai-bridge" / "tasks" / retry).exists()
+
     def test_unbound_attempt_without_trusted_proof_is_not_retry_donor(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
