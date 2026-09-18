@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,6 +42,10 @@ _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,160}$")
 _REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,200}$")
 _PROTECTED_BRANCHES = frozenset({"master", "main"})
 _METADATA_FILENAME = "mcp-candidate-clone.json"
+_CANDIDATE_CLONES_DIRNAME = ".mcp-candidate-clones"
+_LINEAGE_LOCKS_DIRNAME = ".locks"
+_LINEAGE_LOCK_TIMEOUT_S = 30.0
+_LINEAGE_LOCK_POLL_S = 0.05
 _DEFAULT_GIT_NAME = "MCP Control Plane"
 _DEFAULT_GIT_EMAIL = "control-plane@gateway.invalid"
 _GIT_DIAGNOSTIC_LIMIT = 1200
@@ -427,15 +437,35 @@ def _workspace_root(config_dir: Path) -> Path:
     return resolved
 
 
-def _source_root(config_dir: Path, project: str) -> Path:
+def _candidate_clones_root(workspace_root: Path) -> Path:
+    return workspace_root / _CANDIDATE_CLONES_DIRNAME
+
+
+def _source_root(config_dir: Path, project: str, *, workspace_root: Path) -> Path:
     try:
         info = get_registry(config_dir / "projects.yaml").project_info(project)
         raw = info.get("root")
         if not isinstance(raw, str) or not raw.strip():
             raise ValueError("missing root")
         root = Path(raw).resolve(strict=True)
+    except CandidateCloneError:
+        raise
     except Exception as exc:
         raise _fail("PROJECT_NOT_FOUND", "source project is not registered or unavailable") from exc
+
+    project_type = info.get("type") if isinstance(info, dict) else None
+    clones_root = _candidate_clones_root(workspace_root).resolve(strict=False)
+    try:
+        under_candidate_root = root.relative_to(clones_root) is not None
+    except ValueError:
+        under_candidate_root = False
+    if project_type == "candidate-clone" or under_candidate_root:
+        raise _fail(
+            "CANDIDATE_SOURCE_DENIED",
+            "candidate clones cannot be used as candidate-clone sources",
+            retryable=False,
+            details={"source_project": project},
+        )
     if not (root / ".git").exists():
         raise _fail("INVALID_INPUT", "source project must be a git worktree")
     return root
@@ -493,81 +523,250 @@ def _register_candidate(
         raise _fail(exc.code, exc.message) from exc
 
 
-def prepare_candidate_clone(
+def _lineage_lock_name(project: str, branch: str) -> str:
+    digest = hashlib.sha256(f"{project}\0{branch}".encode()).hexdigest()[:16]
+    return f"{_slug(project, limit=32)}-{_slug(branch, limit=48)}-{digest}.lock"
+
+
+@contextlib.contextmanager
+def _lineage_lock(workspace_root: Path, project: str, branch: str) -> Iterator[None]:
+    """Serialize one source-project/branch lineage without following symlinks."""
+    clones_root = _candidate_clones_root(workspace_root)
+    try:
+        clones_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise _fail(
+            "CANDIDATE_LOCK_FAILED",
+            "candidate lineage lock storage could not be prepared",
+            retryable=True,
+        ) from exc
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        clones_fd = os.open(str(clones_root), directory_flags | nofollow)
+    except OSError as exc:
+        raise _fail(
+            "CANDIDATE_LOCK_FAILED",
+            "candidate lineage lock storage is unsafe or unavailable",
+            retryable=True,
+        ) from exc
+
+    locks_fd: int | None = None
+    lock_fd: int | None = None
+    acquired = False
+    try:
+        try:
+            os.mkdir(_LINEAGE_LOCKS_DIRNAME, 0o700, dir_fd=clones_fd)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise _fail(
+                "CANDIDATE_LOCK_FAILED",
+                "candidate lineage lock directory could not be prepared",
+                retryable=True,
+            ) from exc
+
+        try:
+            locks_fd = os.open(
+                _LINEAGE_LOCKS_DIRNAME,
+                directory_flags | nofollow,
+                dir_fd=clones_fd,
+            )
+        except OSError as exc:
+            raise _fail(
+                "CANDIDATE_LOCK_FAILED",
+                "candidate lineage lock directory is unsafe or unavailable",
+                retryable=True,
+            ) from exc
+
+        lock_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | nofollow
+        try:
+            lock_fd = os.open(
+                _lineage_lock_name(project, branch),
+                lock_flags,
+                0o600,
+                dir_fd=locks_fd,
+            )
+        except OSError as exc:
+            raise _fail(
+                "CANDIDATE_LOCK_FAILED",
+                "candidate lineage lock is unsafe or unavailable",
+                retryable=True,
+            ) from exc
+
+        try:
+            lock_stat = os.fstat(lock_fd)
+        except OSError as exc:
+            raise _fail(
+                "CANDIDATE_LOCK_FAILED",
+                "candidate lineage lock could not be inspected",
+                retryable=True,
+            ) from exc
+        if not stat.S_ISREG(lock_stat.st_mode):
+            raise _fail(
+                "CANDIDATE_LOCK_FAILED",
+                "candidate lineage lock is not a regular file",
+                retryable=False,
+            )
+
+        deadline = time.monotonic() + _LINEAGE_LOCK_TIMEOUT_S
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise _fail(
+                        "CANDIDATE_LOCK_TIMEOUT",
+                        "candidate lineage lock could not be acquired",
+                        retryable=True,
+                    ) from None
+                time.sleep(_LINEAGE_LOCK_POLL_S)
+            except OSError as exc:
+                raise _fail(
+                    "CANDIDATE_LOCK_FAILED",
+                    "candidate lineage lock could not be acquired",
+                    retryable=True,
+                ) from exc
+        yield
+    finally:
+        if lock_fd is not None:
+            if acquired:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            os.close(lock_fd)
+        if locks_fd is not None:
+            os.close(locks_fd)
+        os.close(clones_fd)
+
+
+def _lineage_scan_failure(message: str) -> CandidateCloneError:
+    return _fail("CANDIDATE_LINEAGE_SCAN_FAILED", message, retryable=True)
+
+
+def _read_candidate_metadata(candidate_dir: Path) -> dict[str, Any]:
+    git_dir = candidate_dir / ".git"
+    metadata_path = git_dir / _METADATA_FILENAME
+    try:
+        git_stat = git_dir.lstat()
+        metadata_stat = metadata_path.lstat()
+    except OSError as exc:
+        raise _lineage_scan_failure("candidate lineage metadata is unavailable") from exc
+    if stat.S_ISLNK(git_stat.st_mode) or not stat.S_ISDIR(git_stat.st_mode):
+        raise _lineage_scan_failure("candidate lineage git metadata is unsafe")
+    if stat.S_ISLNK(metadata_stat.st_mode) or not stat.S_ISREG(metadata_stat.st_mode):
+        raise _lineage_scan_failure("candidate lineage metadata is unsafe")
+    try:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise _lineage_scan_failure("candidate lineage metadata cannot be read") from exc
+    if not isinstance(data, dict):
+        raise _lineage_scan_failure("candidate lineage metadata is malformed")
+    if data.get("project_id") != candidate_dir.name:
+        raise _lineage_scan_failure("candidate lineage metadata identity does not match its directory")
+    if not isinstance(data.get("source_project"), str) or not isinstance(data.get("branch"), str):
+        raise _lineage_scan_failure("candidate lineage metadata is incomplete")
+    return data
+
+
+def _find_lineage_claimant(
+    workspace_root: Path,
+    *,
+    source_project: str,
+    branch: str,
+    exclude_project_id: str,
+) -> dict[str, Any] | None:
+    clones_root = _candidate_clones_root(workspace_root)
+    try:
+        with os.scandir(clones_root) as entries:
+            for entry in entries:
+                if entry.name == _LINEAGE_LOCKS_DIRNAME or entry.name == exclude_project_id:
+                    continue
+                if not entry.name.startswith("candidate-"):
+                    continue
+                try:
+                    if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                        raise _lineage_scan_failure("candidate lineage entry is unsafe")
+                except OSError as exc:
+                    raise _lineage_scan_failure("candidate lineage entry cannot be inspected") from exc
+                metadata = _read_candidate_metadata(Path(entry.path))
+                if metadata.get("source_project") == source_project and metadata.get("branch") == branch:
+                    return metadata
+    except CandidateCloneError:
+        raise
+    except OSError as exc:
+        raise _lineage_scan_failure("candidate lineage directory cannot be scanned") from exc
+    return None
+
+
+def _safe_claimant_details(claimant: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    project_id = claimant.get("project_id")
+    if isinstance(project_id, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", project_id):
+        safe["existing_project_id"] = project_id
+    base_sha = claimant.get("base_sha")
+    if isinstance(base_sha, str) and re.fullmatch(r"[0-9a-f]{40}", base_sha):
+        safe["existing_base_sha"] = base_sha
+    head = claimant.get("head")
+    if isinstance(head, str) and re.fullmatch(r"[0-9a-f]{40}", head):
+        safe["existing_head"] = head
+    return safe
+
+
+def _prepare_candidate_locked(
+    *,
+    workspace_root: Path,
+    source_root: Path,
     project: str,
     branch: str,
-    base_ref: str | None = None,
-    *,
+    base_ref: str | None,
+    requested_ref: str,
+    base_sha: str,
+    local_has_base: bool,
     config_dir: Path,
     journal_root: Path,
 ) -> CandidateCloneReceipt:
-    """Create or recover one durable writeable clone and register it as a project."""
-    if not isinstance(project, str) or not project.strip():
-        raise _fail("INVALID_INPUT", "project must be a non-empty string")
-    project = project.strip()
-    branch = _validate_branch(branch)
-    base_ref = _validate_ref(base_ref)
-    config_dir = config_dir.resolve()
-    journal_root = journal_root.resolve()
-    workspace_root = _workspace_root(config_dir)
-    source_root = _source_root(config_dir, project)
-    try:
-        source_root.relative_to(workspace_root)
-    except ValueError as exc:
-        raise _fail("POLICY_DENIED", "source project root is outside workspace registry root") from exc
-
-    requested_ref = base_ref or "HEAD"
-    local_sha = _local_commit_or_none(source_root, requested_ref)
-    remote_sha = _remote_ref_sha(source_root, requested_ref) if base_ref else None
-    if base_ref and remote_sha is None and local_sha is None:
-        raise _fail(
-            "SOURCE_REF_NOT_AVAILABLE",
-            "base ref is unavailable in both trusted remote and local source",
-            retryable=True,
-            details={"base_ref": requested_ref},
-        )
-    base_sha = remote_sha or local_sha
-    if base_sha is None:
-        raise _fail(
-            "SOURCE_REPO_STALE",
-            "source repository cannot resolve the requested base commit",
-            retryable=True,
-            details={"base_ref": requested_ref},
-        )
-    if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
-        raise _fail("SOURCE_REF_NOT_AVAILABLE", "base ref did not resolve to a commit")
-    try:
-        source_is_shallow = _source_is_shallow(source_root)
-    except ManagedSourceBundleError as exc:
-        ownership_error = _source_ownership_error(
-            operation="inspect source repository completeness",
-            exc=exc,
-            source_root=source_root,
-        )
-        if ownership_error is not None:
-            raise ownership_error from exc
-        raise _fail(
-            "SOURCE_REPO_STALE",
-            "source repository completeness could not be inspected",
-            retryable=True,
-            details={
-                "base_ref": requested_ref,
-                "base_sha": base_sha,
-                "source_cause": classify_source_failure_message(str(exc)).value,
-            },
-        ) from exc
-    local_has_base = (
-        _local_commit_or_none(source_root, base_sha) == base_sha
-        and not source_is_shallow
-    )
     project_id = _project_id(project, branch, base_sha)
-    candidate_root = workspace_root / ".mcp-candidate-clones" / project_id
+    candidate_root = _candidate_clones_root(workspace_root) / project_id
     relative_root = candidate_root.relative_to(workspace_root).as_posix()
-    recovered = candidate_root.exists()
+    try:
+        candidate_stat = candidate_root.lstat()
+    except FileNotFoundError:
+        candidate_stat = None
+    except OSError as exc:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "candidate clone path cannot be inspected safely",
+            retryable=True,
+        ) from exc
+    recovered = candidate_stat is not None
 
-    if candidate_root.exists():
-        if not candidate_root.is_dir() or not (candidate_root / ".git").exists():
-            raise _fail("WORKSPACE_CONTENDED", "candidate clone path exists but is not a git worktree", retryable=False)
+    if candidate_stat is not None:
+        if stat.S_ISLNK(candidate_stat.st_mode) or not stat.S_ISDIR(candidate_stat.st_mode):
+            raise _fail(
+                "WORKSPACE_CONTENDED",
+                "candidate clone path exists but is not a safe git worktree",
+                retryable=False,
+            )
+        git_dir = candidate_root / ".git"
+        try:
+            git_stat = git_dir.lstat()
+        except OSError:
+            git_stat = None
+        if (
+            git_stat is None
+            or stat.S_ISLNK(git_stat.st_mode)
+            or not stat.S_ISDIR(git_stat.st_mode)
+        ):
+            raise _fail(
+                "WORKSPACE_CONTENDED",
+                "candidate clone git directory is missing or unsafe",
+                retryable=False,
+            )
         dirty, status_sha, status_entries = _status_state(candidate_root)
         current_branch = _run_git(
             candidate_root,
@@ -594,6 +793,25 @@ def prepare_candidate_clone(
                 },
             )
     else:
+        claimant = _find_lineage_claimant(
+            workspace_root,
+            source_project=project,
+            branch=branch,
+            exclude_project_id=project_id,
+        )
+        if claimant is not None:
+            details: dict[str, Any] = {
+                "branch": branch,
+                "requested_base_sha": base_sha,
+            }
+            details.update(_safe_claimant_details(claimant))
+            raise _fail(
+                "CANDIDATE_LINEAGE_EXISTS",
+                "a candidate clone already exists for this source project and branch",
+                retryable=False,
+                details=details,
+            )
+
         candidate_root.parent.mkdir(parents=True, exist_ok=True)
         tmp = candidate_root.with_name(f".{candidate_root.name}.tmp")
         if tmp.exists():
@@ -719,11 +937,93 @@ def prepare_candidate_clone(
         clean=not dirty,
         git_identity={"user.name": _DEFAULT_GIT_NAME, "user.email": _DEFAULT_GIT_EMAIL},
         recovery_policy=(
-            "Clone is durable under the workspace registry root and can be reused by calling "
-            "prepare_candidate_clone with the same project, branch, and base_ref. Dirty or moved "
-            "clones fail closed with WORKSPACE_CONTENDED."
+            "Clone is durable under the workspace registry root and is unique per exact source "
+            "project and feature branch. Exact-base recovery is idempotent; a different base for "
+            "an existing lineage fails closed until that lineage is explicitly reconciled."
         ),
     )
+
+
+def prepare_candidate_clone(
+    project: str,
+    branch: str,
+    base_ref: str | None = None,
+    *,
+    config_dir: Path,
+    journal_root: Path,
+) -> CandidateCloneReceipt:
+    """Create or recover one durable writeable clone and register it as a project."""
+    if not isinstance(project, str) or not project.strip():
+        raise _fail("INVALID_INPUT", "project must be a non-empty string")
+    project = project.strip()
+    branch = _validate_branch(branch)
+    base_ref = _validate_ref(base_ref)
+    config_dir = config_dir.resolve()
+    journal_root = journal_root.resolve()
+    workspace_root = _workspace_root(config_dir)
+    source_root = _source_root(config_dir, project, workspace_root=workspace_root)
+    try:
+        source_root.relative_to(workspace_root)
+    except ValueError as exc:
+        raise _fail("POLICY_DENIED", "source project root is outside workspace registry root") from exc
+
+    requested_ref = base_ref or "HEAD"
+    local_sha = _local_commit_or_none(source_root, requested_ref)
+    remote_sha = _remote_ref_sha(source_root, requested_ref) if base_ref else None
+    if base_ref and remote_sha is None and local_sha is None:
+        raise _fail(
+            "SOURCE_REF_NOT_AVAILABLE",
+            "base ref is unavailable in both trusted remote and local source",
+            retryable=True,
+            details={"base_ref": requested_ref},
+        )
+    base_sha = remote_sha or local_sha
+    if base_sha is None:
+        raise _fail(
+            "SOURCE_REPO_STALE",
+            "source repository cannot resolve the requested base commit",
+            retryable=True,
+            details={"base_ref": requested_ref},
+        )
+    if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
+        raise _fail("SOURCE_REF_NOT_AVAILABLE", "base ref did not resolve to a commit")
+    try:
+        source_is_shallow = _source_is_shallow(source_root)
+    except ManagedSourceBundleError as exc:
+        ownership_error = _source_ownership_error(
+            operation="inspect source repository completeness",
+            exc=exc,
+            source_root=source_root,
+        )
+        if ownership_error is not None:
+            raise ownership_error from exc
+        raise _fail(
+            "SOURCE_REPO_STALE",
+            "source repository completeness could not be inspected",
+            retryable=True,
+            details={
+                "base_ref": requested_ref,
+                "base_sha": base_sha,
+                "source_cause": classify_source_failure_message(str(exc)).value,
+            },
+        ) from exc
+    local_has_base = (
+        _local_commit_or_none(source_root, base_sha) == base_sha
+        and not source_is_shallow
+    )
+    with _lineage_lock(workspace_root, project, branch):
+        return _prepare_candidate_locked(
+            workspace_root=workspace_root,
+            source_root=source_root,
+            project=project,
+            branch=branch,
+            base_ref=base_ref,
+            requested_ref=requested_ref,
+            base_sha=base_sha,
+            local_has_base=local_has_base,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
 
 
 __all__ = ["CandidateCloneError", "CandidateCloneReceipt", "prepare_candidate_clone"]
