@@ -350,6 +350,87 @@ def test_prepare_candidate_clone_refuses_dirty_existing_clone(registry_fixture) 
     assert details["dirty"] is True
 
 
+def test_prepare_candidate_clone_rejects_exact_root_symlink_before_git_access(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    receipt = prepare_candidate_clone(
+        "source-project",
+        "candidate/exact-root-symlink",
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    target = workspace / "exact-root-symlink-target"
+    clone_root.rename(target)
+    clone_root.symlink_to(target, target_is_directory=True)
+    sentinel = target / "sentinel.txt"
+    sentinel.write_text("untouched\n", encoding="utf-8")
+
+    def unexpected_status(_repo: Path) -> tuple[bool, str, int]:
+        raise AssertionError("candidate status must not follow an exact-root symlink")
+
+    monkeypatch.setattr(candidate_clone_module, "_status_state", unexpected_status)
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_clone_module.prepare_candidate_clone(
+            "source-project",
+            "candidate/exact-root-symlink",
+            base,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert exc_info.value.retryable is False
+    assert sentinel.read_text(encoding="utf-8") == "untouched\n"
+
+
+def test_prepare_candidate_clone_rejects_exact_git_symlink_before_status(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    receipt = prepare_candidate_clone(
+        "source-project",
+        "candidate/exact-git-symlink",
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    git_dir = clone_root / ".git"
+    target = workspace / "exact-git-symlink-target"
+    git_dir.rename(target)
+    git_dir.symlink_to(target, target_is_directory=True)
+    sentinel = target / "sentinel.txt"
+    sentinel.write_text("untouched\n", encoding="utf-8")
+
+    def unexpected_status(_repo: Path) -> tuple[bool, str, int]:
+        raise AssertionError("candidate status must not follow an exact .git symlink")
+
+    monkeypatch.setattr(candidate_clone_module, "_status_state", unexpected_status)
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_clone_module.prepare_candidate_clone(
+            "source-project",
+            "candidate/exact-git-symlink",
+            base,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    assert exc_info.value.code == "WORKSPACE_CONTENDED"
+    assert exc_info.value.retryable is False
+    assert sentinel.read_text(encoding="utf-8") == "untouched\n"
+
+
 def test_prepare_candidate_clone_resolves_symbolic_base_ref(registry_fixture) -> None:
     workspace, source, config_dir, journal_root, base = registry_fixture
     _git(source, "branch", "base-for-candidate", base)

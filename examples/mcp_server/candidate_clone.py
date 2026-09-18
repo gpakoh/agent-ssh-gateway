@@ -733,13 +733,38 @@ def _prepare_candidate_locked(
     project_id = _project_id(project, branch, base_sha)
     candidate_root = _candidate_clones_root(workspace_root) / project_id
     relative_root = candidate_root.relative_to(workspace_root).as_posix()
-    recovered = candidate_root.exists()
+    try:
+        candidate_stat = candidate_root.lstat()
+    except FileNotFoundError:
+        candidate_stat = None
+    except OSError as exc:
+        raise _fail(
+            "WORKSPACE_CONTENDED",
+            "candidate clone path cannot be inspected safely",
+            retryable=True,
+        ) from exc
+    recovered = candidate_stat is not None
 
-    if candidate_root.exists():
-        if not candidate_root.is_dir() or not (candidate_root / ".git").exists():
+    if candidate_stat is not None:
+        if stat.S_ISLNK(candidate_stat.st_mode) or not stat.S_ISDIR(candidate_stat.st_mode):
             raise _fail(
                 "WORKSPACE_CONTENDED",
-                "candidate clone path exists but is not a git worktree",
+                "candidate clone path exists but is not a safe git worktree",
+                retryable=False,
+            )
+        git_dir = candidate_root / ".git"
+        try:
+            git_stat = git_dir.lstat()
+        except OSError:
+            git_stat = None
+        if (
+            git_stat is None
+            or stat.S_ISLNK(git_stat.st_mode)
+            or not stat.S_ISDIR(git_stat.st_mode)
+        ):
+            raise _fail(
+                "WORKSPACE_CONTENDED",
+                "candidate clone git directory is missing or unsafe",
                 retryable=False,
             )
         dirty, status_sha, status_entries = _status_state(candidate_root)
