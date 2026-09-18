@@ -1808,6 +1808,16 @@ class TestInspectAgentTask:
         # be treated as evidence that model/tool activity happened.
         (td / "agent-report.md").write_text("# Agent Runner Result\n", encoding="utf-8")
         (td / "implementation-diff.patch").write_text("", encoding="utf-8")
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {
+                    "attempt_id": "attempt-1",
+                    "fingerprint": "fp",
+                    "job_id": "job-1",
+                }
+            ),
+            encoding="utf-8",
+        )
         os.utime(td / "agent-status.md", (now - 700, now - 700))
         os.utime(td / "opencode-output.log", (now - 1, now - 1))
         os.utime(td / "failure-status.json", (now - 1, now - 1))
@@ -1818,6 +1828,11 @@ class TestInspectAgentTask:
             task_id=task_id,
             stale_after_seconds=600,
             now_epoch=now,
+            job_status=lambda job_id: {
+                "status": "failed",
+                "job_id": job_id,
+                "exit_code": 1,
+            },
         )
 
         assert result["terminal"] is True
@@ -1853,6 +1868,62 @@ class TestInspectAgentTask:
                 "task_id": "<new-task-id>",
             },
         }
+
+    def test_worker_terminal_status_cannot_authorize_replacement_while_job_runs(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)
+        task_id = "a12345678901"
+        td = tmp_path / ".ai-bridge" / "tasks" / task_id
+        td.mkdir(parents=True)
+        (td / "agent-status.md").write_text("Status: failed\n", encoding="utf-8")
+        (td / "failure-status.json").write_text(
+            json.dumps(
+                {
+                    "reason": "opencode_server_error",
+                    "phase": "pre_useful_work",
+                    "upstream_ref": "err_bf7ae62d",
+                    "correlation_hint": (
+                        "Correlate OpenCode server logs with upstream ref err_bf7ae62d"
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+        (td / "attempt-state.json").write_text(
+            json.dumps(
+                {
+                    "attempt_id": "attempt-1",
+                    "fingerprint": "fp",
+                    "job_id": "job-1",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = inspect_agent_task(
+            self._shell_runner(tmp_path),
+            project="my-proj",
+            task_id=task_id,
+            job_status=lambda job_id: {
+                "status": "running",
+                "job_id": job_id,
+            },
+        )
+
+        assert result["terminal"] is True
+        assert result["job"]["status"] == "running"
+        assert result["verdict"] == "opencode_server_error"
+        assert result["recovery"]["action"] == (
+            "preserve_execution_identity_until_gateway_terminal"
+        )
+        assert result["recovery"]["worker_termination_proven"] is False
+        assert result["recovery"]["replacement_allowed_now"] is False
+        assert result["recovery"]["do_not_create_new_task_id"] is True
+        assert "run_agent_after_recreate" not in result["recovery"]
+        assert result["recovery"]["supervisor_recreate_after_termination"][
+            "requires_supervisor_owned_contract"
+        ] is True
 
     def test_terminal_status_is_finished_even_with_old_logs(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MCP_AGENT_STATE_ROOT", raising=False)

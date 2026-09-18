@@ -1956,6 +1956,15 @@ def _gateway_job_absent(job: dict[str, Any] | None) -> bool:
     )
 
 
+def _gateway_job_terminal_proven(job: dict[str, Any] | None) -> bool:
+    """Return true only for authoritative known-terminal Gateway state."""
+    return bool(
+        job
+        and job.get("known") is True
+        and _job_status_token(job) in _AGENT_TERMINAL_STATUSES
+    )
+
+
 def _agent_reconciliation_diagnostics(
     *,
     attempt: dict[str, Any] | None,
@@ -2529,9 +2538,7 @@ def agent_task_status(
     )
     gate_ledger["runner_lifecycle_completed"] = bool(
         gate_ledger.get("valid") is True
-        and job is not None
-        and job.get("known") is True
-        and job_token in _AGENT_TERMINAL_STATUSES
+        and _gateway_job_terminal_proven(job)
     )
     gate_ledger["authoritative"] = False
     reconciliation = _agent_reconciliation_diagnostics(
@@ -2750,9 +2757,7 @@ def inspect_agent_task(
     )
     gate_ledger["runner_lifecycle_completed"] = bool(
         gate_ledger.get("valid") is True
-        and job is not None
-        and job.get("known") is True
-        and job_token in _AGENT_TERMINAL_STATUSES
+        and _gateway_job_terminal_proven(job)
     )
     gate_ledger["authoritative"] = False
     reconciliation = _agent_reconciliation_diagnostics(
@@ -2889,16 +2894,29 @@ def inspect_agent_task(
         and failure_reason == "opencode_server_error"
         and failure.get("phase") == "pre_useful_work"
     ):
-        result["recovery"] = {
-            "action": "recreate_from_supervisor_contract",
-            "worker_termination_proven": True,
-            "replacement_allowed_now": True,
-            "supervisor_recreate": _supervisor_recreate_hint(project, task_id),
-            "run_agent_after_recreate": {
-                "project": project,
-                "task_id": "<new-task-id>",
-            },
-        }
+        if _gateway_job_terminal_proven(job):
+            result["recovery"] = {
+                "action": "recreate_from_supervisor_contract",
+                "worker_termination_proven": True,
+                "replacement_allowed_now": True,
+                "supervisor_recreate": _supervisor_recreate_hint(project, task_id),
+                "run_agent_after_recreate": {
+                    "project": project,
+                    "task_id": "<new-task-id>",
+                },
+            }
+        else:
+            result["recovery"] = {
+                "action": "preserve_execution_identity_until_gateway_terminal",
+                "worker_termination_proven": False,
+                "replacement_allowed_now": False,
+                "do_not_create_new_task_id": True,
+                "inspect_agent_task": {"project": project, "task_id": task_id},
+                "supervisor_recreate_after_termination": _supervisor_recreate_hint(
+                    project,
+                    task_id,
+                ),
+            }
     elif reasoning_loop.get("detected"):
         result["recovery"] = {
             "action": "cancel_then_recreate_from_supervisor_contract",
