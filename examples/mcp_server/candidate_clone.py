@@ -986,170 +986,19 @@ def prepare_candidate_clone(
         _local_commit_or_none(source_root, base_sha) == base_sha
         and not source_is_shallow
     )
-    project_id = _project_id(project, branch, base_sha)
-    candidate_root = workspace_root / ".mcp-candidate-clones" / project_id
-    relative_root = candidate_root.relative_to(workspace_root).as_posix()
-    recovered = candidate_root.exists()
-
-    if candidate_root.exists():
-        if not candidate_root.is_dir() or not (candidate_root / ".git").exists():
-            raise _fail("WORKSPACE_CONTENDED", "candidate clone path exists but is not a git worktree", retryable=False)
-        dirty, status_sha, status_entries = _status_state(candidate_root)
-        current_branch = _run_git(
-            candidate_root,
-            ["rev-parse", "--abbrev-ref", "HEAD"],
-            operation="read candidate branch",
+    with _lineage_lock(workspace_root, project, branch):
+        return _prepare_candidate_locked(
+            workspace_root=workspace_root,
+            source_root=source_root,
+            project=project,
+            branch=branch,
+            base_ref=base_ref,
+            requested_ref=requested_ref,
+            base_sha=base_sha,
+            local_has_base=local_has_base,
+            config_dir=config_dir,
+            journal_root=journal_root,
         )
-        current_head = _run_git(
-            candidate_root,
-            ["rev-parse", "HEAD"],
-            operation="read candidate head",
-        ).lower()
-        if dirty or current_branch != branch or current_head != base_sha:
-            raise _fail(
-                "WORKSPACE_CONTENDED",
-                "candidate clone already exists with different git state",
-                retryable=True,
-                details={
-                    "project_id": project_id,
-                    "branch": current_branch,
-                    "head": current_head,
-                    "dirty": dirty,
-                    "status_sha256": status_sha,
-                    "status_entries": status_entries,
-                },
-            )
-    else:
-        candidate_root.parent.mkdir(parents=True, exist_ok=True)
-        tmp = candidate_root.with_name(f".{candidate_root.name}.tmp")
-        if tmp.exists():
-            shutil.rmtree(tmp)
-        try:
-            if local_has_base:
-                try:
-                    clone_registered_commit_via_bundle(
-                        source_root=source_root,
-                        expected_sha=base_sha,
-                        destination=tmp,
-                        timeout=120,
-                    )
-                except RegisteredSourceCloneError as exc:
-                    raise _fail(
-                        "SOURCE_REPO_OWNERSHIP_BLOCKED"
-                        if exc.phase in {"source_trust", "resolve_source", "resolve_source_objects"}
-                        else "TOOL_EXECUTION_FAILED",
-                        "source repository could not be materialized through the trusted bundle bridge",
-                        retryable=exc.retryable,
-                        details={
-                            "operation": "clone source repository",
-                            "phase": exc.phase,
-                            "exit_code": exc.exit_code,
-                        },
-                    ) from exc
-            else:
-                try:
-                    publication = ensure_managed_source_bundle(project, base_sha)
-                except ManagedSourceBundleError as exc:
-                    raise _fail(
-                        "SOURCE_REPO_STALE",
-                        "trusted remote base exists but cannot be materialized",
-                        retryable=True,
-                        details={
-                            "base_ref": requested_ref,
-                            "base_sha": base_sha,
-                            "source_cause": classify_source_failure_message(str(exc)).value,
-                        },
-                    ) from exc
-                except ValueError as exc:
-                    raise _fail(
-                        "SOURCE_REPO_STALE",
-                        "trusted remote base exists but cannot be materialized",
-                        retryable=False,
-                        details={
-                            "base_ref": requested_ref,
-                            "base_sha": base_sha,
-                            "source_cause": "invalid_source_metadata",
-                        },
-                    ) from exc
-                if publication is None:
-                    raise _fail(
-                        "SOURCE_REPO_STALE",
-                        "trusted remote base exists but managed source storage is unavailable",
-                        retryable=True,
-                        details={"base_ref": requested_ref, "base_sha": base_sha},
-                    )
-                _run_git(
-                    candidate_root.parent,
-                    ["clone", "--no-checkout", publication.path, str(tmp)],
-                    timeout=120,
-                    operation="clone managed source bundle",
-                )
-            _run_git(
-                tmp,
-                ["checkout", "-B", branch, base_sha],
-                operation="checkout candidate branch",
-            )
-            _run_git(
-                tmp,
-                ["config", "user.name", _DEFAULT_GIT_NAME],
-                operation="configure candidate git user.name",
-            )
-            _run_git(
-                tmp,
-                ["config", "user.email", _DEFAULT_GIT_EMAIL],
-                operation="configure candidate git user.email",
-            )
-            tmp.replace(candidate_root)
-        except Exception:
-            if tmp.exists():
-                shutil.rmtree(tmp, ignore_errors=True)
-            raise
-
-    registered, registry_hash = _register_candidate(
-        config_dir=config_dir,
-        journal_root=journal_root,
-        project_id=project_id,
-        root=relative_root,
-        source_project=project,
-    )
-    head = _run_git(
-        candidate_root,
-        ["rev-parse", "HEAD"],
-        operation="read prepared candidate head",
-    ).lower()
-    dirty, status_sha, status_entries = _status_state(candidate_root)
-    metadata = {
-        "version": 1,
-        "project_id": project_id,
-        "source_project": project,
-        "branch": branch,
-        "base_ref": base_ref or "HEAD",
-        "base_sha": base_sha,
-        "head": head,
-        "root": relative_root,
-        "registry_hash": registry_hash,
-        "status_sha256": status_sha,
-        "status_entries": status_entries,
-    }
-    _write_metadata(_metadata_path(candidate_root), metadata)
-    return CandidateCloneReceipt(
-        project_id=project_id,
-        source_project=project,
-        branch=branch,
-        base_ref=base_ref or "HEAD",
-        base_sha=base_sha,
-        head=head,
-        root=".",
-        recovered=recovered,
-        registered=registered,
-        clean=not dirty,
-        git_identity={"user.name": _DEFAULT_GIT_NAME, "user.email": _DEFAULT_GIT_EMAIL},
-        recovery_policy=(
-            "Clone is durable under the workspace registry root and can be reused by calling "
-            "prepare_candidate_clone with the same project, branch, and base_ref. Dirty or moved "
-            "clones fail closed with WORKSPACE_CONTENDED."
-        ),
-    )
 
 
 __all__ = ["CandidateCloneError", "CandidateCloneReceipt", "prepare_candidate_clone"]

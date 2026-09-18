@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -9,6 +12,7 @@ from app.workspace.registry import reset_registry
 from examples.mcp_server.agent_sources import ManagedSourceBundleError, ManagedSourcePublication
 from examples.mcp_server.candidate_clone import (
     CandidateCloneError,
+    CandidateCloneReceipt,
     prepare_candidate_clone,
 )
 
@@ -34,6 +38,13 @@ def _init_repo(root: Path) -> str:
     _git(root, "add", "README.md")
     _git(root, "commit", "-q", "-m", "base")
     return _git(root, "rev-parse", "HEAD")
+
+
+def _commit(repo: Path, message: str) -> str:
+    (repo / "README.md").write_text(message + "\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
 
 
 @pytest.fixture
@@ -519,3 +530,296 @@ def test_prepare_candidate_clone_remote_base_without_managed_source_returns_stal
 
     assert exc_info.value.code == "SOURCE_REPO_STALE"
     assert exc_info.value.retryable is True
+
+
+def test_prepare_candidate_clone_same_lineage_new_base_fails_closed(registry_fixture) -> None:
+    workspace, source, config_dir, journal_root, base = registry_fixture
+    first = prepare_candidate_clone(
+        "source-project",
+        "candidate/lineage-new-base",
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    new_base = _commit(source, "lineage-new-base")
+    clones_root = workspace / ".mcp-candidate-clones"
+    before = {p.name for p in clones_root.iterdir() if p.name.startswith("candidate-")}
+    registry_before = (config_dir / "projects.yaml").read_text(encoding="utf-8")
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        prepare_candidate_clone(
+            "source-project",
+            "candidate/lineage-new-base",
+            new_base,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    err = exc_info.value
+    assert err.code == "CANDIDATE_LINEAGE_EXISTS"
+    assert err.retryable is False
+    assert err.message == "a candidate clone already exists for this source project and branch"
+    details = err.details
+    assert details is not None
+    assert details["branch"] == "candidate/lineage-new-base"
+    assert details["requested_base_sha"] == new_base
+    assert details["existing_project_id"] == first.project_id
+    assert details["existing_base_sha"] == base
+    after = {p.name for p in clones_root.iterdir() if p.name.startswith("candidate-")}
+    assert after == before
+    assert (config_dir / "projects.yaml").read_text(encoding="utf-8") == registry_before
+
+
+def test_prepare_candidate_clone_allows_distinct_branches(registry_fixture) -> None:
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    first = prepare_candidate_clone(
+        "source-project",
+        "candidate/distinct-a",
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    second = prepare_candidate_clone(
+        "source-project",
+        "candidate/distinct-b",
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+
+    assert second.project_id != first.project_id
+    assert second.recovered is False
+    assert second.registered is True
+    assert second.clean is True
+    assert (workspace / ".mcp-candidate-clones" / first.project_id).is_dir()
+    assert (workspace / ".mcp-candidate-clones" / second.project_id).is_dir()
+    registry = (config_dir / "projects.yaml").read_text(encoding="utf-8")
+    assert first.project_id in registry
+    assert second.project_id in registry
+
+
+def test_prepare_candidate_clone_denies_candidate_sources(registry_fixture) -> None:
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    first = prepare_candidate_clone(
+        "source-project",
+        "candidate/deny-source",
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    registry_path = config_dir / "projects.yaml"
+    registry_path.write_text(
+        registry_path.read_text(encoding="utf-8")
+        + "\n"
+        + "  candidate-typed-source:\n"
+        + "    root: source\n"
+        + "    type: candidate-clone\n"
+        + "    description: candidate typed source\n"
+        + "    tags: [test]\n"
+        + "\n"
+        + "  candidate-path-source:\n"
+        + f"    root: .mcp-candidate-clones/{first.project_id}\n"
+        + "    type: repository\n"
+        + "    description: candidate root source\n"
+        + "    tags: [test]\n",
+        encoding="utf-8",
+    )
+    reset_registry()
+
+    for denied_project in ("candidate-typed-source", "candidate-path-source"):
+        with pytest.raises(CandidateCloneError) as exc_info:
+            prepare_candidate_clone(
+                denied_project,
+                "candidate/denied-flow",
+                base,
+                config_dir=config_dir,
+                journal_root=journal_root,
+            )
+        err = exc_info.value
+        assert err.code == "CANDIDATE_SOURCE_DENIED"
+        assert err.retryable is False
+        assert err.details == {"source_project": denied_project}
+
+    candidate_dirs = {
+        p.name
+        for p in (workspace / ".mcp-candidate-clones").iterdir()
+        if p.name.startswith("candidate-")
+    }
+    assert candidate_dirs == {first.project_id}
+
+
+def test_prepare_candidate_clone_serializes_concurrent_same_lineage(registry_fixture) -> None:
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+
+    def call(_: int) -> CandidateCloneReceipt:
+        return prepare_candidate_clone(
+            "source-project",
+            "candidate/concurrent-lineage",
+            base,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        receipts = list(pool.map(call, range(3)))
+
+    assert len({receipt.project_id for receipt in receipts}) == 1
+    assert sum(receipt.registered for receipt in receipts) == 1
+    assert sum(receipt.recovered for receipt in receipts) == 2
+    assert all(receipt.clean for receipt in receipts)
+    candidate_dirs = {
+        p.name
+        for p in (workspace / ".mcp-candidate-clones").iterdir()
+        if p.name.startswith("candidate-")
+    }
+    assert candidate_dirs == {receipts[0].project_id}
+    registry = (config_dir / "projects.yaml").read_text(encoding="utf-8")
+    registered_ids = [
+        line.split(":")[0].strip()
+        for line in registry.splitlines()
+        if line.startswith(f"  {receipts[0].project_id}:")
+    ]
+    assert registered_ids == [receipts[0].project_id]
+
+
+@pytest.mark.parametrize("corruption", ["invalid-json", "mismatched-id"])
+def test_prepare_candidate_clone_malformed_lineage_metadata_fails_closed(
+    registry_fixture,
+    corruption: str,
+) -> None:
+    workspace, source, config_dir, journal_root, base = registry_fixture
+    first = prepare_candidate_clone(
+        "source-project",
+        "candidate/malformed-lineage",
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / first.project_id
+    metadata_path = clone_root / ".git" / "mcp-candidate-clone.json"
+    if corruption == "invalid-json":
+        metadata_path.write_text("{ not json\n", encoding="utf-8")
+    else:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+        data["project_id"] = "candidate-impostor"
+        metadata_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    new_base = _commit(source, "malformed-lineage-new-base")
+    with pytest.raises(CandidateCloneError) as exc_info:
+        prepare_candidate_clone(
+            "source-project",
+            "candidate/malformed-lineage",
+            new_base,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    err = exc_info.value
+    assert err.code == "CANDIDATE_LINEAGE_SCAN_FAILED"
+    assert err.retryable is True
+    assert not (workspace / ".mcp-candidate-clones" / "candidate-impostor").exists()
+
+
+@pytest.mark.parametrize("link_target", ["metadata-file", "git-dir"])
+def test_prepare_candidate_clone_symlink_lineage_metadata_fails_closed(
+    registry_fixture,
+    link_target: str,
+) -> None:
+    workspace, source, config_dir, journal_root, base = registry_fixture
+    first = prepare_candidate_clone(
+        "source-project",
+        "candidate/symlink-lineage",
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / first.project_id
+    if link_target == "metadata-file":
+        metadata_path = clone_root / ".git" / "mcp-candidate-clone.json"
+        backup = metadata_path.with_name(metadata_path.name + ".real")
+        metadata_path.rename(backup)
+        metadata_path.symlink_to(backup)
+    else:
+        git_dir = clone_root / ".git"
+        backup = git_dir.with_name(git_dir.name + ".real")
+        git_dir.rename(backup)
+        git_dir.symlink_to(backup)
+
+    new_base = _commit(source, "symlink-lineage-new-base")
+    with pytest.raises(CandidateCloneError) as exc_info:
+        prepare_candidate_clone(
+            "source-project",
+            "candidate/symlink-lineage",
+            new_base,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    err = exc_info.value
+    assert err.code == "CANDIDATE_LINEAGE_SCAN_FAILED"
+    assert err.retryable is True
+
+
+def test_prepare_candidate_clone_symlink_lock_storage_fails_closed(registry_fixture) -> None:
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    clones_root = workspace / ".mcp-candidate-clones"
+    clones_root.mkdir(parents=True, exist_ok=True)
+    os.symlink(str(workspace / "lock-storage-target"), str(clones_root / ".locks"))
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        prepare_candidate_clone(
+            "source-project",
+            "candidate/symlink-storage",
+            base,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    err = exc_info.value
+    assert err.code == "CANDIDATE_LOCK_FAILED"
+    assert err.retryable is True
+    assert "candidate/symlink-storage" not in (config_dir / "projects.yaml").read_text(
+        encoding="utf-8"
+    )
+    candidate_dirs = {
+        p.name for p in clones_root.iterdir() if p.name != ".locks" and p.name.startswith("candidate-")
+    }
+    assert candidate_dirs == set()
+
+
+def test_prepare_candidate_clone_symlink_lock_file_fails_closed(registry_fixture) -> None:
+    from examples.mcp_server import candidate_clone as candidate_clone_module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    clones_root = workspace / ".mcp-candidate-clones"
+    clones_root.mkdir(parents=True, exist_ok=True)
+    (clones_root / ".locks").mkdir()
+    lock_name = candidate_clone_module._lineage_lock_name(
+        "source-project",
+        "candidate/symlink-lockfile",
+    )
+    target = workspace / "lock-file-target"
+    target.write_text("", encoding="utf-8")
+    os.symlink(str(target), str(clones_root / ".locks" / lock_name))
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        prepare_candidate_clone(
+            "source-project",
+            "candidate/symlink-lockfile",
+            base,
+            config_dir=config_dir,
+            journal_root=journal_root,
+        )
+
+    err = exc_info.value
+    assert err.code == "CANDIDATE_LOCK_FAILED"
+    assert err.retryable is True
+    assert "candidate/symlink-lockfile" not in (config_dir / "projects.yaml").read_text(
+        encoding="utf-8"
+    )
+    candidate_dirs = {
+        p.name
+        for p in clones_root.iterdir()
+        if p.name != ".locks" and p.name.startswith("candidate-")
+    }
+    assert candidate_dirs == set()
