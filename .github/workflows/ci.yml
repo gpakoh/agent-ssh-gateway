@@ -41,7 +41,9 @@ jobs:
     # step (network stall, a test deadlocking) would run until GitHub's
     # own default (360 minutes) or the self-hosted runner's own limits,
     # occupying a runner slot the whole time instead of failing fast.
-    timeout-minutes: 45
+    # Keep this above Makefile's 45m unit-suite process guard so integration,
+    # smoke, collection-count and audit steps retain bounded completion time.
+    timeout-minutes: 60
     env:
       CI_PACKAGE_HTTP_PROXY: ${{ secrets.CI_PACKAGE_HTTP_PROXY }}
       CI_PACKAGE_HTTPS_PROXY: ${{ secrets.CI_PACKAGE_HTTPS_PROXY }}
