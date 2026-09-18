@@ -723,6 +723,7 @@ def gateway_retry_agent_task(
             job_status=lambda job_id: _server_client().job_status(job_id),
             continuation_prompt=continuation_prompt,
             trusted_never_submitted=False,
+            trusted_retry_seed=None,
         ),
         success_text="Prepared agent task retry.",
     )

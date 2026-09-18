@@ -159,6 +159,7 @@ def test_retry_agent_task_prepares_new_task(monkeypatch):
     assert result["result"]["kwargs"]["retry_task_id"] == "retry-task-001"
     assert result["result"]["kwargs"]["continuation_prompt"] == "Продолжай"
     assert result["result"]["kwargs"]["trusted_never_submitted"] is False
+    assert result["result"]["kwargs"]["trusted_retry_seed"] is None
 
 
 def test_cancel_agent_task_uses_bound_attempt_job(monkeypatch):

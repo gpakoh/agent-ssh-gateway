@@ -3165,28 +3165,22 @@ def _retry_plan_text(
     return prefix + (plan if plan.endswith("\n") else plan + "\n")
 
 
-def _load_retry_task_contract(
-    run_cmd,
+def _validated_trusted_retry_seed(
+    seed: dict[str, Any],
     *,
-    project: str,
     source_task_id: str,
-) -> dict[str, Any]:
-    result = read_agent_task_file(
-        run_cmd,
-        project=project,
-        task_id=source_task_id,
-        filename="task.json",
-    )
-    text = str(result.get("stdout", ""))
-    if text == "(not found)":
-        raise AttemptStateError(f"source task {source_task_id} has no task.json")
-    try:
-        data = json.loads(text)
-    except (TypeError, ValueError) as exc:
-        raise AttemptStateError(f"source task {source_task_id} task.json is invalid") from exc
-    if not isinstance(data, dict):
-        raise AttemptStateError(f"source task {source_task_id} task.json is invalid")
-    return data
+) -> tuple[dict[str, Any], str]:
+    """Validate supervisor-owned retry bytes without consulting workspace task files."""
+    contract = seed.get("task_contract")
+    plan = seed.get("current_plan")
+    if not isinstance(contract, dict):
+        raise ValueError("trusted retry seed task_contract must be an object")
+    if not isinstance(plan, str) or not plan.strip():
+        raise ValueError("trusted retry seed current_plan must be a non-empty string")
+    source_id = contract.get("task_id")
+    if source_id != source_task_id:
+        raise ValueError("trusted retry seed task_id does not match source_task_id")
+    return dict(contract), plan
 
 
 def prepare_agent_task_retry(
@@ -3199,20 +3193,24 @@ def prepare_agent_task_retry(
     job_status=None,
     continuation_prompt: str | None = None,
     trusted_never_submitted: bool = False,
+    trusted_retry_seed: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Prepare a fresh task only from a control-plane-proven never-submitted source.
+    """Prepare a fresh task only from supervisor-owned retry inputs.
 
-    A missing job_id is not proof that dispatch never happened: the durable
-    submit path may have crossed the Gateway boundary before losing the job
-    receipt. Callers must therefore provide an explicit trusted
-    trusted_never_submitted decision from outside worker-writable task
-    artifacts. Production currently has no such retry proof and fails closed.
+    A missing job_id is not proof that dispatch never happened, and a
+    never-submitted fleet lease proves only dispatch state -- not the
+    authenticity of workspace task.json/current-plan.md. Successful cloning
+    therefore requires both trusted_never_submitted=True and a supervisor-owned
+    trusted_retry_seed containing the source task contract and current plan.
+    Production currently has no such full retry seed and fails closed.
     """
     validate_task_id(source_task_id)
     validate_task_id(retry_task_id)
     continuation_prompt = _validate_continuation_prompt(continuation_prompt)
     if not isinstance(trusted_never_submitted, bool):
         raise TypeError("trusted_never_submitted must be a boolean")
+    if trusted_retry_seed is not None and not isinstance(trusted_retry_seed, dict):
+        raise TypeError("trusted_retry_seed must be an object or None")
     if source_task_id == retry_task_id:
         raise ValueError("retry_task_id must be different from source_task_id")
 
@@ -3272,14 +3270,16 @@ def prepare_agent_task_retry(
     if (
         inspection.get("attempt_state_error") is not None
         or not trusted_never_submitted
+        or trusted_retry_seed is None
         or (attempt is not None and not unbound_attempt)
     ):
         return {
             "stdout": "",
             "stderr": (
-                "source task lacks trusted never-submitted proof; worker-writable "
-                "task.json cannot seed a new task_id. Retry the same durable execution "
-                "or recreate the task from the supervisor-owned contract"
+                "source task lacks trusted never-submitted proof and supervisor-owned "
+                "retry seed; worker-writable task.json/current-plan.md cannot seed a "
+                "new task_id. Retry the same durable execution or recreate the task "
+                "from the supervisor-owned contract"
             ),
             "exit_code": 1,
             "code": "AGENT_RETRY_SOURCE_UNTRUSTED",
@@ -3292,11 +3292,19 @@ def prepare_agent_task_retry(
             },
         }
 
-    contract = _load_retry_task_contract(
-        run_cmd,
-        project=project,
-        source_task_id=source_task_id,
-    )
+    try:
+        contract, plan = _validated_trusted_retry_seed(
+            trusted_retry_seed,
+            source_task_id=source_task_id,
+        )
+    except (TypeError, ValueError) as exc:
+        return {
+            "stdout": "",
+            "stderr": str(exc),
+            "exit_code": 1,
+            "code": "AGENT_RETRY_SEED_INVALID",
+        }
+
     agent = str(contract.get("agent") or "opencode")
     retry_contract = dict(contract)
     retry_contract["task_id"] = retry_task_id
@@ -3312,15 +3320,6 @@ def prepare_agent_task_retry(
     validate_base_ref(retry_contract.get("base_ref") or None)
     resolve_task_source_contract(retry_contract)
 
-    plan_result = read_agent_task_file(
-        run_cmd,
-        project=project,
-        task_id=source_task_id,
-        filename="current-plan.md",
-    )
-    plan = str(plan_result.get("stdout", ""))
-    if plan == "(not found)":
-        plan = ""
     phase = validate_workflow_phase(str(retry_contract.get("workflow_phase") or "implementation"))
     status = build_initial_status(agent, retry_task_id) + f"\nRetry of: {source_task_id}\n"
     td = task_dir(project, retry_task_id)
