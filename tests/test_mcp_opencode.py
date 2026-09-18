@@ -24,6 +24,7 @@ MCP_DIR = str(Path(__file__).resolve().parents[1] / "examples" / "mcp_server")
 if MCP_DIR not in sys.path:
     sys.path.insert(0, MCP_DIR)
 
+from examples.mcp_server.agent_tasks import build_task_json  # noqa: E402
 from examples.mcp_server.opencode_tools import project_run_opencode  # noqa: E402
 
 TASK_ID = "2026-06-25-fix-auth-opencode"
@@ -164,6 +165,32 @@ class TestProjectRunOpencodeExecutes:
         result = project_run_opencode(rc, project="test", task_id=TASK_ID, run_script=run_script)
         assert result["status"] == "needs-review"
         assert f"TASK_BASE_REF='{base_ref}'" in captured["script"]
+
+    def test_malformed_persisted_gate_contract_errors_before_execution(self):
+        task_json = json.loads(
+            build_task_json(
+                task_id=TASK_ID,
+                agent="opencode",
+                required_checks=["pytest -q"],
+                worktree_path="../agent-worktrees/test-opencode",
+            )
+        )
+        task_json["gates"][2]["check_sha256"] = "0" * 64
+        rc = _fake_run_cmd(task_json=task_json)
+        run_script = MagicMock(
+            return_value={"exit_code": 0, "stdout": "", "stderr": ""}
+        )
+
+        result = project_run_opencode(
+            rc,
+            project="test",
+            task_id=TASK_ID,
+            run_script=run_script,
+        )
+
+        assert result["status"] == "error"
+        assert "does not bind required_checks" in result["error"]
+        run_script.assert_not_called()
 
     def test_invalid_task_base_ref_errors_before_execution(self):
         rc = _fake_run_cmd(

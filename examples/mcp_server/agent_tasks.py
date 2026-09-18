@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -29,6 +30,8 @@ AGENT_LOG_FILENAME = "opencode-output.log"
 AGENT_HEARTBEAT_FILENAME = "agent-heartbeat.json"
 AGENT_PROXY_STATUS_FILENAME = "proxy-status.json"
 AGENT_FAILURE_STATUS_FILENAME = "failure-status.json"
+GATES_MD_FILENAME = "GATES.md"
+GATE_LEDGER_FILENAME = "gate-ledger.json"
 AGENT_LOG_MAX_BYTES = 64 * 1024
 AGENT_LOG_MAX_TAIL_LINES = 1000
 AGENT_ARTIFACT_MAX_BYTES = 64 * 1024
@@ -45,6 +48,8 @@ AGENT_ARTIFACT_FILENAMES: dict[str, str] = {
     "required_checks": "required-checks.log",
     "consensus": "consensus.md",
     "task": "task.json",
+    "gates": GATES_MD_FILENAME,
+    "gate_ledger": GATE_LEDGER_FILENAME,
 }
 _AGENT_ARTIFACTS_BY_FILENAME = {filename: key for key, filename in AGENT_ARTIFACT_FILENAMES.items()}
 AGENT_STALE_AFTER_SECONDS = 600
@@ -270,6 +275,276 @@ def validate_scope_contract(
     overlap = sorted(set(allowed).intersection(forbidden))
     if overlap:
         raise ValueError(f"allowed_files and forbidden_files overlap: {', '.join(overlap)}")
+
+
+GATE_KINDS = frozenset(
+    {"scope", "execution", "required_check", "acceptance", "supervisor_review"}
+)
+GATE_OWNERS = frozenset({"gateway", "supervisor"})
+GATE_ID_RE = re.compile(
+    r"^(?:scope|execution|check-[1-9][0-9]*|acceptance-[1-9][0-9]*|supervisor-review)$"
+)
+_GATE_LEDGER_STATUSES = frozenset(
+    {"passed", "failed", "warning", "skipped", "pending_supervisor"}
+)
+_GATE_LEDGER_ACCEPTANCE_STATES = frozenset({"needs_supervisor", "machine_unmet"})
+
+
+def validate_acceptance_criteria(
+    acceptance_criteria: list[str] | None,
+) -> list[str]:
+    """Normalize bounded acceptance prose used for supervisor-owned gates."""
+    if acceptance_criteria is None:
+        return []
+    if not isinstance(acceptance_criteria, list):
+        raise TypeError("acceptance_criteria must be a list of non-empty strings")
+    if len(acceptance_criteria) > 64:
+        raise ValueError("acceptance_criteria may contain at most 64 items")
+    normalized: list[str] = []
+    for idx, item in enumerate(acceptance_criteria):
+        label = f"acceptance_criteria[{idx}]"
+        if not isinstance(item, str):
+            raise TypeError(f"{label} must be a string, got {type(item).__name__}")
+        value = item.strip()
+        if not value:
+            raise ValueError(f"{label} must be non-empty")
+        if len(value) > 1000:
+            raise ValueError(f"{label} must be at most 1000 characters")
+        normalized.append(value)
+    return normalized
+
+
+def build_gate_specs(
+    *,
+    required_checks: list[str] | None,
+    acceptance_criteria: list[str] | None,
+) -> list[dict[str, Any]]:
+    """Build deterministic machine and supervisor-owned acceptance gates."""
+    validate_required_checks(required_checks)
+    criteria = validate_acceptance_criteria(acceptance_criteria)
+    checks = [item.strip() for item in (required_checks or [])]
+    gates: list[dict[str, Any]] = [
+        {
+            "id": "scope",
+            "kind": "scope",
+            "owner": "gateway",
+            "outcome": (
+                "Implementation remains inside the declared file scope and "
+                "preserves guarded parent/source integrity."
+            ),
+        },
+        {
+            "id": "execution",
+            "kind": "execution",
+            "owner": "gateway",
+            "outcome": "The bounded worker execution reaches a terminal zero exit code.",
+        },
+    ]
+    for index, check in enumerate(checks, start=1):
+        gates.append(
+            {
+                "id": f"check-{index}",
+                "kind": "required_check",
+                "owner": "gateway",
+                "outcome": f"Required check {index} passes in the isolated verification workspace.",
+                "check_index": index - 1,
+                "check_sha256": hashlib.sha256(check.encode("utf-8")).hexdigest(),
+            }
+        )
+    for index, criterion in enumerate(criteria, start=1):
+        gates.append(
+            {
+                "id": f"acceptance-{index}",
+                "kind": "acceptance",
+                "owner": "supervisor",
+                "outcome": criterion,
+            }
+        )
+    gates.append(
+        {
+            "id": "supervisor-review",
+            "kind": "supervisor_review",
+            "owner": "supervisor",
+            "outcome": (
+                "Supervisor independently reviews call sites, security and "
+                "transactional semantics and decides closure/readiness."
+            ),
+        }
+    )
+    return gates
+
+
+def validate_gate_specs(
+    value: Any,
+    *,
+    required_checks: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Validate an immutable task gate contract exactly and fail closed."""
+    if not isinstance(value, list) or not value:
+        raise ValueError("task gate contract must be a non-empty list")
+    checks = [item.strip() for item in (required_checks or [])]
+    seen: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for idx, raw in enumerate(value):
+        if not isinstance(raw, dict):
+            raise TypeError(f"gates[{idx}] must be an object")
+        gate_id = raw.get("id")
+        kind = raw.get("kind")
+        owner = raw.get("owner")
+        outcome = raw.get("outcome")
+        if not isinstance(gate_id, str) or GATE_ID_RE.fullmatch(gate_id) is None:
+            raise ValueError(f"gates[{idx}].id is invalid")
+        if gate_id in seen:
+            raise ValueError(f"duplicate gate id: {gate_id}")
+        seen.add(gate_id)
+        if kind not in GATE_KINDS:
+            raise ValueError(f"gates[{idx}].kind is invalid")
+        if owner not in GATE_OWNERS:
+            raise ValueError(f"gates[{idx}].owner is invalid")
+        if not isinstance(outcome, str) or not outcome.strip() or len(outcome.strip()) > 1000:
+            raise ValueError(
+                f"gates[{idx}].outcome must be a non-empty string up to 1000 characters"
+            )
+        gate: dict[str, Any] = {
+            "id": gate_id,
+            "kind": kind,
+            "owner": owner,
+            "outcome": outcome.strip(),
+        }
+        if kind == "required_check":
+            check_index = raw.get("check_index")
+            digest = raw.get("check_sha256")
+            if isinstance(check_index, bool) or not isinstance(check_index, int):
+                raise TypeError(f"gates[{idx}].check_index must be an integer")
+            if check_index < 0 or check_index >= len(checks):
+                raise ValueError(f"gates[{idx}].check_index is out of range")
+            expected = hashlib.sha256(checks[check_index].encode("utf-8")).hexdigest()
+            if digest != expected:
+                raise ValueError(
+                    f"gates[{idx}].check_sha256 does not bind required_checks[{check_index}]"
+                )
+            gate["check_index"] = check_index
+            gate["check_sha256"] = expected
+        elif "check_index" in raw or "check_sha256" in raw:
+            raise ValueError(
+                f"gates[{idx}] has required-check fields on non-check gate"
+            )
+        normalized.append(gate)
+
+    if len(normalized) < 3:
+        raise ValueError(
+            "gate contract must contain scope, execution, and supervisor-review gates"
+        )
+    if normalized[0].get("id") != "scope" or normalized[0].get("kind") != "scope" or normalized[0].get("owner") != "gateway":
+        raise ValueError("gate contract must start with the gateway-owned scope gate")
+    if normalized[1].get("id") != "execution" or normalized[1].get("kind") != "execution" or normalized[1].get("owner") != "gateway":
+        raise ValueError(
+            "gate contract must contain the gateway-owned execution gate second"
+        )
+
+    cursor = 2
+    for check_index in range(len(checks)):
+        if cursor >= len(normalized) - 1:
+            raise ValueError("gate contract is missing required-check gates")
+        gate = normalized[cursor]
+        if (
+            gate.get("id") != f"check-{check_index + 1}"
+            or gate.get("kind") != "required_check"
+            or gate.get("owner") != "gateway"
+            or gate.get("check_index") != check_index
+        ):
+            raise ValueError(
+                "gate contract required-check gates must exactly match required_checks order"
+            )
+        cursor += 1
+
+    acceptance_index = 1
+    while cursor < len(normalized) - 1:
+        gate = normalized[cursor]
+        if (
+            gate.get("id") != f"acceptance-{acceptance_index}"
+            or gate.get("kind") != "acceptance"
+            or gate.get("owner") != "supervisor"
+        ):
+            raise ValueError(
+                "gate contract acceptance gates must be contiguous and supervisor-owned"
+            )
+        acceptance_index += 1
+        cursor += 1
+
+    final_gate = normalized[-1]
+    if (
+        final_gate.get("id") != "supervisor-review"
+        or final_gate.get("kind") != "supervisor_review"
+        or final_gate.get("owner") != "supervisor"
+    ):
+        raise ValueError(
+            "gate contract must end with the supervisor-owned review gate"
+        )
+    return normalized
+
+
+def resolve_gate_specs(task_json: dict[str, Any]) -> list[dict[str, Any]]:
+    """Resolve persisted gates; only legacy tasks with no gates may derive."""
+    required_checks_raw = task_json.get("required_checks", [])
+    if required_checks_raw is None:
+        required_checks: list[str] = []
+    elif isinstance(required_checks_raw, list) and all(
+        isinstance(item, str) for item in required_checks_raw
+    ):
+        required_checks = [item.strip() for item in required_checks_raw if item.strip()]
+    else:
+        raise TypeError("task.json field 'required_checks' must be a list of strings")
+    raw = task_json.get("gates")
+    if raw is None:
+        return build_gate_specs(
+            required_checks=required_checks,
+            acceptance_criteria=[],
+        )
+    return validate_gate_specs(raw, required_checks=required_checks)
+
+
+def _gate_contract_sha256(gates: list[dict[str, Any]]) -> str:
+    canonical = json.dumps(
+        gates, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _task_contract_sha256(task_json: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        task_json, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def build_gates_markdown(
+    task_id: str,
+    gates: list[dict[str, Any]],
+    *,
+    required_checks: list[str] | None = None,
+) -> str:
+    """Render readable gates without making GATES.md an authority."""
+    validate_task_id(task_id)
+    validated = validate_gate_specs(gates, required_checks=required_checks)
+    lines = [
+        "# Acceptance gates",
+        "",
+        f"Task: `{task_id}`",
+        "",
+        "This is a readable projection of the immutable `task.json[gates]` contract.",
+        "Agent evidence is useful, but supervisor-owned gates remain pending until",
+        "independent supervisor review; the agent must never declare the finding",
+        "or project closed/ready on its own.",
+        "",
+    ]
+    for gate in validated:
+        lines.append(
+            f"- [ ] `{gate['id']}` — owner=`{gate['owner']}` "
+            f"kind=`{gate['kind']}` — {gate['outcome']}"
+        )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _encoded_write(path: str, content: str) -> str:
@@ -621,6 +896,7 @@ def build_task_json(
     allowed_files: list[str] | None = None,
     forbidden_files: list[str] | None = None,
     required_checks: list[str] | None = None,
+    acceptance_criteria: list[str] | None = None,
     worktree_path: str | None = None,
     commit_allowed: bool = False,
     push_allowed: bool = False,
@@ -660,6 +936,10 @@ def build_task_json(
         }
     )
     normalized_backends = _validate_allowed_backends(agent, allowed_backends)
+    gates = build_gate_specs(
+        required_checks=required_checks,
+        acceptance_criteria=acceptance_criteria,
+    )
     data: dict[str, Any] = {
         "task_id": task_id,
         "agent": agent,
@@ -667,6 +947,7 @@ def build_task_json(
         "allowed_files": allowed_files or [],
         "forbidden_files": forbidden_files or [],
         "required_checks": required_checks or [],
+        "gates": gates,
         "worktree_path": worktree_path or "",
         "base_ref": source_contract["base_ref"] or "",
         "source_mode": source_contract["source_mode"] or SOURCE_MODE_COMMITTED_HEAD,
@@ -1044,6 +1325,241 @@ def _task_file_stat(run_cmd, *, project: str, task_id: str, filename: str) -> di
         return {"exists": True, "size_bytes": None, "mtime_epoch": None}
     return {"exists": True, "size_bytes": size, "mtime_epoch": mtime}
 
+
+
+def _read_agent_gate_ledger(
+    run_cmd,
+    *,
+    project: str,
+    task_id: str,
+) -> dict[str, Any]:
+    """Validate shared runner evidence against the current immutable task contract."""
+    result = read_agent_task_file(
+        run_cmd, project=project, task_id=task_id, filename=GATE_LEDGER_FILENAME
+    )
+    text = str(result.get("stdout", ""))
+    if text == "(not found)":
+        return {"exists": False, "authoritative": False}
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return {
+            "exists": True,
+            "valid": False,
+            "authoritative": False,
+            "error": "gate ledger is not valid JSON",
+        }
+    if not isinstance(data, dict):
+        return {
+            "exists": True,
+            "valid": False,
+            "authoritative": False,
+            "error": "gate ledger is not a JSON object",
+        }
+    if data.get("version") != 1 or data.get("generated_by") != "gateway-runner":
+        return {
+            "exists": True,
+            "valid": False,
+            "authoritative": False,
+            "error": "gate ledger provenance is invalid",
+        }
+
+    machine_gates_met = data.get("machine_gates_met")
+    acceptance_state = data.get("acceptance_state")
+    gate_digest = data.get("gate_contract_sha256")
+    task_digest = data.get("task_contract_sha256")
+    if not isinstance(machine_gates_met, bool):
+        return {
+            "exists": True,
+            "valid": False,
+            "authoritative": False,
+            "error": "gate ledger machine state is invalid",
+        }
+    expected_state = "needs_supervisor" if machine_gates_met else "machine_unmet"
+    if (
+        acceptance_state not in _GATE_LEDGER_ACCEPTANCE_STATES
+        or acceptance_state != expected_state
+    ):
+        return {
+            "exists": True,
+            "valid": False,
+            "authoritative": False,
+            "error": "gate ledger acceptance state is inconsistent",
+        }
+    for name, digest in (
+        ("contract", gate_digest),
+        ("task-contract", task_digest),
+    ):
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            return {
+                "exists": True,
+                "valid": False,
+                "authoritative": False,
+                "error": f"gate ledger {name} digest is invalid",
+            }
+
+    task_result = read_agent_task_file(
+        run_cmd, project=project, task_id=task_id, filename="task.json"
+    )
+    task_text = str(task_result.get("stdout", ""))
+    if task_text == "(not found)":
+        return {
+            "exists": True,
+            "valid": False,
+            "authoritative": False,
+            "error": "task contract is missing",
+        }
+    try:
+        task_data = json.loads(task_text)
+        if not isinstance(task_data, dict):
+            raise TypeError("task contract must be an object")
+        task_gates = resolve_gate_specs(task_data)
+    except (TypeError, ValueError):
+        return {
+            "exists": True,
+            "valid": False,
+            "authoritative": False,
+            "error": "task gate contract is invalid",
+        }
+    if _task_contract_sha256(task_data) != task_digest:
+        return {
+            "exists": True,
+            "valid": False,
+            "authoritative": False,
+            "error": "gate ledger does not match current task contract",
+        }
+    if _gate_contract_sha256(task_gates) != gate_digest:
+        return {
+            "exists": True,
+            "valid": False,
+            "authoritative": False,
+            "error": "gate ledger does not match current task gate contract",
+        }
+
+    raw_gates = data.get("gates")
+    if not isinstance(raw_gates, list) or len(raw_gates) != len(task_gates):
+        return {
+            "exists": True,
+            "valid": False,
+            "authoritative": False,
+            "error": "gate ledger entries are invalid",
+        }
+
+    safe_gates: list[dict[str, Any]] = []
+    for index, (raw, contract_gate) in enumerate(
+        zip(raw_gates, task_gates, strict=True)
+    ):
+        if not isinstance(raw, dict):
+            return {
+                "exists": True,
+                "valid": False,
+                "authoritative": False,
+                "error": f"gate ledger entry {index} is invalid",
+            }
+        if any(
+            raw.get(key) != contract_gate.get(key)
+            for key in ("id", "kind", "owner", "outcome")
+        ):
+            return {
+                "exists": True,
+                "valid": False,
+                "authoritative": False,
+                "error": f"gate ledger entry {index} does not match task contract",
+            }
+        status = raw.get("status")
+        if status not in _GATE_LEDGER_STATUSES:
+            return {
+                "exists": True,
+                "valid": False,
+                "authoritative": False,
+                "error": f"gate ledger entry {index} status is invalid",
+            }
+        owner = contract_gate["owner"]
+        if owner == "supervisor" and status != "pending_supervisor":
+            return {
+                "exists": True,
+                "valid": False,
+                "authoritative": False,
+                "error": "supervisor-owned gate cannot be completed by runner",
+            }
+        if owner == "gateway" and status == "pending_supervisor":
+            return {
+                "exists": True,
+                "valid": False,
+                "authoritative": False,
+                "error": "gateway-owned gate has invalid pending-supervisor status",
+            }
+
+        safe: dict[str, Any] = {
+            "id": contract_gate["id"],
+            "kind": contract_gate["kind"],
+            "owner": owner,
+            "outcome": contract_gate["outcome"],
+            "status": status,
+        }
+        exit_code = raw.get("exit_code")
+        if exit_code is not None:
+            if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+                return {
+                    "exists": True,
+                    "valid": False,
+                    "authoritative": False,
+                    "error": f"gate ledger entry {index} exit code is invalid",
+                }
+            safe["exit_code"] = exit_code
+        if contract_gate["kind"] == "required_check":
+            if (
+                raw.get("check_index") != contract_gate.get("check_index")
+                or raw.get("check_sha256") != contract_gate.get("check_sha256")
+            ):
+                return {
+                    "exists": True,
+                    "valid": False,
+                    "authoritative": False,
+                    "error": (
+                        f"gate ledger check entry {index} is not bound to task contract"
+                    ),
+                }
+            safe["check_index"] = contract_gate["check_index"]
+            safe["check_sha256"] = contract_gate["check_sha256"]
+        safe_gates.append(safe)
+
+    computed_machine_met = all(
+        gate["status"] == "passed"
+        for gate in safe_gates
+        if gate["owner"] == "gateway"
+    )
+    if computed_machine_met != machine_gates_met:
+        return {
+            "exists": True,
+            "valid": False,
+            "authoritative": False,
+            "error": (
+                "gate ledger machine summary does not match gateway-owned gate entries"
+            ),
+        }
+
+    passed = sum(1 for gate in safe_gates if gate["status"] == "passed")
+    pending = sum(
+        1 for gate in safe_gates if gate["status"] == "pending_supervisor"
+    )
+    unmet = len(safe_gates) - passed - pending
+    return {
+        "exists": True,
+        "valid": True,
+        "authoritative": False,
+        "generated_by": "gateway-runner",
+        "gate_contract_sha256": gate_digest,
+        "task_contract_sha256": task_digest,
+        "machine_gates_met": machine_gates_met,
+        "acceptance_state": acceptance_state,
+        "counts": {
+            "passed": passed,
+            "pending_supervisor": pending,
+            "unmet": unmet,
+        },
+        "gates": safe_gates,
+    }
 
 
 def _read_agent_heartbeat(
@@ -2008,6 +2524,16 @@ def agent_task_status(
 
     terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
     active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
+    gate_ledger = _read_agent_gate_ledger(
+        run_cmd, project=project, task_id=task_id
+    )
+    gate_ledger["runner_lifecycle_completed"] = bool(
+        gate_ledger.get("valid") is True
+        and job is not None
+        and job.get("known") is True
+        and job_token in _AGENT_TERMINAL_STATUSES
+    )
+    gate_ledger["authoritative"] = False
     reconciliation = _agent_reconciliation_diagnostics(
         attempt=attempt,
         job=job,
@@ -2074,6 +2600,7 @@ def agent_task_status(
         "runner_heartbeat_fresh": runner_heartbeat_fresh,
         "proxy_status": proxy_status,
         "failure": failure,
+        "acceptance": gate_ledger,
         "stale_after_seconds": stale_after_seconds,
         "terminal": terminal,
         "likely_hung": likely_hung,
@@ -2199,6 +2726,16 @@ def inspect_agent_task(
 
     terminal = bool(status_token in _AGENT_TERMINAL_STATUSES or job_token in _AGENT_TERMINAL_STATUSES)
     active = bool(status_token in _AGENT_ACTIVE_STATUSES or job_token in _AGENT_ACTIVE_STATUSES)
+    gate_ledger = _read_agent_gate_ledger(
+        run_cmd, project=project, task_id=task_id
+    )
+    gate_ledger["runner_lifecycle_completed"] = bool(
+        gate_ledger.get("valid") is True
+        and job is not None
+        and job.get("known") is True
+        and job_token in _AGENT_TERMINAL_STATUSES
+    )
+    gate_ledger["authoritative"] = False
     reconciliation = _agent_reconciliation_diagnostics(
         attempt=attempt,
         job=job,
@@ -2296,6 +2833,7 @@ def inspect_agent_task(
         "runner_heartbeat_fresh": runner_heartbeat_fresh,
         "proxy_status": proxy_status,
         "failure": failure,
+        "acceptance": gate_ledger,
         "startup": startup,
         "reasoning_loop": reasoning_loop,
         "trailing_colon_stall": trailing_colon_stall,
@@ -2416,6 +2954,7 @@ def write_agent_task(
         allowed_files=allowed_files,
         forbidden_files=forbidden_files,
         required_checks=required_checks,
+        acceptance_criteria=acceptance_criteria,
         worktree_path=worktree_path,
         base_ref=base_ref,
         allowed_backends=allowed_backends,
@@ -2446,6 +2985,12 @@ def write_agent_task(
         artifact_dir=td,
     )
     initial_status = build_initial_status(agent=agent, task_id=task_id)
+    task_data = json.loads(task_json)
+    gates_markdown = build_gates_markdown(
+        task_id,
+        task_data["gates"],
+        required_checks=required_checks,
+    )
 
     tasks_dir = task_tasks_dir(project)
     targets = [
@@ -2453,6 +2998,7 @@ def write_agent_task(
         f"{td}/current-plan.md",
         f"{td}/consensus.md",
         f"{td}/agent-status.md",
+        f"{td}/{GATES_MD_FILENAME}",
     ]
     if worktree_path:
         targets.append(f"{td}/worktree-path.txt")
@@ -2476,6 +3022,7 @@ def write_agent_task(
             _encoded_write(f"{td}/current-plan.md", current_plan),
             _encoded_write(f"{td}/consensus.md", consensus),
             _encoded_write(f"{td}/agent-status.md", initial_status),
+            _encoded_write(f"{td}/{GATES_MD_FILENAME}", gates_markdown),
         ]
     )
     if worktree_path:
@@ -2615,16 +3162,21 @@ def prepare_agent_task_retry(
     retry_task_id: str,
     job_status=None,
     continuation_prompt: str | None = None,
+    trusted_never_submitted: bool = False,
 ) -> dict[str, Any]:
-    """Prepare a new immutable task from a terminal/cancelled source task.
+    """Prepare a fresh task only from a control-plane-proven never-submitted source.
 
-    The retry receives a fresh task directory and intentionally does not copy
-    attempt-state.json, logs, reports, diffs, or heartbeats. The caller must run
-    the returned retry_task_id explicitly through run_agent/run_opencode.
+    A missing job_id is not proof that dispatch never happened: the durable
+    submit path may have crossed the Gateway boundary before losing the job
+    receipt. Callers must therefore provide an explicit trusted
+    trusted_never_submitted decision from outside worker-writable task
+    artifacts. Production currently has no such retry proof and fails closed.
     """
     validate_task_id(source_task_id)
     validate_task_id(retry_task_id)
     continuation_prompt = _validate_continuation_prompt(continuation_prompt)
+    if not isinstance(trusted_never_submitted, bool):
+        raise TypeError("trusted_never_submitted must be a boolean")
     if source_task_id == retry_task_id:
         raise ValueError("retry_task_id must be different from source_task_id")
 
@@ -2642,9 +3194,13 @@ def prepare_agent_task_retry(
             "exit_code": 1,
             "code": "TASK_NOT_FOUND",
         }
-    attempt = inspection.get("attempt") if isinstance(inspection.get("attempt"), dict) else None
-    not_submitted = bool(attempt and not attempt.get("job_id"))
-    if not inspection.get("terminal") and not not_submitted:
+    attempt = (
+        inspection.get("attempt")
+        if isinstance(inspection.get("attempt"), dict)
+        else None
+    )
+    unbound_attempt = bool(attempt and attempt.get("job_id") is None)
+    if not inspection.get("terminal") and not unbound_attempt:
         return {
             "stdout": "",
             "stderr": "source task is not terminal; cancel it and wait for terminal state before retrying",
@@ -2655,6 +3211,48 @@ def prepare_agent_task_retry(
                 "status": inspection.get("status"),
                 "verdict": inspection.get("verdict"),
                 "job": inspection.get("job"),
+            },
+        }
+
+    acceptance = inspection.get("acceptance")
+    if (
+        isinstance(acceptance, dict)
+        and acceptance.get("exists") is True
+        and acceptance.get("valid") is not True
+    ):
+        return {
+            "stdout": "",
+            "stderr": "source task gate evidence does not match its immutable task contract",
+            "exit_code": 1,
+            "code": "AGENT_GATE_EVIDENCE_INVALID",
+            "source": {
+                "task_id": source_task_id,
+                "status": inspection.get("status"),
+                "verdict": inspection.get("verdict"),
+                "acceptance": acceptance,
+            },
+        }
+
+    if (
+        inspection.get("attempt_state_error") is not None
+        or not trusted_never_submitted
+        or (attempt is not None and not unbound_attempt)
+    ):
+        return {
+            "stdout": "",
+            "stderr": (
+                "source task lacks trusted never-submitted proof; worker-writable "
+                "task.json cannot seed a new task_id. Retry the same durable execution "
+                "or recreate the task from the supervisor-owned contract"
+            ),
+            "exit_code": 1,
+            "code": "AGENT_RETRY_SOURCE_UNTRUSTED",
+            "source": {
+                "task_id": source_task_id,
+                "status": inspection.get("status"),
+                "verdict": inspection.get("verdict"),
+                "job": inspection.get("job"),
+                "acceptance": acceptance,
             },
         }
 
@@ -2669,6 +3267,8 @@ def prepare_agent_task_retry(
     retry_contract["created"] = datetime.now(UTC).isoformat()
     # Validate the copied immutable contract before persisting it.
     validate_required_checks(retry_contract.get("required_checks") or [])
+    retry_gates = resolve_gate_specs(retry_contract)
+    retry_contract["gates"] = retry_gates
     validate_scope_contract(
         retry_contract.get("allowed_files") or [],
         retry_contract.get("forbidden_files") or [],
@@ -2704,6 +3304,11 @@ def prepare_agent_task_retry(
         ),
         f"{td}/consensus.md": consensus,
         f"{td}/agent-status.md": status,
+        f"{td}/{GATES_MD_FILENAME}": build_gates_markdown(
+            retry_task_id,
+            retry_gates,
+            required_checks=retry_contract.get("required_checks") or [],
+        ),
     }
     tasks_dir = task_tasks_dir(project)
     guard_paths = [tasks_dir, td, *files]

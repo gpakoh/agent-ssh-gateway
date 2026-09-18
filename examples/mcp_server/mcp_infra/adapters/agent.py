@@ -709,7 +709,7 @@ def gateway_retry_agent_task(
     retry_task_id: str,
     continuation_prompt: str | None = None,
 ) -> dict[str, Any]:
-    """Prepare a fresh retry task from a terminal/cancelled source task."""
+    """Refuse retry cloning until trusted never-submitted proof is available."""
 
     return run_tool(
         tool="retry_agent_task",
@@ -722,6 +722,7 @@ def gateway_retry_agent_task(
             retry_task_id=retry_task_id,
             job_status=lambda job_id: _server_client().job_status(job_id),
             continuation_prompt=continuation_prompt,
+            trusted_never_submitted=False,
         ),
         success_text="Prepared agent task retry.",
     )

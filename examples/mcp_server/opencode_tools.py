@@ -39,6 +39,7 @@ from examples.mcp_server.agent_tools import (
     _resolve_attempt,
     _resolve_project_root,
     _submit_same_key_retry,
+    _task_gate_binding,
     _task_string_list,
     _wait_same_job,
     _workflow_execution_scope,
@@ -167,6 +168,7 @@ def project_run_opencode(
         _, allowed_files = _workflow_execution_scope(task_json or {})
         forbidden_files = _task_string_list(task_json or {}, "forbidden_files")
         required_checks = _task_string_list(task_json or {}, "required_checks")
+        gates, task_contract_digest = _task_gate_binding(task_json or {})
     except (TypeError, ValueError) as exc:
         return {
             "task_id": task_id,
@@ -187,6 +189,8 @@ def project_run_opencode(
         allowed_files=allowed_files,
         forbidden_files=forbidden_files,
         required_checks=required_checks,
+        gates=gates,
+        task_contract_sha256=task_contract_digest,
         managed_clone=managed_clone,
         base_ref=source_ref,
         managed_source_path=managed_source_path,

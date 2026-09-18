@@ -22,6 +22,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from examples.mcp_server.agent_tasks import build_gate_specs
 from examples.mcp_server.agent_tools import (
     PROXY_LIMIT_MARKERS,
     _build_opencode_script,
@@ -1626,6 +1627,8 @@ def _run_supervisor_postrun(
     forbidden_files: list[str] | None = None,
     required_checks: list[str] | None = None,
     worker_rc: int = 0,
+    gates: list[dict[str, object]] | None = None,
+    task_contract_sha256: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     td = root / "task-artifacts"
     td.mkdir(exist_ok=True)
@@ -1634,10 +1637,13 @@ def _run_supervisor_postrun(
             f"td={shlex.quote(str(td))}",
             f"BASE_HEAD={shlex.quote(base_head)}",
             f"RC={worker_rc}",
+            *_runner_artifact_io_script_lines(),
             *_supervisor_postrun_script_lines(
                 allowed_files,
                 forbidden_files or [],
                 required_checks or [],
+                gates=gates,
+                task_contract_sha256=task_contract_sha256,
             ),
             "exit $FINAL_RC",
         ]
@@ -1722,6 +1728,61 @@ class TestSupervisorPostrunEvidence:
         assert "changed by worker" in patch
         report = json.loads((td / "scope-violations.json").read_text(encoding="utf-8"))
         assert any(item["type"] == "head-changed" for item in report["violations"])
+
+    def test_gate_ledger_is_generated_from_supervisor_evidence(self, tmp_path):
+        base_head = _init_git_repo(tmp_path)
+        checks = ["true"]
+        gates = build_gate_specs(
+            required_checks=checks,
+            acceptance_criteria=["Supervisor verifies end-to-end semantics."],
+        )
+
+        result, td = _run_supervisor_postrun(
+            tmp_path,
+            base_head=base_head,
+            allowed_files=[],
+            required_checks=checks,
+            gates=gates,
+            task_contract_sha256="d" * 64,
+        )
+
+        assert result.returncode == 0, result.stderr
+        ledger = json.loads((td / "gate-ledger.json").read_text(encoding="utf-8"))
+        assert ledger["generated_by"] == "gateway-runner"
+        assert ledger["task_contract_sha256"] == "d" * 64
+        assert ledger["machine_gates_met"] is True
+        assert ledger["acceptance_state"] == "needs_supervisor"
+        by_id = {gate["id"]: gate for gate in ledger["gates"]}
+        assert by_id["scope"]["status"] == "passed"
+        assert by_id["execution"]["status"] == "passed"
+        assert by_id["check-1"]["status"] == "passed"
+        assert by_id["acceptance-1"]["status"] == "pending_supervisor"
+        assert by_id["supervisor-review"]["status"] == "pending_supervisor"
+
+    def test_missing_check_tool_is_machine_unmet_even_when_runner_warns(self, tmp_path):
+        base_head = _init_git_repo(tmp_path)
+        checks = ["mcp-definitely-missing-tool --version"]
+        gates = build_gate_specs(
+            required_checks=checks,
+            acceptance_criteria=[],
+        )
+
+        result, td = _run_supervisor_postrun(
+            tmp_path,
+            base_head=base_head,
+            allowed_files=[],
+            required_checks=checks,
+            gates=gates,
+            task_contract_sha256="e" * 64,
+        )
+
+        assert result.returncode == 0, result.stderr
+        ledger = json.loads((td / "gate-ledger.json").read_text(encoding="utf-8"))
+        assert ledger["machine_gates_met"] is False
+        assert ledger["acceptance_state"] == "machine_unmet"
+        by_id = {gate["id"]: gate for gate in ledger["gates"]}
+        assert by_id["check-1"]["status"] == "warning"
+        assert by_id["supervisor-review"]["status"] == "pending_supervisor"
 
     def test_required_check_failure_controls_final_exit(self, tmp_path):
         base_head = _init_git_repo(tmp_path)
@@ -1906,6 +1967,10 @@ class TestSupervisorPostrunEvidence:
         _git(parent, "worktree", "add", "--detach", str(worker), "HEAD")
         td = tmp_path / "artifacts"
         td.mkdir()
+        gates = build_gate_specs(
+            required_checks=[],
+            acceptance_criteria=[],
+        )
 
         script = "\n".join(
             [
@@ -1921,6 +1986,8 @@ class TestSupervisorPostrunEvidence:
                     [],
                     [],
                     [],
+                    gates=gates,
+                    task_contract_sha256="a" * 64,
                     parent_root=str(parent),
                 ),
                 "exit $FINAL_RC",
@@ -1938,6 +2005,11 @@ class TestSupervisorPostrunEvidence:
         before = (td / "parent-tree-before.txt").read_text(encoding="utf-8").strip()
         after = (td / "parent-tree-after.txt").read_text(encoding="utf-8").strip()
         assert before != after
+        ledger = json.loads((td / "gate-ledger.json").read_text(encoding="utf-8"))
+        by_id = {gate["id"]: gate for gate in ledger["gates"]}
+        assert by_id["scope"]["status"] == "failed"
+        assert by_id["scope"]["exit_code"] == 1
+        assert ledger["machine_gates_met"] is False
 
     def test_parent_index_only_mutation_fails_closed(self, tmp_path):
         parent = tmp_path / "parent"
@@ -2126,6 +2198,66 @@ class TestSupervisorRequiredCheckDevExtraBootstrap:
         assert not check_marker.exists()
         status = (td / "agent-status.md").read_text(encoding="utf-8")
         assert "dev extra bootstrap FAILED" in status
+
+
+def test_worker_cannot_spoof_canonical_gates_or_gate_ledger(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_PROXY_REQUIRED", "false")
+    monkeypatch.delenv("OPENCODE_PROXY_PROVIDER_URL", raising=False)
+    source = tmp_path / "gate-spoof-source"
+    source.mkdir()
+    _init_git_repo(source)
+    artifacts = tmp_path / "gate-spoof-artifacts"
+    artifacts.mkdir()
+    (artifacts / "current-plan.md").write_text("# noop\n", encoding="utf-8")
+
+    fake_bin = tmp_path / "gate-spoof-bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "opencode"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f"printf 'worker-spoofed-gates\\n' > {shlex.quote(str(artifacts / 'GATES.md'))}\n"
+        f"printf '%s\\n' '{{\"generated_by\":\"worker\",\"machine_gates_met\":true}}' > "
+        f"{shlex.quote(str(artifacts / 'gate-ledger.json'))}\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    gates = build_gate_specs(
+        required_checks=[],
+        acceptance_criteria=["Supervisor independently accepts the result."],
+    )
+    script = _build_opencode_script(
+        str(artifacts),
+        TASK_ID,
+        None,
+        project_root=str(source),
+        allowed_files=[],
+        required_checks=[],
+        gates=gates,
+        task_contract_sha256="f" * 64,
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=RUNNER_HARNESS_TIMEOUT_SECONDS,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    gates_text = (artifacts / "GATES.md").read_text(encoding="utf-8")
+    assert "worker-spoofed-gates" not in gates_text
+    assert "supervisor-review" in gates_text
+    ledger = json.loads(
+        (artifacts / "gate-ledger.json").read_text(encoding="utf-8")
+    )
+    assert ledger["generated_by"] == "gateway-runner"
+    assert ledger["task_contract_sha256"] == "f" * 64
+    assert ledger["machine_gates_met"] is True
+    assert ledger["gates"][-1]["status"] == "pending_supervisor"
 
 
 def _run_fake_opencode_failure(
