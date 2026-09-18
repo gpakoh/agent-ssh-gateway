@@ -7,10 +7,16 @@ adapter.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
 import re
+import stat
+import threading
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +27,11 @@ from app.workspace.registry import resolve_runtime_registry_path
 from examples.mcp_server.supervisor_integration import integrate_file
 
 _PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_REGISTRY_LOCK_FILENAME = ".project-registry.lock"
+_REGISTRY_LOCK_TIMEOUT_S = 30.0
+_REGISTRY_LOCK_POLL_S = 0.05
+_REGISTRY_PROCESS_LOCK = threading.RLock()
+_REGISTRY_LOCK_STATE = threading.local()
 
 
 class ProjectRegistrationError(ValueError):
@@ -56,6 +67,73 @@ class ProjectUnregistrationResult:
 
 def _error(code: str, message: str) -> ProjectRegistrationError:
     return ProjectRegistrationError(code, message)
+
+
+@contextlib.contextmanager
+def project_registry_mutation_lock(journal_root: Path) -> Iterator[None]:
+    """Serialize registry mutations across threads and processes."""
+    if not _REGISTRY_PROCESS_LOCK.acquire(timeout=_REGISTRY_LOCK_TIMEOUT_S):
+        raise _error("WORKSPACE_CONTENDED", "Registry mutation lock is busy.")
+    try:
+        depth = int(getattr(_REGISTRY_LOCK_STATE, "depth", 0))
+        if depth > 0:
+            _REGISTRY_LOCK_STATE.depth = depth + 1
+            try:
+                yield
+            finally:
+                _REGISTRY_LOCK_STATE.depth = depth
+            return
+
+        try:
+            journal_root.mkdir(parents=True, exist_ok=True)
+            root_stat = journal_root.lstat()
+        except OSError as exc:
+            raise _error("TOOL_EXECUTION_FAILED", "Registry mutation lock root is unavailable.") from exc
+        if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+            raise _error("POLICY_DENIED", "Registry mutation lock root is unsafe.")
+
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if nofollow is None:
+            raise _error("POLICY_DENIED", "Secure registry mutation locking is unavailable.")
+        flags = os.O_RDWR | os.O_CREAT | nofollow | getattr(os, "O_CLOEXEC", 0)
+        lock_path = journal_root / _REGISTRY_LOCK_FILENAME
+        try:
+            fd = os.open(lock_path, flags, 0o600)
+        except OSError as exc:
+            raise _error("TOOL_EXECUTION_FAILED", "Registry mutation lock cannot be opened.") from exc
+
+        locked = False
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise _error("POLICY_DENIED", "Registry mutation lock file is unsafe.")
+            os.fchmod(fd, 0o600)
+
+            deadline = time.monotonic() + _REGISTRY_LOCK_TIMEOUT_S
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise _error(
+                            "WORKSPACE_CONTENDED",
+                            "Registry mutation lock is busy.",
+                        ) from exc
+                    time.sleep(_REGISTRY_LOCK_POLL_S)
+
+            _REGISTRY_LOCK_STATE.depth = 1
+            try:
+                yield
+            finally:
+                _REGISTRY_LOCK_STATE.depth = 0
+        finally:
+            if locked:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+    finally:
+        _REGISTRY_PROCESS_LOCK.release()
 
 
 def _normalize_metadata(
@@ -347,7 +425,7 @@ def _merged_registry_data(
     return merged
 
 
-def register_project(
+def _register_project_unlocked(
     *,
     config_dir: Path,
     journal_root: Path,
@@ -428,7 +506,34 @@ def register_project(
     )
 
 
-def unregister_project_exact(
+def register_project(
+    *,
+    config_dir: Path,
+    journal_root: Path,
+    project_id: str,
+    root: str,
+    project_type: str = "unknown",
+    description: str = "",
+    tags: list[str] | None = None,
+    parent: str | None = None,
+    persist_to_source: bool = False,
+) -> ProjectRegistrationResult:
+    """Serialize and register one validated project entry."""
+    with project_registry_mutation_lock(journal_root):
+        return _register_project_unlocked(
+            config_dir=config_dir,
+            journal_root=journal_root,
+            project_id=project_id,
+            root=root,
+            project_type=project_type,
+            description=description,
+            tags=tags,
+            parent=parent,
+            persist_to_source=persist_to_source,
+        )
+
+
+def _unregister_project_exact_unlocked(
     *,
     config_dir: Path,
     journal_root: Path,
@@ -498,8 +603,10 @@ def unregister_project_exact(
     merged_projects = {**source_projects, **runtime_projects}
     descendant_prefix = expected_root + "/"
     for other_id, other_entry in merged_projects.items():
-        if other_id == project_id or not isinstance(other_entry, dict):
+        if other_id == project_id:
             continue
+        if not isinstance(other_entry, dict):
+            raise _error("TOOL_EXECUTION_FAILED", "Project registry entry is malformed.")
         if other_entry.get("parent") == project_id:
             raise _error("WORKSPACE_CONTENDED", "Candidate project still has registered descendants.")
         other_root = other_entry.get("root")
@@ -536,3 +643,21 @@ def unregister_project_exact(
         storage=storage,
         already_absent=False,
     )
+
+def unregister_project_exact(
+    *,
+    config_dir: Path,
+    journal_root: Path,
+    project_id: str,
+    expected_root: str,
+    expected_type: str,
+) -> ProjectUnregistrationResult:
+    """Serialize and CAS-remove one exact project entry."""
+    with project_registry_mutation_lock(journal_root):
+        return _unregister_project_exact_unlocked(
+            config_dir=config_dir,
+            journal_root=journal_root,
+            project_id=project_id,
+            expected_root=expected_root,
+            expected_type=expected_type,
+        )

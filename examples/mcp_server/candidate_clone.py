@@ -33,6 +33,7 @@ from examples.mcp_server.managed_git import _minimal_git_env
 from examples.mcp_server.project_registry_control import (
     ProjectRegistrationError,
     ProjectUnregistrationResult,
+    project_registry_mutation_lock,
     register_project,
     unregister_project_exact,
 )
@@ -1557,23 +1558,24 @@ def candidate_cleanup(
     }
 
     with _lineage_lock(workspace_root, expected_source_project, expected_branch):
-        return _cleanup_candidate_locked(
-            project_id=project_id,
-            expected_head_sha=expected_head_sha,
-            expected_branch=expected_branch,
-            expected_source_project=expected_source_project,
-            preserved_ref=preserved_ref,
-            config_dir=config_dir,
-            journal_root=journal_root,
-            source_root=source_root,
-            candidates_root=candidates_root,
-            candidate_root=candidate_root,
-            expected_registry_root=expected_registry_root,
-            expected_identity=expected_identity,
-            tombstone_path=tombstone_path,
-            tombstone_id=tombstone_id,
-            reference_guard=reference_guard,
-        )
+        with project_registry_mutation_lock(journal_root):
+            return _cleanup_candidate_locked(
+                project_id=project_id,
+                expected_head_sha=expected_head_sha,
+                expected_branch=expected_branch,
+                expected_source_project=expected_source_project,
+                preserved_ref=preserved_ref,
+                config_dir=config_dir,
+                journal_root=journal_root,
+                source_root=source_root,
+                candidates_root=candidates_root,
+                candidate_root=candidate_root,
+                expected_registry_root=expected_registry_root,
+                expected_identity=expected_identity,
+                tombstone_path=tombstone_path,
+                tombstone_id=tombstone_id,
+                reference_guard=reference_guard,
+            )
 
 
 def _cleanup_candidate_locked(

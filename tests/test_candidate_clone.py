@@ -4,6 +4,8 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -907,6 +909,80 @@ def test_prepare_candidate_clone_symlink_lock_file_fails_closed(registry_fixture
         if p.name != ".locks" and p.name.startswith("candidate-")
     }
     assert candidate_dirs == set()
+
+
+def test_register_project_rejects_symlinked_registry_mutation_lock(
+    registry_fixture,
+    tmp_path: Path,
+) -> None:
+    from examples.mcp_server import project_registry_control as registry_module
+
+    workspace, _source, config_dir, journal_root, _base = registry_fixture
+    new_root = workspace / "lock-symlink-project"
+    new_root.mkdir()
+    journal_root.mkdir(parents=True, exist_ok=True)
+    victim = tmp_path / "registry-lock-victim"
+    victim.write_text("sentinel\n", encoding="utf-8")
+    (journal_root / ".project-registry.lock").symlink_to(victim)
+
+    with pytest.raises(registry_module.ProjectRegistrationError):
+        registry_module.register_project(
+            config_dir=config_dir,
+            journal_root=journal_root,
+            project_id="lock-symlink-project",
+            root="lock-symlink-project",
+            project_type="test",
+            persist_to_source=True,
+        )
+
+    assert victim.read_text(encoding="utf-8") == "sentinel\n"
+    assert "lock-symlink-project:" not in (config_dir / "projects.yaml").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_registry_mutation_lock_same_process_contention_is_bounded(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import project_registry_control as registry_module
+
+    workspace, _source, config_dir, journal_root, _base = registry_fixture
+    new_root = workspace / "bounded-lock-project"
+    new_root.mkdir()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_lock() -> None:
+        with registry_module.project_registry_mutation_lock(journal_root):
+            entered.set()
+            assert release.wait(timeout=5)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        holder = pool.submit(hold_lock)
+        assert entered.wait(timeout=5)
+        monkeypatch.setattr(registry_module, "_REGISTRY_LOCK_TIMEOUT_S", 0.05)
+
+        started = time.monotonic()
+        with pytest.raises(registry_module.ProjectRegistrationError) as exc_info:
+            registry_module.register_project(
+                config_dir=config_dir,
+                journal_root=journal_root,
+                project_id="bounded-lock-project",
+                root="bounded-lock-project",
+                project_type="test",
+                persist_to_source=True,
+            )
+        elapsed = time.monotonic() - started
+
+        assert exc_info.value.code == "WORKSPACE_CONTENDED"
+        assert elapsed < 1.0
+        release.set()
+        holder.result(timeout=5)
+
+    assert "bounded-lock-project:" not in (config_dir / "projects.yaml").read_text(
+        encoding="utf-8"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1889,6 +1965,55 @@ def test_candidate_cleanup_refuses_registered_descendant(
     assert clone_root.exists()
 
 
+def test_candidate_cleanup_fails_closed_on_malformed_unrelated_registry_entry(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-malformed-sibling"
+    preserved_ref = "archive/candidate-cleanup-malformed-sibling"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    registry_path = config_dir / "projects.yaml"
+    registry_path.write_text(
+        registry_path.read_text(encoding="utf-8") + "  malformed-sibling: []\n",
+        encoding="utf-8",
+    )
+    reset_registry()
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    with pytest.raises(CandidateCloneError) as exc_info:
+        candidate_cleanup(
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+
+    assert exc_info.value.code == "TOOL_EXECUTION_FAILED"
+    assert clone_root.exists()
+    assert receipt.project_id in registry_path.read_text(encoding="utf-8")
+
+
 def test_candidate_cleanup_reconciles_missing_dir_still_registered(
     registry_fixture,
     monkeypatch: pytest.MonkeyPatch,
@@ -2415,6 +2540,85 @@ def test_candidate_cleanup_holds_lineage_lock_across_registry_and_delete(
     assert ("lock", "source-project", branch) in lock_events
     assert lock_events.index("enter") < lock_events.index("rmtree")
     assert lock_events.index("rmtree") < lock_events.index("exit")
+
+
+def test_candidate_cleanup_holds_registry_lock_through_rmtree(
+    registry_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples.mcp_server import candidate_clone as module
+    from examples.mcp_server import project_registry_control as registry_module
+
+    workspace, _source, config_dir, journal_root, base = registry_fixture
+    branch = "candidate/cleanup-registry-lock"
+    preserved_ref = "archive/candidate-cleanup-registry-lock"
+    receipt = prepare_candidate_clone(
+        "source-project",
+        branch,
+        base,
+        config_dir=config_dir,
+        journal_root=journal_root,
+    )
+    clone_root = workspace / ".mcp-candidate-clones" / receipt.project_id
+    child_root = clone_root / "late-child"
+    child_root.mkdir()
+    _mock_cleanup_remote_probe(
+        monkeypatch,
+        module,
+        preserved_ref=preserved_ref,
+        head=base,
+        delivery_branch=branch,
+        delivery="absent",
+    )
+
+    monkeypatch.setenv("MCP_SUPERVISOR_JOURNAL_ROOT", str(journal_root))
+    entered_rmtree = threading.Event()
+    release_rmtree = threading.Event()
+    real_rmtree = module.shutil.rmtree
+
+    def blocking_rmtree(path: Path) -> None:
+        entered_rmtree.set()
+        assert release_rmtree.wait(timeout=5)
+        real_rmtree(path)
+
+    monkeypatch.setattr(module.shutil, "rmtree", blocking_rmtree)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        cleanup_future = pool.submit(
+            candidate_cleanup,
+            receipt.project_id,
+            base,
+            branch,
+            "source-project",
+            preserved_ref,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            reference_guard=_idle_guard,
+        )
+        assert entered_rmtree.wait(timeout=5)
+
+        register_future = pool.submit(
+            registry_module.register_project,
+            config_dir=config_dir,
+            journal_root=journal_root,
+            project_id="late-child",
+            root=f".mcp-candidate-clones/{receipt.project_id}/late-child",
+            project_type="candidate-child",
+            persist_to_source=False,
+        )
+        time.sleep(0.2)
+        assert not register_future.done()
+
+        release_rmtree.set()
+        cleaned = cleanup_future.result(timeout=5)
+        assert cleaned.directory_removed is True
+
+        with pytest.raises(registry_module.ProjectRegistrationError) as exc_info:
+            register_future.result(timeout=5)
+        assert exc_info.value.code == "INVALID_INPUT"
+
+    assert not clone_root.exists()
+    assert "late-child" not in (config_dir / "projects.yaml").read_text(encoding="utf-8")
 
 
 def test_candidate_cleanup_serializes_concurrent_callers(
