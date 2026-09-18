@@ -31,9 +31,10 @@ PYTEST_UNIT_ARGS ?=
 # Keep this deterministic process-level guard inside the workflow's outer
 # budget so pytest terminates with evidence before the runner kills the job.
 # The suite is normally much faster, but shared self-hosted runner contention
-# has repeatedly pushed healthy 6.5k-test runs beyond the old fixed 25m guard.
-# Keep the budget explicit/overridable and below ci.yml's outer test-job budget.
-PYTEST_UNIT_TIMEOUT ?= 35m
+# has repeatedly stretched healthy 6.5k-test runs from ~22m past the old 35m
+# guard. Keep a bounded 45m process guard and a larger outer CI job budget so
+# pytest can still emit its real failure/coverage summary before job teardown.
+PYTEST_UNIT_TIMEOUT ?= 45m
 test-unit:
 	timeout --signal=TERM --kill-after=30s $(PYTEST_UNIT_TIMEOUT) uv run pytest -m "not host_smoke and not e2e and not integration and not smoke" --reruns 2 --reruns-delay 2 --only-rerun 'WebSocketDisconnect' --cov=app --cov-report=term-missing --cov-fail-under=69 -q $(PYTEST_UNIT_ARGS)
 

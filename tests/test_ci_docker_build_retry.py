@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "ci-docker-build-retry.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+E2E_COLLECTION_TIMEOUT_SECONDS = 60
 
 
 def _fake_docker(tmp_path: Path, mode: str) -> tuple[dict[str, str], Path]:
@@ -159,7 +160,7 @@ def test_webui_e2e_remote_mode_collects_all_browser_tests_without_local_toolchai
         text=True,
         capture_output=True,
         check=False,
-        timeout=20,
+        timeout=E2E_COLLECTION_TIMEOUT_SECONDS,
     )
 
     output = result.stdout + result.stderr
