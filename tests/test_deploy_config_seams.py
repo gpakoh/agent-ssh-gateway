@@ -1010,6 +1010,117 @@ class TestHostSmokeRunsAfterSuccessfulDeploy:
         assert "pytestmark = pytest.mark.host_smoke" in text
 
 
+class TestHostSmokeCheckoutIsGiteaLocal:
+    """host-smoke must source its checkout from this Gitea server by exact
+    SHA instead of actions/checkout@v7 -- the self-hosted runner pool has no
+    github.com egress for the action download, and the authoritative gate must
+    prove the exact deployed commit, never the runner's mutable working tree.
+    GITEA_TOKEN reaches git only via a chmod-700 GIT_ASKPASS helper, so the
+    credential never appears in the URL, argv, git config, stdout, or any file.
+    """
+
+    @staticmethod
+    def _job() -> dict:
+        return _load_workflow(CI_WORKFLOW_PATH)["jobs"]["host-smoke"]
+
+    @staticmethod
+    def _checkout_step() -> dict:
+        for step in _load_workflow(CI_WORKFLOW_PATH)["jobs"]["host-smoke"]["steps"]:
+            if step.get("name") == "Checkout exact deployed commit from Gitea":
+                return step
+        raise AssertionError(
+            "host-smoke has no 'Checkout exact deployed commit from Gitea' step"
+        )
+
+    def test_host_smoke_has_zero_actions_checkout_dependency(self):
+        steps = self._job()["steps"]
+        for step in steps:
+            uses = step.get("uses", "")
+            assert not uses.startswith("actions/checkout"), (
+                "host-smoke must not use actions/checkout (github.com action download)"
+            )
+            assert not uses, "host-smoke must not use any third-party action"
+
+    def test_host_smoke_job_contract_and_permissions_unchanged(self):
+        job = self._job()
+        assert job.get("needs") == ["deploy"]
+        assert job["if"] == (
+            "github.ref_name == 'master' && github.event_name == 'push' && "
+            "github.server_url != 'https://github.com'"
+        )
+        assert job["runs-on"] == "host-smoke-ci"
+        assert job["timeout-minutes"] == 20
+        assert job["permissions"] == {"contents": "read"}
+
+    def test_checkout_is_first_step_and_later_steps_unchanged(self):
+        names = [step.get("name", "") for step in self._job()["steps"]]
+        assert names == [
+            "Checkout exact deployed commit from Gitea",
+            "Set up Python",
+            "Fail-closed pre-smoke — all three containers must run this commit",
+            "OAuth black-box smoke (must be exactly 1 PASS, never SKIP)",
+            "Fail-closed post-OAuth — containers still on this commit",
+            "Make host-smoke (full suite)",
+            "Report",
+        ]
+
+    def test_repo_url_is_token_free_server_and_repository(self):
+        run = self._checkout_step()["run"]
+        assert 'REPO_URL="${{ github.server_url }}/${{ github.repository }}.git"' in run
+
+    def test_gitea_token_comes_only_from_secrets_in_step_env(self):
+        step = self._checkout_step()
+        assert step.get("env") == {"GITEA_TOKEN": "${{ secrets.GITEA_TOKEN }}"}
+        assert "${{ secrets." not in step["run"], (
+            "token must live in step env, never interpolated into the run body"
+        )
+
+    def test_run_body_has_no_credential_url_or_token_leak(self):
+        run = self._checkout_step()["run"]
+        assert "://" not in run, (
+            "no literal URL scheme -- REPO_URL stays a token-free github.server_url expression"
+        )
+        assert "@" not in run, "no userinfo@host credential URL"
+        assert run.count("GITEA_TOKEN") == 1, (
+            "GITEA_TOKEN may be referenced only once, inside the GIT_ASKPASS helper"
+        )
+
+    def test_run_body_protects_token_with_chmod700_askpass_and_trap(self):
+        run = self._checkout_step()["run"]
+        assert "mktemp -d" in run
+        assert "chmod 700" in run
+        assert "GIT_ASKPASS" in run
+        assert "GIT_TERMINAL_PROMPT=0" in run
+        assert "trap" in run and "EXIT" in run and "rm -rf" in run
+
+    def test_run_body_validates_expected_sha_lowercase_40_hex(self):
+        run = self._checkout_step()["run"]
+        assert "EXPECTED_SHA" in run
+        assert "[0-9a-f]{40}" in run
+        assert "lowercase 40-hex sha" in run
+
+    def test_run_body_fetches_exact_sha_and_verifies_fetch_head_before_checkout(self):
+        run = self._checkout_step()["run"]
+        assert "--no-tags" in run
+        assert "--depth=1" in run
+        assert "FETCH_HEAD" in run
+        assert "fetched commit" in run
+        assert run.index("fetched commit") < run.index("git checkout"), (
+            "FETCH_HEAD must be verified exact BEFORE the detached force checkout"
+        )
+
+    def test_run_body_force_detaches_and_verifies_head_and_clean_status(self):
+        run = self._checkout_step()["run"]
+        assert "git checkout" in run and "--detach" in run and "-f" in run
+        assert run.index("git checkout") < run.index("git clean")
+        assert "rev-parse HEAD" in run
+        assert run.index("git checkout") < run.index("rev-parse HEAD"), (
+            "HEAD must be re-verified AFTER the checkout"
+        )
+        assert "git status --porcelain" in run
+        assert "worktree is not clean" in run
+
+
 class TestPrBuildsAndSmokeTestsDockerArtifact:
     """P1 BLOCKER audit finding: a PR's `test` job only ever exercised
     the source tree -- ruff/mypy/pytest against files on disk -- never

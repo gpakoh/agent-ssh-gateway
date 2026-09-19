@@ -711,12 +711,69 @@ jobs:
     if: github.ref_name == 'master' && github.event_name == 'push' && github.server_url != 'https://github.com'
     runs-on: host-smoke-ci
     timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
-        with:
+      - name: Checkout exact deployed commit from Gitea
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+
           # Smoke the exact commit that was deployed, never whatever the
-          # runner's mutable working tree happens to be.
-          ref: ${{ github.sha }}
+          # runner's mutable working tree happens to be. Check out straight
+          # from this Gitea server (no actions/checkout, no github.com
+          # dependency). The token reaches git only through a chmod-700
+          # GIT_ASKPASS helper so it never lands in the URL, argv, git
+          # config, stdout, or any file.
+          EXPECTED_SHA="${{ github.sha }}"
+          if ! printf '%s' "$EXPECTED_SHA" | grep -qxE '[0-9a-f]{40}'; then
+            echo "::error::EXPECTED_SHA is not a lowercase 40-hex sha" >&2
+            exit 1
+          fi
+
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}.git"
+
+          askpass_dir="$(mktemp -d)"
+          chmod 700 "$askpass_dir"
+          trap 'rm -rf "$askpass_dir"' EXIT
+          askpass_file="$askpass_dir/git-askpass.sh"
+          cat > "$askpass_file" <<'ASKPASS'
+          #!/bin/sh
+          printf %s "$GITEA_TOKEN"
+          ASKPASS
+          chmod 700 "$askpass_file"
+          export GIT_ASKPASS="$askpass_file"
+          export GIT_TERMINAL_PROMPT=0
+
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          if git remote get-url origin >/dev/null 2>&1; then
+            git remote set-url origin "$REPO_URL"
+          else
+            git remote add origin "$REPO_URL"
+          fi
+          git -c protocol.version=2 fetch -q --no-tags --depth=1 origin "$EXPECTED_SHA"
+
+          fetched="$(git rev-parse FETCH_HEAD)"
+          if [ "$fetched" != "$EXPECTED_SHA" ]; then
+            echo "::error::fetched commit $fetched != expected $EXPECTED_SHA" >&2
+            exit 1
+          fi
+
+          git checkout -q -f --detach "$fetched"
+          git clean -fdx
+
+          head_sha="$(git rev-parse HEAD)"
+          if [ "$head_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::HEAD $head_sha != expected $EXPECTED_SHA" >&2
+            exit 1
+          fi
+
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::worktree is not clean after checkout" >&2
+            exit 1
+          fi
 
       - name: Set up Python
         run: |
