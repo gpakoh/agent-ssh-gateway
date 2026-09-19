@@ -928,7 +928,18 @@ class TestE2eActuallyRunsSomewhere:
 
         cleanup = next(s for s in steps if s.get("name") == "Stop Selenium Chromium sidecar")
         assert "always()" in cleanup["if"]
-        assert 'docker rm -f "$E2E_SELENIUM_CONTAINER"' in cleanup["run"]
+        assert "github.server_url != 'https://github.com'" in cleanup["if"]
+        run = cleanup["run"]
+        assert 'docker stop --time 5 "$E2E_SELENIUM_CONTAINER"' in run
+        assert 'docker rm -f "$E2E_SELENIUM_CONTAINER"' in run
+        assert run.count('"$E2E_SELENIUM_CONTAINER"') == 2, (
+            "both stop and remove must target the exact CID variable, nothing else"
+        )
+        assert "prune" not in run
+        assert "docker ps" not in run
+        assert "::warning::" in run
+        assert "exit 0" in run
+        assert "continue-on-error" not in cleanup
 
 
 class TestHostSmokeRunsAfterSuccessfulDeploy:

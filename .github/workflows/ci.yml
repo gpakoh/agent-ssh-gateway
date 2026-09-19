@@ -373,10 +373,17 @@ jobs:
       - name: Stop Selenium Chromium sidecar
         if: always() && github.server_url != 'https://github.com'
         run: |
-          set -euo pipefail
+          set +e
           if [ -n "${E2E_SELENIUM_CONTAINER:-}" ]; then
-            docker rm -f "$E2E_SELENIUM_CONTAINER" >/dev/null
+            docker stop --time 5 "$E2E_SELENIUM_CONTAINER" >/dev/null 2>&1
+            stop_status=$?
+            docker rm -f "$E2E_SELENIUM_CONTAINER" >/dev/null 2>&1
+            rm_status=$?
+            if [ "$stop_status" -ne 0 ] || [ "$rm_status" -ne 0 ]; then
+              echo "::warning::Selenium Chromium sidecar cleanup failed (docker stop=$stop_status, docker rm -f=$rm_status); teardown is non-fatal"
+            fi
           fi
+          exit 0
 
   build-and-push:
     # Runs the build+smoke-test steps on BOTH a real push to master AND a
